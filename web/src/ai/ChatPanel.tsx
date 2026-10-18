@@ -10,6 +10,7 @@ import {
   Wrench,
   X,
   AlertTriangle,
+  Camera,
 } from "lucide-react";
 import {
   MODELS,
@@ -23,7 +24,7 @@ import {
   stop,
   useChat,
 } from "./chatState";
-import { useStore } from "../store";
+import { getDoc, toast, useStore } from "../store";
 import { Menu, MOD, Seg, SelectField, type MenuItem } from "../ui/controls";
 import { imagesFrom } from "./images";
 import { isPhone } from "../panels/PhoneNote";
@@ -347,6 +348,8 @@ export function ChatPanel() {
                 </span>
               ) : null}
             </div>
+          ) : it.kind === "shot" ? (
+            <Shot key={it.id} url={it.url} label={it.label} />
           ) : (
             <div key={it.id} className={"msg " + it.kind}>
               {"images" in it && it.images?.length ? (
@@ -442,6 +445,13 @@ export function ChatPanel() {
               onClick={() => fileRef.current?.click()}
             >
               <ImagePlus size={14} />
+            </button>
+            <button
+              className="ibtn"
+              title="Attach a screenshot of the selection (or of the page) so Claude can see it"
+              onClick={attachCanvasShot}
+            >
+              <Camera size={14} />
             </button>
             <input
               ref={fileRef}
@@ -606,6 +616,31 @@ function ConnectCard() {
           .
         </div>
       </details>
+    </div>
+  );
+}
+
+/** Attaches a screenshot of the selection (or the topmost layer on the page) to the next message. */
+async function attachCanvasShot() {
+  try {
+    const { getScreenshot } = await import("./browserTools");
+    const shot = await getScreenshot(undefined, 1);
+    const name = getDoc().nodes[shot.id]?.name ?? "canvas";
+    attachImage(`data:image/png;base64,${shot.data}`, `${name}.png`);
+  } catch (err) {
+    toast(String(err instanceof Error ? err.message : err).replace(/^./, (c) => c.toUpperCase()), "error");
+  }
+}
+
+/** A screenshot Claude took; click to see it larger. */
+function Shot({ url, label }: { url: string; label: string }) {
+  const [big, setBig] = useState(false);
+  return (
+    <div className={"msg shot" + (big ? " big" : "")}>
+      <button className="shot-img" title={big ? "Smaller" : "Larger"} onClick={() => setBig(!big)}>
+        <img src={url} alt={label} />
+      </button>
+      <span className="muted small">{label}</span>
     </div>
   );
 }

@@ -96,6 +96,35 @@ pub async fn fetch_page(State(_state): State<Shared>, headers: HeaderMap, Query(
   }
 }
 
+/// An image attached to a chat message, passed to Claude Code as an image content block.
+pub struct ChatImage {
+  pub media_type: &'static str,
+  /// Base64, already checked to decode and fit the size limit.
+  pub data: String,
+}
+
+/// The attachments Claude can see directly: images in a supported format and under the size limit.
+pub fn chat_images(attachments: &[Value]) -> Vec<ChatImage> {
+  attachments
+    .iter()
+    .filter_map(|a| {
+      let media_type = match a["mediaType"].as_str().unwrap_or("image/png") {
+        "image/png" => "image/png",
+        "image/jpeg" => "image/jpeg",
+        "image/gif" => "image/gif",
+        "image/webp" => "image/webp",
+        _ => return None,
+      };
+      let data = a["data"].as_str()?;
+      let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
+      (bytes.len() <= MAX_ATTACHMENT_BYTES).then(|| ChatImage {
+        media_type,
+        data: data.to_string(),
+      })
+    })
+    .collect()
+}
+
 /// Writes base64 attachments into the workspace and returns their absolute paths.
 pub fn save_attachments(workspace: &Path, attachments: &[Value]) -> Vec<PathBuf> {
   let dir = workspace.join(".designotron").join("attachments");
@@ -140,6 +169,18 @@ mod tests {
     assert!(bypass_proxy("http://localhost/x"));
     assert!(bypass_proxy("http://[::1]:8080/"));
     assert!(!bypass_proxy("https://api.figma.com/v1/files/x"));
+  }
+
+  #[test]
+  fn chat_images_keep_supported_images_only() {
+    let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG fake");
+    let images = chat_images(&[
+      json!({ "mediaType": "image/png", "data": png }),
+      json!({ "mediaType": "image/svg+xml", "data": png }),
+      json!({ "mediaType": "image/jpeg", "data": "not base64!!" }),
+      json!({ "data": png }),
+    ]);
+    assert_eq!(images.iter().map(|i| i.media_type).collect::<Vec<_>>(), ["image/png", "image/png"]);
   }
 
   #[test]

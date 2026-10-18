@@ -2,7 +2,7 @@
 // executed in the browser with the user's own key.
 
 import Anthropic from "@anthropic-ai/sdk";
-import { useChat, push, appendText, patchItem } from "./chatState";
+import { useChat, push, appendText, patchItem, showScreenshot } from "./chatState";
 import { executeTool, systemPrompt, toolDefs } from "./tools";
 import type { Attachment } from "./bridgeClient";
 
@@ -85,6 +85,7 @@ export async function runApiAgent(prompt: string, images: Attachment[] = []) {
       const chip = push({ kind: "tool", name: use.name, ok: null });
       const out = await executeTool(use.name, use.input);
       patchItem(chip, { ok: out.ok, detail: out.ok ? undefined : String(out.result) });
+      showScreenshot(out);
       const text = typeof out.result === "string" ? out.result : JSON.stringify(out.result);
       results.push({
         type: "tool_result",

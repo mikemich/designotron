@@ -5,14 +5,16 @@
 //  - "api": direct Messages API calls from the browser with the user's key.
 
 import { create } from "zustand";
-import { useStore } from "../store";
+import { getDoc, useStore } from "../store";
 import { bridge, type Attachment } from "./bridgeClient";
 import { runApiAgent, resetApiConversation } from "./apiAgent";
 import { contextLine } from "./tools";
 
 export type ChatItem =
   | { id: number; kind: "user" | "assistant" | "error" | "system"; text: string; images?: string[] }
-  | { id: number; kind: "tool"; name: string; ok: boolean | null; detail?: string };
+  | { id: number; kind: "tool"; name: string; ok: boolean | null; detail?: string }
+  /** A screenshot Claude took to check its work, shown so you see what it saw. */
+  | { id: number; kind: "shot"; url: string; label: string };
 
 export type Mode = "bridge" | "api";
 
@@ -97,6 +99,19 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 let nextImage = 1;
 
 /** Queues an image (data: URL) for the next message. */
+/** Shows a screenshot Claude took (get_screenshot) in the chat, during a chat turn. */
+export function showScreenshot(out: { result?: unknown; image?: { data: string; mediaType: string } | null }) {
+  if (!out.image || !useChat.getState().running) return;
+  const id = (out.result as { nodeId?: string } | undefined)?.nodeId;
+  let name = "";
+  try {
+    name = id ? (getDoc().nodes[id]?.name ?? "") : "";
+  } catch {
+    /* engine not ready */
+  }
+  push({ kind: "shot", url: `data:${out.image.mediaType};base64,${out.image.data}`, label: name ? `Claude looked at “${name}”` : "Claude took a screenshot" });
+}
+
 export function attachImage(url: string, name = "image") {
   if (!/^data:image\/(png|jpeg|gif|webp);base64,/.test(url)) {
     push({ kind: "error", text: "Only PNG, JPEG, GIF and WebP images can be attached." });

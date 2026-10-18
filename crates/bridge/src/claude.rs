@@ -6,7 +6,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
@@ -69,11 +69,15 @@ impl ChatControl {
 }
 
 /// Runs one chat turn and streams Claude Code's `stream-json` events to the editor.
-pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
+/// Runs one chat turn. Images go to Claude Code as image blocks of a stream-json user
+/// message (so it sees them directly); otherwise the prompt is a plain argument.
+/// `turn` is the editor's number for this message, echoed in chat_done/chat_error so a late
+/// reply from an earlier turn can't end the current one.
+pub async fn run_chat(state: Shared, prompt: String, session: Option<String>, images: Vec<crate::fetch::ChatImage>, turn: u64) {
   if state.claude.version.is_none() {
     state
       .editor
-      .send(json!({ "type": "chat_error", "message": "Claude Code CLI not found. Install it and sign in (`claude`, then /login)." }))
+      .send(json!({ "type": "chat_error", "turn": turn, "message": "Claude Code CLI not found. Install it and sign in (`claude`, then /login)." }))
       .await;
     return;
   }
@@ -84,7 +88,7 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
   if let Err(e) = tokio::fs::write(&config_path, mcp_config.to_string()).await {
     state
       .editor
-      .send(json!({ "type": "chat_error", "message": format!("could not write MCP config: {e}") }))
+      .send(json!({ "type": "chat_error", "turn": turn, "message": format!("could not write MCP config: {e}") }))
       .await;
     return;
   }
@@ -104,9 +108,13 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
   );
 
   let mut cmd = Command::new(&state.claude.bin);
+  cmd.arg("-p");
+  if images.is_empty() {
+    cmd.arg(&prompt);
+  } else {
+    cmd.args(["--input-format", "stream-json"]);
+  }
   cmd
-    .arg("-p")
-    .arg(&prompt)
     .args(["--output-format", "stream-json", "--verbose", "--include-partial-messages"])
     .arg("--mcp-config")
     .arg(&config_path)
@@ -121,7 +129,7 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
   }
   cmd
     .current_dir(&state.workspace)
-    .stdin(Stdio::null())
+    .stdin(if images.is_empty() { Stdio::null() } else { Stdio::piped() })
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .kill_on_drop(true);
@@ -131,11 +139,24 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
     Err(e) => {
       state
         .editor
-        .send(json!({ "type": "chat_error", "message": format!("could not start Claude Code: {e}") }))
+        .send(json!({ "type": "chat_error", "turn": turn, "message": format!("could not start Claude Code: {e}") }))
         .await;
       return;
     }
   };
+  if let Some(mut stdin) = child.stdin.take() {
+    let mut content = vec![json!({ "type": "text", "text": prompt })];
+    content.extend(
+      images
+        .iter()
+        .map(|i| json!({ "type": "image", "source": { "type": "base64", "media_type": i.media_type, "data": i.data } })),
+    );
+    let line = json!({ "type": "user", "message": { "role": "user", "content": content } }).to_string() + "\n";
+    // Closing stdin afterwards ends the input: one message per turn.
+    if let Err(e) = stdin.write_all(line.as_bytes()).await {
+      log::warn!("could not send the message to Claude Code: {e}");
+    }
+  }
   let stdout = child.stdout.take();
   let stderr = child.stderr.take();
   *state.chat.child.lock().await = Some(child);
@@ -158,12 +179,24 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
       if let Some(s) = event["session_id"].as_str() {
         session_id = Some(s.to_string());
       }
+      let done = event["type"] == "result";
       state.editor.send(json!({ "type": "chat_event", "event": event })).await;
+      // The result ends the turn; newer CLIs can keep running for a while afterwards.
+      if done {
+        break;
+      }
     }
   }
 
   let status = match state.chat.child.lock().await.take() {
-    Some(mut c) => c.wait().await.ok(),
+    Some(mut c) => match tokio::time::timeout(std::time::Duration::from_secs(3), c.wait()).await {
+      Ok(s) => s.ok(),
+      Err(_) => {
+        // Still running after its result: stop it (the turn is complete).
+        let _ = c.kill().await;
+        c.wait().await.ok().map(|_| std::process::ExitStatus::default())
+      }
+    },
     None => None,
   };
   let stderr_text = stderr_task.await.unwrap_or_default();
@@ -183,12 +216,18 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
       } else {
         tail
       };
-      state.editor.send(json!({ "type": "chat_error", "message": message })).await;
+      state
+        .editor
+        .send(json!({ "type": "chat_error", "turn": turn, "message": message }))
+        .await;
     }
     None => {
       state.editor.send(json!({ "type": "log", "message": "Stopped." })).await;
     }
     _ => {}
   }
-  state.editor.send(json!({ "type": "chat_done", "sessionId": session_id })).await;
+  state
+    .editor
+    .send(json!({ "type": "chat_done", "turn": turn, "sessionId": session_id }))
+    .await;
 }

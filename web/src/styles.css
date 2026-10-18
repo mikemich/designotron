@@ -1874,3 +1874,31 @@ body:has(.main > .chat) .phone-note {
   height: 24px;
   padding: 0 10px;
 }
+
+/* Screenshots Claude took, shown in the chat. */
+.msg.shot {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+  background: none;
+}
+.shot-img {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fff;
+  width: fit-content;
+  max-width: 100%;
+}
+.shot-img img {
+  display: block;
+  max-width: 160px;
+  max-height: 120px;
+  object-fit: contain;
+}
+.msg.shot.big .shot-img img {
+  max-width: 100%;
+  max-height: 480px;
+}

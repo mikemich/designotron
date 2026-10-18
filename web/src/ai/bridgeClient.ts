@@ -4,7 +4,7 @@
 
 import { getEngine, onDocChange } from "../store";
 import { executeTool } from "./tools";
-import { appendText, patchItem, push, useChat } from "./chatState";
+import { appendText, patchItem, push, showScreenshot, useChat } from "./chatState";
 import { onPreviewMessage } from "./preview";
 
 function bridgeUrl(): string {
@@ -39,6 +39,8 @@ class BridgeClient {
   private docTimer: ReturnType<typeof setTimeout> | null = null;
   private liveText: number | null = null;
   private toolChips = new Map<string, number>();
+  /** Number of the latest chat message, echoed back by the bridge. */
+  private turn = 0;
   /** Set once an error has been shown for the current turn, to avoid repeats. */
   private turnError = false;
 
@@ -113,7 +115,7 @@ class BridgeClient {
   chat(prompt: string, sessionId: string | null, attachments: Attachment[] = []) {
     this.liveText = null;
     this.turnError = false;
-    this.send({ type: "chat", prompt, sessionId, attachments });
+    this.send({ type: "chat", prompt, sessionId, attachments, turn: ++this.turn });
   }
 
   cancel() {
@@ -128,17 +130,21 @@ class BridgeClient {
       case "tool_call": {
         const out = await executeTool(m.name, m.input);
         this.send({ type: "tool_result", id: m.id, ok: out.ok, result: out.result, image: out.image ?? null });
+        showScreenshot(out);
         break;
       }
       case "chat_event":
         this.onClaudeEvent(m.event);
         break;
       case "chat_done":
+        // A late reply from an earlier turn (its process exiting after a newer turn began).
+        if (m.turn != null && m.turn !== this.turn) break;
         if (m.sessionId) useChat.setState({ sessionId: m.sessionId });
         useChat.setState({ running: false });
         this.liveText = null;
         break;
       case "chat_error":
+        if (m.turn != null && m.turn !== this.turn) break;
         // A non-zero exit after an error we already explained adds nothing.
         if (!this.turnError) this.reportError(String(m.message));
         useChat.setState({ running: false });
@@ -215,6 +221,8 @@ class BridgeClient {
       if (e.is_error && e.result && !this.turnError) this.reportError(String(e.result));
       const cost = typeof e.total_cost_usd === "number" ? ` · $${e.total_cost_usd.toFixed(3)} API-equivalent` : "";
       push({ kind: "system", text: `Done in ${((e.duration_ms ?? 0) / 1000).toFixed(1)}s${cost}` });
+      // The turn is over at its result, even if the CLI process takes a moment to exit.
+      useChat.setState({ running: false });
     }
   }
 }

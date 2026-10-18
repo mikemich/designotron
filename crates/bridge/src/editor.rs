@@ -137,18 +137,20 @@ async fn serve(socket: WebSocket, state: Shared) {
       "chat" => {
         let mut prompt = v["prompt"].as_str().unwrap_or("").to_string();
         let session = v["sessionId"].as_str().map(String::from);
+        let mut images = Vec::new();
         if let Some(list) = v["attachments"].as_array().filter(|l| !l.is_empty()) {
+          // Claude sees the images directly; the saved copies are for code it writes (e.g.
+          // building a screenshot as a page) or tools that take a file.
+          images = crate::fetch::chat_images(list);
           let paths = crate::fetch::save_attachments(&state.workspace, list);
           if !paths.is_empty() {
             let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-            prompt.push_str(&format!(
-              "\n\nAttached image(s), read them with the Read tool:\n{}",
-              names.join("\n")
-            ));
+            prompt.push_str(&format!("\n\nThe attached image(s) are also saved at:\n{}", names.join("\n")));
           }
         }
+        let turn = v["turn"].as_u64().unwrap_or(0);
         let st = state.clone();
-        tokio::spawn(async move { claude::run_chat(st, prompt, session).await });
+        tokio::spawn(async move { claude::run_chat(st, prompt, session, images, turn).await });
       }
       "chat_cancel" => state.chat.cancel().await,
       "preview_start" => {
