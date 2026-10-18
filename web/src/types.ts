@@ -145,6 +145,23 @@ export interface Node {
   interactions: Interaction[];
   exportSettings: { format: "png" | "jpg" | "svg"; scale: number; suffix: string }[];
   notes: string;
+  layoutGrids: LayoutGrid[];
+}
+
+export interface LayoutGrid {
+  pattern: "columns" | "rows" | "grid";
+  count: number;
+  gutter: number;
+  margin: number;
+  size: number;
+  alignment: "stretch" | "start" | "center" | "end";
+  color: string;
+  visible: boolean;
+}
+
+export interface RulerGuide {
+  axis: "x" | "y";
+  position: number;
 }
 
 export interface Page {
@@ -153,6 +170,7 @@ export interface Page {
   children: string[];
   background: string;
   flowStart: string | null;
+  guides: RulerGuide[];
 }
 
 export interface Doc {

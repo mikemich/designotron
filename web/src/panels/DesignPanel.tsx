@@ -25,7 +25,7 @@ import {
   WrapText,
   CornerUpLeft,
 } from "lucide-react";
-import type { Effect, Node, Paint } from "../types";
+import type { Effect, LayoutGrid, Node, Paint } from "../types";
 import { dispatch, FONTS, getDoc, styleTextSelection, useDoc, useSelection, useStore, zoomToSelection } from "../store";
 import { common, IconButton, MIXED, NumberField, Section, Seg, SelectField, type Maybe } from "../ui/controls";
 import { paintLabel, PaintSwatch, cssColor, ColorPicker } from "../ui/color";
@@ -67,6 +67,7 @@ export function DesignPanel() {
       <PaintsSection title="Fill" nodes={nodes} ids={ids} keyName="fills" />
       <PaintsSection title="Stroke" nodes={nodes} ids={ids} keyName="strokes" />
       <EffectsSection nodes={nodes} ids={ids} />
+      {nodes.length === 1 && ["frame", "component"].includes(nodes[0].type) && <GridSection node={nodes[0]} />}
       <ExportSection nodes={nodes} />
       {nodes.length === 1 && <NotesSection node={nodes[0]} />}
     </div>
@@ -763,6 +764,93 @@ function EffectsSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           </div>
         );
       })}
+    </Section>
+  );
+}
+
+const GRID_DEFAULTS: Record<LayoutGrid["pattern"], LayoutGrid> = {
+  columns: { pattern: "columns", count: 12, gutter: 20, margin: 20, size: 60, alignment: "stretch", color: "#FF00001A", visible: true },
+  rows: { pattern: "rows", count: 6, gutter: 20, margin: 20, size: 60, alignment: "stretch", color: "#0D99FF1A", visible: true },
+  grid: { pattern: "grid", count: 1, gutter: 0, margin: 0, size: 8, alignment: "stretch", color: "#FF00001A", visible: true },
+};
+
+/** Layout grids on a frame: canvas overlay plus snapping (never exported). */
+function GridSection({ node }: { node: Node }) {
+  const list = node.layoutGrids ?? [];
+  const [open, setOpen] = useState<number | null>(null);
+  const set = (layoutGrids: LayoutGrid[]) => update([node.id], { layoutGrids });
+  const label = (g: LayoutGrid) => (g.pattern === "grid" ? `Grid (${g.size}px)` : `${g.count} ${g.pattern}`);
+  return (
+    <Section
+      title="Layout grid"
+      actions={
+        <IconButton title="Add layout grid" onClick={() => (set([...list, list.length ? GRID_DEFAULTS.grid : GRID_DEFAULTS.columns]), setOpen(list.length))}>
+          <Plus size={14} />
+        </IconButton>
+      }
+    >
+      {list.map((g, i) => {
+        const setG = (patch: Partial<LayoutGrid>) => set(list.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+        return (
+          <div key={i} style={{ marginBottom: 8 }}>
+            <div className="row">
+              <button className="btn" style={{ flex: 1, justifyContent: "flex-start" }} onClick={() => setOpen(open === i ? null : i)}>
+                <Scan size={13} /> {label(g)}
+              </button>
+              <IconButton title={g.visible ? "Hide" : "Show"} onClick={() => setG({ visible: !g.visible })}>
+                {g.visible ? <Eye size={13} /> : <EyeOff size={13} />}
+              </IconButton>
+              <IconButton title="Remove" onClick={() => set(list.filter((_, j) => j !== i))}>
+                <Minus size={13} />
+              </IconButton>
+            </div>
+            {open === i && (
+              <>
+                <div className="row">
+                  <SelectField
+                    value={g.pattern}
+                    options={[
+                      { value: "columns", label: "Columns" },
+                      { value: "rows", label: "Rows" },
+                      { value: "grid", label: "Grid" },
+                    ]}
+                    onChange={(pattern) => setG({ ...GRID_DEFAULTS[pattern], color: g.color, visible: g.visible })}
+                  />
+                  {g.pattern !== "grid" && (
+                    <SelectField
+                      value={g.alignment}
+                      options={[
+                        { value: "stretch", label: "Stretch" },
+                        { value: "start", label: g.pattern === "columns" ? "Left" : "Top" },
+                        { value: "center", label: "Center" },
+                        { value: "end", label: g.pattern === "columns" ? "Right" : "Bottom" },
+                      ]}
+                      onChange={(alignment) => setG({ alignment })}
+                    />
+                  )}
+                </div>
+                <div className="grid2">
+                  {g.pattern === "grid" ? (
+                    <NumberField label="Size" min={1} value={g.size} onChange={(size) => setG({ size })} onScrubStart={begin} onScrubEnd={end} />
+                  ) : (
+                    <>
+                      <NumberField label="Count" min={1} value={g.count} onChange={(count) => setG({ count: Math.max(1, Math.round(count)) })} onScrubStart={begin} onScrubEnd={end} />
+                      <NumberField label="Gutter" min={0} value={g.gutter} onChange={(gutter) => setG({ gutter })} onScrubStart={begin} onScrubEnd={end} />
+                      {g.alignment !== "center" && <NumberField label="Margin" min={0} value={g.margin} onChange={(margin) => setG({ margin })} onScrubStart={begin} onScrubEnd={end} />}
+                      {g.alignment !== "stretch" && <NumberField label="Width" min={1} value={g.size} onChange={(size) => setG({ size })} onScrubStart={begin} onScrubEnd={end} />}
+                    </>
+                  )}
+                </div>
+                <div className="row">
+                  <PaintSwatch paint={{ type: "solid", color: g.color, opacity: 1, visible: true }} onChange={(p) => p.type === "solid" && setG({ color: p.color })} onOpen={begin} onClose={end} />
+                  <span className="muted">{g.color}</span>
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })}
+      {list.length > 0 && !useStore.getState().showGrids && <div className="muted small">Layout grids are hidden (⇧⌘4 to show).</div>}
     </Section>
   );
 }

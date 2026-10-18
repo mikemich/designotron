@@ -20,7 +20,7 @@ import {
   Undo2,
 } from "lucide-react";
 import * as A from "../actions";
-import { dispatch, setTool, useDoc, useStore, zoomBy, zoomToFit, zoomToSelection } from "../store";
+import { dispatch, setTool, toggleView, useDoc, useStore, zoomBy, zoomToFit, zoomToSelection } from "../store";
 import type { Tool } from "../types";
 import { ALT, Menu, MOD, SHIFT, type MenuItem } from "../ui/controls";
 import { useChat } from "../ai/chatState";
@@ -79,6 +79,9 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     { label: "Zoom to fit", kbd: `${SHIFT}1`, onClick: zoomToFit },
     { label: "Zoom to selection", kbd: `${SHIFT}2`, onClick: zoomToSelection },
     { label: "Zoom to 100%", kbd: `${SHIFT}0`, onClick: () => zoomBy(1 / useStore.getState().viewport.zoom) },
+    { label: `${useStore.getState().showRulers ? "Hide" : "Show"} rulers`, kbd: `${SHIFT}R`, onClick: () => toggleView("showRulers") },
+    { label: `${useStore.getState().showGrids ? "Hide" : "Show"} layout grids`, kbd: `${SHIFT}${MOD}4`, onClick: () => toggleView("showGrids") },
+    { label: "Version history", onClick: () => useStore.setState({ leftTab: "history" }) },
   ];
 
   const toolBtn = (t: Tool, title: string, icon: JSX.Element) => (

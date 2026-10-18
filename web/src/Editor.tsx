@@ -8,7 +8,8 @@ import { Presenter } from "./Presenter";
 import { Tour } from "./Tour";
 import { installShortcuts } from "./shortcuts";
 import { getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
-import { loadFile, saveFile } from "./files";
+import { listVersions, loadFile, saveFile, saveVersion } from "./files";
+import { AUTO_VERSION_MS } from "./panels/HistoryPanel";
 import { nodeSvg, svgToPngBlob } from "./exporter";
 import { readFileAsDataUrl } from "./assets";
 
@@ -48,6 +49,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     if (!ready) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let lastThumb = 0;
+    let lastVersion = Date.now();
+    listVersions(fileId).then((v) => (lastVersion = v[0]?.createdAt ?? 0));
     const save = async () => {
       const json = getEngine().save();
       const doc = getDoc();
@@ -58,6 +61,10 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       }
       await saveFile(fileId, doc.name, json, thumb);
       useStore.setState({ dirty: false });
+      if (Date.now() - lastVersion > AUTO_VERSION_MS) {
+        lastVersion = Date.now();
+        await saveVersion(fileId, "Autosave", json, true);
+      }
     };
     const off = onDocChange(() => {
       if (timer) clearTimeout(timer);

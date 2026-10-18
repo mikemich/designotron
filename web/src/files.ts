@@ -100,6 +100,8 @@ export async function loadFile(id: string): Promise<string | null> {
 }
 
 export async function deleteFile(id: string) {
+  for (const v of await listVersions(id)) await del(`dt:version:${id}:${v.id}`);
+  await del("dt:versions:" + id);
   await del("dt:file:" + id);
   await writeIndex((idx) => idx.filter((f) => f.id !== id));
 }
@@ -120,6 +122,60 @@ export async function duplicateFile(id: string): Promise<string | null> {
   const nid = newFileId();
   await saveFile(nid, doc.name, JSON.stringify(doc));
   return nid;
+}
+
+// Version history: named or automatic snapshots of a file, newest first.
+
+export interface Version {
+  id: string;
+  name: string;
+  createdAt: number;
+  auto: boolean;
+}
+
+const MAX_AUTO_VERSIONS = 30;
+
+export async function listVersions(fileId: string): Promise<Version[]> {
+  return ((await get("dt:versions:" + fileId)) as Version[] | undefined) ?? [];
+}
+
+export async function saveVersion(fileId: string, name: string, docJson: string, auto = false): Promise<Version> {
+  const used = new Set(referencedAssets(docJson));
+  const assets = Object.fromEntries(Object.entries(allAssets()).filter(([k]) => used.has(k)));
+  const v: Version = { id: "v" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), name, createdAt: Date.now(), auto };
+  await set(`dt:version:${fileId}:${v.id}`, { doc: docJson, assets } satisfies StoredFile);
+  let list = [v, ...(await listVersions(fileId))];
+  // Keep every named version; drop the oldest automatic ones.
+  const autos = list.filter((x) => x.auto);
+  for (const old of autos.slice(MAX_AUTO_VERSIONS)) {
+    await del(`dt:version:${fileId}:${old.id}`);
+    list = list.filter((x) => x.id !== old.id);
+  }
+  await set("dt:versions:" + fileId, list);
+  return v;
+}
+
+export async function loadVersion(fileId: string, versionId: string): Promise<string | null> {
+  const f = (await get(`dt:version:${fileId}:${versionId}`)) as StoredFile | undefined;
+  if (!f) return null;
+  loadAssets(f.assets);
+  return f.doc;
+}
+
+export async function renameVersion(fileId: string, versionId: string, name: string) {
+  const list = await listVersions(fileId);
+  await set(
+    "dt:versions:" + fileId,
+    list.map((v) => (v.id === versionId ? { ...v, name, auto: false } : v)),
+  );
+}
+
+export async function deleteVersion(fileId: string, versionId: string) {
+  await del(`dt:version:${fileId}:${versionId}`);
+  await set(
+    "dt:versions:" + fileId,
+    (await listVersions(fileId)).filter((v) => v.id !== versionId),
+  );
 }
 
 export function toDtron(docJson: string): string {

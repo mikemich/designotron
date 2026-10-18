@@ -74,7 +74,7 @@ export interface Viewport {
 }
 
 export type RightTab = "design" | "prototype" | "code" | "review" | "app";
-export type LeftTab = "layers" | "assets";
+export type LeftTab = "layers" | "assets" | "history";
 
 interface Store {
   rev: number;
@@ -96,6 +96,28 @@ interface Store {
   dropTarget: string | null;
   /** Character range selected in the text being edited (code points). */
   textSel: { id: string; start: number; end: number } | null;
+  showRulers: boolean;
+  showGrids: boolean;
+}
+
+const pref = (k: string, d: boolean) => {
+  try {
+    const v = localStorage.getItem(k);
+    return v === null ? d : v === "1";
+  } catch {
+    return d;
+  }
+};
+
+/** Toggles a remembered view option (rulers, layout grids). */
+export function toggleView(key: "showRulers" | "showGrids") {
+  const on = !useStore.getState()[key];
+  useStore.setState({ [key]: on } as Partial<Store>);
+  try {
+    localStorage.setItem(`dt:${key}`, on ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
 }
 
 export const useStore = create<Store>(() => ({
@@ -117,6 +139,8 @@ export const useStore = create<Store>(() => ({
   toast: null,
   dropTarget: null,
   textSel: null,
+  showRulers: pref("dt:showRulers", false),
+  showGrids: pref("dt:showGrids", true),
 }));
 
 /** Applies a style to the selected characters of the text being edited; false if none. */

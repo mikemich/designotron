@@ -214,6 +214,45 @@ try {
   await shot("05b-review");
   await page.click(".panel.right .tab:has-text('Design')");
 
+  // Rulers and guides: Shift+R shows rulers; dragging out of the left ruler adds a vertical guide.
+  await page.click("#dt-canvas", { position: { x: 600, y: 900 } });
+  await page.keyboard.press("Shift+R");
+  await page.waitForSelector(".ruler.left", { timeout: 3000 });
+  const lr = await page.locator(".ruler.left").boundingBox();
+  await page.mouse.move(lr.x + 10, lr.y + 300);
+  await page.mouse.down();
+  await page.mouse.move(lr.x + 200, lr.y + 300, { steps: 5 });
+  await page.mouse.up();
+  const guides = await page.evaluate(() => window.__dt.doc().pages.find((p) => p.id === window.__dt.state().page).guides);
+  check("drag from ruler creates a guide", guides.length === 1 && guides[0].axis === "x", JSON.stringify(guides));
+
+  // Layout grid on a frame: overlay draws the columns.
+  await page.evaluate(() => {
+    const d = window.__dt.doc();
+    const id = Object.values(d.nodes).find((n) => n.name === "Lint me").id;
+    window.__dt.dispatch({ op: "select", ids: [id] });
+  });
+  await page.click(".section:has-text('Layout grid') .ibtn[title='Add layout grid']");
+  await page.waitForTimeout(100);
+  const bands = await page.locator(".grid-overlay rect").count();
+  check("layout grid adds column overlay", bands === 12, `${bands} bands`);
+  await shot("05c-rulers-grid");
+
+  // Version history: save, change, restore, undo the restore.
+  await page.click(".panel .tab:has-text('History')");
+  await page.fill(".history input.textinput", "Before delete");
+  await page.click(".history button:has-text('Save')");
+  await page.waitForSelector(".version:has-text('Before delete')");
+  const nodesBefore = Object.keys((await doc()).nodes).length;
+  await page.keyboard.press("Delete");
+  const nodesDeleted = Object.keys((await doc()).nodes).length;
+  await page.click(".version:has-text('Before delete') .ibtn[title='Restore this version']");
+  await page.waitForFunction((n) => Object.keys(window.__dt.doc().nodes).length === n, nodesBefore, { timeout: 3000 }).catch(() => {});
+  const nodesRestored = Object.keys((await doc()).nodes).length;
+  check("version restore brings back deleted layers", nodesDeleted < nodesBefore && nodesRestored === nodesBefore, `${nodesBefore} → ${nodesDeleted} → ${nodesRestored}`);
+  await page.keyboard.press("Shift+R");
+  await page.click(".panel .tab:has-text('Layers')");
+
   // Templates: each builds into a fresh file from the files screen.
   for (const name of ["Landing page", "Dashboard", "Design system"]) {
     await page.evaluate(() => (location.hash = "#/"));

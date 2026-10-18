@@ -47,6 +47,7 @@ pub fn new_document(ids: &mut IdGen, name: &str) -> Document {
     children: Vec::new(),
     background: "#F5F5F5".into(),
     flow_start: None,
+    guides: Vec::new(),
   };
   Document {
     id: ids.next("d_"),

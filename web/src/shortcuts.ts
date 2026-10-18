@@ -1,6 +1,6 @@
 import * as A from "./actions";
 import { copySelection, pasteHere } from "./canvas/contextMenu";
-import { selection, setTool, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
+import { selection, setTool, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
 
 function isTyping(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement;
@@ -21,6 +21,7 @@ export function installShortcuts(): () => void {
     };
 
     if (mod) {
+      if (e.shiftKey && e.code === "Digit4") return run(() => toggleView("showGrids"));
       if (k === "z") return run(e.shiftKey ? A.redo : A.undo);
       if (k === "y") return run(A.redo);
       if (k === "d") return run(A.duplicate);
@@ -58,6 +59,7 @@ export function installShortcuts(): () => void {
 
     if (e.shiftKey) {
       if (k === "a") return run(A.addAutoLayout);
+      if (k === "r") return run(() => toggleView("showRulers"));
       if (k === "l") return run(() => setTool("arrow"));
       if (k === "p") return run(() => setTool("pencil"));
       if (k === "h" && has) return run(() => A.flip(true));

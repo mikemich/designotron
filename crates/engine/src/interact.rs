@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::doc::IdGen;
 use crate::geom::{dist_to_segment, local_matrix, point_in_polygon, Mat, Point, Rect};
-use crate::model::{Document, Node, NodeId, NodeType, TextAutoResize};
+use crate::model::{Axis, Document, Node, NodeId, NodeType, TextAutoResize};
 use crate::shapes;
 
 /// Deepest visible, unlocked node under a page-space point.
@@ -165,8 +165,15 @@ pub struct Snap {
   pub guides: Vec<Guide>,
 }
 
-/// Rects that moving nodes may snap to: siblings, the parent and top-level frames.
-fn snap_targets(doc: &Document, page: &str, moving: &[NodeId]) -> Vec<Rect> {
+/// What moving nodes may snap to: sibling/parent/top-level frame rects, plus
+/// page guides and layout grid lines as (position, span start, span end).
+struct Targets {
+  rects: Vec<Rect>,
+  xs: Vec<(f64, f64, f64)>,
+  ys: Vec<(f64, f64, f64)>,
+}
+
+fn snap_targets(doc: &Document, page: &str, moving: &[NodeId]) -> Targets {
   let excluded: Vec<NodeId> = moving.iter().flat_map(|m| doc.subtree(m)).collect();
   let mut ids: Vec<NodeId> = Vec::new();
   if let Some(first) = moving.first() {
@@ -180,12 +187,41 @@ fn snap_targets(doc: &Document, page: &str, moving: &[NodeId]) -> Vec<Rect> {
   }
   ids.sort();
   ids.dedup();
-  ids
+  let rects = ids
     .into_iter()
     .filter(|i| !excluded.contains(i))
     .filter(|i| doc.get(i).map(|n| n.visible).unwrap_or(false))
     .map(|i| doc.abs_bounds(&i))
-    .collect()
+    .collect();
+  let mut t = Targets {
+    rects,
+    xs: Vec::new(),
+    ys: Vec::new(),
+  };
+  const FAR: f64 = 1e7;
+  if let Some(pg) = doc.page(page) {
+    for g in &pg.guides {
+      match g.axis {
+        Axis::X => t.xs.push((g.position, FAR, -FAR)),
+        Axis::Y => t.ys.push((g.position, FAR, -FAR)),
+      }
+    }
+  }
+  // Layout grids of the frames containing the moving nodes.
+  let mut anc = moving.first().and_then(|m| doc.get(m)).and_then(|n| n.parent.clone());
+  while let Some(a) = anc {
+    let Some(n) = doc.get(&a) else { break };
+    if n.visible && !n.layout_grids.is_empty() {
+      let r = doc.abs_bounds(&a);
+      for g in n.layout_grids.iter().filter(|g| g.visible) {
+        let (xs, ys) = crate::grids::lines(&r, g);
+        t.xs.extend(xs.into_iter().map(|x| (x, r.y, r.bottom())));
+        t.ys.extend(ys.into_iter().map(|y| (y, r.x, r.right())));
+      }
+    }
+    anc = n.parent.clone();
+  }
+  t
 }
 
 /// Snaps a page-space move delta of `ids` to nearby edges and centres.
@@ -233,7 +269,7 @@ pub fn snap_rect(doc: &Document, page: &str, exclude: &[NodeId], r: Rect, edges:
   (out, guides)
 }
 
-fn best_snap(r: &Rect, targets: &[Rect], thr: f64, edges: [bool; 4]) -> (Option<f64>, Option<f64>) {
+fn best_snap(r: &Rect, targets: &Targets, thr: f64, edges: [bool; 4]) -> (Option<f64>, Option<f64>) {
   let all = edges.iter().all(|e| *e);
   let mut xs: Vec<f64> = Vec::new();
   if edges[0] {
@@ -255,31 +291,39 @@ fn best_snap(r: &Rect, targets: &[Rect], thr: f64, edges: [bool; 4]) -> (Option<
   if edges[3] {
     ys.push(r.bottom());
   }
-  let pick = |vals: &[f64], tv: &dyn Fn(&Rect) -> [f64; 3]| -> Option<f64> {
+  let pick = |vals: &[f64], tv: &dyn Fn(&Rect) -> [f64; 3], lines: &[(f64, f64, f64)]| -> Option<f64> {
     let mut best: Option<f64> = None;
-    for t in targets {
-      for target in tv(t) {
-        for v in vals {
-          let d = target - v;
-          if d.abs() <= thr && best.is_none_or(|b| d.abs() < b.abs()) {
-            best = Some(d);
-          }
+    let rect_values = targets.rects.iter().flat_map(tv);
+    for target in rect_values.chain(lines.iter().map(|l| l.0)) {
+      for v in vals {
+        let d = target - v;
+        if d.abs() <= thr && best.is_none_or(|b| d.abs() < b.abs()) {
+          best = Some(d);
         }
       }
     }
     best
   };
   (
-    pick(&xs, &|t: &Rect| [t.x, t.center().x, t.right()]),
-    pick(&ys, &|t: &Rect| [t.y, t.center().y, t.bottom()]),
+    pick(&xs, &|t: &Rect| [t.x, t.center().x, t.right()], &targets.xs),
+    pick(&ys, &|t: &Rect| [t.y, t.center().y, t.bottom()], &targets.ys),
   )
 }
 
-fn guides_for(r: &Rect, targets: &[Rect], gx: bool, gy: bool) -> Vec<Guide> {
+fn guides_for(r: &Rect, all: &Targets, gx: bool, gy: bool) -> Vec<Guide> {
   let mut out = Vec::new();
   let near = |a: f64, b: f64| (a - b).abs() < 0.5;
+  let targets = &all.rects;
   if gx {
     for v in [r.x, r.center().x, r.right()] {
+      for l in all.xs.iter().filter(|l| near(l.0, v)) {
+        out.push(Guide {
+          x1: v,
+          y1: r.y.min(l.1),
+          x2: v,
+          y2: r.bottom().max(l.2),
+        });
+      }
       for t in targets {
         if [t.x, t.center().x, t.right()].iter().any(|tv| near(*tv, v)) {
           out.push(Guide {
@@ -294,6 +338,14 @@ fn guides_for(r: &Rect, targets: &[Rect], gx: bool, gy: bool) -> Vec<Guide> {
   }
   if gy {
     for v in [r.y, r.center().y, r.bottom()] {
+      for l in all.ys.iter().filter(|l| near(l.0, v)) {
+        out.push(Guide {
+          x1: r.x.min(l.1),
+          y1: v,
+          x2: r.right().max(l.2),
+          y2: v,
+        });
+      }
       for t in targets {
         if [t.y, t.center().y, t.bottom()].iter().any(|tv| near(*tv, v)) {
           out.push(Guide {

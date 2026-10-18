@@ -33,6 +33,71 @@ pub struct Page {
   pub background: String,
   #[serde(default)]
   pub flow_start: Option<NodeId>,
+  /// Ruler guides drawn across the whole page.
+  #[serde(default)]
+  pub guides: Vec<RulerGuide>,
+}
+
+/// A page guide: a vertical line at `position` for axis X, horizontal for Y.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RulerGuide {
+  pub axis: Axis,
+  pub position: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Axis {
+  X,
+  Y,
+}
+
+/// Figma-style layout grid on a frame: columns, rows or a square grid.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LayoutGrid {
+  pub pattern: GridPattern,
+  pub count: u32,
+  pub gutter: f64,
+  pub margin: f64,
+  /// Cell size for `grid`; column/row size when not stretched.
+  pub size: f64,
+  pub alignment: GridAlign,
+  pub color: String,
+  pub visible: bool,
+}
+
+impl Default for LayoutGrid {
+  fn default() -> Self {
+    LayoutGrid {
+      pattern: GridPattern::Columns,
+      count: 12,
+      gutter: 20.0,
+      margin: 0.0,
+      size: 8.0,
+      alignment: GridAlign::Stretch,
+      color: "#FF00001A".into(),
+      visible: true,
+    }
+  }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum GridPattern {
+  Columns,
+  Rows,
+  Grid,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum GridAlign {
+  Stretch,
+  Start,
+  Center,
+  End,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -147,6 +212,8 @@ pub struct Node {
   pub export_settings: Vec<ExportSetting>,
   /// Free-form notes for developers / AI ("dev mode" annotations).
   pub notes: String,
+  /// Layout grids (frames only); editor overlay and snapping, never rendered.
+  pub layout_grids: Vec<LayoutGrid>,
 }
 
 impl Default for Node {
@@ -196,6 +263,7 @@ impl Default for Node {
       interactions: Vec::new(),
       export_settings: Vec::new(),
       notes: String::new(),
+      layout_grids: Vec::new(),
     }
   }
 }

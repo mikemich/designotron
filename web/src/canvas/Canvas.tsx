@@ -14,6 +14,7 @@ import {
 import { apply, corners, invert, mid, polyPoints, rectCorners, simplify, toScreen, type Pt } from "./geometry";
 import { TextEditor } from "./TextEditor";
 import { EmptyPrompt } from "./EmptyPrompt";
+import { GridOverlay, PageGuides, Rulers } from "./Rulers";
 import { insertImageFile } from "../actions";
 import { canvasMenu } from "./contextMenu";
 import { Menu, type MenuItem } from "../ui/controls";
@@ -73,6 +74,16 @@ export function Canvas() {
   const marquee = useStore((s) => s.marquee);
   const rightTab = useStore((s) => s.rightTab);
   const dropTarget = useStore((s) => s.dropTarget);
+  const showRulers = useStore((s) => s.showRulers);
+  const showGrids = useStore((s) => s.showGrids);
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setSize({ w: el.clientWidth, h: el.clientHeight }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const drag = useRef<Drag | null>(null);
   const [draw, setDraw] = useState<{ start: Pt; cur: Pt } | null>(null);
   const [pen, setPen] = useState<VectorPoint[]>([]);
@@ -632,6 +643,8 @@ export function Canvas() {
         <g transform={`translate(${v.x} ${v.y}) scale(${v.zoom})`} dangerouslySetInnerHTML={{ __html: svg }} />
       </svg>
       <svg className="overlay">
+        {showGrids && <GridOverlay v={v} />}
+        <PageGuides v={v} width={size.w} height={size.h} />
         {topFrames.map((f) => {
           const n = doc.nodes[f.id];
           const p = toScreen(v, apply(f.matrix, { x: 0, y: 0 }));
@@ -712,6 +725,7 @@ export function Canvas() {
         {pen.length > 0 && <PenPreview pts={pen} cursor={penCursor} v={v} />}
         {vectorNode?.vector && vectorM && <VectorPoints node={vectorNode} m={vectorM} v={v} />}
       </svg>
+      {showRulers && <Rulers v={v} width={size.w} height={size.h} selection={selItems.union} />}
       {editingText && <TextEditor id={editingText} />}
       {empty && tool === "move" && <EmptyPrompt />}
       <div className="zoom-indicator">{Math.round(v.zoom * 100)}%</div>

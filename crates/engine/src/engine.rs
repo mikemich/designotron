@@ -13,7 +13,8 @@ use crate::geom::{Point, Rect};
 use crate::interact::{self, Handle};
 use crate::layout;
 use crate::model::{
-  AutoLayout, ColorStyle, Document, Interaction, LayoutDirection, Node, NodeId, NodeType, Page, Paint, Sizing, TextStyle, VectorPoint,
+  AutoLayout, ColorStyle, Document, Interaction, LayoutDirection, Node, NodeId, NodeType, Page, Paint, RulerGuide, Sizing, TextStyle,
+  VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render::{self, Mode, RenderOptions};
@@ -71,6 +72,16 @@ pub enum Command {
   SetPageBackground {
     id: String,
     color: String,
+  },
+  /// Replaces the page's ruler guides (current page when `page` is None).
+  SetGuides {
+    #[serde(default)]
+    page: Option<String>,
+    guides: Vec<RulerGuide>,
+  },
+  /// Swaps in a whole document as one undoable step (restoring a version).
+  ReplaceDocument {
+    doc: Value,
   },
   SetDocName {
     name: String,
@@ -322,6 +333,11 @@ pub enum Query {
     zoom: f64,
     #[serde(default)]
     exclude: Vec<NodeId>,
+  },
+  /// Visible layout grids on a page, for the canvas overlay.
+  GridOverlay {
+    #[serde(default)]
+    page: Option<String>,
   },
   Copy {
     ids: Vec<NodeId>,
@@ -678,6 +694,7 @@ impl Engine {
           children: vec![],
           background: "#F5F5F5".into(),
           flow_start: None,
+          guides: Vec::new(),
         });
         self.page = id.clone();
         self.selection.clear();
@@ -700,6 +717,25 @@ impl Engine {
       }
       Command::SetPageBackground { id, color } => {
         self.doc.page_mut(&id).ok_or("no such page")?.background = crate::color::normalize(&color);
+        Ok(json!({}))
+      }
+      Command::SetGuides { page, guides } => {
+        let id = page.unwrap_or_else(|| self.page.clone());
+        self.doc.page_mut(&id).ok_or("no such page")?.guides = guides;
+        Ok(json!({}))
+      }
+      Command::ReplaceDocument { doc } => {
+        let doc: Document = serde_json::from_value(doc).map_err(|e| format!("not a Designotron document: {e}"))?;
+        if doc.pages.is_empty() {
+          return Err("document has no pages".into());
+        }
+        if doc.page(&self.page).is_none() {
+          self.page = doc.pages[0].id.clone();
+        }
+        self.doc = doc;
+        self.selection.clear();
+        self.refresh_fingerprints();
+        layout::relayout_all(&mut self.doc, self.measurer.as_ref());
         Ok(json!({}))
       }
       Command::SetDocName { name } => {
@@ -1434,6 +1470,7 @@ impl Engine {
         );
         json!({ "x": r.x, "y": r.y, "guides": guides })
       }
+      Query::GridOverlay { page } => crate::grids::overlay(&self.doc, page.as_deref().unwrap_or(&self.page)),
       Query::Copy { ids } => json!(self.copy(&ids)),
       Query::ExportSvg { id } => json!(render::export_svg(&self.doc, &id, m)),
       Query::ExportHtml { id } => json!(codegen::export_html(&self.doc, &id, m)),
@@ -1539,6 +1576,95 @@ mod tests {
 
   fn id_of(v: &Value) -> String {
     v["id"].as_str().unwrap().to_string()
+  }
+
+  fn rect(e: &mut Engine, x: f64, y: f64, w: f64, h: f64, parent: Option<NodeId>) -> String {
+    let r = e
+      .dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x,
+        y,
+        width: w,
+        height: h,
+        parent,
+      })
+      .unwrap();
+    id_of(&r)
+  }
+
+  #[test]
+  fn moves_snap_to_ruler_guides() {
+    let mut e = engine();
+    let id = rect(&mut e, 1000.0, 1000.0, 50.0, 50.0, None);
+    e.dispatch(Command::SetGuides {
+      page: None,
+      guides: vec![RulerGuide {
+        axis: crate::model::Axis::X,
+        position: 1104.0,
+      }],
+    })
+    .unwrap();
+    // Right edge lands 2px short of the guide and snaps onto it.
+    let r = e
+      .dispatch(Command::Translate {
+        ids: vec![id.clone()],
+        dx: 52.0,
+        dy: 0.0,
+        snap: true,
+        zoom: 1.0,
+      })
+      .unwrap();
+    assert_eq!(e.doc.get(&id).unwrap().x, 1054.0, "{r}");
+    e.dispatch(Command::Undo).unwrap();
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.doc.page(&e.page).unwrap().guides.is_empty(), "guides are undoable");
+  }
+
+  #[test]
+  fn moves_snap_to_layout_grid_columns() {
+    let mut e = engine();
+    let frame = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 0.0,
+        y: 0.0,
+        width: 1000.0,
+        height: 600.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.doc.get_mut(&frame).unwrap().layout_grids = vec![crate::model::LayoutGrid {
+      count: 4,
+      gutter: 20.0,
+      margin: 40.0,
+      ..Default::default()
+    }];
+    let child = rect(&mut e, 300.0, 300.0, 20.0, 20.0, Some(frame.clone()));
+    // Column 2 starts at 40 + 215 + 20 = 275; move the left edge to 277.
+    e.dispatch(Command::Translate {
+      ids: vec![child.clone()],
+      dx: -23.0,
+      dy: 0.0,
+      snap: true,
+      zoom: 1.0,
+    })
+    .unwrap();
+    assert_eq!(e.doc.abs_bounds(&child).x, 275.0);
+    let overlay = e.query(Query::GridOverlay { page: None }).unwrap();
+    assert_eq!(overlay[0]["bands"].as_array().unwrap().len(), 4);
+  }
+
+  #[test]
+  fn replace_document_is_undoable() {
+    let mut e = engine();
+    let before = e.to_json();
+    let id = rect(&mut e, 0.0, 0.0, 10.0, 10.0, None);
+    let snapshot: Value = serde_json::from_str(&before).unwrap();
+    e.dispatch(Command::ReplaceDocument { doc: snapshot }).unwrap();
+    assert!(e.doc.get(&id).is_none());
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.doc.get(&id).is_some());
   }
 
   #[test]

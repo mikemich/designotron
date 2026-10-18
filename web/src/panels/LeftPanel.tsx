@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { HistoryPanel } from "./HistoryPanel";
 import {
   ChevronDown,
   ChevronRight,
@@ -40,14 +41,19 @@ export function LeftPanel() {
         <button className={"tab" + (tab === "assets" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "assets" })}>
           Assets
         </button>
+        <button className={"tab" + (tab === "history" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "history" })}>
+          History
+        </button>
       </div>
       {tab === "layers" ? (
         <>
           <Pages />
           <Layers />
         </>
-      ) : (
+      ) : tab === "assets" ? (
         <Assets />
+      ) : (
+        <HistoryPanel />
       )}
     </div>
   );

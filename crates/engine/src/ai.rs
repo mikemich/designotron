@@ -79,6 +79,7 @@ fn spec_schema() -> Value {
       "viewBox": { "type": "array", "description": "[minX, minY, width, height] for svgPath, default [0,0,24,24]" },
       "componentId": { "type": "string", "description": "For type instance" },
       "notes": { "type": "string", "description": "Developer annotation" },
+      "layoutGrids": { "type": "array", "description": "Frame layout grids, e.g. [{pattern:'columns', count:12, gutter:24, margin:80}] or [{pattern:'grid', size:8}]", "items": { "type": "object" } },
       "children": { "type": "array", "items": { "type": "object" } }
     },
     "required": ["type"]
@@ -676,6 +677,9 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
   }
   if let Some(v) = s.get("absolute").and_then(|v| v.as_bool()) {
     n.absolute_position = v;
+  }
+  if let Some(v) = s.get("layoutGrids") {
+    n.layout_grids = serde_json::from_value(v.clone()).map_err(|e| format!("layoutGrids: {e}"))?;
   }
   if let Some(v) = s.get("notes").and_then(|v| v.as_str()) {
     n.notes = v.to_string();

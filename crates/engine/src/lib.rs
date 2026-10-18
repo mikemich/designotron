@@ -10,6 +10,7 @@ pub mod components;
 pub mod doc;
 pub mod engine;
 pub mod geom;
+pub mod grids;
 pub mod interact;
 pub mod layout;
 pub mod lint;

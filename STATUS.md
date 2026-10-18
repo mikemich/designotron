@@ -5,7 +5,7 @@ change that finishes, starts or breaks them.
 
 ## In progress
 
-- Working through [ROADMAP.md](ROADMAP.md) in order. Next: version history, rulers, guides, layout grids.
+- Working through [ROADMAP.md](ROADMAP.md) in order. Next: boolean operations, flatten, masks, outline stroke.
 
 ## To do
 
@@ -16,13 +16,12 @@ Ordered by impact on "replace Figma for a small team".
 | 1  | Real-time multiplayer                  | CRDT (Yjs/Automerge or a Rust CRDT) over the bridge or a hosted relay |
 | 2  | Accounts, cloud files, sharing links   | Needs a hosted backend; today files are local (IndexedDB + `.dtron`)  |
 | 3  | Comments                               | Pins on canvas, threads, mentions; needs (2) for teams                |
-| 4  | Version history                        | Named snapshots in IndexedDB first, cloud later                       |
+| 4  | Cloud version history                  | Local named/auto versions shipped; sync them once files are in the cloud |
 | 6  | Boolean operations, flatten, masks     | Union/subtract/intersect/exclude, outline stroke, mask groups         |
 | 7  | Performance for large files            | Incremental render, canvas/WebGL path, persistent maps for undo       |
 | 8  | Figma file import                      | `.fig` / Figma REST API JSON to Designotron model                     |
 | 9  | Variables and modes                    | Colour/number/string tokens with light/dark modes                     |
 | 10 | Vector editing completeness            | Add/delete points, bend tool, renormalise bounds after edits          |
-| 11 | Layout grids, rulers, guides           | Column/row grids on frames, draggable guides                          |
 | 12 | Smart animate                          | Interpolate matching layers between frames (currently a dissolve)     |
 | 13 | Plugin API                             | Sandboxed JS plugins over the same Command/Query surface              |
 | 14 | Canvas gradient and image-crop handles | Edit gradients and crops directly on the canvas                       |
@@ -58,6 +57,8 @@ Ordered by impact on "replace Figma for a small team".
 | Code export     | Semantic tags (h1–h3, button, nav, header, …), `<img>` for image layers, responsive roots           |
 | Review          | Design lint (contrast, tiny text, clipped text, off-grid, tap targets, names, near-duplicate colours, unlinked styles) with one-click and bulk fixes; Claude critique |
 | Claude actions  | Paste/drop/attach images in chat (both modes), quick actions (flows, variants, responsive, dark mode, content, rename, code sync, tokens from code), "Rebuild as editable layers" on image layers |
+| Versions        | History tab: named versions, automatic version every 10 min of editing, restore (undoable), rename, duplicate as file |
+| Precision       | Rulers (⇧R) with selection extents, page guides dragged from rulers (move, drag back to delete), layout grids on frames (columns/rows/grid, ⇧⌘4), snapping to guides and grid lines |
 | Live app        | App tab: write the generated project to `workspace/app` (or keep it in sync), run `npm run dev` through the bridge, preview at mobile/desktop width, logs, "Ask Claude to fix it" |
 | Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README                                                             |
 
@@ -67,7 +68,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 53 engine + bridge unit tests                          | `cargo test --workspace`                     |
+| 58 engine + bridge unit tests                          | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
@@ -76,7 +77,8 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 | Presenter hotspots and prototype navigation            | `web/scripts/e2e.mjs`                        |
 | Autosave survives reload, Claude panel opens           | `web/scripts/e2e.mjs`                        |
 | Templates, tour, empty prompt, ⌘B on a word, Review fixes | `web/scripts/e2e.mjs`                     |
-| Chat image attachment and quick actions menu           | `web/scripts/e2e.mjs` (31/31 passing)        |
+| Chat image attachment and quick actions menu           | `web/scripts/e2e.mjs`                        |
+| Ruler guide drag, layout grid overlay, version restore | `web/scripts/e2e.mjs` (34/34 passing)        |
 | Production build served by the bridge                  | `E2E_URL=http://127.0.0.1:5174 npm run e2e`  |
 | Release binaries download and serve the editor         | `install.sh` and `npx designotron` on Linux  |
 | Exported Landing/Dashboard projects build and match    | `tsc` + `vite build`, compared screenshots   |
@@ -96,7 +98,7 @@ until someone runs it with a real key.
 
 | Area             | Limitation                                                                                               |
 |------------------|----------------------------------------------------------------------------------------------------------|
-| Collaboration    | Single user. No multiplayer, accounts, sharing, comments or version history                              |
+| Collaboration    | Single user. No multiplayer, accounts, sharing or comments; versions live only in this browser           |
 | Storage          | Files live in the browser (IndexedDB). Clearing site data deletes them; save `.dtron` files to keep them |
 | Scale            | Each change re-renders the page as SVG and snapshots the document; thousands of layers will feel slow    |
 | Text             | No OpenType features or per-range line height; widths depend on the web font having loaded               |
@@ -129,6 +131,6 @@ until someone runs it with a real key.
 | Export                     | Yes         | Plus code export Figma lacks            |
 | Dev Mode / inspect         | Partial     | Code tab, notes                         |
 | Multiplayer, comments      | No          | Top of the to-do list                   |
-| Version history            | No          |                                         |
+| Version history            | Local       | Named + automatic, per browser          |
 | Plugins                    | No          | MCP covers AI automation today          |
 | AI                         | Yes         | Claude Code (Pro/Max) and API key       |
