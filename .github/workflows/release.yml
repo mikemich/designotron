@@ -1,9 +1,15 @@
 name: Release
 
-# Push a tag like v0.2.0 to build binaries for every platform and publish a GitHub release.
+# Builds binaries for every platform and publishes a GitHub release. Either push a tag
+# like v0.2.0, or run it from the Actions tab with a version (it creates the tag).
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the v, e.g. 0.2.0"
+        required: true
 
 permissions:
   contents: write
@@ -61,3 +67,5 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+          target_commitish: ${{ github.sha }}
