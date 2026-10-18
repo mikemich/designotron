@@ -56,7 +56,7 @@ export function EmptyPrompt() {
               } finally {
                 dispatch({ op: "endGesture" });
               }
-              requestAnimationFrame(zoomToFit);
+              requestAnimationFrame(() => requestAnimationFrame(zoomToFit));
             }}
           >
             {t.name}

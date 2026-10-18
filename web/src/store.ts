@@ -24,8 +24,15 @@ let engine: WasmEngine | null = null;
 const measureCache = new Map<string, number>();
 
 /** Loads the WASM engine, installs the text measurer and waits for web fonts. */
-export async function bootEngine(): Promise<void> {
-  if (engine) return;
+let booting: Promise<void> | null = null;
+
+/** Loads the WASM engine once; every caller shares the same load. */
+export function bootEngine(): Promise<void> {
+  booting ??= loadEngine();
+  return booting;
+}
+
+async function loadEngine(): Promise<void> {
   const ctx = document.createElement("canvas").getContext("2d")!;
   (globalThis as any).dtMeasureText = (family: string, size: number, weight: number, italic: boolean, text: string) => {
     const font = `${italic ? "italic " : ""}${weight} ${size}px "${family}", sans-serif`;
@@ -99,7 +106,8 @@ interface Store {
   showRulers: boolean;
   showGrids: boolean;
   variablesOpen: boolean;
-  figmaOpen: boolean;
+  /** "new": opened from the files dashboard for a new file, which is discarded if nothing is imported. */
+  figmaOpen: boolean | "new";
   /** Comment thread open in a popover. */
   openComment: string | null;
   /** New comment being written at a page position. */

@@ -35,7 +35,7 @@ interface CollabState {
 export const useCollab = create<CollabState>(() => ({ status: "off", role: null, mode: null, link: null, peers: {}, dialogOpen: false }));
 
 /** Where shared links open when this editor runs on localhost (guests can't reach that). */
-const HOSTED_EDITOR: string = import.meta.env.VITE_DT_EDITOR_URL || "https://mikemich.github.io/designotron/";
+export const HOSTED_EDITOR: string = import.meta.env.VITE_DT_EDITOR_URL || "https://mikemich.github.io/designotron/";
 
 /** Relay used for online sharing: one the user set, else the build default (VITE_DT_RELAY). */
 export function relayUrl(): string {
@@ -95,7 +95,7 @@ function randomRoomId(): string {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-const isLocalPage = () => ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+export const isLocalPage = () => ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
 
 const COLORS = ["#F24822", "#0FA958", "#9747FF", "#FF7A00", "#1BC4FF", "#FF24BD", "#14AE5C", "#E8A400"];
 const myColor = COLORS[Math.floor(Math.random() * COLORS.length)];

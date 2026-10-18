@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { FileJson, Loader2, X } from "lucide-react";
-import { useStore, toast } from "../store";
+import { getDoc, useStore, toast } from "../store";
+import { deleteFile } from "../files";
 import { importFigmaJson, importFigmaUrl, type ImportResult } from "../figma";
 import { useEscape } from "../ui/controls";
 
@@ -22,7 +23,15 @@ export function FigmaImportDialog() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const close = () => useStore.setState({ figmaOpen: false });
+  const close = async () => {
+    const { figmaOpen, fileId } = useStore.getState();
+    useStore.setState({ figmaOpen: false });
+    // Cancelled from the dashboard: don't leave an empty "Untitled" file behind.
+    if (figmaOpen === "new" && fileId && getDoc().pages.every((p) => p.children.length === 0)) {
+      await deleteFile(fileId);
+      location.hash = "#/";
+    }
+  };
   useEscape(close);
 
   const finish = (r: ImportResult) => {

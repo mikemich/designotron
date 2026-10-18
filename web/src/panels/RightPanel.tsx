@@ -15,20 +15,20 @@ export function RightPanel() {
   const set = (rightTab: RightTab) => useStore.setState({ rightTab });
   return (
     <div className="panel right">
-      <div className="tabs">
-        <button className={"tab" + (tab === "design" ? " active" : "")} onClick={() => set("design")}>
+      <div className="tabs" role="tablist">
+        <button role="tab" aria-selected={tab === "design"} className={"tab" + (tab === "design" ? " active" : "")} onClick={() => set("design")}>
           Design
         </button>
-        <button className={"tab" + (tab === "prototype" ? " active" : "")} onClick={() => set("prototype")}>
+        <button role="tab" aria-selected={tab === "prototype"} className={"tab" + (tab === "prototype" ? " active" : "")} onClick={() => set("prototype")}>
           Prototype
         </button>
-        <button className={"tab" + (tab === "code" ? " active" : "")} onClick={() => set("code")}>
+        <button role="tab" aria-selected={tab === "code"} className={"tab" + (tab === "code" ? " active" : "")} onClick={() => set("code")}>
           Code
         </button>
-        <button className={"tab" + (tab === "review" ? " active" : "")} onClick={() => set("review")}>
+        <button role="tab" aria-selected={tab === "review"} className={"tab" + (tab === "review" ? " active" : "")} onClick={() => set("review")}>
           Review
         </button>
-        <button className={"tab" + (tab === "app" ? " active" : "")} onClick={() => set("app")}>
+        <button role="tab" aria-selected={tab === "app"} className={"tab" + (tab === "app" ? " active" : "")} onClick={() => set("app")}>
           App
         </button>
       </div>

@@ -25,10 +25,12 @@ import {
   WrapText,
   CornerUpLeft,
   Variable,
+  Radius,
+  Blend,
 } from "lucide-react";
 import type { Effect, LayoutGrid, Node, Paint, VarKind } from "../types";
 import { dispatch, FONTS, getDoc, styleTextSelection, useDoc, useSelection, useStore, zoomToSelection } from "../store";
-import { common, IconButton, MIXED, NumberField, Section, Seg, SelectField, type Maybe } from "../ui/controls";
+import { ALT, common, IconButton, MIXED, MOD, NumberField, Section, Seg, SelectField, SHIFT, type Maybe } from "../ui/controls";
 import { paintLabel, PaintSwatch, cssColor, ColorPicker } from "../ui/color";
 import { exportNode } from "../exporter";
 import * as A from "../actions";
@@ -133,10 +135,11 @@ function PagePanel() {
         <div className="muted small" style={{ lineHeight: 1.7 }}>
           F frame · R rectangle · O ellipse · T text · P pen · L line
           <br />
-          Shift+A auto layout · ⌥⌘K component · ⌘G group
+          {`${SHIFT}A auto layout · ${ALT}${MOD}K component · ${MOD}G group`}
           <br />
-          Space+drag to pan · ⌘+scroll to zoom · ⇧1 fit
-          <br />⌘/ opens Claude
+          {`Space+drag to pan · ${MOD}scroll to zoom · ${SHIFT}1 fit`}
+          <br />
+          {`${MOD}/ opens Claude · ? all shortcuts`}
         </div>
       </Section>
     </div>
@@ -220,22 +223,22 @@ function AlignSection() {
   const sel = useStore((s) => s.es.selection);
   return (
     <div className="section" style={{ display: "flex", justifyContent: "space-between", paddingTop: 8, paddingBottom: 8 }}>
-      <IconButton title="Align left (⌥A)" onClick={() => A.align("left")}>
+      <IconButton title={`Align left (${ALT}A)`} onClick={() => A.align("left")}>
         <AlignStartVertical size={14} />
       </IconButton>
-      <IconButton title="Align horizontal centres (⌥H)" onClick={() => A.align("hCenter")}>
+      <IconButton title={`Align horizontal centres (${ALT}H)`} onClick={() => A.align("hCenter")}>
         <AlignCenterVertical size={14} />
       </IconButton>
-      <IconButton title="Align right (⌥D)" onClick={() => A.align("right")}>
+      <IconButton title={`Align right (${ALT}D)`} onClick={() => A.align("right")}>
         <AlignEndVertical size={14} />
       </IconButton>
-      <IconButton title="Align top (⌥W)" onClick={() => A.align("top")}>
+      <IconButton title={`Align top (${ALT}W)`} onClick={() => A.align("top")}>
         <AlignStartHorizontal size={14} />
       </IconButton>
-      <IconButton title="Align vertical centres (⌥V)" onClick={() => A.align("vCenter")}>
+      <IconButton title={`Align vertical centres (${ALT}V)`} onClick={() => A.align("vCenter")}>
         <AlignCenterHorizontal size={14} />
       </IconButton>
-      <IconButton title="Align bottom (⌥S)" onClick={() => A.align("bottom")}>
+      <IconButton title={`Align bottom (${ALT}S)`} onClick={() => A.align("bottom")}>
         <AlignEndHorizontal size={14} />
       </IconButton>
       <IconButton title="Distribute horizontally" disabled={sel.length < 3} onClick={() => A.distribute(true)}>
@@ -306,9 +309,9 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
             label="W"
             value={common(nodes, (n) => n.sizingH)}
             options={[
-              { value: "fixed", label: "Fixed width" },
-              { value: "hug", label: "Hug contents" },
-              { value: "fill", label: "Fill container" },
+              { value: "fixed", label: "Fixed" },
+              { value: "hug", label: "Hug" },
+              { value: "fill", label: "Fill" },
             ]}
             onChange={(sizingH) => update(ids, { sizingH })}
           />
@@ -316,9 +319,9 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
             label="H"
             value={common(nodes, (n) => n.sizingV)}
             options={[
-              { value: "fixed", label: "Fixed height" },
-              { value: "hug", label: "Hug contents" },
-              { value: "fill", label: "Fill container" },
+              { value: "fixed", label: "Fixed" },
+              { value: "hug", label: "Hug" },
+              { value: "fill", label: "Fill" },
             ]}
             onChange={(sizingV) => update(ids, { sizingV })}
           />
@@ -328,7 +331,7 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         <NumberField label={<RotateCw size={11} />} value={common(nodes, (n) => n.rotation)} suffix="°" onChange={(rotation) => update(ids, { rotation })} onScrubStart={begin} onScrubEnd={end} title="Rotation" />
         {radiusable && !corners && (
           <div className="row" style={{ margin: 0 }}>
-            <NumberField label="◜" min={0} value={common(nodes, (n) => n.cornerRadius)} onChange={(cornerRadius) => update(ids, { cornerRadius, cornerRadii: null })} onScrubStart={begin} onScrubEnd={end} title="Corner radius" />
+            <NumberField label={<Radius size={11} />} min={0} value={common(nodes, (n) => n.cornerRadius)} onChange={(cornerRadius) => update(ids, { cornerRadius, cornerRadii: null })} onScrubStart={begin} onScrubEnd={end} title="Corner radius" />
             <IconButton title="Independent corners" onClick={() => setCorners(true)}>
               <Scan size={12} />
             </IconButton>
@@ -403,7 +406,7 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
       <Section
         title="Auto layout"
         actions={
-          <IconButton title="Add auto layout (⇧A)" onClick={A.addAutoLayout}>
+          <IconButton title={`Add auto layout (${SHIFT}A)`} onClick={A.addAutoLayout}>
             <Plus size={14} />
           </IconButton>
         }
@@ -495,7 +498,7 @@ function LayerSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           onChange={(blendMode) => update(ids, { blendMode })}
         />
         <NumberField
-          label="◐"
+          label={<Blend size={11} />}
           value={mapMaybe(common(nodes, (n) => n.opacity), (v) => Math.round(v * 100))}
           suffix="%"
           min={0}

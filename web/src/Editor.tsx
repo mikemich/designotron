@@ -13,9 +13,10 @@ import { usePlugins } from "./plugins";
 import { joinShared, stopSharing, useCollab } from "./collab";
 import { GuestBar } from "./panels/GuestBar";
 import { ShortcutsDialog } from "./panels/ShortcutsDialog";
+import { PhoneNote } from "./panels/PhoneNote";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
-import { getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
+import { bootEngine, getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
 import { listVersions, loadFile, saveFile, saveVersion } from "./files";
 import { AUTO_VERSION_MS } from "./panels/HistoryPanel";
 import { nodeSvg, svgToPngBlob } from "./exporter";
@@ -34,6 +35,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      await bootEngine();
       const json = await loadFile(fileId);
       if (cancelled) return;
       newEngine();
@@ -47,7 +49,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       dispatch({ op: "relayout" });
       useStore.setState({ fileId, dirty: false, editingText: null, editingVector: null, presenting: null });
       setReady(true);
-      requestAnimationFrame(zoomToFit);
+      // Two frames: the canvas has its final size by then.
+      requestAnimationFrame(() => requestAnimationFrame(zoomToFit));
       joinShared();
     })();
     return () => {
@@ -65,7 +68,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     let timer: ReturnType<typeof setTimeout> | null = null;
     let lastThumb = 0;
     let lastVersion = Date.now();
-    listVersions(fileId).then((v) => (lastVersion = v[0]?.createdAt ?? 0));
+    // A file without versions gets its first autosave one interval from now, not on the first save.
+    listVersions(fileId).then((v) => (lastVersion = v[0]?.createdAt ?? Date.now()));
     const save = async () => {
       const json = getEngine().save();
       const doc = getDoc();
@@ -120,6 +124,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       {shareOpen && <ShareDialog />}
       <GuestBar />
       <ShortcutsDialog />
+      <PhoneNote />
       <PluginWindow />
       {toast && (
         <div className={"toast " + toast.kind} role="status" aria-live="polite">

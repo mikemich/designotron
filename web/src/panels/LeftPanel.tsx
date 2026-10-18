@@ -36,17 +36,17 @@ export function LeftPanel() {
   const tab = useStore((s) => s.leftTab);
   return (
     <div className="panel">
-      <div className="tabs">
-        <button className={"tab" + (tab === "layers" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "layers" })}>
+      <div className="tabs" role="tablist">
+        <button role="tab" aria-selected={tab === "layers"} className={"tab" + (tab === "layers" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "layers" })}>
           Layers
         </button>
-        <button className={"tab" + (tab === "assets" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "assets" })}>
+        <button role="tab" aria-selected={tab === "assets"} className={"tab" + (tab === "assets" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "assets" })}>
           Assets
         </button>
-        <button className={"tab" + (tab === "history" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "history" })}>
+        <button role="tab" aria-selected={tab === "history"} className={"tab" + (tab === "history" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "history" })}>
           History
         </button>
-        <button className={"tab" + (tab === "comments" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "comments" })}>
+        <button role="tab" aria-selected={tab === "comments"} className={"tab" + (tab === "comments" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "comments" })}>
           Comments
         </button>
       </div>

@@ -170,6 +170,63 @@ export function Canvas() {
     return () => el.removeEventListener("wheel", onWheel);
   }, []);
 
+  // Touch: two fingers pinch to zoom and pan. Runs before the tools' handlers and keeps the
+  // gesture to itself until every finger is lifted.
+  useEffect(() => {
+    const el = ref.current!;
+    const touches = new Map<number, { x: number; y: number }>();
+    let pinch: { d: number; mx: number; my: number; v: { x: number; y: number; zoom: number } } | null = null;
+    let swallow = false;
+    const local = (x: number, y: number) => {
+      const r = el.getBoundingClientRect();
+      return { x: x - r.left, y: y - r.top };
+    };
+    const measure = () => {
+      const [a, b] = [...touches.values()];
+      const m = local((a.x + b.x) / 2, (a.y + b.y) / 2);
+      return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: m.x, my: m.y };
+    };
+    const down = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2) {
+        pinch = { ...measure(), v: { ...useStore.getState().viewport } };
+        swallow = true;
+      }
+      if (swallow) e.stopPropagation();
+    };
+    const move = (e: PointerEvent) => {
+      if (e.pointerType !== "touch" || !touches.has(e.pointerId)) return;
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (!swallow) return;
+      e.stopPropagation();
+      if (!pinch || touches.size < 2) return;
+      const now = measure();
+      const zoom = Math.min(64, Math.max(0.02, (pinch.v.zoom * now.d) / pinch.d));
+      // Keep the page point that was under the fingers' midpoint under the new midpoint.
+      const px = (pinch.mx - pinch.v.x) / pinch.v.zoom;
+      const py = (pinch.my - pinch.v.y) / pinch.v.zoom;
+      useStore.setState({ viewport: { zoom, x: now.mx - px * zoom, y: now.my - py * zoom } });
+    };
+    const up = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") return;
+      touches.delete(e.pointerId);
+      if (touches.size < 2) pinch = null;
+      if (swallow) e.stopPropagation();
+      if (touches.size === 0) swallow = false;
+    };
+    el.addEventListener("pointerdown", down, true);
+    el.addEventListener("pointermove", move, true);
+    el.addEventListener("pointerup", up, true);
+    el.addEventListener("pointercancel", up, true);
+    return () => {
+      el.removeEventListener("pointerdown", down, true);
+      el.removeEventListener("pointermove", move, true);
+      el.removeEventListener("pointerup", up, true);
+      el.removeEventListener("pointercancel", up, true);
+    };
+  }, []);
+
   // Pen tool: Enter/Escape finishes the path.
   useEffect(() => {
     if (tool !== "pen") {
@@ -781,7 +838,7 @@ export function Canvas() {
       <RemoteCursors v={v} />
       {showRulers && <Rulers v={v} width={size.w} height={size.h} selection={selItems.union} />}
       {editingText && <TextEditor id={editingText} />}
-      {empty && tool === "move" && <EmptyPrompt />}
+      {empty && (tool === "move" || tool === "hand") && <EmptyPrompt />}
       <div className="zoom-indicator">{Math.round(v.zoom * 100)}%</div>
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>

@@ -1,68 +1,105 @@
 import { useEffect, useLayoutEffect, useState } from "react";
+import { getDoc, useStore } from "./store";
+import { MOD } from "./ui/controls";
 
+// One-time hints that appear when they become relevant, instead of a tour up front.
+// They never dim the screen or block the first-run prompt, and wait while a dialog is open.
 const KEY = "dt:tour-done";
 
-const STEPS: { selector: string; title: string; body: string }[] = [
-  { selector: ".topbar .group", title: "Tools", body: "Frame (F), shapes (R, O, L), pen (P), text (T) and the hand (H, or hold Space). Click a tool, then drag on the canvas." },
-  { selector: ".main > .panel:not(.right)", title: "Layers and pages", body: "Everything on the canvas, as a tree. Drag to reorder or nest, double-click to rename. Assets holds your components and styles." },
-  { selector: ".panel.right", title: "Design, Prototype, Code", body: "Edit the selection's size, auto layout, colours and effects. Link screens in Prototype. Get React, HTML or CSS in Code." },
-  { selector: "button[title^='Claude']", title: "Claude", body: "Describe what you want and Claude builds it on the canvas, using your Claude Code login (Pro/Max) or an API key. Shortcut: ⌘/." },
+interface Hint {
+  id: string;
+  selector: string;
+  title: string;
+  body: string;
+  /** When the hint becomes relevant. */
+  when: () => boolean;
+}
+
+const hasLayers = () => {
+  const doc = getDoc();
+  const page = doc.pages.find((p) => p.id === useStore.getState().es.page) ?? doc.pages[0];
+  return !!page && page.children.length > 0;
+};
+
+const HINTS: Hint[] = [
+  {
+    id: "layers",
+    selector: ".main > .panel:not(.right)",
+    title: "Layers",
+    body: "Everything on this page, as a tree. Drag to reorder or nest, double-click to rename. Assets holds components and styles.",
+    when: hasLayers,
+  },
+  {
+    id: "design",
+    selector: ".panel.right",
+    title: "Design, Prototype, Code",
+    body: "Edit the selection's size, auto layout, colours and effects. Link screens in Prototype; get React, HTML or CSS in Code.",
+    when: () => useStore.getState().es.selection.length > 0,
+  },
+  {
+    id: "claude",
+    selector: "button[title^='Claude']",
+    title: "Ask Claude",
+    body: `Claude can design, critique and fix this file, and turn it into real code. Open it any time with ${MOD}/.`,
+    when: () => hasLayers() && !useStore.getState().chatOpen,
+  },
 ];
 
-function done(): boolean {
+const seen = (id: string): boolean => {
   try {
-    return localStorage.getItem(KEY) === "1";
+    return localStorage.getItem(KEY) === "1" || localStorage.getItem(`dt:hint:${id}`) === "1";
   } catch {
     return true;
   }
-}
+};
 
-/** One-time guided tour of the editor. */
 export function Tour() {
-  const [step, setStep] = useState(() => (done() ? -1 : 0));
+  const rev = useStore((s) => s.rev);
+  const selection = useStore((s) => s.es.selection);
+  const chatOpen = useStore((s) => s.chatOpen);
+  const [hint, setHint] = useState<Hint | null>(null);
   const [rect, setRect] = useState<DOMRect | null>(null);
-  const finish = () => {
-    try {
-      localStorage.setItem(KEY, "1");
-    } catch {
-      /* storage unavailable: the tour simply shows again next time */
-    }
-    setStep(-1);
-  };
-  useLayoutEffect(() => {
-    if (step < 0) return;
-    const el = document.querySelector(STEPS[step].selector);
-    setRect(el ? el.getBoundingClientRect() : null);
-  }, [step]);
+
+  // Pick the first relevant hint not seen yet, after things settle.
   useEffect(() => {
-    if (step < 0) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && finish();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [step]);
-  if (step < 0 || !rect) return null;
-  const s = STEPS[step];
-  const width = 300;
-  const below = rect.bottom + 180 < window.innerHeight;
-  const left = Math.min(window.innerWidth - width - 12, Math.max(12, rect.left + rect.width / 2 - width / 2));
-  const top = below ? rect.bottom + 10 : Math.max(12, rect.top - 170);
+    if (hint) return;
+    const t = setTimeout(() => {
+      if (document.querySelector(".modal-bg, .menu")) return;
+      setHint(HINTS.find((h) => !seen(h.id) && h.when()) ?? null);
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [rev, selection, chatOpen, hint]);
+
+  useLayoutEffect(() => {
+    const el = hint && document.querySelector(hint.selector);
+    setRect(el ? el.getBoundingClientRect() : null);
+  }, [hint, chatOpen]);
+
+  const dismiss = (all = false) => {
+    try {
+      localStorage.setItem(all ? KEY : `dt:hint:${hint!.id}`, "1");
+    } catch {
+      /* storage unavailable */
+    }
+    setHint(null);
+  };
+
+  if (!hint || !rect || rect.width === 0) return null;
+  const width = 280;
+  const right = hint.id === "design";
+  const left = right ? rect.left - width - 12 : hint.id === "layers" ? rect.right + 12 : Math.min(window.innerWidth - width - 12, rect.left + rect.width / 2 - width / 2);
+  const top = hint.id === "claude" ? rect.bottom + 10 : rect.top + 60;
   return (
-    <div className="tour-layer">
-      <div className="tour-highlight" style={{ left: rect.left - 4, top: rect.top - 4, width: rect.width + 8, height: rect.height + 8 }} />
-      <div className="tour-card" style={{ left, top, width }}>
-        <div className="small muted">
-          {step + 1} of {STEPS.length}
-        </div>
-        <div style={{ fontWeight: 600, fontSize: 14, margin: "4px 0 6px" }}>{s.title}</div>
-        <div style={{ lineHeight: 1.55 }}>{s.body}</div>
-        <div className="row" style={{ marginTop: 12, justifyContent: "space-between" }}>
-          <button className="btn" onClick={finish}>
-            Skip tour
-          </button>
-          <button className="btn primary" onClick={() => (step + 1 < STEPS.length ? setStep(step + 1) : finish())}>
-            {step + 1 < STEPS.length ? "Next" : "Start designing"}
-          </button>
-        </div>
+    <div className="hint-card" role="status" style={{ left: Math.max(12, left), top, width }}>
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>{hint.title}</div>
+      <div style={{ lineHeight: 1.55 }}>{hint.body}</div>
+      <div className="row" style={{ marginTop: 10, justifyContent: "space-between" }}>
+        <button className="btn" onClick={() => dismiss(true)}>
+          No more tips
+        </button>
+        <button className="btn primary" onClick={() => dismiss()}>
+          Got it
+        </button>
       </div>
     </div>
   );

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, Globe, Loader2, Share2, Users, Wifi, X } from "lucide-react";
+import { Check, Copy, Globe, Link2, Loader2, Share2, Users, Wifi, X } from "lucide-react";
+import { copyLink } from "../snapshot";
 import { pageIsRelay, relayUrl, remixShared, startOnline, startSharing, stopSharing, useCollab } from "../collab";
 import { useChat } from "../ai/chatState";
 import { Avatar, userName } from "../canvas/Comments";
@@ -18,6 +19,20 @@ export function ShareDialog() {
   // The built-in relay needs no explanation; the address field is for people who run their own.
   const [customRelay, setCustomRelay] = useState(!relayUrl());
   const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+  const [copyNote, setCopyNote] = useState<string | null>(null);
+  const sendCopy = async () => {
+    setError(null);
+    try {
+      const { url, withoutImages } = await copyLink();
+      await navigator.clipboard.writeText(url).catch(() => prompt("Copy this link:", url));
+      setCopyState("copied");
+      setCopyNote(withoutImages ? "Images were left out to keep the link short; send a .dtron file to include them." : null);
+      setTimeout(() => setCopyState("idle"), 2000);
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    }
+  };
   const close = () => useCollab.setState({ dialogOpen: false });
   useEscape(close);
 
@@ -93,6 +108,20 @@ export function ShareDialog() {
                 <button className="btn primary" disabled={!!busy || !relay.trim()} onClick={() => start("online")}>
                   {busy === "online" ? <Loader2 size={13} className="spin" /> : <Globe size={13} />} Share online
                 </button>
+              </div>
+
+              <div className="share-option">
+                <div className="row" style={{ gap: 6 }}>
+                  <Link2 size={14} /> <b>Send a copy</b>
+                  <span className="muted small">no server, works anytime</span>
+                </div>
+                <div className="muted small" style={{ lineHeight: 1.5 }}>
+                  A link that contains this file. Whoever opens it gets their own copy to remix; your file stays yours.
+                </div>
+                <button className="btn" disabled={!!busy} onClick={sendCopy}>
+                  {copyState === "copied" ? <Check size={13} /> : <Link2 size={13} />} {copyState === "copied" ? "Link copied" : "Copy link to a copy"}
+                </button>
+                {copyNote && <div className="muted small">{copyNote}</div>}
               </div>
 
               <div className="share-option">

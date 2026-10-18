@@ -560,6 +560,8 @@ textarea.textinput {
 .canvas {
   position: relative;
   overflow: hidden;
+  /* Touch gestures are handled by the canvas (pinch to zoom, two fingers to pan). */
+  touch-action: none;
   background: var(--canvas);
   outline: none;
   min-width: 0;
@@ -1060,6 +1062,11 @@ a.btn {
   .topbar {
     overflow-x: auto;
   }
+  .draw-tools,
+  .desk-only,
+  .empty-prompt .kbd-hint:last-child {
+    display: none !important;
+  }
   .topbar .center {
     display: none;
   }
@@ -1106,27 +1113,16 @@ a.btn {
   letter-spacing: 0.06em;
 }
 
-/* ---------- Tour ---------- */
-.tour-layer {
+/* ---------- Hints (replace the old tour) ---------- */
+.hint-card {
   position: fixed;
-  inset: 0;
-  z-index: 250;
-  pointer-events: none;
-}
-.tour-highlight {
-  position: fixed;
-  border: 2px solid var(--accent);
-  border-radius: 8px;
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
-}
-.tour-card {
-  position: fixed;
+  z-index: 60;
   background: #1f1f1f;
-  border: 1px solid #444;
+  border: 1px solid var(--accent);
   border-radius: 10px;
-  padding: 14px;
-  pointer-events: all;
+  padding: 12px 14px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  font-size: 12px;
 }
 
 /* ---------- Review ---------- */
@@ -1298,6 +1294,19 @@ a.btn {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Actions appear on hover or keyboard focus, so names get the full width. */
+.version .ibtn {
+  display: none;
+}
+.version:hover .ibtn,
+.version:focus-within .ibtn {
+  display: grid;
+}
+@media (hover: none) {
+  .version .ibtn {
+    display: grid;
+  }
 }
 
 /* Modal + variables editor */
@@ -1700,4 +1709,27 @@ a.btn {
 }
 .bridge-setup summary {
   cursor: pointer;
+}
+
+.draw-tools {
+  display: contents;
+}
+
+/* ---------- Phone note ---------- */
+.phone-note {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  z-index: 45;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+  line-height: 1.5;
 }

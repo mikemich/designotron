@@ -18,7 +18,7 @@ const js = fs.readFileSync(path.join(dist, jsFile), "utf8").replace(/<\/script/g
   .replace(/\uFFFD/g, "\\uFFFD");
 const css = cssFile ? fs.readFileSync(path.join(dist, cssFile), "utf8") : "";
 const wasm = fs.readFileSync("src/wasm/pkg/designotron_engine_wasm_bg.wasm").toString("base64");
-const fonts = html.match(/<link\s+href="(https:\/\/fonts\.googleapis\.com[^"]+)"/)[1];
+const fonts = html.match(/href="(https:\/\/fonts\.googleapis\.com\/css2[^"]+)"/)[1];
 
 const page = `<title>Designotron</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">

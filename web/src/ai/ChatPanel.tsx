@@ -24,7 +24,7 @@ import {
   useChat,
 } from "./chatState";
 import { useStore } from "../store";
-import { Menu, Seg, SelectField, type MenuItem } from "../ui/controls";
+import { Menu, MOD, Seg, SelectField, type MenuItem } from "../ui/controls";
 import { imagesFrom } from "./images";
 
 const SUGGESTIONS = [
@@ -187,7 +187,7 @@ export function ChatPanel() {
         </button>
         <button
           className="ibtn"
-          title="Close (⌘/)"
+          title={`Close (${MOD}/)`}
           onClick={() => useStore.setState({ chatOpen: false })}
         >
           <X size={14} />

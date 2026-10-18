@@ -2,10 +2,21 @@ import { useEffect, useState } from "react";
 import { Figma, FilePlus, FolderOpen, Github, MoreHorizontal } from "lucide-react";
 import { REPO_URL } from "./panels/GuestBar";
 import { deleteFile, duplicateFile, fromDtron, listFiles, newFileId, pickFile, renameFile, saveFile, type FileMeta } from "./files";
-import { getEngine, newEngine, dispatch, toast, useStore } from "./store";
+import { bootEngine, getEngine, newEngine, dispatch, toast, useStore } from "./store";
 import { TEMPLATES, type Template } from "./templates";
 import { persistentStorage } from "./files";
 import { Menu, type MenuItem } from "./ui/controls";
+
+/** "just now", "5 minutes ago", "yesterday", or a date. */
+function edited(t: number): string {
+  const m = Math.round((Date.now() - t) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} minute${m === 1 ? "" : "s"} ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
+  if (h < 48) return "yesterday";
+  return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric", year: new Date(t).getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
+}
 
 export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   const [files, setFiles] = useState<FileMeta[] | null>(null);
@@ -17,6 +28,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   }, []);
 
   const create = async (template: Template | null) => {
+    await bootEngine();
     newEngine();
     if (template) template.build();
     else dispatch({ op: "setDocName", name: "Untitled" });
@@ -55,7 +67,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
         <button
           className="btn"
           onClick={async () => {
-            useStore.setState({ figmaOpen: true });
+            useStore.setState({ figmaOpen: "new" });
             await create(null);
           }}
         >
@@ -94,7 +106,9 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
             <div className="thumb">{f.thumbnail ? <img src={f.thumbnail} alt="" /> : <span className="muted">No preview yet</span>}</div>
             <div className="meta">
               <div className="n">{f.name}</div>
-              <div className="muted small">Edited {new Date(f.updatedAt).toLocaleString()}</div>
+              <div className="muted small" title={new Date(f.updatedAt).toLocaleString()}>
+                Edited {edited(f.updatedAt)}
+              </div>
             </div>
             <button
               className="ibtn more"
