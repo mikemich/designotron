@@ -117,7 +117,7 @@ export async function send(prompt: string) {
     if (st.bridgeStatus !== "connected") {
       push({
         kind: "error",
-        text: "The Designotron bridge isn't running. Start it with `cargo run -p designotron-bridge` (or `npm run dev` from web/), or switch to API-key mode in settings.",
+        text: "The Designotron bridge isn't running on this computer. Start it with `npx designotron` (or `./dev.sh` in a checkout), or switch to API-key mode in settings.",
       });
       return;
     }

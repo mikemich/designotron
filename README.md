@@ -18,8 +18,25 @@ local bridge server. See [STATUS.md](STATUS.md) for what works today and what is
 
 ## Quick start
 
-Requirements: Node 20+ and Rust (stable). The prebuilt WASM engine is committed, so you only
-need the WASM toolchain when you change the engine.
+**Try it in your browser:** https://mikemich.github.io/designotron (no install; Claude needs the
+local bridge or an API key).
+
+**Run it on your computer** (editor + Claude Code bridge in one binary):
+
+```bash
+npx designotron
+```
+
+or
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mikemich/designotron/main/install.sh | sh
+designotron
+```
+
+It opens the editor at http://127.0.0.1:5174. Your Claude Code designs go in `./workspace`.
+
+**From source** (Node 20+ and Rust; the prebuilt WASM engine is committed):
 
 ```bash
 git clone https://github.com/mikemich/designotron
@@ -27,10 +44,8 @@ cd designotron
 ./dev.sh
 ```
 
-Open http://localhost:5173 and pick **Open sample**.
-
-`dev.sh` starts the bridge on `127.0.0.1:5174` and the editor dev server on `:5173`. Without
-the bridge the editor still works; only Claude Code chat and MCP need it.
+Open http://localhost:5173 and pick **Open sample**. Without the bridge the editor still
+works; only Claude Code chat and MCP need it.
 
 ## Using Claude
 
@@ -75,14 +90,18 @@ stored in this browser's localStorage.
 - **Build with Claude Code** (Code tab): asks Claude Code to turn the design into a
   production-quality app in `workspace/`, run the build, and report back.
 
-## Production build
+## Production build and releases
 
 ```bash
-cd web && npm run build      # outputs web/dist
-cd .. && cargo run -p designotron-bridge --release
+cd web && npm run build                                   # outputs web/dist
+cd .. && cargo build --release -p designotron-bridge --features embed-web
+./target/release/designotron                              # one binary, editor included
 ```
 
-The bridge serves `web/dist`, so everything runs at http://127.0.0.1:5174.
+Pushing a `v*` tag builds binaries for macOS, Linux and Windows and publishes a GitHub
+release (`.github/workflows/release.yml`). `install.sh` and the `npx designotron` launcher
+in `npm/` download from those releases. Every push to `main` deploys the hosted editor
+(`.github/workflows/pages.yml`).
 
 ## Keyboard shortcuts
 

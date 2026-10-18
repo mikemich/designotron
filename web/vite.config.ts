@@ -7,7 +7,8 @@ const single = process.env.DT_SINGLE === "1";
 
 export default defineConfig({
   plugins: [react()],
-  base: single ? "./" : "/",
+  // DT_BASE sets the public path for hosted builds (GitHub Pages serves /designotron/).
+  base: single ? "./" : (process.env.DT_BASE ?? "/"),
   build: single ? { outDir: "dist-single", rollupOptions: { output: { inlineDynamicImports: true } } } : {},
   server: {
     port: 5173,

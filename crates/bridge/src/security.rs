@@ -4,8 +4,12 @@
 
 use axum::http::HeaderMap;
 
-/// Extra allowed origins, comma separated (e.g. a hosted copy of the editor).
+/// Extra allowed origins, comma separated (e.g. a self-hosted copy of the editor).
 const ALLOWED_ORIGINS_ENV: &str = "DESIGNOTRON_ALLOWED_ORIGINS";
+/// Set to refuse the official hosted editor as well (local pages only).
+const LOCAL_ONLY_ENV: &str = "DESIGNOTRON_LOCAL_ONLY";
+/// The official hosted editor (GitHub Pages).
+const HOSTED_ORIGINS: &[&str] = &["https://mikemich.github.io"];
 
 pub fn origin_allowed(headers: &HeaderMap) -> bool {
   let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
@@ -13,6 +17,9 @@ pub fn origin_allowed(headers: &HeaderMap) -> bool {
     return true;
   };
   if is_local_url(origin) {
+    return true;
+  }
+  if std::env::var(LOCAL_ONLY_ENV).is_err() && HOSTED_ORIGINS.contains(&origin) {
     return true;
   }
   std::env::var(ALLOWED_ORIGINS_ENV)
@@ -57,6 +64,8 @@ mod tests {
     assert!(origin_allowed(&headers(&[("origin", "http://localhost:5173")])));
     assert!(origin_allowed(&headers(&[("origin", "http://127.0.0.1:5174")])));
     assert!(!origin_allowed(&headers(&[("origin", "https://evil.example")])));
+    assert!(origin_allowed(&headers(&[("origin", "https://mikemich.github.io")])));
+    assert!(!origin_allowed(&headers(&[("origin", "https://mikemich.github.io.evil.example")])));
     assert!(!origin_allowed(&headers(&[("origin", "http://localhost.evil.example")])));
   }
 

@@ -65,7 +65,7 @@ export function ChatPanel() {
                   : `Bridge connected${claude?.version ? ` · Claude Code ${claude.version}` : ""}`
                 : bridgeStatus === "connecting"
                   ? "Connecting to bridge…"
-                  : "Bridge offline — run `cargo run -p designotron-bridge`"}
+                  : "Bridge offline: run `npx designotron` on this computer"}
             </>
           ) : (
             <>

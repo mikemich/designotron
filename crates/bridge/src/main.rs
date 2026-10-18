@@ -9,6 +9,7 @@ mod editor;
 mod headless;
 mod mcp;
 mod security;
+mod web;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -17,7 +18,6 @@ use std::sync::Arc;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
-use tower_http::services::{ServeDir, ServeFile};
 
 use crate::claude::ClaudeInfo;
 use crate::editor::EditorLink;
@@ -40,6 +40,7 @@ struct Config {
   port: u16,
   workspace: PathBuf,
   static_dir: Option<PathBuf>,
+  open: bool,
 }
 
 fn parse_args() -> Config {
@@ -51,29 +52,30 @@ fn parse_args() -> Config {
     .map(PathBuf::from)
     .unwrap_or_else(|_| PathBuf::from("workspace"));
   let mut static_dir: Option<PathBuf> = std::env::var("DESIGNOTRON_STATIC").ok().map(PathBuf::from);
+  let mut open = std::env::var("DESIGNOTRON_NO_OPEN").is_err();
   let mut args = std::env::args().skip(1);
   while let Some(a) = args.next() {
     match a.as_str() {
       "--port" => port = args.next().and_then(|p| p.parse().ok()).unwrap_or(port),
       "--workspace" => workspace = args.next().map(PathBuf::from).unwrap_or(workspace),
       "--static" => static_dir = args.next().map(PathBuf::from),
+      "--no-open" => open = false,
+      "-V" | "--version" => {
+        log::info!("designotron {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+      }
       "-h" | "--help" => {
-        log::info!("usage: designotron [--port 5174] [--workspace ./workspace] [--static web/dist]");
+        log::info!("usage: designotron [--port 5174] [--workspace ./workspace] [--static web/dist] [--no-open]");
         std::process::exit(0);
       }
       other => log::warn!("ignoring unknown argument {other}"),
-    }
-  }
-  if static_dir.is_none() {
-    let candidate = PathBuf::from("web/dist");
-    if candidate.join("index.html").exists() {
-      static_dir = Some(candidate);
     }
   }
   Config {
     port,
     workspace,
     static_dir,
+    open,
   }
 }
 
@@ -107,11 +109,9 @@ async fn main() {
     .route("/mcp", post(mcp::handle).get(mcp::reject_get).delete(mcp::end_session))
     .with_state(state.clone());
 
-  if let Some(dir) = &cfg.static_dir {
-    log::info!("serving editor from {}", dir.display());
-    let index = dir.join("index.html");
-    app = app.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)));
-  }
+  let ui = web::pick(cfg.static_dir.clone());
+  let serves_ui = !matches!(ui, web::Source::None);
+  app = web::mount(app, &ui);
 
   let addr = SocketAddr::from(([127, 0, 0, 1], cfg.port));
   let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -125,8 +125,11 @@ async fn main() {
   log::info!("  editor websocket: ws://{addr}/bridge/ws");
   log::info!("  MCP for Claude Code: claude mcp add --transport http designotron http://{addr}/mcp");
   log::info!("  workspace: {}", state.workspace.display());
-  if cfg.static_dir.is_some() {
+  if serves_ui {
     log::info!("  open the editor: http://{addr}");
+    if cfg.open {
+      web::open_browser(&format!("http://{addr}"));
+    }
   }
   let server = axum::serve(listener, app).with_graceful_shutdown(async {
     let _ = tokio::signal::ctrl_c().await;
