@@ -1,6 +1,6 @@
 // Local file storage (IndexedDB) and the portable `.dtron` file format.
 
-import { get, set, del } from "idb-keyval";
+import { get as idbGet, set as idbSet, del as idbDel } from "idb-keyval";
 import { allAssets, loadAssets, referencedAssets } from "./assets";
 
 export interface FileMeta {
@@ -24,6 +24,48 @@ export interface DtronFile {
 }
 
 const INDEX = "dt:index";
+
+// IndexedDB can be missing or throw (private windows, sandboxed previews); fall back to memory.
+const memory = new Map<string, unknown>();
+let idbOk = true;
+
+async function get(key: string): Promise<unknown> {
+  if (idbOk) {
+    try {
+      return await idbGet(key);
+    } catch {
+      idbOk = false;
+    }
+  }
+  return memory.get(key);
+}
+
+async function set(key: string, value: unknown): Promise<void> {
+  memory.set(key, value);
+  if (idbOk) {
+    try {
+      await idbSet(key, value);
+    } catch {
+      idbOk = false;
+    }
+  }
+}
+
+async function del(key: string): Promise<void> {
+  memory.delete(key);
+  if (idbOk) {
+    try {
+      await idbDel(key);
+    } catch {
+      idbOk = false;
+    }
+  }
+}
+
+/** False when files only live in memory for this session. */
+export function persistentStorage(): boolean {
+  return idbOk;
+}
 
 export async function listFiles(): Promise<FileMeta[]> {
   const idx = ((await get(INDEX)) as FileMeta[] | undefined) ?? [];

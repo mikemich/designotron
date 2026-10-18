@@ -39,7 +39,9 @@ export async function bootEngine(): Promise<void> {
     }
     return w;
   };
-  await init({ module_or_path: wasmUrl });
+  const embedded = (globalThis as any).__DT_WASM_B64 as string | undefined;
+  const source = embedded ? Uint8Array.from(atob(embedded), (c) => c.charCodeAt(0)) : wasmUrl;
+  await init({ module_or_path: source });
   await Promise.race([
     Promise.all(FONTS.flatMap((f) => [400, 600, 700].map((w) => document.fonts.load(`${w} 16px "${f}"`).catch(() => null)))),
     new Promise((r) => setTimeout(r, 2500)),

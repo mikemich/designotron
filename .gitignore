@@ -6,3 +6,4 @@ workspace
 test-results
 target
 web/scripts/.*.mjs
+dist-single

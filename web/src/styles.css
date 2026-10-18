@@ -964,3 +964,30 @@ textarea.textinput {
 .align-grid button:hover i {
   background: #aaa;
 }
+
+/* ---------- Narrow screens ---------- */
+@media (max-width: 820px) {
+  .main,
+  .main.with-chat {
+    grid-template-columns: 1fr;
+  }
+  .main > .panel,
+  .main > .chat:not(:only-child) {
+    display: none;
+  }
+  .topbar {
+    overflow-x: auto;
+  }
+  .topbar .center {
+    display: none;
+  }
+  .files {
+    padding: 20px 16px;
+  }
+  .files-head {
+    flex-wrap: wrap;
+  }
+  .hero {
+    flex-wrap: wrap;
+  }
+}
