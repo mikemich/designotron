@@ -5,7 +5,7 @@ change that finishes, starts or breaks them.
 
 ## In progress
 
-- Working through [ROADMAP.md](ROADMAP.md) in order. Next: boolean operations, flatten, masks, outline stroke.
+- Working through [ROADMAP.md](ROADMAP.md) in order. Next: variables and modes.
 
 ## To do
 
@@ -17,7 +17,7 @@ Ordered by impact on "replace Figma for a small team".
 | 2  | Accounts, cloud files, sharing links   | Needs a hosted backend; today files are local (IndexedDB + `.dtron`)  |
 | 3  | Comments                               | Pins on canvas, threads, mentions; needs (2) for teams                |
 | 4  | Cloud version history                  | Local named/auto versions shipped; sync them once files are in the cloud |
-| 6  | Boolean operations, flatten, masks     | Union/subtract/intersect/exclude, outline stroke, mask groups         |
+| 6  | Live boolean groups                    | Booleans are destructive today (one vector); keep the inputs editable |
 | 7  | Performance for large files            | Incremental render, canvas/WebGL path, persistent maps for undo       |
 | 8  | Figma file import                      | `.fig` / Figma REST API JSON to Designotron model                     |
 | 9  | Variables and modes                    | Colour/number/string tokens with light/dark modes                     |
@@ -59,6 +59,7 @@ Ordered by impact on "replace Figma for a small team".
 | Claude actions  | Paste/drop/attach images in chat (both modes), quick actions (flows, variants, responsive, dark mode, content, rename, code sync, tokens from code), "Rebuild as editable layers" on image layers |
 | Versions        | History tab: named versions, automatic version every 10 min of editing, restore (undoable), rename, duplicate as file |
 | Precision       | Rulers (⇧R) with selection extents, page guides dragged from rulers (move, drag back to delete), layout grids on frames (columns/rows/grid, ⇧⌘4), snapping to guides and grid lines |
+| Vector ops      | Union, subtract, intersect, exclude (i_overlay), flatten keeping curves, outline stroke (inside/center/outside), use as mask (alpha masks, ⌥⌘M); SVG path parser for imported icons |
 | Live app        | App tab: write the generated project to `workspace/app` (or keep it in sync), run `npm run dev` through the bridge, preview at mobile/desktop width, logs, "Ask Claude to fix it" |
 | Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README                                                             |
 
@@ -68,7 +69,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 58 engine + bridge unit tests                          | `cargo test --workspace`                     |
+| 65 engine + bridge unit tests                          | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
@@ -78,7 +79,8 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 | Autosave survives reload, Claude panel opens           | `web/scripts/e2e.mjs`                        |
 | Templates, tour, empty prompt, ⌘B on a word, Review fixes | `web/scripts/e2e.mjs`                     |
 | Chat image attachment and quick actions menu           | `web/scripts/e2e.mjs`                        |
-| Ruler guide drag, layout grid overlay, version restore | `web/scripts/e2e.mjs` (34/34 passing)        |
+| Ruler guide drag, layout grid overlay, version restore | `web/scripts/e2e.mjs`                        |
+| Boolean subtract from the toolbar, mask rendering      | `web/scripts/e2e.mjs` (36/36 passing)        |
 | Production build served by the bridge                  | `E2E_URL=http://127.0.0.1:5174 npm run e2e`  |
 | Release binaries download and serve the editor         | `install.sh` and `npx designotron` on Linux  |
 | Exported Landing/Dashboard projects build and match    | `tsc` + `vite build`, compared screenshots   |
@@ -106,7 +108,8 @@ until someone runs it with a real key.
 | Headless text    | Bridge headless mode measures text with a heuristic, so layout can differ slightly from the editor       |
 | Strokes          | Inside/outside alignment is exact for rectangles/ellipses; other shapes clip or fall back to center      |
 | Effects          | Background blur is not drawn on the canvas (exported to code as `backdrop-filter`)                       |
-| Vectors          | Can move points and handles, cannot add/delete points; no boolean ops, masks or outline stroke           |
+| Vectors          | Can move points and handles, cannot add/delete points; boolean results are flattened (not live) and curves become polylines; text can't be flattened |
+| Masks in code    | A frame or group containing a mask is exported to code as inline SVG                                     |
 | Components       | Overrides on nested instances through an outer instance are not preserved; variant swap drops overrides  |
 | Multi-resize     | Resizing several rotated layers at once approximates their new boxes                                     |
 | Prototyping      | Smart animate plays as a dissolve; no overlays, scroll-to or variables                                   |

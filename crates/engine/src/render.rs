@@ -39,7 +39,7 @@ pub fn render_page(doc: &Document, page: &str, m: &dyn TextMeasurer, opts: Rende
     uid: 0,
   };
   let roots = doc.page(page).map(|p| p.children.clone()).unwrap_or_default();
-  let body: String = roots.iter().map(|id| r.node(id, None)).collect();
+  let body = r.list(&roots);
   format!("<defs>{}</defs>{}", r.defs, body)
 }
 
@@ -117,7 +117,7 @@ impl<'a> Renderer<'a> {
 
   fn body(&mut self, n: &Node) -> String {
     match n.kind {
-      NodeType::Group => n.children.iter().map(|c| self.node(c, None)).collect(),
+      NodeType::Group => self.children(n),
       NodeType::Text => self.text(n),
       k if k.is_frame_like() => {
         let geo = Geo::Rect {
@@ -126,7 +126,7 @@ impl<'a> Renderer<'a> {
           r: shapes::corner_radii(n),
         };
         let mut out = self.fills(n, &geo);
-        let kids: String = n.children.iter().map(|c| self.node(c, None)).collect();
+        let kids = self.children(n);
         if !kids.is_empty() {
           if n.clip_content {
             let cid = self.id("clip");
@@ -148,6 +148,40 @@ impl<'a> Renderer<'a> {
         out
       }
     }
+  }
+
+  fn children(&mut self, n: &Node) -> String {
+    self.list(&n.children)
+  }
+
+  /// Renders siblings in paint order; a mask layer clips every sibling painted above it.
+  fn list(&mut self, ids: &[String]) -> String {
+    let mut out = String::new();
+    let mut masked: Option<(String, String)> = None;
+    for c in ids {
+      let is_mask = self.doc.get(c).map(|m| m.is_mask && m.visible).unwrap_or(false);
+      if is_mask {
+        if let Some((mid, body)) = masked.take() {
+          out.push_str(&format!("<g mask=\"url(#{mid})\">{body}</g>"));
+        }
+        let mid = self.id("mask");
+        let shape = self.node(c, None);
+        self.defs.push_str(&format!(
+          "<mask id=\"{mid}\" maskUnits=\"userSpaceOnUse\" x=\"-100000\" y=\"-100000\" width=\"200000\" height=\"200000\" style=\"mask-type:alpha\">{shape}</mask>"
+        ));
+        masked = Some((mid, String::new()));
+        continue;
+      }
+      let el = self.node(c, None);
+      match masked.as_mut() {
+        Some((_, body)) => body.push_str(&el),
+        None => out.push_str(&el),
+      }
+    }
+    if let Some((mid, body)) = masked {
+      out.push_str(&format!("<g mask=\"url(#{mid})\">{body}</g>"));
+    }
+    out
   }
 
   fn geometry(&self, n: &Node) -> Geo {

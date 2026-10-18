@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { HistoryPanel } from "./HistoryPanel";
 import {
   ChevronDown,
+  SquareDashed,
   ChevronRight,
   Circle,
   Component,
@@ -133,6 +134,7 @@ function RenameInput({ value, onDone }: { value: string; onDone: (v: string) => 
 }
 
 export function nodeIcon(n: Node, size = 13) {
+  if (n.isMask) return <SquareDashed size={size} />;
   switch (n.type) {
     case "frame":
       return n.layout ? <Frame size={size} /> : <Hash size={size} />;

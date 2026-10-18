@@ -33,6 +33,11 @@ export const createComponent = () => selection().length && dispatch({ op: "creat
 export const combineVariants = () => dispatch({ op: "combineVariants", ids: selection() });
 export const detachInstance = () => dispatch({ op: "detachInstance", ids: selection() });
 export const selectAll = () => dispatch({ op: "selectAll" });
+export type BoolOp = "union" | "subtract" | "intersect" | "exclude";
+export const booleanOp = (operation: BoolOp) => selection().length > 1 && dispatch({ op: "booleanOp", ids: selection(), operation });
+export const flatten = () => selection().length && dispatch({ op: "flatten", ids: selection() });
+export const outlineStroke = () => selection().length && dispatch({ op: "outlineStroke", ids: selection() });
+export const useAsMask = () => selection().length && dispatch({ op: "useAsMask", ids: selection() });
 export const reorder = (to: "front" | "back" | "forward" | "backward") => dispatch({ op: "reorder", ids: selection(), to });
 export const align = (how: "left" | "hCenter" | "right" | "top" | "vCenter" | "bottom") => dispatch({ op: "align", ids: selection(), how });
 export const distribute = (horizontal: boolean) => dispatch({ op: "distribute", ids: selection(), horizontal });

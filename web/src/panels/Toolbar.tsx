@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   ArrowUpRight,
   ChevronDown,
+  Combine,
   Circle,
   Hand,
   Hash,
@@ -37,6 +38,7 @@ const SHAPES: { tool: Tool; label: string; key: string; icon: JSX.Element }[] = 
 export function Toolbar({ onHome }: { onHome: () => void }) {
   const tool = useStore((s) => s.tool);
   const es = useStore((s) => s.es);
+  const multi = es.selection.length > 1;
   const zoom = useStore((s) => s.viewport.zoom);
   const dirty = useStore((s) => s.dirty);
   const chatOpen = useStore((s) => s.chatOpen);
@@ -130,6 +132,26 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           <ImageIcon size={16} />
         </button>
         {toolBtn("hand", "Hand (H)", <Hand size={16} />)}
+        {multi && (
+          <button
+            className="tbtn"
+            title="Boolean operations"
+            onClick={(e) =>
+              open(e, [
+                { label: "Union selection", onClick: () => A.booleanOp("union") },
+                { label: "Subtract selection", onClick: () => A.booleanOp("subtract") },
+                { label: "Intersect selection", onClick: () => A.booleanOp("intersect") },
+                { label: "Exclude selection", onClick: () => A.booleanOp("exclude") },
+                { sep: true },
+                { label: "Flatten", kbd: `${MOD}E`, onClick: A.flatten },
+                { label: "Use as mask", kbd: `${ALT}${MOD}M`, onClick: A.useAsMask },
+              ])
+            }
+          >
+            <Combine size={16} />
+            <ChevronDown size={12} />
+          </button>
+        )}
       </div>
       <div className="center">
         <input

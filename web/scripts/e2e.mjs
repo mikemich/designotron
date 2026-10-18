@@ -253,6 +253,43 @@ try {
   await page.keyboard.press("Shift+R");
   await page.click(".panel .tab:has-text('Layers')");
 
+  // Boolean subtract from the toolbar menu, then a mask with ⌥⌘M.
+  const made = await page.evaluate(() =>
+    window.__dt.dispatch({
+      op: "ai",
+      tool: "create_nodes",
+      input: {
+        nodes: [
+          { type: "rectangle", name: "Base", x: -600, y: 0, width: 120, height: 120, fill: "#6D4AFF" },
+          { type: "ellipse", name: "Hole", x: -570, y: 30, width: 60, height: 60, fill: "#000000" },
+          { type: "ellipse", name: "Avatar mask", x: -390, y: 10, width: 100, height: 100, fill: "#000000" },
+          { type: "rectangle", name: "Photo", x: -400, y: 0, width: 120, height: 120, fill: "#14AE5C" },
+        ],
+      },
+    }).created.map((c) => c.id),
+  );
+  await page.evaluate((ids) => window.__dt.dispatch({ op: "select", ids }), [made[0], made[1]]);
+  await page.click(".tbtn[title='Boolean operations']");
+  await page.click(".menu .item:has-text('Subtract selection')");
+  const boolNode = await page.evaluate(() => {
+    const d = window.__dt.doc();
+    const n = d.nodes[window.__dt.state().selection[0]];
+    return { type: n.type, name: n.name, subpaths: n.vector?.subpaths?.length };
+  });
+  check("boolean subtract makes a vector with a hole", boolNode.type === "vector" && boolNode.subpaths === 2, JSON.stringify(boolNode));
+  await page.evaluate((ids) => window.__dt.dispatch({ op: "select", ids }), [made[2], made[3]]);
+  await page.keyboard.press("Control+Alt+KeyM");
+  const masked = await page.evaluate(() => document.querySelector(".canvas > svg")?.innerHTML.includes("<mask"));
+  check("use as mask renders an SVG mask", masked);
+  await page.evaluate(() => {
+    const d = window.__dt.doc();
+    const ids = Object.values(d.nodes).filter((n) => n.name === "Subtract" || n.name === "Mask group").map((n) => n.id);
+    window.__dt.dispatch({ op: "select", ids });
+  });
+  await page.keyboard.press("Shift+2");
+  await page.waitForTimeout(150);
+  await shot("05d-boolean-mask");
+
   // Templates: each builds into a fresh file from the files screen.
   for (const name of ["Landing page", "Dashboard", "Design system"]) {
     await page.evaluate(() => (location.hash = "#/"));

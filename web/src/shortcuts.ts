@@ -23,6 +23,9 @@ export function installShortcuts(): () => void {
     if (mod) {
       if (e.shiftKey && e.code === "Digit4") return run(() => toggleView("showGrids"));
       if (k === "z") return run(e.shiftKey ? A.redo : A.undo);
+      if (k === "e" && !e.shiftKey) return run(A.flatten);
+      if (k === "o" && e.shiftKey) return run(A.outlineStroke);
+      if (e.altKey && e.code === "KeyM") return run(A.useAsMask);
       if (k === "y") return run(A.redo);
       if (k === "d") return run(A.duplicate);
       if (k === "a") return run(A.selectAll);

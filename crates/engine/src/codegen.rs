@@ -160,7 +160,17 @@ impl<'a> Ctx<'a> {
       self.h1_used = false;
     }
     let image_src = image_only(&n);
+    // Masks have no faithful HTML equivalent; export the masked container as SVG.
+    let has_mask = n
+      .children
+      .iter()
+      .any(|c| self.doc.get(c).map(|m| m.is_mask && m.visible).unwrap_or(false));
     let mut el = match n.kind {
+      _ if has_mask => {
+        let mut e = El::new("div");
+        e.raw = Some(export_svg(self.doc, &n.id, self.m));
+        e
+      }
       NodeType::Text => {
         let mut e = self.text_el(&n);
         e.tag = self.heading_tag(&n);
@@ -241,7 +251,7 @@ impl<'a> Ctx<'a> {
       };
       el.s("align-items", items);
     }
-    if n.kind.is_container() {
+    if n.kind.is_container() && !has_mask {
       let child_place = |c: &Node| match n.layout.as_ref() {
         Some(al) if !c.absolute_position => Place::Flow {
           horizontal: al.direction == LayoutDirection::Horizontal,

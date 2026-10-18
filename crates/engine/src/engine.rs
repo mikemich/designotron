@@ -9,12 +9,12 @@ use serde_json::{json, Value};
 
 use crate::components;
 use crate::doc::{new_document, IdGen};
-use crate::geom::{Point, Rect};
+use crate::geom::{Mat, Point, Rect};
 use crate::interact::{self, Handle};
 use crate::layout;
 use crate::model::{
-  AutoLayout, ColorStyle, Document, Interaction, LayoutDirection, Node, NodeId, NodeType, Page, Paint, RulerGuide, Sizing, TextStyle,
-  VectorPoint,
+  AutoLayout, ColorStyle, Document, Interaction, LayoutDirection, Node, NodeId, NodeType, Page, Paint, RulerGuide, Sizing, SubPath,
+  TextStyle, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render::{self, Mode, RenderOptions};
@@ -196,6 +196,23 @@ pub enum Command {
     pivot_y: f64,
   },
   Group {
+    ids: Vec<NodeId>,
+  },
+  /// Union/subtract/intersect/exclude into one vector (bottom layer's style).
+  BooleanOp {
+    ids: Vec<NodeId>,
+    operation: crate::paths::BoolOp,
+  },
+  /// Merges shapes into one editable vector, keeping curves.
+  Flatten {
+    ids: Vec<NodeId>,
+  },
+  /// Converts strokes into filled vector shapes.
+  OutlineStroke {
+    ids: Vec<NodeId>,
+  },
+  /// One layer: toggles it as a mask. Several: groups them, bottom layer masks the rest.
+  UseAsMask {
     ids: Vec<NodeId>,
   },
   Ungroup {
@@ -657,6 +674,61 @@ impl Engine {
       .collect();
   }
 
+  /// Inserts a vector built from page-space subpaths, styled like `style`, under `parent`.
+  fn insert_vector(&mut self, style: &Node, page_sps: Vec<SubPath>, parent: Option<NodeId>, index: Option<usize>, name: &str) -> NodeId {
+    let inv = parent.as_deref().map(|p| self.doc.abs_matrix(p).invert()).unwrap_or_default();
+    let local: Vec<SubPath> = page_sps.iter().map(|sp| crate::paths::transform(sp, &inv)).collect();
+    let r = |v: f64| (v * 1000.0).round() / 1000.0;
+    let (x0, y0, x1, y1) = crate::paths::bounds(&local).unwrap_or((0.0, 0.0, 1.0, 1.0));
+    let (x0, y0, x1, y1) = (r(x0), r(y0), r(x1), r(y1));
+    let shift = Mat::translate(-x0, -y0);
+    let id = self.gen.next("n_");
+    let n = Node {
+      id: id.clone(),
+      kind: NodeType::Vector,
+      name: if name.is_empty() { "Vector".into() } else { name.to_string() },
+      x: x0,
+      y: y0,
+      width: (x1 - x0).max(0.01),
+      height: (y1 - y0).max(0.01),
+      fills: style.fills.clone(),
+      strokes: style.strokes.clone(),
+      stroke_weight: style.stroke_weight,
+      stroke_align: style.stroke_align,
+      effects: style.effects.clone(),
+      opacity: style.opacity,
+      blend_mode: style.blend_mode,
+      vector: Some(crate::model::VectorData {
+        subpaths: local.iter().map(|sp| crate::paths::transform(sp, &shift)).collect(),
+        raw: None,
+      }),
+      ..Default::default()
+    };
+    let page = self.page.clone();
+    self.doc.insert(n, parent.as_deref(), &page, index);
+    id
+  }
+
+  /// Replaces layers (paint order) with one vector placed where the top one was.
+  fn replace_with_vector(&mut self, ids: &[NodeId], page_sps: Vec<SubPath>, name: &str) -> Result<NodeId, String> {
+    let top = ids.last().ok_or("nothing selected")?;
+    let parent = self.doc.get(top).and_then(|n| n.parent.clone());
+    let index = self.doc.index_in_parent(top).map(|i| i + 1);
+    // Style comes from the bottom layer (its first shape if it is a group).
+    let mut style_id = ids[0].clone();
+    while let Some(n) = self.doc.get(&style_id) {
+      match (n.kind, n.children.first()) {
+        (NodeType::Group, Some(c)) => style_id = c.clone(),
+        _ => break,
+      }
+    }
+    let style = self.doc.get(&style_id).cloned().ok_or("no such layer")?;
+    let id = self.insert_vector(&style, page_sps, parent, index, name);
+    ops::delete(&mut self.doc, ids);
+    self.selection = vec![id.clone()];
+    Ok(id)
+  }
+
   /// Parent for newly drawn content: the deepest frame under the point.
   fn auto_parent(&self, explicit: Option<NodeId>, x: f64, y: f64) -> Option<NodeId> {
     explicit
@@ -980,6 +1052,106 @@ impl Engine {
       } => {
         ops::rotate(&mut self.doc, &ids, angle, Point::new(pivot_x, pivot_y));
         Ok(json!({}))
+      }
+      Command::BooleanOp { ids, operation: op } => {
+        let ids = ops::paint_order(&self.doc, &ops::top_most(&self.doc, &ids));
+        if ids.len() < 2 {
+          return Err("select at least two layers".into());
+        }
+        let shapes: Vec<Vec<Vec<[f64; 2]>>> = ids
+          .iter()
+          .map(|id| crate::paths::to_contours(&crate::paths::page_outline(&self.doc, id)).0)
+          .collect();
+        if shapes.iter().any(|s| s.is_empty()) {
+          return Err("boolean operations need closed shapes (text and lines can't be combined)".into());
+        }
+        let result = crate::paths::boolean(&shapes, op);
+        if result.is_empty() {
+          return Err("the result is empty".into());
+        }
+        let name = match op {
+          crate::paths::BoolOp::Union => "Union",
+          crate::paths::BoolOp::Subtract => "Subtract",
+          crate::paths::BoolOp::Intersect => "Intersect",
+          crate::paths::BoolOp::Exclude => "Exclude",
+        };
+        let id = self.replace_with_vector(&ids, crate::paths::contours_to_subpaths(&result), name)?;
+        Ok(json!({ "id": id }))
+      }
+      Command::Flatten { ids } => {
+        let ids = ops::paint_order(&self.doc, &ops::top_most(&self.doc, &ids));
+        let sps: Vec<SubPath> = ids.iter().flat_map(|id| crate::paths::page_outline(&self.doc, id)).collect();
+        if sps.is_empty() {
+          return Err("nothing to flatten (text can't be flattened yet)".into());
+        }
+        let name = if ids.len() == 1 {
+          self.doc.get(&ids[0]).map(|n| n.name.clone()).unwrap_or_default()
+        } else {
+          "Vector".into()
+        };
+        let id = self.replace_with_vector(&ids, sps, &name)?;
+        Ok(json!({ "id": id }))
+      }
+      Command::OutlineStroke { ids } => {
+        let mut created = Vec::new();
+        for id in ops::top_most(&self.doc, &ids) {
+          let Some(n) = self.doc.get(&id).cloned() else { continue };
+          let strokes: Vec<Paint> = n.strokes.iter().filter(|p| p.visible()).cloned().collect();
+          if strokes.is_empty() || n.stroke_weight <= 0.0 || n.kind == NodeType::Group {
+            continue;
+          }
+          let outline = crate::paths::page_outline(&self.doc, &id);
+          let ring = crate::paths::stroke_outline(&n, &outline);
+          if ring.is_empty() {
+            continue;
+          }
+          let mut style = n.clone();
+          style.fills = strokes;
+          style.strokes.clear();
+          let keep = n.fills.iter().any(|p| p.visible());
+          let new_id = self.insert_vector(
+            &style,
+            crate::paths::contours_to_subpaths(&ring),
+            n.parent.clone(),
+            self.doc.index_in_parent(&id).map(|i| i + 1),
+            &n.name,
+          );
+          if keep {
+            if let Some(m) = self.doc.get_mut(&id) {
+              m.strokes.clear();
+            }
+          } else {
+            ops::delete(&mut self.doc, std::slice::from_ref(&id));
+          }
+          created.push(new_id);
+        }
+        if created.is_empty() {
+          return Err("select layers with a visible stroke".into());
+        }
+        self.selection = created.clone();
+        Ok(json!({ "ids": created }))
+      }
+      Command::UseAsMask { ids } => {
+        let ids = ops::paint_order(&self.doc, &ops::top_most(&self.doc, &ids));
+        match ids.len() {
+          0 => Err("nothing selected".into()),
+          1 => {
+            let n = self.doc.get_mut(&ids[0]).ok_or("no such layer")?;
+            n.is_mask = !n.is_mask;
+            Ok(json!({ "id": ids[0], "isMask": n.is_mask }))
+          }
+          _ => {
+            let group = ops::group(&mut self.doc, &ids, &mut self.gen).ok_or("could not group the selection")?;
+            if let Some(g) = self.doc.get_mut(&group) {
+              g.name = "Mask group".into();
+            }
+            if let Some(m) = self.doc.get_mut(&ids[0]) {
+              m.is_mask = true;
+            }
+            self.selection = vec![group.clone()];
+            Ok(json!({ "id": group }))
+          }
+        }
       }
       Command::Group { ids } => {
         let id = ops::group(&mut self.doc, &ids, &mut self.gen).ok_or("nothing to group")?;
@@ -1590,6 +1762,95 @@ mod tests {
       })
       .unwrap();
     id_of(&r)
+  }
+
+  #[test]
+  fn boolean_subtract_makes_one_vector_with_a_hole() {
+    let mut e = engine();
+    let outer = rect(&mut e, 0.0, 0.0, 100.0, 100.0, None);
+    let inner = rect(&mut e, 25.0, 25.0, 50.0, 50.0, None);
+    e.doc.get_mut(&outer).unwrap().fills = vec![Paint::solid("#FF0000")];
+    let r = e
+      .dispatch(Command::BooleanOp {
+        ids: vec![inner.clone(), outer.clone()],
+        operation: crate::paths::BoolOp::Subtract,
+      })
+      .unwrap();
+    let id = id_of(&r);
+    let n = e.doc.get(&id).unwrap();
+    assert_eq!(n.kind, NodeType::Vector);
+    assert_eq!(n.vector.as_ref().unwrap().subpaths.len(), 2, "outer contour + hole");
+    assert_eq!((n.x, n.y, n.width, n.height), (0.0, 0.0, 100.0, 100.0));
+    assert!(
+      matches!(&n.fills[0], Paint::Solid { color, .. } if color == "#FF0000"),
+      "bottom layer's style"
+    );
+    assert!(e.doc.get(&outer).is_none() && e.doc.get(&inner).is_none());
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.doc.get(&outer).is_some() && e.doc.get(&id).is_none());
+  }
+
+  #[test]
+  fn flatten_and_outline_stroke() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 10.0, 10.0, None);
+    let b = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Ellipse,
+        x: 20.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let flat = id_of(&e.dispatch(Command::Flatten { ids: vec![a, b] }).unwrap());
+    let n = e.doc.get(&flat).unwrap();
+    assert_eq!(n.vector.as_ref().unwrap().subpaths.len(), 2);
+    assert_eq!(n.width, 30.0);
+
+    let s = rect(&mut e, 0.0, 50.0, 40.0, 40.0, None);
+    {
+      let n = e.doc.get_mut(&s).unwrap();
+      n.fills.clear();
+      n.strokes = vec![Paint::solid("#000000")];
+      n.stroke_weight = 4.0;
+      n.stroke_align = crate::model::StrokeAlign::Inside;
+    }
+    let r = e.dispatch(Command::OutlineStroke { ids: vec![s.clone()] }).unwrap();
+    let out = r["ids"][0].as_str().unwrap().to_string();
+    let v = e.doc.get(&out).unwrap();
+    assert!(e.doc.get(&s).is_none(), "a stroke-only layer is replaced");
+    assert_eq!(
+      (v.x, v.y, v.width, v.height),
+      (0.0, 50.0, 40.0, 40.0),
+      "inside stroke stays within the box"
+    );
+    assert!(v.strokes.is_empty() && !v.fills.is_empty());
+  }
+
+  #[test]
+  fn use_as_mask_groups_and_masks_siblings_above() {
+    let mut e = engine();
+    let m = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Ellipse,
+        x: 0.0,
+        y: 0.0,
+        width: 50.0,
+        height: 50.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let img = rect(&mut e, 0.0, 0.0, 80.0, 80.0, None);
+    let g = id_of(&e.dispatch(Command::UseAsMask { ids: vec![img, m.clone()] }).unwrap());
+    assert!(e.doc.get(&m).unwrap().is_mask);
+    assert_eq!(e.doc.get(&g).unwrap().children[0], m);
+    let page = e.page.clone();
+    let svg = e.render(&page, &[]);
+    assert!(svg.contains("<mask id=") && svg.contains("mask=\"url(#"), "{svg}");
   }
 
   #[test]

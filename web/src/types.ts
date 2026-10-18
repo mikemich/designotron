@@ -146,6 +146,7 @@ export interface Node {
   exportSettings: { format: "png" | "jpg" | "svg"; scale: number; suffix: string }[];
   notes: string;
   layoutGrids: LayoutGrid[];
+  isMask: boolean;
 }
 
 export interface LayoutGrid {

@@ -17,6 +17,7 @@ pub mod lint;
 pub mod model;
 pub mod ops;
 pub mod patch;
+pub mod paths;
 pub mod render;
 pub mod shapes;
 pub mod text;

@@ -79,6 +79,16 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
     { label: "Frame selection", kbd: `${ALT}${MOD}G`, onClick: A.frameSelection },
   ];
   if (nodes.some((n) => ["group", "frame"].includes(n.type))) items.push({ label: "Ungroup", kbd: `${SHIFT}${MOD}G`, onClick: A.ungroup });
+  items.push({ label: one?.isMask ? "Remove mask" : "Use as mask", kbd: `${ALT}${MOD}M`, onClick: A.useAsMask });
+  if (nodes.length > 1) {
+    items.push({ heading: "Boolean" });
+    items.push({ label: "Union", onClick: () => A.booleanOp("union") });
+    items.push({ label: "Subtract", onClick: () => A.booleanOp("subtract") });
+    items.push({ label: "Intersect", onClick: () => A.booleanOp("intersect") });
+    items.push({ label: "Exclude", onClick: () => A.booleanOp("exclude") });
+  }
+  if (nodes.some((n) => n.type !== "text")) items.push({ label: "Flatten", kbd: `${MOD}E`, onClick: A.flatten });
+  if (nodes.some((n) => n.strokeWeight > 0 && n.strokes.some((p) => p.visible))) items.push({ label: "Outline stroke", kbd: `${SHIFT}${MOD}O`, onClick: A.outlineStroke });
   items.push({ label: "Add auto layout", kbd: `${SHIFT}A`, onClick: A.addAutoLayout });
   items.push({ sep: true });
   if (!nodes.some((n) => n.type === "component" || n.type === "instance")) items.push({ label: "Create component", kbd: `${ALT}${MOD}K`, onClick: A.createComponent });

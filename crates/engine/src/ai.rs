@@ -122,7 +122,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "arrange",
-      "description": "Structural actions on layers: group, ungroup, frame, duplicate, create_component, combine_variants, detach_instance, add_auto_layout, remove_auto_layout, bring_to_front, send_to_back, align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal, distribute_vertical.",
+      "description": "Structural actions on layers: group, ungroup, frame, duplicate, create_component, combine_variants, detach_instance, add_auto_layout, remove_auto_layout, bring_to_front, send_to_back, align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal, distribute_vertical, union, subtract (bottom layer minus the rest), intersect, exclude, flatten, outline_stroke, mask (bottom layer masks the others).",
       "input_schema": { "type": "object", "properties": { "action": { "type": "string" }, "ids": { "type": "array", "items": { "type": "string" } } }, "required": ["action", "ids"] }
     },
     {
@@ -450,6 +450,25 @@ fn arrange(e: &mut Engine, input: &Value) -> Result<Value, String> {
     "frame" => Command::FrameSelection { ids },
     "duplicate" => Command::Duplicate { ids },
     "create_component" => Command::CreateComponent { ids },
+    "union" => Command::BooleanOp {
+      ids,
+      operation: crate::paths::BoolOp::Union,
+    },
+    "subtract" => Command::BooleanOp {
+      ids,
+      operation: crate::paths::BoolOp::Subtract,
+    },
+    "intersect" => Command::BooleanOp {
+      ids,
+      operation: crate::paths::BoolOp::Intersect,
+    },
+    "exclude" => Command::BooleanOp {
+      ids,
+      operation: crate::paths::BoolOp::Exclude,
+    },
+    "flatten" => Command::Flatten { ids },
+    "outline_stroke" => Command::OutlineStroke { ids },
+    "mask" => Command::UseAsMask { ids },
     "combine_variants" => Command::CombineVariants { ids },
     "detach_instance" => Command::DetachInstance { ids },
     "add_auto_layout" => Command::AddAutoLayout { ids },

@@ -214,6 +214,8 @@ pub struct Node {
   pub notes: String,
   /// Layout grids (frames only); editor overlay and snapping, never rendered.
   pub layout_grids: Vec<LayoutGrid>,
+  /// Masks the siblings painted above it (Figma "Use as mask"); not drawn itself.
+  pub is_mask: bool,
 }
 
 impl Default for Node {
@@ -264,6 +266,7 @@ impl Default for Node {
       export_settings: Vec::new(),
       notes: String::new(),
       layout_grids: Vec::new(),
+      is_mask: false,
     }
   }
 }
