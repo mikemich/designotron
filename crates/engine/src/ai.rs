@@ -144,6 +144,21 @@ pub fn tool_defs() -> Value {
       }, "required": ["nodeId"] }
     },
     {
+      "name": "get_comments",
+      "description": "Open comment threads from collaborators (all pages), with the layer each one is attached to. Address them, then reply_comment and resolve_comment.",
+      "input_schema": { "type": "object", "properties": { "includeResolved": { "type": "boolean" } } }
+    },
+    {
+      "name": "reply_comment",
+      "description": "Reply to a comment thread, e.g. to say what you changed.",
+      "input_schema": { "type": "object", "properties": { "id": { "type": "string" }, "text": { "type": "string" } }, "required": ["id", "text"] }
+    },
+    {
+      "name": "resolve_comment",
+      "description": "Mark a comment thread resolved (or reopen it with resolved: false).",
+      "input_schema": { "type": "object", "properties": { "id": { "type": "string" }, "resolved": { "type": "boolean" } }, "required": ["id"] }
+    },
+    {
       "name": "define_variables",
       "description": "Create or update a variable collection with modes (e.g. Light/Dark) and colour/number/string/boolean variables. Bind layer properties with bind: {fill: 'Theme/Background', cornerRadius: 'Radius/md'} in create_nodes/update_nodes (bindable: fill, stroke, cornerRadius, gap, padding, opacity, width, height, strokeWeight, fontSize, characters, visible), and switch a frame's mode with variableModes: {Theme: 'Dark'}. Bound variables become CSS variables in exported code.",
       "input_schema": { "type": "object", "properties": {
@@ -417,6 +432,21 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       Ok(json!({ "ok": true }))
     }
     "define_variables" => define_variables(e, input),
+    "get_comments" => Ok(crate::comments::list(
+      &e.doc,
+      None,
+      input.get("includeResolved").and_then(|v| v.as_bool()).unwrap_or(false),
+    )),
+    "reply_comment" => e.dispatch_inner(Command::ReplyComment {
+      id: input.get("id").and_then(|v| v.as_str()).ok_or("id is required")?.to_string(),
+      text: input.get("text").and_then(|v| v.as_str()).ok_or("text is required")?.to_string(),
+      author: "Claude".into(),
+      time: input.get("time").and_then(|v| v.as_f64()).unwrap_or(0.0),
+    }),
+    "resolve_comment" => e.dispatch_inner(Command::ResolveComment {
+      id: input.get("id").and_then(|v| v.as_str()).ok_or("id is required")?.to_string(),
+      resolved: input.get("resolved").and_then(|v| v.as_bool()).unwrap_or(true),
+    }),
     "define_styles" => {
       let mut ids = Vec::new();
       for c in input.get("colors").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
@@ -607,6 +637,7 @@ pub fn summary(e: &Engine, depth: usize) -> Value {
     "components": e.doc.components().iter().map(|c| json!({ "id": c.id, "name": c.name, "width": c.width, "height": c.height })).collect::<Vec<_>>(),
     "colorStyles": e.doc.styles.colors,
     "variables": crate::variables::summary(&e.doc),
+    "openComments": e.doc.comments.values().filter(|c| !c.resolved).count(),
     "nextFreeX": roots.iter().map(|r| e.doc.abs_bounds(r).right()).fold(0.0, f64::max) + if roots.is_empty() { 0.0 } else { 100.0 },
   })
 }

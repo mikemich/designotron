@@ -323,6 +323,38 @@ try {
   const dark = await page.evaluate((id) => window.__dt.doc().nodes[id].fills[0].color, themed.tile);
   check("variables: bound fill follows the frame's mode", light === "#6D4AFF" && dark === "#111111", `${light} → ${dark}`);
 
+  // Comments: the comment tool pins a thread to a layer; Claude's tools reply and resolve it.
+  await page.keyboard.press("Escape");
+  await page.click("#dt-canvas", { position: { x: 700, y: 950 } });
+  await page.keyboard.press("c");
+  const tile = await page.evaluate(() => {
+    const d = window.__dt.doc();
+    return Object.values(d.nodes).find((n) => n.name === "Tile")?.id;
+  });
+  await page.evaluate((id) => (window.__dt.dispatch({ op: "select", ids: [id] }), window.__dt.zoomToFit()), tile);
+  await page.waitForTimeout(200);
+  const tileBox = await page.evaluate((id) => {
+    const el = document.querySelector(`#dt-canvas [data-id="${id}"]`);
+    const r = el.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  }, tile);
+  await page.mouse.click(tileBox.x, tileBox.y);
+  await page.waitForSelector(".comment-popover textarea");
+  const nameField = page.locator(".comment-popover input[placeholder='Your name']");
+  if (await nameField.count()) await nameField.fill("Ana");
+  await page.fill(".comment-popover textarea", "Make the tile rounder");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector(".comment-pin");
+  await shot("05f-comments");
+  const thread = await page.evaluate(() => Object.values(window.__dt.doc().comments)[0]);
+  await page.evaluate(async (id) => {
+    await window.__dt.tool("reply_comment", { id, text: "Done, radius 16" });
+    await window.__dt.tool("resolve_comment", { id });
+  }, thread.id);
+  const after = await page.evaluate((id) => window.__dt.doc().comments[id], thread.id);
+  check("comments: pinned to a layer, replied and resolved by Claude's tools", thread.node === tile && after.resolved && after.messages[1].author === "Claude", JSON.stringify({ node: thread.node, msgs: after.messages.length }));
+  await page.keyboard.press("v");
+
   // Figma import from a saved REST API export.
   await page.evaluate(() => (location.hash = "#/"));
   await page.waitForSelector(".files");

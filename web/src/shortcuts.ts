@@ -102,6 +102,7 @@ export function installShortcuts(): () => void {
       p: "pen",
       t: "text",
       h: "hand",
+      c: "comment",
     };
     if (tools[k]) return run(() => setTool(tools[k]));
   };

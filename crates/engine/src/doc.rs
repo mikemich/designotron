@@ -57,6 +57,7 @@ pub fn new_document(ids: &mut IdGen, name: &str) -> Document {
     nodes: imbl::OrdMap::new(),
     styles: Styles::default(),
     variables: Vec::new(),
+    comments: Default::default(),
   }
 }
 

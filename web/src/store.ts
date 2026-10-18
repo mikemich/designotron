@@ -74,7 +74,7 @@ export interface Viewport {
 }
 
 export type RightTab = "design" | "prototype" | "code" | "review" | "app";
-export type LeftTab = "layers" | "assets" | "history";
+export type LeftTab = "layers" | "assets" | "history" | "comments";
 
 interface Store {
   rev: number;
@@ -100,6 +100,10 @@ interface Store {
   showGrids: boolean;
   variablesOpen: boolean;
   figmaOpen: boolean;
+  /** Comment thread open in a popover. */
+  openComment: string | null;
+  /** New comment being written at a page position. */
+  draftComment: { x: number; y: number; node: string | null } | null;
 }
 
 const pref = (k: string, d: boolean) => {
@@ -145,6 +149,8 @@ export const useStore = create<Store>(() => ({
   showGrids: pref("dt:showGrids", true),
   variablesOpen: false,
   figmaOpen: false,
+  openComment: null,
+  draftComment: null,
 }));
 
 /** Applies a style to the selected characters of the text being edited; false if none. */

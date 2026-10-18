@@ -153,6 +153,34 @@ export interface Node {
   variableModes: Record<string, string>;
 }
 
+export interface CommentMessage {
+  author: string;
+  text: string;
+  time: number;
+}
+
+export interface CommentThread {
+  id: string;
+  page: string;
+  x: number;
+  y: number;
+  node: string | null;
+  resolved: boolean;
+  messages: CommentMessage[];
+}
+
+/** A thread as listed by the `comments` query (position resolved to page coordinates). */
+export interface CommentPin {
+  id: string;
+  page: string;
+  x: number;
+  y: number;
+  nodeId: string | null;
+  nodeName: string | null;
+  resolved: boolean;
+  messages: CommentMessage[];
+}
+
 export type VarKind = "color" | "number" | "string" | "boolean";
 
 export interface Variable {
@@ -207,6 +235,7 @@ export interface Doc {
     texts: { id: string; name: string; fontFamily: string; fontSize: number; fontWeight: number; lineHeight: number | null; letterSpacing: number }[];
   };
   variables: VariableCollection[];
+  comments: Record<string, CommentThread>;
 }
 
 export interface EngineState {

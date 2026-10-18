@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { HistoryPanel } from "./HistoryPanel";
+import { CommentsPanel } from "./CommentsPanel";
 import {
   ChevronDown,
   SquareDashed,
@@ -45,6 +46,9 @@ export function LeftPanel() {
         <button className={"tab" + (tab === "history" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "history" })}>
           History
         </button>
+        <button className={"tab" + (tab === "comments" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "comments" })}>
+          Comments
+        </button>
       </div>
       {tab === "layers" ? (
         <>
@@ -53,6 +57,8 @@ export function LeftPanel() {
         </>
       ) : tab === "assets" ? (
         <Assets />
+      ) : tab === "comments" ? (
+        <CommentsPanel />
       ) : (
         <HistoryPanel />
       )}

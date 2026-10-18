@@ -3,6 +3,7 @@ import {
   ArrowUpRight,
   ChevronDown,
   Combine,
+  MessageCircle,
   Circle,
   Hand,
   Hash,
@@ -134,6 +135,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           <ImageIcon size={16} />
         </button>
         {toolBtn("hand", "Hand (H)", <Hand size={16} />)}
+        {toolBtn("comment", "Comment (C)", <MessageCircle size={16} />)}
         {multi && (
           <button
             className="tbtn"

@@ -24,6 +24,32 @@ pub struct Document {
   /// Variable collections (tokens with modes).
   #[serde(default)]
   pub variables: Vec<crate::variables::Collection>,
+  /// Comment threads pinned to the canvas (keyed by id so collaborators merge cleanly).
+  #[serde(default)]
+  pub comments: BTreeMap<String, Comment>,
+}
+
+/// A comment thread: a pin on a page, optionally attached to a layer so it follows it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Comment {
+  pub id: String,
+  pub page: String,
+  /// Page position, or the offset from the attached layer's top-left.
+  pub x: f64,
+  pub y: f64,
+  pub node: Option<NodeId>,
+  pub resolved: bool,
+  pub messages: Vec<CommentMessage>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CommentMessage {
+  pub author: String,
+  pub text: String,
+  /// Milliseconds since the Unix epoch (supplied by the client).
+  pub time: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

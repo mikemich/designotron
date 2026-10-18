@@ -97,6 +97,33 @@ pub enum Command {
     #[serde(default)]
     mode: Option<String>,
   },
+  /// Starts a comment thread at a page position, attached to `node` when given.
+  AddComment {
+    #[serde(default)]
+    page: Option<String>,
+    x: f64,
+    y: f64,
+    #[serde(default)]
+    node: Option<NodeId>,
+    text: String,
+    author: String,
+    #[serde(default)]
+    time: f64,
+  },
+  ReplyComment {
+    id: String,
+    text: String,
+    author: String,
+    #[serde(default)]
+    time: f64,
+  },
+  ResolveComment {
+    id: String,
+    resolved: bool,
+  },
+  DeleteComment {
+    id: String,
+  },
   /// Imports a Figma REST API file (or /nodes response) as new pages.
   ImportFigma {
     file: Value,
@@ -376,6 +403,13 @@ pub enum Query {
     #[serde(default)]
     exclude: Vec<NodeId>,
   },
+  /// Comment threads on a page with resolved page positions.
+  Comments {
+    #[serde(default)]
+    page: Option<String>,
+    #[serde(default)]
+    include_resolved: bool,
+  },
   /// Visible layout grids on a page, for the canvas overlay.
   GridOverlay {
     #[serde(default)]
@@ -512,9 +546,13 @@ impl Engine {
             imbl::ordmap::DiffItem::Remove(k, _) => removed.push(k.clone()),
           }
         }
-        let d = &self.doc;
-        let meta =
-          json!({ "id": d.id, "name": d.name, "schema": d.schema, "pages": d.pages, "styles": d.styles, "variables": d.variables });
+        // Every document-level field except the node table (cheap: the node map clone is O(1)).
+        let mut shell = self.doc.clone();
+        shell.nodes = imbl::OrdMap::new();
+        let mut meta = serde_json::to_value(&shell).unwrap_or(Value::Null);
+        if let Some(m) = meta.as_object_mut() {
+          m.remove("nodes");
+        }
         json!({ "nodes": nodes, "removed": removed, "meta": meta })
       }
       _ => json!({ "full": self.doc }),
@@ -1044,6 +1082,56 @@ impl Engine {
             None => n.variable_modes.remove(&cid),
           };
         }
+        Ok(json!({}))
+      }
+      Command::AddComment {
+        page,
+        x,
+        y,
+        node,
+        text,
+        author,
+        time,
+      } => {
+        let page = page.unwrap_or_else(|| self.page.clone());
+        if self.doc.page(&page).is_none() {
+          return Err("no such page".into());
+        }
+        let node = node.filter(|n| self.doc.get(n).is_some());
+        // Attached comments store their offset from the layer so they move with it.
+        let (cx, cy) = match &node {
+          Some(n) => {
+            let b = self.doc.abs_bounds(n);
+            (x - b.x, y - b.y)
+          }
+          None => (x, y),
+        };
+        let id = self.gen.next("c_");
+        self.doc.comments.insert(
+          id.clone(),
+          crate::model::Comment {
+            id: id.clone(),
+            page,
+            x: cx,
+            y: cy,
+            node,
+            resolved: false,
+            messages: vec![crate::model::CommentMessage { author, text, time }],
+          },
+        );
+        Ok(json!({ "id": id }))
+      }
+      Command::ReplyComment { id, text, author, time } => {
+        let c = self.doc.comments.get_mut(&id).ok_or("no such comment")?;
+        c.messages.push(crate::model::CommentMessage { author, text, time });
+        Ok(json!({}))
+      }
+      Command::ResolveComment { id, resolved } => {
+        self.doc.comments.get_mut(&id).ok_or("no such comment")?.resolved = resolved;
+        Ok(json!({}))
+      }
+      Command::DeleteComment { id } => {
+        self.doc.comments.remove(&id).ok_or("no such comment")?;
         Ok(json!({}))
       }
       Command::ImportFigma { file, images } => {
@@ -1909,6 +1997,7 @@ impl Engine {
         );
         json!({ "x": r.x, "y": r.y, "guides": guides })
       }
+      Query::Comments { page, include_resolved } => crate::comments::list(&self.doc, page.as_deref(), include_resolved),
       Query::GridOverlay { page } => crate::grids::overlay(&self.doc, page.as_deref().unwrap_or(&self.page)),
       Query::Copy { ids } => json!(self.copy(&ids)),
       Query::ExportSvg { id } => json!(render::export_svg(&self.doc, &id, m)),
@@ -2033,6 +2122,48 @@ mod tests {
 
   fn ai(e: &mut Engine, tool: &str, input: Value) -> Value {
     e.dispatch(Command::Ai { tool: tool.into(), input }).unwrap()
+  }
+
+  #[test]
+  fn comments_follow_their_layer_and_claude_can_resolve_them() {
+    let mut e = engine();
+    let card = rect(&mut e, 100.0, 100.0, 50.0, 50.0, None);
+    let id = id_of(
+      &e.dispatch(Command::AddComment {
+        page: None,
+        x: 110.0,
+        y: 105.0,
+        node: Some(card.clone()),
+        text: "Make this bigger".into(),
+        author: "Ana".into(),
+        time: 1.0,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::Translate {
+      ids: vec![card.clone()],
+      dx: 50.0,
+      dy: 0.0,
+      snap: false,
+      zoom: 1.0,
+    })
+    .unwrap();
+    let list = ai(&mut e, "get_comments", json!({}));
+    assert_eq!(
+      (list[0]["x"].as_f64(), list[0]["y"].as_f64()),
+      (Some(160.0), Some(105.0)),
+      "pin moved with the layer"
+    );
+    assert_eq!(list[0]["nodeId"], card);
+    ai(&mut e, "reply_comment", json!({ "id": id, "text": "Done: 80×80" }));
+    ai(&mut e, "resolve_comment", json!({ "id": id }));
+    let c = &e.doc.comments[&id];
+    assert!(c.resolved && c.messages[1].author == "Claude");
+    assert_eq!(
+      ai(&mut e, "get_comments", json!({})).as_array().unwrap().len(),
+      0,
+      "resolved threads are hidden by default"
+    );
   }
 
   #[test]

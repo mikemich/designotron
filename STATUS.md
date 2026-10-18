@@ -15,7 +15,7 @@ Ordered by impact on "replace Figma for a small team".
 |----|----------------------------------------|-----------------------------------------------------------------------|
 | 1  | Real-time multiplayer                  | CRDT (Yjs/Automerge or a Rust CRDT) over the bridge or a hosted relay |
 | 2  | Accounts, cloud files, sharing links   | Needs a hosted backend; today files are local (IndexedDB + `.dtron`)  |
-| 3  | Comments                               | Pins on canvas, threads, mentions; needs (2) for teams                |
+| 3  | Comment extras                         | Mentions and notifications; shared with teammates once (1)/(2) land   |
 | 4  | Cloud version history                  | Local named/auto versions shipped; sync them once files are in the cloud |
 | 6  | Live boolean groups                    | Booleans are destructive today (one vector); keep the inputs editable |
 | 7  | Faster painting of huge files          | Engine and DOM updates are incremental; a canvas/WebGL renderer would cut paint cost at 10k+ layers |
@@ -63,6 +63,7 @@ Ordered by impact on "replace Figma for a small team".
 | Variables       | Collections with modes, colour/number/string/boolean variables (editor dialog), bindings for fill, stroke, radius, gap, padding, opacity, size, font size, text, visibility; per-frame modes inherited by children and instances; `tokens.css` + `var(--…)` + `data-<collection>` attributes in exported code; `define_variables`/`bind`/`variableModes` for Claude |
 | Figma import    | File → Import from Figma (link + personal access token, or a saved REST JSON): pages, frames, auto layout, constraints, components/variants, instances with recovered overrides, mixed text, vectors from Figma geometry, gradients, images (downloaded into the file), effects, masks, prototype links |
 | Performance     | Persistent node map (O(1) snapshots), diff-driven layout/component sync, per-root canvas render cache with transform-only moves, document deltas to JS, contained canvas layout |
+| Comments        | Comment tool (C), pins that follow their layer, threads with replies, resolve/reopen, Comments tab; Claude reads them (`get_comments`), replies and resolves; "Ask Claude to address them" |
 | Live app        | App tab: write the generated project to `workspace/app` (or keep it in sync), run `npm run dev` through the bridge, preview at mobile/desktop width, logs, "Ask Claude to fix it" |
 | Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README                                                             |
 
@@ -72,7 +73,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 71 engine + bridge unit tests                          | `cargo test --workspace`                     |
+| 72 engine + bridge unit tests                          | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
@@ -85,7 +86,8 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 | Ruler guide drag, layout grid overlay, version restore | `web/scripts/e2e.mjs`                        |
 | Boolean subtract from the toolbar, mask rendering      | `web/scripts/e2e.mjs`                        |
 | Variables dialog, fill binding, frame mode switch      | `web/scripts/e2e.mjs`                        |
-| Figma JSON import through the dialog                   | `web/scripts/e2e.mjs` (38/38 passing)        |
+| Figma JSON import through the dialog                   | `web/scripts/e2e.mjs`                        |
+| Comment on a layer, Claude replies and resolves        | `web/scripts/e2e.mjs` (39/39 passing)        |
 | Bridge reaches api.figma.com and real sites via proxy  | curl `/bridge/figma` (403 for a bad token), `/bridge/fetch` |
 | Engine: drag step 0.13 ms, edit 0.3 ms on 6k layers    | `cargo run --release -p designotron-engine --example bench` (was 42 ms / 46 ms) |
 | Browser drag on 6k layers: ~10 ms script, ~1 ms layout per frame | `web/scripts/perf.mjs` on the production build (was 25 ms script + 80 ms layout) |
@@ -108,7 +110,7 @@ until someone runs it with a real key.
 
 | Area             | Limitation                                                                                               |
 |------------------|----------------------------------------------------------------------------------------------------------|
-| Collaboration    | Single user. No multiplayer, accounts, sharing or comments; versions live only in this browser           |
+| Collaboration    | Comments are per file; no multiplayer, accounts or sharing yet; versions live only in this browser       |
 | Storage          | Files live in the browser (IndexedDB). Clearing site data deletes them; save `.dtron` files to keep them |
 | Scale            | Updates are incremental, but the canvas is one big SVG: painting 10k+ layers zoomed out is the limit (software rendering in headless tests ~35 ms/frame at 6k) |
 | Text             | No OpenType features or per-range line height; widths depend on the web font having loaded               |

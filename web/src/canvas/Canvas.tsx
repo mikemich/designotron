@@ -15,6 +15,7 @@ import { apply, corners, invert, mid, polyPoints, rectCorners, simplify, toScree
 import { TextEditor } from "./TextEditor";
 import { EmptyPrompt } from "./EmptyPrompt";
 import { GridOverlay, PageGuides, Rulers } from "./Rulers";
+import { CommentLayer } from "./Comments";
 import { insertImageFile } from "../actions";
 import { canvasMenu } from "./contextMenu";
 import { Menu, type MenuItem } from "../ui/controls";
@@ -302,8 +303,11 @@ export function Canvas() {
         drag.current = { kind: "pencil", points: [p] };
         setPencil([p]);
         break;
-      case "comment":
+      case "comment": {
+        const node = query<string | null>({ q: "pick", x: p.x, y: p.y, zoom: zoom(), deep: true });
+        useStore.setState({ draftComment: { x: p.x, y: p.y, node }, openComment: null });
         break;
+      }
       default:
         drag.current = { kind: "draw", start: p, cur: p };
         setDraw({ start: p, cur: p });
@@ -766,6 +770,7 @@ export function Canvas() {
         {pen.length > 0 && <PenPreview pts={pen} cursor={penCursor} v={v} />}
         {vectorNode?.vector && vectorM && <VectorPoints node={vectorNode} m={vectorM} v={v} />}
       </svg>
+      <CommentLayer v={v} />
       {showRulers && <Rulers v={v} width={size.w} height={size.h} selection={selItems.union} />}
       {editingText && <TextEditor id={editingText} />}
       {empty && tool === "move" && <EmptyPrompt />}

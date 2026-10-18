@@ -48,6 +48,8 @@ export async function executeTool(name: string, input: any): Promise<ToolOutcome
     if (name === "import_url") {
       return { ok: true, result: await importUrl(input ?? {}) };
     }
+    // The engine has no clock; stamp Claude's comment replies here.
+    if (name === "reply_comment") input = { ...input, time: Date.now() };
     const result = dispatchOrThrow({ op: "ai", tool: name, input: input ?? {} });
     if (name === "select") setTimeout(zoomToSelection, 0);
     return { ok: true, result };
