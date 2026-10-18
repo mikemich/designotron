@@ -33,10 +33,11 @@ async function mcp(method, params) {
 
 const browser = await chromium.launch(launch);
 const page = await (await browser.newContext({ viewport: { width: 1600, height: 1000 }, ignoreHTTPSErrors: true })).newPage();
+await page.addInitScript(() => localStorage.setItem("dt:tour-done", "1"));
 try {
   await page.goto(URL);
   await page.waitForSelector(".files");
-  await page.click("text=Open sample").catch(() => page.click(".file-card"));
+  await page.click(".file-card:has-text('Mobile app')");
   await page.waitForSelector("#dt-canvas");
   await page.waitForFunction(() => window.__dt.chat().bridgeStatus === "connected", null, { timeout: 15000 });
   check("editor connects to bridge", true);

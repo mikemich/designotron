@@ -13,6 +13,7 @@ import {
 } from "../store";
 import { apply, corners, invert, mid, polyPoints, rectCorners, simplify, toScreen, type Pt } from "./geometry";
 import { TextEditor } from "./TextEditor";
+import { EmptyPrompt } from "./EmptyPrompt";
 import { insertImageFile } from "../actions";
 import { canvasMenu } from "./contextMenu";
 import { Menu, type MenuItem } from "../ui/controls";
@@ -712,15 +713,7 @@ export function Canvas() {
         {vectorNode?.vector && vectorM && <VectorPoints node={vectorNode} m={vectorM} v={v} />}
       </svg>
       {editingText && <TextEditor id={editingText} />}
-      {empty && (
-        <div className="empty-hint">
-          <div>
-            <b>Empty page.</b> Press <b>F</b> to draw a frame, <b>R</b> for a rectangle, <b>T</b> for text.
-            <br />
-            Or open the Claude panel (<b>⌘/</b>) and describe what to build.
-          </div>
-        </div>
-      )}
+      {empty && tool === "move" && <EmptyPrompt />}
       <div className="zoom-indicator">{Math.round(v.zoom * 100)}%</div>
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>

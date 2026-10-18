@@ -24,6 +24,7 @@ function check(name, ok, detail = "") {
 const browser = await chromium.launch(launch);
 const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, ignoreHTTPSErrors: true });
 const page = await context.newPage();
+await page.addInitScript(() => localStorage.setItem("dt:tour-done", "1"));
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 page.on("console", (m) => m.type() === "error" && !m.text().includes("WebSocket") && !m.text().includes("Failed to load resource") && errors.push(m.text()));
@@ -38,7 +39,7 @@ try {
   check("files dashboard loads", true);
   await shot("01-files");
 
-  await page.click("text=Open sample");
+  await page.click(".file-card:has-text('Mobile app')");
   await page.waitForSelector("#dt-canvas", { timeout: 15000 });
   await page.waitForTimeout(800);
   const d0 = await doc();
@@ -182,6 +183,28 @@ try {
   await page.waitForTimeout(500);
   const count2 = Object.keys((await doc()).nodes).length;
   check("autosave survives reload", count2 === count, `${count} → ${count2} nodes`);
+
+  // Templates: each builds into a fresh file from the files screen.
+  for (const name of ["Landing page", "Dashboard", "Design system"]) {
+    await page.evaluate(() => (location.hash = "#/"));
+    await page.waitForSelector(".files");
+    await page.click(`.file-card:has-text('${name}')`);
+    await page.waitForSelector("#dt-canvas");
+    await page.waitForTimeout(300);
+    const n = Object.keys((await doc()).nodes).length;
+    check(`template "${name}" builds`, n > 10, `${n} nodes`);
+    await shot(`08-template-${name.replace(/ /g, "-").toLowerCase()}`);
+  }
+  const ds = await doc();
+  check("design system template has styles and variants", ds.styles.colors.length >= 5 && Object.values(ds.nodes).some((n) => n.type === "componentSet"));
+
+  // New empty file shows the prompt.
+  await page.evaluate(() => (location.hash = "#/"));
+  await page.waitForSelector(".files");
+  await page.click("button:has-text('New design file')");
+  await page.waitForSelector(".empty-prompt", { timeout: 5000 });
+  check("empty file shows the design prompt", true);
+  await shot("09-empty-prompt");
 
   // Chat panel opens.
   await page.keyboard.press("Control+/");

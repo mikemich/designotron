@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { FilePlus, FolderOpen, MoreHorizontal, Sparkles } from "lucide-react";
+import { FilePlus, FolderOpen, MoreHorizontal } from "lucide-react";
 import { deleteFile, duplicateFile, fromDtron, listFiles, newFileId, pickFile, renameFile, saveFile, type FileMeta } from "./files";
 import { getEngine, newEngine, dispatch, toast, useStore } from "./store";
-import { buildSample } from "./sample";
+import { TEMPLATES, type Template } from "./templates";
+import { persistentStorage } from "./files";
 import { Menu, type MenuItem } from "./ui/controls";
 
 export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
@@ -14,9 +15,9 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
     refresh();
   }, []);
 
-  const create = async (sample: boolean) => {
+  const create = async (template: Template | null) => {
     newEngine();
-    if (sample) buildSample();
+    if (template) template.build();
     else dispatch({ op: "setDocName", name: "Untitled" });
     const id = newFileId();
     const json = getEngine().save();
@@ -47,22 +48,33 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
         <button className="btn" onClick={importFile}>
           <FolderOpen size={14} /> Open .dtron
         </button>
-        <button className="btn primary" onClick={() => create(false)}>
+        <button className="btn primary" onClick={() => create(null)}>
           <FilePlus size={14} /> New design file
         </button>
       </div>
-      {files && files.length === 0 && (
-        <div className="hero">
-          <Sparkles size={32} color="#9b85ff" />
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Start with the sample file</div>
-            <div className="muted">Two screens built with auto layout, a component, and a prototype link. Open the Claude panel (⌘/) to keep designing with AI.</div>
-          </div>
-          <button className="btn primary" onClick={() => create(true)}>
-            Open sample
-          </button>
+      {!persistentStorage() && (
+        <div className="hero" style={{ padding: 14 }}>
+          <span className="muted">This browser isn't keeping files between visits here. Use Save as .dtron from the editor menu to keep your work.</span>
         </div>
       )}
+      <div className="section-head" style={{ marginBottom: 12, fontSize: 14 }}>
+        Start from a template
+      </div>
+      <div className="files-grid" style={{ marginBottom: 32 }}>
+        {TEMPLATES.map((t) => (
+          <div key={t.id} className="file-card" onClick={() => create(t)}>
+            <TemplateThumb t={t} />
+            <div className="meta">
+              <div className="n">{t.name}</div>
+              <div className="muted small">{t.description}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="section-head" style={{ marginBottom: 12, fontSize: 14 }}>
+        Your files
+      </div>
+      {files && files.length === 0 && <div className="muted" style={{ marginBottom: 20 }}>No files yet. Pick a template above or create a new file.</div>}
       <div className="files-grid">
         {files?.map((f) => (
           <div key={f.id} className="file-card" onClick={() => onOpen(f.id)}>
@@ -109,20 +121,49 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
             </button>
           </div>
         ))}
-        {files && files.length > 0 && (
-          <div className="file-card" onClick={() => create(true)}>
-            <div className="thumb">
-              <Sparkles size={28} color="#9b85ff" />
-            </div>
-            <div className="meta">
-              <div className="n">New sample file</div>
-              <div className="muted small">Screens, components, prototype</div>
-            </div>
-          </div>
-        )}
       </div>
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
       {t && <div className={"toast " + t.kind}>{t.text}</div>}
+    </div>
+  );
+}
+
+/** Small schematic preview of a template. */
+function TemplateThumb({ t }: { t: Template }) {
+  const [bg, accent] = t.colors;
+  const block = (style: React.CSSProperties, key?: number) => <div key={key} style={{ position: "absolute", borderRadius: 4, ...style }} />;
+  return (
+    <div className="thumb" style={{ position: "relative", background: bg }}>
+      {t.id === "mobile" && (
+        <>
+          {block({ left: "30%", top: 14, width: "18%", height: 112, background: "#0E0B1F", border: `2px solid ${accent}` })}
+          {block({ left: "52%", top: 14, width: "18%", height: 112, background: "#F6F5FB" })}
+          {block({ left: "33%", top: 96, width: "12%", height: 10, background: accent })}
+        </>
+      )}
+      {t.id === "landing" && (
+        <>
+          {block({ left: "12%", top: 16, width: "76%", height: 46, background: "#1E293B" })}
+          {block({ left: "36%", top: 50, width: "28%", height: 8, background: accent })}
+          {[0, 1, 2].map((i) => block({ left: `${12 + i * 26}%`, top: 72, width: "23%", height: 50, background: "#F8FAFC" }, i))}
+        </>
+      )}
+      {t.id === "dashboard" && (
+        <>
+          {block({ left: "10%", top: 14, width: "16%", height: 112, background: "#0F172A" })}
+          {[0, 1, 2].map((i) => block({ left: `${30 + i * 20}%`, top: 14, width: "17%", height: 24, background: "#FFFFFF", border: "1px solid #E2E8F0" }, i))}
+          {block({ left: "30%", top: 46, width: "57%", height: 80, background: "#FFFFFF", border: "1px solid #E2E8F0" })}
+          {[0, 1, 2, 3, 4, 5].map((i) => block({ left: `${34 + i * 8.5}%`, top: 120 - (20 + ((i * 37) % 50)), width: "5%", height: 20 + ((i * 37) % 50), background: accent }, i))}
+        </>
+      )}
+      {t.id === "system" && (
+        <>
+          {["#F97316", "#C2410C", "#1C1917", "#78716C", "#16A34A"].map((c, i) => block({ left: `${12 + i * 15}%`, top: 22, width: "12%", height: 34, background: c }, i))}
+          {block({ left: "12%", top: 72, width: "22%", height: 18, background: accent, borderRadius: 6 })}
+          {block({ left: "38%", top: 72, width: "22%", height: 18, background: "#FFFFFF", border: "1px solid #D6D3D1", borderRadius: 6 })}
+          {block({ left: "12%", top: 100, width: "48%", height: 6, background: "#D6D3D1" })}
+        </>
+      )}
     </div>
   );
 }

@@ -552,7 +552,7 @@ textarea.textinput {
   outline: none;
   min-width: 0;
 }
-.canvas svg {
+.canvas > svg {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -990,4 +990,59 @@ textarea.textinput {
   .hero {
     flex-wrap: wrap;
   }
+}
+
+/* ---------- Empty page prompt ---------- */
+.empty-prompt {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(520px, calc(100% - 32px));
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  cursor: default;
+}
+.empty-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.empty-prompt textarea {
+  min-height: 76px;
+  margin-bottom: 8px;
+  user-select: text;
+}
+.empty-divider {
+  margin: 16px 0 8px;
+  color: var(--text-3);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ---------- Tour ---------- */
+.tour-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  pointer-events: none;
+}
+.tour-highlight {
+  position: fixed;
+  border: 2px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+}
+.tour-card {
+  position: fixed;
+  background: #1f1f1f;
+  border: 1px solid #444;
+  border-radius: 10px;
+  padding: 14px;
+  pointer-events: all;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }

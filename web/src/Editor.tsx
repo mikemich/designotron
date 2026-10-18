@@ -5,6 +5,7 @@ import { RightPanel } from "./panels/RightPanel";
 import { Toolbar } from "./panels/Toolbar";
 import { ChatPanel } from "./ai/ChatPanel";
 import { Presenter } from "./Presenter";
+import { Tour } from "./Tour";
 import { installShortcuts } from "./shortcuts";
 import { getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
 import { loadFile, saveFile } from "./files";
@@ -90,6 +91,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         {chatOpen && <ChatPanel />}
       </div>
       {presenting && <Presenter start={presenting} />}
+      <Tour />
       {toast && <div className={"toast " + toast.kind}>{toast.text}</div>}
     </div>
   );
