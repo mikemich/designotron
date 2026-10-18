@@ -57,7 +57,10 @@ pub enum NodeType {
 impl NodeType {
   /// Node types that own children and render like a frame.
   pub fn is_frame_like(self) -> bool {
-    matches!(self, NodeType::Frame | NodeType::Component | NodeType::ComponentSet | NodeType::Instance)
+    matches!(
+      self,
+      NodeType::Frame | NodeType::Component | NodeType::ComponentSet | NodeType::Instance
+    )
   }
 
   pub fn is_container(self) -> bool {
@@ -286,7 +289,11 @@ pub enum Paint {
 
 impl Paint {
   pub fn solid(color: &str) -> Paint {
-    Paint::Solid { color: color.to_string(), opacity: 1.0, visible: true }
+    Paint::Solid {
+      color: color.to_string(),
+      opacity: 1.0,
+      visible: true,
+    }
   }
 
   pub fn visible(&self) -> bool {
@@ -611,7 +618,11 @@ pub struct VectorPoint {
 
 impl VectorPoint {
   pub fn at(x: f64, y: f64) -> Self {
-    VectorPoint { x, y, ..Default::default() }
+    VectorPoint {
+      x,
+      y,
+      ..Default::default()
+    }
   }
 }
 
@@ -646,7 +657,12 @@ pub struct ShapeProps {
 
 impl Default for ShapeProps {
   fn default() -> Self {
-    ShapeProps { point_count: 5, inner_radius: 0.38, start_cap: StrokeCap::None, end_cap: StrokeCap::None }
+    ShapeProps {
+      point_count: 5,
+      inner_radius: 0.38,
+      start_cap: StrokeCap::None,
+      end_cap: StrokeCap::None,
+    }
   }
 }
 
@@ -732,7 +748,11 @@ pub struct ExportSetting {
 
 impl Default for ExportSetting {
   fn default() -> Self {
-    ExportSetting { format: ExportFormat::Png, scale: 1.0, suffix: String::new() }
+    ExportSetting {
+      format: ExportFormat::Png,
+      scale: 1.0,
+      suffix: String::new(),
+    }
   }
 }
 
@@ -785,4 +805,3 @@ fn default_angle() -> f64 {
 }
 
 // Defaults required by `#[serde(default)]` on structs holding these enums.
-

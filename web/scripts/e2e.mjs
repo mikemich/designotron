@@ -139,16 +139,14 @@ try {
 
   // Screenshot tool (browser-only).
   const shotRes = await page.evaluate(async (id) => {
-    const m = await import("/src/ai/tools.ts");
-    const out = await m.executeTool("get_screenshot", { id });
+    const out = await window.__dt.tool("get_screenshot", { id });
     return { ok: out.ok, len: out.image?.data.length ?? 0, err: out.ok ? null : out.result };
   }, welcome.id);
   check("get_screenshot rasterises", shotRes.ok && shotRes.len > 1000, shotRes.err ?? `${shotRes.len} b64 chars`);
 
   // Import HTML tool.
   const imp = await page.evaluate(async () => {
-    const m = await import("/src/ai/tools.ts");
-    return m.executeTool("import_html", {
+    return window.__dt.tool("import_html", {
       html: '<div style="padding:32px;background:#0F172A;color:white;font-family:Inter"><h1 style="margin:0 0 12px;font-size:40px">Pricing</h1><p style="color:#94A3B8;margin:0">Simple plans for everyone.</p><button style="margin-top:20px;padding:12px 20px;border-radius:10px;border:0;background:#7C5CFF;color:white;font-size:16px">Start free</button></div>',
       x: 900,
       y: 950,

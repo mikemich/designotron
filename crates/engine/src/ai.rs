@@ -10,9 +10,9 @@ use crate::codegen;
 use crate::engine::{Command, Engine};
 use crate::geom::Point;
 use crate::model::{
-  Action, Align, AutoLayout, Effect, EffectType, GradientStop, Interaction, LayoutDirection, Node, NodeId, NodeType, Paint,
-  RawPath, ScaleMode, Sizing, StrokeAlign, SubPath, TextAlignH, TextAlignV, TextAutoResize, TextCase, TextDecoration,
-  Transition, Trigger, VectorData, VectorPoint,
+  Action, Align, AutoLayout, Effect, EffectType, GradientStop, Interaction, LayoutDirection, Node, NodeId, NodeType, Paint, RawPath,
+  ScaleMode, Sizing, StrokeAlign, SubPath, TextAlignH, TextAlignV, TextAutoResize, TextCase, TextDecoration, Transition, Trigger,
+  VectorData, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render;
@@ -194,12 +194,20 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       Ok(json!(out))
     }
     "create_nodes" => {
-      let specs = input.get("nodes").and_then(|v| v.as_array()).cloned().ok_or("nodes must be an array")?;
+      let specs = input
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .ok_or("nodes must be an array")?;
       let created = insert_specs(e, &specs, input.get("parentId").and_then(|v| v.as_str()))?;
       Ok(json!({ "created": created }))
     }
     "update_nodes" => {
-      let updates = input.get("updates").and_then(|v| v.as_array()).cloned().ok_or("updates must be an array")?;
+      let updates = input
+        .get("updates")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .ok_or("updates must be an array")?;
       let mut done = Vec::new();
       for u in &updates {
         let id = u.get("id").and_then(|v| v.as_str()).ok_or("each update needs an id")?;
@@ -211,7 +219,10 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         }
         let diff = diff_patch(&before, &after);
         if !diff.as_object().map(|m| m.is_empty()).unwrap_or(true) {
-          e.dispatch_inner(Command::Update { ids: vec![id.to_string()], patch: diff })?;
+          e.dispatch_inner(Command::Update {
+            ids: vec![id.to_string()],
+            patch: diff,
+          })?;
         }
         done.push(id.to_string());
       }
@@ -232,17 +243,26 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       if input.get("parentId").is_some() || input.get("index").is_some() {
         let parent = input.get("parentId").and_then(|v| v.as_str()).map(String::from);
         let index = input.get("index").and_then(|v| v.as_u64()).map(|v| v as usize);
-        e.dispatch_inner(Command::MoveToParent { ids: ids.clone(), parent, index })?;
+        e.dispatch_inner(Command::MoveToParent {
+          ids: ids.clone(),
+          parent,
+          index,
+        })?;
       }
       Ok(json!({ "moved": ids }))
     }
     "arrange" => arrange(e, input),
     "create_instance" => {
-      let comp = input.get("componentId").and_then(|v| v.as_str()).ok_or("componentId required")?.to_string();
+      let comp = input
+        .get("componentId")
+        .and_then(|v| v.as_str())
+        .ok_or("componentId required")?
+        .to_string();
       let parent = input.get("parentId").and_then(|v| v.as_str()).map(String::from);
       let (x, y) = (num(input.get("x")).unwrap_or(0.0), num(input.get("y")).unwrap_or(0.0));
       let page = e.page.clone();
-      let id = crate::components::create_instance(&mut e.doc, &comp, parent.as_deref(), &page, x, y, &mut e.gen).ok_or("componentId is not a component")?;
+      let id = crate::components::create_instance(&mut e.doc, &comp, parent.as_deref(), &page, x, y, &mut e.gen)
+        .ok_or("componentId is not a component")?;
       Ok(json!({ "id": id }))
     }
     "set_prototype" => {
@@ -297,8 +317,13 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       let name = input.get("name").and_then(|v| v.as_str()).map(String::from);
       match input.get("action").and_then(|v| v.as_str()).unwrap_or("") {
         "add" => e.dispatch_inner(Command::AddPage { name }),
-        "rename" => e.dispatch_inner(Command::RenamePage { id: id.ok_or("id required")?, name: name.ok_or("name required")? }),
-        "delete" => e.dispatch_inner(Command::DeletePage { id: id.ok_or("id required")? }),
+        "rename" => e.dispatch_inner(Command::RenamePage {
+          id: id.ok_or("id required")?,
+          name: name.ok_or("name required")?,
+        }),
+        "delete" => e.dispatch_inner(Command::DeletePage {
+          id: id.ok_or("id required")?,
+        }),
         "switch" => {
           let id = id.ok_or("id required")?;
           if e.doc.page(&id).is_none() {
@@ -312,7 +337,10 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       }
     }
     "select" => {
-      let ids: Vec<NodeId> = str_list(input.get("ids")).into_iter().filter(|i| e.doc.nodes.contains_key(i)).collect();
+      let ids: Vec<NodeId> = str_list(input.get("ids"))
+        .into_iter()
+        .filter(|i| e.doc.nodes.contains_key(i))
+        .collect();
       if let Some(n) = ids.first().and_then(|i| e.doc.get(i)) {
         e.page = n.page.clone();
       }
@@ -323,10 +351,18 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       let format = input.get("format").and_then(|v| v.as_str()).unwrap_or("react");
       let m = e.measurer();
       if format == "project" {
-        let files: Vec<Value> = codegen::export_project(&e.doc, m).into_iter().map(|f| json!({ "path": f.path, "content": f.content })).collect();
+        let files: Vec<Value> = codegen::export_project(&e.doc, m)
+          .into_iter()
+          .map(|f| json!({ "path": f.path, "content": f.content }))
+          .collect();
         return Ok(json!({ "files": files }));
       }
-      let id = input.get("id").and_then(|v| v.as_str()).map(String::from).or_else(|| e.selection.first().cloned()).ok_or("id required")?;
+      let id = input
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| e.selection.first().cloned())
+        .ok_or("id required")?;
       if e.doc.get(&id).is_none() {
         return Err(format!("no node {id}"));
       }
@@ -358,11 +394,20 @@ fn arrange(e: &mut Engine, input: &Value) -> Result<Value, String> {
     "bring_to_front" => Command::Reorder { ids, to: ReorderTo::Front },
     "send_to_back" => Command::Reorder { ids, to: ReorderTo::Back },
     "align_left" => Command::Align { ids, how: AlignHow::Left },
-    "align_center" => Command::Align { ids, how: AlignHow::HCenter },
+    "align_center" => Command::Align {
+      ids,
+      how: AlignHow::HCenter,
+    },
     "align_right" => Command::Align { ids, how: AlignHow::Right },
     "align_top" => Command::Align { ids, how: AlignHow::Top },
-    "align_middle" => Command::Align { ids, how: AlignHow::VCenter },
-    "align_bottom" => Command::Align { ids, how: AlignHow::Bottom },
+    "align_middle" => Command::Align {
+      ids,
+      how: AlignHow::VCenter,
+    },
+    "align_bottom" => Command::Align {
+      ids,
+      how: AlignHow::Bottom,
+    },
     "distribute_horizontal" => Command::Distribute { ids, horizontal: true },
     "distribute_vertical" => Command::Distribute { ids, horizontal: false },
     other => return Err(format!("unknown arrange action '{other}'")),
@@ -416,7 +461,11 @@ fn outline(e: &Engine, id: &str, depth: usize) -> Value {
       "layout".into(),
       json!(format!(
         "{} gap {} pad {} {} {} {}",
-        if l.direction == LayoutDirection::Horizontal { "row" } else { "column" },
+        if l.direction == LayoutDirection::Horizontal {
+          "row"
+        } else {
+          "column"
+        },
         l.gap,
         l.padding_top,
         l.padding_right,
@@ -430,7 +479,10 @@ fn outline(e: &Engine, id: &str, depth: usize) -> Value {
   }
   if !n.children.is_empty() {
     if depth > 0 {
-      m.insert("children".into(), json!(n.children.iter().map(|c| outline(e, c, depth - 1)).collect::<Vec<_>>()));
+      m.insert(
+        "children".into(),
+        json!(n.children.iter().map(|c| outline(e, c, depth - 1)).collect::<Vec<_>>()),
+      );
     } else {
       m.insert("childCount".into(), json!(n.children.len()));
     }
@@ -450,7 +502,10 @@ pub fn insert_specs(e: &mut Engine, specs: &[Value], parent: Option<&str>) -> Re
       return Err(format!("{p} is a {} and cannot have children", pn.kind.label()));
     }
   }
-  let page = parent.and_then(|p| e.doc.get(p)).map(|n| n.page.clone()).unwrap_or_else(|| e.page.clone());
+  let page = parent
+    .and_then(|p| e.doc.get(p))
+    .map(|n| n.page.clone())
+    .unwrap_or_else(|| e.page.clone());
   let mut roots = Vec::new();
   for spec in specs {
     let id = build(e, spec, parent, &page)?;
@@ -463,9 +518,13 @@ pub fn insert_specs(e: &mut Engine, specs: &[Value], parent: Option<&str>) -> Re
 fn build(e: &mut Engine, spec: &Value, parent: Option<&str>, page: &str) -> Result<NodeId, String> {
   let kind_str = spec.get("type").and_then(|v| v.as_str()).unwrap_or("frame").to_lowercase();
   if kind_str == "instance" {
-    let comp = spec.get("componentId").and_then(|v| v.as_str()).ok_or("instance needs componentId")?;
+    let comp = spec
+      .get("componentId")
+      .and_then(|v| v.as_str())
+      .ok_or("instance needs componentId")?;
     let (x, y) = (num(spec.get("x")).unwrap_or(0.0), num(spec.get("y")).unwrap_or(0.0));
-    let id = crate::components::create_instance(&mut e.doc, comp, parent, page, x, y, &mut e.gen).ok_or("componentId is not a component")?;
+    let id =
+      crate::components::create_instance(&mut e.doc, comp, parent, page, x, y, &mut e.gen).ok_or("componentId is not a component")?;
     let mut n = e.doc.get(&id).cloned().unwrap();
     apply_spec(&mut n, spec, true)?;
     let before = e.doc.get(&id).cloned().unwrap();
@@ -475,7 +534,11 @@ fn build(e: &mut Engine, spec: &Value, parent: Option<&str>, page: &str) -> Resu
     return Ok(id);
   }
   let kind = parse_kind(&kind_str)?;
-  let name = spec.get("name").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| e.doc.next_name(kind.label()));
+  let name = spec
+    .get("name")
+    .and_then(|v| v.as_str())
+    .map(String::from)
+    .unwrap_or_else(|| e.doc.next_name(kind.label()));
   let mut n = ops::default_node(kind, e.gen.next("n_"), name);
   if kind == NodeType::Frame {
     // AI frames start transparent unless a fill is given; screens get white.
@@ -557,7 +620,11 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
   }
   let text_kind = n.kind == NodeType::Text;
   // Text colour goes to fills on text layers.
-  let fill_key = if text_kind && s.get("color").is_some() { s.get("color") } else { s.get("fill").or(s.get("background")) };
+  let fill_key = if text_kind && s.get("color").is_some() {
+    s.get("color")
+  } else {
+    s.get("fill").or(s.get("background"))
+  };
   if let Some(f) = fill_key {
     n.fills = parse_fills(f)?;
   }
@@ -565,7 +632,12 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
     n.fills = parse_fills(f)?;
   }
   if let Some(url) = s.get("imageUrl").or(s.get("src")).and_then(|v| v.as_str()) {
-    n.fills = vec![Paint::Image { src: url.to_string(), scale_mode: ScaleMode::Fill, opacity: 1.0, visible: true }];
+    n.fills = vec![Paint::Image {
+      src: url.to_string(),
+      scale_mode: ScaleMode::Fill,
+      opacity: 1.0,
+      visible: true,
+    }];
   }
   if let Some(st) = s.get("stroke") {
     n.strokes = parse_fills(st)?;
@@ -598,7 +670,8 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
     _ => {}
   }
   if let Some(sh) = s.get("shadow") {
-    n.effects.retain(|e| !matches!(e.kind, EffectType::DropShadow | EffectType::InnerShadow));
+    n.effects
+      .retain(|e| !matches!(e.kind, EffectType::DropShadow | EffectType::InnerShadow));
     let list = match sh {
       Value::Array(a) => a.clone(),
       Value::Null => vec![],
@@ -606,7 +679,11 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
     };
     for e in list {
       n.effects.push(Effect {
-        kind: if e.get("inset").and_then(|v| v.as_bool()).unwrap_or(false) { EffectType::InnerShadow } else { EffectType::DropShadow },
+        kind: if e.get("inset").and_then(|v| v.as_bool()).unwrap_or(false) {
+          EffectType::InnerShadow
+        } else {
+          EffectType::DropShadow
+        },
         color: crate::color::normalize(e.get("color").and_then(|v| v.as_str()).unwrap_or("#00000026")),
         x: num(e.get("x")).unwrap_or(0.0),
         y: num(e.get("y")).unwrap_or(4.0),
@@ -619,22 +696,41 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
   if let Some(b) = num(s.get("blur")) {
     n.effects.retain(|e| e.kind != EffectType::LayerBlur);
     if b > 0.0 {
-      n.effects.push(Effect { kind: EffectType::LayerBlur, blur: b, ..Default::default() });
+      n.effects.push(Effect {
+        kind: EffectType::LayerBlur,
+        blur: b,
+        ..Default::default()
+      });
     }
   }
   if let Some(b) = num(s.get("backgroundBlur")) {
     n.effects.retain(|e| e.kind != EffectType::BackgroundBlur);
     if b > 0.0 {
-      n.effects.push(Effect { kind: EffectType::BackgroundBlur, blur: b, ..Default::default() });
+      n.effects.push(Effect {
+        kind: EffectType::BackgroundBlur,
+        blur: b,
+        ..Default::default()
+      });
     }
   }
   if let Some(l) = s.get("layout") {
     if l.is_null() || l.as_bool() == Some(false) {
       n.layout = None;
     } else {
-      let mut al = n.layout.clone().unwrap_or(AutoLayout { gap: 0.0, padding_top: 0.0, padding_right: 0.0, padding_bottom: 0.0, padding_left: 0.0, ..Default::default() });
+      let mut al = n.layout.clone().unwrap_or(AutoLayout {
+        gap: 0.0,
+        padding_top: 0.0,
+        padding_right: 0.0,
+        padding_bottom: 0.0,
+        padding_left: 0.0,
+        ..Default::default()
+      });
       if let Some(d) = l.get("direction").and_then(|v| v.as_str()) {
-        al.direction = if matches!(d, "horizontal" | "row" | "x") { LayoutDirection::Horizontal } else { LayoutDirection::Vertical };
+        al.direction = if matches!(d, "horizontal" | "row" | "x") {
+          LayoutDirection::Horizontal
+        } else {
+          LayoutDirection::Vertical
+        };
       }
       if let Some(g) = num(l.get("gap")) {
         al.gap = g;
@@ -739,8 +835,20 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
     }
   }
   if let Some(d) = s.get("svgPath").and_then(|v| v.as_str()) {
-    let vb = s.get("viewBox").and_then(|v| v.as_array()).map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect::<Vec<_>>()).filter(|a| a.len() == 4).unwrap_or(vec![0.0, 0.0, 24.0, 24.0]);
-    n.vector = Some(VectorData { subpaths: vec![], raw: Some(RawPath { d: d.to_string(), view_box: [vb[0], vb[1], vb[2], vb[3]], fill_rule: String::new() }) });
+    let vb = s
+      .get("viewBox")
+      .and_then(|v| v.as_array())
+      .map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect::<Vec<_>>())
+      .filter(|a| a.len() == 4)
+      .unwrap_or(vec![0.0, 0.0, 24.0, 24.0]);
+    n.vector = Some(VectorData {
+      subpaths: vec![],
+      raw: Some(RawPath {
+        d: d.to_string(),
+        view_box: [vb[0], vb[1], vb[2], vb[3]],
+        fill_rule: String::new(),
+      }),
+    });
     if creating {
       if s.get("width").is_none() {
         n.width = 24.0;
@@ -764,13 +872,19 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
       .map(|p| VectorPoint::at(p[0].as_f64().unwrap_or(0.0), p[1].as_f64().unwrap_or(0.0)))
       .collect();
     let closed = s.get("closed").and_then(|v| v.as_bool()).unwrap_or(false);
-    if let Some((x0, y0, x1, y1)) = crate::shapes::subpaths_bounds(&[SubPath { points: points.clone(), closed }]) {
+    if let Some((x0, y0, x1, y1)) = crate::shapes::subpaths_bounds(&[SubPath {
+      points: points.clone(),
+      closed,
+    }]) {
       if creating && s.get("width").is_none() {
         n.width = (x1 - x0).max(1.0);
         n.height = (y1 - y0).max(1.0);
       }
       let pts = points.into_iter().map(|p| VectorPoint::at(p.x - x0, p.y - y0)).collect();
-      n.vector = Some(VectorData { subpaths: vec![SubPath { points: pts, closed }], raw: None });
+      n.vector = Some(VectorData {
+        subpaths: vec![SubPath { points: pts, closed }],
+        raw: None,
+      });
     }
   }
   if let Some(v) = num(s.get("pointCount")) {
@@ -844,7 +958,9 @@ pub fn parse_fills(v: &Value) -> Result<Vec<Paint>, String> {
       }
       Ok(out)
     }
-    Value::Object(_) => serde_json::from_value::<Paint>(v.clone()).map(|p| vec![p]).map_err(|e| format!("invalid paint: {e}")),
+    Value::Object(_) => serde_json::from_value::<Paint>(v.clone())
+      .map(|p| vec![p])
+      .map_err(|e| format!("invalid paint: {e}")),
     _ => Err("invalid fill".into()),
   }
 }
@@ -878,15 +994,31 @@ fn parse_fill_str(s: &str) -> Result<Option<Paint>, String> {
         stops_src = &parts[1..];
       }
     }
-    return Ok(Some(Paint::LinearGradient { stops: parse_stops(stops_src), angle, opacity: 1.0, visible: true }));
+    return Ok(Some(Paint::LinearGradient {
+      stops: parse_stops(stops_src),
+      angle,
+      opacity: 1.0,
+      visible: true,
+    }));
   }
   if let Some(inner) = t.strip_prefix("radial-gradient(").and_then(|r| r.strip_suffix(')')) {
     let parts = split_top_level(inner);
-    let stops_src: Vec<String> = parts.into_iter().filter(|p| crate::color::parse(p.split_whitespace().next().unwrap_or("")).is_some()).collect();
-    return Ok(Some(Paint::RadialGradient { stops: parse_stops(&stops_src), opacity: 1.0, visible: true }));
+    let stops_src: Vec<String> = parts
+      .into_iter()
+      .filter(|p| crate::color::parse(p.split_whitespace().next().unwrap_or("")).is_some())
+      .collect();
+    return Ok(Some(Paint::RadialGradient {
+      stops: parse_stops(&stops_src),
+      opacity: 1.0,
+      visible: true,
+    }));
   }
   let c = crate::color::parse(t).ok_or_else(|| format!("unrecognised colour '{t}'"))?;
-  Ok(Some(Paint::Solid { color: c.hex6(), opacity: c.a, visible: true }))
+  Ok(Some(Paint::Solid {
+    color: c.hex6(),
+    opacity: c.a,
+    visible: true,
+  }))
 }
 
 fn split_top_level(s: &str) -> Vec<String> {
@@ -921,10 +1053,16 @@ fn parse_stops(parts: &[String]) -> Vec<GradientStop> {
     .map(|(i, p)| {
       // Colour may contain spaces (rgba(...)); the position is the trailing token.
       let (color, pos) = match p.rsplit_once(' ') {
-        Some((c, pos)) if pos.ends_with('%') => (c.trim().to_string(), pos.trim_end_matches('%').parse::<f64>().ok().map(|v| v / 100.0)),
+        Some((c, pos)) if pos.ends_with('%') => (
+          c.trim().to_string(),
+          pos.trim_end_matches('%').parse::<f64>().ok().map(|v| v / 100.0),
+        ),
         _ => (p.trim().to_string(), None),
       };
-      GradientStop { color: crate::color::normalize(&color), position: pos.unwrap_or(if n == 1 { 0.0 } else { i as f64 / (n - 1) as f64 }) }
+      GradientStop {
+        color: crate::color::normalize(&color),
+        position: pos.unwrap_or(if n == 1 { 0.0 } else { i as f64 / (n - 1) as f64 }),
+      }
     })
     .collect()
 }
@@ -985,7 +1123,12 @@ mod tests {
         { "type": "vector", "svgPath": "M12 2L2 22h20L12 2z" }
       ]
     }]});
-    let r = e.dispatch(Command::Ai { tool: "create_nodes".into(), input }).unwrap();
+    let r = e
+      .dispatch(Command::Ai {
+        tool: "create_nodes".into(),
+        input,
+      })
+      .unwrap();
     let root = r["created"][0]["id"].as_str().unwrap().to_string();
     let f = e.doc.get(&root).unwrap();
     assert_eq!(f.children.len(), 3);
@@ -1002,12 +1145,31 @@ mod tests {
   #[test]
   fn update_records_and_errors() {
     let mut e = engine();
-    let r = e.dispatch(Command::Ai { tool: "create_nodes".into(), input: json!({ "nodes": [{ "type": "rectangle", "width": 10, "height": 10 }] }) }).unwrap();
+    let r = e
+      .dispatch(Command::Ai {
+        tool: "create_nodes".into(),
+        input: json!({ "nodes": [{ "type": "rectangle", "width": 10, "height": 10 }] }),
+      })
+      .unwrap();
     let id = r["created"][0]["id"].as_str().unwrap().to_string();
-    e.dispatch(Command::Ai { tool: "update_nodes".into(), input: json!({ "updates": [{ "id": id, "fill": "#FF0000", "cornerRadius": 4 }] }) }).unwrap();
+    e.dispatch(Command::Ai {
+      tool: "update_nodes".into(),
+      input: json!({ "updates": [{ "id": id, "fill": "#FF0000", "cornerRadius": 4 }] }),
+    })
+    .unwrap();
     assert_eq!(e.doc.get(&id).unwrap().corner_radius, 4.0);
-    assert!(e.dispatch(Command::Ai { tool: "create_nodes".into(), input: json!({ "nodes": [{ "type": "blob" }] }) }).is_err());
-    assert!(e.dispatch(Command::Ai { tool: "get_screenshot".into(), input: json!({}) }).is_err());
+    assert!(e
+      .dispatch(Command::Ai {
+        tool: "create_nodes".into(),
+        input: json!({ "nodes": [{ "type": "blob" }] })
+      })
+      .is_err());
+    assert!(e
+      .dispatch(Command::Ai {
+        tool: "get_screenshot".into(),
+        input: json!({})
+      })
+      .is_err());
   }
 
   #[test]

@@ -101,7 +101,10 @@ pub fn subpath_d(sp: &SubPath) -> String {
 
 /// Path data for a vector node's own subpaths (raw paths are handled by the renderer).
 pub fn vector_d(n: &Node) -> String {
-  n.vector.as_ref().map(|v| v.subpaths.iter().map(subpath_d).collect::<Vec<_>>().join(" ")).unwrap_or_default()
+  n.vector
+    .as_ref()
+    .map(|v| v.subpaths.iter().map(subpath_d).collect::<Vec<_>>().join(" "))
+    .unwrap_or_default()
 }
 
 /// Flattens subpaths to polylines (cubic segments sampled) for hit-testing.
@@ -164,7 +167,13 @@ mod tests {
   #[test]
   fn subpath_curves() {
     let sp = SubPath {
-      points: vec![VectorPoint { out_x: 10.0, ..VectorPoint::at(0.0, 0.0) }, VectorPoint::at(20.0, 20.0)],
+      points: vec![
+        VectorPoint {
+          out_x: 10.0,
+          ..VectorPoint::at(0.0, 0.0)
+        },
+        VectorPoint::at(20.0, 20.0),
+      ],
       closed: false,
     };
     assert_eq!(subpath_d(&sp), "M0 0C10 0 20 20 20 20");

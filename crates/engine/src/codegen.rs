@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::color;
 use crate::geom::fmt;
 use crate::model::{
-  Action, Align, Document, EffectType, LayoutDirection, Node, NodeType, Paint, ScaleMode, Sizing, StrokeAlign, TextAlignH,
-  TextAutoResize, TextCase, TextDecoration,
+  Action, Align, Document, EffectType, LayoutDirection, Node, NodeType, Paint, ScaleMode, Sizing, StrokeAlign, TextAlignH, TextAutoResize,
+  TextCase, TextDecoration,
 };
 use crate::render::{esc, export_svg, font_stack};
 use crate::text::TextMeasurer;
@@ -43,7 +43,18 @@ struct El {
 
 impl El {
   fn new(tag: &'static str) -> Self {
-    El { tag, styles: vec![], children: vec![], text: None, raw: None, component_ref: None, comment: None, navigate: None, url: None, is_component_root: false }
+    El {
+      tag,
+      styles: vec![],
+      children: vec![],
+      text: None,
+      raw: None,
+      component_ref: None,
+      comment: None,
+      navigate: None,
+      url: None,
+      is_component_root: false,
+    }
   }
 
   fn s(&mut self, k: &str, v: impl Into<String>) {
@@ -65,7 +76,15 @@ struct Ctx<'a> {
 
 impl<'a> Ctx<'a> {
   fn new(doc: &'a Document, m: &'a dyn TextMeasurer, reuse_components: bool) -> Self {
-    let mut c = Ctx { doc, m, components: BTreeMap::new(), screen_names: BTreeMap::new(), screen_order: Vec::new(), used_names: BTreeSet::new(), reuse_components };
+    let mut c = Ctx {
+      doc,
+      m,
+      components: BTreeMap::new(),
+      screen_names: BTreeMap::new(),
+      screen_order: Vec::new(),
+      used_names: BTreeSet::new(),
+      reuse_components,
+    };
     for p in &doc.pages {
       for id in &p.children {
         if let Some(n) = doc.get(id) {
@@ -95,7 +114,11 @@ impl<'a> Ctx<'a> {
     if let Some(n) = self.components.get(comp_id) {
       return n.clone();
     }
-    let base = self.doc.get(comp_id).map(|n| pascal(&n.name, "Component")).unwrap_or_else(|| "Component".into());
+    let base = self
+      .doc
+      .get(comp_id)
+      .map(|n| pascal(&n.name, "Component"))
+      .unwrap_or_else(|| "Component".into());
     let name = self.unique(&base);
     self.components.insert(comp_id.to_string(), name.clone());
     name
@@ -143,8 +166,18 @@ impl<'a> Ctx<'a> {
         el.s("row-gap", px(al.counter_gap));
       }
       if al.primary_align != Align::SpaceBetween && al.gap != 0.0 {
-        el.s("column-gap", px(if al.direction == LayoutDirection::Horizontal { al.gap } else { 0.0 }));
-        el.s("row-gap", px(if al.direction == LayoutDirection::Vertical { al.gap } else { al.counter_gap }));
+        el.s(
+          "column-gap",
+          px(if al.direction == LayoutDirection::Horizontal { al.gap } else { 0.0 }),
+        );
+        el.s(
+          "row-gap",
+          px(if al.direction == LayoutDirection::Vertical {
+            al.gap
+          } else {
+            al.counter_gap
+          }),
+        );
         el.styles.retain(|(k, v)| !(k.ends_with("-gap") && v == "0px"));
       }
       let pad = [al.padding_top, al.padding_right, al.padding_bottom, al.padding_left];
@@ -169,7 +202,9 @@ impl<'a> Ctx<'a> {
     }
     if n.kind.is_container() {
       let child_place = |c: &Node| match n.layout.as_ref() {
-        Some(al) if !c.absolute_position => Place::Flow { horizontal: al.direction == LayoutDirection::Horizontal },
+        Some(al) if !c.absolute_position => Place::Flow {
+          horizontal: al.direction == LayoutDirection::Horizontal,
+        },
         _ => Place::Absolute,
       };
       for cid in &n.children {
@@ -223,8 +258,16 @@ impl<'a> Ctx<'a> {
     }
     let (fill_w, fill_h) = match place {
       Place::Flow { horizontal } => {
-        let main_fill = if horizontal { n.sizing_h == Sizing::Fill } else { n.sizing_v == Sizing::Fill };
-        let cross_fill = if horizontal { n.sizing_v == Sizing::Fill } else { n.sizing_h == Sizing::Fill };
+        let main_fill = if horizontal {
+          n.sizing_h == Sizing::Fill
+        } else {
+          n.sizing_v == Sizing::Fill
+        };
+        let cross_fill = if horizontal {
+          n.sizing_v == Sizing::Fill
+        } else {
+          n.sizing_h == Sizing::Fill
+        };
         if main_fill {
           el.s("flex", "1 1 0");
           el.s(if horizontal { "min-width" } else { "min-height" }, "0");
@@ -234,7 +277,10 @@ impl<'a> Ctx<'a> {
         if cross_fill {
           el.s("align-self", "stretch");
         }
-        (if horizontal { main_fill } else { cross_fill }, if horizontal { cross_fill } else { main_fill })
+        (
+          if horizontal { main_fill } else { cross_fill },
+          if horizontal { cross_fill } else { main_fill },
+        )
       }
       _ => (false, false),
     };
@@ -267,7 +313,10 @@ impl<'a> Ctx<'a> {
     }
     if n.kind == NodeType::Line {
       if let Some(Paint::Solid { color, opacity, .. }) = n.strokes.iter().find(|p| p.visible()) {
-        el.s("border-top", format!("{} solid {}", px(n.stroke_weight), color::css_with_opacity(color, *opacity)));
+        el.s(
+          "border-top",
+          format!("{} solid {}", px(n.stroke_weight), color::css_with_opacity(color, *opacity)),
+        );
       }
       return;
     }
@@ -276,7 +325,16 @@ impl<'a> Ctx<'a> {
       if bgs.len() == 1 && !bgs[0].contains('(') {
         el.s("background-color", bgs[0].clone());
       } else if !bgs.is_empty() {
-        let layers: Vec<String> = bgs.iter().map(|b| if b.contains('(') { b.clone() } else { format!("linear-gradient({b}, {b})") }).collect();
+        let layers: Vec<String> = bgs
+          .iter()
+          .map(|b| {
+            if b.contains('(') {
+              b.clone()
+            } else {
+              format!("linear-gradient({b}, {b})")
+            }
+          })
+          .collect();
         el.s("background", layers.join(", "));
       }
       if let Some(Paint::Image { scale_mode, .. }) = n.fills.iter().find(|p| matches!(p, Paint::Image { .. }) && p.visible()) {
@@ -397,7 +455,14 @@ impl<'a> Ctx<'a> {
       TextCase::Lower => el.s("text-transform", "lowercase"),
       TextCase::Title => el.s("text-transform", "capitalize"),
     }
-    el.s("white-space", if t.auto_resize == TextAutoResize::Width { "pre" } else { "pre-wrap" });
+    el.s(
+      "white-space",
+      if t.auto_resize == TextAutoResize::Width {
+        "pre"
+      } else {
+        "pre-wrap"
+      },
+    );
     el
   }
 }
@@ -412,7 +477,11 @@ fn css_paint(p: &Paint) -> String {
 }
 
 fn css_stops(stops: &[crate::model::GradientStop], opacity: f64) -> String {
-  stops.iter().map(|s| format!("{} {}%", color::css_with_opacity(&s.color, opacity), fmt(s.position * 100.0))).collect::<Vec<_>>().join(", ")
+  stops
+    .iter()
+    .map(|s| format!("{} {}%", color::css_with_opacity(&s.color, opacity), fmt(s.position * 100.0)))
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 fn px(v: f64) -> String {
@@ -548,24 +617,37 @@ fn jsx(el: &El, depth: usize, out: &mut String) {
     class_attr = format!("\"{class_attr}\"");
   }
   let handler = if let Some(screen) = &el.navigate {
-    format!(" onClick={{() => onNavigate?.({})}}", serde_json::to_string(screen).unwrap_or_default())
+    format!(
+      " onClick={{() => onNavigate?.({})}}",
+      serde_json::to_string(screen).unwrap_or_default()
+    )
   } else if let Some(url) = &el.url {
-    format!(" onClick={{() => window.open({}, \"_blank\")}}", serde_json::to_string(url).unwrap_or_default())
+    format!(
+      " onClick={{() => window.open({}, \"_blank\")}}",
+      serde_json::to_string(url).unwrap_or_default()
+    )
   } else if el.is_component_root {
     " onClick={onClick}".to_string()
   } else {
     String::new()
   };
   if let Some(name) = &el.component_ref {
-    out.push_str(&format!("{pad}<{name} className={}{handler} />\n", if class_attr.starts_with('{') { class_attr.clone() } else { class_attr.clone() }));
+    out.push_str(&format!("{pad}<{name} className={class_attr}{handler} />\n"));
     return;
   }
   if let Some(svg) = &el.raw {
-    out.push_str(&format!("{pad}<div className={class_attr}{handler} dangerouslySetInnerHTML={{{{ __html: {} }}}} />\n", serde_json::to_string(svg).unwrap_or_default()));
+    out.push_str(&format!(
+      "{pad}<div className={class_attr}{handler} dangerouslySetInnerHTML={{{{ __html: {} }}}} />\n",
+      serde_json::to_string(svg).unwrap_or_default()
+    ));
     return;
   }
   if let Some(t) = &el.text {
-    out.push_str(&format!("{pad}<{tag} className={class_attr}{handler}>{{{}}}</{tag}>\n", serde_json::to_string(t).unwrap_or_default(), tag = el.tag));
+    out.push_str(&format!(
+      "{pad}<{tag} className={class_attr}{handler}>{{{}}}</{tag}>\n",
+      serde_json::to_string(t).unwrap_or_default(),
+      tag = el.tag
+    ));
     return;
   }
   if el.children.is_empty() {
@@ -583,7 +665,11 @@ fn html(el: &El, depth: usize, out: &mut String) {
   let pad = "  ".repeat(depth);
   let style: String = el.styles.iter().map(|(k, v)| format!("{k}: {v}; ")).collect();
   let style = esc(style.trim_end());
-  let link = el.navigate.as_ref().map(|s| format!(" data-navigate=\"{}\"", esc(s))).unwrap_or_default();
+  let link = el
+    .navigate
+    .as_ref()
+    .map(|s| format!(" data-navigate=\"{}\"", esc(s)))
+    .unwrap_or_default();
   if let Some(svg) = &el.raw {
     out.push_str(&format!("{pad}<div style=\"{style}\"{link}>{svg}</div>\n"));
   } else if let Some(t) = &el.text {
@@ -598,18 +684,28 @@ fn html(el: &El, depth: usize, out: &mut String) {
 }
 
 fn google_fonts_link(doc: &Document) -> String {
-  let fams: BTreeSet<String> = doc.nodes.values().filter_map(|n| n.text.as_ref()).map(|t| t.font_family.clone()).collect();
+  let fams: BTreeSet<String> = doc
+    .nodes
+    .values()
+    .filter_map(|n| n.text.as_ref())
+    .map(|t| t.font_family.clone())
+    .collect();
   if fams.is_empty() {
     return String::new();
   }
-  let q: Vec<String> = fams.iter().map(|f| format!("family={}:wght@300;400;500;600;700;800", f.replace(' ', "+"))).collect();
+  let q: Vec<String> = fams
+    .iter()
+    .map(|f| format!("family={}:wght@300;400;500;600;700;800", f.replace(' ', "+")))
+    .collect();
   format!("https://fonts.googleapis.com/css2?{}&display=swap", q.join("&"))
 }
 
 /// Standalone HTML document for a node.
 pub fn export_html(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
   let mut ctx = Ctx::new(doc, m, false);
-  let Some(el) = ctx.build(id, Place::Root) else { return String::new() };
+  let Some(el) = ctx.build(id, Place::Root) else {
+    return String::new();
+  };
   let mut body = String::new();
   html(&el, 2, &mut body);
   let fonts = google_fonts_link(doc);
@@ -626,7 +722,9 @@ pub fn export_html(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
 pub fn export_react(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
   let mut ctx = Ctx::new(doc, m, true);
   let name = doc.get(id).map(|n| pascal(&n.name, "Design")).unwrap_or_else(|| "Design".into());
-  let Some(el) = ctx.build(id, Place::Root) else { return String::new() };
+  let Some(el) = ctx.build(id, Place::Root) else {
+    return String::new();
+  };
   let mut out = String::from("// Generated by Designotron. Requires Tailwind CSS.\n\n");
   out.push_str(&component_fns(&mut ctx));
   out.push_str(&screen_fn(&name, &el, true));
@@ -647,7 +745,12 @@ fn component_fns(ctx: &mut Ctx) -> String {
   let mut out = String::new();
   let mut done: BTreeSet<String> = BTreeSet::new();
   loop {
-    let pending: Vec<(String, String)> = ctx.components.iter().filter(|(id, _)| !done.contains(*id)).map(|(a, b)| (a.clone(), b.clone())).collect();
+    let pending: Vec<(String, String)> = ctx
+      .components
+      .iter()
+      .filter(|(id, _)| !done.contains(*id))
+      .map(|(a, b)| (a.clone(), b.clone()))
+      .collect();
     if pending.is_empty() {
       break;
     }
@@ -692,12 +795,27 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
     let import = if used.is_empty() {
       String::new()
     } else {
-      format!("import {{ {} }} from \"../components\";\n\n", used.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+      format!(
+        "import {{ {} }} from \"../components\";\n\n",
+        used.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+      )
     };
-    files.push(ProjectFile { path: format!("src/screens/{name}.tsx"), content: format!("{import}{src}") });
+    files.push(ProjectFile {
+      path: format!("src/screens/{name}.tsx"),
+      content: format!("{import}{src}"),
+    });
   }
-  let start = doc.pages.iter().find_map(|p| p.flow_start.clone()).and_then(|s| ctx.screen_names.get(&s).cloned()).or_else(|| screens.first().map(|s| s.1.clone())).unwrap_or_else(|| "Home".into());
-  let imports: String = screens.iter().map(|(_, n)| format!("import {n} from \"./screens/{n}\";\n")).collect();
+  let start = doc
+    .pages
+    .iter()
+    .find_map(|p| p.flow_start.clone())
+    .and_then(|s| ctx.screen_names.get(&s).cloned())
+    .or_else(|| screens.first().map(|s| s.1.clone()))
+    .unwrap_or_else(|| "Home".into());
+  let imports: String = screens
+    .iter()
+    .map(|(_, n)| format!("import {n} from \"./screens/{n}\";\n"))
+    .collect();
   let map: String = screens.iter().map(|(_, n)| format!("  {n},\n")).collect();
   files.push(ProjectFile {
     path: "src/App.tsx".into(),
@@ -708,7 +826,14 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   let fonts = google_fonts_link(doc);
   files.push(ProjectFile {
     path: "src/index.css".into(),
-    content: format!("{}@tailwind base;\n@tailwind components;\n@tailwind utilities;\n", if fonts.is_empty() { String::new() } else { format!("@import url(\"{fonts}\");\n") }),
+    content: format!(
+      "{}@tailwind base;\n@tailwind components;\n@tailwind utilities;\n",
+      if fonts.is_empty() {
+        String::new()
+      } else {
+        format!("@import url(\"{fonts}\");\n")
+      }
+    ),
   });
   files.push(ProjectFile {
     path: "src/main.tsx".into(),
@@ -750,9 +875,14 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   });
   files.push(ProjectFile {
     path: "README.md".into(),
-    content: format!("# {title}\n\nGenerated with [Designotron](https://github.com/mikemich/designotron).\n\n```bash\nnpm install\nnpm run dev\n```\n"),
+    content: format!(
+      "# {title}\n\nGenerated with [Designotron](https://github.com/mikemich/designotron).\n\n```bash\nnpm install\nnpm run dev\n```\n"
+    ),
   });
-  files.push(ProjectFile { path: "design.dtron.json".into(), content: serde_json::to_string_pretty(doc).unwrap_or_default() });
+  files.push(ProjectFile {
+    path: "design.dtron.json".into(),
+    content: serde_json::to_string_pretty(doc).unwrap_or_default(),
+  });
   files
 }
 
@@ -770,7 +900,10 @@ mod tests {
     let mut home = crate::ops::default_node(NodeType::Frame, "home".into(), "Home".into());
     home.width = 390.0;
     home.height = 844.0;
-    home.layout = Some(AutoLayout { gap: 12.0, ..Default::default() });
+    home.layout = Some(AutoLayout {
+      gap: 12.0,
+      ..Default::default()
+    });
     doc.insert(home, None, &page, None);
     let mut detail = crate::ops::default_node(NodeType::Frame, "detail".into(), "Product detail".into());
     detail.x = 500.0;
@@ -779,7 +912,10 @@ mod tests {
     btn.fills = vec![Paint::solid("#7C5CFF")];
     btn.corner_radius = 12.0;
     btn.sizing_h = Sizing::Fill;
-    btn.interactions.push(Interaction { destination: Some("detail".into()), ..Default::default() });
+    btn.interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
     doc.insert(btn, Some("home"), &page, None);
     let mut t = crate::ops::default_node(NodeType::Text, "t".into(), "Title".into());
     t.text.as_mut().unwrap().characters = "Hello \"world\"".into();

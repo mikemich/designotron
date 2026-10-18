@@ -141,7 +141,10 @@ impl Document {
 
   /// Nearest instance ancestor (or the node itself if it is an instance child root).
   pub fn instance_ancestor(&self, id: &str) -> Option<NodeId> {
-    self.ancestors(id).into_iter().find(|a| self.get(a).map(|n| n.kind == NodeType::Instance).unwrap_or(false))
+    self
+      .ancestors(id)
+      .into_iter()
+      .find(|a| self.get(a).map(|n| n.kind == NodeType::Instance).unwrap_or(false))
   }
 
   pub fn local_matrix(&self, n: &Node) -> Mat {
@@ -323,7 +326,10 @@ mod tests {
   use super::*;
 
   fn rect(id: &str) -> Node {
-    Node { id: id.into(), ..Default::default() }
+    Node {
+      id: id.into(),
+      ..Default::default()
+    }
   }
 
   #[test]
@@ -331,7 +337,13 @@ mod tests {
     let mut ids = IdGen::new(7);
     let mut doc = new_document(&mut ids, "t");
     let page = doc.pages[0].id.clone();
-    let mut frame = Node { id: "f".into(), kind: NodeType::Frame, x: 100.0, y: 50.0, ..Default::default() };
+    let mut frame = Node {
+      id: "f".into(),
+      kind: NodeType::Frame,
+      x: 100.0,
+      y: 50.0,
+      ..Default::default()
+    };
     frame.width = 400.0;
     frame.height = 400.0;
     doc.insert(frame, None, &page, None);
@@ -352,8 +364,26 @@ mod tests {
     let mut ids = IdGen::new(7);
     let mut doc = new_document(&mut ids, "t");
     let page = doc.pages[0].id.clone();
-    doc.insert(Node { id: "a".into(), kind: NodeType::Frame, ..Default::default() }, None, &page, None);
-    doc.insert(Node { id: "b".into(), kind: NodeType::Frame, ..Default::default() }, Some("a"), &page, None);
+    doc.insert(
+      Node {
+        id: "a".into(),
+        kind: NodeType::Frame,
+        ..Default::default()
+      },
+      None,
+      &page,
+      None,
+    );
+    doc.insert(
+      Node {
+        id: "b".into(),
+        kind: NodeType::Frame,
+        ..Default::default()
+      },
+      Some("a"),
+      &page,
+      None,
+    );
     doc.reparent("a", Some("b"), None, true);
     assert_eq!(doc.get("a").unwrap().parent, None);
   }

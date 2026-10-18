@@ -30,7 +30,9 @@ pub struct WasmEngine {
 impl WasmEngine {
   #[wasm_bindgen(constructor)]
   pub fn new(seed: f64) -> WasmEngine {
-    WasmEngine { inner: Engine::new(Box::new(CanvasMeasurer), seed as u64) }
+    WasmEngine {
+      inner: Engine::new(Box::new(CanvasMeasurer), seed as u64),
+    }
   }
 
   pub fn load(&mut self, json: &str) -> Result<(), JsValue> {

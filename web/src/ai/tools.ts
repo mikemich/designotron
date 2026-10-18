@@ -52,3 +52,6 @@ export async function executeTool(name: string, input: any): Promise<ToolOutcome
     return { ok: false, result: String(err instanceof Error ? err.message : err) };
   }
 }
+
+// Expose tool execution on the automation handle (see store.ts).
+(globalThis as any).__dt = { ...(globalThis as any).__dt, tool: (name: string, input: unknown) => executeTool(name, input) };

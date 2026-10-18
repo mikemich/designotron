@@ -53,7 +53,11 @@ fn hit_list(doc: &Document, ids: &[NodeId], p: Point, tol: f64) -> Option<NodeId
 }
 
 fn shape_contains(n: &Node, p: Point, tol: f64) -> bool {
-  let half_stroke = if n.strokes.iter().any(|s| s.visible()) { n.stroke_weight / 2.0 } else { 0.0 };
+  let half_stroke = if n.strokes.iter().any(|s| s.visible()) {
+    n.stroke_weight / 2.0
+  } else {
+    0.0
+  };
   let t = tol.max(half_stroke);
   match n.kind {
     NodeType::Ellipse => {
@@ -186,7 +190,9 @@ fn snap_targets(doc: &Document, page: &str, moving: &[NodeId]) -> Vec<Rect> {
 
 /// Snaps a page-space move delta of `ids` to nearby edges and centres.
 pub fn snap_move(doc: &Document, page: &str, ids: &[NodeId], dx: f64, dy: f64, zoom: f64) -> Snap {
-  let Some(start) = doc.bounds_of_many(ids) else { return Snap { dx, dy, guides: vec![] } };
+  let Some(start) = doc.bounds_of_many(ids) else {
+    return Snap { dx, dy, guides: vec![] };
+  };
   let moved = Rect::new(start.x + dx, start.y + dy, start.width, start.height);
   let targets = snap_targets(doc, page, ids);
   let thr = 6.0 / zoom.max(0.01);
@@ -263,7 +269,10 @@ fn best_snap(r: &Rect, targets: &[Rect], thr: f64, edges: [bool; 4]) -> (Option<
     }
     best
   };
-  (pick(&xs, &|t: &Rect| [t.x, t.center().x, t.right()]), pick(&ys, &|t: &Rect| [t.y, t.center().y, t.bottom()]))
+  (
+    pick(&xs, &|t: &Rect| [t.x, t.center().x, t.right()]),
+    pick(&ys, &|t: &Rect| [t.y, t.center().y, t.bottom()]),
+  )
 }
 
 fn guides_for(r: &Rect, targets: &[Rect], gx: bool, gy: bool) -> Vec<Guide> {
@@ -273,7 +282,12 @@ fn guides_for(r: &Rect, targets: &[Rect], gx: bool, gy: bool) -> Vec<Guide> {
     for v in [r.x, r.center().x, r.right()] {
       for t in targets {
         if [t.x, t.center().x, t.right()].iter().any(|tv| near(*tv, v)) {
-          out.push(Guide { x1: v, y1: r.y.min(t.y), x2: v, y2: r.bottom().max(t.bottom()) });
+          out.push(Guide {
+            x1: v,
+            y1: r.y.min(t.y),
+            x2: v,
+            y2: r.bottom().max(t.bottom()),
+          });
         }
       }
     }
@@ -282,7 +296,12 @@ fn guides_for(r: &Rect, targets: &[Rect], gx: bool, gy: bool) -> Vec<Guide> {
     for v in [r.y, r.center().y, r.bottom()] {
       for t in targets {
         if [t.y, t.center().y, t.bottom()].iter().any(|tv| near(*tv, v)) {
-          out.push(Guide { x1: r.x.min(t.x), y1: v, x2: r.right().max(t.right()), y2: v });
+          out.push(Guide {
+            x1: r.x.min(t.x),
+            y1: v,
+            x2: r.right().max(t.right()),
+            y2: v,
+          });
         }
       }
     }
@@ -346,10 +365,18 @@ pub fn resize_node(doc: &mut Document, start: &Node, handle: Handle, delta: Poin
       w = h * ratio;
     }
   }
-  let w = w.abs().max(if start.kind == NodeType::Line { 1.0 } else { 1.0 });
+  let w = w.abs().max(1.0);
   let h = if start.kind == NodeType::Line { 0.0 } else { h.abs().max(1.0) };
 
-  let anchor_of = |f: f64, size: f64| if from_center || f == 0.0 { size / 2.0 } else if f > 0.0 { 0.0 } else { size };
+  let anchor_of = |f: f64, size: f64| {
+    if from_center || f == 0.0 {
+      size / 2.0
+    } else if f > 0.0 {
+      0.0
+    } else {
+      size
+    }
+  };
   let a0 = Point::new(anchor_of(fx, w0), anchor_of(fy, h0));
   let a1 = Point::new(anchor_of(fx, w), anchor_of(fy, h));
   let m0 = local_matrix(start.x, start.y, w0, h0, start.rotation, start.flip_x, start.flip_y);
@@ -363,9 +390,13 @@ pub fn resize_node(doc: &mut Document, start: &Node, handle: Handle, delta: Poin
 }
 
 /// Applies a new box to a node, scaling content where the node type requires it.
+#[allow(clippy::too_many_arguments)]
 pub fn set_geometry(doc: &mut Document, start: &Node, x: f64, y: f64, w: f64, h: f64, changed_w: bool, changed_h: bool) {
   let id = start.id.clone();
-  let (sx, sy) = (if start.width > 0.0 { w / start.width } else { 1.0 }, if start.height > 0.0 { h / start.height } else { 1.0 });
+  let (sx, sy) = (
+    if start.width > 0.0 { w / start.width } else { 1.0 },
+    if start.height > 0.0 { h / start.height } else { 1.0 },
+  );
   if let Some(n) = doc.get_mut(&id) {
     n.x = x;
     n.y = y;
@@ -409,7 +440,16 @@ fn scale_children(doc: &mut Document, id: &str, sx: f64, sy: f64) {
   let children = doc.get(id).map(|n| n.children.clone()).unwrap_or_default();
   for c in children {
     let Some(start) = doc.get(&c).cloned() else { continue };
-    set_geometry(doc, &start, start.x * sx, start.y * sy, (start.width * sx).max(0.5), (start.height * sy).max(if start.kind == NodeType::Line { 0.0 } else { 0.5 }), true, true);
+    set_geometry(
+      doc,
+      &start,
+      start.x * sx,
+      start.y * sy,
+      (start.width * sx).max(0.5),
+      (start.height * sy).max(if start.kind == NodeType::Line { 0.0 } else { 0.5 }),
+      true,
+      true,
+    );
   }
 }
 
@@ -432,7 +472,13 @@ pub fn resize_many(doc: &mut Document, starts: &[Node], from: Rect, to: Rect) {
 }
 
 /// Pen/pencil tool output (page-space points) to a vector node in `parent`.
-pub fn vector_from_points(doc: &Document, gen: &mut IdGen, parent: Option<&str>, points: &[crate::model::VectorPoint], closed: bool) -> Option<Node> {
+pub fn vector_from_points(
+  doc: &Document,
+  gen: &mut IdGen,
+  parent: Option<&str>,
+  points: &[crate::model::VectorPoint],
+  closed: bool,
+) -> Option<Node> {
   if points.len() < 2 {
     return None;
   }
@@ -446,7 +492,14 @@ pub fn vector_from_points(doc: &Document, gen: &mut IdGen, parent: Option<&str>,
       let a = pm_inv.apply(Point::new(p.x, p.y));
       let i = pm_inv.apply_vec(Point::new(p.in_x, p.in_y));
       let o = pm_inv.apply_vec(Point::new(p.out_x, p.out_y));
-      crate::model::VectorPoint { x: a.x, y: a.y, in_x: i.x, in_y: i.y, out_x: o.x, out_y: o.y }
+      crate::model::VectorPoint {
+        x: a.x,
+        y: a.y,
+        in_x: i.x,
+        in_y: i.y,
+        out_x: o.x,
+        out_y: o.y,
+      }
     })
     .collect();
   let sp = crate::model::SubPath { points: local, closed };
@@ -464,7 +517,10 @@ pub fn vector_from_points(doc: &Document, gen: &mut IdGen, parent: Option<&str>,
   if closed {
     n.fills = vec![crate::model::Paint::solid("#D9D9D9")];
   }
-  n.vector = Some(crate::model::VectorData { subpaths: vec![sp], raw: None });
+  n.vector = Some(crate::model::VectorData {
+    subpaths: vec![sp],
+    raw: None,
+  });
   Some(n)
 }
 
@@ -477,11 +533,30 @@ mod tests {
     let mut gen = IdGen::new(2);
     let mut doc = new_document(&mut gen, "t");
     let page = doc.pages[0].id.clone();
-    let f = Node { id: "f".into(), kind: NodeType::Frame, width: 300.0, height: 300.0, ..Default::default() };
+    let f = Node {
+      id: "f".into(),
+      kind: NodeType::Frame,
+      width: 300.0,
+      height: 300.0,
+      ..Default::default()
+    };
     doc.insert(f, None, &page, None);
-    let g = Node { id: "g".into(), kind: NodeType::Group, x: 10.0, y: 10.0, width: 100.0, height: 100.0, ..Default::default() };
+    let g = Node {
+      id: "g".into(),
+      kind: NodeType::Group,
+      x: 10.0,
+      y: 10.0,
+      width: 100.0,
+      height: 100.0,
+      ..Default::default()
+    };
     doc.insert(g, Some("f"), &page, None);
-    let r = Node { id: "r".into(), width: 50.0, height: 50.0, ..Default::default() };
+    let r = Node {
+      id: "r".into(),
+      width: 50.0,
+      height: 50.0,
+      ..Default::default()
+    };
     doc.insert(r, Some("g"), &page, None);
     (doc, page)
   }
@@ -523,7 +598,19 @@ mod tests {
   #[test]
   fn snapping_aligns_left_edges() {
     let (mut doc, page) = doc_with_frame();
-    doc.insert(Node { id: "a".into(), x: 400.0, y: 0.0, width: 50.0, height: 50.0, ..Default::default() }, None, &page, None);
+    doc.insert(
+      Node {
+        id: "a".into(),
+        x: 400.0,
+        y: 0.0,
+        width: 50.0,
+        height: 50.0,
+        ..Default::default()
+      },
+      None,
+      &page,
+      None,
+    );
     // Move "a" so its left edge lands 3px from the frame's right edge (300).
     let s = snap_move(&doc, &page, &["a".into()], -97.0, 100.0, 1.0);
     assert_eq!(s.dx, -100.0);

@@ -50,7 +50,10 @@ impl EditorLink {
     let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let (tx, rx) = oneshot::channel();
     self.pending.lock().await.insert(id, tx);
-    if !self.send(json!({ "type": "tool_call", "id": id, "name": name, "input": input })).await {
+    if !self
+      .send(json!({ "type": "tool_call", "id": id, "name": name, "input": input }))
+      .await
+    {
       self.pending.lock().await.remove(&id);
       return None;
     }
@@ -58,7 +61,11 @@ impl EditorLink {
       Ok(Ok(reply)) => Some(reply),
       _ => {
         self.pending.lock().await.remove(&id);
-        Some(ToolReply { ok: false, result: json!("the editor did not answer in time"), image: None })
+        Some(ToolReply {
+          ok: false,
+          result: json!("the editor did not answer in time"),
+          image: None,
+        })
       }
     }
   }
@@ -109,7 +116,17 @@ async fn serve(socket: WebSocket, state: Shared) {
       "tool_result" => {
         let id = v["id"].as_u64().unwrap_or(0);
         let image = v["image"]["data"].as_str().map(String::from);
-        state.editor.resolve(id, ToolReply { ok: v["ok"].as_bool().unwrap_or(false), result: v["result"].clone(), image }).await;
+        state
+          .editor
+          .resolve(
+            id,
+            ToolReply {
+              ok: v["ok"].as_bool().unwrap_or(false),
+              result: v["result"].clone(),
+              image,
+            },
+          )
+          .await;
       }
       "doc" => {
         if let Some(doc) = v["doc"].as_str() {

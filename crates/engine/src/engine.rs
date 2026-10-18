@@ -13,8 +13,7 @@ use crate::geom::{Point, Rect};
 use crate::interact::{self, Handle};
 use crate::layout;
 use crate::model::{
-  AutoLayout, ColorStyle, Document, Interaction, LayoutDirection, Node, NodeId, NodeType, Page, Paint, Sizing, TextStyle,
-  VectorPoint,
+  AutoLayout, ColorStyle, Document, Interaction, LayoutDirection, Node, NodeId, NodeType, Page, Paint, Sizing, TextStyle, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render::{self, Mode, RenderOptions};
@@ -50,77 +49,288 @@ pub enum Command {
   BeginGesture,
   EndGesture,
   CancelGesture,
-  Select { ids: Vec<NodeId>, #[serde(default)] mode: SelectMode },
+  Select {
+    ids: Vec<NodeId>,
+    #[serde(default)]
+    mode: SelectMode,
+  },
   SelectAll,
-  SetPage { id: String },
-  AddPage { name: Option<String> },
-  RenamePage { id: String, name: String },
-  DeletePage { id: String },
-  SetPageBackground { id: String, color: String },
-  SetDocName { name: String },
-  CreateShape { kind: NodeType, x: f64, y: f64, width: f64, height: f64, parent: Option<NodeId> },
-  CreateText { x: f64, y: f64, characters: String, parent: Option<NodeId> },
-  CreateVector { points: Vec<VectorPoint>, closed: bool, parent: Option<NodeId> },
-  CreateImage { src: String, x: f64, y: f64, width: f64, height: f64, name: Option<String>, parent: Option<NodeId> },
-  InsertSpecs { specs: Vec<Value>, parent: Option<NodeId> },
-  Paste { data: String, parent: Option<NodeId>, x: Option<f64>, y: Option<f64> },
-  Update { ids: Vec<NodeId>, patch: Value },
-  SetText { id: NodeId, characters: String },
-  Delete { ids: Vec<NodeId> },
-  Duplicate { ids: Vec<NodeId> },
+  SetPage {
+    id: String,
+  },
+  AddPage {
+    name: Option<String>,
+  },
+  RenamePage {
+    id: String,
+    name: String,
+  },
+  DeletePage {
+    id: String,
+  },
+  SetPageBackground {
+    id: String,
+    color: String,
+  },
+  SetDocName {
+    name: String,
+  },
+  CreateShape {
+    kind: NodeType,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    parent: Option<NodeId>,
+  },
+  CreateText {
+    x: f64,
+    y: f64,
+    characters: String,
+    parent: Option<NodeId>,
+  },
+  CreateVector {
+    points: Vec<VectorPoint>,
+    closed: bool,
+    parent: Option<NodeId>,
+  },
+  CreateImage {
+    src: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    name: Option<String>,
+    parent: Option<NodeId>,
+  },
+  InsertSpecs {
+    specs: Vec<Value>,
+    parent: Option<NodeId>,
+  },
+  Paste {
+    data: String,
+    parent: Option<NodeId>,
+    x: Option<f64>,
+    y: Option<f64>,
+  },
+  Update {
+    ids: Vec<NodeId>,
+    patch: Value,
+  },
+  SetText {
+    id: NodeId,
+    characters: String,
+  },
+  Delete {
+    ids: Vec<NodeId>,
+  },
+  Duplicate {
+    ids: Vec<NodeId>,
+  },
   /// Gesture-relative translate (total delta since BeginGesture).
-  Translate { ids: Vec<NodeId>, dx: f64, dy: f64, #[serde(default)] snap: bool, #[serde(default = "one")] zoom: f64 },
-  Nudge { ids: Vec<NodeId>, dx: f64, dy: f64 },
-  DropInto { ids: Vec<NodeId>, x: f64, y: f64 },
-  MoveToParent { ids: Vec<NodeId>, parent: Option<NodeId>, index: Option<usize> },
-  Resize { ids: Vec<NodeId>, handle: Handle, dx: f64, dy: f64, #[serde(default)] keep_aspect: bool, #[serde(default)] from_center: bool, #[serde(default)] snap: bool, #[serde(default = "one")] zoom: f64 },
+  Translate {
+    ids: Vec<NodeId>,
+    dx: f64,
+    dy: f64,
+    #[serde(default)]
+    snap: bool,
+    #[serde(default = "one")]
+    zoom: f64,
+  },
+  Nudge {
+    ids: Vec<NodeId>,
+    dx: f64,
+    dy: f64,
+  },
+  DropInto {
+    ids: Vec<NodeId>,
+    x: f64,
+    y: f64,
+  },
+  MoveToParent {
+    ids: Vec<NodeId>,
+    parent: Option<NodeId>,
+    index: Option<usize>,
+  },
+  Resize {
+    ids: Vec<NodeId>,
+    handle: Handle,
+    dx: f64,
+    dy: f64,
+    #[serde(default)]
+    keep_aspect: bool,
+    #[serde(default)]
+    from_center: bool,
+    #[serde(default)]
+    snap: bool,
+    #[serde(default = "one")]
+    zoom: f64,
+  },
   /// Gesture-relative rotation in degrees around a page-space pivot.
-  Rotate { ids: Vec<NodeId>, angle: f64, pivot_x: f64, pivot_y: f64 },
-  Group { ids: Vec<NodeId> },
-  Ungroup { ids: Vec<NodeId> },
-  FrameSelection { ids: Vec<NodeId> },
-  AddAutoLayout { ids: Vec<NodeId> },
-  RemoveAutoLayout { ids: Vec<NodeId> },
-  CreateComponent { ids: Vec<NodeId> },
-  CombineVariants { ids: Vec<NodeId> },
-  CreateInstance { component_id: NodeId, x: f64, y: f64, parent: Option<NodeId> },
-  DetachInstance { ids: Vec<NodeId> },
-  ResetInstance { ids: Vec<NodeId> },
-  SwapComponent { id: NodeId, component_id: NodeId },
-  SetVariant { id: NodeId, prop: String, value: String },
-  Align { ids: Vec<NodeId>, how: AlignHow },
-  Distribute { ids: Vec<NodeId>, horizontal: bool },
-  Reorder { ids: Vec<NodeId>, to: ReorderTo },
-  Flip { ids: Vec<NodeId>, horizontal: bool },
-  AddInteraction { id: NodeId, interaction: Interaction },
-  SetInteractions { id: NodeId, interactions: Vec<Interaction> },
-  SetFlowStart { page: String, id: Option<NodeId> },
-  AddColorStyle { name: String, color: String },
-  AddTextStyle { name: String, from: NodeId },
-  UpdateColorStyle { id: String, name: Option<String>, color: Option<String> },
-  DeleteStyle { id: String },
-  ApplyStyle { ids: Vec<NodeId>, style_id: String },
-  Ai { tool: String, input: Value },
+  Rotate {
+    ids: Vec<NodeId>,
+    angle: f64,
+    pivot_x: f64,
+    pivot_y: f64,
+  },
+  Group {
+    ids: Vec<NodeId>,
+  },
+  Ungroup {
+    ids: Vec<NodeId>,
+  },
+  FrameSelection {
+    ids: Vec<NodeId>,
+  },
+  AddAutoLayout {
+    ids: Vec<NodeId>,
+  },
+  RemoveAutoLayout {
+    ids: Vec<NodeId>,
+  },
+  CreateComponent {
+    ids: Vec<NodeId>,
+  },
+  CombineVariants {
+    ids: Vec<NodeId>,
+  },
+  CreateInstance {
+    component_id: NodeId,
+    x: f64,
+    y: f64,
+    parent: Option<NodeId>,
+  },
+  DetachInstance {
+    ids: Vec<NodeId>,
+  },
+  ResetInstance {
+    ids: Vec<NodeId>,
+  },
+  SwapComponent {
+    id: NodeId,
+    component_id: NodeId,
+  },
+  SetVariant {
+    id: NodeId,
+    prop: String,
+    value: String,
+  },
+  Align {
+    ids: Vec<NodeId>,
+    how: AlignHow,
+  },
+  Distribute {
+    ids: Vec<NodeId>,
+    horizontal: bool,
+  },
+  Reorder {
+    ids: Vec<NodeId>,
+    to: ReorderTo,
+  },
+  Flip {
+    ids: Vec<NodeId>,
+    horizontal: bool,
+  },
+  AddInteraction {
+    id: NodeId,
+    interaction: Interaction,
+  },
+  SetInteractions {
+    id: NodeId,
+    interactions: Vec<Interaction>,
+  },
+  SetFlowStart {
+    page: String,
+    id: Option<NodeId>,
+  },
+  AddColorStyle {
+    name: String,
+    color: String,
+  },
+  AddTextStyle {
+    name: String,
+    from: NodeId,
+  },
+  UpdateColorStyle {
+    id: String,
+    name: Option<String>,
+    color: Option<String>,
+  },
+  DeleteStyle {
+    id: String,
+  },
+  ApplyStyle {
+    ids: Vec<NodeId>,
+    style_id: String,
+  },
+  Ai {
+    tool: String,
+    input: Value,
+  },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "q", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Query {
-  Pick { x: f64, y: f64, zoom: f64, #[serde(default)] deep: bool },
-  Drill { x: f64, y: f64, zoom: f64, container: NodeId },
-  Hit { x: f64, y: f64, zoom: f64 },
-  Marquee { x: f64, y: f64, width: f64, height: f64 },
-  Bounds { ids: Vec<NodeId> },
-  FrameAt { x: f64, y: f64, #[serde(default)] exclude: Vec<NodeId> },
-  SnapPoint { x: f64, y: f64, zoom: f64, #[serde(default)] exclude: Vec<NodeId> },
-  Copy { ids: Vec<NodeId> },
-  ExportSvg { id: NodeId },
-  ExportHtml { id: NodeId },
-  ExportReact { id: NodeId },
+  Pick {
+    x: f64,
+    y: f64,
+    zoom: f64,
+    #[serde(default)]
+    deep: bool,
+  },
+  Drill {
+    x: f64,
+    y: f64,
+    zoom: f64,
+    container: NodeId,
+  },
+  Hit {
+    x: f64,
+    y: f64,
+    zoom: f64,
+  },
+  Marquee {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+  },
+  Bounds {
+    ids: Vec<NodeId>,
+  },
+  FrameAt {
+    x: f64,
+    y: f64,
+    #[serde(default)]
+    exclude: Vec<NodeId>,
+  },
+  SnapPoint {
+    x: f64,
+    y: f64,
+    zoom: f64,
+    #[serde(default)]
+    exclude: Vec<NodeId>,
+  },
+  Copy {
+    ids: Vec<NodeId>,
+  },
+  ExportSvg {
+    id: NodeId,
+  },
+  ExportHtml {
+    id: NodeId,
+  },
+  ExportReact {
+    id: NodeId,
+  },
   ExportProject,
   ToolDefs,
   SystemPrompt,
-  Summary { #[serde(default = "three")] depth: usize },
+  Summary {
+    #[serde(default = "three")]
+    depth: usize,
+  },
 }
 
 fn one() -> f64 {
@@ -149,7 +359,18 @@ impl Engine {
     let mut gen = IdGen::new(seed);
     let doc = new_document(&mut gen, "Untitled");
     let page = doc.pages[0].id.clone();
-    Engine { doc, selection: vec![], page, rev: 1, past: vec![], future: vec![], gesture: None, gen, measurer, fingerprints: HashMap::new() }
+    Engine {
+      doc,
+      selection: vec![],
+      page,
+      rev: 1,
+      past: vec![],
+      future: vec![],
+      gesture: None,
+      gen,
+      measurer,
+      fingerprints: HashMap::new(),
+    }
   }
 
   /// Replaces the document (opening a file). Clears history.
@@ -187,11 +408,23 @@ impl Engine {
   }
 
   pub fn render(&self, page: &str, hidden: &[NodeId]) -> String {
-    render::render_page(&self.doc, page, self.measurer.as_ref(), RenderOptions { mode: Mode::Canvas, hidden })
+    render::render_page(
+      &self.doc,
+      page,
+      self.measurer.as_ref(),
+      RenderOptions {
+        mode: Mode::Canvas,
+        hidden,
+      },
+    )
   }
 
   fn snapshot(&self) -> Snapshot {
-    Snapshot { doc: self.doc.clone(), selection: self.selection.clone(), page: self.page.clone() }
+    Snapshot {
+      doc: self.doc.clone(),
+      selection: self.selection.clone(),
+      page: self.page.clone(),
+    }
   }
 
   fn restore(&mut self, s: Snapshot) {
@@ -278,12 +511,18 @@ impl Engine {
         return Ok(json!({ "selection": self.selection }));
       }
       Command::SelectAll => {
-        let scope = self.selection.first().and_then(|s| self.doc.get(s)).map(|n| (n.parent.clone(), n.page.clone()));
+        let scope = self
+          .selection
+          .first()
+          .and_then(|s| self.doc.get(s))
+          .map(|n| (n.parent.clone(), n.page.clone()));
         self.selection = match scope {
           Some((parent, page)) => self.doc.child_ids(parent.as_deref(), &page),
           None => self.doc.page(&self.page).map(|p| p.children.clone()).unwrap_or_default(),
         };
-        self.selection.retain(|i| self.doc.get(i).map(|n| n.visible && !n.locked).unwrap_or(false));
+        self
+          .selection
+          .retain(|i| self.doc.get(i).map(|n| n.visible && !n.locked).unwrap_or(false));
         self.rev += 1;
         return Ok(json!({ "selection": self.selection }));
       }
@@ -378,12 +617,19 @@ impl Engine {
   }
 
   fn refresh_fingerprints(&mut self) {
-    self.fingerprints = self.doc.components().iter().map(|c| (c.id.clone(), components::fingerprint(&self.doc, &c.id))).collect();
+    self.fingerprints = self
+      .doc
+      .components()
+      .iter()
+      .map(|c| (c.id.clone(), components::fingerprint(&self.doc, &c.id)))
+      .collect();
   }
 
   /// Parent for newly drawn content: the deepest frame under the point.
   fn auto_parent(&self, explicit: Option<NodeId>, x: f64, y: f64) -> Option<NodeId> {
-    explicit.filter(|p| self.doc.nodes.contains_key(p)).or_else(|| ops::frame_at(&self.doc, &self.page, Point::new(x, y), &[]))
+    explicit
+      .filter(|p| self.doc.nodes.contains_key(p))
+      .or_else(|| ops::frame_at(&self.doc, &self.page, Point::new(x, y), &[]))
   }
 
   /// Inserts a node given in page coordinates under `parent`.
@@ -410,7 +656,13 @@ impl Engine {
       Command::AddPage { name } => {
         let id = self.gen.next("p_");
         let name = name.unwrap_or_else(|| format!("Page {}", self.doc.pages.len() + 1));
-        self.doc.pages.push(Page { id: id.clone(), name, children: vec![], background: "#F5F5F5".into(), flow_start: None });
+        self.doc.pages.push(Page {
+          id: id.clone(),
+          name,
+          children: vec![],
+          background: "#F5F5F5".into(),
+          flow_start: None,
+        });
         self.page = id.clone();
         self.selection.clear();
         Ok(json!({ "id": id }))
@@ -438,7 +690,14 @@ impl Engine {
         self.doc.name = name;
         Ok(json!({}))
       }
-      Command::CreateShape { kind, x, y, width, height, parent } => {
+      Command::CreateShape {
+        kind,
+        x,
+        y,
+        width,
+        height,
+        parent,
+      } => {
         let parent = self.auto_parent(parent, x, y);
         let name = self.doc.next_name(kind.label());
         let mut n = ops::default_node(kind, self.gen.next("n_"), name);
@@ -456,7 +715,11 @@ impl Engine {
       Command::CreateText { x, y, characters, parent } => {
         let parent = self.auto_parent(parent, x, y);
         let mut n = ops::default_node(NodeType::Text, self.gen.next("n_"), String::new());
-        n.name = if characters.is_empty() { "Text".into() } else { characters.chars().take(40).collect() };
+        n.name = if characters.is_empty() {
+          "Text".into()
+        } else {
+          characters.chars().take(40).collect()
+        };
         n.x = x;
         n.y = y;
         n.text.as_mut().unwrap().characters = characters;
@@ -467,28 +730,45 @@ impl Engine {
       Command::CreateVector { points, closed, parent } => {
         let first = points.first().copied().unwrap_or_default();
         let parent = self.auto_parent(parent, first.x, first.y);
-        let n = interact::vector_from_points(&self.doc, &mut self.gen, parent.as_deref(), &points, closed).ok_or("a path needs at least two points")?;
+        let n = interact::vector_from_points(&self.doc, &mut self.gen, parent.as_deref(), &points, closed)
+          .ok_or("a path needs at least two points")?;
         let id = n.id.clone();
         let page = self.page.clone();
         self.doc.insert(n, parent.as_deref(), &page, None);
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
       }
-      Command::CreateImage { src, x, y, width, height, name, parent } => {
+      Command::CreateImage {
+        src,
+        x,
+        y,
+        width,
+        height,
+        name,
+        parent,
+      } => {
         let parent = self.auto_parent(parent, x, y);
         let mut n = ops::default_node(NodeType::Rectangle, self.gen.next("n_"), name.unwrap_or_else(|| "Image".into()));
         n.x = x;
         n.y = y;
         n.width = width;
         n.height = height;
-        n.fills = vec![Paint::Image { src, scale_mode: Default::default(), opacity: 1.0, visible: true }];
+        n.fills = vec![Paint::Image {
+          src,
+          scale_mode: Default::default(),
+          opacity: 1.0,
+          visible: true,
+        }];
         let id = self.insert_abs(n, parent.as_deref());
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
       }
       Command::InsertSpecs { specs, parent } => {
         let created = ai::insert_specs(self, &specs, parent.as_deref())?;
-        self.selection = created.iter().filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(String::from)).collect();
+        self.selection = created
+          .iter()
+          .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(String::from))
+          .collect();
         Ok(json!({ "created": created }))
       }
       Command::Paste { data, parent, x, y } => self.paste(&data, parent, x, y),
@@ -550,8 +830,19 @@ impl Engine {
           if self.doc.instance_ancestor(id).is_some() {
             continue;
           }
-          let in_flow = cur.as_ref().and_then(|p| self.doc.get(p)).map(|p| p.layout.is_some()).unwrap_or(false) && !self.doc.get(id).unwrap().absolute_position;
-          if cur != target && !in_flow && cur.as_ref().map(|c| self.doc.get(c).map(|n| n.kind != NodeType::Group).unwrap_or(true)).unwrap_or(true) {
+          let in_flow = cur
+            .as_ref()
+            .and_then(|p| self.doc.get(p))
+            .map(|p| p.layout.is_some())
+            .unwrap_or(false)
+            && !self.doc.get(id).unwrap().absolute_position;
+          if cur != target
+            && !in_flow
+            && cur
+              .as_ref()
+              .map(|c| self.doc.get(c).map(|n| n.kind != NodeType::Group).unwrap_or(true))
+              .unwrap_or(true)
+          {
             // Dropping into auto layout inserts at the pointer position.
             let index = target.as_ref().and_then(|t| self.flow_index(t, Point::new(x, y)));
             self.doc.reparent(id, target.as_deref(), index, true);
@@ -577,8 +868,22 @@ impl Engine {
         }
         Ok(json!({}))
       }
-      Command::Resize { ids, handle, dx, dy, keep_aspect, from_center, snap, zoom } => self.resize(&ids, handle, dx, dy, keep_aspect, from_center, snap, zoom),
-      Command::Rotate { ids, angle, pivot_x, pivot_y } => {
+      Command::Resize {
+        ids,
+        handle,
+        dx,
+        dy,
+        keep_aspect,
+        from_center,
+        snap,
+        zoom,
+      } => self.resize(&ids, handle, dx, dy, keep_aspect, from_center, snap, zoom),
+      Command::Rotate {
+        ids,
+        angle,
+        pivot_x,
+        pivot_y,
+      } => {
         ops::rotate(&mut self.doc, &ids, angle, Point::new(pivot_x, pivot_y));
         Ok(json!({}))
       }
@@ -615,7 +920,14 @@ impl Engine {
         };
         let horizontal = self.infer_direction(&target);
         let n = self.doc.get_mut(&target).ok_or("missing")?;
-        n.layout = Some(AutoLayout { direction: if horizontal { LayoutDirection::Horizontal } else { LayoutDirection::Vertical }, ..Default::default() });
+        n.layout = Some(AutoLayout {
+          direction: if horizontal {
+            LayoutDirection::Horizontal
+          } else {
+            LayoutDirection::Vertical
+          },
+          ..Default::default()
+        });
         n.sizing_h = Sizing::Hug;
         n.sizing_v = Sizing::Hug;
         self.selection = vec![target.clone()];
@@ -641,7 +953,12 @@ impl Engine {
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
       }
-      Command::CreateInstance { component_id, x, y, parent } => {
+      Command::CreateInstance {
+        component_id,
+        x,
+        y,
+        parent,
+      } => {
         let parent = self.auto_parent(parent, x, y);
         let (lx, ly) = match &parent {
           Some(p) => {
@@ -651,7 +968,8 @@ impl Engine {
           None => (x, y),
         };
         let page = self.page.clone();
-        let id = components::create_instance(&mut self.doc, &component_id, parent.as_deref(), &page, lx, ly, &mut self.gen).ok_or("not a component")?;
+        let id = components::create_instance(&mut self.doc, &component_id, parent.as_deref(), &page, lx, ly, &mut self.gen)
+          .ok_or("not a component")?;
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
       }
@@ -672,7 +990,12 @@ impl Engine {
         Ok(json!({}))
       }
       Command::SetVariant { id, prop, value } => {
-        let comp = self.doc.get(&id).and_then(|n| n.instance.as_ref()).map(|i| i.component_id.clone()).ok_or("not an instance")?;
+        let comp = self
+          .doc
+          .get(&id)
+          .and_then(|n| n.instance.as_ref())
+          .map(|i| i.component_id.clone())
+          .ok_or("not an instance")?;
         let target = components::find_variant(&self.doc, &comp, &prop, &value).ok_or("no matching variant")?;
         components::swap_component(&mut self.doc, &id, &target, &mut self.gen);
         Ok(json!({}))
@@ -707,7 +1030,11 @@ impl Engine {
       }
       Command::AddColorStyle { name, color } => {
         let id = self.gen.next("s_");
-        self.doc.styles.colors.push(ColorStyle { id: id.clone(), name, color: crate::color::normalize(&color) });
+        self.doc.styles.colors.push(ColorStyle {
+          id: id.clone(),
+          name,
+          color: crate::color::normalize(&color),
+        });
         Ok(json!({ "id": id }))
       }
       Command::AddTextStyle { name, from } => {
@@ -798,12 +1125,19 @@ impl Engine {
 
   fn infer_direction(&self, id: &str) -> bool {
     let Some(n) = self.doc.get(id) else { return false };
-    let rects: Vec<Rect> = n.children.iter().filter_map(|c| self.doc.get(c)).map(|c| Rect::new(c.x, c.y, c.width, c.height)).collect();
+    let rects: Vec<Rect> = n
+      .children
+      .iter()
+      .filter_map(|c| self.doc.get(c))
+      .map(|c| Rect::new(c.x, c.y, c.width, c.height))
+      .collect();
     if rects.len() < 2 {
       return false;
     }
-    let spread_x = rects.iter().map(|r| r.center().x).fold(f64::NEG_INFINITY, f64::max) - rects.iter().map(|r| r.center().x).fold(f64::INFINITY, f64::min);
-    let spread_y = rects.iter().map(|r| r.center().y).fold(f64::NEG_INFINITY, f64::max) - rects.iter().map(|r| r.center().y).fold(f64::INFINITY, f64::min);
+    let spread_x = rects.iter().map(|r| r.center().x).fold(f64::NEG_INFINITY, f64::max)
+      - rects.iter().map(|r| r.center().x).fold(f64::INFINITY, f64::min);
+    let spread_y = rects.iter().map(|r| r.center().y).fold(f64::NEG_INFINITY, f64::max)
+      - rects.iter().map(|r| r.center().y).fold(f64::INFINITY, f64::min);
     spread_x > spread_y
   }
 
@@ -812,7 +1146,13 @@ impl Engine {
     // Children flowing in auto layout reorder instead of moving freely.
     let (flow, free): (Vec<NodeId>, Vec<NodeId>) = ids.iter().cloned().partition(|id| {
       let n = self.doc.get(id).unwrap();
-      !n.absolute_position && n.parent.as_ref().and_then(|p| self.doc.get(p)).map(|p| p.layout.is_some()).unwrap_or(false)
+      !n.absolute_position
+        && n
+          .parent
+          .as_ref()
+          .and_then(|p| self.doc.get(p))
+          .map(|p| p.layout.is_some())
+          .unwrap_or(false)
     });
     for id in &flow {
       self.reorder_in_flow(id, dx, dy);
@@ -848,7 +1188,12 @@ impl Engine {
   fn reorder_in_flow(&mut self, id: &str, dx: f64, dy: f64) {
     let Some(n) = self.doc.get(id).cloned() else { return };
     let Some(parent) = n.parent.clone() else { return };
-    let horizontal = self.doc.get(&parent).and_then(|p| p.layout.as_ref()).map(|l| l.direction == LayoutDirection::Horizontal).unwrap_or(false);
+    let horizontal = self
+      .doc
+      .get(&parent)
+      .and_then(|p| p.layout.as_ref())
+      .map(|l| l.direction == LayoutDirection::Horizontal)
+      .unwrap_or(false);
     let b = self.doc.abs_bounds(id);
     let c = b.center();
     let pos = if horizontal { c.x + dx } else { c.y + dy };
@@ -864,7 +1209,17 @@ impl Engine {
   }
 
   #[allow(clippy::too_many_arguments)]
-  fn resize(&mut self, ids: &[NodeId], handle: Handle, dx: f64, dy: f64, keep_aspect: bool, from_center: bool, snap: bool, zoom: f64) -> Result<Value, String> {
+  fn resize(
+    &mut self,
+    ids: &[NodeId],
+    handle: Handle,
+    dx: f64,
+    dy: f64,
+    keep_aspect: bool,
+    from_center: bool,
+    snap: bool,
+    zoom: f64,
+  ) -> Result<Value, String> {
     let ids = ops::top_most(&self.doc, ids);
     let mut guides = Vec::new();
     let (mut dx, mut dy) = (dx, dy);
@@ -948,8 +1303,19 @@ impl Engine {
     for n in &nodes {
       map.insert(n.id.clone(), self.gen.next("n_"));
     }
-    let parent = parent.filter(|p| self.doc.get(p).map(|n| n.kind.is_frame_like() && n.kind != NodeType::Instance).unwrap_or(false));
-    let bounds = Rect::union_all(nodes.iter().filter(|n| roots.contains(&n.id)).map(|n| Rect::new(n.x, n.y, n.width, n.height)));
+    let parent = parent.filter(|p| {
+      self
+        .doc
+        .get(p)
+        .map(|n| n.kind.is_frame_like() && n.kind != NodeType::Instance)
+        .unwrap_or(false)
+    });
+    let bounds = Rect::union_all(
+      nodes
+        .iter()
+        .filter(|n| roots.contains(&n.id))
+        .map(|n| Rect::new(n.x, n.y, n.width, n.height)),
+    );
     let (ox, oy) = match (x, y, bounds) {
       (Some(x), Some(y), Some(b)) => (x - b.x, y - b.y),
       _ => (0.0, 0.0),
@@ -1000,7 +1366,14 @@ impl Engine {
       }
       Query::FrameAt { x, y, exclude } => json!(ops::frame_at(&self.doc, &self.page, Point::new(x, y), &exclude)),
       Query::SnapPoint { x, y, zoom, exclude } => {
-        let (r, guides) = interact::snap_rect(&self.doc, &self.page, &exclude, Rect::new(x, y, 0.0, 0.0), [true, false, true, false], zoom);
+        let (r, guides) = interact::snap_rect(
+          &self.doc,
+          &self.page,
+          &exclude,
+          Rect::new(x, y, 0.0, 0.0),
+          [true, false, true, false],
+          zoom,
+        );
         json!({ "x": r.x, "y": r.y, "guides": guides })
       }
       Query::Copy { ids } => json!(self.copy(&ids)),
@@ -1008,7 +1381,10 @@ impl Engine {
       Query::ExportHtml { id } => json!(codegen::export_html(&self.doc, &id, m)),
       Query::ExportReact { id } => json!(codegen::export_react(&self.doc, &id, m)),
       Query::ExportProject => {
-        let files: Vec<Value> = codegen::export_project(&self.doc, m).into_iter().map(|f| json!({ "path": f.path, "content": f.content })).collect();
+        let files: Vec<Value> = codegen::export_project(&self.doc, m)
+          .into_iter()
+          .map(|f| json!({ "path": f.path, "content": f.content }))
+          .collect();
         json!(files)
       }
       Query::ToolDefs => ai::tool_defs(),
@@ -1060,7 +1436,16 @@ mod tests {
   #[test]
   fn create_undo_redo() {
     let mut e = engine();
-    let r = e.dispatch(Command::CreateShape { kind: NodeType::Rectangle, x: 10.0, y: 10.0, width: 50.0, height: 50.0, parent: None }).unwrap();
+    let r = e
+      .dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 10.0,
+        y: 10.0,
+        width: 50.0,
+        height: 50.0,
+        parent: None,
+      })
+      .unwrap();
     let id = id_of(&r);
     assert!(e.doc.get(&id).is_some());
     e.dispatch(Command::Undo).unwrap();
@@ -1072,10 +1457,27 @@ mod tests {
   #[test]
   fn gesture_is_one_undo_step_and_relative() {
     let mut e = engine();
-    let id = id_of(&e.dispatch(Command::CreateShape { kind: NodeType::Rectangle, x: 0.0, y: 0.0, width: 50.0, height: 50.0, parent: None }).unwrap());
+    let id = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 0.0,
+        y: 0.0,
+        width: 50.0,
+        height: 50.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
     e.dispatch(Command::BeginGesture).unwrap();
     for i in 1..=10 {
-      e.dispatch(Command::Translate { ids: vec![id.clone()], dx: i as f64 * 10.0, dy: 0.0, snap: false, zoom: 1.0 }).unwrap();
+      e.dispatch(Command::Translate {
+        ids: vec![id.clone()],
+        dx: i as f64 * 10.0,
+        dy: 0.0,
+        snap: false,
+        zoom: 1.0,
+      })
+      .unwrap();
     }
     e.dispatch(Command::EndGesture).unwrap();
     assert_eq!(e.doc.get(&id).unwrap().x, 100.0);
@@ -1086,8 +1488,28 @@ mod tests {
   #[test]
   fn shapes_drawn_inside_frames_are_parented() {
     let mut e = engine();
-    let f = id_of(&e.dispatch(Command::CreateShape { kind: NodeType::Frame, x: 100.0, y: 100.0, width: 400.0, height: 400.0, parent: None }).unwrap());
-    let r = id_of(&e.dispatch(Command::CreateShape { kind: NodeType::Rectangle, x: 150.0, y: 150.0, width: 10.0, height: 10.0, parent: None }).unwrap());
+    let f = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 100.0,
+        y: 100.0,
+        width: 400.0,
+        height: 400.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let r = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 150.0,
+        y: 150.0,
+        width: 10.0,
+        height: 10.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
     assert_eq!(e.doc.get(&r).unwrap().parent.as_deref(), Some(f.as_str()));
     assert_eq!(e.doc.get(&r).unwrap().x, 50.0);
   }
@@ -1095,10 +1517,33 @@ mod tests {
   #[test]
   fn copy_paste_roundtrip() {
     let mut e = engine();
-    let f = id_of(&e.dispatch(Command::CreateShape { kind: NodeType::Frame, x: 100.0, y: 100.0, width: 200.0, height: 200.0, parent: None }).unwrap());
-    e.dispatch(Command::CreateText { x: 120.0, y: 120.0, characters: "Hello".into(), parent: None }).unwrap();
-    let data = e.copy(&[f.clone()]);
-    let res = e.dispatch(Command::Paste { data, parent: None, x: Some(500.0), y: Some(100.0) }).unwrap();
+    let f = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 100.0,
+        y: 100.0,
+        width: 200.0,
+        height: 200.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::CreateText {
+      x: 120.0,
+      y: 120.0,
+      characters: "Hello".into(),
+      parent: None,
+    })
+    .unwrap();
+    let data = e.copy(std::slice::from_ref(&f));
+    let res = e
+      .dispatch(Command::Paste {
+        data,
+        parent: None,
+        x: Some(500.0),
+        y: Some(100.0),
+      })
+      .unwrap();
     let new_id = res["created"][0].as_str().unwrap().to_string();
     let n = e.doc.get(&new_id).unwrap();
     assert_eq!((n.x, n.y), (500.0, 100.0));
@@ -1109,14 +1554,44 @@ mod tests {
   #[test]
   fn instance_updates_when_component_changes() {
     let mut e = engine();
-    let f = id_of(&e.dispatch(Command::CreateShape { kind: NodeType::Frame, x: 0.0, y: 0.0, width: 100.0, height: 40.0, parent: None }).unwrap());
+    let f = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 40.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
     let comp = id_of(&e.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap());
-    let inst = id_of(&e.dispatch(Command::CreateInstance { component_id: comp.clone(), x: 300.0, y: 0.0, parent: None }).unwrap());
-    e.dispatch(Command::Update { ids: vec![comp.clone()], patch: json!({ "fills": [{ "type": "solid", "color": "#FF0000" }] }) }).unwrap();
+    let inst = id_of(
+      &e.dispatch(Command::CreateInstance {
+        component_id: comp.clone(),
+        x: 300.0,
+        y: 0.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::Update {
+      ids: vec![comp.clone()],
+      patch: json!({ "fills": [{ "type": "solid", "color": "#FF0000" }] }),
+    })
+    .unwrap();
     assert_eq!(e.doc.get(&inst).unwrap().fills, vec![Paint::solid("#FF0000")]);
     // Instance override of fill survives further component edits.
-    e.dispatch(Command::Update { ids: vec![inst.clone()], patch: json!({ "fills": [{ "type": "solid", "color": "#00FF00" }] }) }).unwrap();
-    e.dispatch(Command::Update { ids: vec![comp], patch: json!({ "cornerRadius": 8 }) }).unwrap();
+    e.dispatch(Command::Update {
+      ids: vec![inst.clone()],
+      patch: json!({ "fills": [{ "type": "solid", "color": "#00FF00" }] }),
+    })
+    .unwrap();
+    e.dispatch(Command::Update {
+      ids: vec![comp],
+      patch: json!({ "cornerRadius": 8 }),
+    })
+    .unwrap();
     let i = e.doc.get(&inst).unwrap();
     assert_eq!(i.fills, vec![Paint::solid("#00FF00")]);
     assert_eq!(i.corner_radius, 8.0);
@@ -1126,12 +1601,47 @@ mod tests {
   #[test]
   fn auto_layout_reorders_on_drag() {
     let mut e = engine();
-    let a = id_of(&e.dispatch(Command::CreateShape { kind: NodeType::Rectangle, x: 0.0, y: 0.0, width: 50.0, height: 50.0, parent: None }).unwrap());
-    let b = id_of(&e.dispatch(Command::CreateShape { kind: NodeType::Rectangle, x: 100.0, y: 0.0, width: 50.0, height: 50.0, parent: None }).unwrap());
-    let f = id_of(&e.dispatch(Command::AddAutoLayout { ids: vec![a.clone(), b.clone()] }).unwrap());
-    assert_eq!(e.doc.get(&f).unwrap().layout.as_ref().unwrap().direction, LayoutDirection::Horizontal);
+    let a = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 0.0,
+        y: 0.0,
+        width: 50.0,
+        height: 50.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let b = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 100.0,
+        y: 0.0,
+        width: 50.0,
+        height: 50.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let f = id_of(
+      &e.dispatch(Command::AddAutoLayout {
+        ids: vec![a.clone(), b.clone()],
+      })
+      .unwrap(),
+    );
+    assert_eq!(
+      e.doc.get(&f).unwrap().layout.as_ref().unwrap().direction,
+      LayoutDirection::Horizontal
+    );
     e.dispatch(Command::BeginGesture).unwrap();
-    e.dispatch(Command::Translate { ids: vec![a.clone()], dx: 80.0, dy: 0.0, snap: true, zoom: 1.0 }).unwrap();
+    e.dispatch(Command::Translate {
+      ids: vec![a.clone()],
+      dx: 80.0,
+      dy: 0.0,
+      snap: true,
+      zoom: 1.0,
+    })
+    .unwrap();
     e.dispatch(Command::EndGesture).unwrap();
     assert_eq!(e.doc.get(&f).unwrap().children, vec![b, a]);
   }

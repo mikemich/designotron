@@ -43,8 +43,13 @@ struct Config {
 }
 
 fn parse_args() -> Config {
-  let mut port = std::env::var("DESIGNOTRON_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(DEFAULT_PORT);
-  let mut workspace = std::env::var("DESIGNOTRON_WORKSPACE").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("workspace"));
+  let mut port = std::env::var("DESIGNOTRON_PORT")
+    .ok()
+    .and_then(|p| p.parse().ok())
+    .unwrap_or(DEFAULT_PORT);
+  let mut workspace = std::env::var("DESIGNOTRON_WORKSPACE")
+    .map(PathBuf::from)
+    .unwrap_or_else(|_| PathBuf::from("workspace"));
   let mut static_dir: Option<PathBuf> = std::env::var("DESIGNOTRON_STATIC").ok().map(PathBuf::from);
   let mut args = std::env::args().skip(1);
   while let Some(a) = args.next() {
@@ -65,7 +70,11 @@ fn parse_args() -> Config {
       static_dir = Some(candidate);
     }
   }
-  Config { port, workspace, static_dir }
+  Config {
+    port,
+    workspace,
+    static_dir,
+  }
 }
 
 #[tokio::main]

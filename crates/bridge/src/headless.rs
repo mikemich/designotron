@@ -18,13 +18,17 @@ pub struct Headless {
 
 impl Headless {
   pub fn new(workspace: PathBuf) -> Self {
-    Headless { path: workspace.join(DESIGN_FILE), mirror: Mutex::new(None) }
+    Headless {
+      path: workspace.join(DESIGN_FILE),
+      mirror: Mutex::new(None),
+    }
   }
 
   /// Stores the editor's document and writes it to the workspace.
   pub async fn mirror(&self, doc: &str) {
     *self.mirror.lock().await = Some(doc.to_string());
-    let wrapped = json!({ "format": "designotron", "version": 1, "document": serde_json::from_str::<Value>(doc).unwrap_or(Value::Null), "assets": {} });
+    let wrapped =
+      json!({ "format": "designotron", "version": 1, "document": serde_json::from_str::<Value>(doc).unwrap_or(Value::Null), "assets": {} });
     if let Err(e) = tokio::fs::write(&self.path, serde_json::to_string_pretty(&wrapped).unwrap_or_default()).await {
       log::warn!("could not write {}: {e}", self.path.display());
     }
@@ -53,7 +57,10 @@ fn run_engine(source: Option<&str>, name: &str, input: Value) -> Result<(Value, 
   if let Some(src) = source {
     engine.load(src)?;
   }
-  let result = engine.dispatch(Command::Ai { tool: name.to_string(), input })?;
+  let result = engine.dispatch(Command::Ai {
+    tool: name.to_string(),
+    input,
+  })?;
   Ok((result, engine.to_json()))
 }
 
@@ -66,7 +73,10 @@ fn unwrap_dtron(text: &str) -> String {
 }
 
 fn seed() -> u64 {
-  std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7)
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_nanos() as u64)
+    .unwrap_or(7)
 }
 
 #[cfg(test)]
@@ -78,7 +88,13 @@ mod tests {
     let dir = std::env::temp_dir().join(format!("dtron-test-{}", seed()));
     std::fs::create_dir_all(&dir).unwrap();
     let h = Headless::new(dir.clone());
-    let r = h.call_tool("create_nodes", json!({ "nodes": [{ "type": "frame", "name": "Screen", "width": 390, "height": 844 }] })).await.unwrap();
+    let r = h
+      .call_tool(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "frame", "name": "Screen", "width": 390, "height": 844 }] }),
+      )
+      .await
+      .unwrap();
     assert!(r["created"][0]["id"].is_string());
     let text = std::fs::read_to_string(dir.join(DESIGN_FILE)).unwrap();
     assert!(text.contains("\"Screen\""));

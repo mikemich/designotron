@@ -85,20 +85,42 @@ impl Default for Mat {
 }
 
 impl Mat {
-  pub const IDENTITY: Mat = Mat { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+  pub const IDENTITY: Mat = Mat {
+    a: 1.0,
+    b: 0.0,
+    c: 0.0,
+    d: 1.0,
+    e: 0.0,
+    f: 0.0,
+  };
 
   pub fn translate(x: f64, y: f64) -> Mat {
-    Mat { e: x, f: y, ..Mat::IDENTITY }
+    Mat {
+      e: x,
+      f: y,
+      ..Mat::IDENTITY
+    }
   }
 
   pub fn scale(sx: f64, sy: f64) -> Mat {
-    Mat { a: sx, d: sy, ..Mat::IDENTITY }
+    Mat {
+      a: sx,
+      d: sy,
+      ..Mat::IDENTITY
+    }
   }
 
   pub fn rotate_deg(deg: f64) -> Mat {
     let r = deg.to_radians();
     let (s, c) = r.sin_cos();
-    Mat { a: c, b: s, c: -s, d: c, e: 0.0, f: 0.0 }
+    Mat {
+      a: c,
+      b: s,
+      c: -s,
+      d: c,
+      e: 0.0,
+      f: 0.0,
+    }
   }
 
   /// `self * other` - applies `other` first, then `self`.

@@ -51,7 +51,11 @@ pub fn wrap_in_frame(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen, kind: 
     y: tl.y,
     width: abs.width.max(1.0),
     height: abs.height.max(1.0),
-    fills: if kind == NodeType::Frame { vec![Paint::solid("#FFFFFF")] } else { vec![] },
+    fills: if kind == NodeType::Frame {
+      vec![Paint::solid("#FFFFFF")]
+    } else {
+      vec![]
+    },
     ..Default::default()
   };
   doc.insert(frame, parent.as_deref(), &page, index);
@@ -73,10 +77,9 @@ pub fn ungroup(doc: &mut Document, id: &str) -> Vec<NodeId> {
   if !n.kind.is_container() || n.kind == NodeType::Instance {
     return vec![];
   }
-  let mut index = doc.index_in_parent(id).unwrap_or(0);
-  for c in &n.children {
+  let start = doc.index_in_parent(id).unwrap_or(0);
+  for (index, c) in (start..).zip(n.children.iter()) {
     doc.reparent(c, n.parent.as_deref(), Some(index), true);
-    index += 1;
   }
   doc.remove(id);
   n.children
@@ -197,7 +200,11 @@ pub fn distribute(doc: &mut Document, ids: &[NodeId], horizontal: bool) {
   let first = items.first().unwrap().1;
   let last = items.last().unwrap().1;
   let total: f64 = items.iter().map(|(_, r)| if horizontal { r.width } else { r.height }).sum();
-  let span = if horizontal { last.right() - first.x } else { last.bottom() - first.y };
+  let span = if horizontal {
+    last.right() - first.x
+  } else {
+    last.bottom() - first.y
+  };
   let gap = (span - total) / (items.len() as f64 - 1.0);
   let mut cursor = if horizontal { first.x } else { first.y };
   for (id, r) in &items {
@@ -228,7 +235,9 @@ pub fn reorder(doc: &mut Document, ids: &[NodeId], to: ReorderTo) {
   for id in ids {
     let Some(n) = doc.get(&id).cloned() else { continue };
     let siblings = doc.siblings_of(&id);
-    let Some(i) = siblings.iter().position(|s| *s == id) else { continue };
+    let Some(i) = siblings.iter().position(|s| *s == id) else {
+      continue;
+    };
     let len = siblings.len();
     let target = match to {
       ReorderTo::Front => len - 1,
@@ -281,7 +290,12 @@ pub fn flip(doc: &mut Document, ids: &[NodeId], horizontal: bool) {
 
 /// Default node for a drawing tool.
 pub fn default_node(kind: NodeType, id: String, name: String) -> Node {
-  let mut n = Node { id, kind, name, ..Default::default() };
+  let mut n = Node {
+    id,
+    kind,
+    name,
+    ..Default::default()
+  };
   match kind {
     NodeType::Frame | NodeType::Component => {
       n.fills = vec![Paint::solid("#FFFFFF")];
@@ -290,7 +304,10 @@ pub fn default_node(kind: NodeType, id: String, name: String) -> Node {
     NodeType::Rectangle | NodeType::Ellipse | NodeType::Polygon | NodeType::Star => {
       n.fills = vec![Paint::solid("#D9D9D9")];
       if kind != NodeType::Rectangle && kind != NodeType::Ellipse {
-        n.shape = Some(ShapeProps { point_count: if kind == NodeType::Star { 5 } else { 3 }, ..Default::default() });
+        n.shape = Some(ShapeProps {
+          point_count: if kind == NodeType::Star { 5 } else { 3 },
+          ..Default::default()
+        });
       }
     }
     NodeType::Line => {
@@ -344,8 +361,32 @@ mod tests {
     let mut gen = IdGen::new(9);
     let mut doc = new_document(&mut gen, "t");
     let page = doc.pages[0].id.clone();
-    doc.insert(Node { id: "a".into(), x: 10.0, y: 10.0, width: 20.0, height: 20.0, ..Default::default() }, None, &page, None);
-    doc.insert(Node { id: "b".into(), x: 50.0, y: 40.0, width: 20.0, height: 20.0, ..Default::default() }, None, &page, None);
+    doc.insert(
+      Node {
+        id: "a".into(),
+        x: 10.0,
+        y: 10.0,
+        width: 20.0,
+        height: 20.0,
+        ..Default::default()
+      },
+      None,
+      &page,
+      None,
+    );
+    doc.insert(
+      Node {
+        id: "b".into(),
+        x: 50.0,
+        y: 40.0,
+        width: 20.0,
+        height: 20.0,
+        ..Default::default()
+      },
+      None,
+      &page,
+      None,
+    );
     let g = group(&mut doc, &["a".into(), "b".into()], &mut gen).unwrap();
     let gn = doc.get(&g).unwrap();
     assert_eq!((gn.x, gn.y, gn.width, gn.height), (10.0, 10.0, 60.0, 50.0));
@@ -362,7 +403,18 @@ mod tests {
     let mut doc = new_document(&mut gen, "t");
     let page = doc.pages[0].id.clone();
     for (id, x) in [("a", 0.0), ("b", 10.0), ("c", 100.0)] {
-      doc.insert(Node { id: id.into(), x, width: 10.0, height: 10.0, ..Default::default() }, None, &page, None);
+      doc.insert(
+        Node {
+          id: id.into(),
+          x,
+          width: 10.0,
+          height: 10.0,
+          ..Default::default()
+        },
+        None,
+        &page,
+        None,
+      );
     }
     distribute(&mut doc, &["a".into(), "b".into(), "c".into()], true);
     assert_eq!(doc.get("b").unwrap().x, 50.0);

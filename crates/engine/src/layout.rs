@@ -1,9 +1,7 @@
 //! Auto layout, hug/fill sizing, text auto-resize, group bounds and constraints.
 
 use crate::geom::Rect;
-use crate::model::{
-  Align, ConstraintH, ConstraintV, Document, LayoutDirection, NodeId, NodeType, Sizing, TextAutoResize,
-};
+use crate::model::{Align, ConstraintH, ConstraintV, Document, LayoutDirection, NodeId, NodeType, Sizing, TextAutoResize};
 use crate::text::{layout_for_node, TextMeasurer};
 
 /// Recomputes derived geometry for every page.
@@ -73,7 +71,12 @@ fn parent_has_layout(doc: &Document, id: &str) -> bool {
 pub fn normalize_group(doc: &mut Document, id: &str) {
   let Some(g) = doc.get(id) else { return };
   let children = g.children.clone();
-  let bounds = Rect::union_all(children.iter().filter_map(|c| doc.get(c)).map(|c| doc.local_matrix(c).bounds_of(c.width, c.height)));
+  let bounds = Rect::union_all(
+    children
+      .iter()
+      .filter_map(|c| doc.get(c))
+      .map(|c| doc.local_matrix(c).bounds_of(c.width, c.height)),
+  );
   let Some(b) = bounds else { return };
   if b.x != 0.0 || b.y != 0.0 {
     for c in &children {
@@ -108,7 +111,11 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
   } else {
     (al.padding_top, al.padding_bottom, al.padding_left, al.padding_right)
   };
-  let (main_sizing, cross_sizing) = if horizontal { (frame.sizing_h, frame.sizing_v) } else { (frame.sizing_v, frame.sizing_h) };
+  let (main_sizing, cross_sizing) = if horizontal {
+    (frame.sizing_h, frame.sizing_v)
+  } else {
+    (frame.sizing_v, frame.sizing_h)
+  };
   let flow: Vec<NodeId> = frame
     .children
     .iter()
@@ -119,12 +126,26 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
   let item_of = |doc: &Document, cid: &str| -> Item {
     let c = doc.get(cid).unwrap();
     let (main, counter) = if horizontal { (c.width, c.height) } else { (c.height, c.width) };
-    let (sm, sc) = if horizontal { (c.sizing_h, c.sizing_v) } else { (c.sizing_v, c.sizing_h) };
-    Item { id: cid.to_string(), main, counter, fill_main: sm == Sizing::Fill, fill_counter: sc == Sizing::Fill }
+    let (sm, sc) = if horizontal {
+      (c.sizing_h, c.sizing_v)
+    } else {
+      (c.sizing_v, c.sizing_h)
+    };
+    Item {
+      id: cid.to_string(),
+      main,
+      counter,
+      fill_main: sm == Sizing::Fill,
+      fill_counter: sc == Sizing::Fill,
+    }
   };
   let mut items: Vec<Item> = flow.iter().map(|c| item_of(doc, c)).collect();
   let n = items.len();
-  let gap_total = if n > 1 && al.primary_align != Align::SpaceBetween { al.gap * (n as f64 - 1.0) } else { 0.0 };
+  let gap_total = if n > 1 && al.primary_align != Align::SpaceBetween {
+    al.gap * (n as f64 - 1.0)
+  } else {
+    0.0
+  };
 
   // Main axis frame size.
   let mut main_size = if horizontal { frame.width } else { frame.height };
@@ -182,8 +203,12 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
     Align::Center => (pad_main_start + free / 2.0, al.gap),
     Align::End => (pad_main_start + free, al.gap),
     Align::SpaceBetween => {
-      let g = if n > 1 { (inner_main - items.iter().map(|i| i.main).sum::<f64>()) / (n as f64 - 1.0) } else { 0.0 };
-      (pad_main_start + if n == 1 { 0.0 } else { 0.0 }, g)
+      let g = if n > 1 {
+        (inner_main - items.iter().map(|i| i.main).sum::<f64>()) / (n as f64 - 1.0)
+      } else {
+        0.0
+      };
+      (pad_main_start, g)
     }
   };
   for it in &items {
@@ -337,14 +362,23 @@ mod tests {
     let frame = Node {
       id: "f".into(),
       kind: NodeType::Frame,
-      layout: Some(AutoLayout { direction: LayoutDirection::Horizontal, gap: 10.0, ..Default::default() }),
+      layout: Some(AutoLayout {
+        direction: LayoutDirection::Horizontal,
+        gap: 10.0,
+        ..Default::default()
+      }),
       sizing_h: Sizing::Hug,
       sizing_v: Sizing::Hug,
       ..Default::default()
     };
     doc.insert(frame, None, &page, None);
     for (i, w) in [50.0, 30.0].iter().enumerate() {
-      let n = Node { id: format!("c{i}"), width: *w, height: 20.0 + i as f64 * 10.0, ..Default::default() };
+      let n = Node {
+        id: format!("c{i}"),
+        width: *w,
+        height: 20.0 + i as f64 * 10.0,
+        ..Default::default()
+      };
       doc.insert(n, Some("f"), &page, None);
     }
     relayout_all(&mut doc, &HeuristicMeasurer);
@@ -362,12 +396,23 @@ mod tests {
       kind: NodeType::Frame,
       width: 220.0,
       height: 100.0,
-      layout: Some(AutoLayout { direction: LayoutDirection::Horizontal, gap: 0.0, padding_left: 10.0, padding_right: 10.0, ..Default::default() }),
+      layout: Some(AutoLayout {
+        direction: LayoutDirection::Horizontal,
+        gap: 0.0,
+        padding_left: 10.0,
+        padding_right: 10.0,
+        ..Default::default()
+      }),
       ..Default::default()
     };
     doc.insert(frame, None, &page, None);
     for i in 0..2 {
-      let n = Node { id: format!("c{i}"), sizing_h: Sizing::Fill, sizing_v: Sizing::Fill, ..Default::default() };
+      let n = Node {
+        id: format!("c{i}"),
+        sizing_h: Sizing::Fill,
+        sizing_v: Sizing::Fill,
+        ..Default::default()
+      };
       doc.insert(n, Some("f"), &page, None);
     }
     relayout_all(&mut doc, &HeuristicMeasurer);
@@ -379,8 +424,24 @@ mod tests {
   #[test]
   fn constraints_right() {
     let (mut doc, page) = setup();
-    doc.insert(Node { id: "f".into(), kind: NodeType::Frame, width: 200.0, height: 200.0, ..Default::default() }, None, &page, None);
-    let mut c = Node { id: "c".into(), x: 150.0, width: 40.0, ..Default::default() };
+    doc.insert(
+      Node {
+        id: "f".into(),
+        kind: NodeType::Frame,
+        width: 200.0,
+        height: 200.0,
+        ..Default::default()
+      },
+      None,
+      &page,
+      None,
+    );
+    let mut c = Node {
+      id: "c".into(),
+      x: 150.0,
+      width: 40.0,
+      ..Default::default()
+    };
     c.constraints.horizontal = ConstraintH::Right;
     doc.insert(c, Some("f"), &page, None);
     doc.get_mut("f").unwrap().width = 300.0;

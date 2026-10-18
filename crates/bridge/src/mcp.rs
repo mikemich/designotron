@@ -59,7 +59,11 @@ async fn dispatch(state: &Shared, msg: Value) -> Option<Value> {
   let result = match method {
     "initialize" => {
       let requested = params["protocolVersion"].as_str().unwrap_or(SUPPORTED_VERSIONS[0]);
-      let version = if SUPPORTED_VERSIONS.contains(&requested) { requested } else { SUPPORTED_VERSIONS[0] };
+      let version = if SUPPORTED_VERSIONS.contains(&requested) {
+        requested
+      } else {
+        SUPPORTED_VERSIONS[0]
+      };
       Ok(json!({
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },

@@ -39,7 +39,12 @@ pub struct ClaudeInfo {
 
 pub async fn detect() -> ClaudeInfo {
   let bin = std::env::var(CLAUDE_BIN_ENV).unwrap_or_else(|_| "claude".into());
-  let probe = Command::new(&bin).arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).output();
+  let probe = Command::new(&bin)
+    .arg("--version")
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .output();
   let version = match tokio::time::timeout(Duration::from_secs(10), probe).await {
     Ok(Ok(out)) if out.status.success() => {
       let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -66,7 +71,10 @@ impl ChatControl {
 /// Runs one chat turn and streams Claude Code's `stream-json` events to the editor.
 pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
   if state.claude.version.is_none() {
-    state.editor.send(json!({ "type": "chat_error", "message": "Claude Code CLI not found. Install it and sign in (`claude`, then /login)." })).await;
+    state
+      .editor
+      .send(json!({ "type": "chat_error", "message": "Claude Code CLI not found. Install it and sign in (`claude`, then /login)." }))
+      .await;
     return;
   }
   state.chat.cancel().await;
@@ -74,7 +82,10 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
   let mcp_config = json!({ "mcpServers": { "designotron": { "type": "http", "url": format!("http://127.0.0.1:{}/mcp", state.port) } } });
   let config_path = std::env::temp_dir().join(format!("designotron-mcp-{}.json", state.port));
   if let Err(e) = tokio::fs::write(&config_path, mcp_config.to_string()).await {
-    state.editor.send(json!({ "type": "chat_error", "message": format!("could not write MCP config: {e}") })).await;
+    state
+      .editor
+      .send(json!({ "type": "chat_error", "message": format!("could not write MCP config: {e}") }))
+      .await;
     return;
   }
 
@@ -92,7 +103,8 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
   );
 
   let mut cmd = Command::new(&state.claude.bin);
-  cmd.arg("-p")
+  cmd
+    .arg("-p")
     .arg(&prompt)
     .args(["--output-format", "stream-json", "--verbose", "--include-partial-messages"])
     .arg("--mcp-config")
@@ -106,12 +118,20 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
   if let Some(s) = &session {
     cmd.arg("--resume").arg(s);
   }
-  cmd.current_dir(&state.workspace).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+  cmd
+    .current_dir(&state.workspace)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .kill_on_drop(true);
 
   let mut child = match cmd.spawn() {
     Ok(c) => c,
     Err(e) => {
-      state.editor.send(json!({ "type": "chat_error", "message": format!("could not start Claude Code: {e}") })).await;
+      state
+        .editor
+        .send(json!({ "type": "chat_error", "message": format!("could not start Claude Code: {e}") }))
+        .await;
       return;
     }
   };
@@ -131,7 +151,9 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
   if let Some(out) = stdout {
     let mut lines = BufReader::new(out).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-      let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
+      let Ok(event) = serde_json::from_str::<Value>(&line) else {
+        continue;
+      };
       if let Some(s) = event["session_id"].as_str() {
         session_id = Some(s.to_string());
       }
@@ -146,8 +168,20 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
   let stderr_text = stderr_task.await.unwrap_or_default();
   match status {
     Some(s) if !s.success() => {
-      let tail: String = stderr_text.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-      let message = if tail.is_empty() { format!("Claude Code exited with {s}") } else { tail };
+      let tail: String = stderr_text
+        .lines()
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+      let message = if tail.is_empty() {
+        format!("Claude Code exited with {s}")
+      } else {
+        tail
+      };
       state.editor.send(json!({ "type": "chat_error", "message": message })).await;
     }
     None => {

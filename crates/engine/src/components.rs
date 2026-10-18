@@ -18,7 +18,21 @@ use crate::patch;
 pub const ROOT_KEY: &str = "__root";
 
 /// Root keys that position an instance rather than override it.
-const ROOT_LOCAL_KEYS: &[&str] = &["x", "y", "rotation", "name", "visible", "locked", "flipX", "flipY", "interactions", "constraints", "absolutePosition", "sizingH", "sizingV"];
+const ROOT_LOCAL_KEYS: &[&str] = &[
+  "x",
+  "y",
+  "rotation",
+  "name",
+  "visible",
+  "locked",
+  "flipX",
+  "flipY",
+  "interactions",
+  "constraints",
+  "absolutePosition",
+  "sizingH",
+  "sizingV",
+];
 
 /// Fingerprint of a component subtree; changes whenever the component is edited.
 pub fn fingerprint(doc: &Document, comp_id: &str) -> u64 {
@@ -71,7 +85,15 @@ pub fn create_component(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) -> 
 }
 
 /// Places a new instance of `comp_id`.
-pub fn create_instance(doc: &mut Document, comp_id: &str, parent: Option<&str>, page: &str, x: f64, y: f64, gen: &mut IdGen) -> Option<NodeId> {
+pub fn create_instance(
+  doc: &mut Document,
+  comp_id: &str,
+  parent: Option<&str>,
+  page: &str,
+  x: f64,
+  y: f64,
+  gen: &mut IdGen,
+) -> Option<NodeId> {
   let comp = doc.get(comp_id)?.clone();
   if comp.kind != NodeType::Component {
     return None;
@@ -85,7 +107,10 @@ pub fn create_instance(doc: &mut Document, comp_id: &str, parent: Option<&str>, 
     y,
     width: comp.width,
     height: comp.height,
-    instance: Some(InstanceInfo { component_id: comp_id.to_string(), overrides: BTreeMap::new() }),
+    instance: Some(InstanceInfo {
+      component_id: comp_id.to_string(),
+      overrides: BTreeMap::new(),
+    }),
     ..Default::default()
   };
   doc.insert(inst, parent, page, None);
@@ -162,7 +187,11 @@ pub fn sync_instance(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
   doc.nodes.insert(root.id.clone(), root);
 
   for (mid, p) in &info.overrides {
-    let target = if mid == ROOT_KEY { Some(inst_id.to_string()) } else { map.get(mid).cloned() };
+    let target = if mid == ROOT_KEY {
+      Some(inst_id.to_string())
+    } else {
+      map.get(mid).cloned()
+    };
     if let Some(t) = target {
       if let Some(n) = doc.get_mut(&t) {
         let _ = patch::apply(n, p);
@@ -174,7 +203,11 @@ pub fn sync_instance(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
 /// Records a property edit made on a node that lives in an instance.
 pub fn record_override(doc: &mut Document, node_id: &str, p: &Value) {
   let Some(n) = doc.get(node_id) else { return };
-  let outer = doc.ancestors(node_id).into_iter().rev().find(|a| doc.get(a).map(|x| x.kind == NodeType::Instance).unwrap_or(false));
+  let outer = doc
+    .ancestors(node_id)
+    .into_iter()
+    .rev()
+    .find(|a| doc.get(a).map(|x| x.kind == NodeType::Instance).unwrap_or(false));
   let (inst_id, key, clean) = if n.kind == NodeType::Instance && outer.is_none() {
     let mut clean = patch::sanitize(p);
     if let Value::Object(m) = &mut clean {
@@ -230,7 +263,11 @@ pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mu
 
 /// Groups components into a component set and derives variant properties from names.
 pub fn combine_as_variants(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) -> Option<NodeId> {
-  let comps: Vec<NodeId> = ids.iter().filter(|i| doc.get(i).map(|n| n.kind == NodeType::Component).unwrap_or(false)).cloned().collect();
+  let comps: Vec<NodeId> = ids
+    .iter()
+    .filter(|i| doc.get(i).map(|n| n.kind == NodeType::Component).unwrap_or(false))
+    .cloned()
+    .collect();
   if comps.len() < 2 {
     return None;
   }
@@ -249,7 +286,11 @@ pub fn combine_as_variants(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) 
       c.component.get_or_insert_with(Default::default).variant_props = props;
     }
   }
-  let base = comps.first().and_then(|c| doc.get(c)).map(|c| c.name.split(',').next().unwrap_or("").to_string()).unwrap_or_default();
+  let base = comps
+    .first()
+    .and_then(|c| doc.get(c))
+    .map(|c| c.name.split(',').next().unwrap_or("").to_string())
+    .unwrap_or_default();
   if let Some(set) = doc.get_mut(&set_id) {
     set.x -= pad;
     set.y -= pad;
@@ -287,7 +328,13 @@ pub fn find_variant(doc: &Document, comp_id: &str, prop: &str, value: &str) -> O
   set
     .children
     .iter()
-    .find(|c| doc.get(c).and_then(|n| n.component.as_ref()).map(|ci| ci.variant_props == want).unwrap_or(false))
+    .find(|c| {
+      doc
+        .get(c)
+        .and_then(|n| n.component.as_ref())
+        .map(|ci| ci.variant_props == want)
+        .unwrap_or(false)
+    })
     .cloned()
 }
 
@@ -302,8 +349,27 @@ mod tests {
     let mut gen = IdGen::new(3);
     let mut doc = new_document(&mut gen, "t");
     let page = doc.pages[0].id.clone();
-    doc.insert(Node { id: "c".into(), kind: NodeType::Frame, width: 100.0, height: 40.0, ..Default::default() }, None, &page, None);
-    let label = Node { id: "t".into(), kind: NodeType::Text, text: Some(crate::model::TextProps { characters: "Button".into(), ..Default::default() }), ..Default::default() };
+    doc.insert(
+      Node {
+        id: "c".into(),
+        kind: NodeType::Frame,
+        width: 100.0,
+        height: 40.0,
+        ..Default::default()
+      },
+      None,
+      &page,
+      None,
+    );
+    let label = Node {
+      id: "t".into(),
+      kind: NodeType::Text,
+      text: Some(crate::model::TextProps {
+        characters: "Button".into(),
+        ..Default::default()
+      }),
+      ..Default::default()
+    };
     doc.insert(label, Some("c"), &page, None);
     let comp = create_component(&mut doc, &["c".into()], &mut gen).unwrap();
     let inst = create_instance(&mut doc, &comp, None, &page, 300.0, 0.0, &mut gen).unwrap();

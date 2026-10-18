@@ -3,8 +3,7 @@
 
 use crate::geom::{fmt, Mat};
 use crate::model::{
-  Document, Effect, EffectType, Node, NodeId, NodeType, Paint, ScaleMode, StrokeAlign, StrokeCap, TextAlignH, TextAlignV,
-  TextDecoration,
+  Document, Effect, EffectType, Node, NodeId, NodeType, Paint, ScaleMode, StrokeAlign, StrokeCap, TextAlignH, TextAlignV, TextDecoration,
 };
 use crate::shapes;
 use crate::text::{layout_for_node, TextMeasurer};
@@ -32,7 +31,13 @@ struct Renderer<'a> {
 
 /// Renders all roots of a page as SVG markup (`<defs>` + content), page coordinates.
 pub fn render_page(doc: &Document, page: &str, m: &dyn TextMeasurer, opts: RenderOptions) -> String {
-  let mut r = Renderer { doc, m, opts, defs: String::new(), uid: 0 };
+  let mut r = Renderer {
+    doc,
+    m,
+    opts,
+    defs: String::new(),
+    uid: 0,
+  };
   let roots = doc.page(page).map(|p| p.children.clone()).unwrap_or_default();
   let body: String = roots.iter().map(|id| r.node(id, None)).collect();
   format!("<defs>{}</defs>{}", r.defs, body)
@@ -42,7 +47,16 @@ pub fn render_page(doc: &Document, page: &str, m: &dyn TextMeasurer, opts: Rende
 pub fn export_svg(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
   let Some(n) = doc.get(id) else { return String::new() };
   let b = doc.abs_bounds(id);
-  let mut r = Renderer { doc, m, opts: RenderOptions { mode: Mode::Export, hidden: &[] }, defs: String::new(), uid: 0 };
+  let mut r = Renderer {
+    doc,
+    m,
+    opts: RenderOptions {
+      mode: Mode::Export,
+      hidden: &[],
+    },
+    defs: String::new(),
+    uid: 0,
+  };
   let place = Mat::translate(-b.x, -b.y).mul(&doc.parent_matrix(id));
   let body = r.node(&n.id, Some(place));
   format!(
@@ -106,13 +120,19 @@ impl<'a> Renderer<'a> {
       NodeType::Group => n.children.iter().map(|c| self.node(c, None)).collect(),
       NodeType::Text => self.text(n),
       k if k.is_frame_like() => {
-        let geo = Geo::Rect { w: n.width, h: n.height, r: shapes::corner_radii(n) };
+        let geo = Geo::Rect {
+          w: n.width,
+          h: n.height,
+          r: shapes::corner_radii(n),
+        };
         let mut out = self.fills(n, &geo);
         let kids: String = n.children.iter().map(|c| self.node(c, None)).collect();
         if !kids.is_empty() {
           if n.clip_content {
             let cid = self.id("clip");
-            self.defs.push_str(&format!("<clipPath id=\"{cid}\">{}</clipPath>", geo_el(&geo, "")));
+            self
+              .defs
+              .push_str(&format!("<clipPath id=\"{cid}\">{}</clipPath>", geo_el(&geo, "")));
             out.push_str(&format!("<g clip-path=\"url(#{cid})\">{kids}</g>"));
           } else {
             out.push_str(&kids);
@@ -133,7 +153,9 @@ impl<'a> Renderer<'a> {
   fn geometry(&self, n: &Node) -> Geo {
     match n.kind {
       NodeType::Ellipse => Geo::Ellipse { w: n.width, h: n.height },
-      NodeType::Polygon | NodeType::Star => Geo::Path { d: shapes::points_path(&shapes::polygon_points(n)) },
+      NodeType::Polygon | NodeType::Star => Geo::Path {
+        d: shapes::points_path(&shapes::polygon_points(n)),
+      },
       NodeType::Line => Geo::Line { w: n.width },
       NodeType::Vector => match n.vector.as_ref().and_then(|v| v.raw.clone()) {
         Some(raw) => {
@@ -143,12 +165,20 @@ impl<'a> Renderer<'a> {
           Geo::Raw {
             d: raw.d,
             transform: format!("matrix({} 0 0 {} {} {})", fmt(sx), fmt(sy), fmt(-vx * sx), fmt(-vy * sy)),
-            rule: if raw.fill_rule.is_empty() { "nonzero".into() } else { raw.fill_rule },
+            rule: if raw.fill_rule.is_empty() {
+              "nonzero".into()
+            } else {
+              raw.fill_rule
+            },
           }
         }
         None => Geo::Path { d: shapes::vector_d(n) },
       },
-      _ => Geo::Rect { w: n.width, h: n.height, r: shapes::corner_radii(n) },
+      _ => Geo::Rect {
+        w: n.width,
+        h: n.height,
+        r: shapes::corner_radii(n),
+      },
     }
   }
 
@@ -173,7 +203,10 @@ impl<'a> Renderer<'a> {
     let dash = if n.stroke_dash.is_empty() {
       String::new()
     } else {
-      format!(" stroke-dasharray=\"{}\"", n.stroke_dash.iter().map(|v| fmt(*v)).collect::<Vec<_>>().join(" "))
+      format!(
+        " stroke-dasharray=\"{}\"",
+        n.stroke_dash.iter().map(|v| fmt(*v)).collect::<Vec<_>>().join(" ")
+      )
     };
     let caps = self.line_caps(n);
     for p in n.strokes.iter().filter(|p| p.visible()) {
@@ -181,10 +214,18 @@ impl<'a> Renderer<'a> {
       let stroke = format!(" fill=\"none\" stroke=\"{paint}\"{dash}");
       let el = match (geo, n.stroke_align) {
         (Geo::Rect { w, h, r }, StrokeAlign::Inside) => {
-          format!("<path d=\"{}\" stroke-width=\"{}\"{stroke}/>", shapes::rounded_rect_path(*w, *h, *r, sw / 2.0), fmt(sw))
+          format!(
+            "<path d=\"{}\" stroke-width=\"{}\"{stroke}/>",
+            shapes::rounded_rect_path(*w, *h, *r, sw / 2.0),
+            fmt(sw)
+          )
         }
         (Geo::Rect { w, h, r }, StrokeAlign::Outside) => {
-          format!("<path d=\"{}\" stroke-width=\"{}\"{stroke}/>", shapes::rounded_rect_path(*w, *h, *r, -sw / 2.0), fmt(sw))
+          format!(
+            "<path d=\"{}\" stroke-width=\"{}\"{stroke}/>",
+            shapes::rounded_rect_path(*w, *h, *r, -sw / 2.0),
+            fmt(sw)
+          )
         }
         (Geo::Ellipse { w, h }, align) if align != StrokeAlign::Center => {
           let off = if align == StrokeAlign::Inside { sw / 2.0 } else { -sw / 2.0 };
@@ -199,10 +240,22 @@ impl<'a> Renderer<'a> {
         }
         (Geo::Path { .. } | Geo::Raw { .. }, StrokeAlign::Inside) if n.kind != NodeType::Vector || is_closed(n) => {
           let cid = self.id("sclip");
-          self.defs.push_str(&format!("<clipPath id=\"{cid}\">{}</clipPath>", geo_el(geo, "")));
-          format!("<g clip-path=\"url(#{cid})\">{}</g>", geo_el_stroke(geo, &format!(" stroke-width=\"{}\"{stroke}", fmt(sw * 2.0))))
+          self
+            .defs
+            .push_str(&format!("<clipPath id=\"{cid}\">{}</clipPath>", geo_el(geo, "")));
+          format!(
+            "<g clip-path=\"url(#{cid})\">{}</g>",
+            geo_el_stroke(geo, &format!(" stroke-width=\"{}\"{stroke}", fmt(sw * 2.0)))
+          )
         }
-        _ => geo_el_stroke(geo, &format!(" stroke-width=\"{}\" stroke-linecap=\"{}\" stroke-linejoin=\"round\"{stroke}{caps}", fmt(sw), linecap(n))),
+        _ => geo_el_stroke(
+          geo,
+          &format!(
+            " stroke-width=\"{}\" stroke-linecap=\"{}\" stroke-linejoin=\"round\"{stroke}{caps}",
+            fmt(sw),
+            linecap(n)
+          ),
+        ),
       };
       out.push_str(&el);
     }
@@ -222,12 +275,25 @@ impl<'a> Renderer<'a> {
     let mut out = String::new();
     for (cap, attr) in [(shape.start_cap, "marker-start"), (shape.end_cap, "marker-end")] {
       let shape_el = match cap {
-        StrokeCap::Arrow => "<path d=\"M0 0L10 5L0 10\" fill=\"none\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+        StrokeCap::Arrow => {
+          "<path d=\"M0 0L10 5L0 10\" fill=\"none\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>"
+        }
         StrokeCap::Circle => "<circle cx=\"5\" cy=\"5\" r=\"3\"/>",
         _ => continue,
       };
       let mid = self.id("mk");
-      let colored = shape_el.replace("/>", &format!(" stroke=\"{}\" {}/>", color::css_with_opacity(&color, 1.0), if cap == StrokeCap::Circle { format!("fill=\"{}\"", color::css_with_opacity(&color, 1.0)) } else { String::new() }));
+      let colored = shape_el.replace(
+        "/>",
+        &format!(
+          " stroke=\"{}\" {}/>",
+          color::css_with_opacity(&color, 1.0),
+          if cap == StrokeCap::Circle {
+            format!("fill=\"{}\"", color::css_with_opacity(&color, 1.0))
+          } else {
+            String::new()
+          }
+        ),
+      );
       self.defs.push_str(&format!(
         "<marker id=\"{mid}\" viewBox=\"0 0 10 10\" refX=\"{}\" refY=\"5\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto-start-reverse\">{colored}</marker>",
         if cap == StrokeCap::Arrow { "9" } else { "5" }
@@ -259,10 +325,15 @@ impl<'a> Renderer<'a> {
       }
       Paint::RadialGradient { stops, opacity, .. } => {
         let gid = self.id("rg");
-        self.defs.push_str(&format!("<radialGradient id=\"{gid}\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\">{}</radialGradient>", stops_svg(stops, *opacity)));
+        self.defs.push_str(&format!(
+          "<radialGradient id=\"{gid}\" cx=\"0.5\" cy=\"0.5\" r=\"0.5\">{}</radialGradient>",
+          stops_svg(stops, *opacity)
+        ));
         format!("url(#{gid})")
       }
-      Paint::Image { src, scale_mode, opacity, .. } => {
+      Paint::Image {
+        src, scale_mode, opacity, ..
+      } => {
         let pid = self.id("img");
         let (par, pw, ph) = match scale_mode {
           ScaleMode::Fill => ("xMidYMid slice", w, h),
@@ -283,7 +354,11 @@ impl<'a> Renderer<'a> {
   }
 
   fn effects_filter(&mut self, n: &Node) -> Option<String> {
-    let effects: Vec<&Effect> = n.effects.iter().filter(|e| e.visible && e.kind != EffectType::BackgroundBlur).collect();
+    let effects: Vec<&Effect> = n
+      .effects
+      .iter()
+      .filter(|e| e.visible && e.kind != EffectType::BackgroundBlur)
+      .collect();
     if effects.is_empty() {
       return None;
     }
@@ -298,7 +373,10 @@ impl<'a> Renderer<'a> {
         EffectType::DropShadow => {
           let r = format!("ds{i}");
           let spread = if e.spread > 0.0 {
-            format!("<feMorphology in=\"SourceAlpha\" operator=\"dilate\" radius=\"{}\" result=\"{r}a\"/>", fmt(e.spread))
+            format!(
+              "<feMorphology in=\"SourceAlpha\" operator=\"dilate\" radius=\"{}\" result=\"{r}a\"/>",
+              fmt(e.spread)
+            )
           } else {
             format!("<feOffset in=\"SourceAlpha\" dx=\"0\" dy=\"0\" result=\"{r}a\"/>")
           };
@@ -333,7 +411,10 @@ impl<'a> Renderer<'a> {
     }
     f.push_str("</feMerge>");
     if let Some(blur) = effects.iter().find(|e| e.kind == EffectType::LayerBlur) {
-      f.push_str(&format!("<feGaussianBlur in=\"merged\" stdDeviation=\"{}\"/>", fmt(blur.blur / 2.0)));
+      f.push_str(&format!(
+        "<feGaussianBlur in=\"merged\" stdDeviation=\"{}\"/>",
+        fmt(blur.blur / 2.0)
+      ));
     }
     f.push_str("</filter>");
     self.defs.push_str(&f);
@@ -343,7 +424,12 @@ impl<'a> Renderer<'a> {
   fn text(&mut self, n: &Node) -> String {
     let Some(t) = n.text.as_ref() else { return String::new() };
     let lay = layout_for_node(t, n.width, self.m);
-    let fill = n.fills.iter().find(|p| p.visible()).map(|p| self.paint(p, n.width, n.height)).unwrap_or_else(|| "none".into());
+    let fill = n
+      .fills
+      .iter()
+      .find(|p| p.visible())
+      .map(|p| self.paint(p, n.width, n.height))
+      .unwrap_or_else(|| "none".into());
     let lh = lay.line_height;
     let offset = match t.align_v {
       TextAlignV::Top => 0.0,
@@ -378,7 +464,10 @@ impl<'a> Renderer<'a> {
 }
 
 fn is_closed(n: &Node) -> bool {
-  n.vector.as_ref().map(|v| v.raw.is_some() || v.subpaths.iter().all(|s| s.closed)).unwrap_or(false)
+  n.vector
+    .as_ref()
+    .map(|v| v.raw.is_some() || v.subpaths.iter().all(|s| s.closed))
+    .unwrap_or(false)
 }
 
 fn linecap(n: &Node) -> &'static str {
@@ -390,12 +479,24 @@ fn linecap(n: &Node) -> &'static str {
 }
 
 fn geo_el(geo: &Geo, fill: &str) -> String {
-  let fill_attr = if fill.is_empty() { String::new() } else { format!(" fill=\"{fill}\"") };
+  let fill_attr = if fill.is_empty() {
+    String::new()
+  } else {
+    format!(" fill=\"{fill}\"")
+  };
   match geo {
     Geo::Rect { w, h, r } => {
       if r.iter().all(|v| *v == r[0]) {
-        let rx = if r[0] > 0.0 { format!(" rx=\"{}\"", fmt(r[0])) } else { String::new() };
-        format!("<rect width=\"{}\" height=\"{}\"{rx}{fill_attr}/>", fmt(w.max(0.0)), fmt(h.max(0.0)))
+        let rx = if r[0] > 0.0 {
+          format!(" rx=\"{}\"", fmt(r[0]))
+        } else {
+          String::new()
+        };
+        format!(
+          "<rect width=\"{}\" height=\"{}\"{rx}{fill_attr}/>",
+          fmt(w.max(0.0)),
+          fmt(h.max(0.0))
+        )
       } else {
         format!("<path d=\"{}\"{fill_attr}/>", shapes::rounded_rect_path(*w, *h, *r, 0.0))
       }
@@ -415,7 +516,10 @@ fn geo_el(geo: &Geo, fill: &str) -> String {
 
 fn geo_el_stroke(geo: &Geo, stroke_attrs: &str) -> String {
   match geo {
-    Geo::Raw { d, transform, .. } => format!("<path d=\"{}\" transform=\"{transform}\" vector-effect=\"non-scaling-stroke\"{stroke_attrs}/>", esc(d)),
+    Geo::Raw { d, transform, .. } => format!(
+      "<path d=\"{}\" transform=\"{transform}\" vector-effect=\"non-scaling-stroke\"{stroke_attrs}/>",
+      esc(d)
+    ),
     _ => geo_el(geo, "").replace("/>", &format!("{stroke_attrs}/>")),
   }
 }
@@ -425,18 +529,32 @@ fn stops_svg(stops: &[model::GradientStop], opacity: f64) -> String {
     .iter()
     .map(|s| {
       let c = color::parse(&s.color).unwrap_or(color::Rgba::BLACK);
-      format!("<stop offset=\"{}\" stop-color=\"{}\" stop-opacity=\"{}\"/>", fmt(s.position), c.hex6(), fmt(c.a * opacity))
+      format!(
+        "<stop offset=\"{}\" stop-color=\"{}\" stop-opacity=\"{}\"/>",
+        fmt(s.position),
+        c.hex6(),
+        fmt(c.a * opacity)
+      )
     })
     .collect()
 }
 
 pub fn font_stack(family: &str) -> String {
-  let fallback = if family.to_lowercase().contains("mono") { "monospace" } else if family.contains("Playfair") { "serif" } else { "sans-serif" };
+  let fallback = if family.to_lowercase().contains("mono") {
+    "monospace"
+  } else if family.contains("Playfair") {
+    "serif"
+  } else {
+    "sans-serif"
+  };
   format!("'{family}', {fallback}")
 }
 
 pub fn esc(s: &str) -> String {
-  s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+  s.replace('&', "&amp;")
+    .replace('<', "&lt;")
+    .replace('>', "&gt;")
+    .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -456,7 +574,15 @@ mod tests {
     let mut t = crate::ops::default_node(NodeType::Text, "t".into(), "T".into());
     t.text.as_mut().unwrap().characters = "Hi <b>".into();
     doc.insert(t, Some("f"), &page, None);
-    let svg = render_page(&doc, &page, &HeuristicMeasurer, RenderOptions { mode: Mode::Canvas, hidden: &[] });
+    let svg = render_page(
+      &doc,
+      &page,
+      &HeuristicMeasurer,
+      RenderOptions {
+        mode: Mode::Canvas,
+        hidden: &[],
+      },
+    );
     assert!(svg.contains("data-id=\"f\""));
     assert!(svg.contains("clip-path"));
     assert!(svg.contains("Hi &lt;b&gt;"));

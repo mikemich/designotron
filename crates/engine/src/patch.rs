@@ -70,7 +70,10 @@ mod tests {
 
   #[test]
   fn patch_merges_nested_and_protects() {
-    let mut n = Node { id: "a".into(), ..Default::default() };
+    let mut n = Node {
+      id: "a".into(),
+      ..Default::default()
+    };
     apply(&mut n, &json!({"x": 5, "id": "evil", "text": {"characters": "hi"}})).unwrap();
     assert_eq!(n.x, 5.0);
     assert_eq!(n.id, "a");

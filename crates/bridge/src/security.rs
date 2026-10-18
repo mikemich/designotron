@@ -29,7 +29,10 @@ pub fn host_allowed(headers: &HeaderMap) -> bool {
 }
 
 fn is_local_url(origin: &str) -> bool {
-  let rest = origin.strip_prefix("http://").or_else(|| origin.strip_prefix("https://")).unwrap_or("");
+  let rest = origin
+    .strip_prefix("http://")
+    .or_else(|| origin.strip_prefix("https://"))
+    .unwrap_or("");
   let host = rest.split('/').next().unwrap_or("");
   let name = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
   matches!(name, "localhost" | "127.0.0.1" | "[::1]")

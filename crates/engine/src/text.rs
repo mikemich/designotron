@@ -69,19 +69,30 @@ pub fn layout_text(props: &TextProps, max_width: Option<f64>, m: &dyn TextMeasur
   for paragraph in text.split('\n') {
     match max_width {
       Some(w) if w > 0.0 => wrap_paragraph(paragraph, w, &font, m, &mut lines),
-      _ => lines.push(TextLine { text: paragraph.to_string(), width: m.measure(paragraph, &font) }),
+      _ => lines.push(TextLine {
+        text: paragraph.to_string(),
+        width: m.measure(paragraph, &font),
+      }),
     }
   }
   let lh = props.line_height_px();
   let paragraphs = text.split('\n').count().max(1) as f64;
   let width = lines.iter().map(|l| l.width).fold(0.0, f64::max);
   let height = lines.len().max(1) as f64 * lh + (paragraphs - 1.0) * props.paragraph_spacing;
-  TextLayout { lines, width, height, line_height: lh }
+  TextLayout {
+    lines,
+    width,
+    height,
+    line_height: lh,
+  }
 }
 
 fn wrap_paragraph(p: &str, max_w: f64, font: &FontSpec, m: &dyn TextMeasurer, out: &mut Vec<TextLine>) {
   if p.is_empty() {
-    out.push(TextLine { text: String::new(), width: 0.0 });
+    out.push(TextLine {
+      text: String::new(),
+      width: 0.0,
+    });
     return;
   }
   let mut line = String::new();
@@ -142,7 +153,10 @@ mod tests {
 
   #[test]
   fn wraps_long_text() {
-    let props = TextProps { characters: "hello world this is a long line".into(), ..Default::default() };
+    let props = TextProps {
+      characters: "hello world this is a long line".into(),
+      ..Default::default()
+    };
     let l = layout_text(&props, Some(80.0), &HeuristicMeasurer);
     assert!(l.lines.len() > 1);
     assert!(l.lines.iter().all(|x| x.width <= 80.0 + 0.01 || !x.text.contains(' ')));
@@ -150,7 +164,10 @@ mod tests {
 
   #[test]
   fn newline_splits() {
-    let props = TextProps { characters: "a\nb".into(), ..Default::default() };
+    let props = TextProps {
+      characters: "a\nb".into(),
+      ..Default::default()
+    };
     let l = layout_text(&props, None, &HeuristicMeasurer);
     assert_eq!(l.lines.len(), 2);
     assert_eq!(l.height, 2.0 * 16.0 * 1.2);
