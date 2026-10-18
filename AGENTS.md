@@ -15,7 +15,7 @@ Claude integrates in two ways, both driven by one tool layer (`crates/engine/src
   subscription is only ever used through the user's Claude Code install.
 - **API key**: the browser calls the Messages API directly with a user-supplied key.
 
-Track progress in [STATUS.md](STATUS.md). Update it in the same change whenever you finish,
+Track progress in [STATUS.md](STATUS.md) and follow the order of work in [ROADMAP.md](ROADMAP.md). Update STATUS.md in the same change whenever you finish,
 start or break something.
 
 ## Project Structure
