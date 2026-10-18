@@ -314,10 +314,12 @@ async fn main() {
   let clients = Clients::new(cfg.clients.clone());
   let (maintain, sweep) = (rooms.clone(), clients.clone());
   tokio::spawn(async move {
-    for tick in 1u64.. {
+    let mut tick = 0u32;
+    loop {
       tokio::time::sleep(Duration::from_secs(3)).await;
       maintain.maintain().await;
-      if tick % 20 == 0 {
+      tick = (tick + 1) % 20;
+      if tick == 0 {
         sweep.sweep();
       }
     }
