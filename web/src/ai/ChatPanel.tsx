@@ -148,7 +148,7 @@ export function ChatPanel() {
                   : `Bridge connected${claude?.version ? ` · Claude Code ${claude.version}` : ""}`
                 : bridgeStatus === "connecting"
                   ? "Connecting to bridge…"
-                  : "Bridge offline: run `npx designotron` on this computer"}
+                  : "Bridge offline: start it on this computer (steps below)"}
             </>
           ) : (
             <>
@@ -192,6 +192,7 @@ export function ChatPanel() {
         )}
       </div>
       <div className="chat-log" ref={logRef}>
+        {mode === "bridge" && bridgeStatus === "offline" && <BridgeSetup />}
         {items.length === 0 && (
           <>
             <div className="muted" style={{ lineHeight: 1.6 }}>
@@ -321,6 +322,58 @@ export function ChatPanel() {
         </div>
       </div>
       {menu && <Menu x={menu.x} y={menu.y} items={quickItems} onClose={() => setMenu(null)} />}
+    </div>
+  );
+}
+
+const INSTALL_CMD = "curl -fsSL https://raw.githubusercontent.com/mikemich/designotron/main/install.sh | sh";
+const RUN_CMD = "~/.local/bin/designotron";
+
+function CopyLine({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () =>
+    navigator.clipboard?.writeText(text).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => {},
+    );
+  return (
+    <div className="copy-line">
+      <code>{text}</code>
+      <button onClick={copy} title="Copy">
+        {copied ? <Check size={12} /> : "Copy"}
+      </button>
+    </div>
+  );
+}
+
+/** Shown while the bridge is unreachable: how to start it on this computer. */
+function BridgeSetup() {
+  return (
+    <div className="bridge-setup">
+      <b>Connect Claude</b>
+      <div>Claude runs through the Designotron bridge on your computer, using your Claude Code sign-in.</div>
+      <ol>
+        <li>
+          Install <a href="https://code.claude.com" target="_blank" rel="noreferrer">Claude Code</a> and sign in once: run <code>claude</code>, then <code>/login</code>.
+        </li>
+        <li>
+          Install the bridge (macOS or Linux):
+          <CopyLine text={INSTALL_CMD} />
+          On Windows, download it from{" "}
+          <a href="https://github.com/mikemich/designotron/releases/latest" target="_blank" rel="noreferrer">Releases</a>.
+        </li>
+        <li>
+          Start it and leave it running:
+          <CopyLine text={RUN_CMD} />
+        </li>
+      </ol>
+      <div className="muted">
+        This page connects on its own a few seconds later. If it doesn't (Safari and Brave can stop websites from reaching your computer), use the copy of
+        the editor the bridge serves at <a href="http://127.0.0.1:5174" target="_blank" rel="noreferrer">127.0.0.1:5174</a>.
+      </div>
     </div>
   );
 }

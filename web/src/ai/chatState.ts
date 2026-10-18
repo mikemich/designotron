@@ -155,7 +155,7 @@ export async function send(prompt: string) {
     if (st.bridgeStatus !== "connected") {
       push({
         kind: "error",
-        text: "The Designotron bridge isn't running on this computer. Start it with `npx designotron` (or `./dev.sh` in a checkout), or switch to API-key mode in settings.",
+        text: "The Designotron bridge isn't running on this computer. The setup steps are at the top of this panel. Or switch to API-key mode in settings.",
       });
       return;
     }

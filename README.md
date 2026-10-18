@@ -46,15 +46,13 @@ local bridge or an API key).
 **Run it on your computer** (editor + Claude Code bridge in one binary):
 
 ```bash
-npx designotron
-```
-
-or
-
-```bash
 curl -fsSL https://raw.githubusercontent.com/mikemich/designotron/main/install.sh | sh
-designotron
+~/.local/bin/designotron
 ```
+
+On Windows, download the zip from [Releases](https://github.com/mikemich/designotron/releases/latest).
+While it runs, the hosted editor connects to it too. (`npx designotron` will work once the
+npm package is published.)
 
 It opens the editor at http://127.0.0.1:5174. Your Claude Code designs go in `./workspace`.
 

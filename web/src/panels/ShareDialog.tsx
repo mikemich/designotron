@@ -76,7 +76,7 @@ export function ShareDialog() {
                 <div className="muted small" style={{ lineHeight: 1.5 }}>
                   Your computer hosts the session through the Designotron bridge, behind a secret link.
                 </div>
-                <button className="btn" disabled={!!busy || bridgeStatus !== "connected"} onClick={() => start("lan")} title={bridgeStatus !== "connected" ? "Needs the bridge (npx designotron)" : ""}>
+                <button className="btn" disabled={!!busy || bridgeStatus !== "connected"} onClick={() => start("lan")} title={bridgeStatus !== "connected" ? "Needs the Designotron bridge (setup steps in the Claude panel)" : ""}>
                   {busy === "lan" ? <Loader2 size={13} className="spin" /> : <Users size={13} />} Share on this network
                 </button>
               </div>

@@ -30,7 +30,7 @@ export function AppPanel() {
       <div className="scroll">
         <Section title="Live app">
           <div className="muted small" style={{ lineHeight: 1.6 }}>
-            The live preview runs your app's dev server on this computer through the Designotron bridge. Start it with <code>npx designotron</code>.
+            The live preview runs your app's dev server on this computer through the Designotron bridge. Setup steps are in the Claude panel.
           </div>
         </Section>
       </div>

@@ -41,7 +41,7 @@ export async function importUrl(input: { url: string; width?: number; x?: number
   try {
     res = await fetch(`${bridgeHttpBase()}/bridge/fetch?url=${encodeURIComponent(url.href)}`);
   } catch {
-    throw new Error("importing a website needs the Designotron bridge running (npx designotron)");
+    throw new Error("importing a website needs the Designotron bridge running (setup steps in the Claude panel)");
   }
   if (!res.ok) throw new Error(await res.text());
   let html = await res.text();

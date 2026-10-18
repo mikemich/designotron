@@ -23,7 +23,7 @@ async function api(path: string, query: string, token: string): Promise<any> {
     try {
       res = await fetch(`${bridgeHttpBase()}/bridge/figma?path=${encodeURIComponent(path)}&query=${encodeURIComponent(query)}&token=${encodeURIComponent(token)}`);
     } catch {
-      throw new Error("Couldn't reach the Figma API. Check your connection, or start the bridge (npx designotron) and try again.");
+      throw new Error("Couldn't reach the Figma API. Check your connection, or start the Designotron bridge (setup steps in the Claude panel) and try again.");
     }
   }
   const text = await res.text();
