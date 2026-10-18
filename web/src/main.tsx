@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import "./styles.css";
 import { bootEngine } from "./store";
 import { Editor } from "./Editor";
-import { Files } from "./Files";
+import { Dashboard } from "./Dashboard";
 import { bridge } from "./ai/bridgeClient";
 
 function route(): string | null {
@@ -19,7 +19,7 @@ function App() {
     return () => window.removeEventListener("hashchange", on);
   }, []);
   if (fileId) return <Editor key={fileId} fileId={fileId} onHome={() => (location.hash = "#/")} />;
-  return <Files onOpen={(id) => (location.hash = `#/file/${id}`)} />;
+  return <Dashboard onOpen={(id) => (location.hash = `#/file/${id}`)} />;
 }
 
 bootEngine()

@@ -5,7 +5,7 @@ import { getEngine, newEngine, dispatch, toast, useStore } from "./store";
 import { buildSample } from "./sample";
 import { Menu, type MenuItem } from "./ui/controls";
 
-export function Files({ onOpen }: { onOpen: (id: string) => void }) {
+export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   const [files, setFiles] = useState<FileMeta[] | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const t = useStore((s) => s.toast);

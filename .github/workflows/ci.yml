@@ -10,6 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: No paths that clash on case-insensitive filesystems (macOS, Windows)
+        run: |
+          dupes=$(git ls-files | tr 'A-Z' 'a-z' | sort | uniq -d)
+          if [ -n "$dupes" ]; then echo "$dupes"; exit 1; fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
