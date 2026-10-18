@@ -34,9 +34,12 @@ designotron/
 │   │       ├── render.rs    # SVG renderer (canvas + export share one path)
 │   │       ├── codegen.rs   # React + Tailwind, HTML, full Vite project export
 │   │       ├── ai.rs        # AI tool definitions + executor (chat, MCP, headless)
-│   │       └── ...          # geom, color, text, shapes, patch, ops
+│   │       ├── collab.rs    # Multiplayer deltas, merge + tree repair, selective undo
+│   │       └── ...          # geom, color, text, shapes, patch, ops, paths, grids, figma, variables
 │   ├── engine-wasm/         # wasm-bindgen wrapper (JSON strings across the boundary)
-│   └── bridge/              # Local server: editor websocket, MCP, Claude Code chat
+│   ├── rooms/               # Multiplayer rooms (merge deltas, presence), shared below
+│   ├── bridge/              # Local server: editor websocket, MCP, Claude Code chat, LAN share
+│   └── relay/               # Internet relay for online multiplayer (+ serves the editor)
 ├── web/                     # Editor shell (Vite + React + Zustand)
 │   ├── src/
 │   │   ├── store.ts         # Boots WASM, wraps the engine, UI state
@@ -76,6 +79,9 @@ must never be committed.
   canvas render cache (`render_incremental`) and the JS document copy (`doc_delta`) all work
   from that diff. Only `get_mut` nodes you actually change (use `Document::update_where`), and
   never add per-mutation or per-frame work that scans every node.
+- Room logic lives in `crates/rooms`, used by the bridge (one LAN room) and `crates/relay`
+  (many online rooms keyed by an unguessable id). The relay only stores and relays
+  documents: never add tools, MCP or Claude to it.
 - Multiplayer (`collab.rs` in engine and bridge): peers exchange `collab::delta` JSON; remote
   changes enter through `Command::ApplyRemote` and never join local history. Undo/redo use
   `collab::revert`, so a step only reverses its own changes. Any new document-level field must
@@ -96,6 +102,7 @@ cd web && npm run typecheck            # TypeScript (tsc -b, same as the product
 cd web && npm run e2e                  # Editor smoke test (needs ./dev.sh running)
 cd web && node scripts/bridge-e2e.mjs  # MCP + live editor (E2E_CLAUDE=1 adds a real chat turn)
 cd web && node scripts/collab-e2e.mjs  # Multiplayer with two browsers (bridge serving web/dist)
+cargo run -p designotron-relay -- --static web/dist   # Online relay on :8787 (E2E_RELAY=… for the e2e)
 cargo run --release -p designotron-engine --example bench   # Engine timings on a 6k-layer file
 cd web && node scripts/perf.mjs [frames] [cards]           # Browser drag timings (PROFILE=1, TRACE=1)
 ```

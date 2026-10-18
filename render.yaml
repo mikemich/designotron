@@ -1,0 +1,17 @@
+# Render blueprint for the Designotron relay (online multiplayer + the editor).
+# Dashboard → New → Blueprint → pick this repo. The disk keeps rooms across deploys;
+# on the free plan remove the disk (rooms then live in memory) and expect cold starts.
+services:
+  - type: web
+    name: designotron-relay
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    plan: starter
+    envVars:
+      - key: RUST_LOG
+        value: info
+    disk:
+      name: rooms
+      mountPath: /data
+      sizeGB: 1

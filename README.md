@@ -27,8 +27,9 @@ the result into a working React app.
   of the app next to the canvas.
 - **Bring your work**: import Figma files through the Figma API, import live websites, and
   use `.dtron` files that are plain JSON.
-- **Together**: share a live session on your network with cursors and selections; undo only
-  ever reverts your own changes.
+- **Together**: share a live session online (through a small relay server you can deploy in
+  minutes) or on your local network, with cursors and selections; undo only ever reverts
+  your own changes.
 - **Extensible**: an MCP server for Claude Code in any terminal, and sandboxed JavaScript
   plugins on the same tool API Claude uses (Claude can write them too).
 - **Fast and local-first**: Rust engine compiled to WebAssembly, incremental rendering for
@@ -102,6 +103,16 @@ from your browser to the Anthropic API using the official SDK. The default model
 Opus 5.5 with adaptive thinking, and server-side refusal fallback is enabled. The key is
 stored in this browser's localStorage.
 
+## Working together
+
+**Share** (toolbar) offers two ways to edit a file live with other people:
+
+- **Online**: anyone with the link, anywhere. Rooms live on a Designotron relay, a small
+  open-source server that also serves the editor. Deploy one on Fly.io, Render or any
+  Docker host in a few minutes: see [docs/relay.md](docs/relay.md).
+- **Local network**: same Wi-Fi, no server; your bridge hosts the session behind a secret
+  link.
+
 ## Design to code
 
 - **Code tab**: React + Tailwind, HTML/CSS, CSS or SVG for the selected layer.
@@ -157,6 +168,8 @@ in `npm/` download from those releases. Every push to `main` deploys the hosted 
   generation and the AI tool layer
 - `crates/engine-wasm`: WebAssembly bindings
 - `crates/bridge`: the local server
+- `crates/rooms`: multiplayer rooms (shared by the bridge and the relay)
+- `crates/relay`: the internet relay for online multiplayer
 - `web`: the editor UI
 
 Contributing: read [CONTRIBUTING.md](CONTRIBUTING.md). Coding agents: read [AGENTS.md](AGENTS.md).

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 designotron-engine = { path = "../engine" }
+designotron-rooms = { path = "../rooms" }
 serde.workspace = true
 serde_json.workspace = true
 axum = { version = "0.7.9", features = ["ws"] }

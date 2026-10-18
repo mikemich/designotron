@@ -342,6 +342,7 @@ dependencies = [
  "axum",
  "base64",
  "designotron-engine",
+ "designotron-rooms",
  "env_logger",
  "futures-util",
  "log",
@@ -370,6 +371,35 @@ dependencies = [
  "designotron-engine",
  "serde_json",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "designotron-relay"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "designotron-rooms",
+ "env_logger",
+ "futures-util",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tower-http",
+]
+
+[[package]]
+name = "designotron-rooms"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "designotron-engine",
+ "futures-util",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

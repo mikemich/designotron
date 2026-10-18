@@ -1,12 +1,15 @@
 // Multiplayer end to end: an owner shares through the bridge, a guest joins the link,
 // both edit, presence shows, and undo never reverts the other person's work.
-// Needs the bridge serving the built editor: `npm run build` then the bridge on 5174.
+// LAN mode (default) needs the bridge serving the built editor on 5174.
+// Online mode: E2E_RELAY=http://127.0.0.1:8787 node scripts/collab-e2e.mjs with
+// `designotron-relay --static web/dist` running; the owner opens the editor from E2E_URL.
 
 import { chromium } from "playwright-core";
 import fs from "node:fs";
 import path from "node:path";
 
 const OWNER = process.env.E2E_URL ?? "http://127.0.0.1:5174";
+const RELAY = process.env.E2E_RELAY ?? "";
 const OUT = process.env.E2E_OUT ?? "test-results";
 fs.mkdirSync(OUT, { recursive: true });
 const launch = { headless: true, args: ["--no-sandbox"] };
@@ -45,11 +48,16 @@ try {
   await owner.waitForSelector("#dt-canvas");
   const rect = await owner.evaluate(() => window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [{ type: "rectangle", name: "Shared box", x: 0, y: 0, width: 120, height: 80, fill: "#6D4AFF" }] } }).created[0].id);
   await owner.click(".tbtn[title='Share for live editing']");
-  await owner.fill(".share-dialog input.textinput", "Olga");
-  await owner.click("button:has-text('Start sharing')");
+  await owner.fill(".share-dialog input.textinput >> nth=0", "Olga");
+  if (RELAY) {
+    await owner.fill(".share-dialog input.mono", RELAY);
+    await owner.click("button:has-text('Share online')");
+  } else {
+    await owner.click("button:has-text('Share on this network')");
+  }
   await owner.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 10000 });
   const link = await owner.evaluate(() => window.__dt.collab().link);
-  check("owner starts a share link", /\/\?collab=[0-9a-f]{32}$/.test(link), link);
+  check(`owner starts a ${RELAY ? "online" : "LAN"} share link`, RELAY ? link.startsWith(RELAY + "/?room=") : /\/\?collab=[0-9a-f]{32}$/.test(link), link);
   await owner.keyboard.press("Escape");
   await owner.click(".modal-head .ibtn[title='Close']").catch(() => {});
 
@@ -89,11 +97,11 @@ try {
   check("comments sync between collaborators", await owner.evaluate(() => Object.values(window.__dt.doc().comments).some((c) => c.messages[0].text === "Looks good")));
   await guest.screenshot({ path: path.join(OUT, "collab-guest.png") });
 
-  // A wrong token is refused.
+  // A wrong token (or a too-short room id) is refused.
   const bad = await guest.evaluate(async (url) => {
     const u = new URL(url);
     return new Promise((resolve) => {
-      const ws = new WebSocket(`ws://${u.host}/collab/ws?token=nope`);
+      const ws = new WebSocket(u.searchParams.has("room") ? `ws://${u.host}/ws?room=nope` : `ws://${u.host}/collab/ws?token=nope`);
       ws.onopen = () => resolve("open");
       ws.onerror = () => resolve("refused");
     });

@@ -30,6 +30,9 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Build
         working-directory: web
+        env:
+          # Default relay for "Share online" (Settings → Secrets and variables → Actions → Variables).
+          VITE_DT_RELAY: ${{ vars.DT_RELAY_URL }}
         run: npm ci && DT_BASE=/${{ github.event.repository.name }}/ npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

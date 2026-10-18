@@ -1512,3 +1512,15 @@ textarea.textinput {
   margin-left: -6px;
   border: 2px solid var(--panel);
 }
+.share-option {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.share-option a {
+  color: var(--accent-2);
+}

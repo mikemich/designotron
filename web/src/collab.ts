@@ -25,12 +25,73 @@ export interface Peer {
 interface CollabState {
   status: "off" | "connecting" | "live";
   role: "owner" | "guest" | null;
+  /** Online (through an internet relay) or on the local network (through the bridge). */
+  mode: "online" | "lan" | null;
   link: string | null;
   peers: Record<number, Peer>;
   dialogOpen: boolean;
 }
 
-export const useCollab = create<CollabState>(() => ({ status: "off", role: null, link: null, peers: {}, dialogOpen: false }));
+export const useCollab = create<CollabState>(() => ({ status: "off", role: null, mode: null, link: null, peers: {}, dialogOpen: false }));
+
+/** Where shared links open when this editor runs on localhost (guests can't reach that). */
+const HOSTED_EDITOR: string = import.meta.env.VITE_DT_EDITOR_URL || "https://mikemich.github.io/designotron/";
+
+/** Relay used for online sharing: one the user set, else the build default (VITE_DT_RELAY). */
+export function relayUrl(): string {
+  try {
+    const saved = localStorage.getItem("dt:relay");
+    if (saved) return saved;
+  } catch {
+    /* ignore */
+  }
+  return import.meta.env.VITE_DT_RELAY || "";
+}
+
+export function setRelayUrl(url: string) {
+  try {
+    localStorage.setItem("dt:relay", url);
+  } catch {
+    /* ignore */
+  }
+}
+
+function normalizeRelay(url: string): string {
+  let u = url.trim().replace(/\/+$/, "");
+  if (!/^(https?|wss?):\/\//.test(u)) u = `https://${u}`;
+  return u.replace(/^ws/, "http");
+}
+
+/** Checks that `url` is a Designotron relay; returns its health info. */
+export async function probeRelay(url: string): Promise<{ editor: boolean }> {
+  const base = normalizeRelay(url);
+  if (location.protocol === "https:" && base.startsWith("http:")) throw new Error("This editor is on https, so the relay must be too (https://…).");
+  let info: any;
+  try {
+    info = await (await fetch(`${base}/health`)).json();
+  } catch {
+    throw new Error(`Couldn't reach a relay at ${base}.`);
+  }
+  if (info?.relay !== "designotron") throw new Error(`${base} isn't a Designotron relay.`);
+  return { editor: !!info.editor };
+}
+
+/** True when this page is itself served by a relay (it can share without any setup). */
+export async function pageIsRelay(): Promise<boolean> {
+  try {
+    const info = await (await fetch(`${location.origin}/health`)).json();
+    return info?.relay === "designotron";
+  } catch {
+    return false;
+  }
+}
+
+function randomRoomId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+const isLocalPage = () => ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
 
 const COLORS = ["#F24822", "#0FA958", "#9747FF", "#FF7A00", "#1BC4FF", "#FF24BD", "#14AE5C", "#E8A400"];
 const myColor = COLORS[Math.floor(Math.random() * COLORS.length)];
@@ -169,13 +230,7 @@ function subscribeLocal(): () => void {
   };
 }
 
-/** Owner: starts the LAN share (once) and puts this file in the shared room. */
-export async function startSharing(): Promise<void> {
-  const res = await fetch(`${bridgeHttpBase()}/bridge/share`, { method: "POST" });
-  if (!res.ok) throw new Error(await res.text());
-  const { url } = await res.json();
-  wsUrl = `${bridgeHttpBase().replace(/^http/, "ws")}/collab/ws`;
-  useCollab.setState({ role: "owner", link: url });
+function shareCurrentFile() {
   const json = getEngine().save();
   const used = new Set(referencedAssets(json));
   const assets = Object.fromEntries(Object.entries(allAssets()).filter(([k]) => used.has(k)));
@@ -183,8 +238,32 @@ export async function startSharing(): Promise<void> {
   connect({ doc: JSON.parse(json), assets, reset: true });
 }
 
+/** Owner: shares this file through an internet relay; anyone with the link can join. */
+export async function startOnline(relay: string): Promise<void> {
+  const base = normalizeRelay(relay);
+  const { editor } = await probeRelay(base);
+  setRelayUrl(base);
+  const room = randomRoomId();
+  wsUrl = `${base.replace(/^http/, "ws")}/ws?room=${room}`;
+  // Guests open the relay's own editor if it serves one, else this editor (or the hosted
+  // one when this runs on localhost), pointed at the relay.
+  const link = editor ? `${base}/?room=${room}` : `${isLocalPage() ? HOSTED_EDITOR : location.origin + location.pathname}?room=${room}&relay=${encodeURIComponent(base)}`;
+  useCollab.setState({ role: "owner", mode: "online", link });
+  shareCurrentFile();
+}
+
+/** Owner: starts the LAN share (once) and puts this file in the shared room. */
+export async function startSharing(): Promise<void> {
+  const res = await fetch(`${bridgeHttpBase()}/bridge/share`, { method: "POST" });
+  if (!res.ok) throw new Error(await res.text());
+  const { url } = await res.json();
+  wsUrl = `${bridgeHttpBase().replace(/^http/, "ws")}/collab/ws`;
+  useCollab.setState({ role: "owner", mode: "lan", link: url });
+  shareCurrentFile();
+}
+
 export function stopSharing() {
-  useCollab.setState({ role: null, status: "off", peers: {}, link: null });
+  useCollab.setState({ role: null, mode: null, status: "off", peers: {}, link: null });
   ws?.close();
   ws = null;
   unsubscribe?.();
@@ -193,7 +272,8 @@ export function stopSharing() {
 
 /** Guest: opens (or reuses) a local file for the shared link and joins the room. */
 export function joinFromUrl(): string | null {
-  const token = new URLSearchParams(location.search).get("collab");
+  const q = new URLSearchParams(location.search);
+  const token = q.get("room") ?? q.get("collab");
   if (!token) return null;
   const key = `dt:collab:${token}`;
   let fileId: string | null = null;
@@ -222,10 +302,20 @@ export async function ensureGuestFile(fileId: string) {
 
 /** Called once the editor for the guest file is ready. */
 export function joinShared() {
-  const token = new URLSearchParams(location.search).get("collab");
-  if (!token || useCollab.getState().role) return;
-  wsUrl = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/collab/ws?token=${encodeURIComponent(token)}`;
-  useCollab.setState({ role: "guest", link: location.href });
+  if (useCollab.getState().role) return;
+  const q = new URLSearchParams(location.search);
+  const room = q.get("room");
+  const token = q.get("collab");
+  const wsBase = (http: string) => http.replace(/^http/, "ws");
+  if (room) {
+    // Online: the relay given in the link, or this page's own origin when the relay serves the editor.
+    const relay = normalizeRelay(q.get("relay") || location.origin);
+    wsUrl = `${wsBase(relay)}/ws?room=${encodeURIComponent(room)}`;
+    useCollab.setState({ role: "guest", mode: "online", link: location.href });
+  } else if (token) {
+    wsUrl = `${wsBase(location.origin)}/collab/ws?token=${encodeURIComponent(token)}`;
+    useCollab.setState({ role: "guest", mode: "lan", link: location.href });
+  } else return;
   connect({});
 }
 

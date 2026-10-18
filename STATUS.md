@@ -13,7 +13,7 @@ Ordered by impact on "replace Figma for a small team".
 
 | #  | Item                                   | Notes                                                                 |
 |----|----------------------------------------|-----------------------------------------------------------------------|
-| 1  | Multiplayer beyond the LAN             | LAN sharing works; a hosted relay (or tunnel) for remote teams, and per-property merging instead of per-layer |
+| 1  | Run a public relay                     | Relay is built and deployable; someone has to deploy one and set `DT_RELAY_URL` for the hosted editor. Per-property merging instead of per-layer |
 | 2  | Accounts, cloud files, sharing links   | Needs a hosted backend; today files are local (IndexedDB + `.dtron`)  |
 | 3  | Comment extras                         | Mentions and notifications; shared with teammates once (1)/(2) land   |
 | 4  | Cloud version history                  | Local named/auto versions shipped; sync them once files are in the cloud |
@@ -65,6 +65,7 @@ Ordered by impact on "replace Figma for a small team".
 | Performance     | Persistent node map (O(1) snapshots), diff-driven layout/component sync, per-root canvas render cache with transform-only moves, document deltas to JS, contained canvas layout |
 | Comments        | Comment tool (C), pins that follow their layer, threads with replies, resolve/reopen, Comments tab; Claude reads them (`get_comments`), replies and resolves; "Ask Claude to address them" |
 | Plugins         | Sandboxed iframe plugins (opaque origin) with a promise API over the same tools Claude uses, optional UI panel, one undo step per run; built-in examples; manager with editor; Claude writes plugins via `save_plugin` |
+| Online sharing  | `designotron-relay` (crates/relay, Docker image, Fly/Render configs, GHCR workflow, release binaries) hosts rooms on the internet and serves the editor; Share → Online gives a link anyone can open; rooms saved to disk survive restarts |
 | Multiplayer     | Share (toolbar) hosts a live session through the bridge: secret LAN link (token-guarded listener that serves only the editor and the room), node-level deltas, tree repair for concurrent structure edits, selective undo that never reverts others' work, live cursors, selections, avatars, synced comments and images |
 | Live app        | App tab: write the generated project to `workspace/app` (or keep it in sync), run `npm run dev` through the bridge, preview at mobile/desktop width, logs, "Ask Claude to fix it" |
 | Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README with screenshots and demo GIF (`web/scripts/media.mjs`), CONTRIBUTING, issue and PR templates |
@@ -92,6 +93,8 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 | Comment on a layer, Claude replies and resolves        | `web/scripts/e2e.mjs`                        |
 | Plugins: one undo step, UI panel, sandbox escape fails | `web/scripts/e2e.mjs` (42/42 passing)        |
 | Two browsers: join by link, edits both ways, selective undo, cursors, comments, bad token refused | `web/scripts/collab-e2e.mjs` (9/9) |
+| Same 9 checks online through the relay, locally and in the Docker image | `E2E_RELAY=… node scripts/collab-e2e.mjs` |
+| Relay: rooms, late joiners, restart persistence, bad room ids | `cargo test -p designotron-relay`  |
 | Bridge reaches api.figma.com and real sites via proxy  | curl `/bridge/figma` (403 for a bad token), `/bridge/fetch` |
 | Engine: drag step 0.13 ms, edit 0.3 ms on 6k layers    | `cargo run --release -p designotron-engine --example bench` (was 42 ms / 46 ms) |
 | Browser drag on 6k layers: ~10 ms script, ~1 ms layout per frame | `web/scripts/perf.mjs` on the production build (was 25 ms script + 80 ms layout) |
@@ -114,7 +117,7 @@ until someone runs it with a real key.
 
 | Area             | Limitation                                                                                               |
 |------------------|----------------------------------------------------------------------------------------------------------|
-| Collaboration    | Live sharing is LAN-only and needs the owner's bridge running; concurrent edits to the same layer: last writer wins; no accounts; versions live only in each browser |
+| Collaboration    | Online sharing needs a deployed relay (none is running yet); concurrent edits to the same layer: last writer wins; links are the only access control (no accounts); versions live only in each browser |
 | Storage          | Files live in the browser (IndexedDB). Clearing site data deletes them; save `.dtron` files to keep them |
 | Scale            | Updates are incremental, but the canvas is one big SVG: painting 10k+ layers zoomed out is the limit (software rendering in headless tests ~35 ms/frame at 6k) |
 | Text             | No OpenType features or per-range line height; widths depend on the web font having loaded               |
@@ -149,7 +152,7 @@ until someone runs it with a real key.
 | Prototyping                | Partial     | No smart animate/overlays               |
 | Export                     | Yes         | Plus code export Figma lacks            |
 | Dev Mode / inspect         | Partial     | Code tab, notes                         |
-| Multiplayer, comments      | Yes (LAN)   | Live cursors, comments Claude can resolve |
+| Multiplayer, comments      | Yes         | Online via relay or LAN; comments Claude can resolve |
 | Version history            | Local       | Named + automatic, per browser          |
 | Plugins                    | Yes         | Sandboxed JS over the AI tool API; no store yet |
 | AI                         | Yes         | Claude Code (Pro/Max) and API key       |

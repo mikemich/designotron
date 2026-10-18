@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/engine", "crates/engine-wasm", "crates/bridge"]
+members = ["crates/engine", "crates/engine-wasm", "crates/rooms", "crates/bridge", "crates/relay"]
 
 [workspace.package]
 version = "0.1.0"

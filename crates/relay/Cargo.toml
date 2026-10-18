@@ -1,0 +1,24 @@
+[package]
+name = "designotron-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Internet relay for Designotron multiplayer: hosts shared rooms and optionally serves the editor"
+
+[[bin]]
+name = "designotron-relay"
+path = "src/main.rs"
+
+[dependencies]
+designotron-rooms = { path = "../rooms" }
+serde.workspace = true
+serde_json.workspace = true
+axum = { version = "0.7.9", features = ["ws"] }
+tokio = { version = "1.41", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tower-http = { version = "0.6.2", features = ["fs", "cors"] }
+log = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
