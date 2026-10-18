@@ -1,6 +1,6 @@
 //! Tree navigation and structural edits on a [`Document`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use crate::geom::{local_matrix, Mat, Point, Rect};
 use crate::model::{Document, Node, NodeId, NodeType, Page, Styles, SCHEMA_VERSION};
@@ -54,13 +54,23 @@ pub fn new_document(ids: &mut IdGen, name: &str) -> Document {
     name: name.into(),
     schema: SCHEMA_VERSION,
     pages: vec![page],
-    nodes: BTreeMap::new(),
+    nodes: imbl::OrdMap::new(),
     styles: Styles::default(),
     variables: Vec::new(),
   }
 }
 
 impl Document {
+  /// Mutates the nodes `pred` selects; others keep their shared storage.
+  pub fn update_where(&mut self, pred: impl Fn(&Node) -> bool, mut f: impl FnMut(&mut Node)) {
+    let ids: Vec<NodeId> = self.nodes.values().filter(|n| pred(n)).map(|n| n.id.clone()).collect();
+    for id in ids {
+      if let Some(n) = self.nodes.get_mut(&id) {
+        f(n);
+      }
+    }
+  }
+
   pub fn get(&self, id: &str) -> Option<&Node> {
     self.nodes.get(id)
   }

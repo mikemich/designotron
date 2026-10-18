@@ -426,6 +426,18 @@ pub struct Engine {
   pub(crate) gen: IdGen,
   pub(crate) measurer: Box<dyn TextMeasurer>,
   fingerprints: HashMap<NodeId, u64>,
+  render_cache: RenderCache,
+  /// Document as last sent to the editor UI (see `doc_delta`).
+  synced: Option<Document>,
+}
+
+/// Per-root SVG from the last canvas render, and the document it was made from.
+#[derive(Default)]
+struct RenderCache {
+  page: String,
+  hidden: Vec<NodeId>,
+  doc: Option<Document>,
+  roots: HashMap<NodeId, String>,
 }
 
 impl Engine {
@@ -444,6 +456,8 @@ impl Engine {
       gen,
       measurer,
       fingerprints: HashMap::new(),
+      render_cache: RenderCache::default(),
+      synced: None,
     }
   }
 
@@ -462,6 +476,7 @@ impl Engine {
     self.fingerprints.clear();
     self.refresh_fingerprints();
     layout::relayout_all(&mut self.doc, self.measurer.as_ref());
+    self.render_cache = RenderCache::default();
     self.rev += 1;
     Ok(())
   }
@@ -479,6 +494,105 @@ impl Engine {
       "canRedo": !self.future.is_empty(),
       "inGesture": self.gesture.is_some(),
     })
+  }
+
+  /// Changes since the previous call, for keeping a JS copy of the document current:
+  /// `{full: doc}` the first time (or when `full`), else `{nodes: {id: node}, removed: [ids], meta}`
+  /// where `meta` carries the small document-level fields (pages, styles, variables, name).
+  pub fn doc_delta(&mut self, full: bool) -> Value {
+    let out = match (&self.synced, full) {
+      (Some(prev), false) => {
+        let mut nodes = serde_json::Map::new();
+        let mut removed = Vec::new();
+        for item in prev.nodes.diff(&self.doc.nodes) {
+          match item {
+            imbl::ordmap::DiffItem::Add(k, v) | imbl::ordmap::DiffItem::Update { new: (k, v), .. } => {
+              nodes.insert(k.clone(), serde_json::to_value(v).unwrap_or(Value::Null));
+            }
+            imbl::ordmap::DiffItem::Remove(k, _) => removed.push(k.clone()),
+          }
+        }
+        let d = &self.doc;
+        let meta =
+          json!({ "id": d.id, "name": d.name, "schema": d.schema, "pages": d.pages, "styles": d.styles, "variables": d.variables });
+        json!({ "nodes": nodes, "removed": removed, "meta": meta })
+      }
+      _ => json!({ "full": self.doc }),
+    };
+    self.synced = Some(self.doc.clone());
+    out
+  }
+
+  /// Forgets cached canvas SVG (the next incremental render returns every root).
+  pub fn reset_render_cache(&mut self) {
+    self.render_cache = RenderCache::default();
+  }
+
+  /// Canvas render that re-renders only top-level layers changed since the last call.
+  /// Returns `{order: [root ids], changed: {id: svg}}`, or `{full: svg}` when the page
+  /// uses top-level masks (which span roots).
+  pub fn render_incremental(&mut self, page: &str, hidden: &[NodeId]) -> Value {
+    let roots = self.doc.page(page).map(|p| p.children.clone()).unwrap_or_default();
+    if roots
+      .iter()
+      .any(|r| self.doc.get(r).map(|n| n.is_mask && n.visible).unwrap_or(false))
+    {
+      self.render_cache = RenderCache::default();
+      return json!({ "full": self.render(page, hidden) });
+    }
+    let mut cache = std::mem::take(&mut self.render_cache);
+    let mut dirty: Vec<NodeId> = Vec::new();
+    // Roots whose only change is the root's own position: the client just updates a transform.
+    let mut moved = serde_json::Map::new();
+    match &cache.doc {
+      Some(prev) if cache.page == page => {
+        for (root, ids) in self.changed_by_root(prev) {
+          let only_moved = self.only_moved(prev, &root, &ids);
+          if only_moved
+            && cache.roots.contains_key(&root)
+            && !hidden.iter().any(|h| self.doc.ancestors(h).last() == Some(&root) || *h == root)
+          {
+            if let Some(n) = self.doc.get(&root) {
+              moved.insert(root.clone(), json!(self.doc.local_matrix(n).svg()));
+            }
+          } else {
+            dirty.push(root);
+          }
+        }
+        // Hiding or showing a layer (text editing) repaints its root.
+        for h in cache.hidden.iter().chain(hidden.iter()) {
+          if cache.hidden.contains(h) != hidden.contains(h) {
+            let root = self.doc.ancestors(h).last().cloned().unwrap_or_else(|| h.clone());
+            moved.remove(&root);
+            dirty.push(root);
+          }
+        }
+      }
+      _ => cache.roots.clear(),
+    }
+    let mut changed = serde_json::Map::new();
+    for r in &roots {
+      if dirty.contains(r) || !cache.roots.contains_key(r) {
+        let svg = render::render_root(
+          &self.doc,
+          r,
+          self.measurer.as_ref(),
+          RenderOptions {
+            mode: Mode::Canvas,
+            hidden,
+          },
+        );
+        changed.insert(r.clone(), json!(svg));
+        cache.roots.insert(r.clone(), svg);
+        moved.remove(r);
+      }
+    }
+    cache.roots.retain(|k, _| roots.contains(k));
+    cache.doc = Some(self.doc.clone());
+    cache.page = page.to_string();
+    cache.hidden = hidden.to_vec();
+    self.render_cache = cache;
+    json!({ "order": roots, "changed": changed, "moved": moved })
   }
 
   pub fn render(&self, page: &str, hidden: &[NodeId]) -> String {
@@ -512,6 +626,8 @@ impl Engine {
     match cmd {
       Command::Relayout => {
         layout::relayout_all(&mut self.doc, self.measurer.as_ref());
+        // Text measurement may have changed (fonts loaded): repaint everything.
+        self.render_cache = RenderCache::default();
         self.rev += 1;
         return Ok(json!({}));
       }
@@ -611,6 +727,8 @@ impl Engine {
       _ => {}
     }
 
+    // O(1) with the persistent node map; diffed later to find what needs layout.
+    let prev = self.doc.clone();
     let gesture_relative = matches!(cmd, Command::Translate { .. } | Command::Resize { .. } | Command::Rotate { .. });
     if gesture_relative {
       if let Some(base) = self.gesture.clone() {
@@ -621,7 +739,7 @@ impl Engine {
     let result = self.apply(cmd);
     match result {
       Ok(v) => {
-        self.after_mutation();
+        self.after_mutation(&prev);
         if let Some(b) = before {
           if b.doc != self.doc {
             self.push_past(b);
@@ -648,11 +766,41 @@ impl Engine {
   }
 
   /// Keeps derived state consistent: instances, layout, selection.
-  fn after_mutation(&mut self) {
+  /// Changed node ids grouped by the top-level layer they belong to.
+  fn changed_by_root(&self, prev: &Document) -> HashMap<NodeId, Vec<NodeId>> {
+    let mut out: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let root_in = |doc: &Document, id: &str| doc.ancestors(id).last().cloned().unwrap_or_else(|| id.to_string());
+    for item in prev.nodes.diff(&self.doc.nodes) {
+      let (root, id) = match item {
+        imbl::ordmap::DiffItem::Add(k, _) => (root_in(&self.doc, k), k),
+        imbl::ordmap::DiffItem::Update { new: (k, _), .. } => (root_in(&self.doc, k), k),
+        imbl::ordmap::DiffItem::Remove(k, _) => (root_in(prev, k), k),
+      };
+      out.entry(root).or_default().push(id.clone());
+    }
+    out
+  }
+
+  /// True when the only difference in `root`'s tree is the root's own position.
+  fn only_moved(&self, prev: &Document, root: &str, changed: &[NodeId]) -> bool {
+    changed.len() == 1
+      && changed[0] == root
+      && match (prev.get(root), self.doc.get(root)) {
+        (Some(a), Some(b)) => {
+          let mut a = a.clone();
+          a.x = b.x;
+          a.y = b.y;
+          a == *b
+        }
+        _ => false,
+      }
+  }
+
+  fn after_mutation(&mut self, prev: &Document) {
     crate::variables::normalize(&mut self.doc);
     crate::variables::apply(&mut self.doc);
     for _ in 0..4 {
-      let changed = self.changed_components();
+      let changed = self.changed_components(prev);
       if changed.is_empty() {
         break;
       }
@@ -672,15 +820,34 @@ impl Engine {
     }
     // Instances just synced from their mains resolve variables in their own mode context.
     crate::variables::apply(&mut self.doc);
-    layout::relayout_all(&mut self.doc, self.measurer.as_ref());
+    // Only trees that changed need layout (layout never reaches across top-level layers),
+    // and moving a whole top-level layer changes nothing inside it.
+    for (root, changed) in self.changed_by_root(prev) {
+      if !self.only_moved(prev, &root, &changed) {
+        layout::layout_node(&mut self.doc, &root, self.measurer.as_ref());
+      }
+    }
     self.selection.retain(|i| self.doc.nodes.contains_key(i));
     if self.doc.page(&self.page).is_none() {
       self.page = self.doc.pages[0].id.clone();
     }
   }
 
-  fn changed_components(&mut self) -> Vec<NodeId> {
-    let comps: Vec<NodeId> = self.doc.components().iter().map(|c| c.id.clone()).collect();
+  /// Main components whose subtree changed since `prev` (only those containing changed nodes
+  /// are fingerprinted, so unrelated edits in big files stay cheap).
+  fn changed_components(&mut self, prev: &Document) -> Vec<NodeId> {
+    let mut comps: Vec<NodeId> = Vec::new();
+    for item in prev.nodes.diff(&self.doc.nodes) {
+      let (doc, k) = match item {
+        imbl::ordmap::DiffItem::Add(k, _) | imbl::ordmap::DiffItem::Update { new: (k, _), .. } => (&self.doc, k),
+        imbl::ordmap::DiffItem::Remove(k, _) => (prev, k),
+      };
+      for id in std::iter::once(k.clone()).chain(doc.ancestors(k)) {
+        if !comps.contains(&id) && self.doc.get(&id).map(|n| n.kind == NodeType::Component).unwrap_or(false) {
+          comps.push(id);
+        }
+      }
+    }
     let mut changed = Vec::new();
     for c in comps {
       let fp = components::fingerprint(&self.doc, &c);
@@ -1429,24 +1596,24 @@ impl Engine {
           style.color = crate::color::normalize(&c);
         }
         let color = style.color.clone();
-        for n in self.doc.nodes.values_mut() {
-          if n.fill_style.as_deref() == Some(id.as_str()) {
-            n.fills = vec![Paint::solid(&color)];
-          }
-        }
+        self.doc.update_where(
+          |n| n.fill_style.as_deref() == Some(id.as_str()),
+          |n| n.fills = vec![Paint::solid(&color)],
+        );
         Ok(json!({}))
       }
       Command::DeleteStyle { id } => {
         self.doc.styles.colors.retain(|s| s.id != id);
         self.doc.styles.texts.retain(|s| s.id != id);
-        for n in self.doc.nodes.values_mut() {
+        let uses = |n: &Node| n.fill_style.as_deref() == Some(id.as_str()) || n.text_style.as_deref() == Some(id.as_str());
+        self.doc.update_where(uses, |n| {
           if n.fill_style.as_deref() == Some(id.as_str()) {
             n.fill_style = None;
           }
           if n.text_style.as_deref() == Some(id.as_str()) {
             n.text_style = None;
           }
-        }
+        });
         Ok(json!({}))
       }
       Command::ApplyStyle { ids, style_id } => {

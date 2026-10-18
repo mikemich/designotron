@@ -17,7 +17,8 @@ pub struct Document {
   #[serde(default = "schema_version")]
   pub schema: u32,
   pub pages: Vec<Page>,
-  pub nodes: BTreeMap<NodeId, Node>,
+  /// Persistent map: clones share structure, so undo snapshots and diffs are cheap.
+  pub nodes: imbl::OrdMap<NodeId, Node>,
   #[serde(default)]
   pub styles: Styles,
   /// Variable collections (tokens with modes).

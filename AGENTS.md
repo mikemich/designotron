@@ -71,6 +71,14 @@ must never be committed.
 - When `model.rs` changes, update `web/src/types.ts` in the same change.
 - The bridge binds to 127.0.0.1 and checks `Origin` / `Host` (`security.rs`). Keep it that
   way; the bridge can run Claude Code with write access.
+- Performance model: `Document::nodes` is a persistent `imbl::OrdMap`, so clones are O(1) and
+  `prev.nodes.diff(&doc.nodes)` costs only what changed. Layout, component fingerprints, the
+  canvas render cache (`render_incremental`) and the JS document copy (`doc_delta`) all work
+  from that diff. Only `get_mut` nodes you actually change (use `Document::update_where`), and
+  never add per-mutation or per-frame work that scans every node.
+- The canvas patches one `<g data-root>` per top-level layer; a root whose only change is its
+  position gets a transform update instead of new markup. `.canvas` uses `contain: strict` and
+  its SVGs are sized in pixels so panel updates never re-lay out the canvas.
 
 ## Commands
 
@@ -78,10 +86,12 @@ must never be committed.
 cargo test --workspace                 # Engine + bridge unit tests
 cargo clippy --workspace               # Lints
 cd web && npm run wasm                 # Rebuild web/src/wasm/pkg after engine changes
-cd web && npm run typecheck            # TypeScript
+cd web && npm run typecheck            # TypeScript (tsc -b, same as the production build)
 ./dev.sh                               # Bridge on :5174 + editor on :5173
 cd web && npm run e2e                  # Editor smoke test (needs ./dev.sh running)
 cd web && node scripts/bridge-e2e.mjs  # MCP + live editor (E2E_CLAUDE=1 adds a real chat turn)
+cargo run --release -p designotron-engine --example bench   # Engine timings on a 6k-layer file
+cd web && node scripts/perf.mjs [frames] [cards]           # Browser drag timings (PROFILE=1, TRACE=1)
 ```
 
 After changing anything under `crates/engine`, run `npm run wasm` and commit the regenerated
@@ -91,7 +101,8 @@ After changing anything under `crates/engine`, run `npm run wasm` and commit the
 
 - Rust 2021 edition, two-space indentation (see `rustfmt.toml`)
 - Never use `println!` or `eprintln!` outside of tests; use `log` crate macros instead
-- Engine crate stays dependency-light (`serde`, `serde_json`) and platform-free; no I/O
+- Engine crate stays dependency-light (`serde`, `serde_json`, `imbl`, `i_overlay`) and
+  platform-free; no I/O
 - The engine `Engine` type is not `Send`; in async code keep it inside a sync helper and
   never hold it across an `.await`
 - When two crates export the same type name, alias imports with a suffix: `use foo::Bar as BarFoo;`

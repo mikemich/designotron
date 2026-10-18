@@ -27,6 +27,8 @@ struct Renderer<'a> {
   opts: RenderOptions<'a>,
   defs: String,
   uid: usize,
+  /// Prefix for generated def ids, so separately rendered roots never collide.
+  scope: String,
 }
 
 /// Renders all roots of a page as SVG markup (`<defs>` + content), page coordinates.
@@ -37,10 +39,30 @@ pub fn render_page(doc: &Document, page: &str, m: &dyn TextMeasurer, opts: Rende
     opts,
     defs: String::new(),
     uid: 0,
+    scope: String::new(),
   };
   let roots = doc.page(page).map(|p| p.children.clone()).unwrap_or_default();
   let body = r.list(&roots);
   format!("<defs>{}</defs>{}", r.defs, body)
+}
+
+/// Renders one top-level layer (`<defs>` + content) with def ids scoped to it,
+/// so roots can be cached and re-rendered independently.
+pub fn render_root(doc: &Document, root: &str, m: &dyn TextMeasurer, opts: RenderOptions) -> String {
+  let mut r = Renderer {
+    doc,
+    m,
+    opts,
+    defs: String::new(),
+    uid: 0,
+    scope: format!("{}_", root.replace(|c: char| !c.is_ascii_alphanumeric(), "")),
+  };
+  let body = r.node(root, None);
+  if r.defs.is_empty() {
+    body
+  } else {
+    format!("<defs>{}</defs>{}", r.defs, body)
+  }
 }
 
 /// Renders a single node as a standalone SVG document cropped to its bounds.
@@ -56,6 +78,7 @@ pub fn export_svg(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
     },
     defs: String::new(),
     uid: 0,
+    scope: String::new(),
   };
   let place = Mat::translate(-b.x, -b.y).mul(&doc.parent_matrix(id));
   let body = r.node(&n.id, Some(place));
@@ -79,7 +102,7 @@ enum Geo {
 impl<'a> Renderer<'a> {
   fn id(&mut self, prefix: &str) -> String {
     self.uid += 1;
-    format!("{prefix}{}", self.uid)
+    format!("{}{prefix}{}", self.scope, self.uid)
   }
 
   /// `place` overrides the node's own transform (used by export).

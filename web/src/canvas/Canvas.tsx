@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Handle, Mat, Node, Rect, VectorPoint } from "../types";
 import {
   dispatch,
   getDoc,
   query,
-  renderPage,
+  renderPageIncremental,
   screenToPage,
   selection,
   setTool,
@@ -95,7 +95,48 @@ export function Canvas() {
 
   const doc = getDoc();
   const pageObj = doc.pages.find((p) => p.id === page) ?? doc.pages[0];
-  const svg = useMemo(() => renderPage(page, editingText ? [editingText] : []), [rev, page, editingText]);
+  // Canvas content is patched per top-level layer: only changed roots are re-rendered and replaced.
+  const contentRef = useRef<SVGGElement>(null);
+  const rootEls = useRef(new Map<string, SVGGElement>());
+  useLayoutEffect(() => {
+    const host = contentRef.current;
+    if (!host) return;
+    const fresh = rootEls.current.size === 0;
+    const r = renderPageIncremental(page, editingText ? [editingText] : [], fresh);
+    if ("full" in r) {
+      rootEls.current.clear();
+      host.innerHTML = r.full;
+      return;
+    }
+    if (fresh) host.innerHTML = "";
+    const els = rootEls.current;
+    for (const [id, el] of els) {
+      if (!r.order.includes(id)) {
+        el.remove();
+        els.delete(id);
+      }
+    }
+    const want = r.order.map((id) => {
+      let el = els.get(id);
+      if (!el) {
+        el = document.createElementNS("http://www.w3.org/2000/svg", "g");
+        el.dataset.root = id;
+        els.set(id, el);
+      }
+      if (id in r.changed) el.innerHTML = r.changed[id];
+      else if (id in r.moved) el.querySelector(":scope > g[data-id]")?.setAttribute("transform", r.moved[id]);
+      return el;
+    });
+    for (const c of Array.from(host.children)) if (!els.has((c as SVGGElement).dataset?.root ?? "")) c.remove();
+    // Reorder with as few DOM moves as possible: re-inserting a root forces the browser to
+    // lay it out again, so keep the longest run already in order and move only the rest.
+    const index = new Map(Array.from(host.children).map((c, i) => [c, i]));
+    const keep = longestIncreasingRun(want.map((el) => index.get(el) ?? -1));
+    for (let i = want.length - 1; i >= 0; i--) {
+      if (!keep.has(i)) host.insertBefore(want[i], want[i + 1] ?? null);
+    }
+
+  }, [rev, page, editingText]);
 
   const selItems = useMemo(() => query<{ items: BoundsItem[]; union: Rect | null }>({ q: "bounds", ids: sel }), [rev, sel]);
   const hoverItem = useMemo(() => (hover && !sel.includes(hover) ? query<{ items: BoundsItem[] }>({ q: "bounds", ids: [hover] }).items[0] : null), [rev, hover, sel]);
@@ -639,10 +680,10 @@ export function Canvas() {
       onDragOver={(e) => e.preventDefault()}
       onDrop={onDrop}
     >
-      <svg xmlns="http://www.w3.org/2000/svg">
-        <g transform={`translate(${v.x} ${v.y}) scale(${v.zoom})`} dangerouslySetInnerHTML={{ __html: svg }} />
+      <svg xmlns="http://www.w3.org/2000/svg" width={size.w || undefined} height={size.h || undefined}>
+        <g ref={contentRef} transform={`translate(${v.x} ${v.y}) scale(${v.zoom})`} />
       </svg>
-      <svg className="overlay">
+      <svg className="overlay" width={size.w || undefined} height={size.h || undefined}>
         {showGrids && <GridOverlay v={v} />}
         <PageGuides v={v} width={size.w} height={size.h} />
         {topFrames.map((f) => {
@@ -732,6 +773,27 @@ export function Canvas() {
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>
   );
+}
+
+/** Indices of the longest strictly increasing subsequence of `pos` (entries < 0 never count). */
+function longestIncreasingRun(pos: number[]): Set<number> {
+  const tails: number[] = [];
+  const prev: number[] = new Array(pos.length).fill(-1);
+  for (let i = 0; i < pos.length; i++) {
+    if (pos[i] < 0) continue;
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (pos[tails[mid]] < pos[i]) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo > 0) prev[i] = tails[lo - 1];
+    tails[lo] = i;
+  }
+  const out = new Set<number>();
+  for (let i = tails.length ? tails[tails.length - 1] : -1; i >= 0; i = prev[i]) out.add(i);
+  return out;
 }
 
 function round(n: number) {

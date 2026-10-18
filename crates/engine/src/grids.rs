@@ -70,28 +70,30 @@ pub fn lines(frame: &Rect, g: &LayoutGrid) -> (Vec<f64>, Vec<f64>) {
   }
 }
 
-/// Visible grids on a page for the canvas overlay.
+/// Visible grids on a page for the canvas overlay. Scans node values (no tree walk with a
+/// lookup per node) and only resolves ancestry for the few frames that have grids.
 pub fn overlay(doc: &Document, page: &str) -> Value {
-  let Some(pg) = doc.page(page) else { return json!([]) };
   let mut out = Vec::new();
-  let mut stack: Vec<NodeId> = pg.children.iter().rev().cloned().collect();
-  while let Some(id) = stack.pop() {
-    let Some(n) = doc.get(&id) else { continue };
-    if !n.visible {
+  let with_grids: Vec<NodeId> = doc
+    .nodes
+    .values()
+    .filter(|n| n.page == page && n.visible && n.layout_grids.iter().any(|g| g.visible))
+    .map(|n| n.id.clone())
+    .collect();
+  for id in with_grids {
+    if doc.ancestors(&id).iter().any(|a| doc.get(a).map(|n| !n.visible).unwrap_or(false)) {
       continue;
     }
-    if !n.layout_grids.is_empty() {
-      let r = doc.abs_bounds(&id);
-      for g in n.layout_grids.iter().filter(|g| g.visible) {
-        let item = if g.pattern == GridPattern::Grid {
-          json!({ "frameId": id, "color": g.color, "cell": g.size.max(1.0), "frame": r })
-        } else {
-          json!({ "frameId": id, "color": g.color, "bands": bands(&r, g), "frame": r })
-        };
-        out.push(item);
-      }
+    let Some(n) = doc.get(&id) else { continue };
+    let r = doc.abs_bounds(&id);
+    for g in n.layout_grids.iter().filter(|g| g.visible) {
+      let item = if g.pattern == GridPattern::Grid {
+        json!({ "frameId": id, "color": g.color, "cell": g.size.max(1.0), "frame": r })
+      } else {
+        json!({ "frameId": id, "color": g.color, "bands": bands(&r, g), "frame": r })
+      };
+      out.push(item);
     }
-    stack.extend(n.children.iter().rev().cloned());
   }
   Value::Array(out)
 }

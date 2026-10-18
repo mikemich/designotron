@@ -555,12 +555,14 @@ textarea.textinput {
   background: var(--canvas);
   outline: none;
   min-width: 0;
+  /* Layout elsewhere (panels updating every frame) must never re-lay out the canvas SVG. */
+  contain: strict;
 }
+/* Pixel-sized from the canvas size (not percentages), so they never depend on container layout. */
 .canvas > svg {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  left: 0;
+  top: 0;
   overflow: visible;
 }
 .canvas .overlay {

@@ -67,4 +67,20 @@ impl WasmEngine {
     let hidden: Vec<String> = serde_json::from_str(hidden).unwrap_or_default();
     self.inner.render(page, &hidden)
   }
+
+  /// JSON delta of the document since the last call (`{full}` or `{nodes, removed, meta}`).
+  #[wasm_bindgen(js_name = docDelta)]
+  pub fn doc_delta(&mut self, full: bool) -> String {
+    self.inner.doc_delta(full).to_string()
+  }
+
+  /// JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
+  #[wasm_bindgen(js_name = renderIncremental)]
+  pub fn render_incremental(&mut self, page: &str, hidden: &str, reset: bool) -> String {
+    let hidden: Vec<String> = serde_json::from_str(hidden).unwrap_or_default();
+    if reset {
+      self.inner.reset_render_cache();
+    }
+    self.inner.render_incremental(page, &hidden).to_string()
+  }
 }

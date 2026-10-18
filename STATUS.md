@@ -5,7 +5,7 @@ change that finishes, starts or breaks them.
 
 ## In progress
 
-- Working through [ROADMAP.md](ROADMAP.md) in order. Next: performance (incremental rendering).
+- Working through [ROADMAP.md](ROADMAP.md) in order. Next: comments, multiplayer and a plugin API.
 
 ## To do
 
@@ -18,7 +18,7 @@ Ordered by impact on "replace Figma for a small team".
 | 3  | Comments                               | Pins on canvas, threads, mentions; needs (2) for teams                |
 | 4  | Cloud version history                  | Local named/auto versions shipped; sync them once files are in the cloud |
 | 6  | Live boolean groups                    | Booleans are destructive today (one vector); keep the inputs editable |
-| 7  | Performance for large files            | Incremental render, canvas/WebGL path, persistent maps for undo       |
+| 7  | Faster painting of huge files          | Engine and DOM updates are incremental; a canvas/WebGL renderer would cut paint cost at 10k+ layers |
 | 8  | Figma import extras                    | `.fig` binary files, variables/styles from the Figma API, library components |
 | 9  | Variable extras                        | Aliases in the editor UI, scoping, per-page modes, prototyping with variables |
 | 10 | Vector editing completeness            | Add/delete points, bend tool, renormalise bounds after edits          |
@@ -62,6 +62,7 @@ Ordered by impact on "replace Figma for a small team".
 | Vector ops      | Union, subtract, intersect, exclude (i_overlay), flatten keeping curves, outline stroke (inside/center/outside), use as mask (alpha masks, ⌥⌘M); SVG path parser for imported icons |
 | Variables       | Collections with modes, colour/number/string/boolean variables (editor dialog), bindings for fill, stroke, radius, gap, padding, opacity, size, font size, text, visibility; per-frame modes inherited by children and instances; `tokens.css` + `var(--…)` + `data-<collection>` attributes in exported code; `define_variables`/`bind`/`variableModes` for Claude |
 | Figma import    | File → Import from Figma (link + personal access token, or a saved REST JSON): pages, frames, auto layout, constraints, components/variants, instances with recovered overrides, mixed text, vectors from Figma geometry, gradients, images (downloaded into the file), effects, masks, prototype links |
+| Performance     | Persistent node map (O(1) snapshots), diff-driven layout/component sync, per-root canvas render cache with transform-only moves, document deltas to JS, contained canvas layout |
 | Live app        | App tab: write the generated project to `workspace/app` (or keep it in sync), run `npm run dev` through the bridge, preview at mobile/desktop width, logs, "Ask Claude to fix it" |
 | Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README                                                             |
 
@@ -71,7 +72,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 70 engine + bridge unit tests                          | `cargo test --workspace`                     |
+| 71 engine + bridge unit tests                          | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
@@ -86,6 +87,8 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 | Variables dialog, fill binding, frame mode switch      | `web/scripts/e2e.mjs`                        |
 | Figma JSON import through the dialog                   | `web/scripts/e2e.mjs` (38/38 passing)        |
 | Bridge reaches api.figma.com and real sites via proxy  | curl `/bridge/figma` (403 for a bad token), `/bridge/fetch` |
+| Engine: drag step 0.13 ms, edit 0.3 ms on 6k layers    | `cargo run --release -p designotron-engine --example bench` (was 42 ms / 46 ms) |
+| Browser drag on 6k layers: ~10 ms script, ~1 ms layout per frame | `web/scripts/perf.mjs` on the production build (was 25 ms script + 80 ms layout) |
 | Production build served by the bridge                  | `E2E_URL=http://127.0.0.1:5174 npm run e2e`  |
 | Release binaries download and serve the editor         | `install.sh` and `npx designotron` on Linux  |
 | Exported Landing/Dashboard projects build and match    | `tsc` + `vite build`, compared screenshots   |
@@ -107,7 +110,7 @@ until someone runs it with a real key.
 |------------------|----------------------------------------------------------------------------------------------------------|
 | Collaboration    | Single user. No multiplayer, accounts, sharing or comments; versions live only in this browser           |
 | Storage          | Files live in the browser (IndexedDB). Clearing site data deletes them; save `.dtron` files to keep them |
-| Scale            | Each change re-renders the page as SVG and snapshots the document; thousands of layers will feel slow    |
+| Scale            | Updates are incremental, but the canvas is one big SVG: painting 10k+ layers zoomed out is the limit (software rendering in headless tests ~35 ms/frame at 6k) |
 | Text             | No OpenType features or per-range line height; widths depend on the web font having loaded               |
 | URL import       | Scripts don't run, so sites rendered by JavaScript come in mostly empty; very long pages make many layers |
 | Headless text    | Bridge headless mode measures text with a heuristic, so layout can differ slightly from the editor       |

@@ -17,13 +17,38 @@ use crate::Shared;
 const MAX_PAGE_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES: usize = 15 * 1024 * 1024;
 
-/// HTTP client honouring HTTPS_PROXY and the OS certificate store (corporate proxies, custom CAs).
-fn agent(timeout: Duration) -> ureq::Agent {
-  ureq::AgentBuilder::new()
-    .timeout(timeout)
-    .redirects(5)
-    .try_proxy_from_env(true)
-    .build()
+/// HTTP client honouring HTTPS_PROXY/NO_PROXY and the OS certificate store (corporate
+/// proxies, custom CAs). Loopback addresses never go through a proxy.
+fn agent(url: &str, timeout: Duration) -> ureq::Agent {
+  let builder = ureq::AgentBuilder::new().timeout(timeout).redirects(5);
+  if bypass_proxy(url) {
+    builder.build()
+  } else {
+    builder.try_proxy_from_env(true).build()
+  }
+}
+
+/// Host part of an http(s) URL, without userinfo, port or IPv6 brackets.
+fn host_of(url: &str) -> &str {
+  let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+  let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+  let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+  if let Some(v6) = host.strip_prefix('[') {
+    return v6.split(']').next().unwrap_or(v6);
+  }
+  host.split(':').next().unwrap_or(host)
+}
+
+fn bypass_proxy(url: &str) -> bool {
+  let host = host_of(url);
+  if host == "localhost" || host.starts_with("127.") || host == "::1" || host.ends_with(".localhost") {
+    return true;
+  }
+  let no_proxy = std::env::var("NO_PROXY").or_else(|_| std::env::var("no_proxy")).unwrap_or_default();
+  no_proxy.split(',').map(str::trim).filter(|e| !e.is_empty()).any(|e| {
+    let e = e.trim_start_matches('.');
+    e == "*" || host == e || host.ends_with(&format!(".{e}"))
+  })
 }
 
 #[derive(Deserialize)]
@@ -41,7 +66,7 @@ pub async fn fetch_page(State(_state): State<Shared>, headers: HeaderMap, Query(
   }
   let url = p.url.clone();
   let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-    let agent = agent(Duration::from_secs(20));
+    let agent = agent(&url, Duration::from_secs(20));
     let res = agent
       .get(&url)
       .set("User-Agent", "Mozilla/5.0 (Designotron import)")
@@ -110,6 +135,14 @@ mod tests {
   use serde_json::json;
 
   #[test]
+  fn loopback_skips_the_proxy() {
+    assert!(bypass_proxy("http://127.0.0.1:5199/"));
+    assert!(bypass_proxy("http://localhost/x"));
+    assert!(bypass_proxy("http://[::1]:8080/"));
+    assert!(!bypass_proxy("https://api.figma.com/v1/files/x"));
+  }
+
+  #[test]
   fn saves_valid_attachments_and_skips_bad_ones() {
     let dir = std::env::temp_dir().join(format!("dt-attach-{}", std::process::id()));
     let png = base64::engine::general_purpose::STANDARD.encode([0x89, b'P', b'N', b'G']);
@@ -163,7 +196,7 @@ pub async fn figma_api(State(_state): State<Shared>, headers: HeaderMap, Query(p
     format!("https://api.figma.com/v1/{}?{}", p.path, p.query)
   };
   let result = tokio::task::spawn_blocking(move || -> Result<(u16, String), String> {
-    let agent = agent(Duration::from_secs(120));
+    let agent = agent(&url, Duration::from_secs(120));
     let res = match agent.get(&url).set("X-Figma-Token", &token).call() {
       Ok(r) => r,
       Err(ureq::Error::Status(code, r)) => return Ok((code, r.into_string().unwrap_or_default())),

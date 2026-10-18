@@ -318,11 +318,13 @@ pub fn prune(doc: &mut Document) {
     .iter()
     .map(|c| (c.id.clone(), c.modes.iter().map(|m| m.id.clone()).collect()))
     .collect();
-  for n in doc.nodes.values_mut() {
+  let mode_ok = |c: &String, m: &String| modes.iter().any(|(cid, ms)| cid == c && ms.contains(m));
+  let stale =
+    |n: &crate::model::Node| n.bindings.values().any(|v| !vars.contains(v)) || n.variable_modes.iter().any(|(c, m)| !mode_ok(c, m));
+  doc.update_where(stale, |n| {
     n.bindings.retain(|_, v| vars.contains(v));
-    n.variable_modes
-      .retain(|c, m| modes.iter().any(|(cid, ms)| cid == c && ms.contains(m)));
-  }
+    n.variable_modes.retain(|c, m| mode_ok(c, m));
+  });
 }
 
 /// CSS custom property name for a variable ("Colors/Primary 500" → `--colors-primary-500`).

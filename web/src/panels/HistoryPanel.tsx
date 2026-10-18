@@ -21,7 +21,9 @@ export function HistoryPanel() {
   const [versions, setVersions] = useState<Version[]>([]);
   const [name, setName] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
-  const refresh = () => fileId && listVersions(fileId).then(setVersions);
+  const refresh = () => {
+    if (fileId) listVersions(fileId).then(setVersions);
+  };
   useEffect(() => {
     refresh();
   }, [fileId]);

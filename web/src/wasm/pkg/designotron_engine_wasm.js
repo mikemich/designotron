@@ -98,6 +98,29 @@ export class WasmEngine {
         wasm.__wbg_wasmengine_free(ptr, 0);
     }
     /**
+     * JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
+     * @param {string} page
+     * @param {string} hidden
+     * @param {boolean} reset
+     * @returns {string}
+     */
+    renderIncremental(page, hidden, reset) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passStringToWasm0(page, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(hidden, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ret = wasm.wasmengine_renderIncremental(this.__wbg_ptr, ptr0, len0, ptr1, len1, reset);
+            deferred3_0 = ret[0];
+            deferred3_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
      * @param {number} seed
      */
     constructor(seed) {
@@ -223,6 +246,23 @@ export class WasmEngine {
             return getStringFromWasm0(ptr2, len2);
         } finally {
             wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
+     * JSON delta of the document since the last call (`{full}` or `{nodes, removed, meta}`).
+     * @param {boolean} full
+     * @returns {string}
+     */
+    docDelta(full) {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmengine_docDelta(this.__wbg_ptr, full);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
         }
     }
 }

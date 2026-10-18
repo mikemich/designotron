@@ -165,11 +165,22 @@ export function onDocChange(fn: () => void): () => void {
 
 let docCache: { rev: number; doc: Doc } | null = null;
 
-/** Parsed document for the current revision (cached). */
+/** Parsed document for the current revision. Kept current from engine deltas, so a
+ * change to one layer costs that layer, not the whole file. */
 export function getDoc(): Doc {
   const e = getEngine();
   const rev = e.rev();
-  if (!docCache || docCache.rev !== rev) docCache = { rev, doc: JSON.parse(e.save()) };
+  if (docCache && docCache.rev === rev) return docCache.doc;
+  const d = JSON.parse(e.docDelta(!docCache));
+  if (d.full || !docCache) {
+    docCache = { rev, doc: d.full };
+  } else {
+    // Patch the node table in place (changed nodes are new objects; the table is shared).
+    const nodes = docCache.doc.nodes;
+    Object.assign(nodes, d.nodes);
+    for (const id of d.removed) delete nodes[id];
+    docCache = { rev, doc: { ...d.meta, nodes } };
+  }
   return docCache.doc;
 }
 
@@ -237,6 +248,16 @@ export function currentPage(): string {
 /** Engine SVG for a page with asset references resolved to object URLs. */
 export function renderPage(page: string, hidden: string[]): string {
   return resolveAssets(getEngine().render(page, JSON.stringify(hidden)));
+}
+
+export type RenderUpdate = { full: string } | { order: string[]; changed: Record<string, string>; moved: Record<string, string> };
+
+/** Incremental canvas render: only top-level layers changed since the last call come back. */
+export function renderPageIncremental(page: string, hidden: string[], reset: boolean): RenderUpdate {
+  const r = JSON.parse(getEngine().renderIncremental(page, JSON.stringify(hidden), reset));
+  if ("full" in r) return { full: resolveAssets(r.full) };
+  for (const k in r.changed) r.changed[k] = resolveAssets(r.changed[k]);
+  return r;
 }
 
 export function resolveAssets(svg: string): string {

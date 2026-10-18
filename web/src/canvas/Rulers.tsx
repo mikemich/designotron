@@ -195,7 +195,7 @@ export function Rulers({ v, width, height, selection }: { v: View; width: number
       </svg>
       <div className="ruler-corner" />
       {creating && !Number.isNaN(creating.pos) && (
-        <svg className="guide-preview">
+        <svg className="guide-preview" width={width} height={height}>
           {creating.axis === "x" ? (
             <line x1={creating.pos * v.zoom + v.x} y1={0} x2={creating.pos * v.zoom + v.x} y2={height} stroke="#f24822" />
           ) : (
