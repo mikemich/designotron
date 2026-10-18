@@ -97,6 +97,13 @@ pub enum Command {
     #[serde(default)]
     mode: Option<String>,
   },
+  /// Imports a Figma REST API file (or /nodes response) as new pages.
+  ImportFigma {
+    file: Value,
+    /// Figma imageRef → URL or `asset:` id.
+    #[serde(default)]
+    images: std::collections::BTreeMap<String, String>,
+  },
   /// Swaps in a whole document as one undoable step (restoring a version).
   ReplaceDocument {
     doc: Value,
@@ -871,6 +878,22 @@ impl Engine {
           };
         }
         Ok(json!({}))
+      }
+      Command::ImportFigma { file, images } => {
+        // Importing into a brand-new file replaces its empty starter page.
+        let empty_start = (self.doc.pages.len() == 1 && self.doc.pages[0].children.is_empty()).then(|| self.doc.pages[0].id.clone());
+        let r = crate::figma::import(&mut self.doc, &mut self.gen, &file, &images)?;
+        if let Some(pid) = empty_start {
+          self.doc.pages.retain(|p| p.id != pid);
+          if let Some(name) = file.get("name").and_then(|v| v.as_str()) {
+            self.doc.name = name.to_string();
+          }
+        }
+        if let Some(first) = r["pages"].as_array().and_then(|p| p.first()).and_then(|p| p.as_str()) {
+          self.page = first.to_string();
+          self.selection.clear();
+        }
+        Ok(r)
       }
       Command::ReplaceDocument { doc } => {
         let doc: Document = serde_json::from_value(doc).map_err(|e| format!("not a Designotron document: {e}"))?;

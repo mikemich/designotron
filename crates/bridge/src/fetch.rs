@@ -17,6 +17,15 @@ use crate::Shared;
 const MAX_PAGE_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES: usize = 15 * 1024 * 1024;
 
+/// HTTP client honouring HTTPS_PROXY and the OS certificate store (corporate proxies, custom CAs).
+fn agent(timeout: Duration) -> ureq::Agent {
+  ureq::AgentBuilder::new()
+    .timeout(timeout)
+    .redirects(5)
+    .try_proxy_from_env(true)
+    .build()
+}
+
 #[derive(Deserialize)]
 pub struct FetchParams {
   url: String,
@@ -32,7 +41,7 @@ pub async fn fetch_page(State(_state): State<Shared>, headers: HeaderMap, Query(
   }
   let url = p.url.clone();
   let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).redirects(5).build();
+    let agent = agent(Duration::from_secs(20));
     let res = agent
       .get(&url)
       .set("User-Agent", "Mozilla/5.0 (Designotron import)")
@@ -116,5 +125,70 @@ mod tests {
     assert!(paths[0].extension().unwrap() == "png" && paths[1].extension().unwrap() == "jpg");
     assert_eq!(std::fs::read(&paths[0]).unwrap(), [0x89, b'P', b'N', b'G']);
     let _ = std::fs::remove_dir_all(dir);
+  }
+}
+
+#[derive(Deserialize)]
+pub struct FigmaParams {
+  /// API path after `/v1/`, e.g. `files/KEY` or `files/KEY/images`.
+  path: String,
+  #[serde(default)]
+  query: String,
+  /// Personal access token; a query parameter keeps the request "simple" (no CORS preflight).
+  #[serde(default)]
+  token: String,
+}
+
+/// `GET /bridge/figma?path=files/KEY&query=geometry=paths&token=…` proxies the Figma REST API.
+pub async fn figma_api(State(_state): State<Shared>, headers: HeaderMap, Query(p): Query<FigmaParams>) -> Response {
+  if !crate::security::origin_allowed(&headers) || !crate::security::host_allowed(&headers) {
+    return (StatusCode::FORBIDDEN, "forbidden").into_response();
+  }
+  let ok_path = p.path.starts_with("files/") && p.path.chars().all(|c| c.is_ascii_alphanumeric() || "/_-:".contains(c));
+  let ok_query = p.query.chars().all(|c| c.is_ascii_alphanumeric() || "=&,:_-%;".contains(c));
+  if !ok_path || !ok_query {
+    return (StatusCode::BAD_REQUEST, "unsupported Figma API path").into_response();
+  }
+  let token = headers
+    .get("x-figma-token")
+    .and_then(|v| v.to_str().ok())
+    .map(String::from)
+    .unwrap_or(p.token.clone());
+  if token.is_empty() {
+    return (StatusCode::BAD_REQUEST, "missing Figma token").into_response();
+  }
+  let url = if p.query.is_empty() {
+    format!("https://api.figma.com/v1/{}", p.path)
+  } else {
+    format!("https://api.figma.com/v1/{}?{}", p.path, p.query)
+  };
+  let result = tokio::task::spawn_blocking(move || -> Result<(u16, String), String> {
+    let agent = agent(Duration::from_secs(120));
+    let res = match agent.get(&url).set("X-Figma-Token", &token).call() {
+      Ok(r) => r,
+      Err(ureq::Error::Status(code, r)) => return Ok((code, r.into_string().unwrap_or_default())),
+      Err(e) => return Err(format!("could not reach the Figma API: {e}")),
+    };
+    let mut body = String::new();
+    res
+      .into_reader()
+      .take(200 * 1024 * 1024)
+      .read_to_string(&mut body)
+      .map_err(|e| e.to_string())?;
+    Ok((200, body))
+  })
+  .await;
+  match result {
+    Ok(Ok((code, body))) => (
+      StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY),
+      [
+        (header::CONTENT_TYPE, "application/json"),
+        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+      ],
+      body,
+    )
+      .into_response(),
+    Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
+    Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
   }
 }

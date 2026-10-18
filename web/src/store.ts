@@ -99,6 +99,7 @@ interface Store {
   showRulers: boolean;
   showGrids: boolean;
   variablesOpen: boolean;
+  figmaOpen: boolean;
 }
 
 const pref = (k: string, d: boolean) => {
@@ -143,6 +144,7 @@ export const useStore = create<Store>(() => ({
   showRulers: pref("dt:showRulers", false),
   showGrids: pref("dt:showGrids", true),
   variablesOpen: false,
+  figmaOpen: false,
 }));
 
 /** Applies a style to the selected characters of the text being edited; false if none. */

@@ -1,0 +1,372 @@
+{
+ "name": "Test",
+ "document": {
+  "id": "0:0",
+  "type": "DOCUMENT",
+  "children": [
+   {
+    "id": "0:1",
+    "type": "CANVAS",
+    "name": "Screens",
+    "backgroundColor": {
+     "r": 0.9,
+     "g": 0.9,
+     "b": 0.9,
+     "a": 1
+    },
+    "children": [
+     {
+      "id": "1:1",
+      "type": "COMPONENT",
+      "name": "Button",
+      "absoluteBoundingBox": {
+       "x": 0,
+       "y": 0,
+       "width": 120,
+       "height": 40
+      },
+      "size": {
+       "x": 120,
+       "y": 40
+      },
+      "relativeTransform": [
+       [
+        1,
+        0,
+        0
+       ],
+       [
+        0,
+        1,
+        0
+       ]
+      ],
+      "fills": [
+       {
+        "type": "SOLID",
+        "color": {
+         "r": 0.427,
+         "g": 0.29,
+         "b": 1,
+         "a": 1
+        }
+       }
+      ],
+      "cornerRadius": 8,
+      "layoutMode": "HORIZONTAL",
+      "itemSpacing": 4,
+      "paddingLeft": 16,
+      "paddingRight": 16,
+      "paddingTop": 10,
+      "paddingBottom": 10,
+      "primaryAxisAlignItems": "CENTER",
+      "counterAxisAlignItems": "CENTER",
+      "children": [
+       {
+        "id": "1:2",
+        "type": "TEXT",
+        "name": "Label",
+        "characters": "Buy now",
+        "absoluteBoundingBox": {
+         "x": 16,
+         "y": 10,
+         "width": 88,
+         "height": 20
+        },
+        "size": {
+         "x": 88,
+         "y": 20
+        },
+        "relativeTransform": [
+         [
+          1,
+          0,
+          16
+         ],
+         [
+          0,
+          1,
+          10
+         ]
+        ],
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 1,
+           "g": 1,
+           "b": 1,
+           "a": 1
+          }
+         }
+        ],
+        "style": {
+         "fontFamily": "Inter",
+         "fontWeight": 600,
+         "fontSize": 14,
+         "textAutoResize": "WIDTH_AND_HEIGHT",
+         "lineHeightUnit": "INTRINSIC_%"
+        },
+        "characterStyleOverrides": [
+         0,
+         0,
+         0,
+         0,
+         1,
+         1,
+         1
+        ],
+        "styleOverrideTable": {
+         "1": {
+          "fontWeight": 800
+         }
+        }
+       }
+      ]
+     },
+     {
+      "id": "2:1",
+      "type": "FRAME",
+      "name": "Home",
+      "absoluteBoundingBox": {
+       "x": 200,
+       "y": 0,
+       "width": 393,
+       "height": 852
+      },
+      "size": {
+       "x": 393,
+       "y": 852
+      },
+      "relativeTransform": [
+       [
+        1,
+        0,
+        200
+       ],
+       [
+        0,
+        1,
+        0
+       ]
+      ],
+      "fills": [
+       {
+        "type": "GRADIENT_LINEAR",
+        "gradientHandlePositions": [
+         {
+          "x": 0.5,
+          "y": 0
+         },
+         {
+          "x": 0.5,
+          "y": 1
+         },
+         {
+          "x": 0,
+          "y": 0
+         }
+        ],
+        "gradientStops": [
+         {
+          "color": {
+           "r": 1,
+           "g": 1,
+           "b": 1,
+           "a": 1
+          },
+          "position": 0
+         },
+         {
+          "color": {
+           "r": 0,
+           "g": 0,
+           "b": 0,
+           "a": 0.5
+          },
+          "position": 1
+         }
+        ]
+       }
+      ],
+      "children": [
+       {
+        "id": "3:1",
+        "type": "INSTANCE",
+        "name": "Button",
+        "componentId": "1:1",
+        "absoluteBoundingBox": {
+         "x": 220,
+         "y": 700,
+         "width": 120,
+         "height": 40
+        },
+        "size": {
+         "x": 120,
+         "y": 40
+        },
+        "relativeTransform": [
+         [
+          1,
+          0,
+          20
+         ],
+         [
+          0,
+          1,
+          700
+         ]
+        ],
+        "transitionNodeID": "1:1",
+        "fills": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0.427,
+           "g": 0.29,
+           "b": 1,
+           "a": 1
+          }
+         }
+        ],
+        "cornerRadius": 8,
+        "layoutMode": "HORIZONTAL",
+        "itemSpacing": 4,
+        "paddingLeft": 16,
+        "paddingRight": 16,
+        "paddingTop": 10,
+        "paddingBottom": 10,
+        "primaryAxisAlignItems": "CENTER",
+        "counterAxisAlignItems": "CENTER",
+        "children": [
+         {
+          "id": "I3:1;1:2",
+          "type": "TEXT",
+          "name": "Label",
+          "characters": "Checkout",
+          "absoluteBoundingBox": {
+           "x": 236,
+           "y": 710,
+           "width": 88,
+           "height": 20
+          },
+          "size": {
+           "x": 88,
+           "y": 20
+          },
+          "relativeTransform": [
+           [
+            1,
+            0,
+            16
+           ],
+           [
+            0,
+            1,
+            10
+           ]
+          ],
+          "fills": [
+           {
+            "type": "SOLID",
+            "color": {
+             "r": 1,
+             "g": 1,
+             "b": 1,
+             "a": 1
+            }
+           }
+          ],
+          "style": {
+           "fontFamily": "Inter",
+           "fontWeight": 600,
+           "fontSize": 14,
+           "textAutoResize": "WIDTH_AND_HEIGHT",
+           "lineHeightUnit": "INTRINSIC_%"
+          }
+         }
+        ]
+       },
+       {
+        "id": "3:2",
+        "type": "INSTANCE",
+        "name": "Library icon",
+        "componentId": "99:1",
+        "absoluteBoundingBox": {
+         "x": 220,
+         "y": 20,
+         "width": 24,
+         "height": 24
+        },
+        "size": {
+         "x": 24,
+         "y": 24
+        },
+        "relativeTransform": [
+         [
+          0,
+          1,
+          44
+         ],
+         [
+          -1,
+          0,
+          20
+         ]
+        ],
+        "children": []
+       },
+       {
+        "id": "3:3",
+        "type": "VECTOR",
+        "name": "Check",
+        "absoluteBoundingBox": {
+         "x": 260,
+         "y": 20,
+         "width": 10,
+         "height": 10
+        },
+        "size": {
+         "x": 10,
+         "y": 10
+        },
+        "relativeTransform": [
+         [
+          1,
+          0,
+          60
+         ],
+         [
+          0,
+          1,
+          20
+         ]
+        ],
+        "fills": [],
+        "strokes": [
+         {
+          "type": "SOLID",
+          "color": {
+           "r": 0,
+           "g": 0,
+           "b": 0,
+           "a": 1
+          }
+         }
+        ],
+        "strokeWeight": 2,
+        "fillGeometry": [],
+        "strokeGeometry": [
+         {
+          "path": "M0 5L4 9L10 0L9 0L4 8L1 5Z",
+          "windingRule": "NONZERO"
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ }
+}

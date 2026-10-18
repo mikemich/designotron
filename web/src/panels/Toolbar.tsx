@@ -59,6 +59,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     { heading: "File" },
     { label: "Open .dtron file…", onClick: A.openDtron },
     { label: "Save as .dtron", kbd: `${MOD}S`, onClick: A.saveDtron },
+    { label: "Import from Figma…", onClick: () => useStore.setState({ figmaOpen: true }) },
     { label: "Import HTML as layers…", onClick: A.importHtmlPrompt },
     { label: "Place image…", kbd: `${SHIFT}${MOD}K`, onClick: A.placeImage },
     { label: "Export React project (.zip)", onClick: A.exportProject },

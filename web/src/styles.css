@@ -1316,3 +1316,25 @@ textarea.textinput {
   background: var(--panel-3);
   font-size: 11px;
 }
+
+/* Figma import */
+.figma-dialog {
+  width: 480px;
+}
+.figma-body {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.figma-body a {
+  color: var(--accent-2);
+}
+.error-box {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(242, 72, 34, 0.15);
+  color: #ff8a73;
+  line-height: 1.5;
+}

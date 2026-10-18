@@ -111,6 +111,7 @@ async fn main() {
     .route("/bridge/ws", get(editor::ws_handler))
     .route("/bridge/status", get(status))
     .route("/bridge/fetch", get(fetch::fetch_page))
+    .route("/bridge/figma", get(fetch::figma_api))
     .route("/mcp", post(mcp::handle).get(mcp::reject_get).delete(mcp::end_session))
     .with_state(state.clone());
 

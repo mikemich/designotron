@@ -9,6 +9,7 @@ pub mod color;
 pub mod components;
 pub mod doc;
 pub mod engine;
+pub mod figma;
 pub mod geom;
 pub mod grids;
 pub mod interact;

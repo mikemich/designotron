@@ -323,6 +323,23 @@ try {
   const dark = await page.evaluate((id) => window.__dt.doc().nodes[id].fills[0].color, themed.tile);
   check("variables: bound fill follows the frame's mode", light === "#6D4AFF" && dark === "#111111", `${light} → ${dark}`);
 
+  // Figma import from a saved REST API export.
+  await page.evaluate(() => (location.hash = "#/"));
+  await page.waitForSelector(".files");
+  await page.click(".files-head button:has-text('Import from Figma')");
+  await page.waitForSelector(".figma-dialog");
+  await page.setInputFiles(".figma-dialog input[type=file]", path.join(import.meta.dirname, "fixtures", "figma-sample.json"));
+  await page.waitForFunction(() => window.__dt.doc().pages.some((p) => p.name === "Screens"), null, { timeout: 5000 });
+  const fig = await page.evaluate(() => {
+    const d = window.__dt.doc();
+    const nodes = Object.values(d.nodes);
+    const inst = nodes.find((n) => n.type === "instance");
+    const label = inst && d.nodes[inst.children[0]];
+    return { pages: d.pages.map((p) => p.name), instance: !!inst?.instance?.componentId, label: label?.text?.characters };
+  });
+  check("Figma JSON import keeps components and instance overrides", fig.pages.join() === "Screens" && fig.instance && fig.label === "Checkout", JSON.stringify(fig));
+  await shot("08b-figma-import");
+
   // Templates: each builds into a fresh file from the files screen.
   for (const name of ["Landing page", "Dashboard", "Design system"]) {
     await page.evaluate(() => (location.hash = "#/"));

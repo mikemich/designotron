@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { FilePlus, FolderOpen, MoreHorizontal } from "lucide-react";
+import { Figma, FilePlus, FolderOpen, MoreHorizontal } from "lucide-react";
 import { deleteFile, duplicateFile, fromDtron, listFiles, newFileId, pickFile, renameFile, saveFile, type FileMeta } from "./files";
 import { getEngine, newEngine, dispatch, toast, useStore } from "./store";
 import { TEMPLATES, type Template } from "./templates";
@@ -47,6 +47,15 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
         <div style={{ flex: 1 }} />
         <button className="btn" onClick={importFile}>
           <FolderOpen size={14} /> Open .dtron
+        </button>
+        <button
+          className="btn"
+          onClick={async () => {
+            useStore.setState({ figmaOpen: true });
+            await create(null);
+          }}
+        >
+          <Figma size={14} /> Import from Figma
         </button>
         <button className="btn primary" onClick={() => create(null)}>
           <FilePlus size={14} /> New design file
