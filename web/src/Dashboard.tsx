@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Figma, FilePlus, FolderOpen, MoreHorizontal } from "lucide-react";
+import { Figma, FilePlus, FolderOpen, Github, MoreHorizontal } from "lucide-react";
+import { REPO_URL } from "./panels/GuestBar";
 import { deleteFile, duplicateFile, fromDtron, listFiles, newFileId, pickFile, renameFile, saveFile, type FileMeta } from "./files";
 import { getEngine, newEngine, dispatch, toast, useStore } from "./store";
 import { TEMPLATES, type Template } from "./templates";
@@ -45,6 +46,9 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
         <h1>Designotron</h1>
         <span className="muted">Free, open-source design tool with Claude built in</span>
         <div style={{ flex: 1 }} />
+        <a className="btn" href={REPO_URL} target="_blank" rel="noreferrer" title="Designotron is free and open source. A star helps others find it">
+          <Github size={14} /> Star
+        </a>
         <button className="btn" onClick={importFile}>
           <FolderOpen size={14} /> Open .dtron
         </button>

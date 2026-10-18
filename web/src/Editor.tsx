@@ -11,6 +11,7 @@ import { FigmaImportDialog } from "./panels/FigmaImportDialog";
 import { PluginWindow, PluginsDialog } from "./panels/PluginsDialog";
 import { usePlugins } from "./plugins";
 import { joinShared, stopSharing, useCollab } from "./collab";
+import { GuestBar } from "./panels/GuestBar";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
 import { getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
@@ -116,6 +117,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       {figmaOpen && <FigmaImportDialog />}
       {pluginsOpen && <PluginsDialog />}
       {shareOpen && <ShareDialog />}
+      <GuestBar />
       <PluginWindow />
       {toast && <div className={"toast " + toast.kind}>{toast.text}</div>}
     </div>

@@ -1568,3 +1568,64 @@ textarea.textinput {
 .share-option a {
   color: var(--accent-2);
 }
+
+/* ---------- Guest bar (people who opened a shared link) ---------- */
+.guest-bar {
+  position: fixed;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 24px);
+  padding: 6px 8px 6px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+}
+.guest-bar > span,
+.guest-bar .btn {
+  white-space: nowrap;
+}
+.guest-bar-pitch {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.guest-bar .btn.small {
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+  background: var(--accent);
+  color: white;
+}
+.guest-bar .btn.small:hover {
+  background: var(--accent-2);
+}
+.guest-bar a {
+  color: var(--accent-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex: none;
+}
+.live-dot[data-live="true"] {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(20, 174, 92, 0.25);
+}
+@media (max-width: 900px) {
+  .guest-bar-pitch {
+    display: none;
+  }
+}

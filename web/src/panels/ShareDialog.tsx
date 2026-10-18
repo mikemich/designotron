@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Copy, Globe, Loader2, Users, Wifi, X } from "lucide-react";
-import { pageIsRelay, relayUrl, startOnline, startSharing, stopSharing, useCollab } from "../collab";
+import { Check, Copy, Globe, Loader2, Share2, Users, Wifi, X } from "lucide-react";
+import { pageIsRelay, relayUrl, remixShared, startOnline, startSharing, stopSharing, useCollab } from "../collab";
 import { useChat } from "../ai/chatState";
 import { Avatar, userName } from "../canvas/Comments";
 
@@ -14,12 +14,26 @@ export function ShareDialog() {
   const [relay, setRelay] = useState(relayUrl());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"online" | "lan" | null>(null);
+  // The built-in relay needs no explanation; the address field is for people who run their own.
+  const [customRelay, setCustomRelay] = useState(!relayUrl());
+  const [copied, setCopied] = useState(false);
   const close = () => useCollab.setState({ dialogOpen: false });
 
   // An editor served by a relay can share online with no setup.
   useEffect(() => {
-    if (!relay) pageIsRelay().then((yes) => yes && setRelay(location.origin));
+    if (!relay) pageIsRelay().then((yes) => yes && (setRelay(location.origin), setCustomRelay(false)));
   }, []);
+
+  const copy = (text: string, input?: HTMLInputElement | null) => {
+    navigator.clipboard?.writeText(text).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      },
+      () => input?.select(),
+    );
+  };
+  const invite = () => navigator.share?.({ title: "Design with me in Designotron", url: link ?? "" }).catch(() => {});
 
   const start = async (how: "online" | "lan") => {
     setError(null);
@@ -55,14 +69,25 @@ export function ShareDialog() {
                   <Globe size={14} /> <b>Online</b>
                   <span className="muted small">anyone with the link, anywhere</span>
                 </div>
-                <input className="textinput mono" value={relay} onChange={(e) => setRelay(e.target.value)} placeholder="Relay address, e.g. https://designotron-relay.fly.dev" />
-                <div className="muted small" style={{ lineHeight: 1.5 }}>
-                  Rooms are hosted on a Designotron relay: a small open-source server.{" "}
-                  <a href={RELAY_DOCS} target="_blank" rel="noreferrer">
-                    Deploy one in a few minutes
-                  </a>
-                  .
-                </div>
+                {customRelay ? (
+                  <>
+                    <input className="textinput mono" value={relay} onChange={(e) => setRelay(e.target.value)} placeholder="Relay address, e.g. https://designotron-relay.fly.dev" />
+                    <div className="muted small" style={{ lineHeight: 1.5 }}>
+                      Rooms are hosted on a Designotron relay: a small open-source server.{" "}
+                      <a href={RELAY_DOCS} target="_blank" rel="noreferrer">
+                        Deploy one in a few minutes
+                      </a>
+                      .
+                    </div>
+                  </>
+                ) : (
+                  <div className="muted small" style={{ lineHeight: 1.5 }}>
+                    You get a link; whoever opens it edits with you, no account needed.{" "}
+                    <a href="#" onClick={(e) => (e.preventDefault(), setCustomRelay(true))}>
+                      Use a different relay
+                    </a>
+                  </div>
+                )}
                 <button className="btn primary" disabled={!!busy || !relay.trim()} onClick={() => start("online")}>
                   {busy === "online" ? <Loader2 size={13} className="spin" /> : <Globe size={13} />} Share online
                 </button>
@@ -85,18 +110,33 @@ export function ShareDialog() {
           ) : (
             <>
               <div className="small muted">
-                {role === "owner" ? (mode === "online" ? "Anyone with this link can edit with you:" : "Send this link to people on your network:") : `You joined a shared file${mode === "online" ? " (online)" : ""}.`}
+                {role === "owner" ? (mode === "online" ? "Send this link to the people you want to design with:" : "Send this link to people on your network:") : `You joined a shared file${mode === "online" ? " (online)" : ""}.`}
               </div>
               {role === "owner" && link && (
-                <div className="row" style={{ marginTop: 6 }}>
-                  <input className="textinput mono" readOnly value={link} onFocus={(e) => e.target.select()} />
-                  <button className="btn" onClick={() => navigator.clipboard.writeText(link)}>
-                    <Copy size={13} /> Copy
-                  </button>
-                </div>
+                <>
+                  <div className="row" style={{ marginTop: 6 }}>
+                    <input id="share-link" className="textinput mono" readOnly value={link} onFocus={(e) => e.target.select()} />
+                    <button className="btn primary" onClick={() => copy(link, document.getElementById("share-link") as HTMLInputElement)}>
+                      {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? "Copied" : "Copy"}
+                    </button>
+                  </div>
+                  {"share" in navigator && (
+                    <button className="btn" style={{ marginTop: 8 }} onClick={invite}>
+                      <Share2 size={13} /> Invite…
+                    </button>
+                  )}
+                  <div className="muted small" style={{ marginTop: 8 }}>
+                    Anyone with the link can edit, so send it only to people you trust.
+                  </div>
+                </>
+              )}
+              {role === "guest" && (
+                <button className="btn primary" style={{ marginTop: 8 }} onClick={() => (remixShared(), close())}>
+                  <Copy size={13} /> Make my own copy
+                </button>
               )}
               <div className="small" style={{ marginTop: 12 }}>
-                {status === "live" ? `${list.length + 1} people here` : "Connecting…"}
+                {status !== "live" ? "Connecting…" : list.length ? `${list.length + 1} people here` : "Just you so far"}
               </div>
               <div className="share-peers">
                 <div className="row">

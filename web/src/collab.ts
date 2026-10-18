@@ -281,6 +281,19 @@ export function stopSharing() {
   unsubscribe = null;
 }
 
+/** Guest: keeps a copy of the shared file as their own file, leaves the room and opens it. */
+export async function remixShared(): Promise<void> {
+  const doc = JSON.parse(getEngine().save());
+  doc.name = `${doc.name || "Shared design"} (my copy)`;
+  const id = newFileId();
+  await saveFile(id, doc.name, JSON.stringify(doc));
+  stopSharing();
+  // Drop ?room= so a reload doesn't join again.
+  history.replaceState(null, "", `${location.pathname}#/file/${id}`);
+  dispatchEvent(new HashChangeEvent("hashchange"));
+  toast("Saved as your own file. Edit freely; nobody else sees it.");
+}
+
 /** Guest: opens (or reuses) a local file for the shared link and joins the room. */
 export function joinFromUrl(): string | null {
   const q = new URLSearchParams(location.search);

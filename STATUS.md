@@ -53,6 +53,7 @@ Ordered by impact on "replace Figma for a small team".
 | Import          | HTML/CSS to editable layers (`import_html` tool and File menu), live websites by URL (`import_url`)  |
 | Distribution    | Single `designotron` binary with the editor embedded, release workflow (5 targets, version from the tag), `install.sh` (also installs the background service), `npx designotron` (not on npm yet), Pages workflow, Fly relay deploy workflow |
 | Background bridge | `designotron service install\|uninstall\|status`: launchd agent on macOS, systemd user unit on Linux, with the installing shell's PATH so `claude` is found; running `designotron` while it runs just opens the editor; the Claude panel shows setup steps while the bridge is offline |
+| Growth loops    | Guests who open a shared link see who they're editing with, a "Make my own copy" button (keeps the file as theirs and leaves the room) and a GitHub star link; Share dialog hides the relay field when one is built in, with Copy feedback and the native Invite sheet; link previews (Open Graph/Twitter card, `web/public/og.png`); Star link on the dashboard |
 | Onboarding      | Template gallery (mobile, landing, dashboard, design system), first-run tour, empty-file prompt      |
 | Text            | Mixed styles inside one text layer (font, size, weight, italic, colour, decoration, links); ⌘B/I/U  |
 | Code export     | Semantic tags (h1–h3, button, nav, header, …), `<img>` for image layers, responsive roots           |
@@ -119,7 +120,7 @@ until someone runs it with a real key.
 | Area             | Limitation                                                                                               |
 |------------------|----------------------------------------------------------------------------------------------------------|
 | Background service | Linux unit tested; the macOS launchd agent hasn't been run on a real Mac yet. Windows has no background service (run `designotron.exe`) |
-| Collaboration    | Online sharing needs a deployed relay (none is running yet); concurrent edits to the same layer: last writer wins; links are the only access control (no accounts); versions live only in each browser |
+| Collaboration    | The public relay is a free Render instance (sleeps when idle, first share wakes it in up to a minute); concurrent edits to the same layer: last writer wins; links are the only access control (no accounts); versions live only in each browser |
 | Storage          | Files live in the browser (IndexedDB). Clearing site data deletes them; save `.dtron` files to keep them |
 | Scale            | Updates are incremental, but the canvas is one big SVG: painting 10k+ layers zoomed out is the limit (software rendering in headless tests ~35 ms/frame at 6k) |
 | Text             | No OpenType features or per-range line height; widths depend on the web font having loaded               |
