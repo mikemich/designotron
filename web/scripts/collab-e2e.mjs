@@ -138,7 +138,8 @@ try {
   const bad = await guest.evaluate(async (url) => {
     const u = new URL(url);
     return new Promise((resolve) => {
-      const ws = new WebSocket(u.searchParams.has("room") ? `ws://${u.host}/ws?room=nope` : `ws://${u.host}/collab/ws?token=nope`);
+      const proto = u.protocol === "https:" ? "wss" : "ws";
+      const ws = new WebSocket(u.searchParams.has("room") ? `${proto}://${u.host}/ws?room=nope` : `${proto}://${u.host}/collab/ws?token=nope`);
       ws.onopen = () => resolve("open");
       ws.onerror = () => resolve("refused");
     });
