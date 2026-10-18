@@ -8,6 +8,8 @@ import { newFileId, saveFile } from "./files";
 import { getEngine } from "./store";
 
 const PREFIX = "#/copy/";
+/** View-only links and embeds: play the design, with a Remix button. */
+const VIEW = "#/view/";
 /** Longest link we hand out; chat apps and browsers cope with this. */
 const MAX_LINK = 400_000;
 
@@ -25,27 +27,48 @@ function fromBase64Url(text: string): Uint8Array {
   return Uint8Array.from(atob(text.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 }
 
-/** A link containing this file. Images are left out if they'd make the link too long. */
-export async function copyLink(): Promise<{ url: string; withoutImages: boolean }> {
+/** Where links point: this editor, or the hosted one when this runs on localhost. */
+export const linkBase = () => (isLocalPage() ? HOSTED_EDITOR : location.origin + location.pathname);
+
+/** This file (and its images, unless they'd make links too long), compressed for a link. */
+export async function encodeFile(): Promise<{ data: string; withoutImages: boolean }> {
   const doc = getEngine().save();
   const used = referencedAssets(doc);
   const assets = Object.fromEntries(Object.entries(allAssets()).filter(([k]) => used.includes(k)));
-  const base = isLocalPage() ? HOSTED_EDITOR : location.origin + location.pathname;
   const encode = async (withAssets: boolean) => {
     const json = JSON.stringify({ v: 1, doc: JSON.parse(doc), assets: withAssets ? assets : {} });
-    return base + PREFIX + toBase64Url(await pipe(new TextEncoder().encode(json), new CompressionStream("gzip")));
+    return toBase64Url(await pipe(new TextEncoder().encode(json), new CompressionStream("gzip")));
   };
-  let url = await encode(true);
+  let data = await encode(true);
   let withoutImages = false;
-  if (url.length > MAX_LINK && used.length) {
-    url = await encode(false);
+  if (data.length > MAX_LINK && used.length) {
+    data = await encode(false);
     withoutImages = true;
   }
-  if (url.length > MAX_LINK) throw new Error("This file is too big for a link. Use Save as .dtron and send the file instead.");
-  return { url, withoutImages };
+  if (data.length > MAX_LINK) throw new Error("This file is too big for a link. Use Save as .dtron and send the file instead.");
+  return { data, withoutImages };
 }
 
+/** A link containing this file; whoever opens it gets their own copy. */
+export async function copyLink(): Promise<{ url: string; withoutImages: boolean }> {
+  const { data, withoutImages } = await encodeFile();
+  return { url: linkBase() + PREFIX + data, withoutImages };
+}
+
+/** Copy (remix) and view-only links for the same encoded file. */
+export const copyUrl = (data: string) => linkBase() + PREFIX + data;
+export const viewUrl = (data: string) => linkBase() + VIEW + data;
+
 export const isCopyLink = (hash = location.hash) => hash.startsWith(PREFIX);
+export const isViewLink = (hash = location.hash) => hash.startsWith(VIEW);
+
+/** The file inside a link's data, without saving anything. */
+export async function decodeFile(data: string): Promise<{ doc: any; assets: Record<string, string> }> {
+  const text = new TextDecoder().decode(await pipe(fromBase64Url(data), new DecompressionStream("gzip")));
+  const { doc, assets } = JSON.parse(text);
+  if (!doc?.pages) throw new Error("This link is damaged.");
+  return { doc, assets: assets ?? {} };
+}
 
 /** Saves the file in a copy link as a new local file (once per link) and returns its id. */
 export async function openCopyLink(hash = location.hash): Promise<string> {
@@ -58,9 +81,7 @@ export async function openCopyLink(hash = location.hash): Promise<string> {
   } catch {
     /* ignore */
   }
-  const text = new TextDecoder().decode(await pipe(fromBase64Url(data), new DecompressionStream("gzip")));
-  const { doc, assets } = JSON.parse(text);
-  if (!doc?.pages) throw new Error("This copy link is damaged.");
+  const { doc, assets } = await decodeFile(data);
   loadAssets(assets);
   const id = newFileId();
   await saveFile(id, doc.name || "Shared design", JSON.stringify(doc));

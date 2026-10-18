@@ -1,0 +1,7 @@
+{
+  "name": "designotron",
+  "description": "Lets Claude Code read and edit the design open in Designotron through its local MCP server",
+  "author": { "name": "mikemich" },
+  "homepage": "https://github.com/mikemich/designotron",
+  "license": "MIT"
+}

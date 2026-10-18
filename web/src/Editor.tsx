@@ -14,6 +14,7 @@ import { joinShared, stopSharing, useCollab } from "./collab";
 import { GuestBar } from "./panels/GuestBar";
 import { ShortcutsDialog } from "./panels/ShortcutsDialog";
 import { PhoneNote } from "./panels/PhoneNote";
+import { DemoOverlay } from "./Demo";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
 import { bootEngine, getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
@@ -125,6 +126,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       <GuestBar />
       <ShortcutsDialog />
       <PhoneNote />
+      <DemoOverlay />
       <PluginWindow />
       {toast && (
         <div className={"toast " + toast.kind} role="status" aria-live="polite">

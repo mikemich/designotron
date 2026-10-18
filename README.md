@@ -86,7 +86,15 @@ sees your credentials. File edits inside `workspace/` and a short list of comman
 
 ### From your own terminal (MCP)
 
-With the bridge running:
+With the bridge running, install the Claude Code plugin (MCP server plus a skill that
+teaches Claude how to design well with it):
+
+```
+/plugin install designotron --marketplace mikemich/designotron
+```
+
+On older Claude Code: `/plugin marketplace add mikemich/designotron`, then
+`/plugin install designotron@designotron`. Or add just the MCP server:
 
 ```bash
 claude mcp add --transport http designotron http://127.0.0.1:5174/mcp

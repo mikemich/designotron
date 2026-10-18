@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { getDoc, query, useStore } from "./store";
 import { nodeSvg } from "./exporter";
 import type { Interaction, Rect } from "./types";
+import { REPO_URL } from "./panels/GuestBar";
 
 interface Hotspot {
   id: string;
@@ -10,8 +11,9 @@ interface Hotspot {
   interactions: Interaction[];
 }
 
-/** Prototype player: renders a frame and turns interactions into hotspots. */
-export function Presenter({ start }: { start: string }) {
+/** Prototype player: renders a frame and turns interactions into hotspots. With `remixUrl` it
+ *  is the view-only player for view links and embeds: no close, a Remix button instead. */
+export function Presenter({ start, remixUrl }: { start: string; remixUrl?: string }) {
   const [history, setHistory] = useState<{ id: string; transition: Interaction["transition"] }[]>([{ id: start, transition: "instant" }]);
   const [flash, setFlash] = useState(false);
   const current = history[history.length - 1];
@@ -62,7 +64,7 @@ export function Presenter({ start }: { start: string }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") useStore.setState({ presenting: null });
+      if (e.key === "Escape" && !remixUrl) useStore.setState({ presenting: null });
       const i = frames.indexOf(current.id);
       if (e.key === "ArrowRight" && i < frames.length - 1) setHistory((h) => [...h, { id: frames[i + 1], transition: "slideLeft" }]);
       if (e.key === "ArrowLeft" && i > 0) setHistory((h) => [...h, { id: frames[i - 1], transition: "slideRight" }]);
@@ -96,9 +98,20 @@ export function Presenter({ start }: { start: string }) {
         }}>
           <ChevronRight size={16} />
         </button>
-        <button className="tbtn" title="Close (Esc)" onClick={() => useStore.setState({ presenting: null })}>
-          <X size={16} />
-        </button>
+        {remixUrl ? (
+          <>
+            <a className="btn primary remix" href={remixUrl} target="_blank" rel="noopener" title="Open your own editable copy in Designotron">
+              Remix
+            </a>
+            <a className="made-with" href={REPO_URL} target="_blank" rel="noopener">
+              Made with Designotron
+            </a>
+          </>
+        ) : (
+          <button className="tbtn" title="Close (Esc)" onClick={() => useStore.setState({ presenting: null })}>
+            <X size={16} />
+          </button>
+        )}
       </div>
       <div style={{ overflow: "hidden", width: frame.width * scale, height: frame.height * scale }}>
         <div

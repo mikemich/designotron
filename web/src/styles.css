@@ -1733,3 +1733,68 @@ a.btn {
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* ---------- View links and embeds ---------- */
+.presenter .remix {
+  height: 26px;
+  margin-left: 6px;
+}
+.presenter .made-with {
+  margin: 0 6px 0 10px;
+  font-size: 11px;
+  color: var(--text-2);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.presenter .made-with:hover {
+  color: var(--text);
+}
+.copy-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.link-btn {
+  color: var(--accent-2);
+  padding: 0;
+}
+.link-btn:hover {
+  text-decoration: underline;
+}
+
+/* ---------- Demo replay ---------- */
+.demo-layer {
+  position: fixed;
+  inset: 44px 0 0;
+  z-index: 70;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 24px 16px calc(24px + env(safe-area-inset-bottom, 0px));
+}
+.demo-layer.done {
+  pointer-events: none;
+}
+.demo-card {
+  pointer-events: all;
+  width: min(460px, 100%);
+  background: #1f1f1f;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  line-height: 1.55;
+}
+.demo-who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--accent-2);
+}
+.demo-link {
+  margin-top: 10px;
+  font-size: 12px;
+  text-align: left;
+}

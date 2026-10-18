@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="170" height="28" role="img" aria-label="Open in Designotron">
+  <title>Open in Designotron</title>
+  <rect width="170" height="28" rx="6" fill="#1e1e1e"/>
+  <rect x="1" y="1" width="168" height="26" rx="5" fill="none" stroke="#6d4aff" stroke-opacity=".6"/>
+  <rect x="7" y="6" width="16" height="16" rx="4" fill="#6d4aff"/>
+  <path d="M11.5 10h4a4 4 0 010 8h-4z" fill="#fff"/>
+  <text x="30" y="18.5" fill="#e6e6e6" font-family="Inter,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" font-weight="600">Open in Designotron</text>
+</svg>

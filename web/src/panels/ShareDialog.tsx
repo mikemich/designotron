@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { Check, Copy, Globe, Link2, Loader2, Share2, Users, Wifi, X } from "lucide-react";
-import { copyLink } from "../snapshot";
+import { copyUrl, encodeFile, linkBase, viewUrl } from "../snapshot";
 import { pageIsRelay, relayUrl, remixShared, startOnline, startSharing, stopSharing, useCollab } from "../collab";
 import { useChat } from "../ai/chatState";
 import { Avatar, userName } from "../canvas/Comments";
 import { useEscape } from "../ui/controls";
 
 const RELAY_DOCS = "https://github.com/mikemich/designotron/blob/main/docs/relay.md";
+
+type CopyKind = "copy" | "view" | "embed" | "badge";
 
 /** Share → invite people to edit this file live, online (through a relay) or on the local network. */
 export function ShareDialog() {
@@ -19,16 +21,23 @@ export function ShareDialog() {
   // The built-in relay needs no explanation; the address field is for people who run their own.
   const [customRelay, setCustomRelay] = useState(!relayUrl());
   const [copied, setCopied] = useState(false);
-  const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+  const [copyState, setCopyState] = useState<CopyKind | null>(null);
   const [copyNote, setCopyNote] = useState<string | null>(null);
-  const sendCopy = async () => {
+  /** Copies a link (or snippet) that carries this file: no server involved. */
+  const sendCopy = async (kind: CopyKind) => {
     setError(null);
     try {
-      const { url, withoutImages } = await copyLink();
-      await navigator.clipboard.writeText(url).catch(() => prompt("Copy this link:", url));
-      setCopyState("copied");
+      const { data, withoutImages } = await encodeFile();
+      const text = {
+        copy: copyUrl(data),
+        view: viewUrl(data),
+        embed: `<iframe src="${viewUrl(data)}" width="800" height="600" style="border:1px solid #3a3a3a;border-radius:8px" allowfullscreen></iframe>`,
+        badge: `[![Open in Designotron](${linkBase()}badge.svg)](${copyUrl(data)})`,
+      }[kind];
+      await navigator.clipboard.writeText(text).catch(() => prompt("Copy this:", text));
+      setCopyState(kind);
       setCopyNote(withoutImages ? "Images were left out to keep the link short; send a .dtron file to include them." : null);
-      setTimeout(() => setCopyState("idle"), 2000);
+      setTimeout(() => setCopyState(null), 2000);
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
     }
@@ -118,9 +127,22 @@ export function ShareDialog() {
                 <div className="muted small" style={{ lineHeight: 1.5 }}>
                   A link that contains this file. Whoever opens it gets their own copy to remix; your file stays yours.
                 </div>
-                <button className="btn" disabled={!!busy} onClick={sendCopy}>
-                  {copyState === "copied" ? <Check size={13} /> : <Link2 size={13} />} {copyState === "copied" ? "Link copied" : "Copy link to a copy"}
+                <button className="btn" disabled={!!busy} onClick={() => sendCopy("copy")}>
+                  {copyState === "copy" ? <Check size={13} /> : <Link2 size={13} />} {copyState === "copy" ? "Link copied" : "Copy link to a copy"}
                 </button>
+                <div className="copy-kinds small">
+                  {(
+                    [
+                      ["view", "View-only link", "A link that plays the design (clickable prototype) with a Remix button"],
+                      ["embed", "Embed code", "An <iframe> for blogs, docs and Notion"],
+                      ["badge", "README badge", "An 'Open in Designotron' badge for a GitHub README"],
+                    ] as const
+                  ).map(([kind, label, title]) => (
+                    <button key={kind} className="link-btn" title={title} onClick={() => sendCopy(kind)}>
+                      {copyState === kind ? "Copied ✓" : label}
+                    </button>
+                  ))}
+                </div>
                 {copyNote && <div className="muted small">{copyNote}</div>}
               </div>
 

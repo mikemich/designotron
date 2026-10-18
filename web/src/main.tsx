@@ -6,7 +6,8 @@ import { Editor } from "./Editor";
 import { Dashboard } from "./Dashboard";
 import { bridge } from "./ai/bridgeClient";
 import { ensureGuestFile, joinFromUrl } from "./collab";
-import { isCopyLink, openCopyLink } from "./snapshot";
+import { isCopyLink, isViewLink, openCopyLink } from "./snapshot";
+import { Viewer } from "./Viewer";
 import { toast } from "./store";
 
 function route(): string | null {
@@ -28,14 +29,22 @@ function openCopy() {
     });
 }
 
+const viewData = () => (isViewLink() ? location.hash.slice("#/view/".length) : null);
+
 function App() {
   const [fileId, setFileId] = useState<string | null>(route());
+  const [view, setView] = useState(viewData());
   useEffect(() => {
     if (isCopyLink()) openCopy();
-    const on = () => (isCopyLink() ? openCopy() : setFileId(route()));
+    const on = () => {
+      setView(viewData());
+      if (isCopyLink()) openCopy();
+      else setFileId(route());
+    };
     window.addEventListener("hashchange", on);
     return () => window.removeEventListener("hashchange", on);
   }, []);
+  if (view) return <Viewer key={view} data={view} />;
   if (fileId) return <Editor key={fileId} fileId={fileId} onHome={() => (location.hash = "#/")} />;
   return <Dashboard onOpen={(id) => (location.hash = `#/file/${id}`)} />;
 }

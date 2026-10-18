@@ -40,6 +40,8 @@ designotron/
 │   ├── rooms/               # Multiplayer rooms (merge deltas, presence), shared below
 │   ├── bridge/              # Local server: editor websocket, MCP, Claude Code chat, LAN share
 │   └── relay/               # Internet relay for online multiplayer (+ serves the editor)
+├── .claude-plugin/          # This repo is a Claude Code plugin marketplace (marketplace.json)
+├── plugins/designotron/     # The Claude Code plugin: .mcp.json (bridge MCP) + a design skill
 ├── web/                     # Editor shell (Vite + React + Zustand)
 │   ├── src/
 │   │   ├── store.ts         # Boots WASM, wraps the engine, UI state

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Sparkles } from "lucide-react";
-import { askClaude } from "../ai/chatState";
+import { askClaude, claudeReady, useChat } from "../ai/chatState";
+import { playDemo } from "../Demo";
 import { TEMPLATES } from "../templates";
 import { dispatch, zoomToFit } from "../store";
 
@@ -9,6 +10,7 @@ const IDEAS = ["A landing page for a coffee subscription", "A habit tracker mobi
 /** Shown on an empty page: describe a design for Claude, or start from a template. */
 export function EmptyPrompt() {
   const [text, setText] = useState("");
+  const ready = useChat((s) => claudeReady(s));
   const send = (prompt: string) => {
     if (!prompt.trim()) return;
     askClaude(prompt.trim());
@@ -44,6 +46,11 @@ export function EmptyPrompt() {
           </button>
         ))}
       </div>
+      {!ready && (
+        <button className="link-btn demo-link" onClick={() => playDemo()}>
+          ▶ Not connected yet? Watch Claude design a page (replay, no setup)
+        </button>
+      )}
       <div className="empty-divider">or start from a template</div>
       <div className="suggestions">
         {TEMPLATES.map((t) => (

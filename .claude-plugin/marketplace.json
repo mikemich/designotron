@@ -1,0 +1,14 @@
+{
+  "name": "designotron",
+  "owner": { "name": "mikemich" },
+  "description": "Designotron: a free, open-source design tool Claude can see and edit",
+  "plugins": [
+    {
+      "name": "designotron",
+      "source": "./plugins/designotron",
+      "description": "Lets Claude Code read and edit the design open in Designotron (layers, components, prototypes, code export) through its local MCP server",
+      "category": "design",
+      "tags": ["design", "figma", "ui", "mcp", "prototyping"]
+    }
+  ]
+}
