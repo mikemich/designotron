@@ -1221,3 +1221,98 @@ textarea.textinput {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Modal + variables editor */
+.modal-bg {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 50;
+  display: grid;
+  place-items: center;
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.variables-dialog {
+  width: 860px;
+  height: 540px;
+}
+.variables-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.var-collections {
+  width: 180px;
+  border-right: 1px solid var(--border);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: auto;
+}
+.var-coll {
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.var-coll.active,
+.var-coll:hover {
+  background: var(--panel-2);
+}
+.var-table-wrap {
+  flex: 1;
+  padding: 12px 14px;
+  overflow: auto;
+  line-height: 1.6;
+}
+.var-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.var-table th,
+.var-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 4px 6px;
+  text-align: left;
+  font-weight: 500;
+  vertical-align: middle;
+}
+.var-table .textinput {
+  min-width: 0;
+  width: 100%;
+}
+.var-table .textinput.head {
+  font-weight: 600;
+  background: transparent;
+}
+.textinput.mono {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+.var-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--panel-3);
+  font-size: 11px;
+}

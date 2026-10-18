@@ -5,7 +5,7 @@ change that finishes, starts or breaks them.
 
 ## In progress
 
-- Working through [ROADMAP.md](ROADMAP.md) in order. Next: variables and modes.
+- Working through [ROADMAP.md](ROADMAP.md) in order. Next: Figma import.
 
 ## To do
 
@@ -20,7 +20,7 @@ Ordered by impact on "replace Figma for a small team".
 | 6  | Live boolean groups                    | Booleans are destructive today (one vector); keep the inputs editable |
 | 7  | Performance for large files            | Incremental render, canvas/WebGL path, persistent maps for undo       |
 | 8  | Figma file import                      | `.fig` / Figma REST API JSON to Designotron model                     |
-| 9  | Variables and modes                    | Colour/number/string tokens with light/dark modes                     |
+| 9  | Variable extras                        | Aliases in the editor UI, scoping, per-page modes, prototyping with variables |
 | 10 | Vector editing completeness            | Add/delete points, bend tool, renormalise bounds after edits          |
 | 12 | Smart animate                          | Interpolate matching layers between frames (currently a dissolve)     |
 | 13 | Plugin API                             | Sandboxed JS plugins over the same Command/Query surface              |
@@ -60,6 +60,7 @@ Ordered by impact on "replace Figma for a small team".
 | Versions        | History tab: named versions, automatic version every 10 min of editing, restore (undoable), rename, duplicate as file |
 | Precision       | Rulers (⇧R) with selection extents, page guides dragged from rulers (move, drag back to delete), layout grids on frames (columns/rows/grid, ⇧⌘4), snapping to guides and grid lines |
 | Vector ops      | Union, subtract, intersect, exclude (i_overlay), flatten keeping curves, outline stroke (inside/center/outside), use as mask (alpha masks, ⌥⌘M); SVG path parser for imported icons |
+| Variables       | Collections with modes, colour/number/string/boolean variables (editor dialog), bindings for fill, stroke, radius, gap, padding, opacity, size, font size, text, visibility; per-frame modes inherited by children and instances; `tokens.css` + `var(--…)` + `data-<collection>` attributes in exported code; `define_variables`/`bind`/`variableModes` for Claude |
 | Live app        | App tab: write the generated project to `workspace/app` (or keep it in sync), run `npm run dev` through the bridge, preview at mobile/desktop width, logs, "Ask Claude to fix it" |
 | Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README                                                             |
 
@@ -69,7 +70,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 65 engine + bridge unit tests                          | `cargo test --workspace`                     |
+| 67 engine + bridge unit tests                          | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
@@ -80,7 +81,8 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 | Templates, tour, empty prompt, ⌘B on a word, Review fixes | `web/scripts/e2e.mjs`                     |
 | Chat image attachment and quick actions menu           | `web/scripts/e2e.mjs`                        |
 | Ruler guide drag, layout grid overlay, version restore | `web/scripts/e2e.mjs`                        |
-| Boolean subtract from the toolbar, mask rendering      | `web/scripts/e2e.mjs` (36/36 passing)        |
+| Boolean subtract from the toolbar, mask rendering      | `web/scripts/e2e.mjs`                        |
+| Variables dialog, fill binding, frame mode switch      | `web/scripts/e2e.mjs` (37/37 passing)        |
 | Production build served by the bridge                  | `E2E_URL=http://127.0.0.1:5174 npm run e2e`  |
 | Release binaries download and serve the editor         | `install.sh` and `npx designotron` on Linux  |
 | Exported Landing/Dashboard projects build and match    | `tsc` + `vite build`, compared screenshots   |
@@ -129,7 +131,7 @@ until someone runs it with a real key.
 | Constraints                | Yes         |                                         |
 | Components and variants    | Yes         | Nested override limits                  |
 | Styles                     | Partial     | Colour + text; no effect/grid styles    |
-| Variables                  | No          |                                         |
+| Variables                  | Yes         | Modes, bindings, CSS variables; no aliasing UI |
 | Prototyping                | Partial     | No smart animate/overlays               |
 | Export                     | Yes         | Plus code export Figma lacks            |
 | Dev Mode / inspect         | Partial     | Code tab, notes                         |

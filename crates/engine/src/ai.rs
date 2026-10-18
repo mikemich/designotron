@@ -79,6 +79,8 @@ fn spec_schema() -> Value {
       "viewBox": { "type": "array", "description": "[minX, minY, width, height] for svgPath, default [0,0,24,24]" },
       "componentId": { "type": "string", "description": "For type instance" },
       "notes": { "type": "string", "description": "Developer annotation" },
+      "bind": { "type": "object", "description": "Property → variable name, e.g. {fill: 'Theme/Surface'}; null unbinds" },
+      "variableModes": { "type": "object", "description": "Collection → mode for this frame and its children, e.g. {Theme: 'Dark'}" },
       "layoutGrids": { "type": "array", "description": "Frame layout grids, e.g. [{pattern:'columns', count:12, gutter:24, margin:80}] or [{pattern:'grid', size:8}]", "items": { "type": "object" } },
       "children": { "type": "array", "items": { "type": "object" } }
     },
@@ -142,6 +144,20 @@ pub fn tool_defs() -> Value {
       }, "required": ["nodeId"] }
     },
     {
+      "name": "define_variables",
+      "description": "Create or update a variable collection with modes (e.g. Light/Dark) and colour/number/string/boolean variables. Bind layer properties with bind: {fill: 'Theme/Background', cornerRadius: 'Radius/md'} in create_nodes/update_nodes (bindable: fill, stroke, cornerRadius, gap, padding, opacity, width, height, strokeWeight, fontSize, characters, visible), and switch a frame's mode with variableModes: {Theme: 'Dark'}. Bound variables become CSS variables in exported code.",
+      "input_schema": { "type": "object", "properties": {
+        "collection": { "type": "string" },
+        "modes": { "type": "array", "items": { "type": "string" }, "description": "Mode names; the first is the default. Default: [\"Default\"]" },
+        "variables": { "type": "array", "items": { "type": "object", "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string", "enum": ["color", "number", "string", "boolean"] },
+          "value": { "description": "Same value in every mode" },
+          "values": { "type": "object", "description": "Mode name → value" }
+        }, "required": ["name", "type"] } }
+      }, "required": ["collection", "variables"] }
+    },
+    {
       "name": "define_styles",
       "description": "Create shared colour and text styles (design tokens). Then link layers to them with fix_issues (kinds: [\"unlinkedStyle\"]).",
       "input_schema": { "type": "object", "properties": {
@@ -190,6 +206,82 @@ pub fn tool_defs() -> Value {
       "input_schema": { "type": "object", "properties": { "html": { "type": "string" }, "width": { "type": "number" }, "x": { "type": "number" }, "y": { "type": "number" }, "parentId": { "type": "string" }, "name": { "type": "string" } }, "required": ["html"] }
     }
   ])
+}
+
+fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
+  use crate::variables::{Collection, VarKind, VarMode, Variable};
+  let name = input.get("collection").and_then(|v| v.as_str()).ok_or("collection is required")?;
+  let mut all = e.doc.variables.clone();
+  let idx = match all.iter().position(|c| c.name == name || c.id == name) {
+    Some(i) => i,
+    None => {
+      all.push(Collection {
+        id: e.gen.next("vc_"),
+        name: name.to_string(),
+        ..Default::default()
+      });
+      all.len() - 1
+    }
+  };
+  let mut mode_names: Vec<String> = input
+    .get("modes")
+    .and_then(|v| v.as_array())
+    .map(|a| a.iter().filter_map(|m| m.as_str().map(String::from)).collect())
+    .unwrap_or_default();
+  if mode_names.is_empty() && all[idx].modes.is_empty() {
+    mode_names.push("Default".into());
+  }
+  for m in mode_names {
+    if !all[idx].modes.iter().any(|x| x.name == m) {
+      let id = e.gen.next("vm_");
+      all[idx].modes.push(VarMode { id, name: m });
+    }
+  }
+  let modes = all[idx].modes.clone();
+  for spec in input.get("variables").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+    let vname = spec
+      .get("name")
+      .and_then(|v| v.as_str())
+      .ok_or("each variable needs a name")?
+      .to_string();
+    let kind: VarKind = serde_json::from_value(spec.get("type").cloned().unwrap_or(json!("color"))).map_err(|e| format!("{vname}: {e}"))?;
+    let coll = &mut all[idx];
+    let pos = match coll.variables.iter().position(|v| v.name == vname) {
+      Some(p) => p,
+      None => {
+        coll.variables.push(Variable {
+          id: e.gen.next("v_"),
+          name: vname.clone(),
+          ..Default::default()
+        });
+        coll.variables.len() - 1
+      }
+    };
+    let var = &mut coll.variables[pos];
+    var.kind = kind;
+    let norm = |v: &Value| -> Value {
+      match (kind, v.as_str()) {
+        (VarKind::Color, Some(c)) => json!(crate::color::normalize(c)),
+        _ => v.clone(),
+      }
+    };
+    if let Some(v) = spec.get("value") {
+      for m in &modes {
+        var.values.insert(m.id.clone(), norm(v));
+      }
+    }
+    if let Some(obj) = spec.get("values").and_then(|v| v.as_object()) {
+      for (mk, v) in obj {
+        let mode = modes
+          .iter()
+          .find(|m| &m.name == mk || &m.id == mk)
+          .ok_or_else(|| format!("{vname}: no mode {mk}"))?;
+        var.values.insert(mode.id.clone(), norm(v));
+      }
+    }
+  }
+  e.dispatch_inner(Command::SetVariables { collections: all })?;
+  Ok(crate::variables::summary(&e.doc))
 }
 
 /// Executes a tool against the engine. Browser-only tools return an error here.
@@ -324,6 +416,7 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       });
       Ok(json!({ "ok": true }))
     }
+    "define_variables" => define_variables(e, input),
     "define_styles" => {
       let mut ids = Vec::new();
       for c in input.get("colors").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
@@ -513,6 +606,7 @@ pub fn summary(e: &Engine, depth: usize) -> Value {
     "layers": roots.iter().map(|r| outline(e, r, depth)).collect::<Vec<_>>(),
     "components": e.doc.components().iter().map(|c| json!({ "id": c.id, "name": c.name, "width": c.width, "height": c.height })).collect::<Vec<_>>(),
     "colorStyles": e.doc.styles.colors,
+    "variables": crate::variables::summary(&e.doc),
     "nextFreeX": roots.iter().map(|r| e.doc.abs_bounds(r).right()).fold(0.0, f64::max) + if roots.is_empty() { 0.0 } else { 100.0 },
   })
 }
@@ -696,6 +790,25 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
   }
   if let Some(v) = s.get("absolute").and_then(|v| v.as_bool()) {
     n.absolute_position = v;
+  }
+  if let Some(b) = s.get("bind").and_then(|v| v.as_object()) {
+    for (prop, var) in b {
+      if crate::variables::property_kind(prop).is_none() {
+        return Err(format!("{prop} can't be bound to a variable"));
+      }
+      match var.as_str() {
+        Some(name) => n.bindings.insert(prop.clone(), name.to_string()),
+        None => n.bindings.remove(prop),
+      };
+    }
+  }
+  if let Some(m) = s.get("variableModes").and_then(|v| v.as_object()) {
+    for (coll, mode) in m {
+      match mode.as_str() {
+        Some(name) => n.variable_modes.insert(coll.clone(), name.to_string()),
+        None => n.variable_modes.remove(coll),
+      };
+    }
   }
   if let Some(v) = s.get("layoutGrids") {
     n.layout_grids = serde_json::from_value(v.clone()).map_err(|e| format!("layoutGrids: {e}"))?;

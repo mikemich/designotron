@@ -56,6 +56,7 @@ pub fn new_document(ids: &mut IdGen, name: &str) -> Document {
     pages: vec![page],
     nodes: BTreeMap::new(),
     styles: Styles::default(),
+    variables: Vec::new(),
   }
 }
 

@@ -147,6 +147,28 @@ export interface Node {
   notes: string;
   layoutGrids: LayoutGrid[];
   isMask: boolean;
+  /** Property → variable id. */
+  bindings: Record<string, string>;
+  /** Collection id → mode id. */
+  variableModes: Record<string, string>;
+}
+
+export type VarKind = "color" | "number" | "string" | "boolean";
+
+export interface Variable {
+  id: string;
+  name: string;
+  type: VarKind;
+  /** Mode id → value (or {alias: variableId}). */
+  values: Record<string, unknown>;
+  description: string;
+}
+
+export interface VariableCollection {
+  id: string;
+  name: string;
+  modes: { id: string; name: string }[];
+  variables: Variable[];
 }
 
 export interface LayoutGrid {
@@ -184,6 +206,7 @@ export interface Doc {
     colors: { id: string; name: string; color: string }[];
     texts: { id: string; name: string; fontFamily: string; fontSize: number; fontWeight: number; lineHeight: number | null; letterSpacing: number }[];
   };
+  variables: VariableCollection[];
 }
 
 export interface EngineState {

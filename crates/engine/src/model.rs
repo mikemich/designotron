@@ -20,6 +20,9 @@ pub struct Document {
   pub nodes: BTreeMap<NodeId, Node>,
   #[serde(default)]
   pub styles: Styles,
+  /// Variable collections (tokens with modes).
+  #[serde(default)]
+  pub variables: Vec<crate::variables::Collection>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -216,6 +219,10 @@ pub struct Node {
   pub layout_grids: Vec<LayoutGrid>,
   /// Masks the siblings painted above it (Figma "Use as mask"); not drawn itself.
   pub is_mask: bool,
+  /// Property → variable id (see `variables::PROPERTIES`).
+  pub bindings: BTreeMap<String, String>,
+  /// Collection id → mode id for this layer and its descendants.
+  pub variable_modes: BTreeMap<String, String>,
 }
 
 impl Default for Node {
@@ -267,6 +274,8 @@ impl Default for Node {
       notes: String::new(),
       layout_grids: Vec::new(),
       is_mask: false,
+      bindings: BTreeMap::new(),
+      variable_modes: BTreeMap::new(),
     }
   }
 }

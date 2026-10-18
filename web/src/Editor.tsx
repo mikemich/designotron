@@ -6,6 +6,7 @@ import { Toolbar } from "./panels/Toolbar";
 import { ChatPanel } from "./ai/ChatPanel";
 import { Presenter } from "./Presenter";
 import { Tour } from "./Tour";
+import { VariablesDialog } from "./panels/VariablesDialog";
 import { installShortcuts } from "./shortcuts";
 import { getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
 import { listVersions, loadFile, saveFile, saveVersion } from "./files";
@@ -17,6 +18,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const chatOpen = useStore((s) => s.chatOpen);
   const presenting = useStore((s) => s.presenting);
   const toast = useStore((s) => s.toast);
+  const variablesOpen = useStore((s) => s.variablesOpen);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -99,6 +101,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       </div>
       {presenting && <Presenter start={presenting} />}
       <Tour />
+      {variablesOpen && <VariablesDialog />}
       {toast && <div className={"toast " + toast.kind}>{toast.text}</div>}
     </div>
   );

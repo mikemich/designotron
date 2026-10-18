@@ -65,7 +65,7 @@ const QUICK_ACTIONS: { label: string; prompt: string; fill?: boolean; needsSelec
   {
     label: "Import design tokens from code",
     prompt:
-      "Find the design tokens in the workspace (Tailwind config, CSS variables, theme files). Create them as colour and text styles with define_styles, then call fix_issues with kinds [\"unlinkedStyle\"] to link existing layers to them.",
+      "Find the design tokens in the workspace (Tailwind config, CSS variables, theme files). Create them as variables with define_variables (one collection per token group, with Light/Dark modes if the code has themes) and as colour/text styles with define_styles. Then bind matching layer properties to the variables and call fix_issues with kinds [\"unlinkedStyle\"].",
   },
 ];
 

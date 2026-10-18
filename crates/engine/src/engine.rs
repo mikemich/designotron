@@ -79,6 +79,24 @@ pub enum Command {
     page: Option<String>,
     guides: Vec<RulerGuide>,
   },
+  /// Replaces all variable collections (the variables editor sends the whole set).
+  SetVariables {
+    collections: Vec<crate::variables::Collection>,
+  },
+  /// Binds a layer property to a variable (None unbinds).
+  BindVariable {
+    ids: Vec<NodeId>,
+    property: String,
+    #[serde(default)]
+    variable: Option<String>,
+  },
+  /// Sets which mode of a collection a layer and its children use (None inherits).
+  SetVariableMode {
+    ids: Vec<NodeId>,
+    collection: String,
+    #[serde(default)]
+    mode: Option<String>,
+  },
   /// Swaps in a whole document as one undoable step (restoring a version).
   ReplaceDocument {
     doc: Value,
@@ -624,6 +642,8 @@ impl Engine {
 
   /// Keeps derived state consistent: instances, layout, selection.
   fn after_mutation(&mut self) {
+    crate::variables::normalize(&mut self.doc);
+    crate::variables::apply(&mut self.doc);
     for _ in 0..4 {
       let changed = self.changed_components();
       if changed.is_empty() {
@@ -643,6 +663,8 @@ impl Engine {
         }
       }
     }
+    // Instances just synced from their mains resolve variables in their own mode context.
+    crate::variables::apply(&mut self.doc);
     layout::relayout_all(&mut self.doc, self.measurer.as_ref());
     self.selection.retain(|i| self.doc.nodes.contains_key(i));
     if self.doc.page(&self.page).is_none() {
@@ -796,6 +818,60 @@ impl Engine {
         self.doc.page_mut(&id).ok_or("no such page")?.guides = guides;
         Ok(json!({}))
       }
+      Command::SetVariables { collections } => {
+        self.doc.variables = collections;
+        crate::variables::prune(&mut self.doc);
+        Ok(json!({}))
+      }
+      Command::BindVariable { ids, property, variable } => {
+        let want = crate::variables::property_kind(&property).ok_or_else(|| format!("{property} can't be bound to a variable"))?;
+        let var_id = match &variable {
+          Some(key) => {
+            let (_, v) = crate::variables::find(&self.doc, key).ok_or_else(|| format!("no variable {key}"))?;
+            if v.kind != want {
+              return Err(format!("{property} needs a {want:?} variable, {} is {:?}", v.name, v.kind).to_lowercase());
+            }
+            Some(v.id.clone())
+          }
+          None => None,
+        };
+        for id in &ids {
+          let n = self.doc.get_mut(id).ok_or_else(|| format!("no node {id}"))?;
+          match &var_id {
+            Some(v) => n.bindings.insert(property.clone(), v.clone()),
+            None => n.bindings.remove(&property),
+          };
+        }
+        Ok(json!({}))
+      }
+      Command::SetVariableMode { ids, collection, mode } => {
+        let coll = self
+          .doc
+          .variables
+          .iter()
+          .find(|c| c.id == collection || c.name == collection)
+          .ok_or_else(|| format!("no collection {collection}"))?;
+        let cid = coll.id.clone();
+        let mid = match &mode {
+          Some(m) => Some(
+            coll
+              .modes
+              .iter()
+              .find(|x| &x.id == m || &x.name == m)
+              .map(|x| x.id.clone())
+              .ok_or_else(|| format!("no mode {m} in {}", coll.name))?,
+          ),
+          None => None,
+        };
+        for id in &ids {
+          let n = self.doc.get_mut(id).ok_or_else(|| format!("no node {id}"))?;
+          match &mid {
+            Some(m) => n.variable_modes.insert(cid.clone(), m.clone()),
+            None => n.variable_modes.remove(&cid),
+          };
+        }
+        Ok(json!({}))
+      }
       Command::ReplaceDocument { doc } => {
         let doc: Document = serde_json::from_value(doc).map_err(|e| format!("not a Designotron document: {e}"))?;
         if doc.pages.is_empty() {
@@ -897,6 +973,7 @@ impl Engine {
       }
       Command::Paste { data, parent, x, y } => self.paste(&data, parent, x, y),
       Command::Update { ids, patch: p } => {
+        crate::variables::unbind_for_patch(&mut self.doc, &ids, &p);
         for id in &ids {
           let before = self.doc.get(id).cloned().ok_or_else(|| format!("no node {id}"))?;
           patch::apply(self.doc.get_mut(id).unwrap(), &p)?;
@@ -1762,6 +1839,115 @@ mod tests {
       })
       .unwrap();
     id_of(&r)
+  }
+
+  fn ai(e: &mut Engine, tool: &str, input: Value) -> Value {
+    e.dispatch(Command::Ai { tool: tool.into(), input }).unwrap()
+  }
+
+  #[test]
+  fn variables_follow_modes_and_export_as_css() {
+    let mut e = engine();
+    ai(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "modes": ["Light", "Dark"], "variables": [
+        { "name": "Surface", "type": "color", "values": { "Light": "#FFFFFF", "Dark": "#111111" } },
+        { "name": "Radius", "type": "number", "value": 12 }
+      ]}),
+    );
+    let r = ai(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Screen", "width": 200, "height": 200, "children": [
+        { "type": "rectangle", "name": "Card", "width": 100, "height": 100, "bind": { "fill": "Theme/Surface", "cornerRadius": "Radius" } }
+      ]}]}),
+    );
+    let frame = r["created"][0]["id"].as_str().unwrap().to_string();
+    let card = e.doc.get(&frame).unwrap().children[0].clone();
+    let fill = |e: &Engine| match &e.doc.get(&card).unwrap().fills[0] {
+      Paint::Solid { color, .. } => color.clone(),
+      _ => String::new(),
+    };
+    assert_eq!(fill(&e), "#FFFFFF");
+    assert_eq!(e.doc.get(&card).unwrap().corner_radius, 12.0);
+    assert!(
+      e.doc.get(&card).unwrap().bindings["fill"].starts_with("v_"),
+      "names are normalised to ids"
+    );
+
+    ai(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": frame, "variableModes": { "Theme": "Dark" } }] }),
+    );
+    assert_eq!(fill(&e), "#111111");
+
+    // Generated code uses the CSS variable and switches mode with a data attribute.
+    let files = e.query(Query::ExportProject).unwrap();
+    let all: String = files
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|f| f["content"].as_str().unwrap().to_string())
+      .collect();
+    assert!(
+      all.contains("--surface: #FFFFFF") && all.contains("[data-theme=\"dark\"]"),
+      "tokens.css"
+    );
+    assert!(
+      all.contains("bg-[color:var(--surface)]") && all.contains("data-theme=\"dark\""),
+      "{all}"
+    );
+
+    // Editing the bound fill directly detaches the variable.
+    e.dispatch(Command::Update {
+      ids: vec![card.clone()],
+      patch: json!({ "fills": [{ "type": "solid", "color": "#FF0000", "opacity": 1, "visible": true }] }),
+    })
+    .unwrap();
+    assert_eq!(fill(&e), "#FF0000");
+    assert!(!e.doc.get(&card).unwrap().bindings.contains_key("fill"));
+  }
+
+  #[test]
+  fn instances_resolve_variables_in_their_own_mode() {
+    let mut e = engine();
+    ai(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "modes": ["Light", "Dark"], "variables": [
+        { "name": "Accent", "type": "color", "values": { "Light": "#6D4AFF", "Dark": "#B8A6FF" } }
+      ]}),
+    );
+    let r = ai(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle", "name": "Chip", "width": 40, "height": 20, "bind": { "fill": "Accent" } }] }),
+    );
+    let chip = r["created"][0]["id"].as_str().unwrap().to_string();
+    let comp = ai(&mut e, "arrange", json!({ "action": "create_component", "ids": [chip] }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let r = ai(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Dark screen", "x": 300, "width": 200, "height": 200, "variableModes": { "Theme": "Dark" },
+        "children": [{ "type": "instance", "componentId": comp }] }] }),
+    );
+    let screen = r["created"][0]["id"].as_str().unwrap().to_string();
+    let inst = e.doc.get(&screen).unwrap().children[0].clone();
+    let colors: Vec<String> = e
+      .doc
+      .subtree(&inst)
+      .iter()
+      .filter_map(|id| match e.doc.get(id).unwrap().fills.first() {
+        Some(Paint::Solid { color, .. }) => Some(color.clone()),
+        _ => None,
+      })
+      .collect();
+    assert!(colors.contains(&"#B8A6FF".to_string()), "{colors:?}");
   }
 
   #[test]

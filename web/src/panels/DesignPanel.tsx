@@ -24,8 +24,9 @@ import {
   Underline,
   WrapText,
   CornerUpLeft,
+  Variable,
 } from "lucide-react";
-import type { Effect, LayoutGrid, Node, Paint } from "../types";
+import type { Effect, LayoutGrid, Node, Paint, VarKind } from "../types";
 import { dispatch, FONTS, getDoc, styleTextSelection, useDoc, useSelection, useStore, zoomToSelection } from "../store";
 import { common, IconButton, MIXED, NumberField, Section, Seg, SelectField, type Maybe } from "../ui/controls";
 import { paintLabel, PaintSwatch, cssColor, ColorPicker } from "../ui/color";
@@ -68,6 +69,7 @@ export function DesignPanel() {
       <PaintsSection title="Stroke" nodes={nodes} ids={ids} keyName="strokes" />
       <EffectsSection nodes={nodes} ids={ids} />
       {nodes.length === 1 && ["frame", "component"].includes(nodes[0].type) && <GridSection node={nodes[0]} />}
+      <VariablesSection nodes={nodes} ids={ids} />
       <ExportSection nodes={nodes} />
       {nodes.length === 1 && <NotesSection node={nodes[0]} />}
     </div>
@@ -97,6 +99,19 @@ function PagePanel() {
             <ColorPicker color={page.background} onChange={(color) => dispatch({ op: "setPageBackground", id: page.id, color })} />
           </Popover>
         )}
+      </Section>
+      <Section title="Local variables">
+        <div className="muted small" style={{ marginBottom: 6 }}>
+          {(doc.variables ?? []).length
+            ? (() => {
+                const n = doc.variables.reduce((k, c) => k + c.variables.length, 0);
+                return `${n} variable${n === 1 ? "" : "s"} in ${doc.variables.length} collection${doc.variables.length === 1 ? "" : "s"}`;
+              })()
+            : "Colours, sizes and text with modes (Light/Dark, brands)."}
+        </div>
+        <button className="btn block" onClick={() => useStore.setState({ variablesOpen: true })}>
+          <Variable size={13} /> Open variables
+        </button>
       </Section>
       <Section title="Local styles">
         {doc.styles.colors.length === 0 && doc.styles.texts.length === 0 && <div className="muted small">No styles yet. Create them in the Assets tab.</div>}
@@ -851,6 +866,77 @@ function GridSection({ node }: { node: Node }) {
         );
       })}
       {list.length > 0 && !useStore.getState().showGrids && <div className="muted small">Layout grids are hidden (⇧⌘4 to show).</div>}
+    </Section>
+  );
+}
+
+const BINDABLE: { prop: string; label: string; kind: VarKind; applies: (n: Node) => boolean }[] = [
+  { prop: "fill", label: "Fill", kind: "color", applies: (n) => n.type !== "group" && n.type !== "line" },
+  { prop: "stroke", label: "Stroke", kind: "color", applies: (n) => n.type !== "group" },
+  { prop: "cornerRadius", label: "Radius", kind: "number", applies: (n) => ["rectangle", "frame", "component", "instance"].includes(n.type) },
+  { prop: "gap", label: "Gap", kind: "number", applies: (n) => !!n.layout },
+  { prop: "padding", label: "Padding", kind: "number", applies: (n) => !!n.layout },
+  { prop: "opacity", label: "Opacity", kind: "number", applies: () => true },
+  { prop: "width", label: "Width", kind: "number", applies: () => true },
+  { prop: "height", label: "Height", kind: "number", applies: () => true },
+  { prop: "fontSize", label: "Font size", kind: "number", applies: (n) => n.type === "text" },
+  { prop: "characters", label: "Text", kind: "string", applies: (n) => n.type === "text" },
+  { prop: "visible", label: "Visible", kind: "boolean", applies: () => true },
+];
+
+/** Bind properties to variables and pick variable modes for frames. */
+function VariablesSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
+  const doc = useDoc();
+  const [showAll, setShowAll] = useState(false);
+  const colls = doc.variables ?? [];
+  if (!colls.some((c) => c.variables.length)) return null;
+  const rows = BINDABLE.filter((b) => nodes.every(b.applies));
+  const frames = nodes.every((n) => ["frame", "component", "instance", "group"].includes(n.type));
+  const multiMode = colls.filter((c) => c.modes.length > 1);
+  const bound = rows.filter((b) => nodes.some((n) => n.bindings?.[b.prop]));
+  const visibleRows = showAll ? rows : bound;
+  return (
+    <Section
+      title="Variables"
+      actions={
+        <IconButton title={showAll ? "Show bound only" : "Bind a property"} on={showAll} onClick={() => setShowAll(!showAll)}>
+          <Plus size={14} />
+        </IconButton>
+      }
+    >
+      {frames &&
+        multiMode.map((c) => {
+          const mode = common(nodes, (n) => n.variableModes?.[c.id] ?? "");
+          return (
+            <div key={c.id} className="row">
+              <span className="muted small" style={{ width: 64 }}>
+                {c.name}
+              </span>
+              <SelectField
+                value={mode === MIXED ? "" : mode}
+                options={[{ value: "", label: `Auto (${c.modes[0].name})` }, ...c.modes.map((m) => ({ value: m.id, label: m.name }))]}
+                onChange={(m) => dispatch({ op: "setVariableMode", ids, collection: c.id, mode: m || null })}
+              />
+            </div>
+          );
+        })}
+      {visibleRows.map((b) => {
+        const cur = common(nodes, (n) => n.bindings?.[b.prop] ?? "");
+        const options = colls.flatMap((c) => c.variables.filter((v) => v.type === b.kind).map((v) => ({ value: v.id, label: colls.length > 1 ? `${c.name} / ${v.name}` : v.name })));
+        return (
+          <div key={b.prop} className="row">
+            <span className="muted small" style={{ width: 64 }}>
+              {b.label}
+            </span>
+            <SelectField
+              value={cur === MIXED ? "" : cur}
+              options={[{ value: "", label: options.length ? "Not bound" : `No ${b.kind} variables` }, ...options]}
+              onChange={(v) => dispatch({ op: "bindVariable", ids, property: b.prop, variable: v || null })}
+            />
+          </div>
+        );
+      })}
+      {!visibleRows.length && !(frames && multiMode.length) && <div className="muted small">Click + to bind fill, radius, spacing or text to a variable.</div>}
     </Section>
   );
 }

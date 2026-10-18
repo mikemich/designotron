@@ -21,6 +21,7 @@ pub mod paths;
 pub mod render;
 pub mod shapes;
 pub mod text;
+pub mod variables;
 
 pub use engine::{Command, Engine, Query};
 pub use model::Document;

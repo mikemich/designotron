@@ -98,6 +98,7 @@ interface Store {
   textSel: { id: string; start: number; end: number } | null;
   showRulers: boolean;
   showGrids: boolean;
+  variablesOpen: boolean;
 }
 
 const pref = (k: string, d: boolean) => {
@@ -141,6 +142,7 @@ export const useStore = create<Store>(() => ({
   textSel: null,
   showRulers: pref("dt:showRulers", false),
   showGrids: pref("dt:showGrids", true),
+  variablesOpen: false,
 }));
 
 /** Applies a style to the selected characters of the text being edited; false if none. */

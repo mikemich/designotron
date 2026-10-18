@@ -84,6 +84,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     { label: `${useStore.getState().showRulers ? "Hide" : "Show"} rulers`, kbd: `${SHIFT}R`, onClick: () => toggleView("showRulers") },
     { label: `${useStore.getState().showGrids ? "Hide" : "Show"} layout grids`, kbd: `${SHIFT}${MOD}4`, onClick: () => toggleView("showGrids") },
     { label: "Version history", onClick: () => useStore.setState({ leftTab: "history" }) },
+    { label: "Variables…", onClick: () => useStore.setState({ variablesOpen: true }) },
   ];
 
   const toolBtn = (t: Tool, title: string, icon: JSX.Element) => (

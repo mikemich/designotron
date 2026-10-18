@@ -198,6 +198,7 @@ impl<'a> Ctx<'a> {
     el.is_component_root = place == Place::ComponentRoot;
     self.position(&mut el, &n, place);
     self.visual(&mut el, &n);
+    self.bind_vars(&mut el, &n);
     if el.tag == "img" {
       let fit = if el.styles.iter().any(|(k, v)| k == "background-size" && v == "contain") {
         "contain"
@@ -409,6 +410,61 @@ impl<'a> Ctx<'a> {
     }
     if n.rotation != 0.0 && !vectorish {
       el.s("transform", format!("rotate({}deg)", fmt(n.rotation)));
+    }
+  }
+
+  /// Replaces literal values of variable-bound properties with CSS custom properties,
+  /// and marks layers that switch a collection's mode.
+  fn bind_vars(&self, el: &mut El, n: &Node) {
+    use crate::variables as vars;
+    for (coll_id, mode_id) in &n.variable_modes {
+      if let Some(c) = self.doc.variables.iter().find(|c| &c.id == coll_id) {
+        if let Some(m) = c.modes.iter().find(|m| &m.id == mode_id) {
+          el.attrs.push((vars::mode_attr(c), vars::slug(&m.name)));
+        }
+      }
+    }
+    if el.raw.is_some() {
+      return;
+    }
+    for (prop, var_id) in &n.bindings {
+      let Some((c, v)) = vars::find(self.doc, var_id) else { continue };
+      let name = vars::css_name(c, v);
+      let var = format!("var({name})");
+      let len = format!("calc(var({name})*1px)");
+      let set = |el: &mut El, key: &str, value: &str| {
+        for (k, val) in el.styles.iter_mut() {
+          if k == key {
+            *val = value.to_string();
+          }
+        }
+      };
+      match prop.as_str() {
+        "fill" if n.kind == NodeType::Text => set(el, "color", &var),
+        "fill" => set(el, "background-color", &var),
+        "stroke" => {
+          if let Some(Paint::Solid { color, opacity, .. }) = n.strokes.iter().find(|p| p.visible()) {
+            let lit = color::css_with_opacity(color, *opacity);
+            for (k, val) in el.styles.iter_mut() {
+              if k == "border" || k == "outline" || k == "border-top" {
+                *val = val.replace(&lit, &var);
+              }
+            }
+          }
+        }
+        "cornerRadius" => set(el, "border-radius", &len),
+        "padding" => set(el, "padding", &len),
+        "gap" => {
+          let key = match n.layout.as_ref().map(|l| l.direction) {
+            Some(LayoutDirection::Horizontal) => "column-gap",
+            _ => "row-gap",
+          };
+          set(el, key, &len);
+        }
+        "opacity" => set(el, "opacity", &var),
+        "fontSize" => set(el, "font-size", &len),
+        _ => {}
+      }
     }
   }
 
@@ -756,6 +812,8 @@ fn tw_class(k: &str, v: &str) -> String {
     ("column-gap", _) => format!("gap-x-[{a}]"),
     ("row-gap", _) => format!("gap-y-[{a}]"),
     ("padding", _) => tw_padding(v),
+    ("background-color", _) if v.starts_with("var(") => format!("bg-[color:{a}]"),
+    ("color", _) if v.starts_with("var(") => format!("text-[color:{a}]"),
     ("background-color", _) => format!("bg-[{a}]"),
     ("color", _) => format!("text-[{a}]"),
     ("font-size", _) => format!("text-[length:{a}]"),
@@ -967,9 +1025,10 @@ pub fn export_html(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
   let fonts = google_fonts_link(doc);
   let name = doc.get(id).map(|n| n.name.clone()).unwrap_or_default();
   format!(
-    "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\" />\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n  <title>{}</title>\n{}  <style>*, *::before, *::after {{ box-sizing: border-box; }} body {{ margin: 0; }}</style>\n</head>\n<body>\n{}</body>\n</html>\n",
+    "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\" />\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n  <title>{}</title>\n{}  <style>*, *::before, *::after {{ box-sizing: border-box; }} body {{ margin: 0; }}{}</style>\n</head>\n<body>\n{}</body>\n</html>\n",
     esc(&name),
     if fonts.is_empty() { String::new() } else { format!("  <link rel=\"stylesheet\" href=\"{}\" />\n", esc(&fonts)) },
+    if doc.variables.is_empty() { String::new() } else { format!("\n{}", crate::variables::tokens_css(doc)) },
     body
   )
 }
@@ -1089,14 +1148,25 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   files.push(ProjectFile {
     path: "src/index.css".into(),
     content: format!(
-      "{}@tailwind base;\n@tailwind components;\n@tailwind utilities;\n",
+      "{}{}@tailwind base;\n@tailwind components;\n@tailwind utilities;\n",
       if fonts.is_empty() {
         String::new()
       } else {
         format!("@import url(\"{fonts}\");\n")
+      },
+      if doc.variables.is_empty() {
+        ""
+      } else {
+        "@import \"./tokens.css\";\n"
       }
     ),
   });
+  if !doc.variables.is_empty() {
+    files.push(ProjectFile {
+      path: "src/tokens.css".into(),
+      content: crate::variables::tokens_css(doc),
+    });
+  }
   files.push(ProjectFile {
     path: "src/main.tsx".into(),
     content: "import React from \"react\";\nimport ReactDOM from \"react-dom/client\";\nimport App from \"./App\";\nimport \"./index.css\";\n\nReactDOM.createRoot(document.getElementById(\"root\")!).render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>,\n);\n".into(),

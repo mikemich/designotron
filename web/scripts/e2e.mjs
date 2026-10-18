@@ -290,6 +290,39 @@ try {
   await page.waitForTimeout(150);
   await shot("05d-boolean-mask");
 
+  // Variables: create a collection with Light/Dark in the dialog, bind a fill, switch the frame's mode.
+  await page.evaluate(() => window.__dt.dispatch({ op: "select", ids: [] }));
+  await page.click(".panel.right .tab:has-text('Design')");
+  await page.click("button:has-text('Open variables')");
+  await page.click(".variables-dialog button:has-text('Create collection')");
+  await page.click(".variables-dialog .ibtn[title='Add mode']");
+  await page.click(".variables-dialog button:has-text('Create variable')");
+  await page.click(".menu .item:has-text('Color')");
+  const coll = await page.evaluate(() => window.__dt.doc().variables[0]);
+  // Give the second mode a different colour through the hex field.
+  const hexField = page.locator(".variables-dialog tbody tr td:nth-child(3) input.mono");
+  await hexField.fill("#111111");
+  await hexField.press("Enter");
+  await shot("05e-variables");
+  await page.keyboard.press("Escape");
+  await page.click(".modal-head .ibtn[title='Close']").catch(() => {});
+  const varId = coll.variables[0].id;
+  const themed = await page.evaluate((varId) => {
+    const r = window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [{ type: "frame", name: "Themed", x: -900, y: 0, width: 200, height: 120, children: [{ type: "rectangle", name: "Tile", width: 80, height: 80 }] }] } });
+    const frame = r.created[0].id;
+    const tile = window.__dt.doc().nodes[frame].children[0];
+    window.__dt.dispatch({ op: "select", ids: [tile] });
+    return { frame, tile };
+  }, varId);
+  await page.click(".section:has-text('Variables') .ibtn[title='Bind a property']");
+  await page.locator(".section:has-text('Variables') .row:has-text('Fill') select").selectOption(varId);
+  const light = await page.evaluate((id) => window.__dt.doc().nodes[id].fills[0].color, themed.tile);
+  await page.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), themed.frame);
+  const modeSelect = page.locator(".section:has-text('Variables') .row").first().locator("select");
+  await modeSelect.selectOption({ index: 2 });
+  const dark = await page.evaluate((id) => window.__dt.doc().nodes[id].fills[0].color, themed.tile);
+  check("variables: bound fill follows the frame's mode", light === "#6D4AFF" && dark === "#111111", `${light} → ${dark}`);
+
   // Templates: each builds into a fresh file from the files screen.
   for (const name of ["Landing page", "Dashboard", "Design system"]) {
     await page.evaluate(() => (location.hash = "#/"));
