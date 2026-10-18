@@ -16,6 +16,8 @@ import { TextEditor } from "./TextEditor";
 import { EmptyPrompt } from "./EmptyPrompt";
 import { GridOverlay, PageGuides, Rulers } from "./Rulers";
 import { CommentLayer } from "./Comments";
+import { RemoteCursors, RemoteSelections } from "./RemoteCursors";
+import { reportCursor } from "../collab";
 import { insertImageFile } from "../actions";
 import { canvasMenu } from "./contextMenu";
 import { Menu, type MenuItem } from "../ui/controls";
@@ -317,6 +319,7 @@ export function Canvas() {
   function onPointerMove(e: React.PointerEvent) {
     const d = drag.current;
     const p = pagePt(e);
+    reportCursor(p);
     if (!d) {
       if (tool === "move" && !useStore.getState().editingText) {
         const id = query<string | null>({ q: "pick", x: p.x, y: p.y, zoom: zoom(), deep: e.metaKey || e.ctrlKey });
@@ -678,7 +681,10 @@ export function Canvas() {
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onPointerLeave={() => !drag.current && useStore.setState({ hover: null })}
+      onPointerLeave={() => {
+        reportCursor(null);
+        if (!drag.current) useStore.setState({ hover: null });
+      }}
       onDoubleClick={onDoubleClick}
       onContextMenu={onContextMenu}
       onDragOver={(e) => e.preventDefault()}
@@ -690,6 +696,7 @@ export function Canvas() {
       <svg className="overlay" width={size.w || undefined} height={size.h || undefined}>
         {showGrids && <GridOverlay v={v} />}
         <PageGuides v={v} width={size.w} height={size.h} />
+        <RemoteSelections v={v} />
         {topFrames.map((f) => {
           const n = doc.nodes[f.id];
           const p = toScreen(v, apply(f.matrix, { x: 0, y: 0 }));
@@ -771,6 +778,7 @@ export function Canvas() {
         {vectorNode?.vector && vectorM && <VectorPoints node={vectorNode} m={vectorM} v={v} />}
       </svg>
       <CommentLayer v={v} />
+      <RemoteCursors v={v} />
       {showRulers && <Rulers v={v} width={size.w} height={size.h} selection={selItems.union} />}
       {editingText && <TextEditor id={editingText} />}
       {empty && tool === "move" && <EmptyPrompt />}

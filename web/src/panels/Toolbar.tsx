@@ -4,6 +4,7 @@ import {
   ChevronDown,
   Combine,
   MessageCircle,
+  Users,
   Circle,
   Hand,
   Hash,
@@ -26,6 +27,7 @@ import { dispatch, setTool, toggleView, useDoc, useStore, zoomBy, zoomToFit, zoo
 import type { Tool } from "../types";
 import { ALT, Menu, MOD, SHIFT, type MenuItem } from "../ui/controls";
 import { runPlugin, usePlugins } from "../plugins";
+import { useCollab } from "../collab";
 import { useChat } from "../ai/chatState";
 
 const SHAPES: { tool: Tool; label: string; key: string; icon: JSX.Element }[] = [
@@ -214,11 +216,34 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         >
           <Play size={16} />
         </button>
+        <ShareButton />
         <button className="tbtn primary" onClick={A.exportProject} title="Export the design as a React + Tailwind project">
           Export code
         </button>
       </div>
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>
+  );
+}
+
+/** Collaborator avatars plus the Share button. */
+function ShareButton() {
+  const { peers, role, status } = useCollab();
+  const list = Object.values(peers);
+  return (
+    <>
+      {list.length > 0 && (
+        <div className="peer-avatars">
+          {list.slice(0, 5).map((p) => (
+            <span key={p.id} className="avatar" title={p.name} style={{ width: 24, height: 24, background: p.color, fontSize: 11 }}>
+              {p.name[0]?.toUpperCase()}
+            </span>
+          ))}
+        </div>
+      )}
+      <button className={"tbtn" + (role ? " active" : "")} title={role ? (status === "live" ? "Shared: live" : "Shared: reconnecting…") : "Share for live editing"} onClick={() => useCollab.setState({ dialogOpen: true })}>
+        <Users size={16} />
+      </button>
+    </>
   );
 }

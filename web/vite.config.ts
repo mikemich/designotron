@@ -14,6 +14,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/bridge": { target: BRIDGE, ws: true },
+      "/collab": { target: BRIDGE, ws: true },
       "/mcp": BRIDGE,
     },
   },

@@ -1476,3 +1476,39 @@ textarea.textinput {
   border: 0;
   visibility: hidden;
 }
+
+/* Multiplayer */
+.share-dialog {
+  width: 460px;
+}
+.share-peers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.remote-cursor {
+  position: absolute;
+  pointer-events: none;
+  z-index: 3;
+  transition: left 0.08s linear, top 0.08s linear;
+}
+.remote-cursor span {
+  position: absolute;
+  left: 14px;
+  top: 16px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.peer-avatars {
+  display: flex;
+  margin-right: 4px;
+}
+.peer-avatars .avatar {
+  margin-left: -6px;
+  border: 2px solid var(--panel);
+}

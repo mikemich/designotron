@@ -68,6 +68,18 @@ impl WasmEngine {
     self.inner.render(page, &hidden)
   }
 
+  /// Local changes since the last call, for collaborators (`{full}` the first time).
+  #[wasm_bindgen(js_name = collabDelta)]
+  pub fn collab_delta(&mut self) -> String {
+    self.inner.collab_delta().to_string()
+  }
+
+  /// Starts the collaboration baseline at the current document.
+  #[wasm_bindgen(js_name = collabReset)]
+  pub fn collab_reset(&mut self) {
+    self.inner.collab_reset();
+  }
+
   /// JSON delta of the document since the last call (`{full}` or `{nodes, removed, meta}`).
   #[wasm_bindgen(js_name = docDelta)]
   pub fn doc_delta(&mut self, full: bool) -> String {

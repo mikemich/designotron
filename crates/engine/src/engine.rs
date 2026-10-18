@@ -24,6 +24,13 @@ use crate::{ai, codegen, patch};
 const MAX_HISTORY: usize = 300;
 pub const CLIPBOARD_TAG: &str = "designotron/nodes";
 
+/// One undo step: the state before it and the document right after it. Undo applies the
+/// reverse of before→after to the *current* document, so collaborators' later edits stay.
+struct Step {
+  before: Snapshot,
+  after: Document,
+}
+
 #[derive(Clone)]
 struct Snapshot {
   doc: Document,
@@ -130,6 +137,10 @@ pub enum Command {
     /// Figma imageRef → URL or `asset:` id.
     #[serde(default)]
     images: std::collections::BTreeMap<String, String>,
+  },
+  /// Merges a collaborator's delta (see `collab::delta`); not an undo step.
+  ApplyRemote {
+    delta: Value,
   },
   /// Swaps in a whole document as one undoable step (restoring a version).
   ReplaceDocument {
@@ -454,8 +465,8 @@ pub struct Engine {
   pub selection: Vec<NodeId>,
   pub page: String,
   pub rev: u64,
-  past: Vec<Snapshot>,
-  future: Vec<Snapshot>,
+  past: Vec<Step>,
+  future: Vec<Step>,
   gesture: Option<Snapshot>,
   pub(crate) gen: IdGen,
   pub(crate) measurer: Box<dyn TextMeasurer>,
@@ -463,6 +474,8 @@ pub struct Engine {
   render_cache: RenderCache,
   /// Document as last sent to the editor UI (see `doc_delta`).
   synced: Option<Document>,
+  /// Document as last sent to collaborators (see `collab_delta`).
+  collab_synced: Option<Document>,
 }
 
 /// Per-root SVG from the last canvas render, and the document it was made from.
@@ -492,6 +505,7 @@ impl Engine {
       fingerprints: HashMap::new(),
       render_cache: RenderCache::default(),
       synced: None,
+      collab_synced: None,
     }
   }
 
@@ -559,6 +573,22 @@ impl Engine {
     };
     self.synced = Some(self.doc.clone());
     out
+  }
+
+  /// Local changes since the last call, for collaborators (`collab::delta` format).
+  /// The first call returns `{full: doc}`.
+  pub fn collab_delta(&mut self) -> Value {
+    let out = match &self.collab_synced {
+      Some(base) => crate::collab::delta(base, &self.doc),
+      None => json!({ "full": self.doc }),
+    };
+    self.collab_synced = Some(self.doc.clone());
+    out
+  }
+
+  /// Starts a collaboration baseline at the current document without producing a delta.
+  pub fn collab_reset(&mut self) {
+    self.collab_synced = Some(self.doc.clone());
   }
 
   /// Forgets cached canvas SVG (the next incremental render returns every root).
@@ -670,22 +700,42 @@ impl Engine {
         return Ok(json!({}));
       }
       Command::Undo => {
-        if let Some(prev) = self.past.pop() {
-          let cur = self.snapshot();
-          self.future.push(cur);
-          self.restore(prev);
+        if let Some(step) = self.past.pop() {
+          let prev = self.doc.clone();
+          self.doc = crate::collab::revert(&self.doc, &step.after, &step.before.doc);
+          self.selection = step.before.selection.clone();
+          if self.doc.page(&step.before.page).is_some() {
+            self.page = step.before.page.clone();
+          }
           self.refresh_fingerprints();
+          self.after_mutation(&prev);
+          self.future.push(step);
         }
         self.rev += 1;
         return Ok(json!({}));
       }
       Command::Redo => {
-        if let Some(next) = self.future.pop() {
-          let cur = self.snapshot();
-          self.past.push(cur);
-          self.restore(next);
+        if let Some(step) = self.future.pop() {
+          let prev = self.doc.clone();
+          self.doc = crate::collab::revert(&self.doc, &step.before.doc, &step.after);
           self.refresh_fingerprints();
+          self.after_mutation(&prev);
+          self.past.push(step);
         }
+        self.rev += 1;
+        return Ok(json!({}));
+      }
+      Command::ApplyRemote { delta } => {
+        // A collaborator's change: merged into the document (and the open gesture's base),
+        // never recorded in local history. Callers flush their own delta first.
+        let prev = self.doc.clone();
+        crate::collab::apply(&mut self.doc, &delta)?;
+        if let Some(g) = self.gesture.as_mut() {
+          let _ = crate::collab::apply(&mut g.doc, &delta);
+        }
+        self.refresh_fingerprints();
+        self.after_mutation(&prev);
+        self.collab_synced = Some(self.doc.clone());
         self.rev += 1;
         return Ok(json!({}));
       }
@@ -796,7 +846,10 @@ impl Engine {
   }
 
   fn push_past(&mut self, s: Snapshot) {
-    self.past.push(s);
+    self.past.push(Step {
+      before: s,
+      after: self.doc.clone(),
+    });
     if self.past.len() > MAX_HISTORY {
       self.past.remove(0);
     }
@@ -1740,6 +1793,7 @@ impl Engine {
       | Command::CancelGesture
       | Command::Select { .. }
       | Command::SelectAll
+      | Command::ApplyRemote { .. }
       | Command::SetPage { .. } => Ok(json!({})),
     }
   }

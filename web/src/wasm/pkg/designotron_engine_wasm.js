@@ -98,6 +98,28 @@ export class WasmEngine {
         wasm.__wbg_wasmengine_free(ptr, 0);
     }
     /**
+     * Local changes since the last call, for collaborators (`{full}` the first time).
+     * @returns {string}
+     */
+    collabDelta() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmengine_collabDelta(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Starts the collaboration baseline at the current document.
+     */
+    collabReset() {
+        wasm.wasmengine_collabReset(this.__wbg_ptr);
+    }
+    /**
      * JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
      * @param {string} page
      * @param {string} hidden

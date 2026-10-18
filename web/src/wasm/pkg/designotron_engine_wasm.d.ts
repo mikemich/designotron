@@ -3,6 +3,14 @@
 export class WasmEngine {
   free(): void;
   /**
+   * Local changes since the last call, for collaborators (`{full}` the first time).
+   */
+  collabDelta(): string;
+  /**
+   * Starts the collaboration baseline at the current document.
+   */
+  collabReset(): void;
+  /**
    * JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
    */
   renderIncremental(page: string, hidden: string, reset: boolean): string;
@@ -31,6 +39,8 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_wasmengine_free: (a: number, b: number) => void;
+  readonly wasmengine_collabDelta: (a: number) => [number, number];
+  readonly wasmengine_collabReset: (a: number) => void;
   readonly wasmengine_dispatch: (a: number, b: number, c: number) => [number, number, number, number];
   readonly wasmengine_docDelta: (a: number, b: number) => [number, number];
   readonly wasmengine_load: (a: number, b: number, c: number) => [number, number];
@@ -42,9 +52,9 @@ export interface InitOutput {
   readonly wasmengine_save: (a: number) => [number, number];
   readonly wasmengine_state: (a: number) => [number, number];
   readonly __wbindgen_export_0: WebAssembly.Table;
+  readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-  readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __externref_table_dealloc: (a: number) => void;
   readonly __wbindgen_start: () => void;
 }

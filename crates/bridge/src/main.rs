@@ -5,6 +5,7 @@
 //! - falls back to a native engine on `workspace/design.dtron.json` when no editor is open.
 
 mod claude;
+mod collab;
 mod editor;
 mod fetch;
 mod headless;
@@ -35,6 +36,9 @@ pub struct AppState {
   pub headless: Headless,
   pub chat: claude::ChatControl,
   pub preview: preview::Preview,
+  pub collab: collab::Collab,
+  /// Editor build to serve (also used by the share listener).
+  pub static_dir: Option<PathBuf>,
 }
 
 pub type Shared = Arc<AppState>;
@@ -105,6 +109,8 @@ async fn main() {
     editor: EditorLink::default(),
     chat: claude::ChatControl::default(),
     preview: preview::Preview::default(),
+    collab: collab::Collab::default(),
+    static_dir: cfg.static_dir.clone(),
   });
 
   let mut app = Router::new()
@@ -112,6 +118,8 @@ async fn main() {
     .route("/bridge/status", get(status))
     .route("/bridge/fetch", get(fetch::fetch_page))
     .route("/bridge/figma", get(fetch::figma_api))
+    .route("/bridge/share", post(collab::start_share))
+    .route("/collab/ws", get(collab::owner_ws))
     .route("/mcp", post(mcp::handle).get(mcp::reject_get).delete(mcp::end_session))
     .with_state(state.clone());
 

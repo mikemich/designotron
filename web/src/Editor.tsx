@@ -10,6 +10,8 @@ import { VariablesDialog } from "./panels/VariablesDialog";
 import { FigmaImportDialog } from "./panels/FigmaImportDialog";
 import { PluginWindow, PluginsDialog } from "./panels/PluginsDialog";
 import { usePlugins } from "./plugins";
+import { joinShared, stopSharing, useCollab } from "./collab";
+import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
 import { getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
 import { listVersions, loadFile, saveFile, saveVersion } from "./files";
@@ -24,6 +26,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const variablesOpen = useStore((s) => s.variablesOpen);
   const figmaOpen = useStore((s) => s.figmaOpen);
   const pluginsOpen = usePlugins((s) => s.dialogOpen);
+  const shareOpen = useCollab((s) => s.dialogOpen);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -43,9 +46,12 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       useStore.setState({ fileId, dirty: false, editingText: null, editingVector: null, presenting: null });
       setReady(true);
       requestAnimationFrame(zoomToFit);
+      joinShared();
     })();
     return () => {
       cancelled = true;
+      // Leaving the file leaves its shared session.
+      if (useCollab.getState().role) stopSharing();
     };
   }, [fileId]);
 
@@ -109,6 +115,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       {variablesOpen && <VariablesDialog />}
       {figmaOpen && <FigmaImportDialog />}
       {pluginsOpen && <PluginsDialog />}
+      {shareOpen && <ShareDialog />}
       <PluginWindow />
       {toast && <div className={"toast " + toast.kind}>{toast.text}</div>}
     </div>

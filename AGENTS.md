@@ -76,6 +76,11 @@ must never be committed.
   canvas render cache (`render_incremental`) and the JS document copy (`doc_delta`) all work
   from that diff. Only `get_mut` nodes you actually change (use `Document::update_where`), and
   never add per-mutation or per-frame work that scans every node.
+- Multiplayer (`collab.rs` in engine and bridge): peers exchange `collab::delta` JSON; remote
+  changes enter through `Command::ApplyRemote` and never join local history. Undo/redo use
+  `collab::revert`, so a step only reverses its own changes. Any new document-level field must
+  be handled in `collab::delta`, `apply` and `revert`. The LAN share listener serves only the
+  editor and `/collab/ws` behind the token; never add MCP, chat or fetch routes to it.
 - The canvas patches one `<g data-root>` per top-level layer; a root whose only change is its
   position gets a transform update instead of new markup. `.canvas` uses `contain: strict` and
   its SVGs are sized in pixels so panel updates never re-lay out the canvas.
@@ -90,6 +95,7 @@ cd web && npm run typecheck            # TypeScript (tsc -b, same as the product
 ./dev.sh                               # Bridge on :5174 + editor on :5173
 cd web && npm run e2e                  # Editor smoke test (needs ./dev.sh running)
 cd web && node scripts/bridge-e2e.mjs  # MCP + live editor (E2E_CLAUDE=1 adds a real chat turn)
+cd web && node scripts/collab-e2e.mjs  # Multiplayer with two browsers (bridge serving web/dist)
 cargo run --release -p designotron-engine --example bench   # Engine timings on a 6k-layer file
 cd web && node scripts/perf.mjs [frames] [cards]           # Browser drag timings (PROFILE=1, TRACE=1)
 ```

@@ -5,7 +5,7 @@ change that finishes, starts or breaks them.
 
 ## In progress
 
-- Working through [ROADMAP.md](ROADMAP.md) in order. Next: comments, multiplayer and a plugin API.
+- Working through [ROADMAP.md](ROADMAP.md) in order. Next: growth assets (demo, CONTRIBUTING, issue templates, README).
 
 ## To do
 
@@ -13,7 +13,7 @@ Ordered by impact on "replace Figma for a small team".
 
 | #  | Item                                   | Notes                                                                 |
 |----|----------------------------------------|-----------------------------------------------------------------------|
-| 1  | Real-time multiplayer                  | CRDT (Yjs/Automerge or a Rust CRDT) over the bridge or a hosted relay |
+| 1  | Multiplayer beyond the LAN             | LAN sharing works; a hosted relay (or tunnel) for remote teams, and per-property merging instead of per-layer |
 | 2  | Accounts, cloud files, sharing links   | Needs a hosted backend; today files are local (IndexedDB + `.dtron`)  |
 | 3  | Comment extras                         | Mentions and notifications; shared with teammates once (1)/(2) land   |
 | 4  | Cloud version history                  | Local named/auto versions shipped; sync them once files are in the cloud |
@@ -65,6 +65,7 @@ Ordered by impact on "replace Figma for a small team".
 | Performance     | Persistent node map (O(1) snapshots), diff-driven layout/component sync, per-root canvas render cache with transform-only moves, document deltas to JS, contained canvas layout |
 | Comments        | Comment tool (C), pins that follow their layer, threads with replies, resolve/reopen, Comments tab; Claude reads them (`get_comments`), replies and resolves; "Ask Claude to address them" |
 | Plugins         | Sandboxed iframe plugins (opaque origin) with a promise API over the same tools Claude uses, optional UI panel, one undo step per run; built-in examples; manager with editor; Claude writes plugins via `save_plugin` |
+| Multiplayer     | Share (toolbar) hosts a live session through the bridge: secret LAN link (token-guarded listener that serves only the editor and the room), node-level deltas, tree repair for concurrent structure edits, selective undo that never reverts others' work, live cursors, selections, avatars, synced comments and images |
 | Live app        | App tab: write the generated project to `workspace/app` (or keep it in sync), run `npm run dev` through the bridge, preview at mobile/desktop width, logs, "Ask Claude to fix it" |
 | Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README                                                             |
 
@@ -74,7 +75,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 72 engine + bridge unit tests                          | `cargo test --workspace`                     |
+| 76 engine + bridge unit tests                          | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
@@ -90,6 +91,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 | Figma JSON import through the dialog                   | `web/scripts/e2e.mjs`                        |
 | Comment on a layer, Claude replies and resolves        | `web/scripts/e2e.mjs`                        |
 | Plugins: one undo step, UI panel, sandbox escape fails | `web/scripts/e2e.mjs` (42/42 passing)        |
+| Two browsers: join by link, edits both ways, selective undo, cursors, comments, bad token refused | `web/scripts/collab-e2e.mjs` (9/9) |
 | Bridge reaches api.figma.com and real sites via proxy  | curl `/bridge/figma` (403 for a bad token), `/bridge/fetch` |
 | Engine: drag step 0.13 ms, edit 0.3 ms on 6k layers    | `cargo run --release -p designotron-engine --example bench` (was 42 ms / 46 ms) |
 | Browser drag on 6k layers: ~10 ms script, ~1 ms layout per frame | `web/scripts/perf.mjs` on the production build (was 25 ms script + 80 ms layout) |
@@ -112,7 +114,7 @@ until someone runs it with a real key.
 
 | Area             | Limitation                                                                                               |
 |------------------|----------------------------------------------------------------------------------------------------------|
-| Collaboration    | Comments are per file; no multiplayer, accounts or sharing yet; versions live only in this browser       |
+| Collaboration    | Live sharing is LAN-only and needs the owner's bridge running; concurrent edits to the same layer: last writer wins; no accounts; versions live only in each browser |
 | Storage          | Files live in the browser (IndexedDB). Clearing site data deletes them; save `.dtron` files to keep them |
 | Scale            | Updates are incremental, but the canvas is one big SVG: painting 10k+ layers zoomed out is the limit (software rendering in headless tests ~35 ms/frame at 6k) |
 | Text             | No OpenType features or per-range line height; widths depend on the web font having loaded               |
@@ -147,7 +149,7 @@ until someone runs it with a real key.
 | Prototyping                | Partial     | No smart animate/overlays               |
 | Export                     | Yes         | Plus code export Figma lacks            |
 | Dev Mode / inspect         | Partial     | Code tab, notes                         |
-| Multiplayer, comments      | No          | Top of the to-do list                   |
+| Multiplayer, comments      | Yes (LAN)   | Live cursors, comments Claude can resolve |
 | Version history            | Local       | Named + automatic, per browser          |
 | Plugins                    | Yes         | Sandboxed JS over the AI tool API; no store yet |
 | AI                         | Yes         | Claude Code (Pro/Max) and API key       |

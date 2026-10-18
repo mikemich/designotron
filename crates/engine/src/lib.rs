@@ -5,6 +5,7 @@
 
 pub mod ai;
 pub mod codegen;
+pub mod collab;
 pub mod color;
 pub mod comments;
 pub mod components;
