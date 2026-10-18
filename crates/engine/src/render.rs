@@ -6,7 +6,7 @@ use crate::model::{
   Document, Effect, EffectType, Node, NodeId, NodeType, Paint, ScaleMode, StrokeAlign, StrokeCap, TextAlignH, TextAlignV, TextDecoration,
 };
 use crate::shapes;
-use crate::text::{layout_for_node, TextMeasurer};
+use crate::text::{layout_for_node, SpanStyle, TextMeasurer};
 use crate::{color, model};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -454,13 +454,72 @@ impl<'a> Renderer<'a> {
       if t.italic { " font-style=\"italic\"" } else { "" },
       if t.letter_spacing != 0.0 { format!(" letter-spacing=\"{}\"", fmt(t.letter_spacing)) } else { String::new() },
     );
-    for (i, line) in lay.lines.iter().enumerate() {
-      let y = offset + i as f64 * lh + lh / 2.0;
-      out.push_str(&format!("<tspan x=\"{}\" y=\"{}\">{}</tspan>", fmt(x), fmt(y), esc(&line.text)));
+    let _ = lh;
+    let base = SpanStyle::base(t);
+    let mut top = offset;
+    for line in &lay.lines {
+      let mixed_size = line.segments.iter().any(|sg| sg.style.size != base.size);
+      if mixed_size {
+        // Mixed sizes share an alphabetic baseline (central would centre each span).
+        let max = line.segments.iter().map(|sg| sg.style.size).fold(0.0, f64::max);
+        let y = top + line.height / 2.0 + 0.35 * max;
+        out.push_str(&format!(
+          "<tspan x=\"{}\" y=\"{}\" dominant-baseline=\"alphabetic\">",
+          fmt(x),
+          fmt(y)
+        ));
+      } else {
+        out.push_str(&format!("<tspan x=\"{}\" y=\"{}\">", fmt(x), fmt(top + line.height / 2.0)));
+      }
+      for sg in &line.segments {
+        let attrs = span_attrs(&sg.style, &base, |c| color::css_with_opacity(c, 1.0));
+        if attrs.is_empty() {
+          out.push_str(&esc(&sg.text));
+        } else {
+          out.push_str(&format!("<tspan{attrs}>{}</tspan>", esc(&sg.text)));
+        }
+      }
+      out.push_str("</tspan>");
+      top += line.height;
     }
     out.push_str("</text>");
     out
   }
+}
+
+/// SVG attributes for the parts of a span style that differ from the base.
+fn span_attrs(s: &SpanStyle, base: &SpanStyle, color: impl Fn(&str) -> String) -> String {
+  let mut a = String::new();
+  if s.family != base.family {
+    a.push_str(&format!(" font-family=\"{}\"", esc(&font_stack(&s.family))));
+  }
+  if s.size != base.size {
+    a.push_str(&format!(" font-size=\"{}\"", fmt(s.size)));
+  }
+  if s.weight != base.weight {
+    a.push_str(&format!(" font-weight=\"{}\"", s.weight));
+  }
+  if s.italic != base.italic {
+    a.push_str(if s.italic {
+      " font-style=\"italic\""
+    } else {
+      " font-style=\"normal\""
+    });
+  }
+  if s.letter_spacing != base.letter_spacing {
+    a.push_str(&format!(" letter-spacing=\"{}\"", fmt(s.letter_spacing)));
+  }
+  if s.decoration != base.decoration {
+    a.push_str(match s.decoration {
+      TextDecoration::None => " text-decoration=\"none\"",
+      TextDecoration::Underline => " text-decoration=\"underline\"",
+      TextDecoration::Strikethrough => " text-decoration=\"line-through\"",
+    });
+  }
+  if let Some(c) = &s.color {
+    a.push_str(&format!(" fill=\"{}\"", color(c)));
+  }
+  a
 }
 
 fn is_closed(n: &Node) -> bool {

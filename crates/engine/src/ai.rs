@@ -62,6 +62,7 @@ fn spec_schema() -> Value {
       },
       "absolute": { "type": "boolean", "description": "Ignore parent auto layout" },
       "text": { "type": "string", "description": "Text content (type text)" },
+      "spans": { "type": "array", "description": "Mixed-style text instead of `text`: [{text, fontWeight, italic, color, fontSize, fontFamily, decoration, link}]", "items": { "type": "object" } },
       "fontSize": { "type": "number" },
       "fontWeight": { "type": "number" },
       "fontFamily": { "type": "string", "description": "Inter, Roboto, Poppins, Montserrat, Playfair Display, DM Sans, Space Grotesk, JetBrains Mono, Lato, Open Sans" },
@@ -772,6 +773,15 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
         n.name = v.chars().take(40).collect();
       }
     }
+    if let Some(spans) = s.get("spans").and_then(|v| v.as_array()) {
+      let (characters, runs) = spans_to_runs(spans);
+      if creating && s.get("name").is_none() {
+        n.name = characters.chars().take(40).collect();
+      }
+      let t = n.text.as_mut().unwrap();
+      t.characters = characters;
+      t.runs = runs;
+    }
     let t = n.text.as_mut().unwrap();
     if let Some(v) = num(s.get("fontSize")) {
       t.font_size = v;
@@ -891,6 +901,38 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
     n.shape.get_or_insert_with(Default::default).point_count = v as u32;
   }
   Ok(())
+}
+
+/// `[{text, fontWeight, ...}]` to characters plus style runs.
+fn spans_to_runs(spans: &[Value]) -> (String, Vec<crate::model::TextRun>) {
+  let mut text = String::new();
+  let mut runs = Vec::new();
+  for sp in spans {
+    let piece = sp.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let start = text.chars().count();
+    text.push_str(piece);
+    let end = text.chars().count();
+    let decoration = sp.get("decoration").and_then(|v| v.as_str()).map(|d| match d {
+      "underline" => TextDecoration::Underline,
+      "strikethrough" | "line-through" => TextDecoration::Strikethrough,
+      _ => TextDecoration::None,
+    });
+    runs.push(crate::model::TextRun {
+      start,
+      end,
+      font_family: sp.get("fontFamily").and_then(|v| v.as_str()).map(String::from),
+      font_size: num(sp.get("fontSize")),
+      font_weight: num(sp.get("fontWeight")).map(|v| v as u32),
+      italic: sp.get("italic").and_then(|v| v.as_bool()),
+      color: sp.get("color").and_then(|v| v.as_str()).map(crate::color::normalize),
+      decoration,
+      letter_spacing: num(sp.get("letterSpacing")),
+      link: sp.get("link").and_then(|v| v.as_str()).map(String::from),
+    });
+  }
+  let len = text.chars().count();
+  crate::text::normalize_runs(&mut runs, len);
+  (text, runs)
 }
 
 fn apply_dimension(n: &mut Node, v: Option<&Value>, horizontal: bool) {
@@ -1170,6 +1212,27 @@ mod tests {
         input: json!({})
       })
       .is_err());
+  }
+
+  #[test]
+  fn spans_create_mixed_text() {
+    let mut e = engine();
+    let r = e
+      .dispatch(Command::Ai {
+        tool: "create_nodes".into(),
+        input: json!({ "nodes": [{ "type": "text", "spans": [{ "text": "Save " }, { "text": "40%", "fontWeight": 800, "color": "#16A34A" }, { "text": " today" }] }] }),
+      })
+      .unwrap();
+    let id = r["created"][0]["id"].as_str().unwrap().to_string();
+    let t = e.doc.get(&id).unwrap().text.clone().unwrap();
+    assert_eq!(t.characters, "Save 40% today");
+    assert_eq!(t.runs.len(), 1);
+    assert_eq!((t.runs[0].start, t.runs[0].end), (5, 8));
+    let react = crate::codegen::export_react(&e.doc, &id, &HeuristicMeasurer);
+    assert!(
+      react.contains("<span className=\"font-[800] text-[#16A34A]\">{\"40%\"}</span>"),
+      "{react}"
+    );
   }
 
   #[test]

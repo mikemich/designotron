@@ -121,6 +121,17 @@ pub enum Command {
     id: NodeId,
     characters: String,
   },
+  /// Applies style overrides to characters `start..end` of a text layer.
+  /// `style` uses TextRun field names; `clear` lists overrides to remove.
+  StyleText {
+    id: NodeId,
+    start: usize,
+    end: usize,
+    #[serde(default)]
+    style: Value,
+    #[serde(default)]
+    clear: Vec<String>,
+  },
   Delete {
     ids: Vec<NodeId>,
   },
@@ -791,12 +802,54 @@ impl Engine {
         Ok(json!({}))
       }
       Command::SetText { id, characters } => {
-        let p = json!({ "text": { "characters": characters } });
+        let (old, runs) = self
+          .doc
+          .get(&id)
+          .and_then(|n| n.text.as_ref())
+          .map(|t| (t.characters.clone(), t.runs.clone()))
+          .unwrap_or_default();
+        let runs = crate::text::remap_runs(&old, &characters, &runs);
+        let p = json!({ "text": { "characters": characters, "runs": runs } });
         let n = self.doc.get_mut(&id).ok_or("no such node")?;
         patch::apply(n, &p)?;
         if n.name.is_empty() || n.name == "Text" {
           n.name = characters.chars().take(40).collect();
         }
+        components::record_override(&mut self.doc, &id, &p);
+        Ok(json!({}))
+      }
+      Command::StyleText {
+        id,
+        start,
+        end,
+        style,
+        clear,
+      } => {
+        let t = self.doc.get(&id).and_then(|n| n.text.clone()).ok_or("not a text layer")?;
+        let len = t.characters.chars().count();
+        let mut patch_run: crate::model::TextRun = serde_json::from_value(style).map_err(|e| format!("invalid text style: {e}"))?;
+        if let Some(c) = patch_run.color.as_mut() {
+          *c = crate::color::normalize(c);
+        }
+        let clear: Vec<&str> = clear.iter().map(|s| s.as_str()).collect();
+        let runs = if start == 0 && end >= len && clear.is_empty() {
+          // Whole text: fold the style into the base props instead of a run.
+          let mut tp = t.clone();
+          fold_into_base(&mut tp, &patch_run);
+          let runs = crate::text::style_range(&t.runs, len, 0, len, &crate::model::TextRun::default(), &patch_keys(&patch_run));
+          let p = json!({ "text": { "fontFamily": tp.font_family, "fontSize": tp.font_size, "fontWeight": tp.font_weight, "italic": tp.italic, "letterSpacing": tp.letter_spacing, "decoration": tp.decoration, "runs": runs } });
+          let mut p = p;
+          if let Some(c) = &patch_run.color {
+            p["fills"] = json!([{ "type": "solid", "color": c }]);
+          }
+          patch::apply(self.doc.get_mut(&id).unwrap(), &p)?;
+          components::record_override(&mut self.doc, &id, &p);
+          return Ok(json!({}));
+        } else {
+          crate::text::style_range(&t.runs, len, start, end, &patch_run, &clear)
+        };
+        let p = json!({ "text": { "runs": runs } });
+        patch::apply(self.doc.get_mut(&id).unwrap(), &p)?;
         components::record_override(&mut self.doc, &id, &p);
         Ok(json!({}))
       }
@@ -1420,6 +1473,55 @@ impl Engine {
   }
 }
 
+/// Applies a run's overrides to the base text props.
+fn fold_into_base(t: &mut crate::model::TextProps, r: &crate::model::TextRun) {
+  if let Some(v) = &r.font_family {
+    t.font_family = v.clone();
+  }
+  if let Some(v) = r.font_size {
+    t.font_size = v;
+  }
+  if let Some(v) = r.font_weight {
+    t.font_weight = v;
+  }
+  if let Some(v) = r.italic {
+    t.italic = v;
+  }
+  if let Some(v) = r.letter_spacing {
+    t.letter_spacing = v;
+  }
+  if let Some(v) = r.decoration {
+    t.decoration = v;
+  }
+}
+
+/// Field names a run sets (so existing runs stop overriding them).
+fn patch_keys(r: &crate::model::TextRun) -> Vec<&'static str> {
+  let mut k = Vec::new();
+  if r.font_family.is_some() {
+    k.push("fontFamily");
+  }
+  if r.font_size.is_some() {
+    k.push("fontSize");
+  }
+  if r.font_weight.is_some() {
+    k.push("fontWeight");
+  }
+  if r.italic.is_some() {
+    k.push("italic");
+  }
+  if r.color.is_some() {
+    k.push("color");
+  }
+  if r.decoration.is_some() {
+    k.push("decoration");
+  }
+  if r.letter_spacing.is_some() {
+    k.push("letterSpacing");
+  }
+  k
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -1596,6 +1698,57 @@ mod tests {
     assert_eq!(i.fills, vec![Paint::solid("#00FF00")]);
     assert_eq!(i.corner_radius, 8.0);
     assert_eq!(i.x, 300.0);
+  }
+
+  #[test]
+  fn styled_text_survives_typing() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "Hello world".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::StyleText {
+      id: id.clone(),
+      start: 6,
+      end: 11,
+      style: json!({ "fontWeight": 700, "color": "#ff0000" }),
+      clear: vec![],
+    })
+    .unwrap();
+    // Typing happens one edit at a time: insert at the start, then append.
+    e.dispatch(Command::SetText {
+      id: id.clone(),
+      characters: "Oh, Hello world".into(),
+    })
+    .unwrap();
+    e.dispatch(Command::SetText {
+      id: id.clone(),
+      characters: "Oh, Hello world!".into(),
+    })
+    .unwrap();
+    let t = e.doc.get(&id).unwrap().text.clone().unwrap();
+    assert_eq!(t.runs.len(), 1);
+    assert_eq!((t.runs[0].start, t.runs[0].end), (10, 16));
+    assert_eq!(t.runs[0].color.as_deref(), Some("#FF0000"));
+    // Styling everything folds into the base style and removes conflicting runs.
+    e.dispatch(Command::StyleText {
+      id: id.clone(),
+      start: 0,
+      end: 99,
+      style: json!({ "fontWeight": 300 }),
+      clear: vec![],
+    })
+    .unwrap();
+    let t = e.doc.get(&id).unwrap().text.clone().unwrap();
+    assert_eq!(t.font_weight, 300);
+    assert!(t.runs.iter().all(|r| r.font_weight.is_none()));
+    let svg = e.render(&e.page.clone(), &[]);
+    assert!(svg.contains("fill=\"#FF0000\""));
   }
 
   #[test]

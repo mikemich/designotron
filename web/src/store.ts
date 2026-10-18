@@ -94,6 +94,8 @@ interface Store {
   dirty: boolean;
   toast: { text: string; kind: "info" | "error" } | null;
   dropTarget: string | null;
+  /** Character range selected in the text being edited (code points). */
+  textSel: { id: string; start: number; end: number } | null;
 }
 
 export const useStore = create<Store>(() => ({
@@ -114,7 +116,17 @@ export const useStore = create<Store>(() => ({
   dirty: false,
   toast: null,
   dropTarget: null,
+  textSel: null,
 }));
+
+/** Applies a style to the selected characters of the text being edited; false if none. */
+export function styleTextSelection(style: Record<string, unknown>, clear: string[] = []): boolean {
+  const { editingText, textSel } = useStore.getState();
+  if (!editingText || !textSel || textSel.id !== editingText || textSel.end <= textSel.start) return false;
+  dispatch({ op: "styleText", id: editingText, start: textSel.start, end: textSel.end, style, clear });
+  window.dispatchEvent(new Event("dt-refocus-text"));
+  return true;
+}
 
 const listeners = new Set<() => void>();
 /** Called after every document change (autosave, bridge sync). */
@@ -258,4 +270,5 @@ export function zoomBy(factor: number, cx?: number, cy?: number) {
   dispatch: (cmd: Record<string, unknown>) => dispatch(cmd),
   query: (q: Record<string, unknown>) => query(q),
   zoomToFit: () => zoomToFit(),
+  edit: (id: string) => useStore.setState({ editingText: id }),
 };

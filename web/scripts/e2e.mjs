@@ -98,6 +98,22 @@ try {
   check("text tool creates text", textNode?.text?.characters === "Hello Designotron", textNode ? `${Math.round(textNode.width)}px wide` : "");
   await shot("04-text");
 
+  // Mixed styles: select "Designotron" while editing and press Ctrl+B.
+  await page.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), textNode.id);
+  await page.evaluate((id) => window.__dt.edit(id), textNode.id);
+  await page.waitForSelector(".text-editor");
+  await page.evaluate(() => {
+    const ta = document.querySelector(".text-editor");
+    ta.focus();
+    ta.setSelectionRange(6, 17);
+    ta.dispatchEvent(new Event("select", { bubbles: true }));
+  });
+  await page.keyboard.press("Control+b");
+  await page.keyboard.press("Escape");
+  const styled = (await doc()).nodes[textNode.id].text;
+  check("Ctrl+B bolds only the selected word", styled.runs.length === 1 && styled.runs[0].start === 6 && styled.runs[0].end === 17 && styled.runs[0].fontWeight === 700, JSON.stringify(styled.runs));
+  await shot("04b-mixed-text");
+
   // Group + auto layout via shortcuts.
   await page.evaluate((ids) => window.__dt.dispatch({ op: "select", ids }), [rect.id, textNode.id]);
   await page.keyboard.press("Shift+A");

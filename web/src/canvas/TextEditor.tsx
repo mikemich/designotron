@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { dispatch, getDoc, query, useStore } from "../store";
+import { dispatch, getDoc, query, styleTextSelection, useStore } from "../store";
 import type { Mat } from "../types";
 import { cssColor } from "../ui/color";
 
@@ -18,7 +18,18 @@ export function TextEditor({ id }: { id: string }) {
       el.focus();
       el.select();
     }
+    const refocus = () => {
+      const sel = useStore.getState().textSel;
+      const ta = ref.current;
+      if (!ta || !sel) return;
+      ta.focus();
+      const chars = Array.from(ta.value);
+      ta.setSelectionRange(chars.slice(0, sel.start).join("").length, chars.slice(0, sel.end).join("").length);
+    };
+    window.addEventListener("dt-refocus-text", refocus);
     return () => {
+      window.removeEventListener("dt-refocus-text", refocus);
+      useStore.setState({ textSel: null });
       dispatch({ op: "endGesture" });
       const n = getDoc().nodes[id];
       if (n && n.type === "text" && !n.text?.characters.trim()) dispatch({ op: "delete", ids: [id] });
@@ -34,6 +45,16 @@ export function TextEditor({ id }: { id: string }) {
   const color = fill?.type === "solid" ? cssColor(fill.color, fill.opacity) : "#000";
   const lh = t.lineHeight ?? t.fontSize * 1.2;
   const finish = () => useStore.setState({ editingText: null });
+  const trackSelection = (ta: HTMLTextAreaElement) => {
+    const before = (i: number) => Array.from(ta.value.slice(0, i)).length;
+    useStore.setState({ textSel: { id, start: before(ta.selectionStart), end: before(ta.selectionEnd) } });
+  };
+  /** Current value of a style at the selection start (run override or base). */
+  const styleAt = (key: "fontWeight" | "italic" | "decoration") => {
+    const sel = useStore.getState().textSel;
+    const run = t.runs?.find((r: any) => sel && r.start <= sel.start && r.end > sel.start) as any;
+    return run?.[key] ?? (t as any)[key];
+  };
 
   return (
     <textarea
@@ -55,10 +76,31 @@ export function TextEditor({ id }: { id: string }) {
         whiteSpace: t.autoResize === "width" ? "pre" : "pre-wrap",
       }}
       onChange={(e) => dispatch({ op: "setText", id, characters: e.target.value }, { quiet: true })}
-      onBlur={finish}
+      onSelect={(e) => trackSelection(e.currentTarget)}
+      onKeyUp={(e) => trackSelection(e.currentTarget)}
+      onBlur={(e) => {
+        // Keep editing while the user styles the selection in the side panel or a popover.
+        const next = e.relatedTarget as HTMLElement | null;
+        if (next && next.closest(".panel.right, .popover")) return;
+        finish();
+      }}
       onPointerDown={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
         e.stopPropagation();
+        const mod = e.metaKey || e.ctrlKey;
+        const k = e.key.toLowerCase();
+        if (mod && (k === "b" || k === "i" || k === "u")) {
+          e.preventDefault();
+          trackSelection(e.currentTarget);
+          const style =
+            k === "b"
+              ? { fontWeight: (styleAt("fontWeight") ?? 400) >= 700 ? 400 : 700 }
+              : k === "i"
+                ? { italic: !styleAt("italic") }
+                : { decoration: styleAt("decoration") === "underline" ? "none" : "underline" };
+          styleTextSelection(style);
+          return;
+        }
         if (e.key === "Escape" || (e.key === "Enter" && (e.metaKey || e.ctrlKey))) {
           e.preventDefault();
           finish();

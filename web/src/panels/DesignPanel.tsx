@@ -26,7 +26,7 @@ import {
   CornerUpLeft,
 } from "lucide-react";
 import type { Effect, Node, Paint } from "../types";
-import { dispatch, FONTS, getDoc, useDoc, useSelection, useStore, zoomToSelection } from "../store";
+import { dispatch, FONTS, getDoc, styleTextSelection, useDoc, useSelection, useStore, zoomToSelection } from "../store";
 import { common, IconButton, MIXED, NumberField, Section, Seg, SelectField, type Maybe } from "../ui/controls";
 import { paintLabel, PaintSwatch, cssColor, ColorPicker } from "../ui/color";
 import { exportNode } from "../exporter";
@@ -509,9 +509,18 @@ const WEIGHTS = [
 
 function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const t = (f: (n: Node) => unknown) => common(nodes, (n) => f(n));
-  const set = (patch: Record<string, unknown>) => update(ids, { text: patch });
+  const RUN_KEYS = ["fontFamily", "fontSize", "fontWeight", "italic", "letterSpacing", "decoration"];
+  const set = (patch: Record<string, unknown>) => {
+    // While editing with characters selected, style just those characters.
+    const runPatch = Object.fromEntries(Object.entries(patch).filter(([k]) => RUN_KEYS.includes(k)));
+    if (Object.keys(runPatch).length === Object.keys(patch).length && styleTextSelection(runPatch)) return;
+    update(ids, { text: patch });
+  };
+  const sel = useStore((s) => s.textSel);
+  const editing = useStore((s) => s.editingText);
+  const partial = !!sel && sel.id === editing && sel.end > sel.start;
   return (
-    <Section title="Text">
+    <Section title={partial ? `Text · ${sel!.end - sel!.start} characters selected` : "Text"}>
       <div className="row">
         <SelectField value={t((n) => n.text!.fontFamily) as Maybe<string>} options={FONTS.map((f) => ({ value: f, label: f }))} onChange={(fontFamily) => set({ fontFamily })} />
       </div>
@@ -615,7 +624,11 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
       {paints === MIXED && <div className="muted small">Mixed — click + to replace for all</div>}
       {[...list].reverse().map((p, ri) => {
         const i = list.length - 1 - ri;
-        const setP = (np: Paint) => set(list.map((x, j) => (j === i ? np : x)));
+        const setP = (np: Paint) => {
+          // Colouring selected characters of the text being edited.
+          if (keyName === "fills" && np.type === "solid" && nodes.length === 1 && nodes[0].type === "text" && styleTextSelection({ color: np.color })) return;
+          set(list.map((x, j) => (j === i ? np : x)));
+        };
         return (
           <div className="row" key={i}>
             <label className="field" style={{ paddingLeft: 5, gap: 6 }}>

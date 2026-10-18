@@ -534,6 +534,57 @@ pub struct TextProps {
   pub auto_resize: TextAutoResize,
   pub decoration: TextDecoration,
   pub case: TextCase,
+  /// Style overrides for character ranges (mixed styles), sorted and non-overlapping.
+  pub runs: Vec<TextRun>,
+}
+
+/// Overrides the text layer's base style for characters `start..end` (char offsets).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TextRun {
+  pub start: usize,
+  pub end: usize,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub font_family: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub font_size: Option<f64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub font_weight: Option<u32>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub italic: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub color: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub decoration: Option<TextDecoration>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub letter_spacing: Option<f64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub link: Option<String>,
+}
+
+impl TextRun {
+  /// True when the run overrides nothing.
+  pub fn is_plain(&self) -> bool {
+    self.font_family.is_none()
+      && self.font_size.is_none()
+      && self.font_weight.is_none()
+      && self.italic.is_none()
+      && self.color.is_none()
+      && self.decoration.is_none()
+      && self.letter_spacing.is_none()
+      && self.link.is_none()
+  }
+
+  pub fn same_style(&self, o: &TextRun) -> bool {
+    self.font_family == o.font_family
+      && self.font_size == o.font_size
+      && self.font_weight == o.font_weight
+      && self.italic == o.italic
+      && self.color == o.color
+      && self.decoration == o.decoration
+      && self.letter_spacing == o.letter_spacing
+      && self.link == o.link
+  }
 }
 
 impl Default for TextProps {
@@ -552,6 +603,7 @@ impl Default for TextProps {
       auto_resize: TextAutoResize::Width,
       decoration: TextDecoration::None,
       case: TextCase::Original,
+      runs: Vec::new(),
     }
   }
 }

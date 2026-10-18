@@ -27,11 +27,19 @@ enum Place {
 }
 
 /// Intermediate element tree shared by the JSX and HTML writers.
+struct Span {
+  text: String,
+  styles: Vec<(String, String)>,
+  link: Option<String>,
+}
+
 struct El {
   tag: &'static str,
   styles: Vec<(String, String)>,
   children: Vec<El>,
   text: Option<String>,
+  /// Styled pieces of a mixed-style text: (text, CSS declarations, link).
+  spans: Vec<Span>,
   raw: Option<String>,
   /// Name of a component to reference instead of inlining (`<Button />`).
   component_ref: Option<String>,
@@ -48,6 +56,7 @@ impl El {
       styles: vec![],
       children: vec![],
       text: None,
+      spans: vec![],
       raw: None,
       component_ref: None,
       comment: None,
@@ -415,6 +424,7 @@ impl<'a> Ctx<'a> {
     let t = n.text.clone().unwrap_or_default();
     let mut el = El::new("p");
     el.text = Some(t.characters.clone());
+    el.spans = text_spans(&t);
     el.s("margin", "0");
     match n.fills.iter().find(|p| p.visible()) {
       Some(Paint::Solid { color, opacity, .. }) => el.s("color", color::css_with_opacity(color, *opacity)),
@@ -465,6 +475,66 @@ impl<'a> Ctx<'a> {
     );
     el
   }
+}
+
+/// Splits a mixed-style text into spans with CSS for each override.
+fn text_spans(t: &crate::model::TextProps) -> Vec<Span> {
+  if t.runs.is_empty() {
+    return vec![];
+  }
+  let chars: Vec<char> = t.characters.chars().collect();
+  let mut out = Vec::new();
+  let mut pos = 0;
+  let plain = |a: usize, b: usize| Span {
+    text: chars[a..b].iter().collect(),
+    styles: vec![],
+    link: None,
+  };
+  for r in &t.runs {
+    let (start, end) = (r.start.min(chars.len()), r.end.min(chars.len()));
+    if start > pos {
+      out.push(plain(pos, start));
+    }
+    if end > start {
+      let mut styles: Vec<(String, String)> = Vec::new();
+      if let Some(f) = &r.font_family {
+        styles.push(("font-family".into(), font_stack(f)));
+      }
+      if let Some(v) = r.font_size {
+        styles.push(("font-size".into(), px(v)));
+      }
+      if let Some(v) = r.font_weight {
+        styles.push(("font-weight".into(), v.to_string()));
+      }
+      if let Some(v) = r.italic {
+        styles.push(("font-style".into(), if v { "italic" } else { "normal" }.into()));
+      }
+      if let Some(c) = &r.color {
+        styles.push(("color".into(), color::css_with_opacity(c, 1.0)));
+      }
+      if let Some(d) = r.decoration {
+        let v = match d {
+          TextDecoration::None => "none",
+          TextDecoration::Underline => "underline",
+          TextDecoration::Strikethrough => "line-through",
+        };
+        styles.push(("text-decoration".into(), v.into()));
+      }
+      if let Some(v) = r.letter_spacing {
+        styles.push(("letter-spacing".into(), px(v)));
+      }
+      out.push(Span {
+        text: chars[start..end].iter().collect(),
+        styles,
+        link: r.link.clone(),
+      });
+    }
+    pos = pos.max(end);
+  }
+  if pos < chars.len() {
+    out.push(plain(pos, chars.len()));
+  }
+  out
 }
 
 fn css_paint(p: &Paint) -> String {
@@ -642,6 +712,30 @@ fn jsx(el: &El, depth: usize, out: &mut String) {
     ));
     return;
   }
+  if !el.spans.is_empty() {
+    let inner: String = el
+      .spans
+      .iter()
+      .map(|sp| {
+        let txt = format!("{{{}}}", serde_json::to_string(&sp.text).unwrap_or_default());
+        let classes: Vec<String> = sp.styles.iter().map(|(k, v)| tw_class(k, v)).collect();
+        match (&sp.link, classes.is_empty()) {
+          (Some(href), _) => format!(
+            "<a href={} className=\"{}\">{txt}</a>",
+            serde_json::to_string(href).unwrap_or_default(),
+            classes.join(" ")
+          ),
+          (None, true) => txt,
+          (None, false) => format!("<span className=\"{}\">{txt}</span>", classes.join(" ")),
+        }
+      })
+      .collect();
+    out.push_str(&format!(
+      "{pad}<{tag} className={class_attr}{handler}>{inner}</{tag}>\n",
+      tag = el.tag
+    ));
+    return;
+  }
   if let Some(t) = &el.text {
     out.push_str(&format!(
       "{pad}<{tag} className={class_attr}{handler}>{{{}}}</{tag}>\n",
@@ -672,6 +766,21 @@ fn html(el: &El, depth: usize, out: &mut String) {
     .unwrap_or_default();
   if let Some(svg) = &el.raw {
     out.push_str(&format!("{pad}<div style=\"{style}\"{link}>{svg}</div>\n"));
+  } else if !el.spans.is_empty() {
+    let inner: String = el
+      .spans
+      .iter()
+      .map(|sp| {
+        let st: String = sp.styles.iter().map(|(k, v)| format!("{k}: {v}; ")).collect();
+        let st = esc(st.trim_end());
+        match (&sp.link, st.is_empty()) {
+          (Some(href), _) => format!("<a href=\"{}\" style=\"{st}\">{}</a>", esc(href), esc(&sp.text)),
+          (None, true) => esc(&sp.text),
+          (None, false) => format!("<span style=\"{st}\">{}</span>", esc(&sp.text)),
+        }
+      })
+      .collect();
+    out.push_str(&format!("{pad}<{tag} style=\"{style}\"{link}>{inner}</{tag}>\n", tag = el.tag));
   } else if let Some(t) = &el.text {
     out.push_str(&format!("{pad}<{tag} style=\"{style}\"{link}>{}</{tag}>\n", esc(t), tag = el.tag));
   } else {

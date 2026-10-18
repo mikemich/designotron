@@ -67,6 +67,20 @@ export interface TextProps {
   autoResize: "none" | "width" | "height";
   decoration: "none" | "underline" | "strikethrough";
   case: "original" | "upper" | "lower" | "title";
+  runs: TextRun[];
+}
+
+export interface TextRun {
+  start: number;
+  end: number;
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: number;
+  italic?: boolean;
+  color?: string;
+  decoration?: "none" | "underline" | "strikethrough";
+  letterSpacing?: number;
+  link?: string;
 }
 
 export interface VectorPoint {
