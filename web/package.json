@@ -1,0 +1,41 @@
+{
+  "name": "designotron",
+  "version": "0.1.0",
+  "description": "Free, open-source design tool (Figma alternative) with first-class Claude / Claude Code integration.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "designotron": "server/cli.ts"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n web,bridge -c cyan,magenta \"vite\" \"tsx watch server/bridge.ts\"",
+    "dev:web": "vite",
+    "bridge": "tsx server/bridge.ts",
+    "build": "tsc -b && vite build",
+    "start": "npm run build && NODE_ENV=production tsx server/bridge.ts",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "e2e": "node scripts/e2e.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0",
+    "idb-keyval": "^6.2.1",
+    "immer": "^10.1.1",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.460.0",
+    "nanoid": "^5.0.7",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "playwright-core": "^1.64.1",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.5"
+  }
+}

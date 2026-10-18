@@ -1,0 +1,360 @@
+//! Tree navigation and structural edits on a [`Document`].
+
+use std::collections::{BTreeMap, HashMap};
+
+use crate::geom::{local_matrix, Mat, Point, Rect};
+use crate::model::{Document, Node, NodeId, NodeType, Page, Styles, SCHEMA_VERSION};
+
+/// Deterministic, collision-resistant id generator (xorshift seeded per session).
+#[derive(Clone, Debug)]
+pub struct IdGen {
+  state: u64,
+}
+
+impl IdGen {
+  pub fn new(seed: u64) -> Self {
+    IdGen { state: seed | 1 }
+  }
+
+  pub fn next(&mut self, prefix: &str) -> String {
+    let mut x = self.state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    self.state = x;
+    format!("{prefix}{}", base36(x & 0xFFFF_FFFF_FFFF))
+  }
+}
+
+fn base36(mut v: u64) -> String {
+  const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+  if v == 0 {
+    return "0".into();
+  }
+  let mut out = Vec::new();
+  while v > 0 {
+    out.push(DIGITS[(v % 36) as usize]);
+    v /= 36;
+  }
+  out.reverse();
+  String::from_utf8(out).unwrap_or_default()
+}
+
+pub fn new_document(ids: &mut IdGen, name: &str) -> Document {
+  let page = Page {
+    id: ids.next("p_"),
+    name: "Page 1".into(),
+    children: Vec::new(),
+    background: "#F5F5F5".into(),
+    flow_start: None,
+  };
+  Document {
+    id: ids.next("d_"),
+    name: name.into(),
+    schema: SCHEMA_VERSION,
+    pages: vec![page],
+    nodes: BTreeMap::new(),
+    styles: Styles::default(),
+  }
+}
+
+impl Document {
+  pub fn get(&self, id: &str) -> Option<&Node> {
+    self.nodes.get(id)
+  }
+
+  pub fn get_mut(&mut self, id: &str) -> Option<&mut Node> {
+    self.nodes.get_mut(id)
+  }
+
+  pub fn page(&self, id: &str) -> Option<&Page> {
+    self.pages.iter().find(|p| p.id == id)
+  }
+
+  pub fn page_mut(&mut self, id: &str) -> Option<&mut Page> {
+    self.pages.iter_mut().find(|p| p.id == id)
+  }
+
+  /// Ordered child list (bottom to top) of a parent, or of a page root.
+  pub fn child_ids(&self, parent: Option<&str>, page: &str) -> Vec<NodeId> {
+    match parent {
+      Some(p) => self.get(p).map(|n| n.children.clone()).unwrap_or_default(),
+      None => self.page(page).map(|p| p.children.clone()).unwrap_or_default(),
+    }
+  }
+
+  fn child_list_mut(&mut self, parent: Option<&str>, page: &str) -> Option<&mut Vec<NodeId>> {
+    match parent {
+      Some(p) => self.nodes.get_mut(p).map(|n| &mut n.children),
+      None => self.page_mut(page).map(|p| &mut p.children),
+    }
+  }
+
+  pub fn siblings_of(&self, id: &str) -> Vec<NodeId> {
+    match self.get(id) {
+      Some(n) => self.child_ids(n.parent.as_deref(), &n.page),
+      None => Vec::new(),
+    }
+  }
+
+  pub fn index_in_parent(&self, id: &str) -> Option<usize> {
+    self.siblings_of(id).iter().position(|c| c == id)
+  }
+
+  /// Ancestor ids, nearest first.
+  pub fn ancestors(&self, id: &str) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    let mut cur = self.get(id).and_then(|n| n.parent.clone());
+    while let Some(p) = cur {
+      cur = self.get(&p).and_then(|n| n.parent.clone());
+      out.push(p);
+    }
+    out
+  }
+
+  /// Path from the page root down to (and including) `id`.
+  pub fn path(&self, id: &str) -> Vec<NodeId> {
+    let mut p = self.ancestors(id);
+    p.reverse();
+    p.push(id.to_string());
+    p
+  }
+
+  pub fn is_ancestor(&self, ancestor: &str, id: &str) -> bool {
+    self.ancestors(id).iter().any(|a| a == ancestor)
+  }
+
+  /// Pre-order list of `id` and all its descendants.
+  pub fn subtree(&self, id: &str) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    let mut stack = vec![id.to_string()];
+    while let Some(cur) = stack.pop() {
+      if let Some(n) = self.get(&cur) {
+        for c in n.children.iter().rev() {
+          stack.push(c.clone());
+        }
+        out.push(cur);
+      }
+    }
+    out
+  }
+
+  /// Nearest instance ancestor (or the node itself if it is an instance child root).
+  pub fn instance_ancestor(&self, id: &str) -> Option<NodeId> {
+    self.ancestors(id).into_iter().find(|a| self.get(a).map(|n| n.kind == NodeType::Instance).unwrap_or(false))
+  }
+
+  pub fn local_matrix(&self, n: &Node) -> Mat {
+    local_matrix(n.x, n.y, n.width, n.height, n.rotation, n.flip_x, n.flip_y)
+  }
+
+  /// Page-space transform of a node.
+  pub fn abs_matrix(&self, id: &str) -> Mat {
+    let mut m = Mat::IDENTITY;
+    for nid in self.path(id) {
+      if let Some(n) = self.get(&nid) {
+        m = m.mul(&self.local_matrix(n));
+      }
+    }
+    m
+  }
+
+  /// Page-space transform of a node's parent coordinate system.
+  pub fn parent_matrix(&self, id: &str) -> Mat {
+    match self.get(id).and_then(|n| n.parent.clone()) {
+      Some(p) => self.abs_matrix(&p),
+      None => Mat::IDENTITY,
+    }
+  }
+
+  /// Axis-aligned page-space bounds.
+  pub fn abs_bounds(&self, id: &str) -> Rect {
+    match self.get(id) {
+      Some(n) => self.abs_matrix(id).bounds_of(n.width, n.height),
+      None => Rect::default(),
+    }
+  }
+
+  pub fn bounds_of_many(&self, ids: &[NodeId]) -> Option<Rect> {
+    Rect::union_all(ids.iter().filter(|i| self.nodes.contains_key(*i)).map(|i| self.abs_bounds(i)))
+  }
+
+  pub fn top_level_of(&self, id: &str) -> NodeId {
+    self.path(id).into_iter().next().unwrap_or_else(|| id.to_string())
+  }
+
+  /// Inserts a node into `parent` (or the page root) at `index` (default top).
+  pub fn insert(&mut self, mut node: Node, parent: Option<&str>, page: &str, index: Option<usize>) {
+    node.parent = parent.map(|p| p.to_string());
+    node.page = page.to_string();
+    let id = node.id.clone();
+    self.nodes.insert(id.clone(), node);
+    if let Some(list) = self.child_list_mut(parent, page) {
+      let i = index.unwrap_or(list.len()).min(list.len());
+      list.insert(i, id);
+    }
+  }
+
+  /// Removes a node id from its parent's child list without deleting it.
+  pub fn detach(&mut self, id: &str) {
+    let Some((parent, page)) = self.get(id).map(|n| (n.parent.clone(), n.page.clone())) else {
+      return;
+    };
+    if let Some(list) = self.child_list_mut(parent.as_deref(), &page) {
+      list.retain(|c| c != id);
+    }
+  }
+
+  /// Deletes a node and all descendants.
+  pub fn remove(&mut self, id: &str) {
+    self.detach(id);
+    for nid in self.subtree(id) {
+      self.nodes.remove(&nid);
+    }
+  }
+
+  /// Moves a node under a new parent, keeping its page-space position when `keep_abs`.
+  pub fn reparent(&mut self, id: &str, new_parent: Option<&str>, index: Option<usize>, keep_abs: bool) {
+    if let Some(p) = new_parent {
+      if p == id || self.is_ancestor(id, p) {
+        return;
+      }
+    }
+    let Some(node) = self.get(id) else { return };
+    let page = node.page.clone();
+    let abs = self.abs_matrix(id);
+    self.detach(id);
+    let new_page = match new_parent {
+      Some(p) => self.get(p).map(|n| n.page.clone()).unwrap_or(page),
+      None => page,
+    };
+    if let Some(list) = self.child_list_mut(new_parent, &new_page) {
+      let i = index.unwrap_or(list.len()).min(list.len());
+      list.insert(i, id.to_string());
+    }
+    let parent_m = match new_parent {
+      Some(p) => self.abs_matrix(p),
+      None => Mat::IDENTITY,
+    };
+    if let Some(n) = self.get_mut(id) {
+      n.parent = new_parent.map(|p| p.to_string());
+      n.page = new_page.clone();
+    }
+    if keep_abs {
+      self.set_abs_origin(id, &abs, &parent_m);
+    }
+    for nid in self.subtree(id) {
+      if let Some(n) = self.get_mut(&nid) {
+        n.page = new_page.clone();
+      }
+    }
+  }
+
+  /// Re-derives local x/y/rotation so the node lands on `abs` under a parent transform.
+  fn set_abs_origin(&mut self, id: &str, abs: &Mat, parent_m: &Mat) {
+    let Some(n) = self.get(id) else { return };
+    let (w, h) = (n.width, n.height);
+    let center_abs = abs.apply(Point::new(w / 2.0, h / 2.0));
+    let center_local = parent_m.invert().apply(center_abs);
+    let rel = parent_m.invert().mul(abs);
+    let rotation = rel.b.atan2(rel.a).to_degrees();
+    if let Some(n) = self.get_mut(id) {
+      n.x = center_local.x - w / 2.0;
+      n.y = center_local.y - h / 2.0;
+      n.rotation = normalize_angle(rotation);
+    }
+  }
+
+  /// Deep-clones a subtree with fresh ids. Returns cloned nodes (root first) and an id map.
+  pub fn clone_subtree(&self, id: &str, ids: &mut IdGen) -> (Vec<Node>, HashMap<NodeId, NodeId>) {
+    let order = self.subtree(id);
+    let mut map = HashMap::new();
+    for old in &order {
+      map.insert(old.clone(), ids.next("n_"));
+    }
+    let nodes = order
+      .iter()
+      .filter_map(|old| self.get(old))
+      .map(|n| {
+        let mut c = n.clone();
+        c.id = map[&n.id].clone();
+        c.children = n.children.iter().filter_map(|ch| map.get(ch).cloned()).collect();
+        c.parent = n.parent.as_ref().and_then(|p| map.get(p).cloned());
+        c
+      })
+      .collect();
+    (nodes, map)
+  }
+
+  /// All nodes on a page in paint order (pre-order).
+  pub fn page_nodes(&self, page: &str) -> Vec<NodeId> {
+    let roots = self.page(page).map(|p| p.children.clone()).unwrap_or_default();
+    roots.iter().flat_map(|r| self.subtree(r)).collect()
+  }
+
+  pub fn components(&self) -> Vec<&Node> {
+    self.nodes.values().filter(|n| n.kind == NodeType::Component).collect()
+  }
+
+  /// Unique layer name like "Rectangle 3".
+  pub fn next_name(&self, base: &str) -> String {
+    let count = self.nodes.values().filter(|n| n.name.starts_with(base)).count();
+    format!("{base} {}", count + 1)
+  }
+}
+
+pub fn normalize_angle(a: f64) -> f64 {
+  let mut r = a % 360.0;
+  if r > 180.0 {
+    r -= 360.0;
+  }
+  if r <= -180.0 {
+    r += 360.0;
+  }
+  if r.abs() < 1e-9 {
+    0.0
+  } else {
+    (r * 1000.0).round() / 1000.0
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn rect(id: &str) -> Node {
+    Node { id: id.into(), ..Default::default() }
+  }
+
+  #[test]
+  fn insert_reparent_keeps_position() {
+    let mut ids = IdGen::new(7);
+    let mut doc = new_document(&mut ids, "t");
+    let page = doc.pages[0].id.clone();
+    let mut frame = Node { id: "f".into(), kind: NodeType::Frame, x: 100.0, y: 50.0, ..Default::default() };
+    frame.width = 400.0;
+    frame.height = 400.0;
+    doc.insert(frame, None, &page, None);
+    let mut r = rect("r");
+    r.x = 150.0;
+    r.y = 80.0;
+    doc.insert(r, None, &page, None);
+    doc.reparent("r", Some("f"), None, true);
+    let n = doc.get("r").unwrap();
+    assert_eq!((n.x, n.y), (50.0, 30.0));
+    assert_eq!(doc.abs_bounds("r").x, 150.0);
+    assert_eq!(doc.get("f").unwrap().children, vec!["r".to_string()]);
+    assert!(doc.page(&page).unwrap().children == vec!["f".to_string()]);
+  }
+
+  #[test]
+  fn no_cycles() {
+    let mut ids = IdGen::new(7);
+    let mut doc = new_document(&mut ids, "t");
+    let page = doc.pages[0].id.clone();
+    doc.insert(Node { id: "a".into(), kind: NodeType::Frame, ..Default::default() }, None, &page, None);
+    doc.insert(Node { id: "b".into(), kind: NodeType::Frame, ..Default::default() }, Some("a"), &page, None);
+    doc.reparent("a", Some("b"), None, true);
+    assert_eq!(doc.get("a").unwrap().parent, None);
+  }
+}

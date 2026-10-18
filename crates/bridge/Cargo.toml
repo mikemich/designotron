@@ -1,0 +1,15 @@
+[package]
+name = "designotron-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local bridge: serves the editor, exposes MCP for Claude Code and runs Claude Code chat"
+
+[[bin]]
+name = "designotron"
+path = "src/main.rs"
+
+[dependencies]
+designotron-engine = { path = "../engine" }
+serde.workspace = true
+serde_json.workspace = true
