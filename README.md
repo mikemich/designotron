@@ -136,15 +136,17 @@ Everything after the one-time setup below runs from GitHub Actions:
 |-------------------------|---------------------------------------------------------------------|
 | Hosted editor           | Every push to `main` (`pages.yml`)                                  |
 | Release binaries        | Push a `v*` tag, or Actions → Release → Run workflow with a version (`release.yml`). The version comes from the tag |
-| Online relay            | Every push to `main` deploys to Fly (`relay-deploy.yml`); the hosted editor uses it for Share → Online |
+| Online relay            | Every push to `main` redeploys it: Render through `RENDER_DEPLOY_HOOK`, or Fly (`relay-deploy.yml`); the hosted editor uses it for Share → Online |
 | Relay Docker image      | Every push to `main` (`relay-image.yml`, `ghcr.io/mikemich/designotron-relay`) |
 
 One-time setup (Settings → Secrets and variables → Actions):
 
 1. Pages: Settings → Pages → Source: **GitHub Actions**.
-2. Relay: secret `FLY_API_TOKEN` (from fly.io → Tokens) and variable `FLY_APP` (a unique
-   name). Then run Actions → **Deploy relay** once; it creates the app and rebuilds the
-   hosted editor with it.
+2. Relay for online multiplayer, either:
+   - free: the **Deploy to Render** button in [docs/relay.md](docs/relay.md), then set the
+     variable `DT_RELAY_URL` to its URL (it sleeps when idle and wakes on the next share), or
+   - always on (a few dollars a month): secret `FLY_API_TOKEN` and variable `FLY_APP`, then
+     run Actions → **Deploy relay** once; it creates the app and rebuilds the hosted editor.
 3. npm (optional): `cd npm && npm publish` after each release, so `npx designotron` works.
 
 `install.sh` and the `npx designotron` launcher download the binaries from the latest release.

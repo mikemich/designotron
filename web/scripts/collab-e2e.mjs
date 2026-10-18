@@ -3,7 +3,10 @@
 // LAN mode (default) needs the bridge serving the built editor on 5174.
 // Online mode: E2E_RELAY=http://127.0.0.1:8787 node scripts/collab-e2e.mjs with
 // `designotron-relay --static web/dist` running; the owner opens the editor from E2E_URL.
+// With E2E_RELAY_BIN=target/debug/designotron-relay the script runs an in-memory relay
+// itself and also restarts it mid-session (what free hosts do when they sleep).
 
+import { spawn } from "node:child_process";
 import { chromium } from "playwright-core";
 import fs from "node:fs";
 import path from "node:path";
@@ -28,6 +31,18 @@ const init = () => {
     /* sandboxed frames */
   }
 };
+
+const RELAY_BIN = RELAY && process.env.E2E_RELAY_BIN;
+let relay = null;
+async function startRelay() {
+  relay = spawn(RELAY_BIN, ["--port", new URL(RELAY).port, "--static", "dist"], { stdio: "ignore" });
+  for (let i = 0; i < 50; i++) {
+    if (await fetch(`${RELAY}/health`).then((r) => r.ok, () => false)) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error("relay didn't start");
+}
+if (RELAY_BIN) await startRelay();
 
 const browser = await chromium.launch(launch);
 const owner = await (await browser.newContext({ viewport: { width: 1400, height: 900 } })).newPage();
@@ -97,6 +112,28 @@ try {
   check("comments sync between collaborators", await owner.evaluate(() => Object.values(window.__dt.doc().comments).some((c) => c.messages[0].text === "Looks good")));
   await guest.screenshot({ path: path.join(OUT, "collab-guest.png") });
 
+  if (RELAY_BIN) {
+    // The relay restarts and forgets every room; the editors reconnect and put the file back.
+    relay.kill();
+    await new Promise((r) => relay.once("exit", r));
+    await startRelay();
+    for (const p of [owner, guest]) {
+      await p.waitForFunction(() => window.__dt.collab().status === "connecting", null, { timeout: 5000 }).catch(() => {});
+      await p.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 15000 }).catch(() => {});
+    }
+    const late = await (await browser.newContext()).newPage();
+    await late.addInitScript(init);
+    await late.goto(link);
+    await late.waitForSelector("#dt-canvas");
+    await late.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 15000 }).catch(() => {});
+    await late.waitForFunction(([a, b]) => !!window.__dt.doc().nodes[a] && !!window.__dt.doc().nodes[b], [rect, theirs], { timeout: 15000 }).catch(() => {});
+    const n = await nodes(late);
+    check("after a relay restart, a newcomer still gets the whole file", !!n[rect] && !!n[theirs]);
+    await owner.evaluate((id) => window.__dt.dispatch({ op: "update", ids: [id], patch: { y: 150 } }), rect);
+    await late.waitForFunction((id) => window.__dt.doc().nodes[id]?.y === 150, rect, { timeout: 5000 }).catch(() => {});
+    check("edits flow again after the restart", (await nodes(late))[rect]?.y === 150);
+  }
+
   // A wrong token (or a too-short room id) is refused.
   const bad = await guest.evaluate(async (url) => {
     const u = new URL(url);
@@ -111,5 +148,6 @@ try {
   check("unexpected exception", false, String(err));
 } finally {
   await browser.close();
+  relay?.kill();
 }
 process.exit(failed ? 1 : 0);

@@ -1,17 +1,19 @@
-# Render blueprint for the Designotron relay (online multiplayer + the editor).
-# Dashboard → New → Blueprint → pick this repo. The disk keeps rooms across deploys;
-# on the free plan remove the disk (rooms then live in memory) and expect cold starts.
+# Render blueprint for the Designotron relay (online multiplayer + the editor), on the free
+# plan. Deploy: the "Deploy to Render" button in docs/relay.md, or Dashboard → New →
+# Blueprint → this repository.
+#
+# It runs the public image that relay-image.yml publishes on every push to main. Free
+# services sleep after about 15 idle minutes and lose their rooms when they do; editors
+# that reconnect put the file back. For rooms that survive restarts, use plan: starter
+# and add a disk mounted at /data.
 services:
   - type: web
     name: designotron-relay
-    runtime: docker
-    dockerfilePath: ./Dockerfile
+    runtime: image
+    image:
+      url: ghcr.io/mikemich/designotron-relay:latest
+    plan: free
     healthCheckPath: /health
-    plan: starter
     envVars:
       - key: RUST_LOG
         value: info
-    disk:
-      name: rooms
-      mountPath: /data
-      sizeGB: 1

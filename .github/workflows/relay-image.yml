@@ -39,3 +39,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Redeploys a Render relay with the new image (the RENDER_DEPLOY_HOOK secret is the
+      # service's Settings → Deploy Hook URL).
+      - name: Redeploy on Render
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        if: github.ref == 'refs/heads/main'
+        run: if [ -n "$HOOK" ]; then curl -fsS -X POST "$HOOK" > /dev/null; fi

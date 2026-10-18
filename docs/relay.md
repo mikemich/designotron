@@ -9,6 +9,23 @@ The relay never runs Claude, MCP or any tools. It only stores and relays shared 
 
 ## Deploy one
 
+### Free: Render (about 3 minutes, no server to manage)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/mikemich/designotron)
+
+1. Click the button, sign in to Render with GitHub, and click **Deploy Blueprint**.
+   `render.yaml` runs the public relay image on the free plan.
+2. Copy the service URL (like `https://designotron-relay-xxxx.onrender.com`).
+3. In this repository, add it as the variable `DT_RELAY_URL` (Settings → Secrets and
+   variables → Actions → Variables), then re-run Actions → **Hosted editor**. Share →
+   Online now works with no setup for anyone.
+4. Optional: copy the service's Settings → **Deploy Hook** URL into a repository secret
+   `RENDER_DEPLOY_HOOK`, so every push to `main` redeploys it.
+
+Free services sleep after about 15 idle minutes. The first person to share or join wakes
+the relay (up to a minute); rooms held in memory are lost when it sleeps, and editors that
+reconnect put the file back. Everyone keeps their own copy of the file either way.
+
 Any host that runs a Docker image and supports WebSockets over HTTPS works. The image is
 published to `ghcr.io/mikemich/designotron-relay` on every push to `main`, or build it from
 this repo's `Dockerfile`.
@@ -30,11 +47,6 @@ fly deploy
 ```
 
 Your relay is `https://<app-name>.fly.dev`.
-
-### Render
-
-Dashboard → **New → Blueprint** → choose this repository. `render.yaml` sets up the
-service and a 1 GB disk. The URL looks like `https://designotron-relay.onrender.com`.
 
 ### Any server with Docker
 

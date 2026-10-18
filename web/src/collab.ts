@@ -67,10 +67,14 @@ export async function probeRelay(url: string): Promise<{ editor: boolean }> {
   const base = normalizeRelay(url);
   if (location.protocol === "https:" && base.startsWith("http:")) throw new Error("This editor is on https, so the relay must be too (https://…).");
   let info: any;
+  // Free hosts put idle relays to sleep; the first request wakes them (up to a minute).
+  const slow = setTimeout(() => toast("Waking up the relay, this can take up to a minute…"), 3000);
   try {
     info = await (await fetch(`${base}/health`)).json();
   } catch {
     throw new Error(`Couldn't reach a relay at ${base}.`);
+  } finally {
+    clearTimeout(slow);
   }
   if (info?.relay !== "designotron") throw new Error(`${base} isn't a Designotron relay.`);
   return { editor: !!info.editor };
@@ -213,8 +217,10 @@ function connect(join: Record<string, unknown>) {
     ws = null;
     if (!useCollab.getState().role) return;
     useCollab.setState({ status: "connecting", peers: {} });
-    // Reconnect without replacing the room's document.
-    retry = setTimeout(() => connect({}), 2000);
+    // Reconnect with this copy of the file but without `reset`: the relay keeps the room's
+    // document if it still has one, and adopts ours if it lost the room (e.g. a free host
+    // restarted it after sleeping).
+    retry = setTimeout(() => connect(currentFile()), 2000);
   };
   unsubscribe ??= subscribeLocal();
 }
@@ -230,12 +236,17 @@ function subscribeLocal(): () => void {
   };
 }
 
-function shareCurrentFile() {
+/** This file and the images it uses, as sent in a join. */
+function currentFile(): { doc: unknown; assets: Record<string, unknown> } {
   const json = getEngine().save();
   const used = new Set(referencedAssets(json));
   const assets = Object.fromEntries(Object.entries(allAssets()).filter(([k]) => used.has(k)));
   used.forEach((id) => sentAssets.add(id));
-  connect({ doc: JSON.parse(json), assets, reset: true });
+  return { doc: JSON.parse(json), assets };
+}
+
+function shareCurrentFile() {
+  connect({ ...currentFile(), reset: true });
 }
 
 /** Owner: shares this file through an internet relay; anyone with the link can join. */
