@@ -1,20 +1,41 @@
 # Designotron
 
-A free, open-source design tool in the spirit of Figma, with Claude built in, from first
-sketch to a running app.
+**The open-source design tool for people who build with Claude.** Design in a Figma-style
+editor, let Claude design and critique beside you on your own Claude Pro/Max plan, and turn
+the result into a working React app.
 
-- **Design**: frames, vector tools, auto layout, constraints, components and variants,
-  styles, effects, prototyping with a presenter, PNG/SVG export.
-- **Claude, your way**: chat in the editor through your own **Claude Code** install, so it
-  runs on your **Claude Pro or Max** plan. You can also bring an API key. Claude edits the
-  canvas live, takes screenshots to check its work, and imports HTML as layers.
-- **Design to real code**: export React + Tailwind components, or a complete Vite project
-  where prototype links become working navigation. Or ask Claude Code to build it in your
-  workspace.
-- **MCP server**: your designs are available to Claude Code in any terminal.
+![Designotron demo](docs/media/demo.gif)
 
-The engine is Rust, compiled to WebAssembly for the editor and linked natively into a small
-local bridge server. See [STATUS.md](STATUS.md) for what works today and what is planned.
+| | |
+|---|---|
+| ![Editor](docs/media/editor.png) | ![Claude panel](docs/media/claude.png) |
+| ![Design review](docs/media/review.png) | ![Generated code](docs/media/code.png) |
+
+## What you get
+
+- **A real design tool**: frames, pen and shapes, auto layout, constraints, components and
+  variants, mixed text styles, boolean operations, masks, rulers, guides, layout grids,
+  variables with light/dark modes, prototyping with a presenter, version history.
+- **Claude, your way**: chat runs through your own **Claude Code** install (Pro/Max plan) or
+  an API key. Claude edits the canvas live and checks its work with screenshots. Paste a
+  screenshot or a URL and it rebuilds it as layers; quick actions build flows, variants,
+  responsive and dark versions, and design tokens from your codebase.
+- **Review**: contrast, tap targets, spacing and naming lint with one-click fixes, plus a
+  Claude critique. Comments that Claude can read, act on and resolve.
+- **Design to running code**: React + Tailwind or HTML export, a full Vite project where
+  prototype links become navigation and variables become CSS variables, and a live preview
+  of the app next to the canvas.
+- **Bring your work**: import Figma files through the Figma API, import live websites, and
+  use `.dtron` files that are plain JSON.
+- **Together**: share a live session on your network with cursors and selections; undo only
+  ever reverts your own changes.
+- **Extensible**: an MCP server for Claude Code in any terminal, and sandboxed JavaScript
+  plugins on the same tool API Claude uses (Claude can write them too).
+- **Fast and local-first**: Rust engine compiled to WebAssembly, incremental rendering for
+  large files, files stay on your machine. MIT licensed.
+
+See [STATUS.md](STATUS.md) for exactly what works and what doesn't, and
+[ROADMAP.md](ROADMAP.md) for where it's going.
 
 ## Quick start
 
@@ -44,8 +65,8 @@ cd designotron
 ./dev.sh
 ```
 
-Open http://localhost:5173 and pick **Open sample**. Without the bridge the editor still
-works; only Claude Code chat and MCP need it.
+Open http://localhost:5173 and pick a template. Without the bridge the editor still works;
+Claude Code chat, MCP, the live app preview, website import and sharing need it.
 
 ## Using Claude
 
@@ -118,6 +139,8 @@ in `npm/` download from those releases. Every push to `main` deploys the hosted 
 | Zoom 100%              | ⇧0                | Flip H / V           | ⇧H / ⇧V         |
 | Undo / redo            | ⌘Z / ⇧⌘Z          | Hide / lock          | ⇧⌘H / ⇧⌘L       |
 | Claude panel           | ⌘/                | Save `.dtron`        | ⌘S              |
+| Comment                | C                 | Rulers / grids       | ⇧R / ⇧⌘4        |
+| Flatten / outline      | ⌘E / ⇧⌘O          | Use as mask          | ⌥⌘M             |
 
 ## Architecture
 
@@ -136,7 +159,7 @@ in `npm/` download from those releases. Every push to `main` deploys the hosted 
 - `crates/bridge`: the local server
 - `web`: the editor UI
 
-Contributors and coding agents: read [AGENTS.md](AGENTS.md).
+Contributing: read [CONTRIBUTING.md](CONTRIBUTING.md). Coding agents: read [AGENTS.md](AGENTS.md).
 
 ## File format
 

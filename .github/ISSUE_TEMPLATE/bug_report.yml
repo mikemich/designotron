@@ -1,0 +1,45 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Open the Mobile app template\n2. Select …\n3. …"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected and what happened
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: How you run Designotron
+      options:
+        - Hosted editor (mikemich.github.io)
+        - npx designotron / installed binary
+        - From source (./dev.sh)
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Browser and OS
+      placeholder: Chrome 140 on macOS 15
+  - type: checkboxes
+    id: extras
+    attributes:
+      label: Context
+      options:
+        - label: The bridge was running
+        - label: This involves Claude (chat or MCP)
+        - label: This involves a shared live session
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Screenshots, console errors, or a .dtron file that reproduces it.

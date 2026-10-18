@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: What works today
+    url: https://github.com/mikemich/designotron/blob/main/STATUS.md
+    about: Check the known limitations before filing.

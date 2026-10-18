@@ -19,19 +19,23 @@ Three promises, in this order:
    plan, with no extra subscription.
 3. **Yours**: free, open source, files on your disk, works offline, scriptable over MCP.
 
-## Where it stands
+## Where it stands (October 2026)
 
-| Works today                                          | Weak or missing                                        |
+Phases 1 to 3 are built, and most of phase 4: hosted editor workflow, `npx designotron`,
+templates and onboarding, mixed text, semantic code export, design review, screenshot/URL/
+codebase-to-design actions, live app preview, version history, rulers/guides/grids,
+booleans and masks, variables and modes, Figma import, incremental rendering, comments,
+LAN multiplayer and plugins. [STATUS.md](STATUS.md) has the details and the known limits.
+
+| Strong today                                         | Still weak or missing                                  |
 |------------------------------------------------------|--------------------------------------------------------|
-| Core vector editing, auto layout, constraints        | One text style per layer (no bold word mid-sentence)   |
-| Components, variants, overrides                      | No multiplayer, sharing, comments or version history   |
-| Prototyping + presenter                              | No Figma import, so switching costs are high           |
-| React/Tailwind/HTML export, full project zip         | Generated code is correct but mechanical               |
-| Claude chat via Claude Code (Pro/Max) and API key    | Large files will get slow (full SVG re-render)         |
-| MCP server for Claude Code in any terminal           | Install needs Rust + Node; no hosted version           |
-| Local files with autosave, `.dtron` format           | No boolean ops, masks, rulers, layout grids            |
+| Editing, auto layout, components, variables          | Multiplayer is LAN-only; no accounts or cloud files    |
+| Claude on Pro/Max through Claude Code, plus MCP      | Painting 10k+ layer files (SVG canvas; no WebGL path)  |
+| Design → working Vite/React project, live preview    | Figma import needs an API token; no `.fig` files       |
+| Review with fixes; comments Claude resolves          | Booleans are destructive; no live boolean groups       |
+| Figma import, website import, plugins                | No desktop app; plugin sharing/store                   |
 
-## Phase 1: Make the first ten minutes great (weeks 1-3)
+## Phase 1: Make the first ten minutes great (weeks 1-3) ✅
 
 Goal: someone who has never seen it gets a "wow" moment before they close the tab.
 
@@ -45,7 +49,7 @@ Goal: someone who has never seen it gets a "wow" moment before they close the ta
 | Mixed text styles                      | The most-felt editing gap                                      |
 | Better generated code                  | Semantic tags, responsive layouts, extracted components        |
 
-## Phase 2: AI features nobody else has (weeks 3-8)
+## Phase 2: AI features nobody else has (weeks 3-8) ✅
 
 Goal: features worth posting about. These are the "popular" drivers.
 
@@ -60,7 +64,7 @@ Goal: features worth posting about. These are the "popular" drivers.
 | Variants on demand               | Select a component: "make hover, disabled, dark mode variants"                |
 | Live app preview panel           | Run the generated app next to the canvas and click through it                 |
 
-## Phase 3: Make switching from Figma possible (weeks 6-12)
+## Phase 3: Make switching from Figma possible (weeks 6-12) ✅
 
 | Item                         | Why                                                                |
 |------------------------------|--------------------------------------------------------------------|
@@ -71,7 +75,7 @@ Goal: features worth posting about. These are the "popular" drivers.
 | Variables and modes          | Light/dark themes, tokens that flow into code                      |
 | Performance                  | Incremental rendering, canvas/WebGL path for 5k+ layer files       |
 
-## Phase 4: Teams (months 3-6)
+## Phase 4: Teams (months 3-6): multiplayer (LAN), comments and plugins done; accounts, cloud and desktop next
 
 | Item                          | Notes                                                               |
 |-------------------------------|---------------------------------------------------------------------|
@@ -128,10 +132,16 @@ already is.
 | GitHub stars, contributors           | Community momentum                                     |
 | Week-2 return rate                   | The only number that says people actually switched    |
 
-## This week
+## Next
 
-1. Use it for a real project for an hour and list every rough edge.
-2. Fix that list.
-3. Set up the hosted editor and `npx designotron`.
-4. Record the 60-second demo.
-5. Start Phase 1 items in order.
+1. **Launch checklist** (owner decisions):
+   - Enable GitHub Pages (Settings → Pages → Source: GitHub Actions) so the hosted editor goes live.
+   - `npm publish` from `npm/` so `npx designotron` works for everyone.
+   - Tag `v0.2.0` to publish fresh binaries with everything above.
+   - Record the 60-second demo with a real Claude session (the README GIF is scripted).
+   - Open GitHub Discussions and label 20 good first issues.
+   - Post: Show HN, r/ClaudeAI, r/webdev, r/rust, X/Bluesky (angles in the table above).
+2. A hosted relay (or tunnel) so shared sessions work beyond the LAN, then accounts and
+   cloud files as an optional extra.
+3. A WebGL/canvas renderer path for very large files.
+4. Live boolean groups, `.fig` import, Tauri desktop app, plugin sharing.

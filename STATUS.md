@@ -5,7 +5,7 @@ change that finishes, starts or breaks them.
 
 ## In progress
 
-- Working through [ROADMAP.md](ROADMAP.md) in order. Next: growth assets (demo, CONTRIBUTING, issue templates, README).
+- Roadmap phases 1–3 and most of 4 are done. Next steps and the launch checklist are in [ROADMAP.md](ROADMAP.md#next).
 
 ## To do
 
@@ -67,7 +67,7 @@ Ordered by impact on "replace Figma for a small team".
 | Plugins         | Sandboxed iframe plugins (opaque origin) with a promise API over the same tools Claude uses, optional UI panel, one undo step per run; built-in examples; manager with editor; Claude writes plugins via `save_plugin` |
 | Multiplayer     | Share (toolbar) hosts a live session through the bridge: secret LAN link (token-guarded listener that serves only the editor and the room), node-level deltas, tree repair for concurrent structure edits, selective undo that never reverts others' work, live cursors, selections, avatars, synced comments and images |
 | Live app        | App tab: write the generated project to `workspace/app` (or keep it in sync), run `npm run dev` through the bridge, preview at mobile/desktop width, logs, "Ask Claude to fix it" |
-| Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README                                                             |
+| Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README with screenshots and demo GIF (`web/scripts/media.mjs`), CONTRIBUTING, issue and PR templates |
 
 ## What works (verified)
 
