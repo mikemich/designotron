@@ -964,3 +964,44 @@ fn default_angle() -> f64 {
 }
 
 // Defaults required by `#[serde(default)]` on structs holding these enums.
+
+/// Links a design may open: web, email and phone only. Anything else (`javascript:`, `data:`,
+/// `file:`...) could run code or reach local files when someone clicks it in a shared design or
+/// an exported app. Browsers ignore whitespace and control characters inside the scheme, so
+/// those are removed before checking.
+pub fn safe_link(url: &str) -> Option<String> {
+  let url = url.trim();
+  let scheme: String = url
+    .chars()
+    .filter(|c| !c.is_whitespace() && !c.is_control())
+    .take(10)
+    .collect::<String>()
+    .to_ascii_lowercase();
+  ["http://", "https://", "mailto:", "tel:"]
+    .iter()
+    .any(|p| scheme.starts_with(p))
+    .then(|| url.to_string())
+}
+
+#[cfg(test)]
+mod link_tests {
+  use super::safe_link;
+
+  #[test]
+  fn only_web_mail_and_phone_links_are_allowed() {
+    assert_eq!(safe_link(" https://example.com/a ").as_deref(), Some("https://example.com/a"));
+    assert!(safe_link("mailto:hi@example.com").is_some());
+    for bad in [
+      "javascript:alert(1)",
+      "JaVaScRiPt:x",
+      "java\tscript:x",
+      " \njavascript:x",
+      "data:text/html,x",
+      "file:///etc/passwd",
+      "vbscript:x",
+      "//evil.example",
+    ] {
+      assert!(safe_link(bad).is_none(), "{bad}");
+    }
+  }
+}

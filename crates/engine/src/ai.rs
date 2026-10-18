@@ -401,6 +401,9 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
     }
     "set_prototype" => {
       let id = input.get("nodeId").and_then(|v| v.as_str()).ok_or("nodeId required")?;
+      if let Some(url) = input.get("url").and_then(|v| v.as_str()) {
+        crate::model::safe_link(url).ok_or("url must be an http(s), mailto: or tel: link")?;
+      }
       let action = match input.get("action").and_then(|v| v.as_str()).unwrap_or("navigate") {
         "back" => Action::Back,
         "open_url" => Action::OpenUrl,

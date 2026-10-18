@@ -114,15 +114,53 @@ impl Document {
     self.siblings_of(id).iter().position(|c| c == id)
   }
 
-  /// Ancestor ids, nearest first.
+  /// Ancestor ids, nearest first. Stops at a parent cycle (a damaged or hostile document)
+  /// instead of looping forever.
   pub fn ancestors(&self, id: &str) -> Vec<NodeId> {
-    let mut out = Vec::new();
+    let mut out: Vec<NodeId> = Vec::new();
     let mut cur = self.get(id).and_then(|n| n.parent.clone());
     while let Some(p) = cur {
+      if p == id || out.contains(&p) {
+        break;
+      }
       cur = self.get(&p).and_then(|n| n.parent.clone());
       out.push(p);
     }
     out
+  }
+
+  /// Makes every node in `ids` that is its own ancestor top-level, and keeps only children
+  /// that point back at their parent, so walking the tree (either way) always ends.
+  pub fn break_parent_cycles<'a>(&mut self, ids: impl IntoIterator<Item = &'a NodeId>) {
+    let ids: Vec<&NodeId> = ids.into_iter().collect();
+    for id in &ids {
+      let mut seen: Vec<NodeId> = Vec::new();
+      let mut cur = self.get(id).and_then(|n| n.parent.clone());
+      while let Some(p) = cur {
+        if p == **id {
+          self.get_mut(id).unwrap().parent = None;
+          break;
+        }
+        // A cycle further up that doesn't include this node: its own members break it.
+        if seen.contains(&p) {
+          break;
+        }
+        cur = self.get(&p).and_then(|n| n.parent.clone());
+        seen.push(p);
+      }
+    }
+    for id in ids {
+      let Some(n) = self.get(id) else { continue };
+      let kids: Vec<NodeId> = n
+        .children
+        .iter()
+        .filter(|c| self.get(c).map(|cn| cn.parent.as_deref() == Some(id.as_str())).unwrap_or(false))
+        .cloned()
+        .collect();
+      if kids != n.children {
+        self.get_mut(id).unwrap().children = kids;
+      }
+    }
   }
 
   /// Path from the page root down to (and including) `id`.

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
-import { getDoc, query, useStore } from "./store";
+import { getDoc, query, toast, useStore } from "./store";
 import { nodeSvg } from "./exporter";
 import type { Interaction, Rect } from "./types";
 import { REPO_URL } from "./panels/GuestBar";
@@ -50,7 +50,11 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
 
   const go = (it: Interaction) => {
     if (it.action === "back") setHistory((h) => (h.length > 1 ? h.slice(0, -1) : h));
-    else if (it.action === "openUrl" && it.url) window.open(it.url, "_blank");
+    else if (it.action === "openUrl" && it.url) {
+      const url = safeLink(it.url);
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+      else toast("This prototype link isn't a web, email or phone link, so it wasn't opened", "error");
+    }
     else if (it.action === "navigate" && it.destination && doc.nodes[it.destination]) setHistory((h) => [...h, { id: it.destination!, transition: it.transition }]);
   };
 
@@ -146,4 +150,11 @@ function isDescendant(id: string, ancestor: string): boolean {
   const doc = getDoc();
   for (let p = doc.nodes[id]?.parent; p; p = doc.nodes[p]?.parent ?? null) if (p === ancestor) return true;
   return false;
+}
+
+/** Prototype links come from shared files: only web, email and phone links may open (never
+ *  `javascript:` or `data:`). Mirrors the engine's `safe_link`. */
+export function safeLink(url: string): string | null {
+  const u = url.replace(/[\u0000-\u0020\u007f]/g, "");
+  return /^(https?:\/\/|mailto:|tel:)/i.test(u) ? u : null;
 }

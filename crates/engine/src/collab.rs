@@ -163,6 +163,8 @@ pub fn revert(doc: &Document, from: &Document, to: &Document) -> Document {
 /// (or its page when top-level) exactly once, and lists only hold their own children.
 /// Only the touched nodes, their old and new parents and the pages are examined.
 pub fn repair(doc: &mut Document, before: &Document, touched: &[NodeId]) {
+  // A peer's change must never make a layer its own ancestor (walking the tree would hang).
+  doc.break_parent_cycles(touched);
   let mut check: BTreeSet<NodeId> = BTreeSet::new();
   for id in touched {
     check.insert(id.clone());
@@ -262,6 +264,37 @@ mod tests {
       .as_str()
       .unwrap()
       .to_string()
+  }
+
+  #[test]
+  fn a_peer_cannot_make_a_layer_its_own_ancestor() {
+    let mut e = engine(1);
+    let a = rect(&mut e, 0.0, None);
+    let b = rect(&mut e, 20.0, None);
+    let mut na = serde_json::to_value(e.doc.get(&a).unwrap()).unwrap();
+    let mut nb = serde_json::to_value(e.doc.get(&b).unwrap()).unwrap();
+    // Self-parent.
+    na["parent"] = json!(a);
+    na["children"] = json!([a]);
+    apply(&mut e.doc, &json!({ "nodes": { &a: na.clone() } })).unwrap();
+    assert!(e.doc.ancestors(&a).is_empty());
+    assert_eq!(e.doc.get(&a).unwrap().parent, None);
+    assert!(e.doc.get(&a).unwrap().children.is_empty());
+    // Mutual parents.
+    na["parent"] = json!(b);
+    na["children"] = json!([b]);
+    nb["parent"] = json!(a);
+    nb["children"] = json!([a]);
+    apply(&mut e.doc, &json!({ "nodes": { &a: na, &b: nb } })).unwrap();
+    for id in [&a, &b] {
+      assert!(e.doc.ancestors(id).len() <= 1, "{id}");
+      assert!(!e.doc.ancestors(id).contains(id));
+    }
+    let tops = [&a, &b].iter().filter(|id| e.doc.get(id).unwrap().parent.is_none()).count();
+    assert_eq!(tops, 1, "exactly one side of the cycle is cut");
+    e.dispatch(Command::SelectAll).ok();
+    let page = e.doc.pages[0].id.clone();
+    e.render(&page, &[]);
   }
 
   #[test]

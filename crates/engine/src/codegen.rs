@@ -330,7 +330,7 @@ impl<'a> Ctx<'a> {
             el.navigate = Some(name.clone());
           }
         }
-        Action::OpenUrl => el.url = i.url.clone(),
+        Action::OpenUrl => el.url = i.url.as_deref().and_then(crate::model::safe_link),
         _ => {}
       }
     }
@@ -697,7 +697,7 @@ fn text_spans(t: &crate::model::TextProps) -> Vec<Span> {
       out.push(Span {
         text: chars[start..end].iter().collect(),
         styles,
-        link: r.link.clone(),
+        link: r.link.as_deref().and_then(crate::model::safe_link),
       });
     }
     pos = pos.max(end);

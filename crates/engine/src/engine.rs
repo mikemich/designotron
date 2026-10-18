@@ -534,10 +534,13 @@ impl Engine {
 
   /// Replaces the document (opening a file). Clears history.
   pub fn load(&mut self, json: &str) -> Result<(), String> {
-    let doc: Document = serde_json::from_str(json).map_err(|e| format!("not a Designotron file: {e}"))?;
+    let mut doc: Document = serde_json::from_str(json).map_err(|e| format!("not a Designotron file: {e}"))?;
     if doc.pages.is_empty() {
       return Err("document has no pages".into());
     }
+    // Files and links can come from anyone: never let a parent cycle hang layout or rendering.
+    let ids: Vec<NodeId> = doc.nodes.keys().cloned().collect();
+    doc.break_parent_cycles(&ids);
     self.page = doc.pages[0].id.clone();
     self.doc = doc;
     self.selection.clear();
