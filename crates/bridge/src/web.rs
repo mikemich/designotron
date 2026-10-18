@@ -85,7 +85,15 @@ mod embedded {
       },
     };
     let mime = file.metadata.mimetype().to_string();
-    let cache = if name.starts_with("assets/") { "public, max-age=31536000, immutable" } else { "no-cache" };
-    ([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, cache.to_string())], file.data).into_response()
+    let cache = if name.starts_with("assets/") {
+      "public, max-age=31536000, immutable"
+    } else {
+      "no-cache"
+    };
+    (
+      [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, cache.to_string())],
+      file.data,
+    )
+      .into_response()
   }
 }
