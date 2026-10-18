@@ -159,6 +159,16 @@ pub fn tool_defs() -> Value {
       "input_schema": { "type": "object", "properties": { "id": { "type": "string" }, "format": { "type": "string", "enum": ["react", "html", "svg", "project"] } }, "required": ["format"] }
     },
     {
+      "name": "lint_design",
+      "description": "Check the current page for accessibility and consistency problems (contrast, tiny text, off-grid spacing, near-duplicate colours, small tap targets, clipped text, default layer names). Each issue may include a `fix` command; apply fixes with update_nodes or fix_issues.",
+      "input_schema": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "fix_issues",
+      "description": "Apply the automatic fixes from lint_design. Pass `kinds` to limit which kinds are fixed (e.g. [\"lowContrast\"]).",
+      "input_schema": { "type": "object", "properties": { "kinds": { "type": "array", "items": { "type": "string" } } } }
+    },
+    {
       "name": "get_screenshot",
       "description": "PNG screenshot of a layer (default: current selection or page) so you can visually verify the design.",
       "input_schema": { "type": "object", "properties": { "id": { "type": "string" }, "scale": { "type": "number", "description": "Default 1, max 2" } } }
@@ -373,6 +383,34 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         _ => codegen::export_react(&e.doc, &id, m),
       };
       Ok(json!({ "format": format, "code": code }))
+    }
+    "lint_design" => {
+      let page = e.page.clone();
+      Ok(json!({ "issues": crate::lint::lint_page(&e.doc, &page, e.measurer()) }))
+    }
+    "fix_issues" => {
+      let kinds = str_list(input.get("kinds"));
+      let page = e.page.clone();
+      let mut fixed = 0;
+      // Fixes can surface follow-ups; repeat a few passes with fresh layout.
+      for _ in 0..4 {
+        let issues = crate::lint::lint_page(&e.doc, &page, e.measurer());
+        let todo: Vec<Value> = issues
+          .into_iter()
+          .filter(|i| kinds.is_empty() || kinds.iter().any(|k| k == i.kind))
+          .filter_map(|i| i.fix)
+          .collect();
+        if todo.is_empty() {
+          break;
+        }
+        for fix in todo {
+          let cmd: Command = serde_json::from_value(fix).map_err(|e| e.to_string())?;
+          e.dispatch_inner(cmd)?;
+          fixed += 1;
+        }
+        crate::layout::relayout_all(&mut e.doc, e.measurer.as_ref());
+      }
+      Ok(json!({ "fixed": fixed }))
     }
     t if BROWSER_TOOLS.contains(&t) => Err(format!("{t} needs the Designotron editor open in a browser")),
     other => Err(format!("unknown tool '{other}'")),

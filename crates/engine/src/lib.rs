@@ -12,6 +12,7 @@ pub mod engine;
 pub mod geom;
 pub mod interact;
 pub mod layout;
+pub mod lint;
 pub mod model;
 pub mod ops;
 pub mod patch;

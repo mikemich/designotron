@@ -338,6 +338,11 @@ pub enum Query {
   ExportProject,
   ToolDefs,
   SystemPrompt,
+  /// Design lint issues for a page (default: current page).
+  Lint {
+    #[serde(default)]
+    page: Option<String>,
+  },
   Summary {
     #[serde(default = "three")]
     depth: usize,
@@ -1442,6 +1447,7 @@ impl Engine {
       }
       Query::ToolDefs => ai::tool_defs(),
       Query::SystemPrompt => json!(ai::SYSTEM_PROMPT),
+      Query::Lint { page } => json!(crate::lint::lint_page(&self.doc, page.as_deref().unwrap_or(&self.page), m)),
       Query::Summary { depth } => ai::summary(self, depth),
     })
   }

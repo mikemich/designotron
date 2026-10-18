@@ -73,7 +73,7 @@ export interface Viewport {
   zoom: number;
 }
 
-export type RightTab = "design" | "prototype" | "code";
+export type RightTab = "design" | "prototype" | "code" | "review";
 export type LeftTab = "layers" | "assets";
 
 interface Store {

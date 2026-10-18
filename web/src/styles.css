@@ -229,7 +229,7 @@ textarea {
   border-bottom: 1px solid var(--border);
 }
 .tab {
-  padding: 6px 8px 8px;
+  padding: 6px 7px 8px;
   color: var(--text-2);
   font-weight: 500;
   border-bottom: 2px solid transparent;
@@ -1045,4 +1045,28 @@ textarea.textinput {
   padding: 14px;
   pointer-events: all;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* ---------- Review ---------- */
+.issue {
+  cursor: pointer;
+}
+.issue:hover {
+  background: var(--panel-2);
+}
+.sev {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+.sev.error {
+  color: #ff6b4a;
+}
+.sev.warning {
+  color: #f5b83d;
+}
+.sev.info {
+  color: var(--text-3);
 }

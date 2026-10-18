@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Copy, Download, Play, Plus, Trash2, Sparkles } from "lucide-react";
 import { dispatch, getDoc, query, useDoc, useSelection, useStore } from "../store";
 import { DesignPanel } from "./DesignPanel";
+import { ReviewPanel } from "./ReviewPanel";
 import { IconButton, Section, SelectField } from "../ui/controls";
 import type { Interaction, Node } from "../types";
 import { exportProjectZip, nodeSvg } from "../exporter";
@@ -10,7 +11,7 @@ import { askClaude } from "../ai/chatState";
 
 export function RightPanel() {
   const tab = useStore((s) => s.rightTab);
-  const set = (rightTab: "design" | "prototype" | "code") => useStore.setState({ rightTab });
+  const set = (rightTab: "design" | "prototype" | "code" | "review") => useStore.setState({ rightTab });
   return (
     <div className="panel right">
       <div className="tabs">
@@ -23,10 +24,14 @@ export function RightPanel() {
         <button className={"tab" + (tab === "code" ? " active" : "")} onClick={() => set("code")}>
           Code
         </button>
+        <button className={"tab" + (tab === "review" ? " active" : "")} onClick={() => set("review")}>
+          Review
+        </button>
       </div>
       {tab === "design" && <DesignPanel />}
       {tab === "prototype" && <PrototypePanel />}
       {tab === "code" && <CodePanel />}
+      {tab === "review" && <ReviewPanel />}
     </div>
   );
 }

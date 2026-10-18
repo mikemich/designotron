@@ -200,6 +200,20 @@ try {
   const count2 = Object.keys((await doc()).nodes).length;
   check("autosave survives reload", count2 === count, `${count} → ${count2} nodes`);
 
+  // Review tab: lint finds issues and Fix all resolves the fixable ones.
+  await page.evaluate(() =>
+    window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [{ type: "frame", name: "Lint me", x: 2000, y: 0, width: 300, height: 200, fill: "#FFFFFF", layout: { direction: "vertical", gap: 7, padding: 15 }, children: [{ type: "text", text: "Faint text", color: "#E5E5E5" }] }] } }),
+  );
+  await page.click(".panel.right .tab:has-text('Review')");
+  await page.waitForSelector(".issue");
+  const issuesBefore = await page.locator(".issue").count();
+  await page.click("button:has-text('automatically')");
+  await page.waitForTimeout(200);
+  const left = await page.evaluate(() => window.__dt.query({ q: "lint" }).filter((i) => i.fix).map((i) => `${i.kind}: ${i.message} ${JSON.stringify(i.fix)}`));
+  check("Review tab lists issues and fixes them", issuesBefore > 0 && left.length === 0, `${issuesBefore} issues; left: ${left.join(" | ")}`);
+  await shot("05b-review");
+  await page.click(".panel.right .tab:has-text('Design')");
+
   // Templates: each builds into a fresh file from the files screen.
   for (const name of ["Landing page", "Dashboard", "Design system"]) {
     await page.evaluate(() => (location.hash = "#/"));

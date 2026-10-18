@@ -168,7 +168,7 @@ function buildDashboard() {
     children: [
       { type: "text", text: label, fontSize: 14, color: "#64748B" },
       { type: "text", text: value, fontSize: 30, fontWeight: 700, color: "#0F172A" },
-      { type: "text", text: delta, fontSize: 13, fontWeight: 600, color: up ? "#16A34A" : "#DC2626" },
+      { type: "text", text: delta, fontSize: 13, fontWeight: 600, color: up ? "#15803D" : "#DC2626" },
     ],
   });
   const row = (cells: string[], header = false) => ({
@@ -235,7 +235,7 @@ function buildDashboard() {
                     stroke: "#E2E8F0",
                     cornerRadius: 10,
                     layout: { direction: "horizontal", padding: [10, 14] },
-                    children: [{ type: "text", text: "Search orders, customers…", fontSize: 14, color: "#94A3B8" }],
+                    children: [{ type: "text", text: "Search orders, customers…", fontSize: 14, color: "#64748B" }],
                   },
                 ],
               },
@@ -314,8 +314,8 @@ function buildDesignSystem() {
   });
   const created = ai("create_nodes", {
     nodes: [
-      button("Default", "#F97316", "#FFFFFF"),
-      button("Hover", "#C2410C", "#FFFFFF"),
+      button("Default", "#C2410C", "#FFFFFF"),
+      button("Hover", "#9A3412", "#FFFFFF"),
       button("Secondary", "#FFFFFF", "#1C1917", "#D6D3D1"),
       button("Disabled", "#F5F5F4", "#A8A29E"),
     ].map((b, i) => ({ ...b, x: 80 + i * 150, y: 420 })),
@@ -391,7 +391,7 @@ function buildDesignSystem() {
             stroke: "#D6D3D1",
             cornerRadius: 10,
             layout: { direction: "horizontal", padding: [12, 14] },
-            children: [{ type: "text", text: "you@example.com", fontSize: 15, color: "#A8A29E" }],
+            children: [{ type: "text", text: "you@example.com", fontSize: 15, color: "#78716C" }],
           },
         ],
       },
@@ -416,5 +416,7 @@ function buildDesignSystem() {
     .filter((n) => (n.name === "Input" || n.name === "Card") && !n.parent)
     .map((n) => n.id);
   for (const id of ids) ai("arrange", { action: "create_component", ids: [id] });
+  // Link every colour that matches a style, so editing a style updates the whole system.
+  ai("fix_issues", { kinds: ["unlinkedStyle"] });
   ai("select", { ids: [] });
 }
