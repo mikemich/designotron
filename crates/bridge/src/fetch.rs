@@ -1,0 +1,120 @@
+//! Server-side page fetch for "import a website", and saving chat attachments
+//! where Claude Code can read them.
+
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use axum::extract::{Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use base64::Engine as _;
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::Shared;
+
+const MAX_PAGE_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES: usize = 15 * 1024 * 1024;
+
+#[derive(Deserialize)]
+pub struct FetchParams {
+  url: String,
+}
+
+/// `GET /bridge/fetch?url=…` returns the page's HTML (http/https only).
+pub async fn fetch_page(State(_state): State<Shared>, headers: HeaderMap, Query(p): Query<FetchParams>) -> Response {
+  if !crate::security::origin_allowed(&headers) || !crate::security::host_allowed(&headers) {
+    return (StatusCode::FORBIDDEN, "forbidden").into_response();
+  }
+  if !(p.url.starts_with("http://") || p.url.starts_with("https://")) {
+    return (StatusCode::BAD_REQUEST, "only http and https URLs can be imported").into_response();
+  }
+  let url = p.url.clone();
+  let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
+    let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).redirects(5).build();
+    let res = agent
+      .get(&url)
+      .set("User-Agent", "Mozilla/5.0 (Designotron import)")
+      .set("Accept", "text/html,application/xhtml+xml")
+      .call()
+      .map_err(|e| format!("could not fetch {url}: {e}"))?;
+    let mut body = String::new();
+    res
+      .into_reader()
+      .take(MAX_PAGE_BYTES)
+      .read_to_string(&mut body)
+      .map_err(|e| format!("could not read {url}: {e}"))?;
+    Ok(body)
+  })
+  .await;
+  match result {
+    Ok(Ok(html)) => (
+      [
+        (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+      ],
+      html,
+    )
+      .into_response(),
+    Ok(Err(e)) => (StatusCode::BAD_GATEWAY, e).into_response(),
+    Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+  }
+}
+
+/// Writes base64 attachments into the workspace and returns their absolute paths.
+pub fn save_attachments(workspace: &Path, attachments: &[Value]) -> Vec<PathBuf> {
+  let dir = workspace.join(".designotron").join("attachments");
+  if std::fs::create_dir_all(&dir).is_err() {
+    return vec![];
+  }
+  let stamp = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_millis())
+    .unwrap_or(0);
+  let mut out = Vec::new();
+  for (i, a) in attachments.iter().enumerate() {
+    let Some(data) = a["data"].as_str() else { continue };
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+      continue;
+    };
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+      continue;
+    }
+    let ext = match a["mediaType"].as_str().unwrap_or("image/png") {
+      "image/jpeg" => "jpg",
+      "image/gif" => "gif",
+      "image/webp" => "webp",
+      _ => "png",
+    };
+    let path = dir.join(format!("{stamp}-{i}.{ext}"));
+    if std::fs::write(&path, bytes).is_ok() {
+      out.push(path);
+    }
+  }
+  out
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use serde_json::json;
+
+  #[test]
+  fn saves_valid_attachments_and_skips_bad_ones() {
+    let dir = std::env::temp_dir().join(format!("dt-attach-{}", std::process::id()));
+    let png = base64::engine::general_purpose::STANDARD.encode([0x89, b'P', b'N', b'G']);
+    let paths = save_attachments(
+      &dir,
+      &[
+        json!({ "data": png, "mediaType": "image/png" }),
+        json!({ "data": "not base64!!", "mediaType": "image/png" }),
+        json!({ "data": png, "mediaType": "image/jpeg" }),
+      ],
+    );
+    assert_eq!(paths.len(), 2);
+    assert!(paths[0].extension().unwrap() == "png" && paths[1].extension().unwrap() == "jpg");
+    assert_eq!(std::fs::read(&paths[0]).unwrap(), [0x89, b'P', b'N', b'G']);
+    let _ = std::fs::remove_dir_all(dir);
+  }
+}

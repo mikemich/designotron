@@ -5,6 +5,7 @@
 import { chromium } from "playwright-core";
 import fs from "node:fs";
 import path from "node:path";
+import http from "node:http";
 
 const URL = process.env.E2E_URL ?? "http://localhost:5173";
 const MCP = process.env.E2E_MCP ?? "http://127.0.0.1:5174/mcp";
@@ -60,6 +61,18 @@ try {
 
   const undoable = await page.evaluate(() => window.__dt.state().canUndo);
   check("MCP edits are undoable in the editor", undoable);
+
+  // import_url: the bridge fetches a page, the editor converts it to layers.
+  const site = http.createServer((_, res) => {
+    res.setHeader("content-type", "text/html");
+    res.end(`<html><head><title>Test site</title><style>body{margin:0;background:#101828}h1{color:#fff;font:700 40px Inter;padding:32px}.card{margin:32px;padding:24px;background:#fff;border-radius:16px}</style></head><body><h1>Hello from a website</h1><div class="card">Card body text</div></body></html>`);
+  });
+  await new Promise((r) => site.listen(5199, "127.0.0.1", r));
+  const imported = await mcp("tools/call", { name: "import_url", arguments: { url: "http://127.0.0.1:5199/", width: 800, x: 2000, y: 0 } });
+  site.close();
+  const impText = imported.result?.content?.at(-1)?.text ?? JSON.stringify(imported);
+  const texts = await page.evaluate(() => Object.values(window.__dt.doc().nodes).filter((n) => n.type === "text").map((n) => n.text.characters));
+  check("import_url turns a live page into layers", !imported.result?.isError && texts.includes("Hello from a website") && texts.includes("Card body text"), impText.slice(0, 160));
 
   if (process.env.E2E_CLAUDE) {
     await page.keyboard.press("Control+/");

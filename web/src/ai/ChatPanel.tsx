@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Loader2, Plus, Settings, Square, Wrench, X, AlertTriangle } from "lucide-react";
-import { MODELS, newConversation, send, setApiKey, setMode, setModel, stop, useChat } from "./chatState";
+import { Check, ImagePlus, Loader2, Plus, Settings, Sparkles, Square, Wrench, X, AlertTriangle } from "lucide-react";
+import { MODELS, attachImage, newConversation, removeImage, send, setApiKey, setMode, setModel, stop, useChat } from "./chatState";
 import { useStore } from "../store";
-import { Seg, SelectField } from "../ui/controls";
+import { Menu, Seg, SelectField, type MenuItem } from "../ui/controls";
+import { imagesFrom } from "./images";
 
 const SUGGESTIONS = [
   "Design a 3-screen mobile onboarding flow for a meditation app, with prototype links",
@@ -12,10 +13,70 @@ const SUGGESTIONS = [
   "Build this design as a React app in the workspace",
 ];
 
+/** Prompts behind the ✦ menu. `fill` puts the prompt in the box for the user to finish instead of sending. */
+const QUICK_ACTIONS: { label: string; prompt: string; fill?: boolean; needsSelection?: boolean; needsImage?: boolean }[] = [
+  {
+    label: "Rebuild attached screenshot as layers",
+    needsImage: true,
+    prompt:
+      "Recreate the attached screenshot as editable layers on this page, to the right of existing content. Use frames with auto layout, real text and the closest fonts and colours. Then call get_screenshot and compare it with the original; fix differences in spacing, sizes and colours.",
+  },
+  { label: "Import a website by URL…", fill: true, prompt: "Import this website as editable layers with import_url, then tidy the layer names: https://" },
+  {
+    label: "Design a user flow…",
+    fill: true,
+    prompt: "Design the complete user flow for: \nInclude every screen (empty, loading and error states too), consistent components, and prototype links between screens.",
+  },
+  {
+    label: "Make variants of the selection",
+    needsSelection: true,
+    prompt:
+      "Turn the selected element into a component (if it isn't one) and create a component set with sensible variants (for example Default, Hover, Pressed, Disabled, and size variants where they make sense).",
+  },
+  {
+    label: "Responsive versions (mobile + desktop)",
+    needsSelection: true,
+    prompt: "Create responsive versions of the selected screen: a 393px mobile version and a 1440px desktop version next to it. Adapt the layout, don't just scale it.",
+  },
+  {
+    label: "Dark mode version",
+    needsSelection: true,
+    prompt: "Duplicate the selected screen next to it and make a polished dark mode version. Keep contrast at WCAG AA or better, then run lint_design on it.",
+  },
+  {
+    label: "Fill with realistic content",
+    needsSelection: true,
+    prompt: "Replace placeholder text, names, numbers and images in the selection with realistic, varied content that fits the product. Keep the layout intact.",
+  },
+  {
+    label: "Rename layers semantically",
+    prompt: "Rename the layers on this page with clear semantic names (e.g. Header, Nav, Hero title, Primary button, Card / Title). Don't change anything else.",
+  },
+  {
+    label: "Sync design → code in the workspace",
+    prompt:
+      "Look at the code in the workspace and update it to match the current design: export_code for the screens, then edit the existing components rather than overwriting the project. Run the build to check it compiles.",
+  },
+  {
+    label: "Import screens from my codebase",
+    prompt:
+      "Read the UI code in the workspace (pages, components, styles) and recreate the main screens on this page as editable designs, with shared components turned into Designotron components.",
+  },
+  {
+    label: "Import design tokens from code",
+    prompt:
+      "Find the design tokens in the workspace (Tailwind config, CSS variables, theme files). Create them as colour and text styles with define_styles, then call fix_issues with kinds [\"unlinkedStyle\"] to link existing layers to them.",
+  },
+];
+
 export function ChatPanel() {
-  const { items, running, mode, apiKey, model, bridgeStatus, claude, sessionId } = useChat();
+  const { items, running, mode, apiKey, model, bridgeStatus, claude, sessionId, pending } = useChat();
+  const hasSelection = useStore((s) => s.es.selection.length > 0);
   const [text, setText] = useState("");
   const [settings, setSettings] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -31,6 +92,28 @@ export function ChatPanel() {
   };
 
   const ready = mode === "bridge" ? bridgeStatus === "connected" && claude?.available !== false : !!apiKey;
+
+  const addImages = async (list: DataTransferItemList | FileList | null) => {
+    for (const img of await imagesFrom(list)) attachImage(img.url, img.name);
+  };
+
+  const quickItems: MenuItem[] = QUICK_ACTIONS.map((a) => ({
+    label: a.label,
+    disabled: (a.needsSelection && !hasSelection) || (a.needsImage && !pending.length),
+    onClick: () => {
+      if (a.fill) {
+        setText(a.prompt);
+        setTimeout(() => {
+          const el = inputRef.current;
+          if (!el) return;
+          el.focus();
+          const at = a.prompt.indexOf("\n");
+          const pos = at >= 0 ? at : a.prompt.length;
+          el.setSelectionRange(pos, pos);
+        }, 0);
+      } else send(a.prompt);
+    },
+  }));
 
   return (
     <div className="chat">
@@ -132,6 +215,13 @@ export function ChatPanel() {
             </div>
           ) : (
             <div key={it.id} className={"msg " + it.kind}>
+              {"images" in it && it.images?.length ? (
+                <div className="msg-images">
+                  {it.images.map((u, i) => (
+                    <img key={i} src={u} alt="" />
+                  ))}
+                </div>
+              ) : null}
               {it.text}
             </div>
           ),
@@ -142,12 +232,45 @@ export function ChatPanel() {
           </div>
         )}
       </div>
-      <div className="chat-input">
+      <div
+        className={"chat-input" + (dragOver ? " drag" : "")}
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes("Files")) {
+            e.preventDefault();
+            setDragOver(true);
+          }
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setDragOver(false);
+          addImages(e.dataTransfer.files);
+        }}
+      >
+        {pending.length > 0 && (
+          <div className="attachments">
+            {pending.map((p) => (
+              <div key={p.id} className="attachment" title={p.name}>
+                <img src={p.url} alt={p.name} />
+                <button title="Remove" onClick={() => removeImage(p.id)}>
+                  <X size={10} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <textarea
           ref={inputRef}
           placeholder={ready ? "Describe what to design or change…" : "Connect Claude Code or add an API key to start"}
           value={text}
           onChange={(e) => setText(e.target.value)}
+          onPaste={(e) => {
+            if (Array.from(e.clipboardData.items).some((i) => i.kind === "file" && i.type.startsWith("image/"))) {
+              e.preventDefault();
+              addImages(e.clipboardData.items);
+            }
+          }}
           onKeyDown={(e) => {
             e.stopPropagation();
             if (e.key === "Enter" && !e.shiftKey) {
@@ -157,7 +280,35 @@ export function ChatPanel() {
           }}
         />
         <div className="row" style={{ marginTop: 6, justifyContent: "space-between" }}>
-          <span className="kbd-hint">Enter to send · Shift+Enter for a new line</span>
+          <div className="row" style={{ gap: 2 }}>
+            <button
+              className="ibtn"
+              title="Quick actions"
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setMenu({ x: r.left, y: r.top - 8 });
+              }}
+            >
+              <Sparkles size={14} />
+            </button>
+            <button className="ibtn" title="Attach an image (or paste / drop one)" onClick={() => fileRef.current?.click()}>
+              <ImagePlus size={14} />
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp"
+              multiple
+              hidden
+              onChange={(e) => {
+                addImages(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            <span className="kbd-hint" style={{ marginLeft: 4 }}>
+              Enter to send
+            </span>
+          </div>
           {running ? (
             <button className="btn" onClick={stop}>
               <Square size={12} /> Stop
@@ -169,6 +320,7 @@ export function ChatPanel() {
           )}
         </div>
       </div>
+      {menu && <Menu x={menu.x} y={menu.y} items={quickItems} onClose={() => setMenu(null)} />}
     </div>
   );
 }

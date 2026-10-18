@@ -134,8 +134,18 @@ async fn serve(socket: WebSocket, state: Shared) {
         }
       }
       "chat" => {
-        let prompt = v["prompt"].as_str().unwrap_or("").to_string();
+        let mut prompt = v["prompt"].as_str().unwrap_or("").to_string();
         let session = v["sessionId"].as_str().map(String::from);
+        if let Some(list) = v["attachments"].as_array().filter(|l| !l.is_empty()) {
+          let paths = crate::fetch::save_attachments(&state.workspace, list);
+          if !paths.is_empty() {
+            let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+            prompt.push_str(&format!(
+              "\n\nAttached image(s), read them with the Read tool:\n{}",
+              names.join("\n")
+            ));
+          }
+        }
         let st = state.clone();
         tokio::spawn(async move { claude::run_chat(st, prompt, session).await });
       }

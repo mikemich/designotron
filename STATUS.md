@@ -5,7 +5,7 @@ change that finishes, starts or breaks them.
 
 ## In progress
 
-- Nothing actively in progress. Pick the next item from **To do**.
+- Working through [ROADMAP.md](ROADMAP.md) in order. Next: live app preview panel.
 
 ## To do
 
@@ -17,7 +17,6 @@ Ordered by impact on "replace Figma for a small team".
 | 2  | Accounts, cloud files, sharing links   | Needs a hosted backend; today files are local (IndexedDB + `.dtron`)  |
 | 3  | Comments                               | Pins on canvas, threads, mentions; needs (2) for teams                |
 | 4  | Version history                        | Named snapshots in IndexedDB first, cloud later                       |
-| 5  | Mixed text styles                      | Per-range font, weight, colour, links inside one text layer           |
 | 6  | Boolean operations, flatten, masks     | Union/subtract/intersect/exclude, outline stroke, mask groups         |
 | 7  | Performance for large files            | Incremental render, canvas/WebGL path, persistent maps for undo       |
 | 8  | Figma file import                      | `.fig` / Figma REST API JSON to Designotron model                     |
@@ -29,7 +28,7 @@ Ordered by impact on "replace Figma for a small team".
 | 14 | Canvas gradient and image-crop handles | Edit gradients and crops directly on the canvas                       |
 | 15 | Auto layout extras                     | Min/max width, baseline alignment, per-child margins                  |
 | 16 | Auto layout inference for HTML import  | Map flex/grid containers to auto layout instead of absolute layers    |
-| 17 | Hosted build of the editor             | Static deploy (GitHub Pages); bridge stays local                      |
+| 17 | Enable the hosted editor               | Workflow exists; repo owner must set Settings → Pages → GitHub Actions |
 | 18 | Desktop app packaging                  | Tauri shell bundling the editor and bridge                            |
 | 19 | Touch and tablet input                 | Pinch zoom, pen pressure                                              |
 
@@ -52,8 +51,14 @@ Ordered by impact on "replace Figma for a small team".
 | Claude (API)    | In-browser tool loop with the user's key, screenshots fed back to Claude, refusal fallback enabled   |
 | Claude Code     | Bridge spawns the user's `claude` CLI (Pro/Max login) for in-app chat with live tool chips           |
 | MCP             | `designotron` MCP server for Claude Code in any terminal; headless mode edits `design.dtron.json`    |
-| Import          | HTML/CSS to editable layers (`import_html` tool and File menu)                                       |
-| Docs            | AGENTS.md, STATUS.md, README                                                                        |
+| Import          | HTML/CSS to editable layers (`import_html` tool and File menu), live websites by URL (`import_url`)  |
+| Distribution    | Single `designotron` binary with the editor embedded, release workflow (5 targets), `install.sh`, `npx designotron`, Pages workflow |
+| Onboarding      | Template gallery (mobile, landing, dashboard, design system), first-run tour, empty-file prompt      |
+| Text            | Mixed styles inside one text layer (font, size, weight, italic, colour, decoration, links); ⌘B/I/U  |
+| Code export     | Semantic tags (h1–h3, button, nav, header, …), `<img>` for image layers, responsive roots           |
+| Review          | Design lint (contrast, tiny text, clipped text, off-grid, tap targets, names, near-duplicate colours, unlinked styles) with one-click and bulk fixes; Claude critique |
+| Claude actions  | Paste/drop/attach images in chat (both modes), quick actions (flows, variants, responsive, dark mode, content, rename, code sync, tokens from code), "Rebuild as editable layers" on image layers |
+| Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README                                                             |
 
 ## What works (verified)
 
@@ -61,19 +66,24 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 39 engine + bridge unit tests                          | `cargo test --workspace`                     |
+| 50 engine + bridge unit tests                          | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
 | React and project export                               | `web/scripts/e2e.mjs`                        |
 | AI `create_nodes`, `get_screenshot`, `import_html`     | `web/scripts/e2e.mjs`                        |
 | Presenter hotspots and prototype navigation            | `web/scripts/e2e.mjs`                        |
-| Autosave survives reload, Claude panel opens           | `web/scripts/e2e.mjs` (22/22 passing)        |
-| Production build served by the bridge (same 22 checks)| `E2E_URL=http://127.0.0.1:5174 npm run e2e`  |
+| Autosave survives reload, Claude panel opens           | `web/scripts/e2e.mjs`                        |
+| Templates, tour, empty prompt, ⌘B on a word, Review fixes | `web/scripts/e2e.mjs`                     |
+| Chat image attachment and quick actions menu           | `web/scripts/e2e.mjs` (31/31 passing)        |
+| Production build served by the bridge                  | `E2E_URL=http://127.0.0.1:5174 npm run e2e`  |
+| Release binaries download and serve the editor         | `install.sh` and `npx designotron` on Linux  |
+| Exported Landing/Dashboard projects build and match    | `tsc` + `vite build`, compared screenshots   |
 | MCP initialize, tools/list, tools/call (headless)      | curl against the bridge                      |
 | MCP rejects foreign `Origin` and `Host`                | curl (403) + `security.rs` tests             |
 | MCP call edits the live editor and is undoable         | `web/scripts/bridge-e2e.mjs`                 |
 | MCP `get_screenshot` returns a PNG from the editor     | `web/scripts/bridge-e2e.mjs`                 |
+| `import_url` fetches a page through the bridge         | `web/scripts/bridge-e2e.mjs`                 |
 | In-app chat through local Claude Code uses the tools   | `bridge-e2e.mjs` with `E2E_CLAUDE=1`         |
 
 Not verified here: API-key chat mode against the live API (no key in this environment). The
@@ -87,7 +97,8 @@ until someone runs it with a real key.
 | Collaboration    | Single user. No multiplayer, accounts, sharing, comments or version history                              |
 | Storage          | Files live in the browser (IndexedDB). Clearing site data deletes them; save `.dtron` files to keep them |
 | Scale            | Each change re-renders the page as SVG and snapshots the document; thousands of layers will feel slow    |
-| Text             | One style per text layer; no OpenType features; widths depend on the web font having loaded             |
+| Text             | No OpenType features or per-range line height; widths depend on the web font having loaded               |
+| URL import       | Scripts don't run, so sites rendered by JavaScript come in mostly empty; very long pages make many layers |
 | Headless text    | Bridge headless mode measures text with a heuristic, so layout can differ slightly from the editor       |
 | Strokes          | Inside/outside alignment is exact for rectangles/ellipses; other shapes clip or fall back to center      |
 | Effects          | Background blur is not drawn on the canvas (exported to code as `backdrop-filter`)                       |

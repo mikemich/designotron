@@ -18,14 +18,16 @@ use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render;
 
 /// Tools that need a browser (rasterising, DOM). The web shell executes them.
-pub const BROWSER_TOOLS: &[&str] = &["get_screenshot", "import_html"];
+pub const BROWSER_TOOLS: &[&str] = &["get_screenshot", "import_html", "import_url"];
 
 pub const SYSTEM_PROMPT: &str = "You are the design copilot inside Designotron, a Figma-style design tool. \
 You edit the open document directly through tools. Coordinates are pixels; children are positioned relative to their parent; \
 top-level frames are screens/artboards. Prefer auto layout (layout: {direction, gap, padding, align, crossAlign}) with width/height \
 'fill' or 'hug' for real UI so it converts cleanly to code. Build complete, polished designs in as few create_nodes calls as possible \
 (nest children). Use real copy, consistent spacing (4/8 grid), a clear type scale and accessible contrast. After building, call \
-get_screenshot to check the result visually and fix problems. Place new screens to the right of existing ones so nothing overlaps.";
+get_screenshot to check the result visually and fix problems. Place new screens to the right of existing ones so nothing overlaps. \
+When the user attaches a screenshot or mockup, recreate it as editable layers (not an image) and compare with get_screenshot. \
+Use import_url to bring in a live website, and lint_design / fix_issues to check accessibility and consistency before you finish.";
 
 fn spec_schema() -> Value {
   json!({
@@ -140,8 +142,11 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "define_styles",
-      "description": "Create shared colour styles (design tokens).",
-      "input_schema": { "type": "object", "properties": { "colors": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "color": { "type": "string" } }, "required": ["name", "color"] } } } }
+      "description": "Create shared colour and text styles (design tokens). Then link layers to them with fix_issues (kinds: [\"unlinkedStyle\"]).",
+      "input_schema": { "type": "object", "properties": {
+        "colors": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "color": { "type": "string" } }, "required": ["name", "color"] } },
+        "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": "number" }, "lineHeight": { "type": "number" }, "letterSpacing": { "type": "number" } }, "required": ["name", "fontSize"] } }
+      } }
     },
     {
       "name": "pages",
@@ -172,6 +177,11 @@ pub fn tool_defs() -> Value {
       "name": "get_screenshot",
       "description": "PNG screenshot of a layer (default: current selection or page) so you can visually verify the design.",
       "input_schema": { "type": "object", "properties": { "id": { "type": "string" }, "scale": { "type": "number", "description": "Default 1, max 2" } } }
+    },
+    {
+      "name": "import_url",
+      "description": "Load a live web page (through the local bridge) and convert it into editable layers. Good for redesigning an existing site.",
+      "input_schema": { "type": "object", "properties": { "url": { "type": "string" }, "width": { "type": "number", "description": "Viewport width, default 1440" }, "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["url"] }
     },
     {
       "name": "import_html",
@@ -320,6 +330,19 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         let color = c.get("color").and_then(|v| v.as_str()).unwrap_or("#000000").to_string();
         let r = e.dispatch_inner(Command::AddColorStyle { name, color })?;
         ids.push(r["id"].clone());
+      }
+      for t in input.get("texts").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+        let id = e.gen.next("s_");
+        e.doc.styles.texts.push(crate::model::TextStyle {
+          id: id.clone(),
+          name: t.get("name").and_then(|v| v.as_str()).unwrap_or("Text").to_string(),
+          font_family: t.get("fontFamily").and_then(|v| v.as_str()).unwrap_or("Inter").to_string(),
+          font_size: num(t.get("fontSize")).unwrap_or(16.0),
+          font_weight: num(t.get("fontWeight")).unwrap_or(400.0) as u32,
+          line_height: num(t.get("lineHeight")),
+          letter_spacing: num(t.get("letterSpacing")).unwrap_or(0.0),
+        });
+        ids.push(json!(id));
       }
       Ok(json!({ "created": ids }))
     }

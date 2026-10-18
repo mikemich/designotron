@@ -18,6 +18,20 @@ function bridgeUrl(): string {
   return local ? `${proto}://${location.host}/bridge/ws` : "ws://127.0.0.1:5174/bridge/ws";
 }
 
+/** HTTP base of the bridge (same origin when the editor is served locally). */
+export function bridgeHttpBase(): string {
+  return bridgeUrl()
+    .replace(/^ws/, "http")
+    .replace(/\/bridge\/ws$/, "");
+}
+
+export interface Attachment {
+  name: string;
+  /** Base64 without the data: prefix. */
+  data: string;
+  mediaType: string;
+}
+
 class BridgeClient {
   private ws: WebSocket | null = null;
   private retry: ReturnType<typeof setTimeout> | null = null;
@@ -78,10 +92,10 @@ class BridgeClient {
     }
   }
 
-  chat(prompt: string, sessionId: string | null) {
+  chat(prompt: string, sessionId: string | null, attachments: Attachment[] = []) {
     this.liveText = null;
     this.turnError = false;
-    this.send({ type: "chat", prompt, sessionId });
+    this.send({ type: "chat", prompt, sessionId, attachments });
   }
 
   cancel() {

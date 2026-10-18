@@ -2,7 +2,7 @@
 // engine (one undo step each), browser-only tools are handled here.
 
 import { dispatchOrThrow, getDoc, query, selection, useStore, zoomToSelection } from "../store";
-import { getScreenshot, importHtml } from "./browserTools";
+import { getScreenshot, importHtml, importUrl } from "./browserTools";
 
 export interface ToolOutcome {
   ok: boolean;
@@ -44,6 +44,9 @@ export async function executeTool(name: string, input: any): Promise<ToolOutcome
     }
     if (name === "import_html") {
       return { ok: true, result: await importHtml(input ?? {}) };
+    }
+    if (name === "import_url") {
+      return { ok: true, result: await importUrl(input ?? {}) };
     }
     const result = dispatchOrThrow({ op: "ai", tool: name, input: input ?? {} });
     if (name === "select") setTimeout(zoomToSelection, 0);

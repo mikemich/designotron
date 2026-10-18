@@ -6,6 +6,7 @@
 
 mod claude;
 mod editor;
+mod fetch;
 mod headless;
 mod mcp;
 mod security;
@@ -106,6 +107,7 @@ async fn main() {
   let mut app = Router::new()
     .route("/bridge/ws", get(editor::ws_handler))
     .route("/bridge/status", get(status))
+    .route("/bridge/fetch", get(fetch::fetch_page))
     .route("/mcp", post(mcp::handle).get(mcp::reject_get).delete(mcp::end_session))
     .with_state(state.clone());
 

@@ -242,6 +242,16 @@ try {
   await shot("07-chat");
   check("Claude panel opens", true);
 
+  // Image attachments and quick actions.
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await page.setInputFiles(".chat-input input[type=file]", { name: "shot.png", mimeType: "image/png", buffer: png });
+  await page.waitForSelector(".attachment img", { timeout: 3000 });
+  check("image attachment shows a thumbnail", (await page.evaluate(() => window.__dt.chat().pending.length)) === 1);
+  await page.click(".chat-input .ibtn[title='Quick actions']");
+  const actions = await page.$$eval(".menu .item", (els) => els.map((e) => e.textContent));
+  check("quick actions menu", actions.length >= 10 && actions.some((a) => a.includes("Rebuild attached screenshot")), `${actions.length} actions`);
+  await page.keyboard.press("Escape");
+
   check("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
 } catch (err) {
   check("unexpected exception", false, String(err));

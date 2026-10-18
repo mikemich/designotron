@@ -3,6 +3,7 @@
 import { addAsset, readFileAsDataUrl } from "../assets";
 import { screenshotBase64 } from "../exporter";
 import { dispatchOrThrow, getDoc, selection, useStore, FONTS } from "../store";
+import { bridgeHttpBase } from "./bridgeClient";
 
 /** Picks what to screenshot when no id is given: selection, else the newest top-level frame. */
 export async function getScreenshot(id?: string, scale = 1) {
@@ -27,6 +28,28 @@ interface ImportInput {
 }
 
 type Spec = Record<string, any>;
+
+/** Fetches a live page through the local bridge (no CORS there) and imports it. */
+export async function importUrl(input: { url: string; width?: number; x?: number; y?: number }) {
+  let url: URL;
+  try {
+    url = new URL(input.url.includes("://") ? input.url : `https://${input.url}`);
+  } catch {
+    throw new Error(`not a valid URL: ${input.url}`);
+  }
+  let res: Response;
+  try {
+    res = await fetch(`${bridgeHttpBase()}/bridge/fetch?url=${encodeURIComponent(url.href)}`);
+  } catch {
+    throw new Error("importing a website needs the Designotron bridge running (npx designotron)");
+  }
+  if (!res.ok) throw new Error(await res.text());
+  let html = await res.text();
+  // Resolve relative stylesheets and images against the page. Scripts never run (sandboxed iframe).
+  const base = `<base href="${url.href.replace(/"/g, "&quot;")}">`;
+  html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => m + base) : `<!doctype html><html><head>${base}</head><body>${html}</body></html>`;
+  return importHtml({ html, width: input.width ?? 1440, x: input.x, y: input.y, name: url.hostname });
+}
 
 /** Renders HTML in a hidden iframe and converts the box tree into layer specs. */
 export async function importHtml(input: ImportInput) {

@@ -1,6 +1,30 @@
 import * as A from "../actions";
 import { dispatch, getDoc, query, selection, useStore, zoomToSelection } from "../store";
 import { ALT, MOD, SHIFT, type MenuItem } from "../ui/controls";
+import { assetDataUrl } from "../assets";
+import { askClaude } from "../ai/chatState";
+import { rasterize } from "../ai/images";
+import type { Node } from "../types";
+
+/** The image painted on a layer, as a URL the browser can load. */
+function layerImage(n: Node): string | null {
+  const paint = n.fills.find((f) => f.type === "image" && f.visible);
+  if (!paint || paint.type !== "image") return null;
+  return paint.src.startsWith("asset:") ? (assetDataUrl(paint.src.slice(6)) ?? null) : paint.src;
+}
+
+async function rebuildImage(n: Node, src: string) {
+  let url: string;
+  try {
+    url = await rasterize(src);
+  } catch {
+    url = src;
+  }
+  askClaude(
+    `The attached image is the layer ${n.id} ("${n.name}", ${Math.round(n.width)}×${Math.round(n.height)}). Recreate it as editable layers with create_nodes, at the same size, placed ${Math.round(n.width) + 80}px to the right of it (x = ${Math.round(n.x + n.width + 80)}, y = ${Math.round(n.y)} in the same parent). Use auto layout frames, real text and the closest fonts and colours. Then get_screenshot your result and fix differences. Leave the original image in place.`,
+    [url],
+  );
+}
 
 let internalClipboard = "";
 
@@ -70,6 +94,8 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   items.push({ label: "Flip horizontal", kbd: `${SHIFT}H`, onClick: () => A.flip(true) });
   items.push({ label: "Flip vertical", kbd: `${SHIFT}V`, onClick: () => A.flip(false) });
   items.push({ sep: true });
+  const img = one ? layerImage(one) : null;
+  if (one && img) items.push({ label: "Rebuild as editable layers with Claude", onClick: () => rebuildImage(one, img) });
   items.push({ label: "Ask Claude about this…", kbd: `${MOD}/`, onClick: () => useStore.setState({ chatOpen: true }) });
   return items;
 }

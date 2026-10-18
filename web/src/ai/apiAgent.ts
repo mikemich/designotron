@@ -4,6 +4,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { useChat, push, appendText, patchItem } from "./chatState";
 import { executeTool, systemPrompt, toolDefs } from "./tools";
+import type { Attachment } from "./bridgeClient";
 
 let messages: Anthropic.Beta.BetaMessageParam[] = [];
 let controller: AbortController | null = null;
@@ -18,12 +19,23 @@ export function abortApiAgent() {
 
 const MAX_TURNS = 40;
 
-export async function runApiAgent(prompt: string) {
+export async function runApiAgent(prompt: string, images: Attachment[] = []) {
   const { apiKey, model } = useChat.getState();
   const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
   const tools = toolDefs().map((t) => ({ ...t, eager_input_streaming: true })) as Anthropic.Beta.BetaTool[];
   const system = systemPrompt();
-  messages.push({ role: "user", content: prompt });
+  messages.push({
+    role: "user",
+    content: images.length
+      ? [
+          ...images.map((a) => ({
+            type: "image" as const,
+            source: { type: "base64" as const, media_type: a.mediaType as "image/png", data: a.data },
+          })),
+          { type: "text" as const, text: prompt },
+        ]
+      : prompt,
+  });
   controller = new AbortController();
   let jsonRetries = 0;
 
