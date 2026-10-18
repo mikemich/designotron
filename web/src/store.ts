@@ -190,7 +190,8 @@ export function styleTextSelection(style: Record<string, unknown>, clear: string
   const { editingText, textSel } = useStore.getState();
   if (!editingText || !textSel || textSel.id !== editingText || textSel.end <= textSel.start) return false;
   dispatch({ op: "styleText", id: editingText, start: textSel.start, end: textSel.end, style, clear });
-  window.dispatchEvent(new Event("dt-refocus-text"));
+  // After the current key event, so it can't land in the text being edited.
+  requestAnimationFrame(() => window.dispatchEvent(new Event("dt-refocus-text")));
   return true;
 }
 

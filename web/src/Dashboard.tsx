@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Figma, FilePlus, FolderOpen, Github, Loader2, MoreHorizontal } from "lucide-react";
 import { REPO_URL } from "./panels/GuestBar";
-import { deleteFile, duplicateFile, fromDtron, listFiles, newFileId, pickFile, renameFile, saveFile, type FileMeta } from "./files";
+import { deleteFile, duplicateFile, importDtron, listFiles, newFileId, pickFile, renameFile, saveFile, type FileMeta } from "./files";
 import { bootEngine, getEngine, newEngine, dispatch, toast, useBoot, useStore } from "./store";
 import { TEMPLATES, type Template } from "./templates";
 import { persistentStorage } from "./files";
@@ -51,12 +51,9 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
     const f = await pickFile(".dtron,.json");
     if (!f) return;
     try {
-      const json = fromDtron(await f.text());
-      const id = newFileId();
-      await saveFile(id, JSON.parse(json).name ?? f.name, json);
-      onOpen(id);
+      onOpen(await importDtron(await f.text(), f.name.replace(/\.(dtron|json)$/, "")));
     } catch (err) {
-      toast(String(err), "error");
+      toast(err instanceof Error ? err.message : String(err), "error");
     }
   };
 

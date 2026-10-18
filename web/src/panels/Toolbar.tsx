@@ -26,6 +26,7 @@ import * as A from "../actions";
 import {
   dispatch,
   setTool,
+  toast,
   toggleView,
   useDoc,
   useStore,
@@ -39,6 +40,7 @@ import { runPlugin, usePlugins } from "../plugins";
 import { useCollab } from "../collab";
 import { claudeReady, useChat } from "../ai/chatState";
 import { useShortcuts } from "./ShortcutsDialog";
+import { useImport } from "./ImportDialog";
 
 const SHAPES: { tool: Tool; label: string; key: string; icon: JSX.Element }[] =
   [
@@ -99,7 +101,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
       label: "Import from Figma…",
       onClick: () => useStore.setState({ figmaOpen: true }),
     },
-    { label: "Import HTML as layers…", onClick: A.importHtmlPrompt },
+    { label: "Import website or HTML…", onClick: () => useImport.setState({ open: true }) },
     { label: "Place image…", kbd: `${SHIFT}${MOD}K`, onClick: A.placeImage },
     { label: "Export React project (.zip)", onClick: A.exportProject },
     { sep: true },
@@ -370,6 +372,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
               page?.children.find((id) => doc.nodes[id]?.type === "frame") ??
               page?.children.find((id) => doc.nodes[id]?.type === "component");
             if (first) useStore.setState({ presenting: first });
+            else toast("Nothing to present yet: add a frame (F) first. Presenting plays your frames as a clickable prototype.");
           }}
         >
           <Play size={16} />

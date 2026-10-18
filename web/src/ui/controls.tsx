@@ -22,6 +22,8 @@ export function NumberField(props: {
   const fmt = (v: Maybe<number>) => (v === MIXED ? "Mixed" : String(Math.round(v * 10 ** precision) / 10 ** precision) + (suffix ?? ""));
   const [text, setText] = useState(fmt(value));
   const [focused, setFocused] = useState(false);
+  /** Enter already committed, or Escape cancelled: the blur that follows must not commit. */
+  const settled = useRef(false);
   useEffect(() => {
     if (!focused) setText(fmt(value));
   }, [value, focused]);
@@ -66,20 +68,27 @@ export function NumberField(props: {
       <input
         value={text}
         onFocus={(e) => {
+          settled.current = false;
           setFocused(true);
           e.target.select();
         }}
         onBlur={() => {
           setFocused(false);
-          commit();
+          if (!settled.current) commit();
+          settled.current = false;
         }}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
+            // preventDefault: committing can move focus (e.g. back into text being edited),
+            // and the Enter must not land there as a newline.
+            e.preventDefault();
             commit();
+            settled.current = true;
             (e.target as HTMLInputElement).blur();
           } else if (e.key === "Escape") {
             setText(fmt(value));
+            settled.current = true;
             (e.target as HTMLInputElement).blur();
           } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && value !== MIXED) {
             e.preventDefault();
@@ -223,7 +232,9 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
     };
   }, []);
   return createPortal(
-    <div ref={ref} className="menu" style={pos} onContextMenu={(e) => e.preventDefault()}>
+    // Portalled, but React events still bubble to the component that opened it (e.g. the
+    // canvas, which would re-pick the layer under the pointer before the item runs).
+    <div ref={ref} className="menu" style={pos} onContextMenu={(e) => e.preventDefault()} onPointerDown={(e) => e.stopPropagation()}>
       {props.items.map((it, i) =>
         it.sep ? (
           <div key={i} className="sep" />
@@ -265,11 +276,13 @@ export const MOD = isMac ? "⌘" : "Ctrl+";
 export const ALT = isMac ? "⌥" : "Alt+";
 export const SHIFT = isMac ? "⇧" : "Shift+";
 
-/** Closes a dialog on Escape, unless a menu inside it is open (the menu closes first). */
-export function useEscape(close: () => void) {
+/** Closes a dialog on Escape, unless a menu inside it is open (the menu closes first).
+ *  Listens only while `enabled`, so a closed dialog never swallows the editor's Escape. */
+export function useEscape(close: () => void, enabled = true) {
   const ref = useRef(close);
   ref.current = close;
   useEffect(() => {
+    if (!enabled) return;
     // Capture phase: dialogs stop key events from reaching the editor's shortcuts.
     const key = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || document.querySelector(".menu")) return;
@@ -278,14 +291,14 @@ export function useEscape(close: () => void) {
     };
     window.addEventListener("keydown", key, true);
     return () => window.removeEventListener("keydown", key, true);
-  }, []);
+  }, [enabled]);
 }
 
 /** Dialog behaviour: Escape closes, focus moves into the dialog and stays there (Tab wraps),
  *  and returns to where it was on close. Attach the returned ref to the dialog element. */
 export function useDialog(close: () => void, active = true) {
   const ref = useRef<HTMLDivElement>(null);
-  useEscape(() => active && close());
+  useEscape(close, active);
   useEffect(() => {
     if (!active) return;
     const before = document.activeElement as HTMLElement | null;

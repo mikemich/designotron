@@ -101,6 +101,8 @@ interface Running {
   plugin: Plugin;
   frame: HTMLIFrameElement;
   ui: { width: number; height: number } | null;
+  /** Still running after a few seconds without showing UI. */
+  slow?: boolean;
 }
 
 export const usePlugins = create<{ list: Plugin[]; running: Running | null; dialogOpen: boolean }>(() => ({
@@ -141,9 +143,9 @@ function bootstrap(code: string): string {
     on: (event, fn) => (listeners[event] || (listeners[event] = [])).push(fn),
     ui: { show: (html, size) => { document.body.innerHTML = html; return call("showUi", [size || {}]); } },
   };
-  const run = new Function("dt", "return (async () => {\\n" + ${body} + "\\n})()");
+  // Compiled inside the chain so a syntax error is reported like any other plugin error.
   Promise.resolve()
-    .then(() => run(window.dt))
+    .then(() => new Function("dt", "return (async () => {\\n" + ${body} + "\\n})()")(window.dt))
     .then(() => call("done", []), (err) => call("error", [String(err && err.stack || err)]));
 })();
 <\/script></body></html>`;
@@ -214,10 +216,19 @@ export function runPlugin(plugin: Plugin) {
     }
   };
   window.addEventListener("message", onMessage);
+  // A plugin still busy after a few seconds: close its undo step so the person's own edits
+  // don't merge into it, and show that it's running (with Stop).
+  const slow = setTimeout(() => {
+    if (!running.ui) {
+      endGesture();
+      usePlugins.setState({ running: { ...running, slow: true } });
+    }
+  }, 3000);
   const unsub = useStore.subscribe((s, prev) => {
     if (s.es.selection !== prev.es.selection) frame.contentWindow?.postMessage({ dtHost: true, event: "selectionchange", data: s.es.selection }, "*");
   });
   cleanup = () => {
+    clearTimeout(slow);
     window.removeEventListener("message", onMessage);
     unsub();
     endGesture();

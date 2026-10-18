@@ -87,8 +87,13 @@ export function installShortcuts(): () => void {
         return has && run(() => A.nudge(0, step));
       case "Delete":
       case "Backspace":
+        // Editing vector points: never delete the whole layer.
+        if (st.editingVector) return;
         return has && run(A.deleteSelection);
       case "Escape":
+        if (st.editingVector) return run(() => useStore.setState({ editingVector: null }));
+        // The canvas finishes the pen path on Escape (switching tools here would discard it).
+        if (st.tool === "pen") return;
         if (st.tool !== "move") return run(() => setTool("move"));
         return run(() => (has ? A.selectParent() : null));
       case "Enter":

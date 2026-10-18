@@ -200,8 +200,12 @@ function Layers() {
       return changed ? next : prev;
     });
     requestAnimationFrame(() => {
-      const el = scrollRef.current?.querySelector(`[data-layer="${sel[0]}"]`);
-      el?.scrollIntoView({ block: "nearest" });
+      // By index, since the row may not be rendered (long lists are windowed).
+      const el = scrollRef.current;
+      const i = rowsRef.current.findIndex((r) => r.n.id === sel[0]);
+      if (!el || i < 0) return;
+      if (i * ROW < el.scrollTop) el.scrollTop = i * ROW;
+      else if ((i + 1) * ROW > el.scrollTop + el.clientHeight) el.scrollTop = (i + 1) * ROW - el.clientHeight;
     });
   }, [sel.join(",")]);
 
@@ -218,6 +222,24 @@ function Layers() {
     walk(doc.pages.find((p) => p.id === page)?.children ?? [], 0);
     return out;
   }, [doc, page, expanded]);
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+
+  // Long lists render only the rows in view (plus a margin): thousands of rows cost
+  // ~100 ms per change otherwise.
+  const [view, setView] = useState({ top: 0, height: 1000 });
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const measure = () => setView({ top: el.scrollTop, height: el.clientHeight });
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const windowed = rows.length > WINDOW_FROM;
+  const first = windowed ? Math.max(0, Math.floor(view.top / ROW) - 20) : 0;
+  const last = windowed ? Math.min(rows.length, Math.ceil((view.top + view.height) / ROW) + 20) : rows.length;
 
   const selectedAncestors = useMemo(() => {
     const s = new Set<string>();
@@ -241,9 +263,16 @@ function Layers() {
   };
 
   return (
-    <div className="scroll" ref={scrollRef} onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
+    <div
+      className="scroll"
+      ref={scrollRef}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={onDrop}
+      onScroll={(e) => windowed && setView({ top: e.currentTarget.scrollTop, height: e.currentTarget.clientHeight })}
+    >
       {rows.length === 0 && <div className="muted" style={{ padding: 16 }}>No layers on this page yet.</div>}
-      {rows.map(({ n, depth }) => {
+      {first > 0 && <div style={{ height: first * ROW }} />}
+      {rows.slice(first, last).map(({ n, depth }) => {
         const isSel = sel.includes(n.id);
         const comp = n.type === "component" || n.type === "componentSet" || n.type === "instance";
         const inInstance = isInsideInstance(doc, n);
@@ -341,10 +370,15 @@ function Layers() {
           </div>
         );
       })}
+      {last < rows.length && <div style={{ height: (rows.length - last) * ROW }} />}
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>
   );
 }
+
+/** Layer row height (`.layer` in styles.css) and the list length where windowing starts. */
+const ROW = 30;
+const WINDOW_FROM = 200;
 
 function isInsideInstance(doc: Doc, n: Node): boolean {
   for (let p = n.parent; p; p = doc.nodes[p]?.parent ?? null) if (doc.nodes[p]?.type === "instance") return true;

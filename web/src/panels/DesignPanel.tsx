@@ -281,6 +281,13 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const isText = nodes.every((n) => n.type === "text");
   const radiusable = nodes.every((n) => ["rectangle", "frame", "component", "instance", "componentSet"].includes(n.type));
   const sizeable = nodes.some((n) => n.layout) || !!parent?.layout;
+  // Hug only means something for layers with contents to hug (auto layout, text, groups, instances).
+  const canHug = nodes.every((n) => !!n.layout || ["text", "group", "instance"].includes(n.type));
+  const sizingOptions = [
+    { value: "fixed" as const, label: "Fixed" },
+    ...(canHug ? [{ value: "hug" as const, label: "Hug" }] : []),
+    { value: "fill" as const, label: "Fill" },
+  ];
   return (
     <Section title="Position & size">
       <div className="grid2">
@@ -308,21 +315,13 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           <SelectField
             label="W"
             value={common(nodes, (n) => n.sizingH)}
-            options={[
-              { value: "fixed", label: "Fixed" },
-              { value: "hug", label: "Hug" },
-              { value: "fill", label: "Fill" },
-            ]}
+            options={sizingOptions}
             onChange={(sizingH) => update(ids, { sizingH })}
           />
           <SelectField
             label="H"
             value={common(nodes, (n) => n.sizingV)}
-            options={[
-              { value: "fixed", label: "Fixed" },
-              { value: "hug", label: "Hug" },
-              { value: "fill", label: "Fill" },
-            ]}
+            options={sizingOptions}
             onChange={(sizingV) => update(ids, { sizingV })}
           />
         </div>
@@ -458,7 +457,7 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
             }),
           )}
         </div>
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 6 }}>
           <NumberField label="⇹" title="Gap between items" value={common(nodes, (n) => n.layout!.gap)} onChange={(gap) => set({ gap })} onScrubStart={begin} onScrubEnd={end} min={0} />
           <SelectField
             value={al.primaryAlign === "spaceBetween" ? "between" : "packed"}

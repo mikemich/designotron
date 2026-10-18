@@ -4,6 +4,13 @@ import type { Mat } from "../types";
 import { cssColor } from "../ui/color";
 
 /** In-place text editing: a textarea laid over the (hidden) text node. */
+/** Set by the canvas when it opened the gesture for a text layer it just created. */
+let textGestureOpen = false;
+export function openTextGesture() {
+  dispatch({ op: "beginGesture" });
+  textGestureOpen = true;
+}
+
 export function TextEditor({ id }: { id: string }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const v = useStore((s) => s.viewport);
@@ -12,7 +19,10 @@ export function TextEditor({ id }: { id: string }) {
   const startText = useRef(node?.text?.characters ?? "");
 
   useEffect(() => {
-    dispatch({ op: "beginGesture" });
+    // New text: the canvas already opened the gesture before creating the layer, so creating
+    // and typing are one undo step.
+    if (textGestureOpen) textGestureOpen = false;
+    else dispatch({ op: "beginGesture" });
     const el = ref.current;
     if (el) {
       el.focus();
@@ -30,9 +40,10 @@ export function TextEditor({ id }: { id: string }) {
     return () => {
       window.removeEventListener("dt-refocus-text", refocus);
       useStore.setState({ textSel: null });
-      dispatch({ op: "endGesture" });
+      // Empty text is removed inside the gesture, so abandoning a new text leaves no undo step.
       const n = getDoc().nodes[id];
       if (n && n.type === "text" && !n.text?.characters.trim()) dispatch({ op: "delete", ids: [id] });
+      dispatch({ op: "endGesture" });
     };
   }, [id]);
 

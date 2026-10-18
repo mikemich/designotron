@@ -2,6 +2,7 @@
 
 import { get as idbGet, set as idbSet, del as idbDel } from "idb-keyval";
 import { allAssets, loadAssets, referencedAssets } from "./assets";
+import { documentLoads } from "./store";
 
 export interface FileMeta {
   id: string;
@@ -103,6 +104,7 @@ export async function deleteFile(id: string) {
   for (const v of await listVersions(id)) await del(`dt:version:${id}:${v.id}`);
   await del("dt:versions:" + id);
   await del("dt:file:" + id);
+  clearRecovery(id);
   await writeIndex((idx) => idx.filter((f) => f.id !== id));
 }
 
@@ -213,4 +215,46 @@ export function pickFile(accept: string): Promise<File | null> {
     input.onchange = () => resolve(input.files?.[0] ?? null);
     input.click();
   });
+}
+
+/** Saves a .dtron file's contents as a new file (never over an open one) and returns its id. */
+export async function importDtron(text: string, fallbackName: string): Promise<string> {
+  let json: string;
+  try {
+    json = fromDtron(text);
+  } catch {
+    throw new Error("That isn't a Designotron file, or it's damaged.");
+  }
+  if (!(await documentLoads(json))) throw new Error("That Designotron file is damaged and can't be opened.");
+  const id = newFileId();
+  await saveFile(id, JSON.parse(json).name || fallbackName, json);
+  return id;
+}
+
+// Recovery copies: written synchronously while a page closes, when an IndexedDB save may not
+// finish. Read on the next open, removed after the next successful save.
+const recoveryKey = (id: string) => `dt:recover:${id}`;
+
+export function writeRecovery(id: string, docJson: string) {
+  try {
+    localStorage.setItem(recoveryKey(id), docJson);
+  } catch {
+    /* too large or storage blocked: the IndexedDB save is all we have */
+  }
+}
+
+export function readRecovery(id: string): string | null {
+  try {
+    return localStorage.getItem(recoveryKey(id));
+  } catch {
+    return null;
+  }
+}
+
+export function clearRecovery(id: string) {
+  try {
+    localStorage.removeItem(recoveryKey(id));
+  } catch {
+    /* ignore */
+  }
 }

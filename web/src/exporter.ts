@@ -44,7 +44,8 @@ async function embedFonts(svg: string): Promise<string> {
   if (!families.length) return svg;
   const css = (await Promise.all(families.map(fontFaceCss))).join("\n");
   if (!css) return svg;
-  return svg.replace("<defs>", `<defs><style>${css}</style>`);
+  if (svg.includes("<defs>")) return svg.replace("<defs>", `<defs><style>${css}</style>`);
+  return svg.replace(/<svg[^>]*>/, (open) => `${open}<defs><style>${css}</style></defs>`);
 }
 
 /** Self-contained SVG for a node (assets inlined). */
@@ -90,7 +91,8 @@ export async function exportNode(id: string, format: "png" | "jpg" | "svg", scal
   const svg = nodeSvg(id);
   const base = safeName(node.name) + (suffix || (scale !== 1 && format !== "svg" ? `@${scale}x` : ""));
   if (format === "svg") {
-    download(`${base}.svg`, svg, "image/svg+xml");
+    // Fonts embedded so text looks the same wherever the SVG is opened.
+    download(`${base}.svg`, await embedFonts(svg), "image/svg+xml");
     return;
   }
   const blob = await svgToPngBlob(svg, scale, format === "jpg" ? "image/jpeg" : "image/png");

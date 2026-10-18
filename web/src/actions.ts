@@ -2,7 +2,7 @@
 
 import { addAsset, imageSize, readFileAsDataUrl } from "./assets";
 import { exportProjectZip } from "./exporter";
-import { download, fromDtron, pickFile, toDtron } from "./files";
+import { download, importDtron, pickFile, toDtron } from "./files";
 import {
   canvasSize,
   currentPage,
@@ -15,7 +15,6 @@ import {
   screenToPage,
   toast,
   useStore,
-  zoomToFit,
 } from "./store";
 import type { Rect } from "./types";
 
@@ -44,20 +43,34 @@ export const distribute = (horizontal: boolean) => dispatch({ op: "distribute", 
 export const flip = (horizontal: boolean) => dispatch({ op: "flip", ids: selection(), horizontal });
 export const nudge = (dx: number, dy: number) => dispatch({ op: "nudge", ids: selection(), dx, dy });
 
+/** Runs several edits as one undo step. */
+function oneStep(fn: () => void) {
+  dispatch({ op: "beginGesture" });
+  try {
+    fn();
+  } finally {
+    dispatch({ op: "endGesture" });
+  }
+}
+
 export function toggleVisibility(ids = selection()) {
   const doc = getDoc();
-  for (const id of ids) {
-    const n = doc.nodes[id];
-    if (n) dispatch({ op: "update", ids: [id], patch: { visible: !n.visible } });
-  }
+  oneStep(() => {
+    for (const id of ids) {
+      const n = doc.nodes[id];
+      if (n) dispatch({ op: "update", ids: [id], patch: { visible: !n.visible } });
+    }
+  });
 }
 
 export function toggleLock(ids = selection()) {
   const doc = getDoc();
-  for (const id of ids) {
-    const n = doc.nodes[id];
-    if (n) dispatch({ op: "update", ids: [id], patch: { locked: !n.locked } });
-  }
+  oneStep(() => {
+    for (const id of ids) {
+      const n = doc.nodes[id];
+      if (n) dispatch({ op: "update", ids: [id], patch: { locked: !n.locked } });
+    }
+  });
 }
 
 export function selectParent() {
@@ -160,31 +173,24 @@ export function saveDtron() {
   download(`${doc.name || "Untitled"}.dtron`, toDtron(getEngine().save()), "application/json");
 }
 
-export async function openDtron(): Promise<boolean> {
-  const f = await pickFile(".dtron,.json,application/json");
-  if (!f) return false;
+/** Opens a .dtron file as a new file next to this one (the open file is left as it is). */
+export async function openDtronFile(f: File): Promise<boolean> {
   try {
-    getEngine().load(fromDtron(await f.text()));
-    dispatch({ op: "relayout" });
-    zoomToFit();
+    const id = await importDtron(await f.text(), f.name.replace(/\.(dtron|json)$/, ""));
+    location.hash = `#/file/${id}`;
+    toast(`Opened ${f.name} as a new file`);
     return true;
   } catch (err) {
-    toast(String(err), "error");
+    toast(err instanceof Error ? err.message : String(err), "error");
     return false;
   }
 }
 
-export async function importHtmlPrompt() {
-  const html = window.prompt("Paste HTML (inline styles or a <style> block):");
-  if (!html) return;
-  const { importHtml } = await import("./ai/browserTools");
-  const c = viewportCenter();
-  try {
-    await importHtml({ html, x: c.x, y: c.y, width: 1280 });
-  } catch (err) {
-    toast(String(err), "error");
-  }
+export async function openDtron(): Promise<boolean> {
+  const f = await pickFile(".dtron,.json,application/json");
+  return f ? openDtronFile(f) : false;
 }
+
 
 export const exportProject = () => exportProjectZip().catch((e) => toast(String(e), "error"));
 

@@ -411,6 +411,8 @@ textarea.textinput {
 }
 .seg button {
   flex: 1;
+  min-width: 0;
+  white-space: nowrap;
   height: 24px;
   border-radius: 4px;
   color: var(--text-2);
@@ -1852,4 +1854,23 @@ body:has(.modal-bg) .hint-card {
 /* The phone note gives way to Claude's sheet. */
 body:has(.main > .chat) .phone-note {
   display: none;
+}
+.plugin-running {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+}
+.plugin-running .btn.small {
+  height: 24px;
+  padding: 0 10px;
 }

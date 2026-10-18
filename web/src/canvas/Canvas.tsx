@@ -12,17 +12,15 @@ import {
   zoomBy,
 } from "../store";
 import { apply, corners, invert, mid, polyPoints, rectCorners, simplify, toScreen, type Pt } from "./geometry";
-import { TextEditor } from "./TextEditor";
+import { openTextGesture, TextEditor } from "./TextEditor";
 import { EmptyPrompt } from "./EmptyPrompt";
 import { GridOverlay, PageGuides, Rulers } from "./Rulers";
 import { CommentLayer } from "./Comments";
 import { RemoteCursors, RemoteSelections } from "./RemoteCursors";
 import { reportCursor } from "../collab";
-import { insertImageFile } from "../actions";
+import { insertImageFile, openDtronFile } from "../actions";
 import { canvasMenu } from "./contextMenu";
 import { Menu, type MenuItem } from "../ui/controls";
-import { fromDtron } from "../files";
-import { getEngine } from "../store";
 
 interface BoundsItem {
   id: string;
@@ -557,7 +555,9 @@ export function Canvas() {
     const z = zoom();
     const clicked = Math.hypot(end.x - start.x, end.y - start.y) * z < 3;
     if (tool === "text") {
+      openTextGesture();
       const r = dispatch<{ id: string }>({ op: "createText", x: start.x, y: start.y, characters: "", parent: null });
+      if (!r) dispatch({ op: "endGesture" });
       if (r) {
         if (!clicked) {
           dispatch({ op: "update", ids: [r.id], patch: { width: Math.abs(end.x - start.x), text: { autoResize: "height" } } });
@@ -660,14 +660,7 @@ export function Canvas() {
     const p = pagePt(e);
     for (const f of [...e.dataTransfer.files]) {
       if (f.type.startsWith("image/")) await insertImageFile(f, p.x, p.y);
-      else if (f.name.endsWith(".dtron") || f.name.endsWith(".json")) {
-        try {
-          getEngine().load(fromDtron(await f.text()));
-          dispatch({ op: "relayout" });
-        } catch (err) {
-          console.error(err);
-        }
-      }
+      else if (f.name.endsWith(".dtron") || f.name.endsWith(".json")) await openDtronFile(f);
     }
     const comp = e.dataTransfer.getData("application/x-designotron-component");
     if (comp) dispatch({ op: "createInstance", componentId: comp, x: p.x, y: p.y, parent: null });

@@ -43,7 +43,10 @@ export async function importUrl(input: { url: string; width?: number; x?: number
   } catch {
     throw new Error("importing a website needs the Designotron bridge running (setup steps in the Claude panel)");
   }
-  if (!res.ok) throw new Error(await res.text());
+  const NEEDS_BRIDGE = "importing a website needs the Designotron bridge running (setup steps in the Claude panel)";
+  // No bridge behind this address: a static host answers 404 or its own HTML page.
+  if (res.status === 404 || res.status === 405) throw new Error(NEEDS_BRIDGE);
+  if (!res.ok) throw new Error((await res.text()) || `couldn't fetch ${url.href} (HTTP ${res.status})`);
   let html = await res.text();
   // Resolve relative stylesheets and images against the page. Scripts never run (sandboxed iframe).
   const base = `<base href="${url.href.replace(/"/g, "&quot;")}">`;

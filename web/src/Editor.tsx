@@ -13,12 +13,13 @@ import { usePlugins } from "./plugins";
 import { joinShared, stopSharing, useCollab } from "./collab";
 import { GuestBar } from "./panels/GuestBar";
 import { ShortcutsDialog } from "./panels/ShortcutsDialog";
+import { ImportDialog } from "./panels/ImportDialog";
 import { PhoneNote } from "./panels/PhoneNote";
 import { DemoOverlay } from "./Demo";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
 import { bootEngine, getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
-import { listVersions, loadFile, saveFile, saveVersion } from "./files";
+import { clearRecovery, listVersions, loadFile, readRecovery, saveFile, saveVersion, writeRecovery } from "./files";
 import { AUTO_VERSION_MS } from "./panels/HistoryPanel";
 import { nodeSvg, svgToPngBlob } from "./exporter";
 import { readFileAsDataUrl } from "./assets";
@@ -39,7 +40,10 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     let cancelled = false;
     (async () => {
       await bootEngine();
-      const json = await loadFile(fileId);
+      // loadFile also loads the file's images. A copy kept while the page was closing is
+      // newer than the last IndexedDB save.
+      const stored = await loadFile(fileId);
+      const json = readRecovery(fileId) ?? stored;
       if (cancelled) return;
       // A link to a file that isn't in this browser (deleted, or from another device).
       if (json === null) {
@@ -90,17 +94,19 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           setStale(true);
         }
       };
-    const save = async () => {
+    let closed = false;
+    const save = async (leaving = false) => {
       if (stale) return;
       const json = getEngine().save();
       const doc = getDoc();
       let thumb: string | undefined;
-      if (Date.now() - lastThumb > 15000) {
+      if (!leaving && Date.now() - lastThumb > 15000) {
         lastThumb = Date.now();
         thumb = await thumbnail().catch(() => undefined);
       }
       await saveFile(fileId, doc.name, json, thumb);
-      tabs?.postMessage({ fileId });
+      clearRecovery(fileId);
+      if (!closed) tabs?.postMessage({ fileId });
       useStore.setState({ dirty: false });
       if (Date.now() - lastVersion > AUTO_VERSION_MS) {
         lastVersion = Date.now();
@@ -109,22 +115,35 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     };
     const off = onDocChange(() => {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(save, 700);
+      timer = setTimeout(() => save(), 400);
     });
+    // Closing or reloading: IndexedDB writes can be cut off, so keep a synchronous copy in
+    // localStorage too (picked up the next time the file opens).
+    const leave = () => {
+      if (!useStore.getState().dirty || stale) return;
+      writeRecovery(fileId, getEngine().save());
+      save(true);
+    };
     const beforeUnload = (e: BeforeUnloadEvent) => {
       if (useStore.getState().dirty) {
-        save();
+        leave();
         e.preventDefault();
       }
     };
+    const hidden = () => document.visibilityState === "hidden" && leave();
     window.addEventListener("beforeunload", beforeUnload);
+    window.addEventListener("pagehide", leave);
+    document.addEventListener("visibilitychange", hidden);
     return () => {
       off();
       if (timer) {
         clearTimeout(timer);
-        save();
+        save(true);
       }
       window.removeEventListener("beforeunload", beforeUnload);
+      window.removeEventListener("pagehide", leave);
+      document.removeEventListener("visibilitychange", hidden);
+      closed = true;
       tabs?.close();
     };
   }, [ready, fileId]);
@@ -164,6 +183,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         </div>
       )}
       <ShortcutsDialog />
+      <ImportDialog />
       <PhoneNote />
       <DemoOverlay />
       <PluginWindow />

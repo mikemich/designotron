@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Play, Plus, Sparkles, Trash2, X } from "lucide-react";
+import { Loader2, Play, Plus, Sparkles, Trash2, X } from "lucide-react";
 import { deletePlugin, runPlugin, savePlugin, usePlugins, type Plugin } from "../plugins";
 import { askClaude } from "../ai/chatState";
 import { useDialog } from "../ui/controls";
@@ -109,6 +109,15 @@ export function PluginsDialog() {
 /** Title bar for a plugin that shows UI (the sandboxed iframe sits right below it). */
 export function PluginWindow() {
   const running = usePlugins((s) => s.running);
+  if (running?.slow && !running.ui)
+    return (
+      <div className="plugin-running" role="status">
+        <Loader2 size={13} className="spin" /> Running “{running.plugin.name}”…
+        <button className="btn small" onClick={() => import("../plugins").then((m) => m.stopPlugin())}>
+          Stop
+        </button>
+      </div>
+    );
   if (!running?.ui) return null;
   return (
     <div className="plugin-header" style={{ width: running.ui.width }}>
