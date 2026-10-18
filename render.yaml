@@ -17,3 +17,14 @@ services:
     envVars:
       - key: RUST_LOG
         value: info
+      # Render's proxy appends the client's address to X-Forwarded-For; per-address limits
+      # use it (otherwise every client looks like the proxy).
+      - key: DESIGNOTRON_TRUST_PROXY
+        value: "1"
+      # The free plan has 512 MB of RAM; see docs/relay.md for what this budget counts.
+      - key: DESIGNOTRON_MAX_TOTAL_BYTES
+        value: 192MB
+      # One big file with several people can fill a small budget on its own (each editor's
+      # WebSocket buffers keep a file-sized copy), so the free relay takes files up to 20 MB.
+      - key: DESIGNOTRON_MAX_ROOM_BYTES
+        value: 20MB

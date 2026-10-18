@@ -29,7 +29,15 @@ pub struct Collab {
 impl Default for Collab {
   fn default() -> Self {
     Collab {
-      rooms: Rooms::new(Limits::default(), None),
+      // The bridge runs on the owner's computer: memory isn't the constraint a small
+      // relay host has.
+      rooms: Rooms::new(
+        Limits {
+          max_total_bytes: usize::MAX / 2,
+          ..Limits::default()
+        },
+        None,
+      ),
       share: Mutex::new(None),
     }
   }

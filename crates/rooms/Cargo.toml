@@ -8,7 +8,7 @@ description = "Multiplayer rooms: merges collaborators' document deltas and rela
 [dependencies]
 designotron-engine = { path = "../engine" }
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 axum = { version = "0.7.9", features = ["ws"] }
 tokio = { version = "1.41", features = ["sync", "time", "fs", "macros", "rt"] }
 futures-util = "0.3"

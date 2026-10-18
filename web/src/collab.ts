@@ -106,6 +106,9 @@ let wsUrl = "";
 let applying = false;
 let flushQueued = false;
 let retry: ReturnType<typeof setTimeout> | null = null;
+/** Pause before reconnecting; doubles while the relay refuses or can't be reached. */
+const RETRY_MS = 2000;
+let retryDelay = RETRY_MS;
 const sentAssets = new Set<string>();
 let unsubscribe: (() => void) | null = null;
 
@@ -168,6 +171,7 @@ function onMessage(m: any) {
       const peers: Record<number, Peer> = {};
       for (const p of m.peers ?? []) peers[p.id] = p;
       useCollab.setState({ status: "live", peers });
+      retryDelay = RETRY_MS;
       sendPresence(true);
       break;
     }
@@ -210,7 +214,11 @@ function connect(join: Record<string, unknown>) {
   useCollab.setState({ status: "connecting" });
   const socket = new WebSocket(wsUrl);
   ws = socket;
-  socket.onopen = () => socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, ...join }));
+  let opened = false;
+  socket.onopen = () => {
+    opened = true;
+    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, ...join }));
+  };
   socket.onmessage = (e) => onMessage(JSON.parse(e.data));
   socket.onclose = () => {
     if (ws !== socket) return;
@@ -220,7 +228,11 @@ function connect(join: Record<string, unknown>) {
     // Reconnect with this copy of the file but without `reset`: the relay keeps the room's
     // document if it still has one, and adopts ours if it lost the room (e.g. a free host
     // restarted it after sleeping).
-    retry = setTimeout(() => connect(currentFile()), 2000);
+    // A busy relay (its error was already shown) or one that turns connections away gets
+    // longer and longer pauses, up to a minute.
+    if (!opened && retryDelay === RETRY_MS * 4) toast("Can't connect to the relay right now (it may be busy); still trying…", "error");
+    retry = setTimeout(() => connect(currentFile()), retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 60_000);
   };
   unsubscribe ??= subscribeLocal();
 }

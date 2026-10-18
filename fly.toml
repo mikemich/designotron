@@ -10,6 +10,10 @@ primary_region = "iad"
 
 [env]
   PORT = "8080"
+  # Fly's proxy appends the client's address to X-Forwarded-For; per-address limits use it.
+  DESIGNOTRON_TRUST_PROXY = "1"
+  # Sized for the 512 MB machine below; see docs/relay.md.
+  DESIGNOTRON_MAX_TOTAL_BYTES = "192MB"
 
 [http_service]
   internal_port = 8080

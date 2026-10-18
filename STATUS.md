@@ -67,7 +67,7 @@ Ordered by impact on "replace Figma for a small team".
 | Performance     | Persistent node map (O(1) snapshots), diff-driven layout/component sync, per-root canvas render cache with transform-only moves, document deltas to JS, contained canvas layout |
 | Comments        | Comment tool (C), pins that follow their layer, threads with replies, resolve/reopen, Comments tab; Claude reads them (`get_comments`), replies and resolves; "Ask Claude to address them" |
 | Plugins         | Sandboxed iframe plugins (opaque origin) with a promise API over the same tools Claude uses, optional UI panel, one undo step per run; built-in examples; manager with editor; Claude writes plugins via `save_plugin` |
-| Online sharing  | `designotron-relay` (crates/relay, Docker image, Fly/Render configs, GHCR workflow, release binaries) hosts rooms on the internet and serves the editor; Share → Online gives a link anyone can open; rooms saved to disk survive restarts, and on a relay without a disk (free Render) reconnecting editors put the file back |
+| Online sharing  | `designotron-relay` (crates/relay, Docker image, Fly/Render configs, GHCR workflow, release binaries) hosts rooms on the internet and serves the editor; Share → Online gives a link anyone can open; rooms saved to disk survive restarts, and on a relay without a disk (free Render) reconnecting editors put the file back. Hardened for a 512 MB host: memory budget over rooms and connection buffers (idle rooms unloaded LRU, then "relay is busy" for new rooms/joins; active rooms never dropped), per-address connection and new-room limits (HTTP 429, `X-Forwarded-For` behind `DESIGNOTRON_TRUST_PROXY`), per-connection message rate (presence dropped, changes slowed, flooding disconnected), slow readers disconnected instead of buffered, message size capped at the file limit; `/health` reports memory; the editor backs off when refused |
 | Multiplayer     | Share (toolbar) hosts a live session through the bridge: secret LAN link (token-guarded listener that serves only the editor and the room), node-level deltas, tree repair for concurrent structure edits, selective undo that never reverts others' work, live cursors, selections, avatars, synced comments and images |
 | Live app        | App tab: write the generated project to `workspace/app` (or keep it in sync), run `npm run dev` through the bridge, preview at mobile/desktop width, logs, "Ask Claude to fix it" |
 | Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README with screenshots and demo GIF (`web/scripts/media.mjs`), CONTRIBUTING, issue and PR templates |
@@ -78,7 +78,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 76 engine + bridge unit tests                          | `cargo test --workspace`                     |
+| 91 engine, bridge, rooms and relay tests               | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
@@ -97,6 +97,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 | Two browsers: join by link, edits both ways, selective undo, cursors, comments, bad token refused | `web/scripts/collab-e2e.mjs` (9/9) |
 | Same 9 checks online through the relay, locally and in the Docker image; with `E2E_RELAY_BIN` also a relay restart (rooms lost, editors put the file back) | `E2E_RELAY=… [E2E_RELAY_BIN=…] node scripts/collab-e2e.mjs` |
 | Relay: rooms, late joiners, restart persistence, bad room ids | `cargo test -p designotron-relay`  |
+| Relay limits: idle rooms unloaded over the memory budget (saved first, reload from disk), new rooms refused when full of active ones, per-address connections → 429 (forged `X-Forwarded-For` ignored), new rooms per hour → 429, presence dropped / changes slowed / flooding disconnected, slow readers disconnected, `/health` memory | `cargo test -p designotron-relay -p designotron-rooms` |
 | Bridge reaches api.figma.com and real sites via proxy  | curl `/bridge/figma` (403 for a bad token), `/bridge/fetch` |
 | Engine: drag step 0.13 ms, edit 0.3 ms on 6k layers    | `cargo run --release -p designotron-engine --example bench` (was 42 ms / 46 ms) |
 | Browser drag on 6k layers: ~10 ms script, ~1 ms layout per frame | `web/scripts/perf.mjs` on the production build (was 25 ms script + 80 ms layout) |
@@ -120,7 +121,7 @@ until someone runs it with a real key.
 | Area             | Limitation                                                                                               |
 |------------------|----------------------------------------------------------------------------------------------------------|
 | Background service | Linux unit tested; the macOS launchd agent hasn't been run on a real Mac yet. Windows has no background service (run `designotron.exe`) |
-| Collaboration    | The public relay is a free Render instance (sleeps when idle, first share wakes it in up to a minute); concurrent edits to the same layer: last writer wins; links are the only access control (no accounts); versions live only in each browser |
+| Collaboration    | The public relay is a free Render instance (sleeps when idle, first share wakes it in up to a minute); concurrent edits to the same layer: last writer wins; links are the only access control (no accounts); versions live only in each browser. Relay limits stop single clients, not distributed abuse; messages still uploading aren't counted in the memory budget; on the free relay one large file with several people can fill the budget on its own (WebSocket buffers keep a copy's worth per editor), so it caps shared files at 20 MB |
 | Storage          | Files live in the browser (IndexedDB). Clearing site data deletes them; save `.dtron` files to keep them |
 | Scale            | Updates are incremental, but the canvas is one big SVG: painting 10k+ layers zoomed out is the limit (software rendering in headless tests ~35 ms/frame at 6k) |
 | Text             | No OpenType features or per-range line height; widths depend on the web font having loaded               |
