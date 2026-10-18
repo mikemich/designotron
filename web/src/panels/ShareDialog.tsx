@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { Check, Copy, Globe, Link2, Loader2, Share2, Users, Wifi, X } from "lucide-react";
 import { copyUrl, encodeFile, linkBase, viewUrl } from "../snapshot";
-import { pageIsRelay, relayUrl, remixShared, startOnline, startSharing, stopSharing, useCollab } from "../collab";
+import { myColor, pageIsRelay, relayUrl, remixShared, startOnline, startSharing, stopSharing, useCollab } from "../collab";
 import { useChat } from "../ai/chatState";
-import { Avatar, userName } from "../canvas/Comments";
-import { useEscape } from "../ui/controls";
+import { userName } from "../canvas/Comments";
+import { useDialog } from "../ui/controls";
 
 const RELAY_DOCS = "https://github.com/mikemich/designotron/blob/main/docs/relay.md";
 
@@ -23,9 +23,14 @@ export function ShareDialog() {
   const [copied, setCopied] = useState(false);
   const [copyState, setCopyState] = useState<CopyKind | null>(null);
   const [copyNote, setCopyNote] = useState<string | null>(null);
+  const [copyBusy, setCopyBusy] = useState<CopyKind | null>(null);
+  /** Shown to copy by hand when the clipboard isn't available. */
+  const [manual, setManual] = useState<string | null>(null);
   /** Copies a link (or snippet) that carries this file: no server involved. */
   const sendCopy = async (kind: CopyKind) => {
     setError(null);
+    setCopyNote(null);
+    setCopyBusy(kind);
     try {
       const { data, withoutImages } = await encodeFile();
       const text = {
@@ -34,16 +39,30 @@ export function ShareDialog() {
         embed: `<iframe src="${viewUrl(data)}" width="800" height="600" style="border:1px solid #3a3a3a;border-radius:8px" allowfullscreen></iframe>`,
         badge: `[![Open in Designotron](${linkBase()}badge.svg)](${copyUrl(data)})`,
       }[kind];
-      await navigator.clipboard.writeText(text).catch(() => prompt("Copy this:", text));
-      setCopyState(kind);
-      setCopyNote(withoutImages ? "Images were left out to keep the link short; send a .dtron file to include them." : null);
-      setTimeout(() => setCopyState(null), 2000);
+      const copied = await (navigator.clipboard?.writeText(text) ?? Promise.reject()).then(
+        () => true,
+        () => false,
+      );
+      const notes: string[] = [];
+      if (!copied) setManual(text);
+      else {
+        setManual(null);
+        setCopyState(kind);
+        setTimeout(() => setCopyState(null), 2000);
+      }
+      if (withoutImages) notes.push("Images were left out to keep the link short; send a .dtron file to include them.");
+      // Links over these lengths get cut off or rejected by common chat apps.
+      if (text.length > 30_000) notes.push(`This link is ${Math.round(text.length / 1000)}k characters: too long for Slack, Teams and Discord. Email it, or send a .dtron file.`);
+      else if (text.length > 2_000) notes.push(`This link is ${(text.length / 1000).toFixed(1)}k characters: fine for Slack, email and most chats, too long for Discord and SMS.`);
+      setCopyNote(notes.join(" ") || null);
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setCopyBusy(null);
     }
   };
   const close = () => useCollab.setState({ dialogOpen: false });
-  useEscape(close);
+  const dialogRef = useDialog(close);
 
   // An editor served by a relay can share online with no setup.
   useEffect(() => {
@@ -51,11 +70,12 @@ export function ShareDialog() {
   }, []);
 
   const copy = (text: string, input?: HTMLInputElement | null) => {
-    navigator.clipboard?.writeText(text).then(
+    (navigator.clipboard?.writeText(text) ?? Promise.reject()).then(
       () => {
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       },
+      // No clipboard access: select the link so it can be copied by hand.
       () => input?.select(),
     );
   };
@@ -77,9 +97,9 @@ export function ShareDialog() {
   const list = Object.values(peers);
   return (
     <div className="modal-bg" onPointerDown={(e) => e.target === e.currentTarget && close()}>
-      <div className="modal share-dialog" onKeyDown={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} className="modal share-dialog" role="dialog" aria-modal="true" aria-label="Share" onKeyDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <b>Share for live editing</b>
+          <b>Share</b>
           <button className="ibtn" title="Close" onClick={close} style={{ marginLeft: "auto" }}>
             <X size={14} />
           </button>
@@ -128,7 +148,8 @@ export function ShareDialog() {
                   A link that contains this file. Whoever opens it gets their own copy to remix; your file stays yours.
                 </div>
                 <button className="btn" disabled={!!busy} onClick={() => sendCopy("copy")}>
-                  {copyState === "copy" ? <Check size={13} /> : <Link2 size={13} />} {copyState === "copy" ? "Link copied" : "Copy link to a copy"}
+                  {copyBusy === "copy" ? <Loader2 size={13} className="spin" /> : copyState === "copy" ? <Check size={13} /> : <Link2 size={13} />}{" "}
+                  {copyState === "copy" ? "Link copied" : "Copy link"}
                 </button>
                 <div className="copy-kinds small">
                   {(
@@ -139,10 +160,16 @@ export function ShareDialog() {
                     ] as const
                   ).map(([kind, label, title]) => (
                     <button key={kind} className="link-btn" title={title} onClick={() => sendCopy(kind)}>
-                      {copyState === kind ? "Copied ✓" : label}
+                      {copyBusy === kind ? "Copying…" : copyState === kind ? "Copied ✓" : label}
                     </button>
                   ))}
                 </div>
+                {manual && (
+                  <>
+                    <div className="small">Your browser blocked copying. Select this and copy it:</div>
+                    <textarea className="textinput mono" readOnly rows={3} value={manual} onFocus={(e) => e.target.select()} autoFocus />
+                  </>
+                )}
                 {copyNote && <div className="muted small">{copyNote}</div>}
               </div>
 
@@ -193,7 +220,10 @@ export function ShareDialog() {
               </div>
               <div className="share-peers">
                 <div className="row">
-                  <Avatar name={userName() || "You"} /> {userName() || "You"} (you)
+                  <span className="avatar" style={{ width: 22, height: 22, background: myColor, fontSize: 10 }}>
+                    {(userName() || "You")[0].toUpperCase()}
+                  </span>
+                  {userName() ? `${userName()} (you)` : "You"}
                 </div>
                 {list.map((p) => (
                   <div key={p.id} className="row">

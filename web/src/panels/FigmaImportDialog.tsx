@@ -3,7 +3,7 @@ import { FileJson, Loader2, X } from "lucide-react";
 import { getDoc, useStore, toast } from "../store";
 import { deleteFile } from "../files";
 import { importFigmaJson, importFigmaUrl, type ImportResult } from "../figma";
-import { useEscape } from "../ui/controls";
+import { useDialog } from "../ui/controls";
 
 const TOKEN_KEY = "dt:figmaToken";
 const readToken = () => {
@@ -32,7 +32,7 @@ export function FigmaImportDialog() {
       location.hash = "#/";
     }
   };
-  useEscape(close);
+  const dialogRef = useDialog(close);
 
   const finish = (r: ImportResult) => {
     setResult(r);
@@ -67,7 +67,7 @@ export function FigmaImportDialog() {
 
   return (
     <div className="modal-bg" onPointerDown={(e) => e.target === e.currentTarget && close()}>
-      <div className="modal figma-dialog" onKeyDown={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} className="modal figma-dialog" role="dialog" aria-modal="true" aria-label="Import from Figma" onKeyDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <b>Import from Figma</b>
           <button className="ibtn" title="Close" onClick={close} style={{ marginLeft: "auto" }}>

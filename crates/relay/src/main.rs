@@ -262,6 +262,8 @@ async fn health(State(app): State<App>) -> Json<serde_json::Value> {
   Json(json!({
     "relay": "designotron",
     "version": env!("CARGO_PKG_VERSION"),
+    // The git commit the image was built from (set by relay-image.yml), to tell deploys apart.
+    "commit": option_env!("DESIGNOTRON_COMMIT").unwrap_or("dev"),
     "editor": app.serves_editor,
     "rooms": s.rooms,
     "people": s.people,

@@ -70,6 +70,13 @@ export function CommentLayer({ v }: { v: View }) {
   const pins = useMemo(() => query<CommentPin[]>({ q: "comments", page, includeResolved: true }), [rev, page]);
   const showPins = tool === "comment" || leftTab === "comments" || !!open;
   const toScreen = (x: number, y: number) => ({ left: x * v.zoom + v.x, top: y * v.zoom + v.y });
+  // Popovers sit beside their pin but stay inside the canvas (phones, pins near an edge).
+  const popover = (x: number, y: number) => {
+    const s = toScreen(x, y);
+    const box = document.getElementById("dt-canvas")?.getBoundingClientRect();
+    if (!box) return s;
+    return { left: Math.max(-20, Math.min(s.left, box.width - 280 - 36)), top: Math.max(32, Math.min(s.top, box.height - 220)) };
+  };
   const openPin = pins.find((p) => p.id === open);
   return (
     <>
@@ -92,8 +99,8 @@ export function CommentLayer({ v }: { v: View }) {
               {p.messages.length > 1 && <span className="count">{p.messages.length}</span>}
             </button>
           ))}
-      {openPin && <Thread pin={openPin} style={toScreen(openPin.x, openPin.y)} />}
-      {draft && <Composer draft={draft} style={toScreen(draft.x, draft.y)} />}
+      {openPin && <Thread pin={openPin} style={popover(openPin.x, openPin.y)} />}
+      {draft && <Composer draft={draft} style={popover(draft.x, draft.y)} />}
     </>
   );
 }

@@ -37,7 +37,7 @@ import type { Tool } from "../types";
 import { ALT, Menu, MOD, SHIFT, type MenuItem } from "../ui/controls";
 import { runPlugin, usePlugins } from "../plugins";
 import { useCollab } from "../collab";
-import { useChat } from "../ai/chatState";
+import { claudeReady, useChat } from "../ai/chatState";
 import { useShortcuts } from "./ShortcutsDialog";
 
 const SHAPES: { tool: Tool; label: string; key: string; icon: JSX.Element }[] =
@@ -72,7 +72,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
   const zoom = useStore((s) => s.viewport.zoom);
   const dirty = useStore((s) => s.dirty);
   const chatOpen = useStore((s) => s.chatOpen);
-  const bridge = useChat((s) => s.bridgeStatus);
+  const claudeOn = useChat((s) => claudeReady(s));
   const doc = useDoc();
   const [menu, setMenu] = useState<{
     x: number;
@@ -191,7 +191,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           title="Main menu"
         >
           <div className="logo">D</div>
-          <ChevronDown size={12} />
+          <ChevronDown size={12} data-phone="hide" />
         </button>
         {toolBtn("move", "Move (V)", <MousePointer2 size={16} />)}
         {/* Drawing tools are hidden on phones (view, comment, present and Claude only). */}
@@ -296,12 +296,13 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
             dispatch({ op: "setDocName", name: e.target.value.trim() })
           }
         />
-        <span className="small">{dirty ? "Saving…" : "Saved locally"}</span>
+        <span className="small save-state">{dirty ? "Saving…" : "Saved locally"}</span>
       </div>
       <div className="group">
         <button
           className="tbtn"
           title="Undo"
+          data-phone="hide"
           disabled={!es.canUndo}
           onClick={A.undo}
         >
@@ -310,6 +311,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         <button
           className="tbtn"
           title="Redo"
+          data-phone="hide"
           disabled={!es.canRedo}
           onClick={A.redo}
         >
@@ -351,15 +353,11 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           title={`Claude (${MOD}/)`}
           onClick={() => useStore.setState({ chatOpen: !chatOpen })}
         >
-          <Sparkles size={16} /> Claude
+          <Sparkles size={16} /> <span className="label">Claude</span>
           <span
             className="status-dot"
-            style={{ background: bridge === "connected" ? "#14ae5c" : "#666" }}
-            title={
-              bridge === "connected"
-                ? "Claude Code bridge connected"
-                : "Bridge offline"
-            }
+            style={{ background: claudeOn ? "#14ae5c" : "#666" }}
+            title={claudeOn ? "Claude is connected" : "Claude isn't connected yet"}
           />
         </button>
         <button
@@ -414,6 +412,11 @@ function ShareButton() {
             </span>
           ))}
         </div>
+      )}
+      {role && status !== "live" && (
+        <span className="reconnecting" role="status" title="Your changes are kept and sent when the connection is back">
+          Reconnecting…
+        </span>
       )}
       <button
         className={"tbtn" + (role ? " active" : "")}

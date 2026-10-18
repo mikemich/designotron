@@ -32,6 +32,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const pluginsOpen = usePlugins((s) => s.dialogOpen);
   const shareOpen = useCollab((s) => s.dialogOpen);
   const [ready, setReady] = useState(false);
+  const [missing, setMissing] = useState(false);
+  const [stale, setStale] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,6 +41,11 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       await bootEngine();
       const json = await loadFile(fileId);
       if (cancelled) return;
+      // A link to a file that isn't in this browser (deleted, or from another device).
+      if (json === null) {
+        setMissing(true);
+        return;
+      }
       newEngine();
       if (json) {
         try {
@@ -71,7 +78,20 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     let lastVersion = Date.now();
     // A file without versions gets its first autosave one interval from now, not on the first save.
     listVersions(fileId).then((v) => (lastVersion = v[0]?.createdAt ?? Date.now()));
+    // Another tab saving this file makes this tab's copy stale: stop autosaving here so it
+    // can't overwrite the newer work, and offer a reload.
+    const tabs = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("dt-files");
+    let stale = false;
+    if (tabs)
+      tabs.onmessage = (e) => {
+        // In a live session both tabs stay in sync through the room, so they're not stale.
+        if (e.data?.fileId === fileId && !useCollab.getState().role) {
+          stale = true;
+          setStale(true);
+        }
+      };
     const save = async () => {
+      if (stale) return;
       const json = getEngine().save();
       const doc = getDoc();
       let thumb: string | undefined;
@@ -80,6 +100,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         thumb = await thumbnail().catch(() => undefined);
       }
       await saveFile(fileId, doc.name, json, thumb);
+      tabs?.postMessage({ fileId });
       useStore.setState({ dirty: false });
       if (Date.now() - lastVersion > AUTO_VERSION_MS) {
         lastVersion = Date.now();
@@ -104,9 +125,19 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         save();
       }
       window.removeEventListener("beforeunload", beforeUnload);
+      tabs?.close();
     };
   }, [ready, fileId]);
 
+  if (missing)
+    return (
+      <div className="empty-hint">
+        <div>This file isn't in this browser. It may have been deleted, or it was made on another device.</div>
+        <button className="btn primary" style={{ marginTop: 12 }} onClick={onHome}>
+          Back to your files
+        </button>
+      </div>
+    );
   if (!ready) return <div className="empty-hint">Loading…</div>;
   return (
     <div className="app">
@@ -124,6 +155,14 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       {pluginsOpen && <PluginsDialog />}
       {shareOpen && <ShareDialog />}
       <GuestBar />
+      {stale && (
+        <div className="stale-bar" role="alert">
+          This file was changed in another tab. Edits here are no longer saved.
+          <button className="btn primary small" onClick={() => location.reload()}>
+            Reload
+          </button>
+        </div>
+      )}
       <ShortcutsDialog />
       <PhoneNote />
       <DemoOverlay />

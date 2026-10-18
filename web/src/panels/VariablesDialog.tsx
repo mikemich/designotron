@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Hash, Palette, Plus, ToggleLeft, Trash2, Type as TypeIcon, X } from "lucide-react";
 import { dispatch, useDoc, useStore } from "../store";
 import type { VarKind, Variable, VariableCollection } from "../types";
-import { Menu, type MenuItem, useEscape } from "../ui/controls";
+import { Menu, type MenuItem, useDialog } from "../ui/controls";
 import { cssColor } from "../ui/color";
 
 const uid = (p: string) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -73,7 +73,7 @@ export function VariablesDialog() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const coll = collections.find((c) => c.id === active) ?? collections[0];
   const close = () => useStore.setState({ variablesOpen: false });
-  useEscape(close);
+  const dialogRef = useDialog(close);
 
   const update = (fn: (c: VariableCollection) => VariableCollection) => save(collections.map((c) => (c.id === coll.id ? fn(c) : c)));
   const addCollection = () => {
@@ -102,7 +102,7 @@ export function VariablesDialog() {
 
   return (
     <div className="modal-bg" onPointerDown={(e) => e.target === e.currentTarget && close()}>
-      <div className="modal variables-dialog" onKeyDown={(e) => e.key === "Escape" && close()}>
+      <div ref={dialogRef} className="modal variables-dialog" role="dialog" aria-modal="true" aria-label="Variables" onKeyDown={(e) => e.key === "Escape" && close()}>
         <div className="modal-head">
           <b>Local variables</b>
           <button className="ibtn" title="Close" onClick={close} style={{ marginLeft: "auto" }}>

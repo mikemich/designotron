@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Figma, FilePlus, FolderOpen, Github, MoreHorizontal } from "lucide-react";
+import { Figma, FilePlus, FolderOpen, Github, Loader2, MoreHorizontal } from "lucide-react";
 import { REPO_URL } from "./panels/GuestBar";
 import { deleteFile, duplicateFile, fromDtron, listFiles, newFileId, pickFile, renameFile, saveFile, type FileMeta } from "./files";
-import { bootEngine, getEngine, newEngine, dispatch, toast, useStore } from "./store";
+import { bootEngine, getEngine, newEngine, dispatch, toast, useBoot, useStore } from "./store";
 import { TEMPLATES, type Template } from "./templates";
 import { persistentStorage } from "./files";
 import { Menu, type MenuItem } from "./ui/controls";
@@ -22,13 +22,22 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   const [files, setFiles] = useState<FileMeta[] | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const t = useStore((s) => s.toast);
+  const engineError = useBoot((s) => s.error);
+  /** The file being created while the engine loads ("new" or a template id). */
+  const [opening, setOpening] = useState<string | null>(null);
   const refresh = () => listFiles().then(setFiles);
   useEffect(() => {
     refresh();
   }, []);
 
   const create = async (template: Template | null) => {
-    await bootEngine();
+    setOpening(template?.id ?? "new");
+    try {
+      await bootEngine();
+    } catch {
+      setOpening(null);
+      return;
+    }
     newEngine();
     if (template) template.build();
     else dispatch({ op: "setDocName", name: "Untitled" });
@@ -73,10 +82,18 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
         >
           <Figma size={14} /> Import from Figma
         </button>
-        <button className="btn primary" onClick={() => create(null)}>
-          <FilePlus size={14} /> New design file
+        <button className="btn primary" onClick={() => create(null)} disabled={!!opening}>
+          {opening === "new" ? <Loader2 size={14} className="spin" /> : <FilePlus size={14} />} {opening === "new" ? "Loading editor…" : "New design file"}
         </button>
       </div>
+      {engineError && (
+        <div className="error-box" style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 12 }}>
+          <span>The editor engine couldn't load. Check your connection; your files are safe.</span>
+          <button className="btn" onClick={() => bootEngine().catch(() => {})}>
+            Retry
+          </button>
+        </div>
+      )}
       {!persistentStorage() && (
         <div className="hero" style={{ padding: 14 }}>
           <span className="muted">This browser isn't keeping files between visits here. Use Save as .dtron from the editor menu to keep your work.</span>
@@ -87,11 +104,11 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       </div>
       <div className="files-grid" style={{ marginBottom: 32 }}>
         {TEMPLATES.map((t) => (
-          <div key={t.id} className="file-card" onClick={() => create(t)}>
+          <div key={t.id} className="file-card" onClick={() => !opening && create(t)}>
             <TemplateThumb t={t} />
             <div className="meta">
               <div className="n">{t.name}</div>
-              <div className="muted small">{t.description}</div>
+              <div className="muted small">{opening === t.id ? "Loading editor…" : t.description}</div>
             </div>
           </div>
         ))}

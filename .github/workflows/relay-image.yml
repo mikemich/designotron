@@ -37,6 +37,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: DESIGNOTRON_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       # Redeploys a Render relay with the new image (the RENDER_DEPLOY_HOOK secret is the

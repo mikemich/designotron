@@ -29,6 +29,8 @@ interface ChatStore {
   pending: PendingImage[];
   /** A prompt asked before Claude was connected; sent as soon as it is. */
   queued: string | null;
+  /** The API key has worked at least once. */
+  keyChecked: boolean;
 }
 
 export interface PendingImage {
@@ -64,6 +66,7 @@ export const useChat = create<ChatStore>(() => ({
   sessionId: null,
   pending: [],
   queued: null,
+  keyChecked: ls("dt:keyChecked", "") === "1",
 }));
 
 const bridgeReady = (s: ChatStore) => s.bridgeStatus === "connected" && s.claude?.available !== false;
@@ -74,11 +77,15 @@ export function claudeReady(s: ChatStore = useChat.getState()): boolean {
 }
 
 // Send a queued prompt once Claude connects, switching to whichever mode came up.
+// Switching modes on its own only happens before the person has picked one (never into
+// per-use API billing after they chose Claude Code).
+const modeChosen = () => ls("dt:chatMode", "") !== "";
+
 useChat.subscribe((s) => {
   if (!s.queued || s.running) return;
   if (!claudeReady(s)) {
-    if (s.mode === "api" && bridgeReady(s)) setMode("bridge");
-    else if (s.mode === "bridge" && s.apiKey && s.bridgeStatus === "offline") setMode("api");
+    if (!modeChosen() && s.mode === "api" && bridgeReady(s)) useChat.setState({ mode: "bridge" });
+    else if (!modeChosen() && s.mode === "bridge" && s.apiKey && s.bridgeStatus === "offline") useChat.setState({ mode: "api" });
     return;
   }
   const prompt = s.queued;
@@ -140,10 +147,11 @@ export function setMode(mode: Mode) {
 export function setApiKey(apiKey: string) {
   try {
     localStorage.setItem("dt:apiKey", apiKey);
+    localStorage.removeItem("dt:keyChecked");
   } catch {
     /* ignore */
   }
-  useChat.setState({ apiKey });
+  useChat.setState({ apiKey, keyChecked: false });
 }
 
 export function setModel(model: string) {
@@ -202,8 +210,18 @@ export async function send(prompt: string) {
   useChat.setState({ running: true });
   try {
     await runApiAgent(full, attachments);
+    if (!st.keyChecked) {
+      useChat.setState({ keyChecked: true });
+      try {
+        localStorage.setItem("dt:keyChecked", "1");
+      } catch {
+        /* ignore */
+      }
+    }
   } catch (err) {
     push({ kind: "error", text: apiErrorText(err) });
+    // A rejected key: keep the prompt so it sends once a valid key is entered.
+    if ((err as { status?: number })?.status === 401) useChat.setState({ queued: prompt });
   } finally {
     useChat.setState({ running: false });
   }

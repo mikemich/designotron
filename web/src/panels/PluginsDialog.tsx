@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Play, Plus, Sparkles, Trash2, X } from "lucide-react";
 import { deletePlugin, runPlugin, savePlugin, usePlugins, type Plugin } from "../plugins";
 import { askClaude } from "../ai/chatState";
-import { useEscape } from "../ui/controls";
+import { useDialog } from "../ui/controls";
 
 const TEMPLATE = `// Plugins use the same tools as Claude: await dt.tool(name, input).
 // dt.selection(), dt.getDocument(), dt.getNodes(ids), dt.notify(text),
@@ -16,14 +16,14 @@ export function PluginsDialog() {
   const list = usePlugins((s) => s.list);
   const [editing, setEditing] = useState<Plugin | null>(null);
   const close = () => usePlugins.setState({ dialogOpen: false });
-  useEscape(close);
+  const dialogRef = useDialog(close);
   const run = (p: Plugin) => {
     close();
     runPlugin(p);
   };
   return (
     <div className="modal-bg" onPointerDown={(e) => e.target === e.currentTarget && close()}>
-      <div className="modal plugins-dialog" onKeyDown={(e) => e.stopPropagation()}>
+      <div ref={dialogRef} className="modal plugins-dialog" role="dialog" aria-modal="true" aria-label="Plugins" onKeyDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <b>{editing ? (editing.builtin ? editing.name : "Edit plugin") : "Plugins"}</b>
           <button className="ibtn" title="Close" onClick={close} style={{ marginLeft: "auto" }}>

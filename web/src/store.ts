@@ -26,9 +26,19 @@ const measureCache = new Map<string, number>();
 /** Loads the WASM engine, installs the text measurer and waits for web fonts. */
 let booting: Promise<void> | null = null;
 
-/** Loads the WASM engine once; every caller shares the same load. */
+/** Why the engine failed to load (shown with a Retry button), or null. */
+export const useBoot = create<{ error: string | null }>(() => ({ error: null }));
+
+/** Loads the WASM engine once; every caller shares the same load. A failure can be retried. */
 export function bootEngine(): Promise<void> {
-  booting ??= loadEngine();
+  booting ??= loadEngine().then(
+    () => useBoot.setState({ error: null }),
+    (err) => {
+      booting = null;
+      useBoot.setState({ error: String(err instanceof Error ? err.message : err) });
+      throw err;
+    },
+  );
   return booting;
 }
 
@@ -58,6 +68,20 @@ async function loadEngine(): Promise<void> {
     measureCache.clear();
     dispatch({ op: "relayout" });
   });
+}
+
+/** Whether a document JSON loads in the engine, without touching the open file. */
+export async function documentLoads(json: string): Promise<boolean> {
+  await bootEngine();
+  const probe = new WasmEngine(1);
+  try {
+    probe.load(json);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    probe.free();
+  }
 }
 
 /** Replaces the engine with a fresh one holding an empty document. */
@@ -225,7 +249,8 @@ export function toast(text: string, kind: "info" | "error" = "info") {
   useStore.setState({ toast: { text, kind } });
   setTimeout(() => {
     if (useStore.getState().toast?.text === text) useStore.setState({ toast: null });
-  }, kind === "error" ? 5000 : 2500);
+    // Long enough to read: about 15 characters a second, at least 2.5 s (5 s for errors).
+  }, Math.max(kind === "error" ? 5000 : 2500, text.length * 65));
 }
 
 /** Runs an engine command. Errors surface as a toast and return null. */

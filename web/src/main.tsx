@@ -49,8 +49,9 @@ function App() {
   return <Dashboard onOpen={(id) => (location.hash = `#/file/${id}`)} />;
 }
 
+// Only for shared links, which can't show anything without the engine.
 const failed = (err: unknown) => {
-  document.getElementById("root")!.innerHTML = `<pre style="padding:24px;color:#f88">Failed to start Designotron:\n${String(err)}</pre>`;
+  document.getElementById("root")!.innerHTML = `<div style="padding:32px;color:#e6e6e6;font:14px Inter,system-ui,sans-serif;line-height:1.6">The editor engine couldn't load (${String(err).replace(/[<&]/g, "")}).<br>Check your connection and try again.<br><button onclick="location.reload()" style="margin-top:12px;padding:6px 14px;border-radius:6px;border:0;background:#6d4aff;color:#fff;font:inherit">Retry</button></div>`;
 };
 // StrictMode is intentionally off: editor effects open/close undo gestures.
 const render = () => ReactDOM.createRoot(document.getElementById("root")!).render(<App />);
@@ -61,7 +62,8 @@ if (joinFromUrl()) {
     .then(async () => {
       const shared = joinFromUrl()!;
       if (route() !== shared) await ensureGuestFile(shared);
-      location.hash = `#/file/${shared}`;
+      // Replace (not push) so Back doesn't return to a bare ?room= page that would join again.
+      history.replaceState(null, "", `${location.pathname}${location.search}#/file/${shared}`);
       bridge.start();
       render();
     })
@@ -69,7 +71,8 @@ if (joinFromUrl()) {
 } else {
   // The files dashboard doesn't need the engine: show it while the engine loads.
   render();
+  // A failure shows a Retry banner on the dashboard (useBoot), so it isn't fatal here.
   bootEngine()
     .then(() => bridge.start())
-    .catch(failed);
+    .catch(() => {});
 }

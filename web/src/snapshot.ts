@@ -4,8 +4,8 @@
 
 import { allAssets, loadAssets, referencedAssets } from "./assets";
 import { HOSTED_EDITOR, isLocalPage } from "./collab";
-import { newFileId, saveFile } from "./files";
-import { getEngine } from "./store";
+import { loadFile, newFileId, saveFile } from "./files";
+import { documentLoads, getEngine } from "./store";
 
 const PREFIX = "#/copy/";
 /** View-only links and embeds: play the design, with a Remix button. */
@@ -62,12 +62,23 @@ export const viewUrl = (data: string) => linkBase() + VIEW + data;
 export const isCopyLink = (hash = location.hash) => hash.startsWith(PREFIX);
 export const isViewLink = (hash = location.hash) => hash.startsWith(VIEW);
 
-/** The file inside a link's data, without saving anything. */
+const DAMAGED = "This link is incomplete or damaged. Ask for a new one.";
+
+/** The file inside a link's data, without saving anything. Images that don't decode are dropped. */
 export async function decodeFile(data: string): Promise<{ doc: any; assets: Record<string, string> }> {
-  const text = new TextDecoder().decode(await pipe(fromBase64Url(data), new DecompressionStream("gzip")));
-  const { doc, assets } = JSON.parse(text);
-  if (!doc?.pages) throw new Error("This link is damaged.");
-  return { doc, assets: assets ?? {} };
+  let doc: any;
+  let assets: Record<string, string> = {};
+  try {
+    const text = new TextDecoder().decode(await pipe(fromBase64Url(data), new DecompressionStream("gzip")));
+    const parsed = JSON.parse(text);
+    doc = parsed?.doc;
+    if (parsed?.assets && typeof parsed.assets === "object") assets = parsed.assets;
+  } catch {
+    throw new Error(DAMAGED);
+  }
+  if (!doc?.pages || !(await documentLoads(JSON.stringify(doc)))) throw new Error(DAMAGED);
+  const images = Object.fromEntries(Object.entries(assets).filter(([, url]) => typeof url === "string" && /^data:image\/[\w+.-]+;base64,[A-Za-z0-9+/=]+$/.test(url)));
+  return { doc, assets: images };
 }
 
 /** Saves the file in a copy link as a new local file (once per link) and returns its id. */
@@ -77,7 +88,8 @@ export async function openCopyLink(hash = location.hash): Promise<string> {
   const key = `dt:copy:${data.length}:${data.slice(-24)}`;
   try {
     const known = localStorage.getItem(key);
-    if (known) return known;
+    // Reuse the earlier copy only if it still exists (it may have been deleted).
+    if (known && (await loadFile(known))) return known;
   } catch {
     /* ignore */
   }

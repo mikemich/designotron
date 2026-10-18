@@ -13,6 +13,10 @@ export interface Presence {
   page: string;
   cursor: { x: number; y: number } | null;
   selection: string[];
+  /** Sent by whoever shared the file, so guests can tell when they leave. */
+  owner?: boolean;
+  /** The owner clicked Stop sharing. */
+  ended?: boolean;
 }
 
 export interface Peer {
@@ -30,9 +34,11 @@ interface CollabState {
   link: string | null;
   peers: Record<number, Peer>;
   dialogOpen: boolean;
+  /** Guests: the person who shared the file has left ("left") or stopped sharing ("ended"). */
+  ownerGone: { name: string; how: "left" | "ended" } | null;
 }
 
-export const useCollab = create<CollabState>(() => ({ status: "off", role: null, mode: null, link: null, peers: {}, dialogOpen: false }));
+export const useCollab = create<CollabState>(() => ({ status: "off", role: null, mode: null, link: null, peers: {}, dialogOpen: false, ownerGone: null }));
 
 /** Where shared links open when this editor runs on localhost (guests can't reach that). */
 export const HOSTED_EDITOR: string = import.meta.env.VITE_DT_EDITOR_URL || "https://mikemich.github.io/designotron/";
@@ -98,7 +104,8 @@ function randomRoomId(): string {
 export const isLocalPage = () => ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
 
 const COLORS = ["#F24822", "#0FA958", "#9747FF", "#FF7A00", "#1BC4FF", "#FF24BD", "#14AE5C", "#E8A400"];
-const myColor = COLORS[Math.floor(Math.random() * COLORS.length)];
+/** This person's cursor colour, as collaborators see it. */
+export const myColor = COLORS[Math.floor(Math.random() * COLORS.length)];
 const myName = () => userName() || "Anonymous";
 
 let ws: WebSocket | null = null;
@@ -154,20 +161,36 @@ function scheduleFlush() {
   requestAnimationFrame(flush);
 }
 
-function loadShared(doc: unknown, assets: Record<string, string>) {
+/** Whether this session has joined its room before (reconnects keep the view and local edits). */
+let joinedOnce = false;
+
+function loadShared(doc: unknown, assets: Record<string, string>, fit = true) {
   loadAssets(assets ?? {});
   for (const id of Object.keys(assets ?? {})) sentAssets.add(id);
   getEngine().load(JSON.stringify(doc));
   dispatch({ op: "relayout" });
   getEngine().collabReset();
-  requestAnimationFrame(zoomToFit);
+  if (fit) requestAnimationFrame(zoomToFit);
 }
 
 function onMessage(m: any) {
   switch (m.type) {
     case "welcome": {
-      if (m.doc) loadShared(m.doc, m.assets);
+      // Edits made here while disconnected: everything since the room last heard from us.
+      const pending = joinedOnce && m.doc ? JSON.parse(getEngine().collabDelta()) : null;
+      if (m.doc) loadShared(m.doc, m.assets, !joinedOnce);
       else getEngine().collabReset();
+      if (pending && !pending.full && !isEmptyDelta(pending)) {
+        // Put them back on top of the room's copy and send them, so nothing made offline is lost.
+        applying = true;
+        try {
+          dispatch({ op: "applyRemote", delta: pending }, { quiet: true });
+        } finally {
+          applying = false;
+        }
+        send({ type: "delta", delta: pending, assets: newAssets(JSON.stringify(pending.nodes ?? {})) });
+      }
+      joinedOnce = true;
       const peers: Record<number, Peer> = {};
       for (const p of m.peers ?? []) peers[p.id] = p;
       useCollab.setState({ status: "live", peers });
@@ -196,12 +219,21 @@ function onMessage(m: any) {
     case "leave":
       useCollab.setState((s) => {
         const peers = { ...s.peers };
+        const gone = peers[m.id];
         delete peers[m.id];
-        return { peers };
+        const ownerGone = gone?.presence?.owner && !s.ownerGone ? { name: gone.name, how: "left" as const } : s.ownerGone;
+        return { peers, ownerGone };
       });
       break;
     case "presence":
-      useCollab.setState((s) => (s.peers[m.id] ? { peers: { ...s.peers, [m.id]: { ...s.peers[m.id], presence: m.presence } } } : s));
+      useCollab.setState((s) => {
+        const p = s.peers[m.id];
+        if (!p) return s;
+        const peers = { ...s.peers, [m.id]: { ...p, presence: m.presence } };
+        // The owner stopped sharing, or came back.
+        const ownerGone = m.presence?.ended ? { name: p.name, how: "ended" as const } : m.presence?.owner ? null : s.ownerGone;
+        return { peers, ownerGone };
+      });
       break;
     case "error":
       toast(m.message, "error");
@@ -264,13 +296,17 @@ function shareCurrentFile() {
 /** Owner: shares this file through an internet relay; anyone with the link can join. */
 export async function startOnline(relay: string): Promise<void> {
   const base = normalizeRelay(relay);
-  const { editor } = await probeRelay(base);
+  await probeRelay(base);
   setRelayUrl(base);
   const room = randomRoomId();
   wsUrl = `${base.replace(/^http/, "ws")}/ws?room=${room}`;
-  // Guests open the relay's own editor if it serves one, else this editor (or the hosted
-  // one when this runs on localhost), pointed at the relay.
-  const link = editor ? `${base}/?room=${room}` : `${isLocalPage() ? HOSTED_EDITOR : location.origin + location.pathname}?room=${room}&relay=${encodeURIComponent(base)}`;
+  // Guests open this editor (or the hosted one when this runs on localhost), pointed at the
+  // relay: never the relay's bundled editor, which can be older than this one.
+  const here = location.origin + location.pathname;
+  const link =
+    base === location.origin
+      ? `${here}?room=${room}` // this page is served by the relay itself
+      : `${isLocalPage() ? HOSTED_EDITOR : here}?room=${room}&relay=${encodeURIComponent(base)}`;
   useCollab.setState({ role: "owner", mode: "online", link });
   shareCurrentFile();
 }
@@ -286,7 +322,10 @@ export async function startSharing(): Promise<void> {
 }
 
 export function stopSharing() {
-  useCollab.setState({ role: null, mode: null, status: "off", peers: {}, link: null });
+  joinedOnce = false;
+  // Tell guests the owner stopped sharing (they keep their copy and can save it).
+  if (useCollab.getState().role === "owner") send({ type: "presence", presence: { page: "", cursor: null, selection: [], owner: true, ended: true } satisfies Presence });
+  useCollab.setState({ role: null, mode: null, status: "off", peers: {}, link: null, ownerGone: null });
   ws?.close();
   ws = null;
   unsubscribe?.();
@@ -371,7 +410,8 @@ function sendPresence(now: boolean) {
     lastPresence = Date.now();
     presenceTimer = null;
     const st = useStore.getState();
-    send({ type: "presence", presence: { page: st.es.page, cursor, selection: st.es.selection } satisfies Presence });
+    const owner = useCollab.getState().role === "owner" || undefined;
+    send({ type: "presence", presence: { page: st.es.page, cursor, selection: st.es.selection, owner } satisfies Presence });
   };
   if (now) return go();
   if (presenceTimer) return;

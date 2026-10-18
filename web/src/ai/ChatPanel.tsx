@@ -26,6 +26,7 @@ import {
 import { useStore } from "../store";
 import { Menu, MOD, Seg, SelectField, type MenuItem } from "../ui/controls";
 import { imagesFrom } from "./images";
+import { isPhone } from "../panels/PhoneNote";
 
 const SUGGESTIONS = [
   "Design a 3-screen mobile onboarding flow for a meditation app, with prototype links",
@@ -118,6 +119,7 @@ export function ChatPanel() {
     claude,
     sessionId,
     pending,
+    keyChecked,
   } = useChat();
   const hasSelection = useStore((s) => s.es.selection.length > 0);
   const [text, setText] = useState("");
@@ -247,7 +249,7 @@ export function ChatPanel() {
                 style={{ background: apiKey ? "#14ae5c" : "#666" }}
               />
               {apiKey
-                ? MODELS.find((m) => m.value === model)?.label
+                ? `${MODELS.find((m) => m.value === model)?.label}${keyChecked ? "" : " · key not checked yet"}`
                 : "No API key set"}
             </>
           )}
@@ -511,6 +513,7 @@ function CopyLine({ text }: { text: string }) {
 function ConnectCard() {
   const queued = useChat((s) => s.queued);
   const mode = useChat((s) => s.mode);
+  const savedKey = useChat((s) => s.apiKey);
   const [key, setKey] = useState("");
   const save = () => {
     if (!key.trim()) return;
@@ -554,7 +557,12 @@ function ConnectCard() {
           Connect
         </button>
       </div>
-      <details open={mode === "bridge" && !queued}>
+      {mode === "bridge" && savedKey && (
+        <button className="btn" onClick={() => setMode("api")} title="Billed per use to your Anthropic API account">
+          Use my saved API key instead
+        </button>
+      )}
+      <details open={mode === "bridge" && !queued && !isPhone()}>
         <summary>
           <b>Have Claude Pro or Max?</b> Use it at no extra cost
         </summary>

@@ -627,6 +627,10 @@ textarea.textinput {
   text-align: center;
   line-height: 1.8;
 }
+.empty-hint a,
+.empty-hint button {
+  pointer-events: auto;
+}
 .empty-hint b {
   color: var(--text-2);
 }
@@ -1062,6 +1066,13 @@ a.btn {
   .topbar {
     overflow-x: auto;
   }
+  /* Touch targets of at least 40px. */
+  .topbar .tbtn {
+    min-width: 40px;
+    height: 40px;
+  }
+  [data-phone="hide"],
+  .topbar .tbtn .label,
   .draw-tools,
   .desk-only,
   .empty-prompt .kbd-hint:last-child {
@@ -1114,9 +1125,13 @@ a.btn {
 }
 
 /* ---------- Hints (replace the old tour) ---------- */
+/* Below dialogs (z 50+), and hidden while one is open. */
+body:has(.modal-bg) .hint-card {
+  display: none;
+}
 .hint-card {
   position: fixed;
-  z-index: 60;
+  z-index: 45;
   background: #1f1f1f;
   border: 1px solid var(--accent);
   border-radius: 10px;
@@ -1797,4 +1812,44 @@ a.btn {
   margin-top: 10px;
   font-size: 12px;
   text-align: left;
+}
+.reconnecting {
+  font-size: 11px;
+  color: #f5b13d;
+  white-space: nowrap;
+  padding: 0 6px;
+}
+.stale-bar {
+  position: fixed;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 41;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 12px;
+  border-radius: 10px;
+  background: #3a2a10;
+  border: 1px solid #f5b13d;
+  font-size: 12px;
+  max-width: calc(100vw - 24px);
+}
+.stale-bar .btn.small {
+  height: 24px;
+  padding: 0 10px;
+}
+
+@media (max-width: 1000px) {
+  .topbar .save-state {
+    display: none;
+  }
+}
+.suggestions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+/* The phone note gives way to Claude's sheet. */
+body:has(.main > .chat) .phone-note {
+  display: none;
 }

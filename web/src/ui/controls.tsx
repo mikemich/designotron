@@ -280,3 +280,47 @@ export function useEscape(close: () => void) {
     return () => window.removeEventListener("keydown", key, true);
   }, []);
 }
+
+/** Dialog behaviour: Escape closes, focus moves into the dialog and stays there (Tab wraps),
+ *  and returns to where it was on close. Attach the returned ref to the dialog element. */
+export function useDialog(close: () => void, active = true) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEscape(() => active && close());
+  useEffect(() => {
+    if (!active) return;
+    const before = document.activeElement as HTMLElement | null;
+    const focusable = () =>
+      [...(ref.current?.querySelectorAll<HTMLElement>("input, textarea, select, button, a[href], [tabindex]:not([tabindex='-1'])") ?? [])].filter(
+        (el) => !el.hasAttribute("disabled") && el.offsetParent !== null,
+      );
+    const t = setTimeout(() => {
+      const els = focusable();
+      // The first field if there is one (the close button comes first otherwise).
+      (els.find((el) => el.matches("input, textarea, select")) ?? els[0])?.focus();
+    }, 0);
+    const trap = (e: KeyboardEvent) => {
+      if (e.key !== "Tab" || !ref.current) return;
+      const els = focusable();
+      if (!els.length) return;
+      const first = els[0];
+      const last = els[els.length - 1];
+      if (!ref.current.contains(document.activeElement)) {
+        e.preventDefault();
+        first.focus();
+      } else if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", trap, true);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener("keydown", trap, true);
+      before?.focus?.();
+    };
+  }, [active]);
+  return ref;
+}

@@ -14,7 +14,8 @@ FROM rust:1-bookworm AS relay
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rustfmt.toml ./
 COPY crates/ crates/
-RUN cargo build --release -p designotron-relay
+ARG DESIGNOTRON_COMMIT=dev
+RUN DESIGNOTRON_COMMIT=$DESIGNOTRON_COMMIT cargo build --release -p designotron-relay
 
 FROM debian:bookworm-slim
 RUN useradd --system --uid 10001 relay && mkdir -p /data && chown relay /data

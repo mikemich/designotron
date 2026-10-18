@@ -118,19 +118,24 @@ try {
     // The relay restarts and forgets every room; the editors reconnect and put the file back.
     relay.kill();
     await new Promise((r) => relay.once("exit", r));
+    // Both keep working while the relay is down; nothing made offline may be lost.
+    for (const p of [owner, guest]) await p.waitForFunction(() => window.__dt.collab().status === "connecting", null, { timeout: 5000 }).catch(() => {});
+    const mk = (p, name, x) => p.evaluate(([name, x]) => window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [{ type: "rectangle", name, x, y: 300, width: 50, height: 50 }] } }).created[0].id, [name, x]);
+    const offA = await mk(owner, "Offline A", 0);
+    const offB = await mk(guest, "Offline B", 100);
     await startRelay();
-    for (const p of [owner, guest]) {
-      await p.waitForFunction(() => window.__dt.collab().status === "connecting", null, { timeout: 5000 }).catch(() => {});
-      await p.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 15000 }).catch(() => {});
-    }
+    for (const p of [owner, guest]) await p.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 20000 }).catch(() => {});
+    for (const p of [owner, guest]) await p.waitForFunction(([a, b]) => !!window.__dt.doc().nodes[a] && !!window.__dt.doc().nodes[b], [offA, offB], { timeout: 8000 }).catch(() => {});
+    const both = await Promise.all([owner, guest].map((p) => p.evaluate(([a, b]) => !!window.__dt.doc().nodes[a] && !!window.__dt.doc().nodes[b], [offA, offB])));
+    check("edits made while the relay was down survive for everyone", both.every(Boolean), JSON.stringify(both));
     const late = await (await browser.newContext()).newPage();
     await late.addInitScript(init);
     await late.goto(link);
     await late.waitForSelector("#dt-canvas");
     await late.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 15000 }).catch(() => {});
-    await late.waitForFunction(([a, b]) => !!window.__dt.doc().nodes[a] && !!window.__dt.doc().nodes[b], [rect, theirs], { timeout: 15000 }).catch(() => {});
+    await late.waitForFunction(([a, b, c, d]) => [a, b, c, d].every((id) => !!window.__dt.doc().nodes[id]), [rect, theirs, offA, offB], { timeout: 15000 }).catch(() => {});
     const n = await nodes(late);
-    check("after a relay restart, a newcomer still gets the whole file", !!n[rect] && !!n[theirs]);
+    check("after a relay restart, a newcomer still gets the whole file", !!n[rect] && !!n[theirs] && !!n[offA] && !!n[offB]);
     await owner.evaluate((id) => window.__dt.dispatch({ op: "update", ids: [id], patch: { y: 150 } }), rect);
     await late.waitForFunction((id) => window.__dt.doc().nodes[id]?.y === 150, rect, { timeout: 5000 }).catch(() => {});
     check("edits flow again after the restart", (await nodes(late))[rect]?.y === 150);

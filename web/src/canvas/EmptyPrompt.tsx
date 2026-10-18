@@ -11,6 +11,7 @@ const IDEAS = ["A landing page for a coffee subscription", "A habit tracker mobi
 export function EmptyPrompt() {
   const [text, setText] = useState("");
   const ready = useChat((s) => claudeReady(s));
+  const queued = useChat((s) => s.queued);
   const send = (prompt: string) => {
     if (!prompt.trim()) return;
     askClaude(prompt.trim());
@@ -34,7 +35,7 @@ export function EmptyPrompt() {
         }}
       />
       <div className="row" style={{ justifyContent: "space-between" }}>
-        <span className="kbd-hint">Claude builds it on the canvas</span>
+        <span className="kbd-hint">{queued ? "Waiting for Claude: connect it in the panel on the right" : "Claude builds it on the canvas"}</span>
         <button className="btn primary" onClick={() => send(text)} disabled={!text.trim()}>
           <Sparkles size={13} /> Design with Claude
         </button>

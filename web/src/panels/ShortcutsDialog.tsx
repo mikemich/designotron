@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { X } from "lucide-react";
-import { ALT, MOD, SHIFT, useEscape } from "../ui/controls";
+import { ALT, MOD, SHIFT, useDialog } from "../ui/controls";
 
 export const useShortcuts = create<{ open: boolean }>(() => ({ open: false }));
 
@@ -53,11 +53,11 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
 export function ShortcutsDialog() {
   const open = useShortcuts((s) => s.open);
   const close = () => useShortcuts.setState({ open: false });
-  useEscape(() => open && close());
+  const dialogRef = useDialog(close, open);
   if (!open) return null;
   return (
     <div className="modal-bg" onPointerDown={(e) => e.target === e.currentTarget && close()}>
-      <div className="modal shortcuts-dialog" role="dialog" aria-label="Keyboard shortcuts">
+      <div ref={dialogRef} className="modal shortcuts-dialog" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
         <div className="modal-head">
           <b>Keyboard shortcuts</b>
           <button className="ibtn" title="Close" onClick={close} style={{ marginLeft: "auto" }}>

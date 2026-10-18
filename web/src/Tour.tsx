@@ -71,8 +71,13 @@ export function Tour() {
   }, [rev, selection, chatOpen, hint]);
 
   useLayoutEffect(() => {
-    const el = hint && document.querySelector(hint.selector);
-    setRect(el ? el.getBoundingClientRect() : null);
+    const measure = () => {
+      const el = hint && document.querySelector(hint.selector);
+      setRect(el ? el.getBoundingClientRect() : null);
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
   }, [hint, chatOpen]);
 
   const dismiss = (all = false) => {
@@ -90,7 +95,7 @@ export function Tour() {
   const left = right ? rect.left - width - 12 : hint.id === "layers" ? rect.right + 12 : Math.min(window.innerWidth - width - 12, rect.left + rect.width / 2 - width / 2);
   const top = hint.id === "claude" ? rect.bottom + 10 : rect.top + 60;
   return (
-    <div className="hint-card" role="status" style={{ left: Math.max(12, left), top, width }}>
+    <div className="hint-card" role="status" style={{ left: Math.max(12, Math.min(left, window.innerWidth - width - 12)), top: Math.min(top, window.innerHeight - 180), width }}>
       <div style={{ fontWeight: 600, marginBottom: 4 }}>{hint.title}</div>
       <div style={{ lineHeight: 1.55 }}>{hint.body}</div>
       <div className="row" style={{ marginTop: 10, justifyContent: "space-between" }}>
