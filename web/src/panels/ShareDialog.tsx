@@ -3,6 +3,7 @@ import { Check, Copy, Globe, Loader2, Share2, Users, Wifi, X } from "lucide-reac
 import { pageIsRelay, relayUrl, remixShared, startOnline, startSharing, stopSharing, useCollab } from "../collab";
 import { useChat } from "../ai/chatState";
 import { Avatar, userName } from "../canvas/Comments";
+import { useEscape } from "../ui/controls";
 
 const RELAY_DOCS = "https://github.com/mikemich/designotron/blob/main/docs/relay.md";
 
@@ -18,6 +19,7 @@ export function ShareDialog() {
   const [customRelay, setCustomRelay] = useState(!relayUrl());
   const [copied, setCopied] = useState(false);
   const close = () => useCollab.setState({ dialogOpen: false });
+  useEscape(close);
 
   // An editor served by a relay can share online with no setup.
   useEffect(() => {

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Play, Plus, Sparkles, Trash2, X } from "lucide-react";
 import { deletePlugin, runPlugin, savePlugin, usePlugins, type Plugin } from "../plugins";
 import { askClaude } from "../ai/chatState";
+import { useEscape } from "../ui/controls";
 
 const TEMPLATE = `// Plugins use the same tools as Claude: await dt.tool(name, input).
 // dt.selection(), dt.getDocument(), dt.getNodes(ids), dt.notify(text),
@@ -15,6 +16,7 @@ export function PluginsDialog() {
   const list = usePlugins((s) => s.list);
   const [editing, setEditing] = useState<Plugin | null>(null);
   const close = () => usePlugins.setState({ dialogOpen: false });
+  useEscape(close);
   const run = (p: Plugin) => {
     close();
     runPlugin(p);

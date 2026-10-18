@@ -1333,7 +1333,9 @@ impl Engine {
         let p = json!({ "text": { "characters": characters, "runs": runs } });
         let n = self.doc.get_mut(&id).ok_or("no such node")?;
         patch::apply(n, &p)?;
-        if n.name.is_empty() || n.name == "Text" {
+        // The name follows the text until the user renames the layer.
+        let auto_name: String = old.chars().take(40).collect();
+        if n.name.is_empty() || n.name == "Text" || n.name == auto_name {
           n.name = characters.chars().take(40).collect();
         }
         components::record_override(&mut self.doc, &id, &p);
@@ -2688,6 +2690,8 @@ mod tests {
     let t = e.doc.get(&id).unwrap().text.clone().unwrap();
     assert_eq!(t.runs.len(), 1);
     assert_eq!((t.runs[0].start, t.runs[0].end), (10, 16));
+    // Typing letter by letter keeps the name in step with the text.
+    assert_eq!(e.doc.get(&id).unwrap().name, "Oh, Hello world!");
     assert_eq!(t.runs[0].color.as_deref(), Some("#FF0000"));
     // Styling everything folds into the base style and removes conflicting runs.
     e.dispatch(Command::StyleText {

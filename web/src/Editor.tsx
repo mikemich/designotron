@@ -12,6 +12,7 @@ import { PluginWindow, PluginsDialog } from "./panels/PluginsDialog";
 import { usePlugins } from "./plugins";
 import { joinShared, stopSharing, useCollab } from "./collab";
 import { GuestBar } from "./panels/GuestBar";
+import { ShortcutsDialog } from "./panels/ShortcutsDialog";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
 import { getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
@@ -118,8 +119,13 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       {pluginsOpen && <PluginsDialog />}
       {shareOpen && <ShareDialog />}
       <GuestBar />
+      <ShortcutsDialog />
       <PluginWindow />
-      {toast && <div className={"toast " + toast.kind}>{toast.text}</div>}
+      {toast && (
+        <div className={"toast " + toast.kind} role="status" aria-live="polite">
+          {toast.text}
+        </div>
+      )}
     </div>
   );
 }

@@ -27,6 +27,8 @@ interface ChatStore {
   sessionId: string | null;
   /** Images waiting to be sent with the next message. */
   pending: PendingImage[];
+  /** A prompt asked before Claude was connected; sent as soon as it is. */
+  queued: string | null;
 }
 
 export interface PendingImage {
@@ -61,7 +63,28 @@ export const useChat = create<ChatStore>(() => ({
   claude: null,
   sessionId: null,
   pending: [],
+  queued: null,
 }));
+
+const bridgeReady = (s: ChatStore) => s.bridgeStatus === "connected" && s.claude?.available !== false;
+
+/** Whether a prompt can be sent now, in either mode. */
+export function claudeReady(s: ChatStore = useChat.getState()): boolean {
+  return s.mode === "bridge" ? bridgeReady(s) : !!s.apiKey;
+}
+
+// Send a queued prompt once Claude connects, switching to whichever mode came up.
+useChat.subscribe((s) => {
+  if (!s.queued || s.running) return;
+  if (!claudeReady(s)) {
+    if (s.mode === "api" && bridgeReady(s)) setMode("bridge");
+    else if (s.mode === "bridge" && s.apiKey && s.bridgeStatus === "offline") setMode("api");
+    return;
+  }
+  const prompt = s.queued;
+  useChat.setState({ queued: null });
+  send(prompt);
+});
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 let nextImage = 1;
@@ -147,6 +170,11 @@ export function askClaude(prompt: string, images: string[] = []) {
 export async function send(prompt: string) {
   const st = useChat.getState();
   if (st.running || !prompt.trim()) return;
+  // Not connected yet: keep the prompt (the panel shows how to connect) instead of failing.
+  if (!claudeReady(st) && !(st.mode === "bridge" && st.claude?.available === false)) {
+    useChat.setState({ queued: prompt });
+    return;
+  }
   const attachments = st.pending.map(toAttachment);
   push({ kind: "user", text: prompt, images: st.pending.map((p) => p.url) });
   useChat.setState({ pending: [] });
@@ -175,10 +203,24 @@ export async function send(prompt: string) {
   try {
     await runApiAgent(full, attachments);
   } catch (err) {
-    push({ kind: "error", text: String(err instanceof Error ? err.message : err) });
+    push({ kind: "error", text: apiErrorText(err) });
   } finally {
     useChat.setState({ running: false });
   }
+}
+
+/** Plain-language text for Anthropic API errors (the SDK's message is raw JSON). */
+function apiErrorText(err: unknown): string {
+  const status = (err as { status?: number })?.status;
+  if (status === 401) {
+    setApiKey("");
+    return "That API key wasn't accepted. Paste a valid key from console.anthropic.com to continue.";
+  }
+  if (status === 403) return "This API key isn't allowed to use that model. Pick another model in settings or check the key's permissions.";
+  if (status === 429) return "Rate limit reached for this API key. Wait a minute and try again.";
+  if (status === 529 || status === 503) return "Claude is overloaded right now. Try again in a moment.";
+  if (status === 400 && /credit balance/i.test(String((err as Error).message))) return "This API key's account is out of credit. Add credit at console.anthropic.com.";
+  return String(err instanceof Error ? err.message : err);
 }
 
 export function stop() {

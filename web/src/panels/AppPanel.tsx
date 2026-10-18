@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ExternalLink, FolderDown, Loader2, Play, RotateCw, Sparkles, Square } from "lucide-react";
 import { Section, Seg } from "../ui/controls";
 import { useChat, askClaude } from "../ai/chatState";
+import { useStore } from "../store";
 import { setLiveSync, startPreview, stopPreview, usePreview, writeProject } from "../ai/preview";
 
 const DEVICES = { mobile: 393, desktop: 1440 } as const;
@@ -30,8 +31,11 @@ export function AppPanel() {
       <div className="scroll">
         <Section title="Live app">
           <div className="muted small" style={{ lineHeight: 1.6 }}>
-            The live preview runs your app's dev server on this computer through the Designotron bridge. Setup steps are in the Claude panel.
+            The live preview runs your app's dev server on this computer through the Designotron bridge.
           </div>
+          <button className="btn" style={{ marginTop: 8 }} onClick={() => useStore.setState({ chatOpen: true })}>
+            Show setup steps
+          </button>
         </Section>
       </div>
     );

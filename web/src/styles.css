@@ -6,9 +6,11 @@
   --border: #3a3a3a;
   --text: #e6e6e6;
   --text-2: #a6a6a6;
-  --text-3: #7a7a7a;
-  --accent: #7c5cff;
-  --accent-2: #9b85ff;
+  --text-3: #9a9a9a;
+  /* Accent passes WCAG AA with white text; --accent-2 is accent-coloured text on panels. */
+  --accent: #6d4aff;
+  --accent-hover: #5a36f2;
+  --accent-2: #b3a3ff;
   --select: #0d99ff;
   --component: #9747ff;
   --danger: #f24822;
@@ -153,7 +155,7 @@ textarea {
   font-weight: 600;
 }
 .tbtn.primary:hover {
-  background: var(--accent-2);
+  background: var(--accent-hover);
 }
 .logo {
   width: 32px;
@@ -171,6 +173,8 @@ textarea {
   position: fixed;
   z-index: 100;
   min-width: 220px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   background: #1f1f1f;
   border: 1px solid #444;
   border-radius: 8px;
@@ -272,9 +276,13 @@ textarea {
 .row:last-child {
   margin-bottom: 0;
 }
+.grid2 > *,
+.grid3 > * {
+  min-width: 0;
+}
 .grid2 {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 6px;
   margin-bottom: 6px;
 }
@@ -332,7 +340,7 @@ textarea {
   width: 24px;
   flex-shrink: 0;
   text-align: center;
-  color: var(--text-3);
+  color: var(--text-2);
   cursor: ew-resize;
   font-size: 11px;
   display: grid;
@@ -433,7 +441,7 @@ textarea.textinput {
   color: white;
 }
 .btn.primary:hover {
-  background: var(--accent-2);
+  background: var(--accent-hover);
 }
 .btn.block {
   width: 100%;
@@ -853,8 +861,17 @@ textarea.textinput {
 .files-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 28px;
+}
+.files-head .btn,
+.topbar .center > * {
+  white-space: nowrap;
+}
+a.btn {
+  color: inherit;
+  text-decoration: none;
 }
 .files-grid {
   display: grid;
@@ -1016,14 +1033,29 @@ textarea.textinput {
 }
 
 /* ---------- Narrow screens ---------- */
+/* Laptops: Claude takes the properties panel's place instead of squeezing the canvas. */
+@media (max-width: 1280px) {
+  .main.with-chat {
+    grid-template-columns: 248px 1fr 360px;
+  }
+  .main.with-chat > .panel.right {
+    display: none;
+  }
+}
 @media (max-width: 820px) {
   .main,
   .main.with-chat {
     grid-template-columns: 1fr;
   }
-  .main > .panel,
-  .main > .chat:not(:only-child) {
+  .main > .panel {
     display: none;
+  }
+  /* Phones: Claude is a full-screen sheet over the canvas (closed with its X). */
+  .main > .chat {
+    position: fixed;
+    inset: 44px 0 0;
+    z-index: 50;
+    border-left: 0;
   }
   .topbar {
     overflow-x: auto;
@@ -1605,7 +1637,7 @@ textarea.textinput {
   color: white;
 }
 .guest-bar .btn.small:hover {
-  background: var(--accent-2);
+  background: var(--accent-hover);
 }
 .guest-bar a {
   color: var(--accent-2);
@@ -1628,4 +1660,44 @@ textarea.textinput {
   .guest-bar-pitch {
     display: none;
   }
+}
+.queued-prompt {
+  background: var(--bg);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  color: var(--text-2);
+}
+
+/* ---------- Keyboard shortcuts ---------- */
+.shortcuts-dialog {
+  width: min(860px, calc(100vw - 32px));
+}
+.shortcuts-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px 24px;
+  padding: 14px 16px 18px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.shortcut-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.shortcut-row kbd {
+  font-family: inherit;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.chat > .bridge-setup {
+  margin: 10px 12px 0;
+  max-height: 60%;
+  overflow-y: auto;
+  flex: none;
+}
+.bridge-setup summary {
+  cursor: pointer;
 }

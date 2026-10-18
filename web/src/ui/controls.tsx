@@ -205,8 +205,9 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
     const el = ref.current;
     if (!el) return;
     setPos({
-      left: Math.min(props.x, window.innerWidth - el.offsetWidth - 8),
-      top: Math.min(props.y, window.innerHeight - el.offsetHeight - 8),
+      left: Math.max(8, Math.min(props.x, window.innerWidth - el.offsetWidth - 8)),
+      // Taller than the window: pin to the top and let it scroll (max-height in CSS).
+      top: Math.max(8, Math.min(props.y, window.innerHeight - el.offsetHeight - 8)),
     });
   }, [props.x, props.y]);
   useEffect(() => {
@@ -263,3 +264,19 @@ export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(
 export const MOD = isMac ? "⌘" : "Ctrl+";
 export const ALT = isMac ? "⌥" : "Alt+";
 export const SHIFT = isMac ? "⇧" : "Shift+";
+
+/** Closes a dialog on Escape, unless a menu inside it is open (the menu closes first). */
+export function useEscape(close: () => void) {
+  const ref = useRef(close);
+  ref.current = close;
+  useEffect(() => {
+    // Capture phase: dialogs stop key events from reaching the editor's shortcuts.
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || document.querySelector(".menu")) return;
+      e.stopPropagation();
+      ref.current();
+    };
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+  }, []);
+}

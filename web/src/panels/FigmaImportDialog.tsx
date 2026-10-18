@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { FileJson, Loader2, X } from "lucide-react";
 import { useStore, toast } from "../store";
 import { importFigmaJson, importFigmaUrl, type ImportResult } from "../figma";
+import { useEscape } from "../ui/controls";
 
 const TOKEN_KEY = "dt:figmaToken";
 const readToken = () => {
@@ -22,6 +23,7 @@ export function FigmaImportDialog() {
   const [result, setResult] = useState<ImportResult | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const close = () => useStore.setState({ figmaOpen: false });
+  useEscape(close);
 
   const finish = (r: ImportResult) => {
     setResult(r);

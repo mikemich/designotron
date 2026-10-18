@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Hash, Palette, Plus, ToggleLeft, Trash2, Type as TypeIcon, X } from "lucide-react";
 import { dispatch, useDoc, useStore } from "../store";
 import type { VarKind, Variable, VariableCollection } from "../types";
-import { Menu, type MenuItem } from "../ui/controls";
+import { Menu, type MenuItem, useEscape } from "../ui/controls";
 import { cssColor } from "../ui/color";
 
 const uid = (p: string) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -73,6 +73,7 @@ export function VariablesDialog() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const coll = collections.find((c) => c.id === active) ?? collections[0];
   const close = () => useStore.setState({ variablesOpen: false });
+  useEscape(close);
 
   const update = (fn: (c: VariableCollection) => VariableCollection) => save(collections.map((c) => (c.id === coll.id ? fn(c) : c)));
   const addCollection = () => {

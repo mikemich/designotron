@@ -42,9 +42,19 @@ class BridgeClient {
   /** Set once an error has been shown for the current turn, to avoid repeats. */
   private turnError = false;
 
+  /** Reconnect delay; grows while the bridge stays offline (fewer console errors). */
+  private delay = 2000;
+
   start() {
     this.connect();
     onDocChange(() => this.scheduleDocPush());
+    // Coming back to the tab (e.g. after installing the bridge) retries at once.
+    window.addEventListener("focus", () => {
+      if (!this.ws && this.retry) {
+        clearTimeout(this.retry);
+        this.connect();
+      }
+    });
   }
 
   private connect() {
@@ -58,6 +68,7 @@ class BridgeClient {
     }
     this.ws = ws;
     ws.onopen = () => {
+      this.delay = 2000;
       useChat.setState({ bridgeStatus: "connected" });
       ws.send(JSON.stringify({ type: "hello", client: "designotron-editor" }));
       this.pushDoc();
@@ -72,7 +83,8 @@ class BridgeClient {
     useChat.setState({ bridgeStatus: "offline" });
     if (useChat.getState().running && useChat.getState().mode === "bridge") useChat.setState({ running: false });
     if (this.retry) clearTimeout(this.retry);
-    this.retry = setTimeout(() => this.connect(), 4000);
+    this.retry = setTimeout(() => this.connect(), this.delay);
+    this.delay = Math.min(this.delay * 1.5, 30000);
   }
 
   /** Sends a message to the bridge if connected. */

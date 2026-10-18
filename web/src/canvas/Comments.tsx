@@ -1,6 +1,6 @@
 // Comment pins on the canvas, thread popovers and the new-comment composer.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, RotateCcw, Sparkles, Trash2, X } from "lucide-react";
 import { dispatch, query, useStore } from "../store";
 import type { CommentPin } from "../types";
@@ -102,11 +102,11 @@ function NameField({ name, setName }: { name: string; setName: (n: string) => vo
   return (
     <input
       className="textinput"
-      placeholder="Your name"
+      placeholder="Your name (optional)"
       value={name}
       onChange={(e) => setName(e.target.value)}
       onKeyDown={(e) => e.stopPropagation()}
-      style={{ marginBottom: 6 }}
+      style={{ marginTop: 6 }}
     />
   );
 }
@@ -115,6 +115,12 @@ function Composer({ draft, style }: { draft: { x: number; y: number; node: strin
   const [text, setText] = useState("");
   const [name, setName] = useState(userName());
   const close = () => useStore.setState({ draftComment: null });
+  const input = useRef<HTMLTextAreaElement>(null);
+  // After the click that placed the pin, so the canvas doesn't take focus back.
+  useEffect(() => {
+    const t = setTimeout(() => input.current?.focus(), 0);
+    return () => clearTimeout(t);
+  }, []);
   const submit = () => {
     if (!text.trim()) return;
     const author = name.trim() || "Anonymous";
@@ -124,8 +130,8 @@ function Composer({ draft, style }: { draft: { x: number; y: number; node: strin
   };
   return (
     <div className="comment-popover" style={style} onPointerDown={(e) => e.stopPropagation()}>
-      {!userName() && <NameField name={name} setName={setName} />}
       <textarea
+        ref={input}
         autoFocus
         className="textinput"
         placeholder="Add a comment… (Claude can read and resolve these)"
@@ -140,6 +146,7 @@ function Composer({ draft, style }: { draft: { x: number; y: number; node: strin
           if (e.key === "Escape") close();
         }}
       />
+      {!userName() && <NameField name={name} setName={setName} />}
       <div className="row" style={{ justifyContent: "flex-end", marginTop: 6 }}>
         <button className="btn" onClick={close}>
           Cancel

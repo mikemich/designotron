@@ -323,7 +323,7 @@ async function __wbg_load(module, imports) {
 function __wbg_get_imports() {
     const imports = {};
     imports.wbg = {};
-    imports.wbg.__wbg_dtMeasureText_dd5a35263fabc29f = function(arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
+    imports.wbg.__wbg_dtMeasureText_a60eeb4caf138e9e = function(arg0, arg1, arg2, arg3, arg4, arg5, arg6) {
         const ret = globalThis.dtMeasureText(getStringFromWasm0(arg0, arg1), arg2, arg3 >>> 0, arg4 !== 0, getStringFromWasm0(arg5, arg6));
         return ret;
     };

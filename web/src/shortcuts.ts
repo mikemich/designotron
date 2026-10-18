@@ -1,6 +1,7 @@
 import * as A from "./actions";
 import { copySelection, pasteHere } from "./canvas/contextMenu";
 import { selection, setTool, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
+import { useShortcuts } from "./panels/ShortcutsDialog";
 
 function isTyping(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement;
@@ -59,6 +60,8 @@ export function installShortcuts(): () => void {
       const code = e.code.replace("Key", "").toLowerCase();
       if (map[code]) return run(map[code]);
     }
+
+    if (e.key === "?") return run(() => useShortcuts.setState({ open: true }));
 
     if (e.shiftKey) {
       if (k === "a") return run(A.addAutoLayout);

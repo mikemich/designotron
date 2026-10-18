@@ -29,6 +29,7 @@ import { ALT, Menu, MOD, SHIFT, type MenuItem } from "../ui/controls";
 import { runPlugin, usePlugins } from "../plugins";
 import { useCollab } from "../collab";
 import { useChat } from "../ai/chatState";
+import { useShortcuts } from "./ShortcutsDialog";
 
 const SHAPES: { tool: Tool; label: string; key: string; icon: JSX.Element }[] = [
   { tool: "rectangle", label: "Rectangle", key: "R", icon: <Square size={16} /> },
@@ -90,6 +91,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     { label: `${useStore.getState().showGrids ? "Hide" : "Show"} layout grids`, kbd: `${SHIFT}${MOD}4`, onClick: () => toggleView("showGrids") },
     { label: "Version history", onClick: () => useStore.setState({ leftTab: "history" }) },
     { label: "Variables…", onClick: () => useStore.setState({ variablesOpen: true }) },
+    { label: "Keyboard shortcuts", kbd: "?", onClick: () => useShortcuts.setState({ open: true }) },
     { sep: true },
     { heading: "Plugins" },
     ...usePlugins.getState().list.slice(0, 8).map((p) => ({ label: p.name, onClick: () => runPlugin(p) })),

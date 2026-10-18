@@ -25,7 +25,18 @@
     />
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- Shown until the engine loads; React replaces it. -->
+      <div style="height:100vh;display:grid;place-items:center;background:#1e1e1e;color:#e6e6e6;font-family:Inter,system-ui,sans-serif">
+        <div style="text-align:center">
+          <div style="width:48px;height:48px;border-radius:12px;background:#6d4aff;margin:0 auto 16px;display:grid;place-items:center">
+            <svg width="26" height="26" viewBox="0 0 32 32"><path d="M9 8h8a7 7 0 010 14H9z" fill="white" /></svg>
+          </div>
+          <div style="font-size:20px;font-weight:700">Designotron</div>
+          <div style="margin-top:6px;color:#a6a6a6;font-size:14px">Design with Claude, free and open source. Loading…</div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
