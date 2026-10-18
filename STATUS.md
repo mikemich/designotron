@@ -37,7 +37,8 @@ Ordered by impact on "replace Figma for a small team".
 |-----------------|------------------------------------------------------------------------------------------------------|
 | Engine (Rust)   | Serde document model, pages, undo/redo with gesture coalescing, JSON merge-patch edits               |
 | Layout          | Auto layout (direction, gap, padding, alignment, space-between, wrap), hug/fill/fixed, constraints   |
-| Components      | Main components, instances with stable ids, overrides, reset/detach, variants (component sets)       |
+| Components      | Main components, instances with stable ids, overrides, reset/detach, variants (component sets); swap instance (panel and context menu), add variant, rename variant properties and values; pasting an instance into another file brings its main component |
+| Styles          | Colour and text styles: create, rename, edit in place (`UpdateColorStyle`, `UpdateTextStyle`), delete; style chips with detach in Fill and Text |
 | Canvas          | Pan/zoom, Figma-style picking and drill-down, marquee, move/resize/rotate, smart-guide snapping      |
 | Tools           | Frame, rectangle, ellipse, line, arrow, polygon, star, pen, pencil, text, image, hand                |
 | Editing         | In-place text editing, vector point/handle editing, alt-drag duplicate, drop into frames, clipboard  |
@@ -79,7 +80,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 98 engine, bridge, rooms and relay tests               | `cargo test --workspace`                     |
+| 100 engine, bridge, rooms and relay tests              | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |

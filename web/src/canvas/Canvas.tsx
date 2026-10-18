@@ -394,16 +394,18 @@ export function Canvas() {
           if (Math.hypot(dx, dy) * zoom() < 3) return;
           d.started = true;
           d.clickSelect = null;
+          dispatch({ op: "beginGesture" });
           if (d.alt) {
-            // Alt-drag duplicates in place, then moves the copies.
+            // Alt-drag duplicates in place, then moves the copies. Rebasing makes the drag move
+            // the copies while undo still goes back to before the paste: one undo step.
             const doc = getDoc();
             const data = query<string>({ q: "copy", ids: d.ids });
             const parent = doc.nodes[d.ids[0]]?.parent ?? null;
             const b = query<{ union: Rect | null }>({ q: "bounds", ids: d.ids }).union;
             const r = dispatch<{ created: string[] }>({ op: "paste", data, parent, x: b?.x ?? null, y: b?.y ?? null });
             if (r) d.ids = r.created;
+            dispatch({ op: "rebaseGesture" });
           }
-          dispatch({ op: "beginGesture" });
           useStore.setState({ hover: null });
         }
         const r = dispatch<{ guides: any[] }>({ op: "translate", ids: d.ids, dx, dy, snap: !e.ctrlKey, zoom: zoom() }, { quiet: true });

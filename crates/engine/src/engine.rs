@@ -55,6 +55,10 @@ pub enum Command {
   Undo,
   Redo,
   BeginGesture,
+  /// Within a gesture: makes the current document the base that gesture-relative commands
+  /// (translate, resize, rotate) work from, while undo still returns to where the gesture
+  /// began. Used by Alt-drag: paste the copies, rebase, then move them; one undo step.
+  RebaseGesture,
   EndGesture,
   CancelGesture,
   Select {
@@ -358,6 +362,19 @@ pub enum Command {
     name: Option<String>,
     color: Option<String>,
   },
+  /// Edits a text style in place (keeping its id) and updates every layer that uses it.
+  UpdateTextStyle {
+    id: String,
+    name: Option<String>,
+    font_family: Option<String>,
+    font_size: Option<f64>,
+    font_weight: Option<u32>,
+    line_height: Option<f64>,
+    /// Clears the line height (back to auto).
+    #[serde(default)]
+    auto_line_height: bool,
+    letter_spacing: Option<f64>,
+  },
   DeleteStyle {
     id: String,
   },
@@ -468,6 +485,8 @@ pub struct Engine {
   past: Vec<Step>,
   future: Vec<Step>,
   gesture: Option<Snapshot>,
+  /// Where undo returns to when the gesture was rebased (`RebaseGesture`).
+  gesture_undo: Option<Snapshot>,
   /// Latest `Translate` delta of the open gesture (where an auto layout child was dragged to).
   drag_delta: Option<Point>,
   pub(crate) gen: IdGen,
@@ -502,6 +521,7 @@ impl Engine {
       past: vec![],
       future: vec![],
       gesture: None,
+      gesture_undo: None,
       drag_delta: None,
       gen,
       measurer,
@@ -524,6 +544,7 @@ impl Engine {
     self.past.clear();
     self.future.clear();
     self.gesture = None;
+    self.gesture_undo = None;
     self.fingerprints.clear();
     self.refresh_fingerprints();
     layout::relayout_all(&mut self.doc, self.measurer.as_ref());
@@ -736,6 +757,9 @@ impl Engine {
         if let Some(g) = self.gesture.as_mut() {
           let _ = crate::collab::apply(&mut g.doc, &delta);
         }
+        if let Some(g) = self.gesture_undo.as_mut() {
+          let _ = crate::collab::apply(&mut g.doc, &delta);
+        }
         self.refresh_fingerprints();
         self.after_mutation(&prev);
         self.collab_synced = Some(self.doc.clone());
@@ -744,11 +768,21 @@ impl Engine {
       }
       Command::BeginGesture => {
         self.gesture = Some(self.snapshot());
+        self.gesture_undo = None;
         self.drag_delta = None;
         return Ok(json!({}));
       }
-      Command::EndGesture => {
+      Command::RebaseGesture => {
         if let Some(base) = self.gesture.take() {
+          self.gesture_undo.get_or_insert(base);
+          self.gesture = Some(self.snapshot());
+          self.drag_delta = None;
+        }
+        return Ok(json!({}));
+      }
+      Command::EndGesture => {
+        let gesture = self.gesture.take();
+        if let Some(base) = self.gesture_undo.take().or(gesture) {
           if base.doc != self.doc {
             self.push_past(base);
           }
@@ -757,7 +791,8 @@ impl Engine {
         return Ok(json!({}));
       }
       Command::CancelGesture => {
-        if let Some(base) = self.gesture.take() {
+        let gesture = self.gesture.take();
+        if let Some(base) = self.gesture_undo.take().or(gesture) {
           self.restore(base);
         }
         self.rev += 1;
@@ -1793,6 +1828,52 @@ impl Engine {
         });
         Ok(json!({}))
       }
+      Command::UpdateTextStyle {
+        id,
+        name,
+        font_family,
+        font_size,
+        font_weight,
+        line_height,
+        auto_line_height,
+        letter_spacing,
+      } => {
+        let style = self.doc.styles.texts.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
+        if let Some(v) = name {
+          style.name = v;
+        }
+        if let Some(v) = font_family {
+          style.font_family = v;
+        }
+        if let Some(v) = font_size {
+          style.font_size = v.max(1.0);
+        }
+        if let Some(v) = font_weight {
+          style.font_weight = v;
+        }
+        if auto_line_height {
+          style.line_height = None;
+        } else if let Some(v) = line_height {
+          style.line_height = Some(v);
+        }
+        if let Some(v) = letter_spacing {
+          style.letter_spacing = v;
+        }
+        let t = style.clone();
+        self.doc.update_where(
+          |n| n.text_style.as_deref() == Some(id.as_str()),
+          |n| {
+            if let Some(tp) = n.text.as_mut() {
+              tp.font_family = t.font_family.clone();
+              tp.font_size = t.font_size;
+              tp.font_weight = t.font_weight;
+              tp.line_height = t.line_height;
+              tp.letter_spacing = t.letter_spacing;
+            }
+          },
+        );
+        Ok(json!({}))
+      }
       Command::ApplyStyle { ids, style_id } => {
         if let Some(c) = self.doc.styles.colors.iter().find(|s| s.id == style_id).cloned() {
           for id in &ids {
@@ -1825,6 +1906,7 @@ impl Engine {
       | Command::Undo
       | Command::Redo
       | Command::BeginGesture
+      | Command::RebaseGesture
       | Command::EndGesture
       | Command::CancelGesture
       | Command::Select { .. }
@@ -2723,6 +2805,86 @@ mod tests {
     assert_eq!(e.doc.get(&id).unwrap().x, 100.0);
     e.dispatch(Command::Undo).unwrap();
     assert_eq!(e.doc.get(&id).unwrap().x, 0.0);
+  }
+
+  #[test]
+  fn updating_a_text_style_keeps_its_id_and_updates_its_layers() {
+    let mut e = engine();
+    let t = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "Heading".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.doc.styles.texts.push(crate::model::TextStyle {
+      id: "ts1".into(),
+      name: "H1".into(),
+      font_family: "Inter".into(),
+      font_size: 32.0,
+      font_weight: 700,
+      line_height: None,
+      letter_spacing: 0.0,
+    });
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![t.clone()],
+      style_id: "ts1".into(),
+    })
+    .unwrap();
+    e.dispatch(Command::UpdateTextStyle {
+      id: "ts1".into(),
+      name: Some("Display".into()),
+      font_family: None,
+      font_size: Some(48.0),
+      font_weight: None,
+      line_height: Some(56.0),
+      auto_line_height: false,
+      letter_spacing: None,
+    })
+    .unwrap();
+    let s = &e.doc.styles.texts[0];
+    assert_eq!((s.id.as_str(), s.name.as_str(), s.font_size), ("ts1", "Display", 48.0));
+    let tp = e.doc.get(&t).unwrap().text.clone().unwrap();
+    assert_eq!((tp.font_size, tp.font_weight, tp.line_height), (48.0, 700, Some(56.0)));
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.get(&t).unwrap().text.as_ref().unwrap().font_size, 32.0);
+  }
+
+  #[test]
+  fn rebased_gesture_moves_new_layers_and_undoes_in_one_step() {
+    // Alt-drag: the copy is made inside the gesture, then the gesture is rebased so the
+    // drag moves it; one undo removes the whole thing.
+    let mut e = engine();
+    e.dispatch(Command::BeginGesture).unwrap();
+    let id = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 0.0,
+        y: 0.0,
+        width: 50.0,
+        height: 50.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::RebaseGesture).unwrap();
+    for i in 1..=3 {
+      e.dispatch(Command::Translate {
+        ids: vec![id.clone()],
+        dx: i as f64 * 20.0,
+        dy: 0.0,
+        snap: false,
+        zoom: 1.0,
+      })
+      .unwrap();
+    }
+    e.dispatch(Command::EndGesture).unwrap();
+    assert_eq!(e.doc.get(&id).unwrap().x, 60.0);
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.doc.get(&id).is_none());
+    assert!(e.past.is_empty());
   }
 
   #[test]

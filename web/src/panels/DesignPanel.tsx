@@ -462,6 +462,13 @@ const WEIGHTS = [
 
 function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const t = (f: (n: Node) => unknown) => common(nodes, (n) => f(n));
+  // A layer-wide value is "Mixed" when a styled range overrides it with something else.
+  const r = <K extends "fontFamily" | "fontWeight" | "fontSize" | "letterSpacing">(key: K) => {
+    const v = common(nodes, (n) => n.text![key]);
+    if (v === MIXED) return v;
+    const ranged = nodes.some((n) => (n.text!.runs ?? []).some((run) => run[key] !== undefined && (run[key] as unknown) !== v));
+    return ranged ? MIXED : v;
+  };
   const RUN_KEYS = ["fontFamily", "fontSize", "fontWeight", "italic", "letterSpacing", "decoration"];
   const set = (patch: Record<string, unknown>) => {
     // While editing with characters selected, style just those characters.
@@ -476,11 +483,11 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
     <Section title={partial ? `Text · ${sel!.end - sel!.start} characters selected` : "Text"} actions={<ApplyStyleButton kind="text" ids={ids} />}>
       <StyleChip kind="text" nodes={nodes} ids={ids} />
       <div className="row">
-        <SelectField value={t((n) => n.text!.fontFamily) as Maybe<string>} options={FONTS.map((f) => ({ value: f, label: f }))} onChange={(fontFamily) => set({ fontFamily })} />
+        <SelectField value={r("fontFamily") as Maybe<string>} options={FONTS.map((f) => ({ value: f, label: f }))} onChange={(fontFamily) => set({ fontFamily })} />
       </div>
       <div className="grid2">
-        <SelectField value={t((n) => n.text!.fontWeight) as Maybe<number>} options={WEIGHTS} onChange={(fontWeight) => set({ fontWeight })} />
-        <NumberField value={t((n) => n.text!.fontSize) as Maybe<number>} min={1} onChange={(fontSize) => set({ fontSize })} onScrubStart={begin} onScrubEnd={end} label="Aa" title="Font size" />
+        <SelectField value={r("fontWeight") as Maybe<number>} options={WEIGHTS} onChange={(fontWeight) => set({ fontWeight })} />
+        <NumberField value={r("fontSize") as Maybe<number>} min={1} onChange={(fontSize) => set({ fontSize })} onScrubStart={begin} onScrubEnd={end} label="Aa" title="Font size" />
       </div>
       <div className="grid2">
         <NumberField
@@ -492,7 +499,7 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           onScrubStart={begin}
           onScrubEnd={end}
         />
-        <NumberField label="|A|" title="Letter spacing" value={t((n) => n.text!.letterSpacing) as Maybe<number>} step={0.1} onChange={(letterSpacing) => set({ letterSpacing })} onScrubStart={begin} onScrubEnd={end} />
+        <NumberField label="|A|" title="Letter spacing" value={r("letterSpacing") as Maybe<number>} step={0.1} onChange={(letterSpacing) => set({ letterSpacing })} onScrubStart={begin} onScrubEnd={end} />
       </div>
       <div className="row">
         <Seg

@@ -234,41 +234,27 @@ export function updateColorStyle(id: string, change: { name?: string; color?: st
   return dispatch({ op: "updateColorStyle", id, name: change.name ?? null, color: change.color ?? null }) !== null;
 }
 
-/**
- * Edits the text style at `index`. The engine has no text-style update command, so this
- * re-creates that style and the ones after it (keeping their order), re-links every layer
- * that used them, re-applies the edited style's properties to its layers, and deletes the
- * old styles, all as one undo step. Style ids change as a result.
- */
+/** Edits the text style at `index` in place (its id stays) and updates the layers using it. */
 export function updateTextStyle(index: number, change: Partial<Omit<TextStyle, "id">>): boolean {
-  const doc = getDoc();
-  const styles = doc.styles.texts;
-  const target = styles[index];
+  const target = getDoc().styles.texts[index];
   if (!target) return false;
   if (change.name !== undefined) {
     change.name = change.name.trim();
     if (!change.name) return toast("Name can't be empty", "error"), false;
   }
-  const edited: TextStyle = { ...target, ...change };
-  if (JSON.stringify(edited) === JSON.stringify(target)) return true;
-  const propsChanged = (["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing"] as const).some((k) => edited[k] !== target[k]);
-  const tail = styles.slice(index);
-  const users = new Map<string, string[]>(tail.map((s) => [s.id, []]));
-  for (const n of Object.values(doc.nodes)) if (n.textStyle && users.has(n.textStyle)) users.get(n.textStyle)!.push(n.id);
-  return batch(() => {
-    const texts = tail.map((s, i) => {
-      const t = i === 0 ? edited : s;
-      return { name: t.name, fontFamily: t.fontFamily, fontSize: t.fontSize, fontWeight: t.fontWeight, lineHeight: t.lineHeight, letterSpacing: t.letterSpacing };
-    });
-    const created = dispatchOrThrow<{ created: string[] }>({ op: "ai", tool: "define_styles", input: { texts } }).created;
-    tail.forEach((s, i) => {
-      const ids = users.get(s.id)!;
-      if (!ids.length) return;
-      if (i === 0 && propsChanged) dispatchOrThrow({ op: "applyStyle", ids, styleId: created[i] });
-      else dispatchOrThrow({ op: "update", ids, patch: { textStyle: created[i] } });
-    });
-    for (const s of tail) dispatchOrThrow({ op: "deleteStyle", id: s.id });
-  });
+  return (
+    dispatch({
+      op: "updateTextStyle",
+      id: target.id,
+      name: change.name ?? null,
+      fontFamily: change.fontFamily ?? null,
+      fontSize: change.fontSize ?? null,
+      fontWeight: change.fontWeight ?? null,
+      lineHeight: change.lineHeight ?? null,
+      autoLineHeight: "lineHeight" in change && change.lineHeight == null,
+      letterSpacing: change.letterSpacing ?? null,
+    }) !== null
+  );
 }
 
 /** A text style with default properties (for "+" with no text selected). */

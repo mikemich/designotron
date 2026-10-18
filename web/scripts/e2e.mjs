@@ -252,6 +252,8 @@ try {
   const nodesBefore = Object.keys((await doc()).nodes).length;
   await page.keyboard.press("Delete");
   const nodesDeleted = Object.keys((await doc()).nodes).length;
+  // Row actions show on hover.
+  await page.hover(".version:has-text('Before delete')");
   await page.click(".version:has-text('Before delete') .ibtn[title='Restore this version']");
   await page.waitForFunction((n) => Object.keys(window.__dt.doc().nodes).length === n, nodesBefore, { timeout: 3000 }).catch(() => {});
   const nodesRestored = Object.keys((await doc()).nodes).length;
