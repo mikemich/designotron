@@ -11,11 +11,9 @@ import {
   ArrowDown,
   ArrowRight,
   Bold,
-  Component,
   Eye,
   EyeOff,
   Italic,
-  Link2,
   Minus,
   Plus,
   RotateCw,
@@ -23,18 +21,19 @@ import {
   Strikethrough,
   Underline,
   WrapText,
-  CornerUpLeft,
   Variable,
   Radius,
   Blend,
 } from "lucide-react";
 import type { Effect, LayoutGrid, Node, Paint, VarKind } from "../types";
-import { dispatch, FONTS, getDoc, styleTextSelection, useDoc, useSelection, useStore, zoomToSelection } from "../store";
+import { dispatch, FONTS, getDoc, styleTextSelection, useDoc, useSelection, useStore } from "../store";
 import { ALT, common, IconButton, MIXED, MOD, NumberField, Section, Seg, SelectField, SHIFT, type Maybe } from "../ui/controls";
 import { paintLabel, PaintSwatch, cssColor, ColorPicker } from "../ui/color";
 import { exportNode } from "../exporter";
 import * as A from "../actions";
 import { Popover } from "../ui/controls";
+import { ComponentSetSection, InstanceSection, MainComponentSection } from "./ComponentControls";
+import { ApplyStyleButton, StyleChip } from "./StyleControls";
 
 const begin = () => dispatch({ op: "beginGesture" });
 const end = () => dispatch({ op: "endGesture" });
@@ -147,75 +146,11 @@ function PagePanel() {
 }
 
 function ComponentSection({ nodes }: { nodes: Node[] }) {
-  const doc = getDoc();
   if (nodes.length !== 1) return null;
   const n = nodes[0];
-  if (n.type === "component") {
-    const isVariant = n.parent && doc.nodes[n.parent]?.type === "componentSet";
-    return (
-      <Section title={<span style={{ color: "#c4a5ff" }}>❖ Main component</span>}>
-        <textarea
-          className="textinput"
-          placeholder="Description (used by Claude and code export)"
-          defaultValue={n.component?.description ?? ""}
-          key={n.id}
-          onKeyDown={(e) => e.stopPropagation()}
-          onBlur={(e) => update([n.id], { component: { ...n.component, description: e.target.value } })}
-        />
-        {isVariant && (
-          <div className="muted small" style={{ marginTop: 6 }}>
-            Variant: {Object.entries(n.component?.variantProps ?? {}).map(([k, v]) => `${k}=${v}`).join(", ")}
-          </div>
-        )}
-      </Section>
-    );
-  }
-  if (n.type === "instance" && n.instance) {
-    const comp = doc.nodes[n.instance.componentId];
-    const set = comp?.parent ? doc.nodes[comp.parent] : null;
-    const variantProps: Record<string, Set<string>> = {};
-    if (set?.type === "componentSet") {
-      for (const cid of set.children) {
-        for (const [k, v] of Object.entries(doc.nodes[cid]?.component?.variantProps ?? {})) (variantProps[k] ??= new Set()).add(v);
-      }
-    }
-    return (
-      <Section
-        title={
-          <span style={{ color: "#c4a5ff" }}>
-            <Component size={12} style={{ verticalAlign: -2 }} /> {comp?.name ?? "Missing component"}
-          </span>
-        }
-        actions={
-          <>
-            <IconButton title="Go to main component" onClick={() => comp && (dispatch({ op: "select", ids: [comp.id] }), zoomToSelection())}>
-              <Link2 size={13} />
-            </IconButton>
-            <IconButton title="Reset overrides" onClick={() => dispatch({ op: "resetInstance", ids: [n.id] })}>
-              <CornerUpLeft size={13} />
-            </IconButton>
-            <IconButton title="Detach instance" onClick={A.detachInstance}>
-              <Scan size={13} />
-            </IconButton>
-          </>
-        }
-      >
-        {Object.entries(variantProps).map(([k, values]) => (
-          <div className="row" key={k}>
-            <span className="muted" style={{ width: 70 }}>
-              {k}
-            </span>
-            <SelectField
-              value={comp?.component?.variantProps[k] ?? ""}
-              options={[...values].map((v) => ({ value: v, label: v }))}
-              onChange={(value) => dispatch({ op: "setVariant", id: n.id, prop: k, value })}
-            />
-          </div>
-        ))}
-        {Object.keys(n.instance.overrides).length > 0 && <div className="muted small">{Object.keys(n.instance.overrides).length} override(s)</div>}
-      </Section>
-    );
-  }
+  if (n.type === "component") return <MainComponentSection n={n} />;
+  if (n.type === "componentSet") return <ComponentSetSection n={n} />;
+  if (n.type === "instance" && n.instance) return <InstanceSection n={n} />;
   return null;
 }
 
@@ -538,7 +473,8 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const editing = useStore((s) => s.editingText);
   const partial = !!sel && sel.id === editing && sel.end > sel.start;
   return (
-    <Section title={partial ? `Text · ${sel!.end - sel!.start} characters selected` : "Text"}>
+    <Section title={partial ? `Text · ${sel!.end - sel!.start} characters selected` : "Text"} actions={<ApplyStyleButton kind="text" ids={ids} />}>
+      <StyleChip kind="text" nodes={nodes} ids={ids} />
       <div className="row">
         <SelectField value={t((n) => n.text!.fontFamily) as Maybe<string>} options={FONTS.map((f) => ({ value: f, label: f }))} onChange={(fontFamily) => set({ fontFamily })} />
       </div>
@@ -627,18 +563,22 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
     <Section
       title={title}
       actions={
-        <IconButton
-          title={`Add ${title.toLowerCase()}`}
-          onClick={() => {
-            const color = keyName === "fills" ? (nodes[0].type === "text" ? "#000000" : "#D9D9D9") : "#000000";
-            set([...list, { type: "solid", color, opacity: 1, visible: true }]);
-            if (keyName === "strokes" && nodes.every((n) => n.strokeWeight === 0)) update(ids, { strokeWeight: 1 });
-          }}
-        >
-          <Plus size={14} />
-        </IconButton>
+        <>
+          {keyName === "fills" && <ApplyStyleButton kind="fill" ids={ids} />}
+          <IconButton
+            title={`Add ${title.toLowerCase()}`}
+            onClick={() => {
+              const color = keyName === "fills" ? (nodes[0].type === "text" ? "#000000" : "#D9D9D9") : "#000000";
+              set([...list, { type: "solid", color, opacity: 1, visible: true }]);
+              if (keyName === "strokes" && nodes.every((n) => n.strokeWeight === 0)) update(ids, { strokeWeight: 1 });
+            }}
+          >
+            <Plus size={14} />
+          </IconButton>
+        </>
       }
     >
+      {keyName === "fills" && <StyleChip kind="fill" nodes={nodes} ids={ids} />}
       {paints === MIXED && <div className="muted small">Mixed — click + to replace for all</div>}
       {[...list].reverse().map((p, ri) => {
         const i = list.length - 1 - ri;

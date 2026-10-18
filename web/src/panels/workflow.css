@@ -1,0 +1,210 @@
+/* Component, variant and style workflow controls (ComponentControls, StyleControls). */
+
+.wf-gap {
+  margin-top: 8px;
+}
+.wf-purple {
+  color: #c4a5ff;
+  flex-shrink: 0;
+}
+
+/* Inline editable text fields */
+.field.wf-inline input {
+  padding: 0 6px;
+}
+.field.wf-inline .wf-lbl {
+  width: 40px;
+  cursor: default;
+}
+
+/* Variant properties */
+.wf-props {
+  margin-top: 8px;
+}
+.wf-props-head,
+.wf-prop-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.wf-props-head {
+  margin-bottom: 4px;
+}
+.wf-prop-block {
+  margin-bottom: 10px;
+}
+.wf-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  padding-left: 12px;
+}
+.field.wf-value {
+  flex: 0 1 auto;
+  width: calc(50% - 2px);
+  height: 24px;
+}
+.wf-prop-label {
+  width: 70px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Swap instance */
+.field.wf-swap {
+  gap: 6px;
+  padding: 0 8px;
+  text-align: left;
+}
+.wf-swap-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-picker .textinput {
+  margin-bottom: 6px;
+}
+.wf-picker-list {
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 0 -4px;
+}
+.wf-pick {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 4px;
+  text-align: left;
+}
+.wf-pick:hover {
+  background: var(--select);
+  color: white;
+}
+.wf-pick:hover .muted,
+.wf-pick:hover .wf-purple {
+  color: white;
+}
+.wf-pick-set {
+  font-weight: 600;
+}
+.wf-pick-sub {
+  padding-left: 26px;
+}
+.wf-pick.current {
+  color: var(--accent-2);
+}
+.wf-pick-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-pick-dot {
+  width: 12px;
+  flex-shrink: 0;
+}
+.wf-pick-head {
+  padding: 6px 8px 2px;
+}
+.wf-empty {
+  padding: 8px;
+}
+
+/* Applied style chip (design panel) */
+.wf-chip-row {
+  margin-bottom: 8px;
+}
+.wf-chip {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 5px;
+  background: var(--panel-2);
+  border: 1px solid #4a4a4a;
+}
+.wf-chip-swatch {
+  width: 14px;
+  height: 14px;
+  cursor: default;
+}
+.wf-chip-ag {
+  font-size: 12px;
+}
+.wf-chip-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Style lists (Assets tab) */
+.wf-style {
+  border-radius: 5px;
+  margin: 0 -6px 2px;
+}
+.wf-style.editing {
+  background: #262626;
+  padding-bottom: 6px;
+}
+.wf-style-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 6px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.wf-style-row:hover {
+  background: var(--panel-2);
+}
+.wf-style-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-ag {
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.wf-style-tools {
+  display: flex;
+  opacity: 0;
+}
+.wf-style-row:hover .wf-style-tools,
+.wf-style-tools.pinned,
+.wf-style-tools:focus-within {
+  opacity: 1;
+}
+.wf-style-tools .ibtn {
+  width: 22px;
+  height: 22px;
+}
+.wf-style-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 6px 0;
+}
+.wf-style-edit .grid2 {
+  margin-bottom: 0;
+}
+.wf-style-edit .field {
+  flex: none;
+}

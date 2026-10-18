@@ -24,13 +24,12 @@ import {
   Type,
   Unlock,
   Group as GroupIcon,
-  Trash2,
 } from "lucide-react";
-import { dispatch, getDoc, useDoc, useStore, zoomToSelection } from "../store";
+import { dispatch, useDoc, useStore, zoomToSelection } from "../store";
 import type { Doc, Node } from "../types";
 import { IconButton, Menu, type MenuItem } from "../ui/controls";
 import { viewportCenter } from "../actions";
-import { cssColor } from "../ui/color";
+import { ColorStylesSection, TextStylesSection } from "./StyleControls";
 
 export function LeftPanel() {
   const tab = useStore((s) => s.leftTab);
@@ -389,7 +388,6 @@ function Assets() {
   const doc = useDoc();
   const [q, setQ] = useState("");
   const comps = Object.values(doc.nodes).filter((n) => n.type === "component" && n.name.toLowerCase().includes(q.toLowerCase()));
-  const sel = useStore((s) => s.es.selection);
   return (
     <div className="scroll">
       <div className="section">
@@ -422,65 +420,8 @@ function Assets() {
           </div>
         ))}
       </div>
-      <div className="section">
-        <div className="section-head">
-          <span>Colour styles</span>
-          <IconButton
-            title="Create colour style from selection"
-            onClick={() => {
-              const n = getDoc().nodes[sel[0]];
-              const f = n?.fills.find((p) => p.type === "solid");
-              const color = f && f.type === "solid" ? f.color : "#7C5CFF";
-              const name = window.prompt("Style name", "Primary");
-              if (name) {
-                const r = dispatch<{ id: string }>({ op: "addColorStyle", name, color });
-                if (r && n) dispatch({ op: "applyStyle", ids: [n.id], styleId: r.id });
-              }
-            }}
-          >
-            <Plus size={14} />
-          </IconButton>
-        </div>
-        {doc.styles.colors.map((s) => (
-          <div key={s.id} className="row" style={{ cursor: "pointer" }} onClick={() => sel.length && dispatch({ op: "applyStyle", ids: sel, styleId: s.id })} title="Apply to selection">
-            <div className="swatch">
-              <i style={{ background: cssColor(s.color) }} />
-            </div>
-            <span style={{ flex: 1 }}>{s.name}</span>
-            <span className="muted small">{s.color}</span>
-            <IconButton title="Delete style" onClick={(e) => (e.stopPropagation(), dispatch({ op: "deleteStyle", id: s.id }))}>
-              <Trash2 size={12} />
-            </IconButton>
-          </div>
-        ))}
-      </div>
-      <div className="section">
-        <div className="section-head">
-          <span>Text styles</span>
-          <IconButton
-            title="Create text style from selected text"
-            onClick={() => {
-              const n = getDoc().nodes[sel[0]];
-              if (n?.type !== "text") return;
-              const name = window.prompt("Style name", "Heading");
-              if (name) dispatch({ op: "addTextStyle", name, from: n.id });
-            }}
-          >
-            <Plus size={14} />
-          </IconButton>
-        </div>
-        {doc.styles.texts.map((s) => (
-          <div key={s.id} className="row" style={{ cursor: "pointer" }} onClick={() => sel.length && dispatch({ op: "applyStyle", ids: sel, styleId: s.id })}>
-            <span style={{ fontFamily: s.fontFamily, fontWeight: s.fontWeight, flex: 1 }}>Ag {s.name}</span>
-            <span className="muted small">
-              {s.fontSize}/{s.fontWeight}
-            </span>
-            <IconButton title="Delete style" onClick={(e) => (e.stopPropagation(), dispatch({ op: "deleteStyle", id: s.id }))}>
-              <Trash2 size={12} />
-            </IconButton>
-          </div>
-        ))}
-      </div>
+      <ColorStylesSection filter={q} />
+      <TextStylesSection filter={q} />
     </div>
   );
 }

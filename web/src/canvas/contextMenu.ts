@@ -5,6 +5,12 @@ import { assetDataUrl } from "../assets";
 import { askClaude } from "../ai/chatState";
 import { rasterize } from "../ai/images";
 import type { Node } from "../types";
+import { addVariant } from "../componentOps";
+import { openSwapPicker } from "../panels/ComponentControls";
+
+/** Where the last right-click happened, so pickers opened from the menu appear there. */
+let menuAt = { x: 240, y: 160 };
+if (typeof window !== "undefined") window.addEventListener("contextmenu", (e) => (menuAt = { x: e.clientX, y: e.clientY }), true);
 
 /** The image painted on a layer, as a URL the browser can load. */
 function layerImage(n: Node): string | null {
@@ -93,6 +99,11 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   items.push({ sep: true });
   if (!nodes.some((n) => n.type === "component" || n.type === "instance")) items.push({ label: "Create component", kbd: `${ALT}${MOD}K`, onClick: A.createComponent });
   if (nodes.length > 1 && nodes.every((n) => n.type === "component")) items.push({ label: "Combine as variants", onClick: A.combineVariants });
+  if (one && (one.type === "component" || one.type === "componentSet")) items.push({ label: "Add variant", onClick: () => addVariant(one) });
+  if (nodes.every((n) => n.type === "instance")) {
+    const at = menuAt;
+    items.push({ label: "Swap instance…", onClick: () => openSwapPicker(sel, at.x, at.y) });
+  }
   if (one?.type === "instance") {
     items.push({ label: "Go to main component", onClick: () => one.instance && dispatch({ op: "select", ids: [one.instance.componentId] }) && zoomToSelection() });
     items.push({ label: "Reset all overrides", onClick: () => dispatch({ op: "resetInstance", ids: [one.id] }) });
@@ -107,5 +118,15 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   const img = one ? layerImage(one) : null;
   if (one && img) items.push({ label: "Rebuild as editable layers with Claude", onClick: () => rebuildImage(one, img) });
   items.push({ label: "Ask Claude about this…", kbd: `${MOD}/`, onClick: () => useStore.setState({ chatOpen: true }) });
-  return items;
+  return keepSelection(items, sel);
+}
+
+/** The menu renders inside the canvas, so pressing an item also reaches the canvas pointer
+ * handler, which can clear or change the selection. Items act on the selection the menu opened with. */
+function keepSelection(items: MenuItem[], sel: string[]): MenuItem[] {
+  const restore = () => {
+    const now = selection();
+    if (now.length !== sel.length || now.some((id, i) => id !== sel[i])) dispatch({ op: "select", ids: sel });
+  };
+  return items.map((it) => (it.onClick ? { ...it, onClick: () => (restore(), it.onClick!()) } : it));
 }
