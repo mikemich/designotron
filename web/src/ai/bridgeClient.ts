@@ -5,6 +5,7 @@
 import { getEngine, onDocChange } from "../store";
 import { executeTool } from "./tools";
 import { appendText, patchItem, push, useChat } from "./chatState";
+import { onPreviewMessage } from "./preview";
 
 function bridgeUrl(): string {
   try {
@@ -74,6 +75,11 @@ class BridgeClient {
     this.retry = setTimeout(() => this.connect(), 4000);
   }
 
+  /** Sends a message to the bridge if connected. */
+  request(msg: unknown) {
+    this.send(msg);
+  }
+
   private send(msg: unknown) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
@@ -124,6 +130,11 @@ class BridgeClient {
         // A non-zero exit after an error we already explained adds nothing.
         if (!this.turnError) this.reportError(String(m.message));
         useChat.setState({ running: false });
+        break;
+      case "preview":
+      case "preview_log":
+      case "project_written":
+        onPreviewMessage(m);
         break;
       case "log":
         push({ kind: "system", text: m.message });

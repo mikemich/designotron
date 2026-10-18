@@ -5,7 +5,7 @@ change that finishes, starts or breaks them.
 
 ## In progress
 
-- Working through [ROADMAP.md](ROADMAP.md) in order. Next: live app preview panel.
+- Working through [ROADMAP.md](ROADMAP.md) in order. Next: version history, rulers, guides, layout grids.
 
 ## To do
 
@@ -58,6 +58,7 @@ Ordered by impact on "replace Figma for a small team".
 | Code export     | Semantic tags (h1–h3, button, nav, header, …), `<img>` for image layers, responsive roots           |
 | Review          | Design lint (contrast, tiny text, clipped text, off-grid, tap targets, names, near-duplicate colours, unlinked styles) with one-click and bulk fixes; Claude critique |
 | Claude actions  | Paste/drop/attach images in chat (both modes), quick actions (flows, variants, responsive, dark mode, content, rename, code sync, tokens from code), "Rebuild as editable layers" on image layers |
+| Live app        | App tab: write the generated project to `workspace/app` (or keep it in sync), run `npm run dev` through the bridge, preview at mobile/desktop width, logs, "Ask Claude to fix it" |
 | Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README                                                             |
 
 ## What works (verified)
@@ -66,7 +67,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 50 engine + bridge unit tests                          | `cargo test --workspace`                     |
+| 53 engine + bridge unit tests                          | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
@@ -84,6 +85,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 | MCP call edits the live editor and is undoable         | `web/scripts/bridge-e2e.mjs`                 |
 | MCP `get_screenshot` returns a PNG from the editor     | `web/scripts/bridge-e2e.mjs`                 |
 | `import_url` fetches a page through the bridge         | `web/scripts/bridge-e2e.mjs`                 |
+| App tab writes, installs, runs and stops the app       | `web/scripts/bridge-e2e.mjs`                 |
 | In-app chat through local Claude Code uses the tools   | `bridge-e2e.mjs` with `E2E_CLAUDE=1`         |
 
 Not verified here: API-key chat mode against the live API (no key in this environment). The

@@ -74,6 +74,23 @@ try {
   const texts = await page.evaluate(() => Object.values(window.__dt.doc().nodes).filter((n) => n.type === "text").map((n) => n.text.characters));
   check("import_url turns a live page into layers", !imported.result?.isError && texts.includes("Hello from a website") && texts.includes("Card body text"), impText.slice(0, 160));
 
+  // Live app preview: write the generated project, run it, see it in the App tab.
+  if (!process.env.E2E_SKIP_PREVIEW) {
+    await page.click(".tabs .tab:has-text('App')");
+    await page.click("button:has-text('Write design to workspace')");
+    await page.waitForFunction(() => document.querySelector(".app-panel")?.textContent?.includes("updated"), null, { timeout: 10000 });
+    await page.click("button:has-text('Run app')");
+    await page.waitForSelector(".app-frame iframe", { timeout: 240000 });
+    const frame = page.frameLocator(".app-frame iframe");
+    await frame.locator("#root :text('Get started')").first().waitFor({ timeout: 60000 }).catch(() => {});
+    const appText = await frame.locator("body").innerText({ timeout: 5000 }).catch((e) => String(e));
+    await page.screenshot({ path: path.join(OUT, "bridge-app-preview.png") });
+    check("live app preview runs the generated project", appText.includes("Get started"), appText.replace(/\s+/g, " ").slice(0, 80));
+    await page.click(".app-panel button:has-text('Stop')");
+    await page.waitForFunction(() => !document.querySelector(".app-frame iframe"), null, { timeout: 10000 });
+    check("stopping the preview stops the dev server", true);
+  }
+
   if (process.env.E2E_CLAUDE) {
     await page.keyboard.press("Control+/");
     await page.waitForSelector(".chat textarea");

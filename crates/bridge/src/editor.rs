@@ -108,6 +108,7 @@ async fn serve(socket: WebSocket, state: Shared) {
     "mcp": format!("http://127.0.0.1:{}/mcp", state.port),
   });
   let _ = tx.send(Message::Text(welcome.to_string()));
+  let _ = tx.send(Message::Text(state.preview.status(&state.workspace).await.to_string()));
 
   while let Some(Ok(msg)) = stream.next().await {
     let Message::Text(text) = msg else { continue };
@@ -150,6 +151,22 @@ async fn serve(socket: WebSocket, state: Shared) {
         tokio::spawn(async move { claude::run_chat(st, prompt, session).await });
       }
       "chat_cancel" => state.chat.cancel().await,
+      "preview_start" => {
+        tokio::spawn(crate::preview::start(state.clone()));
+      }
+      "preview_stop" => {
+        tokio::spawn(crate::preview::stop(state.clone()));
+      }
+      "write_project" => {
+        let files = v["files"].as_array().cloned().unwrap_or_default();
+        let binaries = v["binaries"].as_array().cloned().unwrap_or_default();
+        let reply = match crate::preview::write_project(&state.workspace, &files, &binaries) {
+          Ok(n) => json!({ "type": "project_written", "ok": true, "written": n, "dir": state.workspace.join(crate::preview::APP_DIR) }),
+          Err(e) => json!({ "type": "project_written", "ok": false, "error": e }),
+        };
+        let _ = tx.send(Message::Text(reply.to_string()));
+        let _ = tx.send(Message::Text(state.preview.status(&state.workspace).await.to_string()));
+      }
       "hello" => {}
       other => log::debug!("unknown editor message {other}"),
     }

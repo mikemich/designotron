@@ -96,7 +96,8 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>) {
   let system = format!(
     "{}\n\nYou are running inside Designotron's chat panel. The open design is available through the mcp__designotron__* tools; \
      use them for anything about the design (read with get_document / get_nodes, verify with get_screenshot). \
-     Your working directory ({}) is where application code goes when the user asks you to build the design for real. \
+     Your working directory ({}) is where application code goes when the user asks you to build the design for real; \
+     prefer the `app/` folder, which the editor's App tab runs with `npm run dev` as a live preview next to the design. \
      Keep replies short; the user watches the canvas update live.",
     designotron_engine::ai::SYSTEM_PROMPT,
     state.workspace.display()

@@ -1121,3 +1121,26 @@ textarea.textinput {
   max-height: 90px;
   border-radius: 4px;
 }
+
+/* Live app preview */
+.app-frame {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #fff;
+}
+.app-frame iframe {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border: 0;
+  transform-origin: 0 0;
+  background: #fff;
+}
+.app-logs {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 10px;
+}

@@ -9,6 +9,7 @@ mod editor;
 mod fetch;
 mod headless;
 mod mcp;
+mod preview;
 mod security;
 mod web;
 
@@ -33,6 +34,7 @@ pub struct AppState {
   pub editor: EditorLink,
   pub headless: Headless,
   pub chat: claude::ChatControl,
+  pub preview: preview::Preview,
 }
 
 pub type Shared = Arc<AppState>;
@@ -102,6 +104,7 @@ async fn main() {
     claude,
     editor: EditorLink::default(),
     chat: claude::ChatControl::default(),
+    preview: preview::Preview::default(),
   });
 
   let mut app = Router::new()
@@ -139,6 +142,8 @@ async fn main() {
   if let Err(e) = server.await {
     log::error!("server error: {e}");
   }
+  // Don't leave the app's dev server running after the bridge exits.
+  preview::stop(state).await;
 }
 
 async fn status(axum::extract::State(s): axum::extract::State<Shared>) -> Json<serde_json::Value> {
