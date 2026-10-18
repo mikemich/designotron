@@ -1,6 +1,6 @@
 {
   "name": "designotron",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Free, open-source design tool with Claude built in. Runs the Designotron editor and its Claude Code bridge locally.",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/mikemich/designotron.git" },

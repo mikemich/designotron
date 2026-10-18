@@ -13,7 +13,7 @@ Ordered by impact on "replace Figma for a small team".
 
 | #  | Item                                   | Notes                                                                 |
 |----|----------------------------------------|-----------------------------------------------------------------------|
-| 1  | Run a public relay                     | Relay is built and deployable; someone has to deploy one and set `DT_RELAY_URL` for the hosted editor. Per-property merging instead of per-layer |
+| 1  | Run a public relay                     | `relay-deploy.yml` deploys to Fly once the `FLY_API_TOKEN` secret and `FLY_APP` variable are set. Per-property merging instead of per-layer |
 | 2  | Accounts, cloud files, sharing links   | Needs a hosted backend; today files are local (IndexedDB + `.dtron`)  |
 | 3  | Comment extras                         | Mentions and notifications; shared with teammates once (1)/(2) land   |
 | 4  | Cloud version history                  | Local named/auto versions shipped; sync them once files are in the cloud |
@@ -51,7 +51,8 @@ Ordered by impact on "replace Figma for a small team".
 | Claude Code     | Bridge spawns the user's `claude` CLI (Pro/Max login) for in-app chat with live tool chips           |
 | MCP             | `designotron` MCP server for Claude Code in any terminal; headless mode edits `design.dtron.json`    |
 | Import          | HTML/CSS to editable layers (`import_html` tool and File menu), live websites by URL (`import_url`)  |
-| Distribution    | Single `designotron` binary with the editor embedded, release workflow (5 targets), `install.sh`, `npx designotron`, Pages workflow |
+| Distribution    | Single `designotron` binary with the editor embedded, release workflow (5 targets, version from the tag), `install.sh` (also installs the background service), `npx designotron` (not on npm yet), Pages workflow, Fly relay deploy workflow |
+| Background bridge | `designotron service install\|uninstall\|status`: launchd agent on macOS, systemd user unit on Linux, with the installing shell's PATH so `claude` is found; running `designotron` while it runs just opens the editor; the Claude panel shows setup steps while the bridge is offline |
 | Onboarding      | Template gallery (mobile, landing, dashboard, design system), first-run tour, empty-file prompt      |
 | Text            | Mixed styles inside one text layer (font, size, weight, italic, colour, decoration, links); ⌘B/I/U  |
 | Code export     | Semantic tags (h1–h3, button, nav, header, …), `<img>` for image layers, responsive roots           |
@@ -117,6 +118,7 @@ until someone runs it with a real key.
 
 | Area             | Limitation                                                                                               |
 |------------------|----------------------------------------------------------------------------------------------------------|
+| Background service | Linux unit tested; the macOS launchd agent hasn't been run on a real Mac yet. Windows has no background service (run `designotron.exe`) |
 | Collaboration    | Online sharing needs a deployed relay (none is running yet); concurrent edits to the same layer: last writer wins; links are the only access control (no accounts); versions live only in each browser |
 | Storage          | Files live in the browser (IndexedDB). Clearing site data deletes them; save `.dtron` files to keep them |
 | Scale            | Updates are incremental, but the canvas is one big SVG: painting 10k+ layers zoomed out is the limit (software rendering in headless tests ~35 ms/frame at 6k) |

@@ -366,7 +366,7 @@ function BridgeSetup() {
           <a href="https://github.com/mikemich/designotron/releases/latest" target="_blank" rel="noreferrer">Releases</a>.
         </li>
         <li>
-          Start it and leave it running:
+          It starts in the background and at every login. If the installer says to start it yourself, run:
           <CopyLine text={RUN_CMD} />
         </li>
       </ol>

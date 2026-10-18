@@ -31,8 +31,9 @@ jobs:
       - name: Build
         working-directory: web
         env:
-          # Default relay for "Share online" (Settings → Secrets and variables → Actions → Variables).
-          VITE_DT_RELAY: ${{ vars.DT_RELAY_URL }}
+          # Default relay for "Share online" (Settings → Secrets and variables → Actions → Variables):
+          # DT_RELAY_URL, else the Fly app that relay-deploy.yml deploys (FLY_APP).
+          VITE_DT_RELAY: ${{ vars.DT_RELAY_URL || (vars.FLY_APP && format('https://{0}.fly.dev', vars.FLY_APP)) || '' }}
         run: npm ci && DT_BASE=/${{ github.event.repository.name }}/ npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

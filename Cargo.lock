@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "designotron-bridge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "designotron-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "i_overlay",
  "imbl",
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "designotron-engine-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "designotron-engine",
  "serde_json",
@@ -375,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "designotron-relay"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "designotron-rooms",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "designotron-rooms"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "designotron-engine",

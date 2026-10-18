@@ -33,4 +33,14 @@ case ":$PATH:" in
   *":$DEST:"*) ;;
   *) echo "Add it to your PATH:  export PATH=\"$DEST:\$PATH\"" ;;
 esac
-echo "Run:  designotron"
+
+# Run it in the background at login, so the hosted editor always finds Claude.
+# Opt out with DESIGNOTRON_NO_SERVICE=1. (Releases before 0.2 have no service command.)
+if [ -z "${DESIGNOTRON_NO_SERVICE:-}" ] && "$DEST/designotron" --help 2>&1 | grep -q "service install"; then
+  if "$DEST/designotron" service install; then
+    echo "Open https://mikemich.github.io/designotron or http://127.0.0.1:5174"
+    exit 0
+  fi
+  echo "Couldn't set up the background service; start it yourself instead."
+fi
+echo "Run:  $DEST/designotron"

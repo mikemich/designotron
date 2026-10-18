@@ -99,6 +99,7 @@ cargo clippy --workspace               # Lints
 cd web && npm run wasm                 # Rebuild web/src/wasm/pkg after engine changes
 cd web && npm run typecheck            # TypeScript (tsc -b, same as the production build)
 ./dev.sh                               # Bridge on :5174 + editor on :5173
+designotron service install|uninstall|status   # Bridge at login (launchd / systemd user unit)
 cd web && npm run e2e                  # Editor smoke test (needs ./dev.sh running)
 cd web && node scripts/bridge-e2e.mjs  # MCP + live editor (E2E_CLAUDE=1 adds a real chat turn)
 cd web && node scripts/collab-e2e.mjs  # Multiplayer with two browsers (bridge serving web/dist)

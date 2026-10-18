@@ -12,6 +12,7 @@ mod headless;
 mod mcp;
 mod preview;
 mod security;
+mod service;
 mod web;
 
 use std::net::SocketAddr;
@@ -27,6 +28,18 @@ use crate::editor::EditorLink;
 use crate::headless::Headless;
 
 const DEFAULT_PORT: u16 = 5174;
+
+/// Whether a Designotron bridge already answers on this port (e.g. the background service).
+fn bridge_running(port: u16) -> bool {
+  ureq::AgentBuilder::new()
+    .timeout(std::time::Duration::from_secs(2))
+    .build()
+    .get(&format!("http://127.0.0.1:{port}/bridge/status"))
+    .call()
+    .ok()
+    .and_then(|r| r.into_string().ok())
+    .is_some_and(|body| body.contains("designotron-bridge"))
+}
 
 pub struct AppState {
   pub port: u16,
@@ -73,6 +86,7 @@ fn parse_args() -> Config {
       }
       "-h" | "--help" => {
         log::info!("usage: designotron [--port 5174] [--workspace ./workspace] [--static web/dist] [--no-open]");
+        log::info!("       designotron service install|uninstall|status   (run in the background at login)");
         std::process::exit(0);
       }
       other => log::warn!("ignoring unknown argument {other}"),
@@ -89,6 +103,10 @@ fn parse_args() -> Config {
 #[tokio::main]
 async fn main() {
   env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+  let argv: Vec<String> = std::env::args().skip(1).collect();
+  if argv.first().map(String::as_str) == Some("service") {
+    std::process::exit(service::run(&argv[1..]));
+  }
   let cfg = parse_args();
   if let Err(e) = std::fs::create_dir_all(&cfg.workspace) {
     log::error!("cannot create workspace {}: {e}", cfg.workspace.display());
@@ -131,7 +149,15 @@ async fn main() {
   let listener = match tokio::net::TcpListener::bind(addr).await {
     Ok(l) => l,
     Err(e) => {
-      log::error!("cannot listen on {addr}: {e} (is another bridge running?)");
+      // Usually the background service: just open the editor it serves.
+      if bridge_running(cfg.port) {
+        log::info!("Designotron is already running: http://{addr}");
+        if cfg.open {
+          web::open_browser(&format!("http://{addr}"));
+        }
+        std::process::exit(0);
+      }
+      log::error!("cannot listen on {addr}: {e}");
       std::process::exit(1);
     }
   };

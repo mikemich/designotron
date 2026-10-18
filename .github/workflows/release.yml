@@ -1,7 +1,8 @@
 name: Release
 
 # Builds binaries for every platform and publishes a GitHub release. Either push a tag
-# like v0.2.0, or run it from the Actions tab with a version (it creates the tag).
+# like v0.2.0, or run it from the Actions tab with a version (it creates the tag). The
+# binaries take their version from the tag, so nothing needs bumping by hand.
 on:
   push:
     tags: ["v*"]
@@ -28,6 +29,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set version from the tag
+        shell: bash
+        env:
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+        run: |
+          v="${VERSION#v}"
+          sed -i.bak "s/^version = \".*\"/version = \"$v\"/" Cargo.toml && rm Cargo.toml.bak
+          grep '^version' Cargo.toml
       - uses: actions/setup-node@v4
         with:
           node-version: 22

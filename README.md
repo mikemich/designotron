@@ -47,14 +47,16 @@ local bridge or an API key).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mikemich/designotron/main/install.sh | sh
-~/.local/bin/designotron
 ```
 
-On Windows, download the zip from [Releases](https://github.com/mikemich/designotron/releases/latest).
-While it runs, the hosted editor connects to it too. (`npx designotron` will work once the
-npm package is published.)
+On macOS and Linux this also starts it in the background at every login
+(`designotron service install`), so the hosted editor finds Claude without a terminal open.
+The editor is also at http://127.0.0.1:5174, and Claude Code's files go in `~/Designotron`.
+Skip the background service with `DESIGNOTRON_NO_SERVICE=1`, and run `~/.local/bin/designotron`
+yourself (it then uses `./workspace`). Run the same command again to update.
 
-It opens the editor at http://127.0.0.1:5174. Your Claude Code designs go in `./workspace`.
+On Windows, download the zip from [Releases](https://github.com/mikemich/designotron/releases/latest)
+and run `designotron.exe`. (`npx designotron` will work once the npm package is published.)
 
 **From source** (Node 20+ and Rust; the prebuilt WASM engine is committed):
 
@@ -128,10 +130,24 @@ cd .. && cargo build --release -p designotron-bridge --features embed-web
 ./target/release/designotron                              # one binary, editor included
 ```
 
-Pushing a `v*` tag builds binaries for macOS, Linux and Windows and publishes a GitHub
-release (`.github/workflows/release.yml`). `install.sh` and the `npx designotron` launcher
-in `npm/` download from those releases. Every push to `main` deploys the hosted editor
-(`.github/workflows/pages.yml`).
+Everything after the one-time setup below runs from GitHub Actions:
+
+| What                    | How                                                                 |
+|-------------------------|---------------------------------------------------------------------|
+| Hosted editor           | Every push to `main` (`pages.yml`)                                  |
+| Release binaries        | Push a `v*` tag, or Actions → Release → Run workflow with a version (`release.yml`). The version comes from the tag |
+| Online relay            | Every push to `main` deploys to Fly (`relay-deploy.yml`); the hosted editor uses it for Share → Online |
+| Relay Docker image      | Every push to `main` (`relay-image.yml`, `ghcr.io/mikemich/designotron-relay`) |
+
+One-time setup (Settings → Secrets and variables → Actions):
+
+1. Pages: Settings → Pages → Source: **GitHub Actions**.
+2. Relay: secret `FLY_API_TOKEN` (from fly.io → Tokens) and variable `FLY_APP` (a unique
+   name). Then run Actions → **Deploy relay** once; it creates the app and rebuilds the
+   hosted editor with it.
+3. npm (optional): `cd npm && npm publish` after each release, so `npx designotron` works.
+
+`install.sh` and the `npx designotron` launcher download the binaries from the latest release.
 
 ## Keyboard shortcuts
 

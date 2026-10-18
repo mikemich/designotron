@@ -13,7 +13,15 @@ Any host that runs a Docker image and supports WebSockets over HTTPS works. The 
 published to `ghcr.io/mikemich/designotron-relay` on every push to `main`, or build it from
 this repo's `Dockerfile`.
 
-### Fly.io (about 5 minutes)
+### Fly.io from GitHub (automatic)
+
+Add a repository secret `FLY_API_TOKEN` (fly.io → Tokens) and a variable `FLY_APP` (a
+unique name) in Settings → Secrets and variables → Actions, then run Actions → **Deploy
+relay**. It creates the app and its volume, deploys, checks `/health`, and rebuilds the
+hosted editor with `https://<FLY_APP>.fly.dev` as its default relay. After that every push
+to `main` redeploys it. Fly bills a small always-on machine (a few dollars a month).
+
+### Fly.io by hand
 
 ```bash
 fly launch --copy-config --no-deploy      # choose a unique app name
@@ -56,7 +64,8 @@ When you open the editor from the relay's own URL, the address is filled in for 
 
 To make a relay the default for the hosted editor (GitHub Pages), add a repository
 variable `DT_RELAY_URL` (Settings → Secrets and variables → Actions → Variables) and
-re-run the "Hosted editor" workflow. Local builds read `VITE_DT_RELAY`.
+re-run the "Hosted editor" workflow. Without it, the hosted editor uses
+`https://<FLY_APP>.fly.dev` when `FLY_APP` is set. Local builds read `VITE_DT_RELAY`.
 
 ## Configuration
 
