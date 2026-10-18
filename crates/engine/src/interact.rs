@@ -405,20 +405,30 @@ pub fn resize_node(doc: &mut Document, start: &Node, handle: Handle, delta: Poin
     h = 0.0;
   } else if keep_aspect && w0 > 0.0 && h0 > 0.0 {
     let ratio = w0 / h0;
+    // Each axis keeps its own sign so a corner can still cross one edge at a time.
     if fx != 0.0 && fy != 0.0 {
       if (w / w0).abs() > (h / h0).abs() {
-        h = w / ratio;
+        h = h.signum() * (w / ratio).abs();
       } else {
-        w = h * ratio;
+        w = w.signum() * (h * ratio).abs();
       }
     } else if fx != 0.0 {
-      h = w / ratio;
+      h = (w / ratio).abs();
     } else {
-      w = h * ratio;
+      w = (h * ratio).abs();
     }
   }
-  let w = w.abs().max(1.0);
-  let h = if start.kind == NodeType::Line { 0.0 } else { h.abs().max(1.0) };
+  // Dragged past the opposite edge, the box flips there and keeps following the cursor.
+  let (fx1, fy1) = (if w < 0.0 { -fx } else { fx }, if h < 0.0 { -fy } else { fy });
+  // Whole-pixel input gives whole-pixel boxes; anything else is rounded to 0.01 px.
+  let whole = !keep_aspect && [w0, h0, d.x, d.y].iter().all(|v| v.fract() == 0.0);
+  let tidy = |v: f64| if whole { v.round() } else { (v * 100.0).round() / 100.0 };
+  let w = tidy(w.abs()).max(1.0);
+  let h = if start.kind == NodeType::Line {
+    0.0
+  } else {
+    tidy(h.abs()).max(1.0)
+  };
 
   let anchor_of = |f: f64, size: f64| {
     if from_center || f == 0.0 {
@@ -430,14 +440,21 @@ pub fn resize_node(doc: &mut Document, start: &Node, handle: Handle, delta: Poin
     }
   };
   let a0 = Point::new(anchor_of(fx, w0), anchor_of(fy, h0));
-  let a1 = Point::new(anchor_of(fx, w), anchor_of(fy, h));
+  let a1 = Point::new(anchor_of(fx1, w), anchor_of(fy1, h));
   let m0 = local_matrix(start.x, start.y, w0, h0, start.rotation, start.flip_x, start.flip_y);
   let anchor_parent = m0.apply(a0);
   let c = Point::new(w / 2.0, h / 2.0);
   let r = Mat::rotate_deg(start.rotation);
   let rp = r.apply_vec(Point::new(a1.x - c.x, a1.y - c.y));
-  let x = anchor_parent.x - c.x - rp.x;
-  let y = anchor_parent.y - c.y - rp.y;
+  let mut x = anchor_parent.x - c.x - rp.x;
+  let mut y = anchor_parent.y - c.y - rp.y;
+  // Rotated boxes keep their exact anchor; upright ones are tidied like the size.
+  if start.rotation == 0.0 {
+    let whole_pos = whole && start.x.fract() == 0.0 && start.y.fract() == 0.0;
+    let tidy_pos = |v: f64| if whole_pos { v.round() } else { (v * 100.0).round() / 100.0 };
+    x = tidy_pos(x);
+    y = tidy_pos(y);
+  }
   set_geometry(doc, start, x, y, w, h, fx != 0.0, fy != 0.0);
 }
 
@@ -514,12 +531,18 @@ pub fn resize_many(doc: &mut Document, starts: &[Node], from: Rect, to: Rect) {
     let nb = Rect::new(to.x + (b.x - from.x) * sx, to.y + (b.y - from.y) * sy, b.width * sx, b.height * sy);
     let pm_inv = doc.parent_matrix(&s.id).invert();
     let tl = pm_inv.apply(Point::new(nb.x, nb.y));
-    let w = (s.width * sx).max(1.0);
-    let h = if s.kind == NodeType::Line { 0.0 } else { (s.height * sy).max(1.0) };
+    // Rounded to 0.01 px so scaling doesn't leave float noise in the panel.
+    let tidy = |v: f64| (v * 100.0).round() / 100.0;
+    let w = tidy(s.width * sx).max(1.0);
+    let h = if s.kind == NodeType::Line {
+      0.0
+    } else {
+      tidy(s.height * sy).max(1.0)
+    };
     // Keep the rotated box's bounds top-left where the scaled bounds start.
     let m = local_matrix(0.0, 0.0, w, h, s.rotation, s.flip_x, s.flip_y);
     let off = m.bounds_of(w, h);
-    set_geometry(doc, s, tl.x - off.x, tl.y - off.y, w, h, sx != 1.0, sy != 1.0);
+    set_geometry(doc, s, tidy(tl.x - off.x), tidy(tl.y - off.y), w, h, sx != 1.0, sy != 1.0);
   }
 }
 
@@ -631,6 +654,32 @@ mod tests {
     resize_node(&mut doc, &start, Handle::W, Point::new(50.0, 0.0), false, false);
     let f = doc.get("f").unwrap();
     assert_eq!((f.x, f.width), (50.0, 250.0));
+  }
+
+  #[test]
+  fn resize_past_the_opposite_edge_flips() {
+    let (mut doc, page) = doc_with_frame();
+    let r = Node {
+      id: "a".into(),
+      x: 500.0,
+      y: 100.0,
+      width: 100.0,
+      height: 100.0,
+      ..Default::default()
+    };
+    doc.insert(r, None, &page, None);
+    let start = doc.get("a").unwrap().clone();
+    resize_node(&mut doc, &start, Handle::E, Point::new(-150.0, 0.0), false, false);
+    let a = doc.get("a").unwrap();
+    assert_eq!((a.x, a.width), (450.0, 50.0), "follows the cursor past the west edge");
+    resize_node(&mut doc, &start, Handle::Nw, Point::new(130.0, 160.0), false, false);
+    let a = doc.get("a").unwrap();
+    assert_eq!((a.x, a.y, a.width, a.height), (600.0, 200.0, 30.0, 60.0));
+    // Sub-pixel input lands on two decimals instead of float noise.
+    resize_node(&mut doc, &start, Handle::S, Point::new(0.0, 30.000_01), false, false);
+    assert_eq!(doc.get("a").unwrap().height, 130.0);
+    resize_node(&mut doc, &start, Handle::S, Point::new(0.0, 0.1 + 0.2), false, false);
+    assert_eq!(doc.get("a").unwrap().height, 100.3);
   }
 
   #[test]

@@ -2,7 +2,7 @@
 //! exposes every mutation as a serialisable [`Command`] and every read as a
 //! [`Query`]. The WASM wrapper and the bridge both drive this type.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -468,6 +468,8 @@ pub struct Engine {
   past: Vec<Step>,
   future: Vec<Step>,
   gesture: Option<Snapshot>,
+  /// Latest `Translate` delta of the open gesture (where an auto layout child was dragged to).
+  drag_delta: Option<Point>,
   pub(crate) gen: IdGen,
   pub(crate) measurer: Box<dyn TextMeasurer>,
   fingerprints: HashMap<NodeId, u64>,
@@ -500,6 +502,7 @@ impl Engine {
       past: vec![],
       future: vec![],
       gesture: None,
+      drag_delta: None,
       gen,
       measurer,
       fingerprints: HashMap::new(),
@@ -741,6 +744,7 @@ impl Engine {
       }
       Command::BeginGesture => {
         self.gesture = Some(self.snapshot());
+        self.drag_delta = None;
         return Ok(json!({}));
       }
       Command::EndGesture => {
@@ -1309,6 +1313,20 @@ impl Engine {
           let before = self.doc.get(id).cloned().ok_or_else(|| format!("no node {id}"))?;
           patch::apply(self.doc.get_mut(id).unwrap(), &p)?;
           components::record_override(&mut self.doc, id, &p);
+          let keys = before
+            .text
+            .as_ref()
+            .filter(|t| !t.runs.is_empty())
+            .map(|t| layer_run_keys(&p, t))
+            .unwrap_or_default();
+          if !keys.is_empty() {
+            if let Some(tp) = self.doc.get_mut(id).and_then(|n| n.text.as_mut()) {
+              let len = tp.characters.chars().count();
+              tp.runs = crate::text::style_range(&tp.runs, len, 0, len, &crate::model::TextRun::default(), &keys);
+              let runs = json!({ "text": { "runs": tp.runs } });
+              components::record_override(&mut self.doc, id, &runs);
+            }
+          }
           let after = self.doc.get(id).unwrap().clone();
           if after.kind.is_frame_like() && (after.width != before.width || after.height != before.height) {
             layout::apply_constraints(&mut self.doc, id, before.width, before.height);
@@ -1400,7 +1418,8 @@ impl Engine {
       }
       Command::DropInto { ids, x, y } => {
         let ids = ops::top_most(&self.doc, &ids);
-        let target = ops::frame_at(&self.doc, &self.page, Point::new(x, y), &ids);
+        let pt = Point::new(x, y);
+        let target = ops::frame_at(&self.doc, &self.page, pt, &ids);
         for id in &ids {
           let cur = self.doc.get(id).and_then(|n| n.parent.clone());
           if self.doc.instance_ancestor(id).is_some() {
@@ -1412,8 +1431,13 @@ impl Engine {
             .map(|p| p.layout.is_some())
             .unwrap_or(false)
             && !self.doc.get(id).unwrap().absolute_position;
+          // Inside its auto layout parent a drag reorders; dropped outside, the layer leaves.
+          let leaves_flow = in_flow && cur.as_deref().map(|p| !self.contains_point(p, pt)).unwrap_or(false);
+          if leaves_flow {
+            self.place_dragged(id);
+          }
           if cur != target
-            && !in_flow
+            && (!in_flow || leaves_flow)
             && cur
               .as_ref()
               .map(|c| self.doc.get(c).map(|n| n.kind != NodeType::Group).unwrap_or(true))
@@ -1422,6 +1446,16 @@ impl Engine {
             // Dropping into auto layout inserts at the pointer position.
             let index = target.as_ref().and_then(|t| self.flow_index(t, Point::new(x, y)));
             self.doc.reparent(id, target.as_deref(), index, true);
+            // Fill only means something in auto layout; outside it the layer keeps its size.
+            if leaves_flow && index.is_none() {
+              if let Some(n) = self.doc.get_mut(id) {
+                for s in [&mut n.sizing_h, &mut n.sizing_v] {
+                  if *s == Sizing::Fill {
+                    *s = Sizing::Fixed;
+                  }
+                }
+              }
+            }
           }
         }
         Ok(json!({ "parent": target }))
@@ -1834,6 +1868,7 @@ impl Engine {
     for id in &flow {
       self.reorder_in_flow(id, dx, dy);
     }
+    self.drag_delta = Some(Point::new(dx, dy));
     let mut guides = Vec::new();
     let (mut fdx, mut fdy) = (dx, dy);
     if snap && !free.is_empty() {
@@ -1860,6 +1895,27 @@ impl Engine {
         })
         .count(),
     )
+  }
+
+  /// True when a page-space point lies inside a node's (possibly rotated) box.
+  fn contains_point(&self, id: &str, p: Point) -> bool {
+    let Some(n) = self.doc.get(id) else { return false };
+    let l = self.doc.abs_matrix(id).invert().apply(p);
+    l.x >= 0.0 && l.y >= 0.0 && l.x <= n.width && l.y <= n.height
+  }
+
+  /// Moves an auto layout child (which only reordered while dragged) to where the
+  /// open gesture's drag would have put it, so it can leave the flow in place.
+  fn place_dragged(&mut self, id: &str) {
+    let (Some(base), Some(d)) = (self.gesture.as_ref(), self.drag_delta) else {
+      return;
+    };
+    if base.doc.get(id).is_none() {
+      return;
+    }
+    let from = base.doc.abs_matrix(id).apply(Point::new(0.0, 0.0));
+    let now = self.doc.abs_matrix(id).apply(Point::new(0.0, 0.0));
+    ops::move_by(&mut self.doc, &[id.to_string()], from.x + d.x - now.x, from.y + d.y - now.y);
   }
 
   fn reorder_in_flow(&mut self, id: &str, dx: f64, dy: f64) {
@@ -1942,25 +1998,32 @@ impl Engine {
     } else {
       let mut to = from;
       let mult = if from_center { 2.0 } else { 1.0 };
-      to.width = (from.width + fx * dx * mult).max(1.0);
-      to.height = (from.height + fy * dy * mult).max(1.0);
+      let mut w = from.width + fx * dx * mult;
+      let mut h = from.height + fy * dy * mult;
       if keep_aspect && from.height > 0.0 {
         let ratio = from.width / from.height;
         if fx != 0.0 {
-          to.height = to.width / ratio;
+          h = h.signum() * (w / ratio).abs();
         } else {
-          to.width = to.height * ratio;
+          w = w.signum() * (h * ratio).abs();
         }
       }
+      to.width = w.abs().max(1.0);
+      to.height = h.abs().max(1.0);
       if from_center {
         to.x = from.center().x - to.width / 2.0;
         to.y = from.center().y - to.height / 2.0;
       } else {
+        // Dragged past the opposite edge, the box flips over it and follows the cursor.
         if fx < 0.0 {
-          to.x = from.right() - to.width;
+          to.x = if w < 0.0 { from.right() } else { from.right() - to.width };
+        } else if fx > 0.0 && w < 0.0 {
+          to.x = from.x - to.width;
         }
         if fy < 0.0 {
-          to.y = from.bottom() - to.height;
+          to.y = if h < 0.0 { from.bottom() } else { from.bottom() - to.height };
+        } else if fy > 0.0 && h < 0.0 {
+          to.y = from.y - to.height;
         }
       }
       let starts: Vec<Node> = ids.iter().filter_map(|i| self.doc.get(i).cloned()).collect();
@@ -2021,8 +2084,84 @@ impl Engine {
         self.doc.nodes.insert(c.id.clone(), c);
       }
     }
+    // Instances whose main component isn't in this file: bring it from the clipboard, or
+    // detach them so they keep their look instead of showing "Missing component".
+    let comps: Vec<Node> = v
+      .get("components")
+      .and_then(|c| serde_json::from_value(c.clone()).ok())
+      .unwrap_or_default();
+    let mut side = None;
+    for n in nodes.iter().filter(|n| n.kind == NodeType::Instance) {
+      let new_id = map[&n.id].clone();
+      let Some(cid) = n.instance.as_ref().map(|i| i.component_id.clone()) else {
+        continue;
+      };
+      if self.is_component(&cid) {
+        continue;
+      }
+      // A component copied along with its instance stands in for it.
+      if let Some(copy) = map.get(&cid).filter(|c| self.is_component(c)).cloned() {
+        if let Some(info) = self.doc.get_mut(&new_id).and_then(|i| i.instance.as_mut()) {
+          info.component_id = copy;
+        }
+      } else if !self.paste_component(&cid, &comps, &mut side) {
+        components::detach_instance(&mut self.doc, &new_id);
+      }
+    }
     self.selection = created.clone();
     Ok(json!({ "created": created }))
+  }
+
+  fn is_component(&self, id: &str) -> bool {
+    self.doc.get(id).map(|n| n.kind == NodeType::Component).unwrap_or(false)
+  }
+
+  /// Inserts main component `cid` from the clipboard's `components`, keeping its ids so
+  /// pasted instances (and their overrides) still match it. Components are stacked off to
+  /// the right of the page's content; `side` tracks where the next one goes. Returns false
+  /// when the component isn't there or its ids are taken in this file.
+  fn paste_component(&mut self, cid: &str, comps: &[Node], side: &mut Option<Point>) -> bool {
+    if self.is_component(cid) {
+      return true;
+    }
+    let Some(start) = comps.iter().position(|n| n.id == cid && n.kind == NodeType::Component) else {
+      return false;
+    };
+    // The clipboard lists each component's subtree in pre-order, from its detached root.
+    let sub: Vec<Node> = std::iter::once(comps[start].clone())
+      .chain(comps[start + 1..].iter().take_while(|n| n.parent.is_some()).cloned())
+      .collect();
+    if sub.iter().any(|n| self.doc.nodes.contains_key(&n.id)) {
+      return false;
+    }
+    let page = self.page.clone();
+    let at = *side.get_or_insert_with(|| {
+      let b = self
+        .doc
+        .bounds_of_many(&self.doc.page(&page).map(|p| p.children.clone()).unwrap_or_default());
+      b.map(|b| Point::new(b.right() + 100.0, b.y)).unwrap_or_default()
+    });
+    for (i, n) in sub.iter().enumerate() {
+      let mut c = n.clone();
+      c.page = page.clone();
+      if i == 0 {
+        c.x = at.x;
+        c.y = at.y;
+        c.parent = None;
+        side.replace(Point::new(at.x, at.y + c.height + 40.0));
+        self.doc.insert(c, None, &page, None);
+      } else {
+        self.doc.nodes.insert(c.id.clone(), c);
+      }
+    }
+    // Instances inside the component need their own mains too.
+    for n in sub.iter().filter(|n| n.kind == NodeType::Instance) {
+      let inner = n.instance.as_ref().map(|i| i.component_id.clone()).unwrap_or_default();
+      if !self.paste_component(&inner, comps, side) {
+        components::detach_instance(&mut self.doc, &n.id);
+      }
+    }
+    true
   }
 
   /// Read-only queries.
@@ -2074,25 +2213,48 @@ impl Engine {
   }
 
   /// Serialises the selection (with page-space root positions) for the clipboard.
+  /// Main components of copied instances (not copied themselves) ride along in `components`
+  /// so a paste into another file can bring them in.
   pub fn copy(&self, ids: &[NodeId]) -> String {
     let roots = ops::paint_order(&self.doc, &ops::top_most(&self.doc, ids));
-    let mut nodes = Vec::new();
-    for r in &roots {
-      let b = self.doc.abs_bounds(r);
-      for nid in self.doc.subtree(r) {
-        if let Some(n) = self.doc.get(&nid) {
-          let mut c = n.clone();
-          if nid == *r {
-            let local = self.doc.local_matrix(n).bounds_of(n.width, n.height);
-            c.x = b.x + (n.x - local.x);
-            c.y = b.y + (n.y - local.y);
-            c.parent = None;
-          }
-          nodes.push(c);
+    let nodes: Vec<Node> = roots.iter().flat_map(|r| self.clipboard_subtree(r)).collect();
+    let mut seen: HashSet<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
+    let mut wanted: Vec<NodeId> = nodes
+      .iter()
+      .filter_map(|n| n.instance.as_ref())
+      .map(|i| i.component_id.clone())
+      .collect();
+    let mut components: Vec<Node> = Vec::new();
+    while let Some(cid) = wanted.pop() {
+      if seen.contains(&cid) || self.doc.get(&cid).map(|c| c.kind != NodeType::Component).unwrap_or(true) {
+        continue;
+      }
+      let sub = self.clipboard_subtree(&cid);
+      seen.extend(sub.iter().map(|n| n.id.clone()));
+      // Components can hold instances of other components.
+      wanted.extend(sub.iter().filter_map(|n| n.instance.as_ref()).map(|i| i.component_id.clone()));
+      components.extend(sub);
+    }
+    json!({ "type": CLIPBOARD_TAG, "roots": roots, "nodes": nodes, "components": components }).to_string()
+  }
+
+  /// A subtree for the clipboard: the root detached, at its page-space position.
+  fn clipboard_subtree(&self, root: &str) -> Vec<Node> {
+    let b = self.doc.abs_bounds(root);
+    let mut out = Vec::new();
+    for nid in self.doc.subtree(root) {
+      if let Some(n) = self.doc.get(&nid) {
+        let mut c = n.clone();
+        if nid == root {
+          let local = self.doc.local_matrix(n).bounds_of(n.width, n.height);
+          c.x = b.x + (n.x - local.x);
+          c.y = b.y + (n.y - local.y);
+          c.parent = None;
         }
+        out.push(c);
       }
     }
-    json!({ "type": CLIPBOARD_TAG, "roots": roots, "nodes": nodes }).to_string()
+    out
   }
 
   pub fn measurer(&self) -> &dyn TextMeasurer {
@@ -2120,6 +2282,26 @@ fn fold_into_base(t: &mut crate::model::TextProps, r: &crate::model::TextRun) {
   if let Some(v) = r.decoration {
     t.decoration = v;
   }
+}
+
+/// Run overrides that a whole-layer `Update` replaces: the text style keys it sets (and run
+/// colours when it sets the fill), so a layer set to Regular/18 doesn't keep a 700/32 word.
+/// A patch carrying its own changed runs (whole-object edits) only replaces keys it changes.
+fn layer_run_keys(p: &Value, before: &crate::model::TextProps) -> Vec<&'static str> {
+  const KEYS: [&str; 6] = ["fontFamily", "fontSize", "fontWeight", "italic", "letterSpacing", "decoration"];
+  let mut keys = Vec::new();
+  if let Some(t) = p.get("text").and_then(|t| t.as_object()) {
+    let old = serde_json::to_value(before).unwrap_or(Value::Null);
+    match t.get("runs") {
+      None => keys.extend(KEYS.iter().filter(|k| t.contains_key(**k))),
+      Some(runs) if *runs == old["runs"] => keys.extend(KEYS.iter().filter(|k| t.get(**k).is_some_and(|v| *v != old[**k]))),
+      Some(_) => {}
+    }
+  }
+  if p.get("fills").is_some() {
+    keys.push("color");
+  }
+  keys
 }
 
 /// Field names a run sets (so existing runs stop overriding them).
@@ -2610,6 +2792,78 @@ mod tests {
   }
 
   #[test]
+  fn pasting_an_instance_into_another_file_brings_its_component() {
+    let mut src = engine();
+    let f = id_of(
+      &src
+        .dispatch(Command::CreateShape {
+          kind: NodeType::Frame,
+          x: 0.0,
+          y: 0.0,
+          width: 100.0,
+          height: 40.0,
+          parent: None,
+        })
+        .unwrap(),
+    );
+    rect(&mut src, 10.0, 10.0, 20.0, 20.0, Some(f.clone()));
+    src.doc.get_mut(&f).unwrap().fills = vec![Paint::solid("#FF0000")];
+    let comp = id_of(&src.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap());
+    let inst = id_of(
+      &src
+        .dispatch(Command::CreateInstance {
+          component_id: comp.clone(),
+          x: 300.0,
+          y: 0.0,
+          parent: None,
+        })
+        .unwrap(),
+    );
+    let data = src.copy(std::slice::from_ref(&inst));
+
+    let mut dst = Engine::new(Box::new(HeuristicMeasurer), 7);
+    rect(&mut dst, 0.0, 0.0, 500.0, 200.0, None);
+    let paste = |e: &mut Engine, data: &str| {
+      let r = e
+        .dispatch(Command::Paste {
+          data: data.to_string(),
+          parent: None,
+          x: Some(50.0),
+          y: Some(50.0),
+        })
+        .unwrap();
+      r["created"][0].as_str().unwrap().to_string()
+    };
+    let pasted = paste(&mut dst, &data);
+    let main = dst.doc.get(&pasted).unwrap().instance.clone().unwrap().component_id;
+    let m = dst.doc.get(&main).expect("main component pasted along");
+    assert_eq!(m.kind, NodeType::Component);
+    assert_eq!(m.page, dst.page);
+    assert!(dst.doc.abs_bounds(&main).x >= 550.0, "placed off to the side of the content");
+    assert_eq!(dst.doc.get(&pasted).unwrap().fills, vec![Paint::solid("#FF0000")]);
+    // A second paste reuses it, and it drives the instances like any main component.
+    paste(&mut dst, &data);
+    assert_eq!(dst.doc.components().len(), 1);
+    dst
+      .dispatch(Command::Update {
+        ids: vec![main],
+        patch: json!({ "fills": [{ "type": "solid", "color": "#00FF00" }] }),
+      })
+      .unwrap();
+    assert_eq!(dst.doc.get(&pasted).unwrap().fills, vec![Paint::solid("#00FF00")]);
+
+    // Without the component in the clipboard the instance is detached, keeping its look.
+    let mut old: Value = serde_json::from_str(&data).unwrap();
+    old.as_object_mut().unwrap().remove("components");
+    let mut other = Engine::new(Box::new(HeuristicMeasurer), 9);
+    let pasted = paste(&mut other, &old.to_string());
+    let n = other.doc.get(&pasted).unwrap();
+    assert_eq!((n.kind, n.instance.is_none()), (NodeType::Frame, true));
+    assert_eq!(n.fills, vec![Paint::solid("#FF0000")]);
+    assert!(other.doc.components().is_empty());
+  }
+
+  #[test]
   fn instance_updates_when_component_changes() {
     let mut e = engine();
     let f = id_of(
@@ -2710,6 +2964,70 @@ mod tests {
   }
 
   #[test]
+  fn resizing_a_selection_past_its_edge_flips() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    let b = rect(&mut e, 100.0, 0.0, 50.0, 50.0, None);
+    e.dispatch(Command::Resize {
+      ids: vec![a.clone(), b.clone()],
+      handle: Handle::E,
+      dx: -200.0,
+      dy: 0.0,
+      keep_aspect: false,
+      from_center: false,
+      snap: false,
+      zoom: 1.0,
+    })
+    .unwrap();
+    let u = e.doc.bounds_of_many(&[a, b]).unwrap();
+    assert!((u.x + 50.0).abs() < 0.02 && (u.width - 50.0).abs() < 0.02, "{u:?}");
+  }
+
+  #[test]
+  fn layer_text_style_overrides_styled_ranges() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "Hello bold world".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::StyleText {
+      id: id.clone(),
+      start: 6,
+      end: 10,
+      style: json!({ "fontWeight": 700, "fontSize": 32, "italic": true, "color": "#FF0000" }),
+      clear: vec![],
+    })
+    .unwrap();
+    let update = |e: &mut Engine, patch: Value| {
+      e.dispatch(Command::Update {
+        ids: vec![id.clone()],
+        patch,
+      })
+      .unwrap()
+    };
+    update(
+      &mut e,
+      json!({ "text": { "fontWeight": 400, "fontSize": 18, "fontFamily": "Roboto" } }),
+    );
+    let t = e.doc.get(&id).unwrap().text.clone().unwrap();
+    assert_eq!((t.font_weight, t.font_size, t.font_family.as_str()), (400, 18.0, "Roboto"));
+    assert_eq!(t.runs.len(), 1, "the run keeps what the layer didn't set");
+    let run = &t.runs[0];
+    assert_eq!((run.font_weight, run.font_size, run.font_family.clone()), (None, None, None));
+    assert_eq!((run.italic, run.color.as_deref()), (Some(true), Some("#FF0000")));
+    // A layer fill recolours every range; runs left with no overrides are dropped.
+    update(&mut e, json!({ "fills": [{ "type": "solid", "color": "#00FF00" }] }));
+    assert_eq!(e.doc.get(&id).unwrap().text.as_ref().unwrap().runs[0].color, None);
+    update(&mut e, json!({ "text": { "italic": false } }));
+    assert!(e.doc.get(&id).unwrap().text.as_ref().unwrap().runs.is_empty());
+  }
+
+  #[test]
   fn auto_layout_reorders_on_drag() {
     let mut e = engine();
     let a = id_of(
@@ -2755,5 +3073,71 @@ mod tests {
     .unwrap();
     e.dispatch(Command::EndGesture).unwrap();
     assert_eq!(e.doc.get(&f).unwrap().children, vec![b, a]);
+  }
+
+  #[test]
+  fn dragging_out_of_auto_layout_reparents() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    let b = rect(&mut e, 100.0, 0.0, 50.0, 50.0, None);
+    let c = rect(&mut e, 200.0, 0.0, 50.0, 50.0, None);
+    let list = id_of(
+      &e.dispatch(Command::AddAutoLayout {
+        ids: vec![a.clone(), b.clone(), c.clone()],
+      })
+      .unwrap(),
+    );
+    let target = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 400.0,
+        y: 0.0,
+        width: 300.0,
+        height: 300.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let drag = |e: &mut Engine, id: &str, dx: f64, dy: f64| {
+      let from = e.doc.abs_bounds(id).center();
+      e.dispatch(Command::BeginGesture).unwrap();
+      e.dispatch(Command::Translate {
+        ids: vec![id.to_string()],
+        dx,
+        dy,
+        snap: false,
+        zoom: 1.0,
+      })
+      .unwrap();
+      e.dispatch(Command::DropInto {
+        ids: vec![id.to_string()],
+        x: from.x + dx,
+        y: from.y + dy,
+      })
+      .unwrap();
+      e.dispatch(Command::EndGesture).unwrap();
+    };
+    // Into the frame under the pointer, where the drag put it.
+    let start = e.doc.abs_bounds(&a);
+    drag(&mut e, &a, 450.0, 100.0);
+    assert_eq!(e.doc.get(&a).unwrap().parent.as_deref(), Some(target.as_str()));
+    let end = e.doc.abs_bounds(&a);
+    assert_eq!((end.x, end.y), (start.x + 450.0, start.y + 100.0));
+    assert_eq!(e.doc.get(&list).unwrap().children, vec![b.clone(), c.clone()]);
+    // Onto the empty page.
+    let start = e.doc.abs_bounds(&b);
+    drag(&mut e, &b, 0.0, 500.0);
+    assert_eq!(e.doc.get(&b).unwrap().parent, None);
+    assert_eq!(e.doc.abs_bounds(&b).y, start.y + 500.0);
+    // Inside the parent it still only reorders.
+    let d = rect(&mut e, 300.0, 0.0, 50.0, 50.0, None);
+    e.dispatch(Command::MoveToParent {
+      ids: vec![d.clone()],
+      parent: Some(list.clone()),
+      index: None,
+    })
+    .unwrap();
+    drag(&mut e, &c, 80.0, 0.0);
+    assert_eq!(e.doc.get(&list).unwrap().children, vec![d, c]);
   }
 }

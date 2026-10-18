@@ -153,6 +153,14 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
   let wrap = al.wrap && horizontal && main_sizing != Sizing::Hug;
 
   if main_sizing == Sizing::Hug {
+    // Fill children can't fill a frame that hugs them: they hug their own content instead.
+    for it in items.iter_mut().filter(|i| i.fill_main) {
+      let size = hug_size(doc, &it.id, horizontal, m);
+      set_size(doc, &it.id, horizontal, Some(size), None);
+      layout_node(doc, &it.id, m);
+      *it = item_of(doc, &it.id);
+      it.main = size;
+    }
     let sum: f64 = items.iter().map(|i| i.main).sum();
     main_size = sum + gap_total + pad_main_start + pad_main_end;
   } else if !wrap {
@@ -171,9 +179,22 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
     }
   }
 
-  // Cross axis.
+  // Cross axis. A hugging frame wraps its other children and fill children stretch to
+  // match; when every child fills, the frame hugs their own content.
+  let hug_cross = cross_sizing == Sizing::Hug;
+  if hug_cross && !wrap {
+    let fixed = items.iter().filter(|i| !i.fill_counter).map(|i| i.counter).reduce(f64::max);
+    let max_c = match fixed {
+      Some(c) => c,
+      None => {
+        let fills: Vec<NodeId> = items.iter().filter(|i| i.fill_counter).map(|i| i.id.clone()).collect();
+        fills.iter().map(|c| hug_size(doc, c, !horizontal, m)).fold(0.0, f64::max)
+      }
+    };
+    cross_size = max_c + pad_cross_start + pad_cross_end;
+  }
   let inner_cross_fixed = cross_size - pad_cross_start - pad_cross_end;
-  if cross_sizing != Sizing::Hug {
+  if !(hug_cross && wrap) {
     for it in items.iter_mut().filter(|i| i.fill_counter) {
       set_size(doc, &it.id, horizontal, None, Some(inner_cross_fixed.max(1.0)));
       layout_node(doc, &it.id, m);
@@ -184,13 +205,8 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
   }
 
   if wrap {
-    arrange_wrapped(doc, id, &items, main_size, cross_sizing == Sizing::Hug);
+    arrange_wrapped(doc, id, &items, main_size, hug_cross);
     return;
-  }
-
-  if cross_sizing == Sizing::Hug {
-    let max_c = items.iter().map(|i| i.counter).fold(0.0, f64::max);
-    cross_size = max_c + pad_cross_start + pad_cross_end;
   }
 
   // Position items.
@@ -237,6 +253,54 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
   } else {
     f.height = main_size.max(1.0);
     f.width = cross_size.max(1.0);
+  }
+}
+
+/// Size a fill child would have if it hugged its content along one axis (used when its
+/// parent hugs): text measures unwrapped (or at its width, for height), auto layout frames
+/// lay out as hug, and other layers have no content to hug so they keep their size.
+fn hug_size(doc: &mut Document, id: &str, horizontal: bool, m: &dyn TextMeasurer) -> f64 {
+  let Some(n) = doc.get(id).cloned() else { return 1.0 };
+  let size = match (n.kind, n.text.clone()) {
+    (NodeType::Text, Some(mut t)) => {
+      if horizontal {
+        t.auto_resize = TextAutoResize::Width;
+      }
+      let lay = layout_for_node(&t, n.width, m);
+      if horizontal {
+        lay.width.ceil()
+      } else {
+        lay.height.ceil()
+      }
+    }
+    (k, _) if k.is_frame_like() && n.layout.is_some() => {
+      // Lay it out as hug on that axis, read the size, then put its sizing back.
+      let set = |doc: &mut Document, s: Sizing| {
+        if let Some(c) = doc.get_mut(id) {
+          if horizontal {
+            c.sizing_h = s;
+          } else {
+            c.sizing_v = s;
+          }
+        }
+      };
+      set(doc, Sizing::Hug);
+      layout_node(doc, id, m);
+      let c = doc.get(id).unwrap();
+      let size = if horizontal { c.width } else { c.height };
+      set(doc, Sizing::Fill);
+      size
+    }
+    _ if horizontal => n.width,
+    _ => n.height,
+  };
+  if horizontal {
+    size
+      .max(n.min_width.unwrap_or(0.0))
+      .min(n.max_width.unwrap_or(f64::INFINITY))
+      .max(1.0)
+  } else {
+    size.max(1.0)
   }
 }
 
@@ -419,6 +483,104 @@ mod tests {
     assert_eq!(doc.get("c0").unwrap().width, 100.0);
     assert_eq!(doc.get("c1").unwrap().x, 110.0);
     assert_eq!(doc.get("c1").unwrap().height, 80.0);
+  }
+
+  #[test]
+  fn hug_parent_sizes_fill_children_to_their_content() {
+    let (mut doc, page) = setup();
+    // A 700 px card whose text fills its width.
+    let card = Node {
+      id: "card".into(),
+      kind: NodeType::Frame,
+      width: 700.0,
+      layout: Some(AutoLayout::default()),
+      sizing_v: Sizing::Hug,
+      ..Default::default()
+    };
+    doc.insert(card, None, &page, None);
+    let props = crate::model::TextProps {
+      characters: "Hello".into(),
+      ..Default::default()
+    };
+    let natural = crate::text::layout_text(&props, None, &HeuristicMeasurer).width.ceil();
+    let label = Node {
+      id: "label".into(),
+      kind: NodeType::Text,
+      sizing_h: Sizing::Fill,
+      text: Some(props),
+      ..Default::default()
+    };
+    doc.insert(label, Some("card"), &page, None);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert_eq!(doc.get("label").unwrap().width, 680.0);
+    doc.get_mut("card").unwrap().sizing_h = Sizing::Hug;
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert_eq!(
+      doc.get("card").unwrap().width,
+      natural + 20.0,
+      "hugs the text, not its old fill width"
+    );
+    assert_eq!(doc.get("label").unwrap().width, natural);
+    // With a fixed sibling the card hugs that, and the fill child stretches to match.
+    let bar = Node {
+      id: "bar".into(),
+      width: 200.0,
+      height: 4.0,
+      ..Default::default()
+    };
+    doc.insert(bar, Some("card"), &page, None);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert_eq!(doc.get("card").unwrap().width, 220.0);
+    assert_eq!(doc.get("label").unwrap().width, 200.0);
+
+    // Main axis: a row that hugs, with a fill child that is itself an auto layout frame.
+    let row = Node {
+      id: "row".into(),
+      kind: NodeType::Frame,
+      width: 700.0,
+      layout: Some(AutoLayout {
+        direction: LayoutDirection::Horizontal,
+        ..Default::default()
+      }),
+      sizing_v: Sizing::Hug,
+      ..Default::default()
+    };
+    doc.insert(row, None, &page, None);
+    let icon = Node {
+      id: "icon".into(),
+      width: 50.0,
+      height: 50.0,
+      ..Default::default()
+    };
+    doc.insert(icon, Some("row"), &page, None);
+    let body = Node {
+      id: "body".into(),
+      kind: NodeType::Frame,
+      layout: Some(AutoLayout {
+        padding_top: 0.0,
+        padding_right: 0.0,
+        padding_bottom: 0.0,
+        padding_left: 0.0,
+        ..Default::default()
+      }),
+      sizing_h: Sizing::Fill,
+      sizing_v: Sizing::Hug,
+      ..Default::default()
+    };
+    doc.insert(body, Some("row"), &page, None);
+    let dot = Node {
+      id: "dot".into(),
+      width: 30.0,
+      height: 30.0,
+      ..Default::default()
+    };
+    doc.insert(dot, Some("body"), &page, None);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert_eq!(doc.get("body").unwrap().width, 620.0);
+    doc.get_mut("row").unwrap().sizing_h = Sizing::Hug;
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert_eq!(doc.get("body").unwrap().width, 30.0);
+    assert_eq!(doc.get("row").unwrap().width, 10.0 + 50.0 + 10.0 + 30.0 + 10.0);
   }
 
   #[test]

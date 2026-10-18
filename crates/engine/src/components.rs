@@ -271,37 +271,96 @@ pub fn combine_as_variants(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) 
   if comps.len() < 2 {
     return None;
   }
+  // Properties come from the original names, before they are rewritten as "Prop=Value".
+  let names: Vec<String> = comps.iter().filter_map(|c| doc.get(c)).map(|c| c.name.clone()).collect();
+  let (set_name, props) = variants_from_names(&names);
   let set_id = crate::ops::wrap_in_frame(doc, &comps, gen, NodeType::ComponentSet)?;
   let pad = 20.0;
-  for (i, cid) in comps.iter().enumerate() {
+  for (cid, props) in comps.iter().zip(props) {
     if let Some(c) = doc.get_mut(cid) {
       c.x += pad;
       c.y += pad;
-      let props = parse_variant_name(&c.name).unwrap_or_else(|| {
-        let mut m = BTreeMap::new();
-        m.insert("Property 1".to_string(), format!("Variant {}", i + 1));
-        m
-      });
       c.name = props.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ");
       c.component.get_or_insert_with(Default::default).variant_props = props;
     }
   }
-  let base = comps
-    .first()
-    .and_then(|c| doc.get(c))
-    .map(|c| c.name.split(',').next().unwrap_or("").to_string())
-    .unwrap_or_default();
   if let Some(set) = doc.get_mut(&set_id) {
     set.x -= pad;
     set.y -= pad;
     set.width += pad * 2.0;
     set.height += pad * 2.0;
-    set.name = if base.contains('=') { "Component Set".into() } else { base };
+    set.name = set_name;
     set.strokes = vec![crate::model::Paint::solid("#9747FF")];
     set.stroke_dash = vec![6.0, 4.0];
     set.corner_radius = 6.0;
   }
   Some(set_id)
+}
+
+/// The set name and each component's variant properties, derived from component names:
+/// "Button/Primary" and "Button/Secondary" make set "Button" with Property 1 = Primary or
+/// Secondary; "Size=Large" names are used as they are; anything else falls back to the
+/// distinct names (or "Variant 1", "Variant 2" …) under "Property 1".
+fn variants_from_names(names: &[String]) -> (String, Vec<BTreeMap<String, String>>) {
+  const DEFAULT_SET: &str = "Component Set";
+  if let Some(parsed) = names.iter().map(|n| parse_variant_name(n)).collect::<Option<Vec<_>>>() {
+    return (DEFAULT_SET.into(), parsed);
+  }
+  let slash = names.iter().all(|n| n.contains('/'));
+  let parts: Vec<Vec<&str>> = names
+    .iter()
+    .map(|n| {
+      if slash {
+        n.split('/').map(str::trim).filter(|s| !s.is_empty()).collect()
+      } else {
+        n.split_whitespace().collect()
+      }
+    })
+    .collect();
+  // Longest shared leading path, leaving every component at least one part of its own.
+  let shortest = parts.iter().map(|p| p.len()).min().unwrap_or(0);
+  let mut common = 0;
+  while common + 1 < shortest && parts.iter().all(|p| p[common] == parts[0][common]) {
+    common += 1;
+  }
+  let base = parts
+    .first()
+    .map(|p| p[..common].join(if slash { "/" } else { " " }))
+    .unwrap_or_default();
+  let props: Vec<BTreeMap<String, String>> = parts
+    .iter()
+    .map(|p| {
+      let rest = &p[common..];
+      if slash {
+        rest
+          .iter()
+          .enumerate()
+          .map(|(i, v)| (format!("Property {}", i + 1), v.to_string()))
+          .collect()
+      } else {
+        BTreeMap::from([("Property 1".to_string(), rest.join(" "))])
+      }
+    })
+    .collect();
+  let distinct = props
+    .iter()
+    .enumerate()
+    .all(|(i, p)| !p.is_empty() && p.values().all(|v| !v.is_empty()) && !props[..i].contains(p));
+  let set_name = if !base.is_empty() {
+    base
+  } else if !names[0].is_empty() && names.iter().all(|n| *n == names[0]) {
+    names[0].clone()
+  } else {
+    DEFAULT_SET.into()
+  };
+  let props = if distinct {
+    props
+  } else {
+    (1..=names.len())
+      .map(|i| BTreeMap::from([("Property 1".to_string(), format!("Variant {i}"))]))
+      .collect()
+  };
+  (set_name, props)
 }
 
 pub fn parse_variant_name(name: &str) -> Option<BTreeMap<String, String>> {
@@ -390,5 +449,62 @@ mod tests {
     assert_eq!(t.characters, "Buy now");
     assert_eq!(t.font_size, 30.0);
     assert_eq!(doc.get(&inst).unwrap().x, 300.0);
+  }
+
+  #[test]
+  fn combine_as_variants_names_the_set_from_the_components() {
+    let combine = |names: &[&str]| {
+      let mut gen = IdGen::new(5);
+      let mut doc = new_document(&mut gen, "t");
+      let page = doc.pages[0].id.clone();
+      let mut ids = Vec::new();
+      for (i, name) in names.iter().enumerate() {
+        let id = format!("c{i}");
+        doc.insert(
+          Node {
+            id: id.clone(),
+            kind: NodeType::Component,
+            name: name.to_string(),
+            x: i as f64 * 120.0,
+            component: Some(ComponentInfo::default()),
+            ..Default::default()
+          },
+          None,
+          &page,
+          None,
+        );
+        ids.push(id);
+      }
+      let set = combine_as_variants(&mut doc, &ids, &mut gen).unwrap();
+      let props: Vec<BTreeMap<String, String>> = ids
+        .iter()
+        .map(|i| doc.get(i).unwrap().component.as_ref().unwrap().variant_props.clone())
+        .collect();
+      (doc.get(&set).unwrap().name.clone(), props, doc.get(&ids[0]).unwrap().name.clone())
+    };
+    let prop = |k: &str, v: &str| BTreeMap::from([(k.to_string(), v.to_string())]);
+
+    let (set, props, first) = combine(&["Button/Primary", "Button/Secondary"]);
+    assert_eq!(set, "Button");
+    assert_eq!(props, vec![prop("Property 1", "Primary"), prop("Property 1", "Secondary")]);
+    assert_eq!(first, "Property 1=Primary");
+
+    let (set, props, _) = combine(&["Icon/Arrow/Small", "Icon/Arrow/Large", "Icon/Check/Small"]);
+    assert_eq!(set, "Icon");
+    assert_eq!(props[1]["Property 1"], "Arrow");
+    assert_eq!(props[1]["Property 2"], "Large");
+
+    let (set, props, _) = combine(&["Size=Small, State=Hover", "Size=Large, State=Hover"]);
+    assert_eq!(set, "Component Set");
+    assert_eq!(props[1]["Size"], "Large");
+
+    let (set, props, _) = combine(&["Primary", "Secondary"]);
+    assert_eq!(set, "Component Set");
+    assert_eq!(props, vec![prop("Property 1", "Primary"), prop("Property 1", "Secondary")]);
+
+    // Same names can't tell variants apart: numbered values, the shared name for the set.
+    let (set, props, _) = combine(&["Card", "Card"]);
+    assert_eq!(set, "Card");
+    assert_eq!(props, vec![prop("Property 1", "Variant 1"), prop("Property 1", "Variant 2")]);
   }
 }
