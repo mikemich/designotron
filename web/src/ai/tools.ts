@@ -45,6 +45,12 @@ export async function executeTool(name: string, input: any): Promise<ToolOutcome
     if (name === "import_html") {
       return { ok: true, result: await importHtml(input ?? {}) };
     }
+    if (name === "save_plugin") {
+      const { savePlugin } = await import("../plugins");
+      const id = "p_" + Date.now().toString(36);
+      savePlugin({ id, name: String(input?.name ?? "Plugin"), description: String(input?.description ?? ""), code: String(input?.code ?? "") });
+      return { ok: true, result: { id, saved: true, note: "The user can run it from the main menu > Plugins." } };
+    }
     if (name === "import_url") {
       return { ok: true, result: await importUrl(input ?? {}) };
     }

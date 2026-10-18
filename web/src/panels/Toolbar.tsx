@@ -25,6 +25,7 @@ import * as A from "../actions";
 import { dispatch, setTool, toggleView, useDoc, useStore, zoomBy, zoomToFit, zoomToSelection } from "../store";
 import type { Tool } from "../types";
 import { ALT, Menu, MOD, SHIFT, type MenuItem } from "../ui/controls";
+import { runPlugin, usePlugins } from "../plugins";
 import { useChat } from "../ai/chatState";
 
 const SHAPES: { tool: Tool; label: string; key: string; icon: JSX.Element }[] = [
@@ -87,6 +88,10 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     { label: `${useStore.getState().showGrids ? "Hide" : "Show"} layout grids`, kbd: `${SHIFT}${MOD}4`, onClick: () => toggleView("showGrids") },
     { label: "Version history", onClick: () => useStore.setState({ leftTab: "history" }) },
     { label: "Variables…", onClick: () => useStore.setState({ variablesOpen: true }) },
+    { sep: true },
+    { heading: "Plugins" },
+    ...usePlugins.getState().list.slice(0, 8).map((p) => ({ label: p.name, onClick: () => runPlugin(p) })),
+    { label: "Manage plugins…", onClick: () => usePlugins.setState({ dialogOpen: true }) },
   ];
 
   const toolBtn = (t: Tool, title: string, icon: JSX.Element) => (

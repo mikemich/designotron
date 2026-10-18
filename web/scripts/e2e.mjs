@@ -24,7 +24,13 @@ function check(name, ok, detail = "") {
 const browser = await chromium.launch(launch);
 const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, ignoreHTTPSErrors: true });
 const page = await context.newPage();
-await page.addInitScript(() => localStorage.setItem("dt:tour-done", "1"));
+await page.addInitScript(() => {
+  try {
+    localStorage.setItem("dt:tour-done", "1");
+  } catch {
+    /* sandboxed frames (plugins) have no storage */
+  }
+});
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 page.on("console", (m) => m.type() === "error" && !m.text().includes("WebSocket") && !m.text().includes("Failed to load resource") && errors.push(m.text()));
@@ -354,6 +360,37 @@ try {
   const after = await page.evaluate((id) => window.__dt.doc().comments[id], thread.id);
   check("comments: pinned to a layer, replied and resolved by Claude's tools", thread.node === tile && after.resolved && after.messages[1].author === "Claude", JSON.stringify({ node: thread.node, msgs: after.messages.length }));
   await page.keyboard.press("v");
+
+  {
+  // Plugins: a built-in plugin edits the selection as one undo step; a UI plugin runs in its
+  // sandboxed iframe; a plugin trying to reach the editor's DOM fails without side effects.
+  const shapes = await page.evaluate(() =>
+    window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [0, 1, 2].map((i) => ({ type: "rectangle", name: `P${i}`, x: -1200 + i * 60, y: 0, width: 40, height: 40, fill: "#888888" })) } }).created.map((c) => c.id),
+  );
+  await page.evaluate((ids) => window.__dt.dispatch({ op: "select", ids }), shapes);
+  await page.evaluate(() => window.__dt.runPlugin("builtin-palette"));
+  await page.waitForFunction(() => window.__dt.plugin() === null, null, { timeout: 5000 });
+  const recoloured = await page.evaluate((ids) => ids.map((id) => window.__dt.doc().nodes[id].fills[0].color), shapes);
+  await page.keyboard.press("Control+z");
+  const reverted = await page.evaluate((ids) => ids.map((id) => window.__dt.doc().nodes[id].fills[0].color), shapes);
+  check("plugin recolours the selection as one undo step", recoloured.every((c) => c !== "#888888") && reverted.every((c) => c === "#888888"), recoloured.join(","));
+  await page.evaluate(() => window.__dt.runPlugin("builtin-rename"));
+  await page.waitForSelector(".plugin-header");
+  const ui = page.frameLocator("iframe.plugin-frame");
+  await ui.locator("#name").fill("Swatch");
+  await ui.locator("#go").click();
+  await page.waitForFunction(() => window.__dt.plugin() === null, null, { timeout: 5000 });
+  const names = await page.evaluate((ids) => ids.map((id) => window.__dt.doc().nodes[id].name), shapes);
+  check("UI plugin renames layers from its sandboxed panel", names.join() === "Swatch 1,Swatch 2,Swatch 3", names.join());
+  const escaped = await page.evaluate(async (id) => {
+    const { savePlugin, runPlugin } = await import("/src/plugins.ts");
+    savePlugin({ id: "evil", name: "Evil", description: "", code: `parent.document.title = "pwned"; await dt.tool("delete_nodes", { ids: ["${id}"] });` });
+    runPlugin({ id: "evil", name: "Evil", description: "", code: `parent.document.title = "pwned"; await dt.tool("delete_nodes", { ids: ["${id}"] });` });
+    await new Promise((r) => setTimeout(r, 800));
+    return { title: document.title, exists: !!window.__dt.doc().nodes[id] };
+  }, shapes[0]);
+  check("plugins are sandboxed from the editor", escaped.title !== "pwned" && escaped.exists, JSON.stringify(escaped));
+  }
 
   // Figma import from a saved REST API export.
   await page.evaluate(() => (location.hash = "#/"));

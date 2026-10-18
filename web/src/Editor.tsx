@@ -8,6 +8,8 @@ import { Presenter } from "./Presenter";
 import { Tour } from "./Tour";
 import { VariablesDialog } from "./panels/VariablesDialog";
 import { FigmaImportDialog } from "./panels/FigmaImportDialog";
+import { PluginWindow, PluginsDialog } from "./panels/PluginsDialog";
+import { usePlugins } from "./plugins";
 import { installShortcuts } from "./shortcuts";
 import { getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
 import { listVersions, loadFile, saveFile, saveVersion } from "./files";
@@ -21,6 +23,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const toast = useStore((s) => s.toast);
   const variablesOpen = useStore((s) => s.variablesOpen);
   const figmaOpen = useStore((s) => s.figmaOpen);
+  const pluginsOpen = usePlugins((s) => s.dialogOpen);
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -105,6 +108,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       <Tour />
       {variablesOpen && <VariablesDialog />}
       {figmaOpen && <FigmaImportDialog />}
+      {pluginsOpen && <PluginsDialog />}
+      <PluginWindow />
       {toast && <div className={"toast " + toast.kind}>{toast.text}</div>}
     </div>
   );

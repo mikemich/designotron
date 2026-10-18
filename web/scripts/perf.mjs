@@ -14,7 +14,13 @@ if (fs.existsSync("/opt/pw-browsers/chromium")) launch.executablePath = "/opt/pw
 
 const browser = await chromium.launch(launch);
 const page = await (await browser.newContext({ viewport: { width: 1600, height: 1000 } })).newPage();
-await page.addInitScript(() => localStorage.setItem("dt:tour-done", "1"));
+await page.addInitScript(() => {
+  try {
+    localStorage.setItem("dt:tour-done", "1");
+  } catch {
+    /* sandboxed frames (plugins) have no storage */
+  }
+});
 await page.goto(URL_);
 await page.waitForSelector(".files");
 await page.click("button:has-text('New design file')");

@@ -23,7 +23,7 @@ Ordered by impact on "replace Figma for a small team".
 | 9  | Variable extras                        | Aliases in the editor UI, scoping, per-page modes, prototyping with variables |
 | 10 | Vector editing completeness            | Add/delete points, bend tool, renormalise bounds after edits          |
 | 12 | Smart animate                          | Interpolate matching layers between frames (currently a dissolve)     |
-| 13 | Plugin API                             | Sandboxed JS plugins over the same Command/Query surface              |
+| 13 | Plugin sharing                         | Install plugins from a URL or a community list; plugin manifests and permissions |
 | 14 | Canvas gradient and image-crop handles | Edit gradients and crops directly on the canvas                       |
 | 15 | Auto layout extras                     | Min/max width, baseline alignment, per-child margins                  |
 | 16 | Auto layout inference for HTML import  | Map flex/grid containers to auto layout instead of absolute layers    |
@@ -64,6 +64,7 @@ Ordered by impact on "replace Figma for a small team".
 | Figma import    | File → Import from Figma (link + personal access token, or a saved REST JSON): pages, frames, auto layout, constraints, components/variants, instances with recovered overrides, mixed text, vectors from Figma geometry, gradients, images (downloaded into the file), effects, masks, prototype links |
 | Performance     | Persistent node map (O(1) snapshots), diff-driven layout/component sync, per-root canvas render cache with transform-only moves, document deltas to JS, contained canvas layout |
 | Comments        | Comment tool (C), pins that follow their layer, threads with replies, resolve/reopen, Comments tab; Claude reads them (`get_comments`), replies and resolves; "Ask Claude to address them" |
+| Plugins         | Sandboxed iframe plugins (opaque origin) with a promise API over the same tools Claude uses, optional UI panel, one undo step per run; built-in examples; manager with editor; Claude writes plugins via `save_plugin` |
 | Live app        | App tab: write the generated project to `workspace/app` (or keep it in sync), run `npm run dev` through the bridge, preview at mobile/desktop width, logs, "Ask Claude to fix it" |
 | Docs            | AGENTS.md, STATUS.md, ROADMAP.md, README                                                             |
 
@@ -87,7 +88,8 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 | Boolean subtract from the toolbar, mask rendering      | `web/scripts/e2e.mjs`                        |
 | Variables dialog, fill binding, frame mode switch      | `web/scripts/e2e.mjs`                        |
 | Figma JSON import through the dialog                   | `web/scripts/e2e.mjs`                        |
-| Comment on a layer, Claude replies and resolves        | `web/scripts/e2e.mjs` (39/39 passing)        |
+| Comment on a layer, Claude replies and resolves        | `web/scripts/e2e.mjs`                        |
+| Plugins: one undo step, UI panel, sandbox escape fails | `web/scripts/e2e.mjs` (42/42 passing)        |
 | Bridge reaches api.figma.com and real sites via proxy  | curl `/bridge/figma` (403 for a bad token), `/bridge/fetch` |
 | Engine: drag step 0.13 ms, edit 0.3 ms on 6k layers    | `cargo run --release -p designotron-engine --example bench` (was 42 ms / 46 ms) |
 | Browser drag on 6k layers: ~10 ms script, ~1 ms layout per frame | `web/scripts/perf.mjs` on the production build (was 25 ms script + 80 ms layout) |
@@ -128,7 +130,8 @@ until someone runs it with a real key.
 | Bridge sync      | If MCP edits happen with no editor open, reopening an older tab overwrites `design.dtron.json`           |
 | Security         | API key (API mode) is stored in this browser's localStorage                                              |
 | Input            | No touch/pen support; editor UI accessibility (keyboard-only, screen readers) is minimal                 |
-| Figma            | Import needs the REST API (no `.fig` files); library components become frames; fonts missing locally fall back; FigJam, Slides and plugins are not implemented |
+| Figma            | Import needs the REST API (no `.fig` files); library components become frames; fonts missing locally fall back; FigJam and Slides are not implemented |
+| Plugins          | Run on the editor's thread: a plugin stuck in an infinite loop freezes the tab                           |
 | Figma API        | Not tested against a real Figma account here (no token); the converter is tested on REST-shaped JSON     |
 
 ## Figma parity snapshot
@@ -146,5 +149,5 @@ until someone runs it with a real key.
 | Dev Mode / inspect         | Partial     | Code tab, notes                         |
 | Multiplayer, comments      | No          | Top of the to-do list                   |
 | Version history            | Local       | Named + automatic, per browser          |
-| Plugins                    | No          | MCP covers AI automation today          |
+| Plugins                    | Yes         | Sandboxed JS over the AI tool API; no store yet |
 | AI                         | Yes         | Claude Code (Pro/Max) and API key       |

@@ -1413,3 +1413,66 @@ textarea.textinput {
 .comment-row.resolved {
   opacity: 0.55;
 }
+
+/* Plugins */
+.plugins-dialog {
+  width: 620px;
+  max-height: 80vh;
+}
+.plugin-list,
+.plugin-editor {
+  padding: 12px 14px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.plugin-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+}
+.plugin-row:hover {
+  background: var(--panel-2);
+}
+.textinput.code {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  min-height: 300px;
+  resize: vertical;
+  white-space: pre;
+}
+.plugin-header {
+  position: fixed;
+  right: 16px;
+  top: 56px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6px 0 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: 10px 10px 0 0;
+  z-index: 40;
+  font-weight: 600;
+}
+.plugin-frame {
+  position: fixed;
+  right: 16px;
+  top: 88px;
+  border: 1px solid var(--border);
+  border-radius: 0 0 10px 10px;
+  background: var(--panel);
+  z-index: 40;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+.plugin-frame.hidden {
+  width: 0;
+  height: 0;
+  border: 0;
+  visibility: hidden;
+}

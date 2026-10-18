@@ -18,7 +18,7 @@ use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render;
 
 /// Tools that need a browser (rasterising, DOM). The web shell executes them.
-pub const BROWSER_TOOLS: &[&str] = &["get_screenshot", "import_html", "import_url"];
+pub const BROWSER_TOOLS: &[&str] = &["get_screenshot", "import_html", "import_url", "save_plugin"];
 
 pub const SYSTEM_PROMPT: &str = "You are the design copilot inside Designotron, a Figma-style design tool. \
 You edit the open document directly through tools. Coordinates are pixels; children are positioned relative to their parent; \
@@ -142,6 +142,11 @@ pub fn tool_defs() -> Value {
         "transition": { "type": "string", "enum": ["instant", "dissolve", "smart_animate", "slide_left", "slide_right", "slide_up", "slide_down"] },
         "clear": { "type": "boolean", "description": "Remove existing interactions first" }
       }, "required": ["nodeId"] }
+    },
+    {
+      "name": "save_plugin",
+      "description": "Save a Designotron plugin the user can run from the Plugins menu. The code is the body of an async function with a `dt` API: await dt.tool(name, input) calls these same tools; dt.selection() returns the selected nodes (full JSON); dt.getDocument(depth); dt.getNodes(ids); dt.notify(text); dt.ui.show(html, {width, height}) shows a panel whose scripts can call dt; dt.on('selectionchange', fn); dt.close(). No DOM or storage access outside the plugin's own UI.",
+      "input_schema": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "code": { "type": "string" } }, "required": ["name", "code"] }
     },
     {
       "name": "get_comments",

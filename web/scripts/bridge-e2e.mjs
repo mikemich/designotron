@@ -34,7 +34,13 @@ async function mcp(method, params) {
 
 const browser = await chromium.launch(launch);
 const page = await (await browser.newContext({ viewport: { width: 1600, height: 1000 }, ignoreHTTPSErrors: true })).newPage();
-await page.addInitScript(() => localStorage.setItem("dt:tour-done", "1"));
+await page.addInitScript(() => {
+  try {
+    localStorage.setItem("dt:tour-done", "1");
+  } catch {
+    /* sandboxed frames (plugins) have no storage */
+  }
+});
 try {
   await page.goto(URL);
   await page.waitForSelector(".files");
