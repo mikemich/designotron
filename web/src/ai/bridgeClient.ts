@@ -24,6 +24,8 @@ class BridgeClient {
   private docTimer: ReturnType<typeof setTimeout> | null = null;
   private liveText: number | null = null;
   private toolChips = new Map<string, number>();
+  /** Set once an error has been shown for the current turn, to avoid repeats. */
+  private turnError = false;
 
   start() {
     this.connect();
@@ -78,6 +80,7 @@ class BridgeClient {
 
   chat(prompt: string, sessionId: string | null) {
     this.liveText = null;
+    this.turnError = false;
     this.send({ type: "chat", prompt, sessionId });
   }
 
@@ -104,13 +107,19 @@ class BridgeClient {
         this.liveText = null;
         break;
       case "chat_error":
-        push({ kind: "error", text: m.message });
+        // A non-zero exit after an error we already explained adds nothing.
+        if (!this.turnError) this.reportError(String(m.message));
         useChat.setState({ running: false });
         break;
       case "log":
         push({ kind: "system", text: m.message });
         break;
     }
+  }
+
+  private reportError(raw: string) {
+    this.turnError = true;
+    push({ kind: "error", text: explainError(raw) });
   }
 
   /** Renders Claude Code `stream-json` events. */
@@ -132,6 +141,12 @@ class BridgeClient {
     }
     if (e.type === "assistant") {
       for (const block of e.message?.content ?? []) {
+        if (block.type === "text" && block.text && isApiError(block.text)) {
+          if (this.liveText !== null) useChat.setState((s) => ({ items: s.items.filter((i) => i.id !== this.liveText) }));
+          this.liveText = null;
+          this.reportError(block.text);
+          continue;
+        }
         if (block.type === "text" && block.text) {
           // Text already arrived through partial events; only add it when it did not.
           const items = useChat.getState().items;
@@ -160,11 +175,27 @@ class BridgeClient {
     }
     if (e.type === "result") {
       if (e.session_id) useChat.setState({ sessionId: e.session_id });
-      if (e.is_error && e.result) push({ kind: "error", text: String(e.result) });
+      if (e.is_error && e.result && !this.turnError) this.reportError(String(e.result));
       const cost = typeof e.total_cost_usd === "number" ? ` · $${e.total_cost_usd.toFixed(3)} API-equivalent` : "";
       push({ kind: "system", text: `Done in ${((e.duration_ms ?? 0) / 1000).toFixed(1)}s${cost}` });
     }
   }
+}
+
+function isApiError(text: string): boolean {
+  return /^(Failed to authenticate|API Error:)/.test(text.trim()) || /authentication_error|OAuth access token has expired/i.test(text);
+}
+
+/** Turns Claude Code failures into an explanation with a fix. */
+function explainError(raw: string): string {
+  if (/authentication_error|OAuth access token has expired|Re-authenticate|not logged in|run \/login|Invalid API key/i.test(raw)) {
+    return "Claude Code needs you to sign in again. In a terminal run `claude`, type /login and finish signing in with your Claude account, then send your message again.";
+  }
+  if (/rate_limit|usage limit|429/i.test(raw)) {
+    return "Your Claude plan's usage limit was reached. Wait for it to reset, or switch to API-key mode in settings.";
+  }
+  if (/overloaded|529/i.test(raw)) return "Claude is overloaded right now. Try again in a minute.";
+  return raw;
 }
 
 function summarizeInput(name: string, input: any): string | undefined {
