@@ -13,3 +13,9 @@ path = "src/main.rs"
 designotron-engine = { path = "../engine" }
 serde.workspace = true
 serde_json.workspace = true
+axum = { version = "0.7.9", features = ["ws"] }
+tokio = { version = "1.41", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "fs", "net", "signal"] }
+tower-http = { version = "0.6.2", features = ["fs"] }
+futures-util = "0.3"
+log = "0.4"
+env_logger = "0.11"

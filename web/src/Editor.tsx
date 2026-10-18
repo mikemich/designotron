@@ -83,7 +83,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   return (
     <div className="app">
       <Toolbar onHome={onHome} />
-      <div className={"main" + (chatOpen ? " chat" : "")}>
+      <div className={"main" + (chatOpen ? " with-chat" : "")}>
         <LeftPanel />
         <Canvas />
         <RightPanel />

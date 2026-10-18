@@ -78,7 +78,7 @@ textarea {
   grid-template-columns: 248px 1fr 272px;
   min-height: 0;
 }
-.main.chat {
+.main.with-chat {
   grid-template-columns: 248px 1fr 272px 380px;
 }
 

@@ -149,3 +149,6 @@ export function stop() {
   else import("./apiAgent").then((m) => m.abortApiAgent());
   useChat.setState({ running: false });
 }
+
+// Expose chat state on the automation handle (see store.ts).
+(globalThis as any).__dt = { ...(globalThis as any).__dt, chat: () => useChat.getState(), send: (p: string) => send(p) };
