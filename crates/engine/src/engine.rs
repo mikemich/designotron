@@ -43,6 +43,8 @@ pub enum SelectMode {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Command {
+  /// Re-measures text and re-runs layout without an undo step (e.g. after web fonts load).
+  Relayout,
   Undo,
   Redo,
   BeginGesture,
@@ -117,6 +119,7 @@ pub enum Query {
   ExportReact { id: NodeId },
   ExportProject,
   ToolDefs,
+  SystemPrompt,
   Summary { #[serde(default = "three")] depth: usize },
 }
 
@@ -200,6 +203,11 @@ impl Engine {
   /// Executes a command. Mutations become one undo step (or join the open gesture).
   pub fn dispatch(&mut self, cmd: Command) -> Result<Value, String> {
     match cmd {
+      Command::Relayout => {
+        layout::relayout_all(&mut self.doc, self.measurer.as_ref());
+        self.rev += 1;
+        return Ok(json!({}));
+      }
       Command::Undo => {
         if let Some(prev) = self.past.pop() {
           let cur = self.snapshot();
@@ -544,7 +552,9 @@ impl Engine {
           }
           let in_flow = cur.as_ref().and_then(|p| self.doc.get(p)).map(|p| p.layout.is_some()).unwrap_or(false) && !self.doc.get(id).unwrap().absolute_position;
           if cur != target && !in_flow && cur.as_ref().map(|c| self.doc.get(c).map(|n| n.kind != NodeType::Group).unwrap_or(true)).unwrap_or(true) {
-            self.doc.reparent(id, target.as_deref(), None, true);
+            // Dropping into auto layout inserts at the pointer position.
+            let index = target.as_ref().and_then(|t| self.flow_index(t, Point::new(x, y)));
+            self.doc.reparent(id, target.as_deref(), index, true);
           }
         }
         Ok(json!({ "parent": target }))
@@ -774,7 +784,8 @@ impl Engine {
       }
       Command::Ai { tool, input } => ai::execute(self, &tool, &input),
       // Handled in dispatch.
-      Command::Undo
+      Command::Relayout
+      | Command::Undo
       | Command::Redo
       | Command::BeginGesture
       | Command::EndGesture
@@ -816,6 +827,22 @@ impl Engine {
     }
     ops::move_by(&mut self.doc, &free, fdx, fdy);
     Ok(json!({ "dx": fdx, "dy": fdy, "guides": guides }))
+  }
+
+  /// Insertion index in an auto layout frame for a page-space point.
+  fn flow_index(&self, frame: &str, p: Point) -> Option<usize> {
+    let f = self.doc.get(frame)?;
+    let horizontal = f.layout.as_ref()?.direction == LayoutDirection::Horizontal;
+    let pos = if horizontal { p.x } else { p.y };
+    Some(
+      f.children
+        .iter()
+        .filter(|c| {
+          let cc = self.doc.abs_bounds(c).center();
+          (if horizontal { cc.x } else { cc.y }) < pos
+        })
+        .count(),
+    )
   }
 
   fn reorder_in_flow(&mut self, id: &str, dx: f64, dy: f64) {
@@ -985,6 +1012,7 @@ impl Engine {
         json!(files)
       }
       Query::ToolDefs => ai::tool_defs(),
+      Query::SystemPrompt => json!(ai::SYSTEM_PROMPT),
       Query::Summary { depth } => ai::summary(self, depth),
     })
   }

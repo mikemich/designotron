@@ -12,5 +12,4 @@ export default defineConfig({
       "/mcp": BRIDGE,
     },
   },
-  test: { environment: "node" },
-} as any);
+});

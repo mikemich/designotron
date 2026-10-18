@@ -1,0 +1,205 @@
+// End-to-end smoke test: drives the editor in headless Chromium.
+// Usage: start `npm run dev` (port 5173), then `npm run e2e`.
+// Env: E2E_URL (default http://localhost:5173), E2E_OUT (screenshot dir), CHROMIUM (executable path).
+
+import { chromium } from "playwright-core";
+import fs from "node:fs";
+import path from "node:path";
+
+const URL = process.env.E2E_URL ?? "http://localhost:5173";
+const OUT = process.env.E2E_OUT ?? "test-results";
+fs.mkdirSync(OUT, { recursive: true });
+
+const launch = { headless: true, args: ["--no-sandbox"] };
+if (process.env.CHROMIUM) launch.executablePath = process.env.CHROMIUM;
+else if (fs.existsSync("/opt/pw-browsers/chromium")) launch.executablePath = "/opt/pw-browsers/chromium";
+if (process.env.HTTPS_PROXY) launch.proxy = { server: process.env.HTTPS_PROXY, bypass: "localhost,127.0.0.1" };
+
+const results = [];
+function check(name, ok, detail = "") {
+  results.push({ name, ok, detail });
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? "  — " + detail : ""}`);
+}
+
+const browser = await chromium.launch(launch);
+const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, ignoreHTTPSErrors: true });
+const page = await context.newPage();
+const errors = [];
+page.on("pageerror", (e) => errors.push(String(e)));
+page.on("console", (m) => m.type() === "error" && !m.text().includes("WebSocket") && !m.text().includes("Failed to load resource") && errors.push(m.text()));
+
+const shot = (name) => page.screenshot({ path: path.join(OUT, `${name}.png`) });
+const state = () => page.evaluate(() => window.__dt.state());
+const doc = () => page.evaluate(() => window.__dt.doc());
+
+try {
+  await page.goto(URL);
+  await page.waitForSelector(".files", { timeout: 20000 });
+  check("files dashboard loads", true);
+  await shot("01-files");
+
+  await page.click("text=Open sample");
+  await page.waitForSelector("#dt-canvas", { timeout: 15000 });
+  await page.waitForTimeout(800);
+  const d0 = await doc();
+  const names = Object.values(d0.nodes).map((n) => n.name);
+  check("sample builds screens", names.includes("Welcome") && names.includes("Home"), `${Object.keys(d0.nodes).length} nodes`);
+  check("sample has component + instance", Object.values(d0.nodes).some((n) => n.type === "component") && Object.values(d0.nodes).some((n) => n.type === "instance"));
+  const rendered = await page.locator("#dt-canvas svg").first().innerHTML();
+  check("canvas renders engine SVG", rendered.includes("data-id"), `${rendered.length} chars`);
+  await shot("02-sample");
+
+  // Draw a rectangle with the R tool.
+  const canvas = await page.locator("#dt-canvas").boundingBox();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("r");
+  const sx = canvas.x + canvas.width - 260;
+  const sy = canvas.y + 120;
+  await page.mouse.move(sx, sy);
+  await page.mouse.down();
+  await page.mouse.move(sx + 120, sy + 80, { steps: 6 });
+  await page.mouse.up();
+  let st = await state();
+  const d1 = await doc();
+  const rect = d1.nodes[st.selection[0]];
+  check("rectangle tool draws and selects", rect?.type === "rectangle", rect ? `${Math.round(rect.width)}×${Math.round(rect.height)}` : "none");
+  await shot("03-rect");
+
+  // Move it by dragging.
+  const before = { x: rect.x, y: rect.y };
+  await page.mouse.move(sx + 60, sy + 40);
+  await page.mouse.down();
+  await page.mouse.move(sx + 160, sy + 140, { steps: 8 });
+  await page.mouse.up();
+  const moved = (await doc()).nodes[rect.id];
+  check("drag moves the layer", moved.x !== before.x && moved.y !== before.y, `(${before.x},${before.y}) → (${moved.x},${moved.y})`);
+
+  // Undo the move.
+  await page.keyboard.press("Control+z");
+  const undone = (await doc()).nodes[rect.id];
+  check("undo restores position", undone.x === before.x && undone.y === before.y);
+
+  // Change fill via the panel hex input.
+  const hex = page.locator(".panel.right .field input").filter({ hasText: "" });
+  await page.evaluate(() => window.__dt.dispatch({ op: "update", ids: window.__dt.state().selection, patch: { fills: [{ type: "solid", color: "#FF3366", opacity: 1, visible: true }], cornerRadius: 16 } }));
+  const filled = (await doc()).nodes[rect.id];
+  check("properties update", filled.fills[0].color === "#FF3366" && filled.cornerRadius === 16);
+  void hex;
+
+  // Text tool.
+  await page.keyboard.press("t");
+  await page.mouse.click(sx, sy + 260);
+  await page.waitForSelector(".text-editor");
+  await page.keyboard.type("Hello Designotron");
+  await page.keyboard.press("Escape");
+  st = await state();
+  const textNode = (await doc()).nodes[st.selection[0]];
+  check("text tool creates text", textNode?.text?.characters === "Hello Designotron", textNode ? `${Math.round(textNode.width)}px wide` : "");
+  await shot("04-text");
+
+  // Group + auto layout via shortcuts.
+  await page.evaluate((ids) => window.__dt.dispatch({ op: "select", ids }), [rect.id, textNode.id]);
+  await page.keyboard.press("Shift+A");
+  st = await state();
+  const al = (await doc()).nodes[st.selection[0]];
+  check("Shift+A wraps in auto layout", !!al?.layout && al.children.length === 2, al?.layout?.direction);
+
+  // Component from selection.
+  await page.keyboard.press("Control+Alt+k");
+  st = await state();
+  check("create component shortcut", (await doc()).nodes[st.selection[0]]?.type === "component");
+
+  // Pen tool: three clicks + Enter.
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("p");
+  await page.mouse.click(canvas.x + 200, canvas.y + canvas.height - 200);
+  await page.mouse.click(canvas.x + 300, canvas.y + canvas.height - 260);
+  await page.mouse.click(canvas.x + 400, canvas.y + canvas.height - 180);
+  await page.keyboard.press("Enter");
+  st = await state();
+  check("pen tool creates vector", (await doc()).nodes[st.selection[0]]?.type === "vector");
+
+  // Code export.
+  const welcome = Object.values(await doc()).length && Object.values((await doc()).nodes).find((n) => n.name === "Welcome");
+  const react = await page.evaluate((id) => window.__dt.query({ q: "exportReact", id }), welcome.id);
+  check("React export", react.includes("export default function Welcome") && react.includes("flex"), `${react.length} chars`);
+  const files = await page.evaluate(() => window.__dt.query({ q: "exportProject" }));
+  check("project export", files.some((f) => f.path === "src/App.tsx") && files.some((f) => f.path.startsWith("src/screens/")), `${files.length} files`);
+
+  // AI tool layer (same path Claude uses).
+  const r = await page.evaluate(() =>
+    window.__dt.dispatch({
+      op: "ai",
+      tool: "create_nodes",
+      input: { nodes: [{ type: "frame", name: "AI card", x: 0, y: 950, width: 320, fill: "#FFFFFF", cornerRadius: 16, layout: { direction: "vertical", padding: 20, gap: 8 }, children: [{ type: "text", text: "Made by a tool call", fontSize: 20, fontWeight: 700 }, { type: "text", text: "Same API as Claude Code via MCP.", width: "fill", color: "#555" }] }] },
+    }),
+  );
+  check("AI create_nodes", !!r?.created?.[0]?.id);
+
+  // Screenshot tool (browser-only).
+  const shotRes = await page.evaluate(async (id) => {
+    const m = await import("/src/ai/tools.ts");
+    const out = await m.executeTool("get_screenshot", { id });
+    return { ok: out.ok, len: out.image?.data.length ?? 0, err: out.ok ? null : out.result };
+  }, welcome.id);
+  check("get_screenshot rasterises", shotRes.ok && shotRes.len > 1000, shotRes.err ?? `${shotRes.len} b64 chars`);
+
+  // Import HTML tool.
+  const imp = await page.evaluate(async () => {
+    const m = await import("/src/ai/tools.ts");
+    return m.executeTool("import_html", {
+      html: '<div style="padding:32px;background:#0F172A;color:white;font-family:Inter"><h1 style="margin:0 0 12px;font-size:40px">Pricing</h1><p style="color:#94A3B8;margin:0">Simple plans for everyone.</p><button style="margin-top:20px;padding:12px 20px;border-radius:10px;border:0;background:#7C5CFF;color:white;font-size:16px">Start free</button></div>',
+      x: 900,
+      y: 950,
+      width: 600,
+    });
+  });
+  check("import_html converts DOM to layers", imp.ok, imp.ok ? "" : String(imp.result));
+
+  // Prototype player.
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => window.__dt.zoomToFit());
+  await page.waitForTimeout(300);
+  await shot("05-after-edits");
+  await page.click("button[title='Present']");
+  await page.waitForSelector(".presenter", { timeout: 5000 });
+  await page.waitForTimeout(300);
+  await shot("06-present");
+  const hotspots = await page.locator(".presenter .hotspot").count();
+  check("presenter shows hotspots", hotspots > 0, `${hotspots} hotspot(s)`);
+  if (hotspots) {
+    await page.locator(".presenter .hotspot").first().click();
+    await page.waitForTimeout(500);
+    const label = await page.locator(".presenter .bar .muted").innerText();
+    check("prototype navigation", label === "Home", label);
+  }
+  await page.keyboard.press("Escape");
+
+  // Persistence: reload and confirm the file survives.
+  await page.waitForTimeout(1200);
+  const count = Object.keys((await doc()).nodes).length;
+  await page.reload();
+  await page.waitForSelector("#dt-canvas", { timeout: 15000 });
+  await page.waitForTimeout(500);
+  const count2 = Object.keys((await doc()).nodes).length;
+  check("autosave survives reload", count2 === count, `${count} → ${count2} nodes`);
+
+  // Chat panel opens.
+  await page.keyboard.press("Control+/");
+  await page.waitForSelector(".chat", { timeout: 3000 });
+  await shot("07-chat");
+  check("Claude panel opens", true);
+
+  check("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
+} catch (err) {
+  check("unexpected exception", false, String(err));
+  await shot("zz-failure").catch(() => {});
+} finally {
+  await browser.close();
+}
+
+const failed = results.filter((r) => !r.ok);
+fs.writeFileSync(path.join(OUT, "e2e-results.json"), JSON.stringify(results, null, 2));
+console.log(`\n${results.length - failed.length}/${results.length} passed`);
+process.exit(failed.length ? 1 : 0);

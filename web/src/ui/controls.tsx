@@ -1,0 +1,265 @@
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+
+export const MIXED = Symbol("mixed");
+export type Maybe<T> = T | typeof MIXED;
+
+/** Number input with a scrubbable label, arrow-key stepping and simple math. */
+export function NumberField(props: {
+  label?: ReactNode;
+  value: Maybe<number>;
+  onChange: (v: number) => void;
+  onScrubStart?: () => void;
+  onScrubEnd?: () => void;
+  step?: number;
+  min?: number;
+  max?: number;
+  suffix?: string;
+  title?: string;
+  precision?: number;
+}) {
+  const { label, value, onChange, step = 1, min, max, suffix, title, precision = 2 } = props;
+  const fmt = (v: Maybe<number>) => (v === MIXED ? "Mixed" : String(Math.round(v * 10 ** precision) / 10 ** precision) + (suffix ?? ""));
+  const [text, setText] = useState(fmt(value));
+  const [focused, setFocused] = useState(false);
+  useEffect(() => {
+    if (!focused) setText(fmt(value));
+  }, [value, focused]);
+  const clamp = (v: number) => Math.min(max ?? Infinity, Math.max(min ?? -Infinity, v));
+  const commit = () => {
+    const raw = text.replace(suffix ?? "", "").trim();
+    if (!raw || raw === "Mixed") return;
+    let v: number;
+    try {
+      // Allow simple expressions like "100/2" or "24+8".
+      v = /^[\d\s+\-*/().]+$/.test(raw) ? Function(`"use strict";return (${raw})`)() : parseFloat(raw);
+    } catch {
+      v = parseFloat(raw);
+    }
+    if (Number.isFinite(v)) onChange(clamp(v));
+  };
+  const scrub = (e: React.PointerEvent) => {
+    if (value === MIXED) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const start = value;
+    props.onScrubStart?.();
+    const move = (ev: PointerEvent) => {
+      const mult = ev.shiftKey ? 10 : ev.altKey ? 0.1 : 1;
+      onChange(clamp(Math.round((start + (ev.clientX - startX) * step * mult) * 100) / 100));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      props.onScrubEnd?.();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  return (
+    <label className="field" title={title}>
+      {label !== undefined && (
+        <span className="lbl" onPointerDown={scrub}>
+          {label}
+        </span>
+      )}
+      <input
+        value={text}
+        onFocus={(e) => {
+          setFocused(true);
+          e.target.select();
+        }}
+        onBlur={() => {
+          setFocused(false);
+          commit();
+        }}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            commit();
+            (e.target as HTMLInputElement).blur();
+          } else if (e.key === "Escape") {
+            setText(fmt(value));
+            (e.target as HTMLInputElement).blur();
+          } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && value !== MIXED) {
+            e.preventDefault();
+            const d = (e.key === "ArrowUp" ? 1 : -1) * step * (e.shiftKey ? 10 : 1);
+            onChange(clamp(value + d));
+          }
+          e.stopPropagation();
+        }}
+      />
+    </label>
+  );
+}
+
+export function SelectField<T extends string | number>(props: {
+  label?: ReactNode;
+  value: Maybe<T>;
+  options: { value: T; label: string }[];
+  onChange: (v: T) => void;
+  title?: string;
+}) {
+  return (
+    <label className="field" title={props.title}>
+      {props.label !== undefined && <span className="lbl">{props.label}</span>}
+      <select
+        value={props.value === MIXED ? "__mixed" : String(props.value)}
+        onChange={(e) => {
+          const opt = props.options.find((o) => String(o.value) === e.target.value);
+          if (opt) props.onChange(opt.value);
+        }}
+      >
+        {props.value === MIXED && <option value="__mixed">Mixed</option>}
+        {props.options.map((o) => (
+          <option key={String(o.value)} value={String(o.value)}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+export function Seg<T extends string>(props: { value: Maybe<T>; options: { value: T; label: ReactNode; title?: string }[]; onChange: (v: T) => void }) {
+  return (
+    <div className="seg">
+      {props.options.map((o) => (
+        <button key={o.value} className={props.value === o.value ? "on" : ""} title={o.title} onClick={() => props.onChange(o.value)}>
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function IconButton(props: { title: string; onClick?: (e: React.MouseEvent) => void; children: ReactNode; on?: boolean; disabled?: boolean }) {
+  return (
+    <button className={"ibtn" + (props.on ? " on" : "")} title={props.title} onClick={props.onClick} disabled={props.disabled}>
+      {props.children}
+    </button>
+  );
+}
+
+export function Section(props: { title: ReactNode; actions?: ReactNode; children?: ReactNode }) {
+  return (
+    <div className="section">
+      <div className="section-head">
+        <span>{props.title}</span>
+        {props.actions && <div className="actions">{props.actions}</div>}
+      </div>
+      {props.children}
+    </div>
+  );
+}
+
+/** Floating panel anchored near a DOM rect; closes on outside click / Escape. */
+export function Popover(props: { anchor: DOMRect; onClose: () => void; children: ReactNode; width?: number }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: props.anchor.left, top: props.anchor.bottom + 6 });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    let left = props.anchor.left - w - 12;
+    if (left < 8) left = Math.min(window.innerWidth - w - 8, props.anchor.right + 8);
+    let top = Math.min(props.anchor.top, window.innerHeight - h - 8);
+    setPos({ left, top: Math.max(8, top) });
+  }, [props.anchor]);
+  useEffect(() => {
+    const down = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as globalThis.Node)) props.onClose();
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") props.onClose();
+    };
+    setTimeout(() => window.addEventListener("pointerdown", down), 0);
+    window.addEventListener("keydown", key);
+    return () => {
+      window.removeEventListener("pointerdown", down);
+      window.removeEventListener("keydown", key);
+    };
+  }, []);
+  return createPortal(
+    <div ref={ref} className="popover" style={{ ...pos, width: props.width ?? 240 }} onKeyDown={(e) => e.stopPropagation()}>
+      {props.children}
+    </div>,
+    document.body,
+  );
+}
+
+export interface MenuItem {
+  label?: string;
+  kbd?: string;
+  onClick?: () => void;
+  sep?: boolean;
+  heading?: string;
+  disabled?: boolean;
+}
+
+export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ left: props.x, top: props.y });
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    setPos({
+      left: Math.min(props.x, window.innerWidth - el.offsetWidth - 8),
+      top: Math.min(props.y, window.innerHeight - el.offsetHeight - 8),
+    });
+  }, [props.x, props.y]);
+  useEffect(() => {
+    const down = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as globalThis.Node)) props.onClose();
+    };
+    const key = (e: KeyboardEvent) => e.key === "Escape" && props.onClose();
+    setTimeout(() => window.addEventListener("pointerdown", down), 0);
+    window.addEventListener("keydown", key);
+    return () => {
+      window.removeEventListener("pointerdown", down);
+      window.removeEventListener("keydown", key);
+    };
+  }, []);
+  return createPortal(
+    <div ref={ref} className="menu" style={pos} onContextMenu={(e) => e.preventDefault()}>
+      {props.items.map((it, i) =>
+        it.sep ? (
+          <div key={i} className="sep" />
+        ) : it.heading ? (
+          <div key={i} className="label">
+            {it.heading}
+          </div>
+        ) : (
+          <button
+            key={i}
+            className="item"
+            disabled={it.disabled}
+            style={it.disabled ? { opacity: 0.4 } : undefined}
+            onClick={() => {
+              props.onClose();
+              it.onClick?.();
+            }}
+          >
+            <span>{it.label}</span>
+            {it.kbd && <span className="kbd">{it.kbd}</span>}
+          </button>
+        ),
+      )}
+    </div>,
+    document.body,
+  );
+}
+
+/** Shared value across a selection, or MIXED. */
+export function common<T, V>(items: T[], get: (t: T) => V): Maybe<V> {
+  if (!items.length) return MIXED as Maybe<V>;
+  const first = get(items[0]);
+  const same = items.every((i) => JSON.stringify(get(i)) === JSON.stringify(first));
+  return same ? first : (MIXED as Maybe<V>);
+}
+
+export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+export const MOD = isMac ? "⌘" : "Ctrl+";
+export const ALT = isMac ? "⌥" : "Alt+";
+export const SHIFT = isMac ? "⇧" : "Shift+";

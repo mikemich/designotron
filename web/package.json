@@ -1,20 +1,14 @@
 {
-  "name": "designotron",
+  "name": "designotron-web",
   "version": "0.1.0",
-  "description": "Free, open-source design tool (Figma alternative) with first-class Claude / Claude Code integration.",
+  "description": "Designotron editor (web shell over the Rust/WASM engine)",
   "type": "module",
   "license": "MIT",
-  "bin": {
-    "designotron": "server/cli.ts"
-  },
   "scripts": {
-    "dev": "concurrently -k -n web,bridge -c cyan,magenta \"vite\" \"tsx watch server/bridge.ts\"",
-    "dev:web": "vite",
-    "bridge": "tsx server/bridge.ts",
+    "dev": "vite",
+    "wasm": "cd .. && cargo build -p designotron-engine-wasm --target wasm32-unknown-unknown --release && wasm-bindgen --target web --out-dir web/src/wasm/pkg target/wasm32-unknown-unknown/release/designotron_engine_wasm.wasm",
     "build": "tsc -b && vite build",
-    "start": "npm run build && NODE_ENV=production tsx server/bridge.ts",
     "typecheck": "tsc -b",
-    "test": "vitest run",
     "e2e": "node scripts/e2e.mjs"
   },
   "dependencies": {
@@ -37,5 +31,6 @@
     "typescript": "^5.6.3",
     "vite": "^5.4.10",
     "vitest": "^2.1.5"
-  }
+  },
+  "private": true
 }

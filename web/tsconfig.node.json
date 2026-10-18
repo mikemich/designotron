@@ -8,9 +8,8 @@
     "skipLibCheck": true,
     "noEmit": true,
     "composite": true,
-    "allowImportingTsExtensions": false,
     "types": ["node"],
     "tsBuildInfoFile": "./node_modules/.tmp/node.tsbuildinfo"
   },
-  "include": ["server", "vite.config.ts", "src/ai/toolDefs.ts"]
+  "include": ["vite.config.ts"]
 }
