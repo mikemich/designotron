@@ -47,6 +47,8 @@ struct El {
   navigate: Option<String>,
   url: Option<String>,
   is_component_root: bool,
+  /// Extra HTML attributes (src, alt, type).
+  attrs: Vec<(String, String)>,
 }
 
 impl El {
@@ -63,6 +65,7 @@ impl El {
       navigate: None,
       url: None,
       is_component_root: false,
+      attrs: vec![],
     }
   }
 
@@ -81,6 +84,8 @@ struct Ctx<'a> {
   screen_order: Vec<(String, String)>,
   used_names: BTreeSet<String>,
   reuse_components: bool,
+  /// One h1 per screen.
+  h1_used: bool,
 }
 
 impl<'a> Ctx<'a> {
@@ -93,6 +98,7 @@ impl<'a> Ctx<'a> {
       screen_order: Vec::new(),
       used_names: BTreeSet::new(),
       reuse_components,
+      h1_used: false,
     };
     for p in &doc.pages {
       for id in &p.children {
@@ -150,21 +156,47 @@ impl<'a> Ctx<'a> {
         }
       }
     }
+    if place == Place::Root {
+      self.h1_used = false;
+    }
+    let image_src = image_only(&n);
     let mut el = match n.kind {
-      NodeType::Text => self.text_el(&n),
+      NodeType::Text => {
+        let mut e = self.text_el(&n);
+        e.tag = self.heading_tag(&n);
+        e
+      }
       NodeType::Vector | NodeType::Polygon | NodeType::Star => {
         let mut e = El::new("div");
         e.raw = Some(export_svg(self.doc, &n.id, self.m));
         e
       }
-      _ => El::new("div"),
+      _ if image_src.is_some() => {
+        let mut e = El::new("img");
+        e.attrs.push(("src".into(), image_src.clone().unwrap_or_default()));
+        e.attrs.push(("alt".into(), n.name.clone()));
+        e
+      }
+      _ => El::new(self.container_tag(&n)),
     };
+    if el.tag == "button" {
+      el.attrs.push(("type".into(), "button".into()));
+    }
     if n.kind == NodeType::Group {
       el.comment = Some(n.name.clone());
     }
     el.is_component_root = place == Place::ComponentRoot;
     self.position(&mut el, &n, place);
     self.visual(&mut el, &n);
+    if el.tag == "img" {
+      let fit = if el.styles.iter().any(|(k, v)| k == "background-size" && v == "contain") {
+        "contain"
+      } else {
+        "cover"
+      };
+      el.styles.retain(|(k, _)| !k.starts_with("background"));
+      el.s("object-fit", fit);
+    }
     if let Some(al) = n.layout.as_ref() {
       el.s("display", "flex");
       if al.direction == LayoutDirection::Vertical {
@@ -187,7 +219,7 @@ impl<'a> Ctx<'a> {
             al.counter_gap
           }),
         );
-        el.styles.retain(|(k, v)| !(k.ends_with("-gap") && v == "0px"));
+        el.styles.retain(|(k, v)| !(k.ends_with("-gap") && (v == "0px" || v == "0")));
       }
       let pad = [al.padding_top, al.padding_right, al.padding_bottom, al.padding_left];
       if pad.iter().any(|p| *p != 0.0) {
@@ -225,6 +257,58 @@ impl<'a> Ctx<'a> {
     }
     self.interactions(&mut el, &n);
     Some(el)
+  }
+
+  /// h1 for the first large heading of a screen, h2/h3 for smaller ones.
+  fn heading_tag(&mut self, n: &Node) -> &'static str {
+    let Some(t) = n.text.as_ref() else { return "p" };
+    if t.font_size >= 32.0 && !self.h1_used {
+      self.h1_used = true;
+      "h1"
+    } else if t.font_size >= 24.0 {
+      "h2"
+    } else if t.font_size >= 18.0 && t.font_weight >= 600 {
+      "h3"
+    } else {
+      "p"
+    }
+  }
+
+  /// Landmark and control tags from layer names and behaviour.
+  fn container_tag(&self, n: &Node) -> &'static str {
+    let name = n.name.to_lowercase();
+    let has = |w: &str| name.split(|c: char| !c.is_alphanumeric()).any(|p| p == w);
+    let clickable = n
+      .interactions
+      .iter()
+      .any(|i| matches!(i.trigger, crate::model::Trigger::OnClick | crate::model::Trigger::OnPress));
+    let small = n.children.len() <= 3 && n.height <= 80.0;
+    let has_text = self
+      .doc
+      .subtree(&n.id)
+      .iter()
+      .any(|c| self.doc.get(c).map(|x| x.kind == NodeType::Text).unwrap_or(false));
+    if (has("button") || has("btn") || has("cta") || clickable) && small && has_text && n.kind != NodeType::Group {
+      return "button";
+    }
+    if n.kind == NodeType::Group {
+      return "div";
+    }
+    if has("nav") || has("navbar") || has("navigation") || has("menu") && n.layout.is_some() {
+      "nav"
+    } else if has("header") || name.contains("top bar") || has("topbar") {
+      "header"
+    } else if has("footer") {
+      "footer"
+    } else if has("sidebar") {
+      "aside"
+    } else if has("main") {
+      "main"
+    } else if has("hero") || has("section") || has("features") || has("pricing") || has("testimonials") || has("faq") {
+      "section"
+    } else {
+      "div"
+    }
   }
 
   fn interactions(&self, el: &mut El, n: &Node) {
@@ -298,6 +382,15 @@ impl<'a> Ctx<'a> {
     }
     let hug_w = n.layout.is_some() && n.sizing_h == Sizing::Hug;
     let hug_h = n.layout.is_some() && n.sizing_v == Sizing::Hug;
+    if place == Place::Root && n.parent.is_none() && n.kind == NodeType::Frame {
+      // Screens stretch to the viewport up to their design width and grow with content.
+      el.s("width", "100%");
+      el.s("max-width", px(n.width));
+      if !hug_h {
+        el.s("min-height", px(n.height));
+      }
+      return;
+    }
     if !fill_w && !hug_w && !text_auto_w {
       el.s("width", px(n.width));
     }
@@ -477,6 +570,18 @@ impl<'a> Ctx<'a> {
   }
 }
 
+/// The image URL when a rectangle is just an image (one visible image fill).
+fn image_only(n: &Node) -> Option<String> {
+  if n.kind != NodeType::Rectangle || !n.children.is_empty() {
+    return None;
+  }
+  let visible: Vec<&Paint> = n.fills.iter().filter(|p| p.visible()).collect();
+  match visible.as_slice() {
+    [Paint::Image { src, .. }] => Some(src.clone()),
+    _ => None,
+  }
+}
+
 /// Splits a mixed-style text into spans with CSS for each override.
 fn text_spans(t: &crate::model::TextProps) -> Vec<Span> {
   if t.runs.is_empty() {
@@ -629,6 +734,11 @@ fn tw_class(k: &str, v: &str) -> String {
     ("background-size", "contain") => "bg-contain".into(),
     ("background-position", "center") => "bg-center".into(),
     ("background-repeat", "no-repeat") => "bg-no-repeat".into(),
+    ("width", "100%") => "w-full".into(),
+    ("object-fit", "cover") => "object-cover".into(),
+    ("object-fit", "contain") => "object-contain".into(),
+    ("max-width", _) => format!("max-w-[{a}]"),
+    ("min-height", _) => format!("min-h-[{a}]"),
     ("left", _) => format!("left-[{a}]"),
     ("top", _) => format!("top-[{a}]"),
     ("width", _) => format!("w-[{a}]"),
@@ -701,6 +811,13 @@ fn jsx(el: &El, depth: usize, out: &mut String) {
   } else {
     String::new()
   };
+  let handler = format!(
+    "{handler}{}",
+    el.attrs
+      .iter()
+      .map(|(k, v)| format!(" {k}={}", serde_json::to_string(v).unwrap_or_default()))
+      .collect::<String>()
+  );
   if let Some(name) = &el.component_ref {
     out.push_str(&format!("{pad}<{name} className={class_attr}{handler} />\n"));
     return;
@@ -757,14 +874,34 @@ fn jsx(el: &El, depth: usize, out: &mut String) {
 
 fn html(el: &El, depth: usize, out: &mut String) {
   let pad = "  ".repeat(depth);
-  let style: String = el.styles.iter().map(|(k, v)| format!("{k}: {v}; ")).collect();
+  let mut decls: Vec<(String, String)> = Vec::new();
+  if el.tag == "button" {
+    // Browsers style buttons; start from a clean slate like Tailwind's preflight.
+    decls.extend(
+      [
+        ("border", "0"),
+        ("background", "none"),
+        ("font", "inherit"),
+        ("color", "inherit"),
+        ("cursor", "pointer"),
+      ]
+      .map(|(k, v)| (k.to_string(), v.to_string())),
+    );
+  }
+  decls.extend(el.styles.iter().cloned());
+  let style: String = decls.iter().map(|(k, v)| format!("{k}: {v}; ")).collect();
   let style = esc(style.trim_end());
-  let link = el
+  let mut link = el
     .navigate
     .as_ref()
     .map(|s| format!(" data-navigate=\"{}\"", esc(s)))
     .unwrap_or_default();
-  if let Some(svg) = &el.raw {
+  for (k, v) in &el.attrs {
+    link.push_str(&format!(" {k}=\"{}\"", esc(v)));
+  }
+  if el.tag == "img" {
+    out.push_str(&format!("{pad}<img style=\"{style}\"{link} />\n"));
+  } else if let Some(svg) = &el.raw {
     out.push_str(&format!("{pad}<div style=\"{style}\"{link}>{svg}</div>\n"));
   } else if !el.spans.is_empty() {
     let inner: String = el
@@ -926,10 +1063,16 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
     .map(|(_, n)| format!("import {n} from \"./screens/{n}\";\n"))
     .collect();
   let map: String = screens.iter().map(|(_, n)| format!("  {n},\n")).collect();
+  let phones: Vec<String> = screens
+    .iter()
+    .filter(|(id, _)| doc.get(id).map(|n| n.width < 600.0).unwrap_or(false))
+    .map(|(_, n)| format!("{n:?}"))
+    .collect();
   files.push(ProjectFile {
     path: "src/App.tsx".into(),
     content: format!(
-      "import {{ useState }} from \"react\";\n{imports}\nconst screens: Record<string, (props: {{ onNavigate?: (s: string) => void }}) => JSX.Element> = {{\n{map}}};\n\nexport default function App() {{\n  const [history, setHistory] = useState<string[]>([{start:?}]);\n  const current = history[history.length - 1];\n  const Screen = screens[current];\n  const onNavigate = (s: string) => setHistory((h) => (s === \"back\" ? h.slice(0, -1) : [...h, s]));\n  return (\n    <div className=\"min-h-screen flex items-start justify-center bg-neutral-100 py-10 overflow-auto\">\n      {{Screen ? <Screen onNavigate={{onNavigate}} /> : null}}\n    </div>\n  );\n}}\n"
+      "import {{ useState }} from \"react\";\n{imports}\nconst screens: Record<string, (props: {{ onNavigate?: (s: string) => void }}) => JSX.Element> = {{\n{map}}};\n\n// Phone-sized screens are shown centred on a backdrop; wider ones fill the window.\nconst phoneScreens = new Set<string>([{phones}]);\n\nexport default function App() {{\n  const [history, setHistory] = useState<string[]>([{start:?}]);\n  const current = history[history.length - 1];\n  const Screen = screens[current];\n  const onNavigate = (s: string) => setHistory((h) => (s === \"back\" ? h.slice(0, -1) : [...h, s]));\n  const phone = phoneScreens.has(current);\n  return (\n    <div className={{phone ? \"min-h-screen flex items-start justify-center bg-neutral-100 py-10\" : \"min-h-screen flex justify-center\"}}>\n      {{Screen ? <Screen onNavigate={{onNavigate}} /> : null}}\n    </div>\n  );\n}}\n",
+      phones = phones.join(", ")
     ),
   });
   let fonts = google_fonts_link(doc);
@@ -1056,6 +1199,41 @@ mod tests {
     assert!(paths.contains(&"package.json"));
     let app = &files.iter().find(|f| f.path == "src/App.tsx").unwrap().content;
     assert!(app.contains("\"Home\""));
+  }
+
+  #[test]
+  fn semantic_tags_and_responsive_root() {
+    let mut doc = sample();
+    let page = doc.pages[0].id.clone();
+    let mut h = crate::ops::default_node(NodeType::Text, "h".into(), "Heading".into());
+    h.text.as_mut().unwrap().characters = "Big title".into();
+    h.text.as_mut().unwrap().font_size = 40.0;
+    doc.insert(h, Some("home"), &page, None);
+    let mut nav = crate::ops::default_node(NodeType::Frame, "nav".into(), "Nav bar".into());
+    nav.layout = Some(AutoLayout::default());
+    doc.insert(nav, Some("home"), &page, None);
+    let mut img = crate::ops::default_node(NodeType::Rectangle, "img".into(), "Product photo".into());
+    img.fills = vec![Paint::Image {
+      src: "https://example.com/p.png".into(),
+      scale_mode: ScaleMode::Fill,
+      opacity: 1.0,
+      visible: true,
+    }];
+    doc.insert(img, Some("home"), &page, None);
+    let mut cta = crate::ops::default_node(NodeType::Frame, "cta".into(), "Primary button".into());
+    cta.height = 44.0;
+    doc.insert(cta, Some("home"), &page, None);
+    let mut label = crate::ops::default_node(NodeType::Text, "lbl".into(), "Label".into());
+    label.text.as_mut().unwrap().characters = "Buy".into();
+    doc.insert(label, Some("cta"), &page, None);
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(src.contains("<h1 "), "{src}");
+    assert!(src.contains("<nav "));
+    assert!(src.contains("<img ") && src.contains("alt=\"Product photo\"") && src.contains("object-cover"));
+    assert!(src.contains("<button ") && src.contains("type=\"button\""));
+    assert!(src.contains("w-full max-w-[390px] min-h-[844px]"), "{src}");
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(html.contains("<img style=") && html.contains("<button style=\"border: 0;"));
   }
 
   #[test]
