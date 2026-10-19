@@ -142,9 +142,18 @@ pub enum Command {
     #[serde(default)]
     images: std::collections::BTreeMap<String, String>,
   },
-  /// Merges a collaborator's delta (see `collab::delta`); not an undo step.
+  /// Merges a collaborator's delta (see `collab::delta`); not an undo step. With `local`,
+  /// the change is this editor's own (made while offline): it goes into the document and is
+  /// sent with the next `collab_delta`.
   ApplyRemote {
     delta: Value,
+    #[serde(default)]
+    local: bool,
+  },
+  /// The relay ordered this editor's oldest unacknowledged delta (or `rejected` it).
+  CollabAck {
+    #[serde(default)]
+    rejected: bool,
   },
   /// Swaps in a whole document as one undoable step (restoring a version).
   ReplaceDocument {
@@ -497,6 +506,12 @@ pub struct Engine {
   synced: Option<Document>,
   /// Document as last sent to collaborators (see `collab_delta`).
   collab_synced: Option<Document>,
+  /// With a relay that orders changes: the room's document as of every change it has
+  /// ordered so far, and this editor's changes it hasn't yet (oldest first). The document
+  /// is always `collab_confirmed` with `collab_pending` on top, so once nothing is pending
+  /// it equals the room's.
+  collab_confirmed: Option<Document>,
+  collab_pending: std::collections::VecDeque<Value>,
 }
 
 /// Per-root SVG from the last canvas render, and the document it was made from.
@@ -529,6 +544,8 @@ impl Engine {
       render_cache: RenderCache::default(),
       synced: None,
       collab_synced: None,
+      collab_confirmed: None,
+      collab_pending: Default::default(),
     }
   }
 
@@ -548,6 +565,8 @@ impl Engine {
     self.future.clear();
     self.gesture = None;
     self.gesture_undo = None;
+    self.collab_confirmed = None;
+    self.collab_pending.clear();
     self.fingerprints.clear();
     self.refresh_fingerprints();
     layout::relayout_all(&mut self.doc, self.measurer.as_ref());
@@ -605,17 +624,47 @@ impl Engine {
   /// Local changes since the last call, for collaborators (`collab::delta` format).
   /// The first call returns `{full: doc}`.
   pub fn collab_delta(&mut self) -> Value {
+    let ordered = self.collab_confirmed.is_some();
     let out = match &self.collab_synced {
-      Some(base) => crate::collab::delta(base, &self.doc),
+      Some(base) => crate::collab::delta(base, &self.doc, ordered),
       None => json!({ "full": self.doc }),
     };
     self.collab_synced = Some(self.doc.clone());
+    if ordered && out.get("full").is_none() && !crate::collab::is_empty(&out) {
+      self.collab_pending.push_back(out.clone());
+    }
     out
   }
 
   /// Starts a collaboration baseline at the current document without producing a delta.
-  pub fn collab_reset(&mut self) {
+  /// `ordered`: the relay acknowledges every change in the order it applies them (and
+  /// understands per-property patches).
+  pub fn collab_reset(&mut self, ordered: bool) {
     self.collab_synced = Some(self.doc.clone());
+    self.collab_confirmed = ordered.then(|| self.doc.clone());
+    self.collab_pending.clear();
+  }
+
+  /// This editor's changes the relay hasn't acknowledged, plus any not yet sent, oldest
+  /// first (to re-apply on top of the room's document after reconnecting).
+  pub fn collab_unsent(&mut self) -> Value {
+    let mut out: Vec<Value> = self.collab_pending.drain(..).collect();
+    if let Some(base) = &self.collab_synced {
+      let d = crate::collab::delta(base, &self.doc, self.collab_confirmed.is_some());
+      if !crate::collab::is_empty(&d) {
+        out.push(d);
+      }
+    }
+    Value::Array(out)
+  }
+
+  /// The confirmed document with every pending change on top.
+  fn collab_rebuild(&self) -> Option<Document> {
+    let mut doc = self.collab_confirmed.clone()?;
+    for d in &self.collab_pending {
+      let _ = crate::collab::apply(&mut doc, d);
+    }
+    Some(doc)
   }
 
   /// Forgets cached canvas SVG (the next incremental render returns every root).
@@ -752,17 +801,48 @@ impl Engine {
         self.rev += 1;
         return Ok(json!({}));
       }
-      Command::ApplyRemote { delta } => {
+      Command::ApplyRemote { delta, local } => {
         // A collaborator's change: merged into the document (and the open gesture's base),
         // never recorded in local history. Callers flush their own delta first.
         let prev = self.doc.clone();
-        crate::collab::apply(&mut self.doc, &delta)?;
+        if local {
+          crate::collab::apply(&mut self.doc, &delta)?;
+          self.after_mutation(&prev);
+          self.rev += 1;
+          return Ok(json!({}));
+        }
+        if let Some(c) = self.collab_confirmed.as_mut() {
+          // In the relay's order, under this editor's own changes it hasn't ordered yet.
+          crate::collab::apply(c, &delta)?;
+          self.doc = self.collab_rebuild().unwrap();
+        } else {
+          crate::collab::apply(&mut self.doc, &delta)?;
+        }
         if let Some(g) = self.gesture.as_mut() {
           let _ = crate::collab::apply(&mut g.doc, &delta);
         }
         if let Some(g) = self.gesture_undo.as_mut() {
           let _ = crate::collab::apply(&mut g.doc, &delta);
         }
+        self.refresh_fingerprints();
+        self.after_mutation(&prev);
+        self.collab_synced = Some(self.doc.clone());
+        self.rev += 1;
+        return Ok(json!({}));
+      }
+      Command::CollabAck { rejected } => {
+        let Some(d) = self.collab_pending.pop_front() else {
+          return Ok(json!({}));
+        };
+        if !rejected {
+          if let Some(c) = self.collab_confirmed.as_mut() {
+            let _ = crate::collab::apply(c, &d);
+          }
+          return Ok(json!({}));
+        }
+        // The relay didn't take it: everyone else's copy lacks it, so this one drops it too.
+        let Some(doc) = self.collab_rebuild() else { return Ok(json!({})) };
+        let prev = std::mem::replace(&mut self.doc, doc);
         self.refresh_fingerprints();
         self.after_mutation(&prev);
         self.collab_synced = Some(self.doc.clone());
@@ -1915,6 +1995,7 @@ impl Engine {
       | Command::Select { .. }
       | Command::SelectAll
       | Command::ApplyRemote { .. }
+      | Command::CollabAck { .. }
       | Command::SetPage { .. } => Ok(json!({})),
     }
   }

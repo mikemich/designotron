@@ -8,8 +8,12 @@
 //! Protocol (JSON text frames):
 //! - client → `{type:"join", name, color, doc?, assets?, reset?}`; the first join with a
 //!   document (or one with `reset`) sets the room's document.
-//! - server → `{type:"welcome", you, doc|null, assets, peers}`
+//! - server → `{type:"welcome", you, doc|null, assets, peers, ordered:true}`
 //! - client ↔ `{type:"delta", delta, assets?}`, `{type:"presence", presence}`
+//! - server → `{type:"ack", rejected?}` to the sender of each delta, at its place in the
+//!   order the room applied changes (`ordered`): editors keep their own unacknowledged
+//!   changes on top of everything acknowledged, so all of them converge on the room's
+//!   document even when people edit the same layer at once.
 //! - server → `{type:"peer"|"leave"|"reload"|"error", …}`; errors carry a `message` the
 //!   editor shows as is.
 //!
@@ -200,6 +204,8 @@ struct Welcome<'a> {
   doc: Option<&'a Document>,
   assets: &'a Map<String, Value>,
   peers: Vec<PeerInfo<'a>>,
+  /// Deltas are acknowledged in order (see the protocol above).
+  ordered: bool,
 }
 
 #[derive(Serialize)]
@@ -656,6 +662,7 @@ impl Rooms {
           presence: &p.presence,
         })
         .collect(),
+      ordered: true,
     };
     out.send(serde_json::to_string(&welcome).unwrap_or_default());
     if adopt && !r.peers.is_empty() {
@@ -682,9 +689,13 @@ impl Rooms {
   }
 
   fn delta(&self, r: &mut Room, id: u64, m: &Incoming<'_>, size: usize) -> Step {
-    let (Some(raw), true) = (m.delta, r.doc.is_some()) else {
+    let Some(raw) = m.delta else {
       return Step::Go;
     };
+    if r.doc.is_none() {
+      self.ack(r, id, true);
+      return Step::Go;
+    }
     let assets = m
       .assets
       .and_then(|a| serde_json::from_str::<Map<String, Value>>(a.get()).ok())
@@ -701,14 +712,17 @@ impl Rooms {
       }
       if r.doc_bytes + growth + r.asset_bytes > max {
         // Not applied: reconnecting gives this editor the room's file again.
+        self.ack(r, id, true);
         return Step::Close(format!("{} Your latest change wasn't shared.", self.too_large()));
       }
     }
     let Ok(delta) = serde_json::from_str::<Value>(raw.get()) else {
+      self.ack(r, id, true);
       return Step::Go;
     };
     if let Err(e) = designotron_engine::collab::apply(r.doc.as_mut().unwrap(), &delta) {
       log::warn!("rejected collab delta: {e}");
+      self.ack(r, id, true);
       return Step::Go;
     }
     let (doc_bytes, asset_bytes) = (r.doc_bytes + growth, r.asset_bytes);
@@ -727,6 +741,7 @@ impl Rooms {
       assets: if keep { m.assets } else { None },
     };
     self.broadcast(r, id, &out, false);
+    self.ack(r, id, false);
     if assets.is_some() && !keep {
       return Step::Warn(format!(
         "Images in this change would make the shared file larger than {} MB, so others won't see them.",
@@ -823,6 +838,21 @@ impl Rooms {
       self.room_bytes.fetch_sub(bytes, Ordering::Relaxed);
     }
     true
+  }
+
+  /// Tells `to` the room has applied (or `rejected`) its latest delta, after everything
+  /// the room applied before it.
+  fn ack(&self, room: &Room, to: u64, rejected: bool) {
+    if let Some(p) = room.peers.get(&to) {
+      p.out.send(
+        if rejected {
+          r#"{"type":"ack","rejected":true}"#
+        } else {
+          r#"{"type":"ack"}"#
+        }
+        .to_string(),
+      );
+    }
   }
 
   /// Sends `msg` to everyone in the room except `from`.

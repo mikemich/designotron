@@ -74,10 +74,17 @@ impl WasmEngine {
     self.inner.collab_delta().to_string()
   }
 
-  /// Starts the collaboration baseline at the current document.
+  /// Starts the collaboration baseline at the current document; `ordered` when the relay
+  /// acknowledges changes in order (see `Engine::collab_reset`).
   #[wasm_bindgen(js_name = collabReset)]
-  pub fn collab_reset(&mut self) {
-    self.inner.collab_reset();
+  pub fn collab_reset(&mut self, ordered: bool) {
+    self.inner.collab_reset(ordered);
+  }
+
+  /// JSON array of this editor's unacknowledged and unsent changes, oldest first.
+  #[wasm_bindgen(js_name = collabUnsent)]
+  pub fn collab_unsent(&mut self) -> String {
+    self.inner.collab_unsent().to_string()
   }
 
   /// JSON delta of the document since the last call (`{full}` or `{nodes, removed, meta}`).

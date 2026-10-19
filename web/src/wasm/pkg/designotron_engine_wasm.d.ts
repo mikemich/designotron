@@ -7,9 +7,14 @@ export class WasmEngine {
    */
   collabDelta(): string;
   /**
-   * Starts the collaboration baseline at the current document.
+   * Starts the collaboration baseline at the current document; `ordered` when the relay
+   * acknowledges changes in order (see `Engine::collab_reset`).
    */
-  collabReset(): void;
+  collabReset(ordered: boolean): void;
+  /**
+   * JSON array of this editor's unacknowledged and unsent changes, oldest first.
+   */
+  collabUnsent(): string;
   /**
    * JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
    */
@@ -40,7 +45,8 @@ export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_wasmengine_free: (a: number, b: number) => void;
   readonly wasmengine_collabDelta: (a: number) => [number, number];
-  readonly wasmengine_collabReset: (a: number) => void;
+  readonly wasmengine_collabReset: (a: number, b: number) => void;
+  readonly wasmengine_collabUnsent: (a: number) => [number, number];
   readonly wasmengine_dispatch: (a: number, b: number, c: number) => [number, number, number, number];
   readonly wasmengine_docDelta: (a: number, b: number) => [number, number];
   readonly wasmengine_load: (a: number, b: number, c: number) => [number, number];

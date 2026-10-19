@@ -111,6 +111,9 @@ const myName = () => userName() || "Anonymous";
 let ws: WebSocket | null = null;
 let wsUrl = "";
 let applying = false;
+/** The relay acknowledges our changes in the order it applies everyone's (newer relays):
+ *  the engine then keeps unacknowledged changes on top, so everyone converges. */
+let ordered = false;
 let flushQueued = false;
 let retry: ReturnType<typeof setTimeout> | null = null;
 /** Pause before reconnecting; doubles while the relay refuses or can't be reached. */
@@ -122,6 +125,7 @@ let unsubscribe: (() => void) | null = null;
 function isEmptyDelta(d: any): boolean {
   return (
     !Object.keys(d.nodes ?? {}).length &&
+    !Object.keys(d.patch ?? {}).length &&
     !(d.removed ?? []).length &&
     !Object.keys(d.comments ?? {}).length &&
     !(d.commentsRemoved ?? []).length &&
@@ -152,7 +156,7 @@ function flush() {
   if (useCollab.getState().status !== "live") return;
   const d = JSON.parse(getEngine().collabDelta());
   if (d.full || isEmptyDelta(d)) return;
-  send({ type: "delta", delta: d, assets: newAssets(JSON.stringify(d.nodes ?? {})) });
+  send({ type: "delta", delta: d, assets: newAssets(JSON.stringify([d.nodes ?? {}, d.patch ?? {}])) });
 }
 
 function scheduleFlush() {
@@ -169,31 +173,31 @@ function loadShared(doc: unknown, assets: Record<string, string>, fit = true) {
   for (const id of Object.keys(assets ?? {})) sentAssets.add(id);
   getEngine().load(JSON.stringify(doc));
   dispatch({ op: "relayout" });
-  getEngine().collabReset();
+  getEngine().collabReset(ordered);
   if (fit) requestAnimationFrame(zoomToFit);
 }
 
 function onMessage(m: any) {
   switch (m.type) {
     case "welcome": {
-      // Edits made here while disconnected: everything since the room last heard from us.
-      const pending = joinedOnce && m.doc ? JSON.parse(getEngine().collabDelta()) : null;
+      // Edits the room never got (made while disconnected, or sent but not acknowledged).
+      const unsent: unknown[] = joinedOnce && m.doc ? JSON.parse(getEngine().collabUnsent()) : [];
+      ordered = !!m.ordered;
       if (m.doc) loadShared(m.doc, m.assets, !joinedOnce);
-      else getEngine().collabReset();
-      if (pending && !pending.full && !isEmptyDelta(pending)) {
-        // Put them back on top of the room's copy and send them, so nothing made offline is lost.
-        applying = true;
-        try {
-          dispatch({ op: "applyRemote", delta: pending }, { quiet: true });
-        } finally {
-          applying = false;
-        }
-        send({ type: "delta", delta: pending, assets: newAssets(JSON.stringify(pending.nodes ?? {})) });
+      else getEngine().collabReset(ordered);
+      // Put them back on top of the room's copy; the flush below sends them, so nothing made
+      // offline is lost.
+      applying = true;
+      try {
+        for (const d of unsent) dispatch({ op: "applyRemote", delta: d, local: true }, { quiet: true });
+      } finally {
+        applying = false;
       }
       joinedOnce = true;
       const peers: Record<number, Peer> = {};
       for (const p of m.peers ?? []) peers[p.id] = p;
       useCollab.setState({ status: "live", peers });
+      if (unsent.length) flush();
       retryDelay = RETRY_MS;
       sendPresence(true);
       break;
@@ -208,6 +212,12 @@ function onMessage(m: any) {
       } finally {
         applying = false;
       }
+      break;
+    case "ack":
+      // The relay applied our oldest unacknowledged change (or turned it down).
+      flush();
+      if (m.rejected) dispatch({ op: "collabAck", rejected: true }, { quiet: true });
+      else getEngine().dispatch(JSON.stringify({ op: "collabAck", rejected: false }));
       break;
     case "reload":
       loadShared(m.doc, m.assets);

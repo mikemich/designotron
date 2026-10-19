@@ -1,6 +1,10 @@
-//! Collaboration: node-level deltas between peers, merging them (last writer wins per
-//! layer), repairing the tree after concurrent structural edits, and reverting one
-//! step without touching other people's changes (selective undo).
+//! Collaboration: deltas between peers, merging them, repairing the tree after concurrent
+//! structural edits, and reverting one step without touching other people's changes
+//! (selective undo).
+//!
+//! Layers changed in place travel as per-property patches (`patch`), so two people editing
+//! different properties of one layer both keep their change; a relay that orders every
+//! change (see `designotron-rooms`) makes everyone converge on the same document.
 
 use std::collections::BTreeSet;
 
@@ -8,13 +12,19 @@ use serde_json::{json, Map, Value};
 
 use crate::model::{Comment, Document, Node, NodeId};
 
-/// Changes from `base` to `doc` as JSON: changed/removed nodes and comments, plus the
-/// document-level fields that differ (name, pages, styles, variables).
-pub fn delta(base: &Document, doc: &Document) -> Value {
+/// Changes from `base` to `doc` as JSON: added nodes in full (`nodes`), changed ones as
+/// per-property `patch`es (whole nodes when `patches` is false, for peers that predate
+/// patches), removed nodes and comments, plus the document-level fields that differ
+/// (name, pages, styles, variables).
+pub fn delta(base: &Document, doc: &Document, patches: bool) -> Value {
   let mut nodes = Map::new();
+  let mut patch = Map::new();
   let mut removed = Vec::new();
   for item in base.nodes.diff(&doc.nodes) {
     match item {
+      imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, v) } if patches => {
+        patch.insert(k.clone(), Value::Object(node_patch(o, v)));
+      }
       imbl::ordmap::DiffItem::Add(k, v) | imbl::ordmap::DiffItem::Update { new: (k, v), .. } => {
         nodes.insert(k.clone(), serde_json::to_value(v).unwrap_or(Value::Null));
       }
@@ -30,6 +40,9 @@ pub fn delta(base: &Document, doc: &Document) -> Value {
   let comments_removed: Vec<&String> = base.comments.keys().filter(|k| !doc.comments.contains_key(*k)).collect();
   let mut out = json!({ "nodes": nodes, "removed": removed, "comments": comments, "commentsRemoved": comments_removed });
   let o = out.as_object_mut().unwrap();
+  if !patch.is_empty() {
+    o.insert("patch".into(), Value::Object(patch));
+  }
   if base.name != doc.name {
     o.insert("name".into(), json!(doc.name));
   }
@@ -45,6 +58,37 @@ pub fn delta(base: &Document, doc: &Document) -> Value {
   out
 }
 
+/// The properties of `new` that differ from `old` (`null` for ones `new` leaves out).
+fn node_patch(old: &Node, new: &Node) -> Map<String, Value> {
+  let (Ok(Value::Object(o)), Ok(Value::Object(n))) = (serde_json::to_value(old), serde_json::to_value(new)) else {
+    return Map::new();
+  };
+  let mut out = Map::new();
+  for (k, v) in &n {
+    if o.get(k) != Some(v) {
+      out.insert(k.clone(), v.clone());
+    }
+  }
+  for k in o.keys().filter(|k| !n.contains_key(*k)) {
+    out.insert(k.clone(), Value::Null);
+  }
+  out
+}
+
+/// `node` with the properties in `patch` replaced (`null` resets one to its default).
+fn patch_node(node: &Node, patch: &Map<String, Value>) -> Result<Node, String> {
+  let mut v = serde_json::to_value(node).map_err(|e| e.to_string())?;
+  let o = v.as_object_mut().ok_or("bad node")?;
+  for (k, val) in patch {
+    if val.is_null() {
+      o.remove(k);
+    } else {
+      o.insert(k.clone(), val.clone());
+    }
+  }
+  serde_json::from_value(v).map_err(|e| e.to_string())
+}
+
 /// True when a delta carries no changes.
 pub fn is_empty(d: &Value) -> bool {
   let empty = |k: &str| {
@@ -58,6 +102,7 @@ pub fn is_empty(d: &Value) -> bool {
       .unwrap_or(true)
   };
   empty("nodes")
+    && empty("patch")
     && empty("removed")
     && empty("comments")
     && empty("commentsRemoved")
@@ -71,6 +116,17 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
   if let Some(nodes) = d.get("nodes").and_then(|v| v.as_object()) {
     for (id, v) in nodes {
       let n: Node = serde_json::from_value(v.clone()).map_err(|e| format!("bad node {id}: {e}"))?;
+      doc.nodes.insert(id.clone(), n);
+      touched.push(id.clone());
+    }
+  }
+  if let Some(patches) = d.get("patch").and_then(|v| v.as_object()) {
+    for (id, p) in patches {
+      // A layer someone deleted meanwhile stays deleted.
+      let (Some(n), Some(p)) = (doc.get(id), p.as_object()) else {
+        continue;
+      };
+      let n = patch_node(n, p).map_err(|e| format!("bad patch {id}: {e}"))?;
       doc.nodes.insert(id.clone(), n);
       touched.push(id.clone());
     }
@@ -124,6 +180,13 @@ pub fn revert(doc: &Document, from: &Document, to: &Document) -> Document {
   let mut touched = Vec::new();
   for item in from.nodes.diff(&to.nodes) {
     match item {
+      // Only the properties this step changed, so a collaborator's edits to other
+      // properties of the same layer survive the undo.
+      imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, v) } if out.get(k).is_some() => {
+        let n = patch_node(out.get(k).unwrap(), &node_patch(o, v)).unwrap_or_else(|_| v.clone());
+        out.nodes.insert(k.clone(), n);
+        touched.push(k.clone());
+      }
       imbl::ordmap::DiffItem::Add(k, v) | imbl::ordmap::DiffItem::Update { new: (k, v), .. } => {
         out.nodes.insert(k.clone(), v.clone());
         touched.push(k.clone());
@@ -319,8 +382,8 @@ mod tests {
     let ra = rect(&mut a, 10.0, Some(frame.clone()));
     let rb = rect(&mut b, 50.0, Some(frame.clone()));
     // Each side's frame lists only its own new child; merging must keep both.
-    let da = delta(&base, &a.doc);
-    let db = delta(&base, &b.doc);
+    let da = delta(&base, &a.doc, true);
+    let db = delta(&base, &b.doc, true);
     apply(&mut a.doc, &db).unwrap();
     apply(&mut b.doc, &da).unwrap();
     for d in [&a.doc, &b.doc] {
@@ -344,7 +407,8 @@ mod tests {
     let base_b = b.doc.clone();
     let theirs = rect(&mut b, 300.0, None);
     a.dispatch(Command::ApplyRemote {
-      delta: delta(&base_b, &b.doc),
+      delta: delta(&base_b, &b.doc, true),
+      local: false,
     })
     .unwrap();
     a.dispatch(Command::Undo).unwrap();
@@ -356,6 +420,131 @@ mod tests {
     assert!(a.doc.get(&theirs).is_some());
   }
 
+  /// A relay (the room's document, applying deltas in arrival order) and its editors.
+  struct Room {
+    doc: Document,
+    editors: Vec<Engine>,
+  }
+
+  impl Room {
+    fn new(n: usize) -> (Room, String) {
+      let mut first = engine(1);
+      let id = rect(&mut first, 0.0, None);
+      let json = first.to_json();
+      let editors = (0..n)
+        .map(|i| {
+          let mut e = engine(10 + i as u64);
+          e.load(&json).unwrap();
+          e.collab_reset(true);
+          e
+        })
+        .collect();
+      (
+        Room {
+          doc: first.doc.clone(),
+          editors,
+        },
+        id,
+      )
+    }
+
+    /// Editor `i` sends its changes; the relay applies them and hands back what each
+    /// editor receives: the delta for the others, an ack for the sender.
+    fn send(&mut self, i: usize) -> Vec<(usize, Value)> {
+      let d = self.editors[i].collab_delta();
+      apply(&mut self.doc, &d).unwrap();
+      (0..self.editors.len())
+        .map(|j| (j, if j == i { json!({ "ack": true }) } else { d.clone() }))
+        .collect()
+    }
+
+    fn receive(&mut self, (j, m): (usize, Value)) {
+      let e = &mut self.editors[j];
+      e.collab_delta(); // flush first, as the editor does
+      if m.get("ack").is_some() {
+        e.dispatch(Command::CollabAck { rejected: false }).unwrap();
+      } else {
+        e.dispatch(Command::ApplyRemote { delta: m, local: false }).unwrap();
+      }
+    }
+
+    fn assert_converged(&self) {
+      for e in &self.editors {
+        assert_eq!(e.doc.nodes, self.doc.nodes);
+      }
+    }
+  }
+
+  fn set(e: &mut Engine, id: &str, patch: Value) {
+    e.dispatch(Command::Update {
+      ids: vec![id.to_string()],
+      patch,
+    })
+    .unwrap();
+  }
+
+  #[test]
+  fn concurrent_edits_to_one_layer_converge() {
+    // Different properties: both survive.
+    let (mut room, id) = Room::new(2);
+    set(&mut room.editors[0], &id, json!({ "opacity": 0.5 }));
+    set(&mut room.editors[1], &id, json!({ "x": 40.0 }));
+    let from_a = room.send(0);
+    let from_b = room.send(1);
+    // Each editor hears the other's change before its own ack (worst case).
+    for m in [from_b[0].clone(), from_a[0].clone(), from_a[1].clone(), from_b[1].clone()] {
+      room.receive(m);
+    }
+    room.assert_converged();
+    let n = room.doc.get(&id).unwrap();
+    assert_eq!((n.opacity, n.x), (0.5, 40.0));
+
+    // The same property: the change the relay ordered last wins everywhere, and an editor
+    // never shows the other's value over its own unacknowledged one.
+    set(&mut room.editors[0], &id, json!({ "x": 1.0 }));
+    set(&mut room.editors[1], &id, json!({ "x": 2.0 }));
+    let from_a = room.send(0);
+    let from_b = room.send(1);
+    room.receive(from_a[1].clone());
+    assert_eq!(room.editors[1].doc.get(&id).unwrap().x, 2.0, "own pending change stays on top");
+    room.receive(from_b[1].clone());
+    room.receive(from_a[0].clone());
+    room.receive(from_b[0].clone());
+    room.assert_converged();
+    assert_eq!(room.doc.get(&id).unwrap().x, 2.0);
+  }
+
+  #[test]
+  fn a_rejected_change_is_dropped_locally() {
+    let (mut room, id) = Room::new(1);
+    let e = &mut room.editors[0];
+    set(e, &id, json!({ "x": 99.0 }));
+    e.collab_delta();
+    e.dispatch(Command::CollabAck { rejected: true }).unwrap();
+    assert_eq!(e.doc.get(&id).unwrap().x, 0.0);
+    assert!(is_empty(&e.collab_delta()));
+  }
+
+  #[test]
+  fn undo_keeps_a_collaborators_edit_to_another_property() {
+    let (mut room, id) = Room::new(2);
+    set(&mut room.editors[0], &id, json!({ "x": 50.0 }));
+    for m in room.send(0) {
+      room.receive(m);
+    }
+    set(&mut room.editors[1], &id, json!({ "opacity": 0.25 }));
+    for m in room.send(1) {
+      room.receive(m);
+    }
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    for m in room.send(0) {
+      room.receive(m);
+    }
+    room.assert_converged();
+    let n = room.doc.get(&id).unwrap();
+    assert_eq!((n.x, n.opacity), (0.0, 0.25));
+  }
+
   #[test]
   fn remote_changes_are_not_undoable_locally_and_do_not_echo() {
     let mut a = engine(1);
@@ -365,7 +554,8 @@ mod tests {
     let base_b = b.doc.clone();
     rect(&mut b, 0.0, None);
     a.dispatch(Command::ApplyRemote {
-      delta: delta(&base_b, &b.doc),
+      delta: delta(&base_b, &b.doc, true),
+      local: false,
     })
     .unwrap();
     assert!(!a.state()["canUndo"].as_bool().unwrap());

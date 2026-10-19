@@ -114,10 +114,28 @@ export class WasmEngine {
         }
     }
     /**
-     * Starts the collaboration baseline at the current document.
+     * Starts the collaboration baseline at the current document; `ordered` when the relay
+     * acknowledges changes in order (see `Engine::collab_reset`).
+     * @param {boolean} ordered
      */
-    collabReset() {
-        wasm.wasmengine_collabReset(this.__wbg_ptr);
+    collabReset(ordered) {
+        wasm.wasmengine_collabReset(this.__wbg_ptr, ordered);
+    }
+    /**
+     * JSON array of this editor's unacknowledged and unsent changes, oldest first.
+     * @returns {string}
+     */
+    collabUnsent() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmengine_collabUnsent(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
     }
     /**
      * JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
