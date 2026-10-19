@@ -5,7 +5,7 @@
 //  - "api": direct Messages API calls from the browser with the user's key.
 
 import { create } from "zustand";
-import { getDoc, useStore } from "../store";
+import { getDoc, onDocChange, useStore, zoomToFit } from "../store";
 import { bridge, type Attachment } from "./bridgeClient";
 import { runApiAgent, resetApiConversation } from "./apiAgent";
 import { contextLine } from "./tools";
@@ -266,6 +266,36 @@ export function stop() {
   if (st.mode === "bridge") bridge.cancel();
   else import("./apiAgent").then((m) => m.abortApiAgent());
   useChat.setState({ running: false });
+}
+
+// A turn that starts on an empty page shows Claude's work: the view fits it as soon as
+// something appears and again when the turn ends (it may land anywhere on the canvas).
+{
+  const pageEmpty = () => {
+    const doc = getDoc();
+    const page = doc.pages.find((p) => p.id === useStore.getState().es.page) ?? doc.pages[0];
+    return !page?.children.length;
+  };
+  let watch: (() => void) | null = null;
+  useChat.subscribe((s, prev) => {
+    if (s.running === prev.running) return;
+    if (s.running) {
+      watch?.();
+      watch = null;
+      if (!pageEmpty()) return;
+      let shown = false;
+      watch = onDocChange(() => {
+        if (!shown && !pageEmpty()) {
+          shown = true;
+          requestAnimationFrame(zoomToFit);
+        }
+      });
+    } else if (watch) {
+      watch();
+      watch = null;
+      if (!pageEmpty()) requestAnimationFrame(zoomToFit);
+    }
+  });
 }
 
 // Expose chat state on the automation handle (see store.ts).

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { create } from "zustand";
 import { Loader2, X } from "lucide-react";
-import { toast } from "../store";
+import { canvasSize, dispatch, getDoc, toast, zoomToRect } from "../store";
 import { viewportCenter } from "../actions";
 import { useDialog } from "../ui/controls";
 
@@ -23,8 +23,17 @@ export function ImportDialog() {
     try {
       const tools = await import("../ai/browserTools");
       const c = viewportCenter();
-      if (url.trim()) await tools.importUrl({ url: url.trim(), x: c.x, y: c.y }, true);
-      else await tools.importHtml({ html, x: c.x, y: c.y, width: 1280 });
+      const width = url.trim() ? 1440 : 1280;
+      const at = { x: Math.round(c.x - width / 2), y: Math.round(c.y), width };
+      const r = url.trim() ? await tools.importUrl({ url: url.trim(), ...at }, true) : await tools.importHtml({ html, ...at });
+      // Show the top of the page across the view, selected.
+      const id: string | undefined = r?.created?.[0]?.id;
+      const frame = id ? getDoc().nodes[id] : undefined;
+      if (frame) {
+        dispatch({ op: "select", ids: [frame.id] });
+        const { w, h } = canvasSize();
+        zoomToRect({ x: frame.x, y: frame.y, width: frame.width, height: Math.min(frame.height, frame.width * (h / Math.max(w, 1))) }, w, h);
+      }
       toast("Imported as layers");
       close();
     } catch (e) {

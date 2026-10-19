@@ -147,6 +147,7 @@ export function ChatPanel() {
     mode === "bridge"
       ? bridgeStatus === "connected" && claude?.available !== false
       : !!apiKey;
+  const connectCard = !ready && !(mode === "bridge" && bridgeStatus === "connecting");
 
   const addImages = async (list: DataTransferItemList | FileList | null) => {
     for (const img of await imagesFrom(list)) attachImage(img.url, img.name);
@@ -307,9 +308,9 @@ export function ChatPanel() {
           </div>
         )}
       </div>
-      {!ready && !(mode === "bridge" && bridgeStatus === "connecting") && (
-        <ConnectCard />
-      )}
+      {connectCard && <ConnectCard alone={!items.length} />}
+      {/* Until Claude is connected, the setup card has the room (the suggestions can't be used yet). */}
+      {connectCard && !items.length ? <div style={{ flex: 1 }} /> : (
       <div className="chat-log" ref={logRef}>
         {items.length === 0 && (
           <>
@@ -370,6 +371,7 @@ export function ChatPanel() {
           </div>
         )}
       </div>
+      )}
       <div
         className={"chat-input" + (dragOver ? " drag" : "")}
         onDragOver={(e) => {
@@ -536,7 +538,7 @@ function CopyLine({ text }: { text: string }) {
 }
 
 /** Shown until Claude is connected: an API key (works at once) or the bridge for Pro/Max. */
-function ConnectCard() {
+function ConnectCard({ alone }: { alone: boolean }) {
   const queued = useChat((s) => s.queued);
   const mode = useChat((s) => s.mode);
   const savedKey = useChat((s) => s.apiKey);
@@ -547,7 +549,7 @@ function ConnectCard() {
     setMode("api");
   };
   return (
-    <div className="bridge-setup">
+    <div className={"bridge-setup" + (alone ? " alone" : "")}>
       <b>Connect Claude</b>
       {queued && (
         <div className="queued-prompt">

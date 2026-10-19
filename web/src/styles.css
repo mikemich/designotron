@@ -1724,6 +1724,13 @@ body:has(.modal-bg) .hint-card {
   overflow-y: auto;
   flex: none;
 }
+/* Nothing in the conversation yet: the card can use the whole panel. */
+.chat > .bridge-setup.alone {
+  max-height: none;
+  flex: 0 1 auto;
+  min-height: 0;
+  margin-bottom: 10px;
+}
 .bridge-setup summary {
   cursor: pointer;
 }
