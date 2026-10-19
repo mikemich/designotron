@@ -136,8 +136,9 @@ export function ChatPanel() {
   }, [items]);
   useEffect(() => inputRef.current?.focus(), []);
 
+  const queued = useChat((s) => s.queued);
   const submit = () => {
-    if (!text.trim() || running) return;
+    if (!text.trim()) return;
     send(text);
     setText("");
   };
@@ -397,10 +398,21 @@ export function ChatPanel() {
             ))}
           </div>
         )}
+        {running && queued && (
+          <div className="queued-prompt">
+            Sends when Claude finishes:{" "}
+            <i>“{queued.length > 120 ? queued.slice(0, 120) + "…" : queued}”</i>{" "}
+            <button className="btn small" onClick={() => useChat.setState({ queued: null })}>
+              Cancel
+            </button>
+          </div>
+        )}
         <textarea
           ref={inputRef}
           placeholder={
-            ready
+            running
+              ? "Claude is working. Type to queue a message for when it's done…"
+              : ready
               ? "Describe what to design or change…"
               : "Connect Claude Code or add an API key to start"
           }
@@ -468,7 +480,11 @@ export function ChatPanel() {
               Enter to send
             </span>
           </div>
-          {running ? (
+          {running && text.trim() ? (
+            <button className="btn primary" onClick={submit} title="Sends when Claude finishes this turn">
+              Queue
+            </button>
+          ) : running ? (
             <button className="btn" onClick={stop}>
               <Square size={12} /> Stop
             </button>

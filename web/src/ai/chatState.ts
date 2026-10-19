@@ -192,7 +192,12 @@ export function askClaude(prompt: string, images: string[] = []) {
 
 export async function send(prompt: string) {
   const st = useChat.getState();
-  if (st.running || !prompt.trim()) return;
+  if (!prompt.trim()) return;
+  // Claude is busy: the message goes out when this turn ends (no need to stop it to ask).
+  if (st.running) {
+    useChat.setState({ queued: st.queued ? `${st.queued}\n\n${prompt}` : prompt });
+    return;
+  }
   // Not connected yet: keep the prompt (the panel shows how to connect) instead of failing.
   if (!claudeReady(st) && !(st.mode === "bridge" && st.claude?.available === false)) {
     useChat.setState({ queued: prompt });

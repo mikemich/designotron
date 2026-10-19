@@ -772,7 +772,8 @@ fn build(e: &mut Engine, spec: &Value, parent: Option<&str>, page: &str) -> Resu
   }
   let id = n.id.clone();
   e.doc.insert(n, parent, page, None);
-  if let Some(children) = spec.get("children").and_then(|v| v.as_array()) {
+  // An empty list is fine on any layer (models often send `children: []` everywhere).
+  if let Some(children) = spec.get("children").and_then(|v| v.as_array()).filter(|c| !c.is_empty()) {
     if !kind.is_container() {
       return Err(format!("{} layers cannot have children; use a frame", kind.label()));
     }
@@ -1384,6 +1385,17 @@ mod tests {
 
   fn engine() -> Engine {
     Engine::new(Box::new(HeuristicMeasurer), 77)
+  }
+
+  #[test]
+  fn empty_children_are_fine_on_any_layer() {
+    let mut e = engine();
+    let r = execute(
+      &mut e,
+      "create_nodes",
+      &json!({ "nodes": [{ "type": "rectangle", "width": 10, "height": 10, "children": [] }] }),
+    );
+    assert!(r.is_ok(), "{r:?}");
   }
 
   #[test]
