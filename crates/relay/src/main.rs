@@ -22,7 +22,7 @@ use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use axum::{Json, Router};
 use designotron_rooms::{valid_room_id, Limits, Rooms, TokenBucket};
 use serde::Deserialize;
@@ -211,9 +211,16 @@ fn parse_args() -> Config {
 
 /// Builds the router (separate from `main` so tests can run it).
 fn router(app: App, static_dir: Option<PathBuf>) -> Router {
+  // The local bridge's endpoints: an editor served from here must not mistake the relay for
+  // a bridge (the editor's page would otherwise come back for them).
+  let not_bridge = || async { (StatusCode::NOT_FOUND, "This is a Designotron relay, not the bridge.") };
   let api = Router::new()
     .route("/ws", get(ws))
     .route("/health", get(health))
+    .route("/bridge", any(not_bridge))
+    .route("/bridge/*rest", any(not_bridge))
+    .route("/collab/*rest", any(not_bridge))
+    .route("/mcp", any(not_bridge))
     // The editor may be hosted elsewhere (e.g. GitHub Pages); health is read cross-origin.
     .layer(CorsLayer::permissive())
     .with_state(app);
@@ -474,6 +481,95 @@ mod tests {
       assert!(h["version"].is_string() && h["editor"] == false);
       assert!(h["memory"]["bytes"].as_u64().unwrap() > 0);
       assert_eq!(h["memory"]["budget"].as_u64(), Some(Limits::default().max_total_bytes as u64));
+    }
+
+    #[tokio::test]
+    async fn a_room_whose_owner_stopped_sharing_turns_later_guests_away() {
+      let (addr, _) = start(None).await;
+      let room = designotron_rooms::random_token();
+      let mut owner = connect(addr, &room, None).await.unwrap();
+      let share = json!({ "type": "join", "name": "Ana", "doc": doc(), "reset": true });
+      owner.send(Message::Text(share.to_string())).await.unwrap();
+      next_json(&mut owner).await;
+      // A guest can't end it.
+      let mut guest = connect(addr, &room, None).await.unwrap();
+      join(&mut guest, None).await;
+      next_json(&mut owner).await; // peer
+      let ended = json!({ "type": "presence", "presence": { "owner": true, "ended": true } });
+      guest.send(Message::Text(ended.to_string())).await.unwrap();
+      next_json(&mut owner).await; // presence
+      let mut late = connect(addr, &room, None).await.unwrap();
+      assert_eq!(join(&mut late, None).await["type"], "welcome");
+      drop(late);
+      owner.send(Message::Text(ended.to_string())).await.unwrap();
+      next_json(&mut guest).await; // presence (or the late guest's peer/leave)
+      let mut late = connect(addr, &room, None).await.unwrap();
+      let m = join(&mut late, None).await;
+      assert_eq!((m["type"].as_str(), m["name"].as_str()), (Some("ended"), Some("Ana")));
+      assert!(late.next().await.is_none_or(|m| matches!(m, Ok(Message::Close(_)) | Err(_))));
+      // Sharing again on purpose reopens it.
+      let mut again = connect(addr, &room, None).await.unwrap();
+      again.send(Message::Text(share.to_string())).await.unwrap();
+      assert_eq!(next_json(&mut again).await["type"], "welcome");
+      let mut late = connect(addr, &room, None).await.unwrap();
+      assert_eq!(join(&mut late, None).await["type"], "welcome");
+    }
+
+    #[tokio::test]
+    async fn people_can_rename_themselves() {
+      let (addr, _) = start(None).await;
+      let room = designotron_rooms::random_token();
+      let mut a = connect(addr, &room, None).await.unwrap();
+      join(&mut a, Some(doc())).await;
+      let mut b = connect(addr, &room, None).await.unwrap();
+      let you = join(&mut b, None).await["you"].clone();
+      next_json(&mut a).await; // peer
+      b.send(Message::Text(json!({ "type": "name", "name": "  Ben  " }).to_string()))
+        .await
+        .unwrap();
+      let m = next_json(&mut a).await;
+      assert_eq!(
+        (m["type"].as_str(), m["name"].as_str(), &m["id"]),
+        (Some("rename"), Some("Ben"), &you)
+      );
+      let mut c = connect(addr, &room, None).await.unwrap();
+      let w = join(&mut c, None).await;
+      assert!(w["peers"].as_array().unwrap().iter().any(|p| p["name"] == "Ben"));
+    }
+
+    #[tokio::test]
+    async fn bridge_paths_are_not_answered_with_the_editor() {
+      let dir = temp_dir("static");
+      std::fs::create_dir_all(&dir).unwrap();
+      std::fs::write(dir.join("index.html"), "<!doctype html>editor").unwrap();
+      let app = App {
+        rooms: Rooms::new(Limits::default(), None),
+        clients: Clients::new(ClientLimits::default()),
+        serves_editor: true,
+      };
+      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let addr = listener.local_addr().unwrap();
+      let service = router(app, Some(dir.clone())).into_make_service_with_connect_info::<SocketAddr>();
+      tokio::spawn(async move { axum::serve(listener, service).await.unwrap() });
+      let get = |path: &'static str| async move {
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        tcp.write_all(format!("GET {path} HTTP/1.0\r\n\r\n").as_bytes()).await.unwrap();
+        let mut body = String::new();
+        tcp.read_to_string(&mut body).await.unwrap();
+        body
+      };
+      for path in [
+        "/bridge/ws",
+        "/bridge/fetch?url=https://example.com",
+        "/bridge",
+        "/collab/ws",
+        "/mcp",
+      ] {
+        let r = get(path).await;
+        assert!(r.starts_with("HTTP/1.0 404"), "{path}: {r}");
+      }
+      assert!(get("/some/file/route").await.contains("editor"), "other paths still get the editor");
+      let _ = std::fs::remove_dir_all(dir);
     }
   }
 

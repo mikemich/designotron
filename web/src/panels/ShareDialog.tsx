@@ -50,10 +50,17 @@ export function ShareDialog() {
         setCopyState(kind);
         setTimeout(() => setCopyState(null), 2000);
       }
-      if (withoutImages) notes.push("Images were left out to keep the link short; send a .dtron file to include them.");
-      // Links over these lengths get cut off or rejected by common chat apps.
-      if (text.length > 30_000) notes.push(`This link is ${Math.round(text.length / 1000)}k characters: too long for Slack, Teams and Discord. Email it, or send a .dtron file.`);
-      else if (text.length > 2_000) notes.push(`This link is ${(text.length / 1000).toFixed(1)}k characters: fine for Slack, email and most chats, too long for Discord and SMS.`);
+      const what = { copy: "link", view: "link", embed: "embed code", badge: "badge" }[kind];
+      const k = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : `${(n / 1000).toFixed(1)}k`);
+      if (withoutImages) notes.push(`Images were left out to keep the ${what} short; send a .dtron file to include them.`);
+      if (kind === "copy" || kind === "view") {
+        // Links over these lengths get cut off or rejected by common chat apps.
+        if (text.length > 30_000) notes.push(`This link is ${k(text.length)} characters: too long for Slack, Teams and Discord. Email it, or send a .dtron file.`);
+        else if (text.length > 2_000) notes.push(`This link is ${k(text.length)} characters: fine for Slack, email and most chats, too long for Discord and SMS.`);
+      } else if (text.length > 30_000) {
+        // Snippets are pasted into pages, not chats; only very long ones run into limits.
+        notes.push(`This ${what} is ${k(text.length)} characters, more than some sites accept in one paste. A smaller file (or one without images) makes it shorter.`);
+      }
       setCopyNote(notes.join(" ") || null);
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
@@ -237,6 +244,11 @@ export function ShareDialog() {
               <button className="btn" style={{ marginTop: 10 }} onClick={() => (stopSharing(), close())}>
                 {role === "owner" ? "Stop sharing" : "Leave"}
               </button>
+              {role === "owner" && mode === "online" && (
+                <div className="muted small" style={{ marginTop: 6 }}>
+                  Stopping ends this link: anyone who opens it later is told you stopped sharing and keeps their own copy. Sharing again makes a new link.
+                </div>
+              )}
             </>
           )}
         </div>

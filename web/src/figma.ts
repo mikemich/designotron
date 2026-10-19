@@ -2,7 +2,7 @@
 // local bridge when the browser blocks it), download its images, convert in the engine.
 
 import { addAsset, readFileAsDataUrl } from "./assets";
-import { bridgeHttpBase } from "./ai/bridgeClient";
+import { bridgeChecked, bridgeHttpBase } from "./ai/bridgeClient";
 import { dispatchOrThrow, zoomToFit } from "./store";
 
 /** File key and optional node id from a figma.com URL. */
@@ -21,6 +21,7 @@ async function api(path: string, query: string, token: string): Promise<any> {
   } catch {
     // Blocked by the browser (CORS/network): go through the bridge.
     try {
+      await bridgeChecked();
       res = await fetch(`${bridgeHttpBase()}/bridge/figma?path=${encodeURIComponent(path)}&query=${encodeURIComponent(query)}&token=${encodeURIComponent(token)}`);
     } catch {
       throw new Error("Couldn't reach the Figma API. Check your connection, or start the Designotron bridge (setup steps in the Claude panel) and try again.");

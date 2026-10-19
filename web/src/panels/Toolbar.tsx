@@ -414,9 +414,14 @@ function ShareButton() {
               {p.name[0]?.toUpperCase()}
             </span>
           ))}
+          {list.length > 5 && (
+            <span className="avatar more" title={list.slice(5).map((p) => p.name).join(", ")}>
+              +{list.length - 5}
+            </span>
+          )}
         </div>
       )}
-      {role && status !== "live" && (
+      {role && status === "connecting" && (
         <span className="reconnecting" role="status" title="Your changes are kept and sent when the connection is back">
           Reconnecting…
         </span>
@@ -433,6 +438,8 @@ function ShareButton() {
         onClick={() => useCollab.setState({ dialogOpen: true })}
       >
         <Users size={16} />
+        {/* Phones show how many people are here instead of avatars (no room for both). */}
+        {list.length > 0 && <span className="share-count">{list.length + 1}</span>}
       </button>
     </>
   );

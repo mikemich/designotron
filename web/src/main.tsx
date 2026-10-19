@@ -9,6 +9,7 @@ import { ensureGuestFile, joinFromUrl } from "./collab";
 import { isCopyLink, isViewLink, openCopyLink } from "./snapshot";
 import { Viewer } from "./Viewer";
 import { toast } from "./store";
+import { isPhone } from "./panels/PhoneNote";
 
 function route(): string | null {
   const m = location.hash.match(/^#\/file\/(\w+)/);
@@ -21,7 +22,11 @@ function openCopy() {
     .then((id) => {
       history.replaceState(null, "", `${location.pathname}#/file/${id}`);
       dispatchEvent(new HashChangeEvent("hashchange"));
-      toast("This is your own copy of a shared design. Edit freely; nobody else sees your changes.");
+      toast(
+        isPhone()
+          ? "This is your own copy of a shared design; nobody else sees your changes. Open it on a computer to edit it fully."
+          : "This is your own copy of a shared design. Edit freely; nobody else sees your changes.",
+      );
     })
     .catch((err) => {
       history.replaceState(null, "", `${location.pathname}#/`);

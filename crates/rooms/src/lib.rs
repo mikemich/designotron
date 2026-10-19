@@ -16,6 +16,10 @@
 //!   document even when people edit the same layer at once.
 //! - server → `{type:"peer"|"leave"|"reload"|"error", …}`; errors carry a `message` the
 //!   editor shows as is.
+//! - client → `{type:"name", name}` renames this person; others get `{type:"rename", id, name}`.
+//! - When the person who shared the file stops sharing (presence `{owner:true, ended:true}`),
+//!   the room remembers it: later joins without `reset` get `{type:"ended", name}` and are
+//!   disconnected, instead of rejoining a room nobody shares any more.
 //!
 //! Memory: rooms and connections are counted in approximate bytes of JSON (a room's
 //! document + images; a connection's WebSocket buffers, which keep the capacity of the
@@ -130,10 +134,17 @@ pub struct Rooms {
   /// Sum of every connection's `Meter`.
   conn_bytes: Arc<AtomicUsize>,
   people: AtomicUsize,
+  /// Rooms whose owner stopped sharing (id → owner's name), oldest first, bounded.
+  ended: std::sync::Mutex<(HashMap<String, String>, std::collections::VecDeque<String>)>,
 }
+
+/// How many ended rooms are remembered.
+const MAX_ENDED: usize = 10_000;
 
 #[derive(Default)]
 struct Room {
+  /// The connection that shared this file (joined with `reset`), when known.
+  owner: Option<u64>,
   doc: Option<Document>,
   /// Asset id → data URL for images referenced by the shared document.
   assets: Map<String, Value>,
@@ -255,6 +266,8 @@ enum Step {
   Warn(String),
   /// Tell the editor and disconnect.
   Close(String),
+  /// Disconnect (the handler already told the editor why).
+  Leave,
 }
 
 /// Outcome of pacing one incoming message.
@@ -350,7 +363,34 @@ impl Rooms {
       room_bytes: AtomicUsize::new(0),
       conn_bytes: Arc::new(AtomicUsize::new(0)),
       people: AtomicUsize::new(0),
+      ended: Default::default(),
     })
+  }
+
+  /// The owner's name when the room's owner stopped sharing.
+  fn ended_by(&self, id: &str) -> Option<String> {
+    self.ended.lock().ok()?.0.get(id).cloned()
+  }
+
+  fn set_ended(&self, id: &str, owner: Option<String>) {
+    let Ok(mut e) = self.ended.lock() else { return };
+    match owner {
+      Some(name) => {
+        if e.0.insert(id.to_string(), name).is_none() {
+          e.1.push_back(id.to_string());
+          while e.1.len() > MAX_ENDED {
+            if let Some(old) = e.1.pop_front() {
+              e.0.remove(&old);
+            }
+          }
+        }
+      }
+      None => {
+        if e.0.remove(id).is_some() {
+          e.1.retain(|x| x != id);
+        }
+      }
+    }
   }
 
   pub fn limits(&self) -> &Limits {
@@ -526,10 +566,26 @@ impl Rooms {
           step
         }
         "delta" if joined => self.delta(&mut r, id, &m, size),
+        "name" if joined => {
+          let name = m.name.as_deref().unwrap_or("").trim().chars().take(40).collect::<String>();
+          if let (false, Some(peer)) = (name.is_empty(), r.peers.get_mut(&id)) {
+            peer.name = name.clone();
+            self.broadcast(&r, id, &json!({ "type": "rename", "id": id, "name": name }), false);
+          }
+          Step::Go
+        }
         "presence" if joined => {
           if let Some(p) = m.presence.filter(|p| p.get().len() <= MAX_PRESENCE_BYTES) {
+            let presence: Value = serde_json::from_str(p.get()).unwrap_or(Value::Null);
+            // The person who shared the file stopped sharing: later joins are told so.
+            // Without a known owner (e.g. after a restart), whoever says they own it.
+            let owner_ok = r.owner.map_or(presence["owner"] == true, |o| o == id);
+            if presence["ended"] == true && owner_ok {
+              let name = r.peers.get(&id).map(|p| p.name.clone()).unwrap_or_default();
+              self.set_ended(&room_id, Some(name));
+            }
             if let Some(peer) = r.peers.get_mut(&id) {
-              peer.presence = serde_json::from_str(p.get()).unwrap_or(Value::Null);
+              peer.presence = presence;
             }
             self.broadcast(
               &r,
@@ -554,6 +610,7 @@ impl Rooms {
           out.send(error_json(&e));
           break;
         }
+        Step::Leave => break,
       }
     }
     let mut r = room.lock().await;
@@ -617,6 +674,14 @@ impl Rooms {
     }
     let name = m.name.as_deref().unwrap_or("Guest").chars().take(40).collect::<String>();
     let color = m.color.as_deref().unwrap_or("#7C5CFF").chars().take(16).collect::<String>();
+    if m.reset && m.doc.is_some() {
+      // Shared (again) on purpose: this connection owns the room.
+      self.set_ended(room_id, None);
+      r.owner = Some(id);
+    } else if let Some(owner) = self.ended_by(room_id) {
+      out.send(json!({ "type": "ended", "name": owner }).to_string());
+      return Step::Leave;
+    }
     let adopt = m.doc.is_some() && (r.doc.is_none() || m.reset);
     if adopt {
       if size > self.limits.max_room_bytes {

@@ -40,10 +40,29 @@ jobs:
           build-args: DESIGNOTRON_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      # Redeploys a Render relay with the new image (the RENDER_DEPLOY_HOOK secret is the
-      # service's Settings → Deploy Hook URL).
+      # Render doesn't notice a new image on its own: this step asks it to redeploy, then
+      # waits for the relay to report this commit. Needs the RENDER_DEPLOY_HOOK secret (the
+      # service's Settings → Deploy Hook URL); the RELAY_URL variable (e.g.
+      # https://designotron-relay.onrender.com) is optional and enables the health wait.
       - name: Redeploy on Render
         env:
           HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+          RELAY_URL: ${{ vars.RELAY_URL }}
         if: github.ref == 'refs/heads/main'
-        run: if [ -n "$HOOK" ]; then curl -fsS -X POST "$HOOK" > /dev/null; fi
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::warning title=Relay not redeployed::The new relay image was published, but Render keeps running the old one. Add the RENDER_DEPLOY_HOOK secret (Render → designotron-relay → Settings → Deploy Hook) in GitHub → Settings → Secrets and variables → Actions, or use Manual Deploy → Deploy latest reference."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK" > /dev/null
+          echo "Asked Render to redeploy."
+          [ -n "$RELAY_URL" ] || exit 0
+          # A free relay takes a few minutes to pull the image and start.
+          for i in $(seq 1 60); do
+            if curl -fsS "$RELAY_URL/health" 2>/dev/null | grep -q "\"commit\":\"$GITHUB_SHA\""; then
+              echo "Relay at $RELAY_URL runs $GITHUB_SHA."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning title=Relay still starting::$RELAY_URL doesn't report $GITHUB_SHA after 10 minutes; check the deploy in Render."

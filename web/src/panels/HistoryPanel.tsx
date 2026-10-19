@@ -38,7 +38,10 @@ export function HistoryPanel() {
     const json = await loadVersion(fileId, v.id);
     if (!json) return toast("That version could not be read", "error");
     await saveVersion(fileId, `Before restoring “${v.name}”`, getEngine().save(), true);
-    dispatchOrThrow({ op: "replaceDocument", doc: JSON.parse(json) });
+    // The file keeps its current name: a version is about the design, not what it's called.
+    const doc = JSON.parse(json);
+    doc.name = getDoc().name;
+    dispatchOrThrow({ op: "replaceDocument", doc });
     toast(`Restored “${v.name}”. Undo to go back.`);
     refresh();
   };

@@ -17,8 +17,13 @@ export function Viewer({ data }: { data: string }) {
         getEngine().load(JSON.stringify(doc));
         dispatch({ op: "relayout" });
         const d = getDoc();
-        const frames = d.pages.flatMap((p) => p.children).filter((id) => ["frame", "component"].includes(d.nodes[id]?.type));
-        setState(frames[0] ? { start: frames[0] } : { error: "This design has no frames to show." });
+        // Same rule as Present in the editor: the starting frame, else the first frame, else
+        // the first component.
+        const page = d.pages[0];
+        const ofType = (t: string) => d.pages.flatMap((p) => p.children).find((id) => d.nodes[id]?.type === t);
+        const flow = page?.flowStart && d.nodes[page.flowStart] ? page.flowStart : null;
+        const start = flow ?? ofType("frame") ?? ofType("component");
+        setState(start ? { start } : { error: "This design has no frames to show." });
       } catch (err) {
         setState({ error: String(err instanceof Error ? err.message : err) });
       }

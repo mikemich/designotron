@@ -4,9 +4,9 @@
 
 import { create } from "zustand";
 import { allAssets, loadAssets, referencedAssets } from "./assets";
-import { bridgeHttpBase } from "./ai/bridgeClient";
-import { dispatch, getEngine, newEngine, onDocChange, toast, useStore, zoomToFit } from "./store";
-import { newFileId, saveFile } from "./files";
+import { bridgeChecked, bridgeHttpBase } from "./ai/bridgeClient";
+import { dispatch, getDoc, getEngine, newEngine, onDocChange, toast, useStore, zoomToFit } from "./store";
+import { deleteFile, newFileId, saveFile } from "./files";
 import { userName } from "./canvas/Comments";
 
 export interface Presence {
@@ -35,7 +35,7 @@ interface CollabState {
   peers: Record<number, Peer>;
   dialogOpen: boolean;
   /** Guests: the person who shared the file has left ("left") or stopped sharing ("ended"). */
-  ownerGone: { name: string; how: "left" | "ended" } | null;
+  ownerGone: { name: string; how: "left" | "ended"; /** Before this guest ever got the file. */ early?: boolean } | null;
 }
 
 export const useCollab = create<CollabState>(() => ({ status: "off", role: null, mode: null, link: null, peers: {}, dialogOpen: false, ownerGone: null }));
@@ -114,6 +114,8 @@ let applying = false;
 /** The relay acknowledges our changes in the order it applies everyone's (newer relays):
  *  the engine then keeps unacknowledged changes on top, so everyone converges. */
 let ordered = false;
+/** The relay said the owner stopped sharing this room. */
+let roomEnded = false;
 let flushQueued = false;
 let retry: ReturnType<typeof setTimeout> | null = null;
 /** Pause before reconnecting; doubles while the relay refuses or can't be reached. */
@@ -245,10 +247,31 @@ function onMessage(m: any) {
         return { peers, ownerGone };
       });
       break;
+    case "rename":
+      useCollab.setState((s) => (s.peers[m.id] ? { peers: { ...s.peers, [m.id]: { ...s.peers[m.id], name: m.name } } } : s));
+      break;
+    case "ended":
+      // The owner stopped sharing before we (re)joined: keep this copy, don't retry.
+      roomEnded = true;
+      // `early`: this copy is still the empty placeholder (the guest never got the file).
+      useCollab.setState({ status: "off", peers: {}, ownerGone: { name: m.name || "The owner", how: "ended", early: !joinedOnce && !Object.keys(getDoc().nodes).length } });
+      break;
     case "error":
       toast(m.message, "error");
       break;
   }
+}
+
+/** Saves this person's name and tells the room (guests pick one after joining). */
+export function setMyName(name: string) {
+  name = name.trim().slice(0, 40);
+  if (!name) return;
+  try {
+    localStorage.setItem("dt:userName", name);
+  } catch {
+    /* ignore */
+  }
+  send({ type: "name", name });
 }
 
 function connect(join: Record<string, unknown>) {
@@ -265,7 +288,7 @@ function connect(join: Record<string, unknown>) {
   socket.onclose = () => {
     if (ws !== socket) return;
     ws = null;
-    if (!useCollab.getState().role) return;
+    if (!useCollab.getState().role || roomEnded) return;
     useCollab.setState({ status: "connecting", peers: {} });
     // Reconnect with this copy of the file but without `reset`: the relay keeps the room's
     // document if it still has one, and adopts ours if it lost the room (e.g. a free host
@@ -323,6 +346,7 @@ export async function startOnline(relay: string): Promise<void> {
 
 /** Owner: starts the LAN share (once) and puts this file in the shared room. */
 export async function startSharing(): Promise<void> {
+  await bridgeChecked();
   const res = await fetch(`${bridgeHttpBase()}/bridge/share`, { method: "POST" });
   if (!res.ok) throw new Error(await res.text());
   const { url } = await res.json();
@@ -333,6 +357,7 @@ export async function startSharing(): Promise<void> {
 
 export function stopSharing() {
   joinedOnce = false;
+  roomEnded = false;
   // Tell guests the owner stopped sharing (they keep their copy and can save it).
   if (useCollab.getState().role === "owner") send({ type: "presence", presence: { page: "", cursor: null, selection: [], owner: true, ended: true } satisfies Presence });
   useCollab.setState({ role: null, mode: null, status: "off", peers: {}, link: null, ownerGone: null });
@@ -342,17 +367,46 @@ export function stopSharing() {
   unsubscribe = null;
 }
 
-/** Guest: keeps a copy of the shared file as their own file, leaves the room and opens it. */
+/** Guest: turns this copy of the shared file into their own file (no second file), leaves
+ *  the room and keeps editing it. */
 export async function remixShared(): Promise<void> {
-  const doc = JSON.parse(getEngine().save());
-  doc.name = `${doc.name || "Shared design"} (my copy)`;
-  const id = newFileId();
-  await saveFile(id, doc.name, JSON.stringify(doc));
+  const q = new URLSearchParams(location.search);
+  const token = q.get("room") ?? q.get("collab");
   stopSharing();
+  const fileId = useStore.getState().fileId;
+  // Renamed after leaving, so the room doesn't get the new name.
+  const name = `${getDoc().name || "Shared design"} (my copy)`;
+  dispatch({ op: "setDocName", name });
+  const id = fileId ?? newFileId();
+  await saveFile(id, name, getEngine().save());
+  // Opening the link again joins with a fresh copy instead of this one.
+  try {
+    if (token) localStorage.removeItem(`dt:collab:${token}`);
+  } catch {
+    /* ignore */
+  }
   // Drop ?room= so a reload doesn't join again.
   history.replaceState(null, "", `${location.pathname}#/file/${id}`);
+  if (id !== fileId) dispatchEvent(new HashChangeEvent("hashchange"));
+  toast("It's your own file now: changes stay with you and nobody else sees them.");
+}
+
+/** Guest who opened a link after sharing ended: drops the empty placeholder file and goes
+ *  to their files. */
+export async function leaveEndedRoom(): Promise<void> {
+  const q = new URLSearchParams(location.search);
+  const token = q.get("room") ?? q.get("collab");
+  const fileId = useStore.getState().fileId;
+  stopSharing();
+  try {
+    if (token) localStorage.removeItem(`dt:collab:${token}`);
+  } catch {
+    /* ignore */
+  }
+  // Deleted first, so the file list it goes to doesn't show it.
+  if (fileId) await deleteFile(fileId);
+  history.replaceState(null, "", `${location.pathname}#/`);
   dispatchEvent(new HashChangeEvent("hashchange"));
-  toast("Saved as your own file. Edit freely; nobody else sees it.");
 }
 
 /** Guest: opens (or reuses) a local file for the shared link and joins the room. */

@@ -3,7 +3,7 @@
 import { addAsset, readFileAsDataUrl } from "../assets";
 import { screenshotBase64 } from "../exporter";
 import { dispatchOrThrow, getDoc, selection, useStore, FONTS } from "../store";
-import { bridgeHttpBase } from "./bridgeClient";
+import { bridgeChecked, bridgeHttpBase } from "./bridgeClient";
 
 /** Picks what to screenshot when no id is given: selection, else the newest top-level frame. */
 export async function getScreenshot(id?: string, scale = 1) {
@@ -41,6 +41,7 @@ export async function importUrl(input: { url: string; width?: number; x?: number
   }
   let res: Response;
   try {
+    await bridgeChecked();
     res = await fetch(`${bridgeHttpBase()}/bridge/fetch?url=${encodeURIComponent(url.href)}${typed ? "&local=true" : ""}`);
   } catch {
     throw new Error("importing a website needs the Designotron bridge running (setup steps in the Claude panel)");

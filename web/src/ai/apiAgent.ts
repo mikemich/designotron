@@ -24,21 +24,36 @@ export async function runApiAgent(prompt: string, images: Attachment[] = []) {
   const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
   const tools = toolDefs().map((t) => ({ ...t, eager_input_streaming: true })) as Anthropic.Beta.BetaTool[];
   const system = systemPrompt();
-  messages.push({
-    role: "user",
-    content: images.length
-      ? [
-          ...images.map((a) => ({
-            type: "image" as const,
-            source: { type: "base64" as const, media_type: a.mediaType as "image/png", data: a.data },
-          })),
-          { type: "text" as const, text: prompt },
-        ]
-      : prompt,
-  });
+  const start = messages.length;
+  const blocks: Anthropic.Beta.BetaContentBlockParam[] = [
+    ...images.map((a) => ({
+      type: "image" as const,
+      source: { type: "base64" as const, media_type: a.mediaType as "image/png", data: a.data },
+    })),
+    { type: "text" as const, text: prompt },
+  ];
+  const last = messages[messages.length - 1];
+  if (last?.role === "user") {
+    // An earlier run stopped after sending tool results: this prompt joins that turn
+    // (two user turns in a row aren't allowed).
+    const prev = typeof last.content === "string" ? [{ type: "text" as const, text: last.content }] : last.content;
+    last.content = [...prev, ...blocks];
+  } else {
+    messages.push({ role: "user", content: images.length ? blocks : prompt });
+  }
   controller = new AbortController();
-  let jsonRetries = 0;
+  try {
+    await runTurns(client, tools, system, model, controller.signal);
+  } catch (err) {
+    // Nothing came back for this prompt: forget it, so retrying doesn't send it twice.
+    if (messages.length === start + 1 && messages[start].role === "user") messages.length = start;
+    else if (messages.length === start && last?.role === "user") last.content = (last.content as Anthropic.Beta.BetaContentBlockParam[]).slice(0, -blocks.length);
+    throw err;
+  }
+}
 
+async function runTurns(client: Anthropic, tools: Anthropic.Beta.BetaTool[], system: string, model: string, signal: AbortSignal) {
+  let jsonRetries = 0;
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     let textItem: number | null = null;
     const stream = client.beta.messages.stream(
@@ -53,7 +68,7 @@ export async function runApiAgent(prompt: string, images: Attachment[] = []) {
         betas: ["server-side-fallback-2026-07-01"],
         fallbacks: "default",
       },
-      { signal: controller.signal },
+      { signal },
     );
     stream.on("text", (delta) => {
       if (textItem === null) textItem = push({ kind: "assistant", text: "" });
@@ -66,7 +81,7 @@ export async function runApiAgent(prompt: string, images: Attachment[] = []) {
       jsonRetries = 0;
     } catch (err) {
       // Only an unparseable streamed tool input is retried; API errors propagate.
-      if (err instanceof Anthropic.APIError || controller.signal.aborted || jsonRetries++ >= 2) throw err;
+      if (err instanceof Anthropic.APIError || signal.aborted || jsonRetries++ >= 2) throw err;
       continue;
     }
 

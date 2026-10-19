@@ -7,6 +7,26 @@ import { executeTool } from "./tools";
 import { appendText, patchItem, push, showScreenshot, useChat } from "./chatState";
 import { onPreviewMessage } from "./preview";
 
+const isLocalPage = ["localhost", "127.0.0.1"].includes(location.hostname);
+/** A local page whose own server isn't a bridge (e.g. a relay serving the editor). */
+let notBridgeHere = false;
+let checked: Promise<void> | null = null;
+
+/** Asks this page's own server whether it is (or proxies) a bridge, once per page load.
+ *  Anything else (a relay, a static server) means the bridge is at its default address. */
+export function bridgeChecked(): Promise<void> {
+  if (!isLocalPage) return Promise.resolve();
+  checked ??= fetch(`${location.origin}/bridge/status`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      notBridgeHere = j?.name !== "designotron-bridge";
+    })
+    .catch(() => {
+      notBridgeHere = true;
+    });
+  return checked;
+}
+
 function bridgeUrl(): string {
   try {
     const custom = localStorage.getItem("dt:bridgeUrl");
@@ -15,11 +35,11 @@ function bridgeUrl(): string {
     /* ignore */
   }
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const local = ["localhost", "127.0.0.1"].includes(location.hostname);
-  return local ? `${proto}://${location.host}/bridge/ws` : "ws://127.0.0.1:5174/bridge/ws";
+  return isLocalPage && !notBridgeHere ? `${proto}://${location.host}/bridge/ws` : "ws://127.0.0.1:5174/bridge/ws";
 }
 
-/** HTTP base of the bridge (same origin when the editor is served locally). */
+/** HTTP base of the bridge (same origin when the editor is served by the bridge; call
+ *  `bridgeChecked` first). */
 export function bridgeHttpBase(): string {
   return bridgeUrl()
     .replace(/^ws/, "http")
@@ -59,8 +79,9 @@ class BridgeClient {
     });
   }
 
-  private connect() {
+  private async connect() {
     useChat.setState({ bridgeStatus: "connecting" });
+    await bridgeChecked();
     let ws: WebSocket;
     try {
       ws = new WebSocket(bridgeUrl());
