@@ -778,13 +778,17 @@ impl Engine {
       Command::Undo => {
         if let Some(step) = self.past.pop() {
           let prev = self.doc.clone();
+          // Nobody else changed anything since: the saved state is exact (and laid out).
+          let exact = self.doc == step.after;
           self.doc = crate::collab::revert(&self.doc, &step.after, &step.before.doc);
           self.selection = step.before.selection.clone();
           if self.doc.page(&step.before.page).is_some() {
             self.page = step.before.page.clone();
           }
           self.refresh_fingerprints();
-          self.after_mutation(&prev);
+          if !exact {
+            self.after_mutation(&prev);
+          }
           self.future.push(step);
         }
         self.rev += 1;
@@ -793,9 +797,14 @@ impl Engine {
       Command::Redo => {
         if let Some(step) = self.future.pop() {
           let prev = self.doc.clone();
+          // As for undo: re-running layout on the saved state could move a value by a
+          // rounding error.
+          let exact = self.doc == step.before.doc;
           self.doc = crate::collab::revert(&self.doc, &step.before.doc, &step.after);
           self.refresh_fingerprints();
-          self.after_mutation(&prev);
+          if !exact {
+            self.after_mutation(&prev);
+          }
           self.past.push(step);
         }
         self.rev += 1;

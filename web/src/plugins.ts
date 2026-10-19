@@ -103,6 +103,8 @@ interface Running {
   ui: { width: number; height: number } | null;
   /** Still running after a few seconds without showing UI. */
   slow?: boolean;
+  /** Stopped answering (e.g. stuck in a loop): only Stop helps. */
+  stuck?: boolean;
 }
 
 export const usePlugins = create<{ list: Plugin[]; running: Running | null; dialogOpen: boolean }>(() => ({
@@ -127,6 +129,7 @@ function bootstrap(code: string): string {
   window.addEventListener("message", (e) => {
     const m = e.data;
     if (!m || !m.dtHost) return;
+    if (m.ping) return parent.postMessage({ dtPlugin: true, pong: true }, "*");
     if (m.event) return (listeners[m.event] || []).forEach((fn) => fn(m.data));
     const p = pending.get(m.id);
     if (!p) return;
@@ -172,6 +175,11 @@ export function runPlugin(plugin: Plugin) {
     if (e.source !== frame.contentWindow) return;
     const m = e.data;
     if (!m?.dtPlugin) return;
+    lastPong = Date.now();
+    if (m.pong) {
+      if (usePlugins.getState().running?.stuck) usePlugins.setState({ running: { ...running, stuck: false } });
+      return;
+    }
     try {
       switch (m.method) {
         case "tool": {
@@ -216,6 +224,16 @@ export function runPlugin(plugin: Plugin) {
     }
   };
   window.addEventListener("message", onMessage);
+  // Watchdog: a plugin that stops answering is flagged so the person can stop it.
+  let lastPong = Date.now();
+  const watchdog = setInterval(() => {
+    frame.contentWindow?.postMessage({ dtHost: true, ping: true }, "*");
+    const cur = usePlugins.getState().running;
+    if (cur?.frame === frame && !cur.stuck && Date.now() - lastPong > 6000) {
+      endGesture();
+      usePlugins.setState({ running: { ...cur, stuck: true } });
+    }
+  }, 2000);
   // A plugin still busy after a few seconds: close its undo step so the person's own edits
   // don't merge into it, and show that it's running (with Stop).
   const slow = setTimeout(() => {
@@ -229,6 +247,7 @@ export function runPlugin(plugin: Plugin) {
   });
   cleanup = () => {
     clearTimeout(slow);
+    clearInterval(watchdog);
     window.removeEventListener("message", onMessage);
     unsub();
     endGesture();

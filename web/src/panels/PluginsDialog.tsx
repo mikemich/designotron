@@ -109,10 +109,10 @@ export function PluginsDialog() {
 /** Title bar for a plugin that shows UI (the sandboxed iframe sits right below it). */
 export function PluginWindow() {
   const running = usePlugins((s) => s.running);
-  if (running?.slow && !running.ui)
+  if (running && (running.stuck || (running.slow && !running.ui)))
     return (
       <div className="plugin-running" role="status">
-        <Loader2 size={13} className="spin" /> Running “{running.plugin.name}”…
+        <Loader2 size={13} className="spin" /> {running.stuck ? `“${running.plugin.name}” isn't responding` : `Running “${running.plugin.name}”…`}
         <button className="btn small" onClick={() => import("../plugins").then((m) => m.stopPlugin())}>
           Stop
         </button>
