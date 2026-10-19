@@ -2,6 +2,7 @@
 //! where Claude Code can read them.
 
 use std::io::Read;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -51,9 +52,77 @@ fn bypass_proxy(url: &str) -> bool {
   })
 }
 
+/// Whether `ip` is on the public internet (not loopback, private, link-local such as
+/// cloud metadata at 169.254.169.254, carrier-grade NAT, unique-local, multicast, …).
+fn is_public(ip: IpAddr) -> bool {
+  match ip {
+    IpAddr::V4(v4) => {
+      let [a, b, ..] = v4.octets();
+      !(v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_multicast()
+        || v4.is_documentation()
+        || a == 0
+        || (a == 100 && (64..128).contains(&b))
+        || (a == 198 && (b == 18 || b == 19))
+        || a >= 240)
+    }
+    IpAddr::V6(v6) => {
+      if let Some(v4) = v6.to_ipv4_mapped() {
+        return is_public(IpAddr::V4(v4));
+      }
+      let first = v6.segments()[0];
+      !(v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80)
+    }
+  }
+}
+
+/// Refuses URLs whose host is (or resolves to) a non-public address.
+fn check_public(url: &str) -> Result<(), String> {
+  let host = host_of(url);
+  let refuse = || {
+    Err(format!("{host} is a local or private network address, so it can't be imported this way. Type the address in Import yourself to import a page from your own machine or network."))
+  };
+  if let Ok(ip) = host.parse::<IpAddr>() {
+    return if is_public(ip) { Ok(()) } else { refuse() };
+  }
+  let lower = host.to_ascii_lowercase();
+  if lower == "localhost"
+    || [".localhost", ".local", ".internal", ".lan", ".home.arpa"]
+      .iter()
+      .any(|s| lower.ends_with(s))
+  {
+    return refuse();
+  }
+  // Behind a proxy the name may not resolve here; the proxy then decides.
+  if let Ok(addrs) = (host, 80).to_socket_addrs() {
+    if addrs.into_iter().any(|a| !is_public(a.ip())) {
+      return refuse();
+    }
+  }
+  Ok(())
+}
+
+/// Resolver for direct connections that only returns public addresses, so a name can't
+/// switch to a private address between the check and the connection.
+fn public_resolver(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
+  let addrs: Vec<SocketAddr> = netloc.to_socket_addrs()?.filter(|a| is_public(a.ip())).collect();
+  if addrs.is_empty() {
+    return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not a public address"));
+  }
+  Ok(addrs)
+}
+
 #[derive(Deserialize)]
 pub struct FetchParams {
   url: String,
+  /// The person typed this address in the import dialog: pages on their own machine or
+  /// network are allowed. Claude's imports (no `local`) reach only the public internet.
+  #[serde(default)]
+  local: bool,
 }
 
 /// `GET /bridge/fetch?url=…` returns the page's HTML (http/https only).
@@ -64,15 +133,50 @@ pub async fn fetch_page(State(_state): State<Shared>, headers: HeaderMap, Query(
   if !(p.url.starts_with("http://") || p.url.starts_with("https://")) {
     return (StatusCode::BAD_REQUEST, "only http and https URLs can be imported").into_response();
   }
-  let url = p.url.clone();
+  let (mut url, local) = (p.url.clone(), p.local);
   let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-    let agent = agent(&url, Duration::from_secs(20));
-    let res = agent
-      .get(&url)
-      .set("User-Agent", "Mozilla/5.0 (Designotron import)")
-      .set("Accept", "text/html,application/xhtml+xml")
-      .call()
-      .map_err(|e| format!("could not fetch {url}: {e}"))?;
+    // Redirects are followed here, so each hop gets the same check.
+    let mut hops = 0;
+    let res = loop {
+      if !local {
+        check_public(&url)?;
+      }
+      let mut builder = ureq::AgentBuilder::new().timeout(Duration::from_secs(20)).redirects(0);
+      builder = if bypass_proxy(&url) {
+        builder
+      } else {
+        builder.try_proxy_from_env(true)
+      };
+      let direct = bypass_proxy(&url)
+        || std::env::var_os("HTTPS_PROXY")
+          .or(std::env::var_os("https_proxy"))
+          .or(std::env::var_os("HTTP_PROXY"))
+          .or(std::env::var_os("http_proxy"))
+          .is_none();
+      if !local && direct {
+        builder = builder.resolver(public_resolver);
+      }
+      let res = builder
+        .build()
+        .get(&url)
+        .set("User-Agent", "Mozilla/5.0 (Designotron import)")
+        .set("Accept", "text/html,application/xhtml+xml")
+        .call()
+        .map_err(|e| format!("could not fetch {url}: {e}"))?;
+      let next = res.header("location").filter(|_| (300..400).contains(&res.status()));
+      let Some(next) = next else { break res };
+      hops += 1;
+      if hops > 5 {
+        return Err(format!("could not fetch {url}: too many redirects"));
+      }
+      let joined = url::Url::parse(&url)
+        .and_then(|u| u.join(next))
+        .map_err(|e| format!("bad redirect from {url}: {e}"))?;
+      if !matches!(joined.scheme(), "http" | "https") {
+        return Err(format!("{url} redirects to a non-web address"));
+      }
+      url = joined.to_string();
+    };
     let mut body = String::new();
     res
       .into_reader()
@@ -166,6 +270,16 @@ mod tests {
   #[test]
   fn loopback_skips_the_proxy() {
     assert!(bypass_proxy("http://127.0.0.1:5199/"));
+    assert!(check_public("http://169.254.169.254/latest/meta-data/").is_err());
+    assert!(check_public("http://10.0.0.1/").is_err());
+    assert!(check_public("http://192.168.1.1/").is_err());
+    assert!(check_public("http://[::1]:8080/").is_err());
+    assert!(check_public("http://[::ffff:127.0.0.1]/").is_err());
+    assert!(check_public("http://[fd00::1]/").is_err());
+    assert!(check_public("http://100.64.0.1/").is_err());
+    assert!(check_public("http://localhost:3000/").is_err());
+    assert!(check_public("http://printer.local/").is_err());
+    assert!(check_public("https://93.184.215.14/").is_ok());
     assert!(bypass_proxy("http://localhost/x"));
     assert!(bypass_proxy("http://[::1]:8080/"));
     assert!(!bypass_proxy("https://api.figma.com/v1/files/x"));

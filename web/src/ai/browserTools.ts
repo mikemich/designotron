@@ -29,8 +29,10 @@ interface ImportInput {
 
 type Spec = Record<string, any>;
 
-/** Fetches a live page through the local bridge (no CORS there) and imports it. */
-export async function importUrl(input: { url: string; width?: number; x?: number; y?: number }) {
+/** Fetches a live page through the local bridge (no CORS there) and imports it. `typed`:
+ *  the person entered the address themselves, so pages on their own machine or network are
+ *  allowed (Claude's imports reach only the public internet). */
+export async function importUrl(input: { url: string; width?: number; x?: number; y?: number }, typed = false) {
   let url: URL;
   try {
     url = new URL(input.url.includes("://") ? input.url : `https://${input.url}`);
@@ -39,7 +41,7 @@ export async function importUrl(input: { url: string; width?: number; x?: number
   }
   let res: Response;
   try {
-    res = await fetch(`${bridgeHttpBase()}/bridge/fetch?url=${encodeURIComponent(url.href)}`);
+    res = await fetch(`${bridgeHttpBase()}/bridge/fetch?url=${encodeURIComponent(url.href)}${typed ? "&local=true" : ""}`);
   } catch {
     throw new Error("importing a website needs the Designotron bridge running (setup steps in the Claude panel)");
   }

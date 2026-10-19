@@ -23,7 +23,7 @@ export function ImportDialog() {
     try {
       const tools = await import("../ai/browserTools");
       const c = viewportCenter();
-      if (url.trim()) await tools.importUrl({ url: url.trim(), x: c.x, y: c.y });
+      if (url.trim()) await tools.importUrl({ url: url.trim(), x: c.x, y: c.y }, true);
       else await tools.importHtml({ html, x: c.x, y: c.y, width: 1280 });
       toast("Imported as layers");
       close();
