@@ -3,6 +3,7 @@
 
 import { dispatch, dispatchOrThrow, getDoc, getEngine, toast } from "./store";
 import type { Doc, Node } from "./types";
+import { MOD } from "./ui/controls";
 
 type Props = Record<string, string>;
 type TextStyle = Doc["styles"]["texts"][number];
@@ -84,6 +85,19 @@ export function renameVariantProperty(set: Node, from: string, to: string): bool
   });
 }
 
+/** Why giving variants these props would make two of them identical (then neither can be
+ *  picked reliably), or null. `next` maps variant id → its new props. */
+function duplicateVariant(doc: Doc, set: Node, next: Map<string, Props>): string | null {
+  const seen = new Set<string>();
+  for (const v of variantsOf(doc, set)) {
+    const props = next.get(v.id) ?? v.component?.variantProps ?? {};
+    const key = variantName(props);
+    if (seen.has(key)) return `A variant with ${key} already exists`;
+    seen.add(key);
+  }
+  return null;
+}
+
 /** Renames a value of a property on every variant that uses it ("Variant 1" → "Hover"). */
 export function renameVariantValue(set: Node, prop: string, from: string, to: string): boolean {
   to = to.trim();
@@ -91,6 +105,13 @@ export function renameVariantValue(set: Node, prop: string, from: string, to: st
   const bad = invalidVariantText(to);
   if (bad) return toast(bad, "error"), false;
   const doc = getDoc();
+  const next = new Map<string, Props>();
+  for (const v of variantsOf(doc, set)) {
+    const props = v.component?.variantProps ?? {};
+    if (props[prop] === from) next.set(v.id, { ...props, [prop]: to });
+  }
+  const clash = duplicateVariant(doc, set, next);
+  if (clash) return toast(clash, "error"), false;
   return batch(() => {
     for (const v of variantsOf(doc, set)) {
       const props = v.component?.variantProps ?? {};
@@ -106,6 +127,10 @@ export function setVariantValue(comp: Node, prop: string, value: string): boolea
   if (props[prop] === value) return true;
   const bad = invalidVariantText(value);
   if (bad) return toast(bad, "error"), false;
+  const doc = getDoc();
+  const set = variantSet(doc, comp);
+  const clash = set && duplicateVariant(doc, set, new Map([[comp.id, { ...props, [prop]: value }]]));
+  if (clash) return toast(clash, "error"), false;
   return batch(() => writeVariantProps(comp, { ...props, [prop]: value }));
 }
 
@@ -136,6 +161,9 @@ export function addVariant(target: Node): boolean {
   if (set) return addToSet(set, target);
   return batch(() => {
     const dup = dispatchOrThrow<{ created: string[] }>({ op: "duplicate", ids: [target.id] }).created[0];
+    // Duplicates inside a frame keep their position: put the new variant beside the original
+    // so the set is built around both.
+    dispatchOrThrow({ op: "update", ids: [dup], patch: { x: target.x + target.width + SET_PAD, y: target.y } });
     const r = dispatchOrThrow<{ id: string }>({ op: "combineVariants", ids: [target.id, dup] });
     // The engine names a set built from plain names "Component Set"; keep the component's name.
     if (target.name) dispatchOrThrow({ op: "update", ids: [r.id], patch: { name: target.name } });
@@ -230,8 +258,26 @@ export function swapInstances(ids: string[], componentId: string): boolean {
 
 // ---------- Styles ----------
 
+/** Why `name` can't be used for the style `id` (another style of the kind has it), or null. */
+function takenStyleName(kind: "colors" | "texts", id: string, name: string): string | null {
+  const other = getDoc().styles[kind].some((s) => s.id !== id && s.name.trim().toLowerCase() === name.trim().toLowerCase());
+  return other ? `A ${kind === "colors" ? "colour" : "text"} style named “${name.trim()}” already exists` : null;
+}
+
 export function updateColorStyle(id: string, change: { name?: string; color?: string }): boolean {
+  const taken = change.name !== undefined ? takenStyleName("colors", id, change.name) : null;
+  if (taken) return toast(taken, "error"), false;
   return dispatch({ op: "updateColorStyle", id, name: change.name ?? null, color: change.color ?? null }) !== null;
+}
+
+/** Deletes a style; layers using it keep their look but are detached (undoable). */
+export function deleteStyle(id: string): boolean {
+  const doc = getDoc();
+  const style = [...doc.styles.colors, ...doc.styles.texts].find((s) => s.id === id);
+  const used = Object.values(doc.nodes).filter((n) => n.fillStyle === id || n.textStyle === id).length;
+  if (dispatch({ op: "deleteStyle", id }) === null) return false;
+  if (used) toast(`Deleted “${style?.name ?? "style"}”: ${used} layer${used === 1 ? "" : "s"} keep${used === 1 ? "s" : ""} the look, detached. Undo with ${MOD}Z.`);
+  return true;
 }
 
 /** Edits the text style at `index` in place (its id stays) and updates the layers using it. */
@@ -241,6 +287,8 @@ export function updateTextStyle(index: number, change: Partial<Omit<TextStyle, "
   if (change.name !== undefined) {
     change.name = change.name.trim();
     if (!change.name) return toast("Name can't be empty", "error"), false;
+    const taken = takenStyleName("texts", target.id, change.name);
+    if (taken) return toast(taken, "error"), false;
   }
   return (
     dispatch({

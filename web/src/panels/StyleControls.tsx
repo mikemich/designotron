@@ -7,7 +7,7 @@ import { dispatch, dispatchOrThrow, FONTS, getDoc, useDoc, useStore } from "../s
 import type { Doc, Node } from "../types";
 import { common, IconButton, Menu, MIXED, NumberField, Popover, SelectField, type MenuItem } from "../ui/controls";
 import { ColorPicker, cssColor } from "../ui/color";
-import { addDefaultTextStyle, batch, nextName, updateColorStyle, updateTextStyle } from "../componentOps";
+import { addDefaultTextStyle, batch, deleteStyle, nextName, updateColorStyle, updateTextStyle } from "../componentOps";
 import { InlineInput } from "./InlineInput";
 import "./workflow.css";
 
@@ -57,7 +57,7 @@ export function StyleChip({ kind, nodes, ids }: { kind: "fill" | "text"; nodes: 
         <span className="wf-chip-name">{name}</span>
         {text && (
           <span className="muted small">
-            {text.fontSize}/{text.lineHeight ?? "Auto"}
+            {textStyleLabel(text)}
           </span>
         )}
       </div>
@@ -145,7 +145,7 @@ function ColorStyleRow({ s, sel, editing, setEditing }: { s: ColorStyle; sel: st
           {s.name}
         </span>
         <span className="muted small">{hex}</span>
-        <StyleRowTools editing={editing} setEditing={setEditing} onDelete={() => dispatch({ op: "deleteStyle", id: s.id })} />
+        <StyleRowTools editing={editing} setEditing={setEditing} onDelete={() => deleteStyle(s.id)} />
       </div>
       {editing && (
         <div className="wf-style-edit">
@@ -218,10 +218,8 @@ function TextStyleRow({ s, index, sel, editing, setEditing }: { s: TextStyle; in
         <span className="wf-style-name" onDoubleClick={() => setEditing(true)}>
           {s.name}
         </span>
-        <span className="muted small">
-          {s.fontSize}/{s.fontWeight}
-        </span>
-        <StyleRowTools editing={editing} setEditing={setEditing} onDelete={() => dispatch({ op: "deleteStyle", id: s.id })} />
+        <span className="muted small">{textStyleLabel(s)}</span>
+        <StyleRowTools editing={editing} setEditing={setEditing} onDelete={() => deleteStyle(s.id)} />
       </div>
       {editing && (
         <div className="wf-style-edit">
@@ -234,8 +232,9 @@ function TextStyleRow({ s, index, sel, editing, setEditing }: { s: TextStyle; in
           <div className="grid2">
             <NumberField
               label="↨"
-              title="Line height (px, 0 = auto)"
-              value={s.lineHeight ?? 0}
+              title="Line height (px; 0 or empty for auto)"
+              value={s.lineHeight ?? null}
+              autoValue={Math.round(s.fontSize * 1.2)}
               min={0}
               onChange={(lh) => set({ lineHeight: lh || null })}
               onScrubStart={begin}
@@ -247,6 +246,12 @@ function TextStyleRow({ s, index, sel, editing, setEditing }: { s: TextStyle; in
       )}
     </div>
   );
+}
+
+/** "32/Auto": size / line height, the same everywhere a text style is summarised. */
+export function textStyleLabel(s: { fontSize: number; lineHeight: number | null }): string {
+  const n = (v: number) => String(Math.round(v * 100) / 100);
+  return `${n(s.fontSize)}/${s.lineHeight == null ? "Auto" : n(s.lineHeight)}`;
 }
 
 function matches(name: string, filter: string): boolean {

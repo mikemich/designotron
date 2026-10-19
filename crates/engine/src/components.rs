@@ -60,15 +60,20 @@ fn strip_position(n: &Node, is_root: bool) -> Node {
 
 /// Turns the given nodes into a main component. Returns the component id.
 pub fn create_component(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) -> Option<NodeId> {
-  let target = if ids.len() == 1 {
-    let n = doc.get(&ids[0])?;
-    if matches!(n.kind, NodeType::Frame | NodeType::Group) {
-      ids[0].clone()
-    } else {
-      crate::ops::wrap_in_frame(doc, ids, gen, NodeType::Frame)?
+  let single = if ids.len() == 1 { doc.get(&ids[0]).cloned() } else { None };
+  let target = match &single {
+    Some(n) if matches!(n.kind, NodeType::Frame | NodeType::Group) => ids[0].clone(),
+    _ => {
+      // Named after the layer it was made from (never the wrapper's "Frame N").
+      let name = single
+        .as_ref()
+        .map(|n| n.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| doc.next_name("Component"));
+      let id = crate::ops::wrap_in_frame(doc, ids, gen, NodeType::Frame)?;
+      doc.get_mut(&id)?.name = name;
+      id
     }
-  } else {
-    crate::ops::wrap_in_frame(doc, ids, gen, NodeType::Frame)?
   };
   for nid in doc.subtree(&target) {
     if let Some(n) = doc.get_mut(&nid) {
@@ -251,12 +256,23 @@ pub fn reset_overrides(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
 
 /// Points an instance at another component (variant swap), dropping child overrides.
 pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mut IdGen) {
-  if doc.get(comp_id).map(|c| c.kind != NodeType::Component).unwrap_or(true) {
+  let Some(new_name) = doc.get(comp_id).filter(|c| c.kind == NodeType::Component).map(|c| c.name.clone()) else {
     return;
-  }
-  if let Some(info) = doc.get_mut(inst_id).and_then(|i| i.instance.as_mut()) {
-    info.component_id = comp_id.to_string();
-    info.overrides.retain(|k, _| k == ROOT_KEY);
+  };
+  let old_name = doc
+    .get(inst_id)
+    .and_then(|i| i.instance.as_ref())
+    .and_then(|info| doc.get(&info.component_id))
+    .map(|c| c.name.clone());
+  if let Some(inst) = doc.get_mut(inst_id) {
+    // An instance still named after its component follows the swap; a name of its own stays.
+    if inst.name.is_empty() || Some(&inst.name) == old_name.as_ref() {
+      inst.name = new_name;
+    }
+    if let Some(info) = inst.instance.as_mut() {
+      info.component_id = comp_id.to_string();
+      info.overrides.retain(|k, _| k == ROOT_KEY);
+    }
   }
   sync_instance(doc, inst_id, gen);
 }
@@ -402,6 +418,149 @@ mod tests {
   use super::*;
   use crate::doc::new_document;
   use serde_json::json;
+
+  /// A file with a "Button" set of two variants (State=Default, State=Pressed) and an
+  /// instance of the default one inside a "Home" frame.
+  fn button_set() -> (crate::engine::Engine, String, String, String) {
+    use crate::engine::{Command, Engine};
+    let id = |v: serde_json::Value| v["id"].as_str().unwrap().to_string();
+    let mut e = Engine::new(Box::new(crate::text::HeuristicMeasurer), 4);
+    let shape = |e: &mut Engine, kind, x| {
+      id(
+        e.dispatch(Command::CreateShape {
+          kind,
+          x,
+          y: 0.0,
+          width: 100.0,
+          height: 40.0,
+          parent: None,
+        })
+        .unwrap(),
+      )
+    };
+    let a = shape(&mut e, NodeType::Rectangle, 0.0);
+    let b = shape(&mut e, NodeType::Rectangle, 200.0);
+    let ca = id(e.dispatch(Command::CreateComponent { ids: vec![a] }).unwrap());
+    let cb = id(e.dispatch(Command::CreateComponent { ids: vec![b] }).unwrap());
+    e.dispatch(Command::Update {
+      ids: vec![ca.clone()],
+      patch: json!({ "name": "State=Default" }),
+    })
+    .unwrap();
+    e.dispatch(Command::Update {
+      ids: vec![cb.clone()],
+      patch: json!({ "name": "State=Pressed" }),
+    })
+    .unwrap();
+    let set = id(
+      e.dispatch(Command::CombineVariants {
+        ids: vec![ca.clone(), cb.clone()],
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::Update {
+      ids: vec![set],
+      patch: json!({ "name": "Button" }),
+    })
+    .unwrap();
+    let home = shape(&mut e, NodeType::Frame, 0.0);
+    e.dispatch(Command::Update {
+      ids: vec![home.clone()],
+      patch: json!({ "name": "Home", "x": 0.0, "y": 300.0, "width": 400.0, "height": 400.0 }),
+    })
+    .unwrap();
+    let inst = id(
+      e.dispatch(Command::CreateInstance {
+        component_id: ca,
+        x: 10.0,
+        y: 10.0,
+        parent: Some(home.clone()),
+      })
+      .unwrap(),
+    );
+    (e, home, inst, cb)
+  }
+
+  #[test]
+  fn a_component_made_from_a_layer_is_named_after_it() {
+    use crate::engine::{Command, Engine};
+    let mut e = Engine::new(Box::new(crate::text::HeuristicMeasurer), 4);
+    let r = e
+      .dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+        parent: None,
+      })
+      .unwrap()["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let layer_name = e.doc.get(&r).unwrap().name.clone();
+    let c = e.dispatch(Command::CreateComponent { ids: vec![r] }).unwrap()["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    assert_eq!(e.doc.get(&c).unwrap().name, layer_name);
+    assert!(!layer_name.starts_with("Frame"));
+  }
+
+  #[test]
+  fn an_instance_named_after_its_variant_follows_a_variant_change() {
+    use crate::engine::Command;
+    let (mut e, _, inst, _) = button_set();
+    assert_eq!(e.doc.get(&inst).unwrap().name, "State=Default");
+    e.dispatch(Command::SetVariant {
+      id: inst.clone(),
+      prop: "State".into(),
+      value: "Pressed".into(),
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&inst).unwrap().name, "State=Pressed");
+    // A name of its own is kept.
+    e.dispatch(Command::Update {
+      ids: vec![inst.clone()],
+      patch: json!({ "name": "Buy button" }),
+    })
+    .unwrap();
+    e.dispatch(Command::SetVariant {
+      id: inst.clone(),
+      prop: "State".into(),
+      value: "Default".into(),
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&inst).unwrap().name, "Buy button");
+  }
+
+  #[test]
+  fn code_uses_the_set_as_one_component_with_a_prop() {
+    use crate::engine::Command;
+    let (mut e, home, inst, pressed) = button_set();
+    let code = crate::codegen::export_react(&e.doc, &home, &crate::text::HeuristicMeasurer);
+    assert!(
+      code.contains("<Button className=") && code.contains(" state=\"Default\" />"),
+      "{code}"
+    );
+    assert!(code.contains("export function Button({ state = \"Default\", ...rest }"), "{code}");
+    assert!(
+      code.contains("if (state === \"Pressed\") return <ButtonPressed {...rest} />;"),
+      "{code}"
+    );
+    assert!(
+      code.contains("function ButtonDefault(") && !code.contains("export function ButtonDefault("),
+      "{code}"
+    );
+    assert!(!code.contains("StateDefault"), "{code}");
+    e.dispatch(Command::SwapComponent {
+      id: inst,
+      component_id: pressed,
+    })
+    .unwrap();
+    let code = crate::codegen::export_react(&e.doc, &home, &crate::text::HeuristicMeasurer);
+    assert!(code.contains(" state=\"Pressed\" />"), "{code}");
+  }
 
   #[test]
   fn instance_follows_component_and_keeps_overrides() {

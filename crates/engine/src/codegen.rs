@@ -79,6 +79,9 @@ struct Ctx<'a> {
   m: &'a dyn TextMeasurer,
   /// Component ids referenced by instances, with generated names.
   components: BTreeMap<String, String>,
+  /// Component sets whose variants are referenced: set id → the exported component that
+  /// picks a variant from props (`<Button state="Pressed" />`).
+  sets: BTreeMap<String, String>,
   screen_names: BTreeMap<String, String>,
   /// Screens in page/layer order.
   screen_order: Vec<(String, String)>,
@@ -94,6 +97,7 @@ impl<'a> Ctx<'a> {
       doc,
       m,
       components: BTreeMap::new(),
+      sets: BTreeMap::new(),
       screen_names: BTreeMap::new(),
       screen_order: Vec::new(),
       used_names: BTreeSet::new(),
@@ -129,6 +133,19 @@ impl<'a> Ctx<'a> {
     if let Some(n) = self.components.get(comp_id) {
       return n.clone();
     }
+    if let Some(set) = self.variant_set(comp_id) {
+      // Every variant gets its own function, named after the set and its values.
+      let set_name = self.unique(&pascal(&set.name, "Component"));
+      self.sets.insert(set.id.clone(), set_name.clone());
+      for v in variants(self.doc, &set) {
+        let values: Vec<String> = v.variant_props().into_values().collect();
+        let name = self.unique(&format!("{set_name}{}", pascal(&values.join(" "), "Variant")));
+        self.components.insert(v.id.clone(), name);
+      }
+      if let Some(n) = self.components.get(comp_id) {
+        return n.clone();
+      }
+    }
     let base = self
       .doc
       .get(comp_id)
@@ -137,6 +154,12 @@ impl<'a> Ctx<'a> {
     let name = self.unique(&base);
     self.components.insert(comp_id.to_string(), name.clone());
     name
+  }
+
+  /// The component set `comp_id` is a variant of.
+  fn variant_set(&self, comp_id: &str) -> Option<Node> {
+    let p = self.doc.get(comp_id)?.parent.as_ref()?;
+    self.doc.get(p).filter(|s| s.kind == NodeType::ComponentSet).cloned()
   }
 
   fn build(&mut self, id: &str, place: Place) -> Option<El> {
@@ -150,7 +173,15 @@ impl<'a> Ctx<'a> {
           let name = self.component_name(&info.component_id);
           let mut el = El::new("div");
           self.position(&mut el, &n, place);
-          el.component_ref = Some(name);
+          match self.variant_set(&info.component_id).and_then(|s| self.sets.get(&s.id).cloned()) {
+            Some(set_name) => {
+              el.component_ref = Some(set_name);
+              for (k, v) in self.doc.get(&info.component_id).map(|c| c.variant_props()).unwrap_or_default() {
+                el.attrs.push((prop_ident(&k), v));
+              }
+            }
+            None => el.component_ref = Some(name),
+          }
           self.interactions(&mut el, &n);
           return Some(el);
         }
@@ -1074,13 +1105,121 @@ fn component_fns(ctx: &mut Ctx) -> String {
       if let Some(el) = ctx.build(&id, Place::ComponentRoot) {
         let mut body = String::new();
         jsx(&el, 2, &mut body);
+        // Variants are reached through their set's component.
+        let export = if ctx.variant_set(&id).is_some() { "" } else { "export " };
         out.push_str(&format!(
-          "export function {name}({{ className, onClick, onNavigate }}: {{ className?: string; onClick?: () => void; onNavigate?: (screen: string) => void }}) {{\n  void onNavigate;\n  return (\n{body}  );\n}}\n\n"
+          "{export}function {name}({{ className, onClick, onNavigate }}: {PROPS}) {{\n  void onNavigate;\n  return (\n{body}  );\n}}\n\n"
         ));
       }
     }
   }
+  for (set_id, set_name) in ctx.sets.clone() {
+    if let Some(set) = ctx.doc.get(&set_id) {
+      out.push_str(&set_fn(ctx, set, &set_name));
+    }
+  }
   out
+}
+
+const PROPS: &str = "{ className?: string; onClick?: () => void; onNavigate?: (screen: string) => void }";
+
+fn variants(doc: &Document, set: &Node) -> Vec<Node> {
+  set
+    .children
+    .iter()
+    .filter_map(|c| doc.get(c))
+    .filter(|c| c.kind == NodeType::Component)
+    .cloned()
+    .collect()
+}
+
+/// camelCase prop name for a variant property ("Size" → `size`).
+fn prop_ident(key: &str) -> String {
+  let p = pascal(key, "Prop");
+  let mut id: String = p
+    .chars()
+    .next()
+    .map(|c| c.to_ascii_lowercase())
+    .into_iter()
+    .chain(p.chars().skip(1))
+    .collect();
+  if [
+    "className",
+    "onClick",
+    "onNavigate",
+    "default",
+    "class",
+    "for",
+    "new",
+    "delete",
+    "in",
+  ]
+  .contains(&id.as_str())
+  {
+    id.push_str("Variant");
+  }
+  id
+}
+
+/// The exported component for a component set: picks the variant matching its props,
+/// defaulting to the set's first variant.
+fn set_fn(ctx: &Ctx, set: &Node, name: &str) -> String {
+  let vs = variants(ctx.doc, set);
+  let Some(first) = vs.first() else { return String::new() };
+  let mut keys: Vec<String> = Vec::new();
+  for v in &vs {
+    for k in v.variant_props().keys() {
+      if !keys.contains(k) {
+        keys.push(k.clone());
+      }
+    }
+  }
+  let defaults = first.variant_props();
+  let q = |v: &str| serde_json::to_string(v).unwrap_or_default();
+  let params: Vec<String> = keys
+    .iter()
+    .map(|k| match defaults.get(k) {
+      Some(d) => format!("{} = {}", prop_ident(k), q(d)),
+      None => prop_ident(k),
+    })
+    .collect();
+  let types: Vec<String> = keys
+    .iter()
+    .map(|k| {
+      let mut values: Vec<String> = Vec::new();
+      for v in &vs {
+        if let Some(val) = v.variant_props().get(k) {
+          if !values.contains(val) {
+            values.push(val.clone());
+          }
+        }
+      }
+      format!(
+        "{}?: {}",
+        prop_ident(k),
+        values.iter().map(|v| q(v)).collect::<Vec<_>>().join(" | ")
+      )
+    })
+    .collect();
+  let mut body = String::new();
+  for v in vs.iter().skip(1) {
+    let Some(fname) = ctx.components.get(&v.id) else { continue };
+    let cond: Vec<String> = v
+      .variant_props()
+      .iter()
+      .map(|(k, val)| format!("{} === {}", prop_ident(k), q(val)))
+      .collect();
+    if !cond.is_empty() {
+      body.push_str(&format!("  if ({}) return <{fname} {{...rest}} />;\n", cond.join(" && ")));
+    }
+  }
+  let default_fn = ctx.components.get(&first.id).cloned().unwrap_or_default();
+  body.push_str(&format!("  return <{default_fn} {{...rest}} />;\n"));
+  format!(
+    "export function {name}({{ {}, ...rest }}: {{ {}; className?: string; onClick?: () => void; onNavigate?: (screen: string) => void }}) {{\n{body}}}\n\n",
+    params.join(", "),
+    types.join("; ")
+  )
 }
 
 pub struct ProjectFile {
@@ -1100,7 +1239,7 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
     }
   }
   let comps = component_fns(&mut ctx);
-  let comp_names: Vec<String> = ctx.components.values().cloned().collect();
+  let comp_names: Vec<String> = ctx.components.values().chain(ctx.sets.values()).cloned().collect();
   files.push(ProjectFile {
     path: "src/components.tsx".into(),
     content: format!("// Reusable components generated from Designotron main components.\n\n{comps}"),

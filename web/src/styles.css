@@ -1909,3 +1909,12 @@ body:has(.main > .chat) .phone-note {
   max-width: 100%;
   max-height: 480px;
 }
+
+/* Component set heading in Assets (its variants are listed below it). */
+.layer.asset-set {
+  cursor: default;
+  font-weight: 600;
+}
+.layer.asset-set:hover {
+  background: none;
+}

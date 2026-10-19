@@ -668,7 +668,9 @@ export function Canvas() {
       else if (f.name.endsWith(".dtron") || f.name.endsWith(".json")) await openDtronFile(f);
     }
     const comp = e.dataTransfer.getData("application/x-designotron-component");
-    if (comp) dispatch({ op: "createInstance", componentId: comp, x: p.x, y: p.y, parent: null });
+    const main = comp ? getDoc().nodes[comp] : null;
+    // Centred on the pointer, like click-to-place in the Assets panel.
+    if (main) dispatch({ op: "createInstance", componentId: comp, x: p.x - main.width / 2, y: p.y - main.height / 2, parent: null });
   }
 
   // ---------- Overlay ----------

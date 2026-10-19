@@ -302,6 +302,14 @@ function buildDesignSystem() {
       { name: "Success", color: "#16A34A" },
       { name: "Danger", color: "#DC2626" },
     ],
+    texts: [
+      { name: "Display", fontFamily: "Inter", fontSize: 48, fontWeight: 800, lineHeight: 56, letterSpacing: 0 },
+      { name: "Heading", fontFamily: "Inter", fontSize: 28, fontWeight: 700, lineHeight: 36, letterSpacing: 0 },
+      { name: "Title", fontFamily: "Inter", fontSize: 18, fontWeight: 700, lineHeight: 26, letterSpacing: 0 },
+      { name: "Body", fontFamily: "Inter", fontSize: 16, fontWeight: 400, lineHeight: 24, letterSpacing: 0 },
+      { name: "Label", fontFamily: "Inter", fontSize: 15, fontWeight: 600, lineHeight: 20, letterSpacing: 0 },
+      { name: "Caption", fontFamily: "Inter", fontSize: 13, fontWeight: 500, lineHeight: 18, letterSpacing: 0 },
+    ],
   });
   const button = (state: string, fill: string, text: string, stroke?: string) => ({
     type: "frame",
@@ -418,5 +426,13 @@ function buildDesignSystem() {
   for (const id of ids) ai("arrange", { action: "create_component", ids: [id] });
   // Link every colour that matches a style, so editing a style updates the whole system.
   ai("fix_issues", { kinds: ["unlinkedStyle"] });
+  // Same for type: text whose size and weight match a text style uses it.
+  const doc = getDoc();
+  for (const style of doc.styles.texts) {
+    const ids = Object.values(doc.nodes)
+      .filter((n) => n.type === "text" && !n.textStyle && n.text?.fontSize === style.fontSize && n.text?.fontWeight === style.fontWeight)
+      .map((n) => n.id);
+    if (ids.length) dispatchOrThrow({ op: "applyStyle", ids, styleId: style.id });
+  }
   ai("select", { ids: [] });
 }

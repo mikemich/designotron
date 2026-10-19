@@ -492,8 +492,12 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
       <div className="grid2">
         <NumberField
           label="↨"
-          title="Line height (px, 0 = auto)"
-          value={t((n) => n.text!.lineHeight ?? Math.round(n.text!.fontSize * 1.2)) as Maybe<number>}
+          title="Line height (px; 0 or empty for auto)"
+          value={t((n) => n.text!.lineHeight ?? null) as Maybe<number> | null}
+          autoValue={(() => {
+            const fs = r("fontSize");
+            return fs === MIXED ? undefined : Math.round((fs as number) * 1.2);
+          })()}
           min={0}
           onChange={(lh) => set({ lineHeight: lh || null })}
           onScrubStart={begin}

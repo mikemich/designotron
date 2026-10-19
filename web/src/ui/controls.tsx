@@ -4,10 +4,13 @@ import { createPortal } from "react-dom";
 export const MIXED = Symbol("mixed");
 export type Maybe<T> = T | typeof MIXED;
 
-/** Number input with a scrubbable label, arrow-key stepping and simple math. */
+/** Number input with a scrubbable label, arrow-key stepping and simple math. `null` shows
+ *  `autoText` (e.g. an automatic line height); scrubbing and arrows then start at `autoValue`. */
 export function NumberField(props: {
   label?: ReactNode;
-  value: Maybe<number>;
+  value: Maybe<number> | null;
+  autoText?: string;
+  autoValue?: number;
   onChange: (v: number) => void;
   onScrubStart?: () => void;
   onScrubEnd?: () => void;
@@ -19,7 +22,8 @@ export function NumberField(props: {
   precision?: number;
 }) {
   const { label, value, onChange, step = 1, min, max, suffix, title, precision = 2 } = props;
-  const fmt = (v: Maybe<number>) => (v === MIXED ? "Mixed" : String(Math.round(v * 10 ** precision) / 10 ** precision) + (suffix ?? ""));
+  const fmt = (v: Maybe<number> | null) =>
+    v === MIXED ? "Mixed" : v === null ? (props.autoText ?? "Auto") : String(Math.round(v * 10 ** precision) / 10 ** precision) + (suffix ?? "");
   const [text, setText] = useState(fmt(value));
   const [focused, setFocused] = useState(false);
   /** Enter already committed, or Escape cancelled: the blur that follows must not commit. */
@@ -30,7 +34,7 @@ export function NumberField(props: {
   const clamp = (v: number) => Math.min(max ?? Infinity, Math.max(min ?? -Infinity, v));
   const commit = () => {
     const raw = text.replace(suffix ?? "", "").trim();
-    if (!raw || raw === "Mixed") return;
+    if (!raw || raw === "Mixed" || raw === (props.autoText ?? "Auto")) return;
     let v: number;
     try {
       // Allow simple expressions like "100/2" or "24+8".
@@ -41,10 +45,10 @@ export function NumberField(props: {
     if (Number.isFinite(v)) onChange(clamp(v));
   };
   const scrub = (e: React.PointerEvent) => {
-    if (value === MIXED) return;
+    const start = value === null ? props.autoValue : value;
+    if (start === MIXED || start === undefined) return;
     e.preventDefault();
     const startX = e.clientX;
-    const start = value;
     props.onScrubStart?.();
     const move = (ev: PointerEvent) => {
       const mult = ev.shiftKey ? 10 : ev.altKey ? 0.1 : 1;
@@ -90,10 +94,10 @@ export function NumberField(props: {
             setText(fmt(value));
             settled.current = true;
             (e.target as HTMLInputElement).blur();
-          } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && value !== MIXED) {
+          } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && value !== MIXED && (value ?? props.autoValue) !== undefined) {
             e.preventDefault();
             const d = (e.key === "ArrowUp" ? 1 : -1) * step * (e.shiftKey ? 10 : 1);
-            onChange(clamp(value + d));
+            onChange(clamp((value ?? props.autoValue!) + d));
           }
           e.stopPropagation();
         }}

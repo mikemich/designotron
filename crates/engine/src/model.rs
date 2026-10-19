@@ -833,6 +833,13 @@ pub struct ComponentInfo {
   pub variant_props: BTreeMap<String, String>,
 }
 
+impl Node {
+  /// A component's variant properties (empty for anything else).
+  pub fn variant_props(&self) -> BTreeMap<String, String> {
+    self.component.as_ref().map(|c| c.variant_props.clone()).unwrap_or_default()
+  }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct InstanceInfo {

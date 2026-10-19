@@ -30,6 +30,7 @@ import type { Doc, Node } from "../types";
 import { IconButton, Menu, type MenuItem } from "../ui/controls";
 import { viewportCenter } from "../actions";
 import { ColorStylesSection, TextStylesSection } from "./StyleControls";
+import { swapGroups } from "../componentOps";
 
 export function LeftPanel() {
   const tab = useStore((s) => s.leftTab);
@@ -387,7 +388,32 @@ function isInsideInstance(doc: Doc, n: Node): boolean {
 function Assets() {
   const doc = useDoc();
   const [q, setQ] = useState("");
-  const comps = Object.values(doc.nodes).filter((n) => n.type === "component" && n.name.toLowerCase().includes(q.toLowerCase()));
+  const match = (s: string) => s.toLowerCase().includes(q.toLowerCase());
+  // Variants are listed under their set (in the set's order), other components on their own.
+  const groups = swapGroups(doc)
+    .map((g) => ({ set: g.set, items: g.set && match(g.set.name) ? g.items : g.items.filter((c) => match(c.name)) }))
+    .filter((g) => g.items.length);
+  const row = (c: Node, label: string, indent: boolean) => (
+    <div
+      key={c.id}
+      className="layer"
+      draggable
+      onDragStart={(e) => e.dataTransfer.setData("application/x-designotron-component", c.id)}
+      onClick={() => {
+        const p = viewportCenter();
+        dispatch({ op: "createInstance", componentId: c.id, x: p.x - c.width / 2, y: p.y - c.height / 2, parent: null });
+      }}
+      title="Click or drag to place an instance"
+    >
+      <span className="icon component" style={{ marginLeft: indent ? 20 : 4 }}>
+        <Component size={13} />
+      </span>
+      <span className="name component">{label}</span>
+      <span className="muted small">
+        {Math.round(c.width)}×{Math.round(c.height)}
+      </span>
+    </div>
+  );
   return (
     <div className="scroll">
       <div className="section">
@@ -397,28 +423,22 @@ function Assets() {
         <div className="section-head">
           <span>Components</span>
         </div>
-        {comps.length === 0 && <div className="muted small">Select layers and press ⌥⌘K to create a component.</div>}
-        {comps.map((c) => (
-          <div
-            key={c.id}
-            className="layer"
-            draggable
-            onDragStart={(e) => e.dataTransfer.setData("application/x-designotron-component", c.id)}
-            onClick={() => {
-              const p = viewportCenter();
-              dispatch({ op: "createInstance", componentId: c.id, x: p.x - c.width / 2, y: p.y - c.height / 2, parent: null });
-            }}
-            title="Click or drag to place an instance"
-          >
-            <span className="icon component" style={{ marginLeft: 4 }}>
-              <Component size={13} />
-            </span>
-            <span className="name component">{c.name}</span>
-            <span className="muted small">
-              {Math.round(c.width)}×{Math.round(c.height)}
-            </span>
-          </div>
-        ))}
+        {groups.length === 0 && <div className="muted small">Select layers and press ⌥⌘K to create a component.</div>}
+        {groups.map((g) =>
+          g.set ? (
+            <div key={g.set.id}>
+              <div className="layer asset-set" title="Component set: place one of its variants">
+                <span className="icon component" style={{ marginLeft: 4 }}>
+                  <Component size={13} />
+                </span>
+                <span className="name component">{g.set.name}</span>
+              </div>
+              {g.items.map((c) => row(c, Object.values(c.component?.variantProps ?? {}).join(", ") || c.name, true))}
+            </div>
+          ) : (
+            g.items.map((c) => row(c, c.name, false))
+          ),
+        )}
       </div>
       <ColorStylesSection filter={q} />
       <TextStylesSection filter={q} />
