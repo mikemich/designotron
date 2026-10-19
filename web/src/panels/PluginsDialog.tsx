@@ -97,7 +97,7 @@ export function PluginsDialog() {
               </button>
             </div>
             <div className="muted small" style={{ marginTop: 10, lineHeight: 1.6 }}>
-              Plugins run in a sandbox with no access to your files or keys, and call the same tools Claude uses. Each run is one undo step.
+              Plugins run in a sandbox with no access to your files or keys, and call the same tools Claude uses. A run that finishes within a few seconds is one undo step; after that, or from a plugin's panel, each change is its own step, so your own edits never get mixed into a plugin's.
             </div>
           </div>
         )}

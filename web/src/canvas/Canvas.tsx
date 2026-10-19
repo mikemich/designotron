@@ -20,6 +20,7 @@ import { RemoteCursors, RemoteSelections } from "./RemoteCursors";
 import { reportCursor } from "../collab";
 import { insertImageFile, openDtronFile } from "../actions";
 import { canvasMenu } from "./contextMenu";
+import { useDemo } from "../Demo";
 import { Menu, type MenuItem } from "../ui/controls";
 
 interface BoundsItem {
@@ -70,6 +71,8 @@ export function Canvas() {
   const sel = useStore((s) => s.es.selection);
   const hover = useStore((s) => s.hover);
   const editingText = useStore((s) => s.editingText);
+  // Sections of the demo replay still waiting to appear.
+  const demoHidden = useDemo((s) => s.hidden);
   const editingVector = useStore((s) => s.editingVector);
   const guides = useStore((s) => s.guides);
   const marquee = useStore((s) => s.marquee);
@@ -103,7 +106,7 @@ export function Canvas() {
     const host = contentRef.current;
     if (!host) return;
     const fresh = rootEls.current.size === 0;
-    const r = renderPageIncremental(page, editingText ? [editingText] : [], fresh);
+    const r = renderPageIncremental(page, editingText ? [...demoHidden, editingText] : demoHidden, fresh);
     if ("full" in r) {
       rootEls.current.clear();
       host.innerHTML = r.full;
@@ -137,7 +140,7 @@ export function Canvas() {
       if (!keep.has(i)) host.insertBefore(want[i], want[i + 1] ?? null);
     }
 
-  }, [rev, page, editingText]);
+  }, [rev, page, editingText, demoHidden]);
 
   const selItems = useMemo(() => query<{ items: BoundsItem[]; union: Rect | null }>({ q: "bounds", ids: sel }), [rev, sel]);
   const hoverItem = useMemo(() => (hover && !sel.includes(hover) ? query<{ items: BoundsItem[] }>({ q: "bounds", ids: [hover] }).items[0] : null), [rev, hover, sel]);

@@ -9,13 +9,13 @@ import { Tour } from "./Tour";
 import { VariablesDialog } from "./panels/VariablesDialog";
 import { FigmaImportDialog } from "./panels/FigmaImportDialog";
 import { PluginWindow, PluginsDialog } from "./panels/PluginsDialog";
-import { usePlugins } from "./plugins";
+import { stopPlugin, usePlugins } from "./plugins";
 import { joinShared, stopSharing, useCollab } from "./collab";
 import { GuestBar } from "./panels/GuestBar";
 import { ShortcutsDialog } from "./panels/ShortcutsDialog";
 import { ImportDialog } from "./panels/ImportDialog";
 import { PhoneNote } from "./panels/PhoneNote";
-import { DemoOverlay } from "./Demo";
+import { DemoOverlay, stopDemo } from "./Demo";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
 import { bootEngine, getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
@@ -67,7 +67,10 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     })();
     return () => {
       cancelled = true;
-      // Leaving the file leaves its shared session.
+      // Leaving the file stops what was running in it (a plugin would otherwise go on
+      // editing whichever file opens next), and leaves its shared session.
+      stopPlugin();
+      stopDemo();
       if (useCollab.getState().role) stopSharing();
     };
   }, [fileId]);

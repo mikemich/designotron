@@ -1,6 +1,6 @@
 // Plugins: user JavaScript run in a sandboxed iframe (opaque origin: no access to the
 // editor's DOM, storage or API key). They call the same tool layer Claude uses through
-// a small promise API over postMessage. One plugin run is one undo step.
+// a small promise API over postMessage. A quick run is one undo step (see runPlugin).
 
 import { create } from "zustand";
 import { dispatch, selection, toast, useStore } from "./store";
@@ -154,7 +154,9 @@ function bootstrap(code: string): string {
 <\/script></body></html>`;
 }
 
-/** Runs a plugin. Its edits form one undo step; it stays alive while it shows UI. */
+/** Runs a plugin; it stays alive while it shows UI. Its edits form one undo step until it
+ *  shows UI or has run for 3 seconds; after that each change is its own step, so the
+ *  person's edits made meanwhile stay separate. */
 export function runPlugin(plugin: Plugin) {
   stopPlugin();
   const frame = document.createElement("iframe");
@@ -202,7 +204,7 @@ export function runPlugin(plugin: Plugin) {
           frame.className = "plugin-frame";
           frame.style.width = `${running.ui.width}px`;
           frame.style.height = `${running.ui.height}px`;
-          // Edits made from a plugin UI are undone together per run of the UI.
+          // From here on each change is its own undo step (the person works alongside the UI).
           endGesture();
           usePlugins.setState({ running: { ...running } });
           return reply(m.id);

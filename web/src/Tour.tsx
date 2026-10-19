@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import { getDoc, useStore } from "./store";
 import { MOD } from "./ui/controls";
+import { useDemo } from "./Demo";
 
 // One-time hints that appear when they become relevant, instead of a tour up front.
-// They never dim the screen or block the first-run prompt, and wait while a dialog is open.
+// They never dim the screen or block the first-run prompt, and wait while a dialog is open
+// or the demo replay runs.
 const KEY = "dt:tour-done";
 
 interface Hint {
@@ -57,18 +59,19 @@ export function Tour() {
   const rev = useStore((s) => s.rev);
   const selection = useStore((s) => s.es.selection);
   const chatOpen = useStore((s) => s.chatOpen);
+  const demo = useDemo((s) => s.caption !== null);
   const [hint, setHint] = useState<Hint | null>(null);
   const [rect, setRect] = useState<DOMRect | null>(null);
 
   // Pick the first relevant hint not seen yet, after things settle.
   useEffect(() => {
-    if (hint) return;
+    if (hint || demo) return;
     const t = setTimeout(() => {
       if (document.querySelector(".modal-bg, .menu")) return;
       setHint(HINTS.find((h) => !seen(h.id) && h.when()) ?? null);
     }, 1200);
     return () => clearTimeout(t);
-  }, [rev, selection, chatOpen, hint]);
+  }, [rev, selection, chatOpen, hint, demo]);
 
   useLayoutEffect(() => {
     const measure = () => {
@@ -89,13 +92,19 @@ export function Tour() {
     setHint(null);
   };
 
-  if (!hint || !rect || rect.width === 0) return null;
+  if (!hint || !rect || rect.width === 0 || demo) return null;
   const width = 280;
-  const right = hint.id === "design";
-  const left = right ? rect.left - width - 12 : hint.id === "layers" ? rect.right + 12 : Math.min(window.innerWidth - width - 12, rect.left + rect.width / 2 - width / 2);
-  const top = hint.id === "claude" ? rect.bottom + 10 : rect.top + 60;
+  let style: React.CSSProperties;
+  if (hint.id === "layers") {
+    // Inside the layers panel, at its foot: it never covers the design.
+    style = { left: rect.left + 8, bottom: window.innerHeight - rect.bottom + 12, width: Math.min(width, rect.width - 16) };
+  } else {
+    const left = hint.id === "design" ? rect.left - width - 12 : Math.min(window.innerWidth - width - 12, rect.left + rect.width / 2 - width / 2);
+    const top = hint.id === "claude" ? rect.bottom + 10 : rect.top + 60;
+    style = { left: Math.max(12, Math.min(left, window.innerWidth - width - 12)), top: Math.min(top, window.innerHeight - 180), width };
+  }
   return (
-    <div className="hint-card" role="status" style={{ left: Math.max(12, Math.min(left, window.innerWidth - width - 12)), top: Math.min(top, window.innerHeight - 180), width }}>
+    <div className="hint-card" role="status" style={style}>
       <div style={{ fontWeight: 600, marginBottom: 4 }}>{hint.title}</div>
       <div style={{ lineHeight: 1.55 }}>{hint.body}</div>
       <div className="row" style={{ marginTop: 10, justifyContent: "space-between" }}>
