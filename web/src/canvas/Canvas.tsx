@@ -839,7 +839,7 @@ export function Canvas() {
       {showRulers && <Rulers v={v} width={size.w} height={size.h} selection={selItems.union} />}
       {editingText && <TextEditor id={editingText} />}
       {empty && (tool === "move" || tool === "hand") && <EmptyPrompt />}
-      <div className="zoom-indicator">{Math.round(v.zoom * 100)}%</div>
+      <ZoomFlash zoom={v.zoom} />
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>
   );
@@ -939,4 +939,17 @@ function VectorPoints({ node, m, v }: { node: Node; m: Mat; v: { x: number; y: n
     }),
   );
   return <g>{items}</g>;
+}
+
+/** The zoom level, shown briefly while it changes (the toolbar always has it). */
+function ZoomFlash({ zoom }: { zoom: number }) {
+  const [shown, setShown] = useState(false);
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) return void (first.current = false);
+    setShown(true);
+    const t = setTimeout(() => setShown(false), 900);
+    return () => clearTimeout(t);
+  }, [zoom]);
+  return <div className={"zoom-indicator" + (shown ? " shown" : "")}>{Math.round(zoom * 100)}%</div>;
 }

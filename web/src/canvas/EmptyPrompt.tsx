@@ -19,34 +19,46 @@ export function EmptyPrompt() {
   };
   return (
     <div className="empty-prompt" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
-      <div className="empty-title">What do you want to design?</div>
-      <textarea
-        id="empty-prompt-input"
-        className="textinput"
-        placeholder="Describe a screen, a flow or a whole app…"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          e.stopPropagation();
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            send(text);
-          }
-        }}
-      />
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <span className="kbd-hint">{queued ? "Waiting for Claude: connect it in the panel on the right" : "Claude builds it on the canvas"}</span>
-        <button className="btn primary" onClick={() => send(text)} disabled={!text.trim()}>
-          <Sparkles size={13} /> Design with Claude
-        </button>
-      </div>
-      <div className="suggestions" style={{ marginTop: 10 }}>
-        {IDEAS.map((i) => (
-          <button key={i} onClick={() => send(i)}>
-            {i}
+      {queued ? (
+        <>
+          <div className="empty-title">Ready when Claude is</div>
+          <div className="queued-prompt" style={{ marginBottom: 4 }}>
+            Waiting to send: <i>“{queued.length > 160 ? queued.slice(0, 160) + "…" : queued}”</i>. Connect Claude in the panel on the right
+            and it starts designing here.
+          </div>
+        </>
+      ) : (
+        <>
+        <div className="empty-title">What do you want to design?</div>
+        <textarea
+          id="empty-prompt-input"
+          className="textinput"
+          placeholder="Describe a screen, a flow or a whole app…"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send(text);
+            }
+          }}
+        />
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <span className="kbd-hint">Claude builds it on the canvas</span>
+          <button className="btn primary" onClick={() => send(text)} disabled={!text.trim()}>
+            <Sparkles size={13} /> Design with Claude
           </button>
-        ))}
-      </div>
+        </div>
+        <div className="suggestions" style={{ marginTop: 10 }}>
+          {IDEAS.map((i) => (
+            <button key={i} onClick={() => send(i)}>
+              {i}
+            </button>
+          ))}
+        </div>
+        </>
+      )}
       {!ready && (
         <button className="link-btn demo-link" onClick={() => playDemo()}>
           ▶ Not connected yet? Watch Claude design a page (replay, no setup)

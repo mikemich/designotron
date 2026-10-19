@@ -1989,3 +1989,60 @@ body:has(.phone-note) .toast {
 .layer.asset-set:hover {
   background: none;
 }
+
+/* Zoom level: flashes while zooming. */
+.zoom-indicator {
+  opacity: 0;
+  transition: opacity 0.25s ease;
+  pointer-events: none;
+}
+.zoom-indicator.shown {
+  opacity: 1;
+  transition-duration: 0.08s;
+}
+
+/* Start screen: describe a design for Claude. */
+.start-prompt {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 32px;
+  max-width: 1084px;
+}
+.start-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.start-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+.start-row textarea {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  font-size: 14px;
+  padding: 10px 12px;
+}
+.start-row .btn {
+  white-space: nowrap;
+  padding: 0 16px;
+}
+.start-prompt .suggestions {
+  margin-top: 12px;
+}
+@media (max-width: 640px) {
+  .start-row {
+    flex-direction: column;
+  }
+  .start-row textarea {
+    min-height: 84px;
+  }
+  .start-row .btn {
+    padding: 10px 16px;
+    justify-content: center;
+  }
+}

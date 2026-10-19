@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Figma, FilePlus, FolderOpen, Github, Loader2, MoreHorizontal } from "lucide-react";
+import { Figma, FilePlus, FolderOpen, Github, Loader2, MoreHorizontal, Sparkles } from "lucide-react";
+import { askWhenOpen } from "./Editor";
 import { REPO_URL } from "./panels/GuestBar";
 import { deleteFile, duplicateFile, importDtron, listFiles, newFileId, pickFile, renameFile, saveFile, type FileMeta } from "./files";
 import { bootEngine, getEngine, newEngine, dispatch, toast, useBoot, useStore } from "./store";
@@ -30,8 +31,16 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
     refresh();
   }, []);
 
-  const create = async (template: Template | null) => {
-    setOpening(template?.id ?? "new");
+  const [idea, setIdea] = useState("");
+  /** A new file with Claude designing what was described (it waits for Claude to connect). */
+  const designWithClaude = async (prompt: string) => {
+    if (!prompt.trim() || opening) return;
+    askWhenOpen(prompt.trim());
+    await create(null, "claude");
+  };
+
+  const create = async (template: Template | null, key?: string) => {
+    setOpening(key ?? template?.id ?? "new");
     try {
       await bootEngine();
     } catch {
@@ -96,8 +105,36 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
           <span className="muted">This browser isn't keeping files between visits here. Use Save as .dtron from the editor menu to keep your work.</span>
         </div>
       )}
+      <div className="start-prompt">
+        <div className="start-title">What do you want to design?</div>
+        <div className="start-row">
+          <textarea
+            className="textinput"
+            rows={2}
+            placeholder="Describe a screen, a flow or a whole app. Claude builds it on the canvas, as editable layers."
+            value={idea}
+            onChange={(e) => setIdea(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                designWithClaude(idea);
+              }
+            }}
+          />
+          <button className="btn primary" onClick={() => designWithClaude(idea)} disabled={!idea.trim() || !!opening}>
+            {opening === "claude" ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />} Design with Claude
+          </button>
+        </div>
+        <div className="suggestions">
+          {["A landing page for a coffee subscription", "A habit tracker mobile app, 3 screens", "A music player with a lyrics view"].map((i) => (
+            <button key={i} onClick={() => designWithClaude(i)} disabled={!!opening}>
+              {i}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="section-head" style={{ marginBottom: 12, fontSize: 14 }}>
-        Start from a template
+        Or start from a template
       </div>
       <div className="files-grid" style={{ marginBottom: 32 }}>
         {TEMPLATES.map((t) => (

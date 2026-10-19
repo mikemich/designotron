@@ -4,6 +4,7 @@ import { LeftPanel } from "./panels/LeftPanel";
 import { RightPanel } from "./panels/RightPanel";
 import { Toolbar } from "./panels/Toolbar";
 import { ChatPanel } from "./ai/ChatPanel";
+import { askClaude } from "./ai/chatState";
 import { Presenter } from "./Presenter";
 import { Tour } from "./Tour";
 import { VariablesDialog } from "./panels/VariablesDialog";
@@ -23,6 +24,12 @@ import { clearRecovery, listVersions, loadFile, readRecovery, saveFile, saveVers
 import { AUTO_VERSION_MS } from "./panels/HistoryPanel";
 import { nodeSvg, svgToPngBlob } from "./exporter";
 import { readFileAsDataUrl } from "./assets";
+
+/** A prompt for Claude to send once the next file has opened (from the start screen). */
+let askOnOpen: string | null = null;
+export function askWhenOpen(prompt: string) {
+  askOnOpen = prompt;
+}
 
 export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void }) {
   const chatOpen = useStore((s) => s.chatOpen);
@@ -64,6 +71,11 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       // Two frames: the canvas has its final size by then.
       requestAnimationFrame(() => requestAnimationFrame(zoomToFit));
       joinShared();
+      if (askOnOpen) {
+        const prompt = askOnOpen;
+        askOnOpen = null;
+        askClaude(prompt);
+      }
     })();
     return () => {
       cancelled = true;
