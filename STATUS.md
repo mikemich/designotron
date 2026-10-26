@@ -79,7 +79,7 @@ Verified on 2026-10-26 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 133 engine, bridge, rooms and relay tests              | `cargo test --workspace`                     |
+| 162 engine, bridge, rooms and relay tests              | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
