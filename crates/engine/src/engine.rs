@@ -2386,6 +2386,10 @@ impl Engine {
         .map(|n| n.kind.is_frame_like() && n.kind != NodeType::Instance)
         .unwrap_or(false)
     });
+    let pasted: Vec<&Node> = nodes.iter().collect();
+    if components::would_nest_nodes(&self.doc, &pasted, parent.as_deref()) {
+      return Err("a component can't contain an instance of itself".into());
+    }
     let bounds = Rect::union_all(
       nodes
         .iter()

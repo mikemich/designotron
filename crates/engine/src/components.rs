@@ -222,35 +222,6 @@ pub fn record_override(doc: &mut Document, node_id: &str, p: &Value) {
   persist_scopes(doc, &scopes);
 }
 
-/// After changes from collaborators were merged in: instances in `touched` whose component or
-/// swap records changed are rebuilt from that record. Node edits merge field by field, so two
-/// people swapping one instance at once would otherwise leave copies of one variant under
-/// the other. New layers get ids from a generator seeded by the instance, so every peer (and
-/// the relay) ends up with the same ones.
-pub fn resync_swapped(doc: &mut Document, prev: &Document, touched: &[NodeId]) {
-  fn swaps(i: &InstanceInfo) -> Vec<(&NodeId, &Value)> {
-    i.overrides.iter().filter_map(|(k, v)| v.get(SWAP_KEY).map(|s| (k, s))).collect()
-  }
-  for id in touched {
-    let (Some(n), Some(p)) = (doc.get(id), prev.get(id)) else {
-      continue;
-    };
-    let (Some(now), Some(before)) = (n.instance.as_ref(), p.instance.as_ref()) else {
-      continue;
-    };
-    if n.kind != NodeType::Instance || (now.component_id == before.component_id && swaps(now) == swaps(before)) {
-      continue;
-    }
-    if doc.instance_ancestor(id).is_none() {
-      // FNV-1a: stable across builds, unlike the std hasher.
-      let seed = id
-        .bytes()
-        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
-      sync_instance(doc, id, &mut IdGen::new(seed));
-    }
-  }
-}
-
 pub fn detach_instance(doc: &mut Document, inst_id: &str) {
   for nid in doc.subtree(inst_id) {
     if let Some(n) = doc.get_mut(&nid) {
@@ -318,7 +289,9 @@ pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mu
     return;
   };
   let Some(key) = inst.master_id.clone() else { return };
-  if doc.is_ancestor(comp_id, &key) || would_nest(doc, comp_id, &enclosing_component(doc, &key)) {
+  // (The host check above covers where the outer instance lives; a swap recorded in it can't
+  // recurse, the copies inside the new component are not expanded again.)
+  if doc.is_ancestor(comp_id, &key) {
     return;
   }
   let new_info = match swap_entry(doc, &parent, &key) {
@@ -443,9 +416,14 @@ fn referenced_components(n: &Node, out: &mut Vec<NodeId>) {
 /// True when `comp` is, or (through the instances inside it) contains, the component `host`:
 /// placing an instance of `comp` inside `host` would make `host` contain itself.
 pub fn would_nest(doc: &Document, comp: &str, host: &Option<NodeId>) -> bool {
+  would_nest_any(doc, vec![comp.to_string()], host)
+}
+
+/// `would_nest` for several components at once, walking each reachable component once.
+pub fn would_nest_any(doc: &Document, comps: Vec<NodeId>, host: &Option<NodeId>) -> bool {
   let Some(host) = host else { return false };
   let mut seen: HashSet<NodeId> = HashSet::new();
-  let mut stack = vec![comp.to_string()];
+  let mut stack = comps;
   while let Some(c) = stack.pop() {
     if c == *host {
       return true;
@@ -462,20 +440,28 @@ pub fn would_nest(doc: &Document, comp: &str, host: &Option<NodeId>) -> bool {
   false
 }
 
-/// True when moving `ids` under `parent` would put a component inside itself.
-pub fn would_nest_under(doc: &Document, ids: &[NodeId], parent: Option<&str>) -> bool {
+/// True when putting `nodes` (an instance of a component, or layers holding some) under
+/// `parent` would put a component inside itself.
+pub fn would_nest_nodes(doc: &Document, nodes: &[&Node], parent: Option<&str>) -> bool {
   let host = parent.and_then(|p| enclosing_component(doc, p));
   if host.is_none() {
     return false;
   }
-  ids.iter().any(|id| {
-    doc.subtree(id).iter().any(|d| {
-      let Some(n) = doc.get(d) else { return false };
-      let mut refs = Vec::new();
-      referenced_components(n, &mut refs);
-      refs.iter().any(|c| would_nest(doc, c, &host)) || (n.kind == NodeType::Component && Some(&n.id) == host.as_ref())
-    })
-  })
+  let mut refs = Vec::new();
+  for n in nodes {
+    referenced_components(n, &mut refs);
+    if n.kind == NodeType::Component && Some(&n.id) == host.as_ref() {
+      return true;
+    }
+  }
+  would_nest_any(doc, refs, &host)
+}
+
+/// True when moving `ids` under `parent` would put a component inside itself.
+pub fn would_nest_under(doc: &Document, ids: &[NodeId], parent: Option<&str>) -> bool {
+  let subtree: Vec<NodeId> = ids.iter().flat_map(|id| doc.subtree(id)).collect();
+  let nodes: Vec<&Node> = subtree.iter().filter_map(|d| doc.get(d)).collect();
+  would_nest_nodes(doc, &nodes, parent)
 }
 
 /// Links layers inside instances that lost their `master_id` (instances nested in main
@@ -1952,18 +1938,6 @@ mod tests {
       assert_eq!(font_size(&e, &label), 40.0);
     }
 
-    /// Every copy under `inst` copies a layer of the component the instance points at.
-    fn consistent(e: &Engine, inst: &str) -> bool {
-      let comp = e.doc.get(inst).unwrap().instance.as_ref().unwrap().component_id.clone();
-      e.doc.subtree(inst).iter().skip(1).all(|d| {
-        e.doc
-          .get(d)
-          .and_then(|n| n.master_id.as_ref())
-          .map(|m| e.doc.is_ancestor(&comp, m))
-          .unwrap_or(true)
-      })
-    }
-
     #[test]
     fn an_edit_that_puts_back_the_main_value_does_not_pin_it_across_a_swap() {
       let mut k = kit();
@@ -2195,23 +2169,124 @@ mod tests {
       crate::collab::apply(&mut relay_doc, &da).unwrap();
       crate::collab::apply(&mut relay_doc, &db).unwrap();
 
-      for (who, doc) in [("peer", &c.doc), ("relay", &relay_doc)] {
-        let info = doc.get(&i).unwrap().instance.clone().unwrap();
-        assert_eq!(info.component_id, off, "{who}");
+      // Merging is per field, so the instance can show a mix of both variants' layers until it
+      // is next re-synced (STATUS lists this); what matters is that the peer and the relay hold
+      // exactly the same thing, and that merging created nothing.
+      let shape_of = |doc: &crate::model::Document| -> Vec<String> {
+        let mut out = vec![format!("{:?}", doc.get(&i).unwrap().instance)];
         for d in doc.subtree(&i).iter().skip(1) {
-          let m = doc.get(d).unwrap().master_id.clone().unwrap();
-          assert!(doc.is_ancestor(&off, &m), "{who}: a copy of {m} under the Off instance");
+          let n = doc.get(d).unwrap();
+          out.push(format!(
+            "{d} {} {:?} {:?} {:?}",
+            n.name,
+            n.master_id,
+            n.fills,
+            n.text.as_ref().map(|t| t.characters.clone())
+          ));
         }
-        let bg = doc.subtree(&i).into_iter().find(|d| doc.get(d).unwrap().name == "Bg").unwrap();
-        assert!(
-          matches!(doc.get(&bg).unwrap().fills.first(), Some(Paint::Solid { color, .. }) if color.eq_ignore_ascii_case("#222222")),
-          "{who}"
-        );
-        let label = doc.subtree(&i).into_iter().find(|d| doc.get(d).unwrap().name == "Label").unwrap();
-        assert_eq!(doc.get(&label).unwrap().text.as_ref().unwrap().characters, "Buy", "{who}");
-      }
-      assert!(consistent(&c, &i));
+        out
+      };
+      assert_eq!(shape_of(&c.doc), shape_of(&relay_doc));
       assert_eq!(c.doc.get(&i).unwrap().instance.as_ref().unwrap().component_id, off);
+      assert_eq!(relay_doc.nodes.len(), base.nodes.len());
+    }
+
+    /// A delta that only repoints instances must never make the merge build layers: a peer
+    /// (or the relay's room doc) could otherwise be made to do unbounded work by a small patch.
+    #[test]
+    fn a_patch_that_repoints_instances_creates_no_nodes_when_merged() {
+      let mut k = kit();
+      let inst = instance(&mut k.e, &k.default, None);
+      let mut doc = k.e.doc.clone();
+      let before = doc.nodes.len();
+      let mut patch = serde_json::Map::new();
+      for _ in 0..3 {
+        patch.insert(inst.clone(), json!({ "instance": { "componentId": k.hover, "overrides": {} } }));
+        crate::collab::apply(&mut doc, &json!({ "patch": patch.clone() })).unwrap();
+        patch.insert(inst.clone(), json!({ "instance": { "componentId": k.default, "overrides": {} } }));
+        crate::collab::apply(&mut doc, &json!({ "patch": patch.clone() })).unwrap();
+      }
+      assert_eq!(doc.nodes.len(), before);
+      let mut ids: Vec<&String> = doc.nodes.keys().collect();
+      ids.sort();
+      ids.dedup();
+      assert_eq!(ids.len(), doc.nodes.len());
+    }
+
+    #[test]
+    fn a_nested_instance_swapped_to_a_component_holding_the_outer_main_stays_bounded() {
+      let mut k = kit();
+      let (card_comp, _) = card(&mut k);
+      // Wrap holds a Card instance, so it contains the Card main the outer instance copies.
+      let w = shape(&mut k.e, NodeType::Frame, 5000.0, None);
+      rename(&mut k.e, &w, "Wrap");
+      k.e
+        .dispatch(Command::CreateInstance {
+          component_id: card_comp.clone(),
+          x: 5010.0,
+          y: 10.0,
+          parent: Some(w.clone()),
+        })
+        .unwrap();
+      let wrap = id(k.e.dispatch(Command::CreateComponent { ids: vec![w] }).unwrap());
+      let o = instance(&mut k.e, &card_comp, None);
+      let nested = nested_instance(&k.e, &o);
+      let count = k.e.doc.nodes.len();
+      k.e
+        .dispatch(Command::SwapComponent {
+          id: nested.clone(),
+          component_id: wrap.clone(),
+        })
+        .unwrap();
+      let nested = nested_instance(&k.e, &o);
+      assert_eq!(k.e.doc.get(&nested).unwrap().instance.as_ref().unwrap().component_id, wrap);
+      let swapped = k.e.doc.nodes.len();
+      assert!(swapped > count && swapped < count + 40, "{count} -> {swapped}");
+      // Edits to the mains involved re-sync it without growing.
+      let title = named(&k.e, &card_comp, "Title");
+      for n in 0..4 {
+        k.e
+          .dispatch(Command::Update {
+            ids: vec![title.clone()],
+            patch: json!({ "text": { "fontSize": 20 + n } }),
+          })
+          .unwrap();
+      }
+      let default_label = named(&k.e, &k.default, "Label");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![default_label],
+          patch: json!({ "text": { "fontSize": 40 } }),
+        })
+        .unwrap();
+      assert_eq!(k.e.doc.nodes.len(), swapped);
+    }
+
+    #[test]
+    fn pasting_an_instance_into_its_own_main_is_refused() {
+      let mut k = kit();
+      let (card_comp, card_inst) = card(&mut k);
+      let data = k.e.copy(std::slice::from_ref(&card_inst));
+      let before = k.e.doc.nodes.len();
+      let r = k.e.dispatch(Command::Paste {
+        data: data.clone(),
+        parent: Some(card_comp.clone()),
+        x: None,
+        y: None,
+      });
+      assert!(r.is_err());
+      assert_eq!(k.e.doc.nodes.len(), before);
+      // Elsewhere it pastes as usual.
+      let other = shape(&mut k.e, NodeType::Frame, 8000.0, None);
+      assert!(k
+        .e
+        .dispatch(Command::Paste {
+          data,
+          parent: Some(other),
+          x: None,
+          y: None
+        })
+        .is_ok());
     }
 
     #[test]

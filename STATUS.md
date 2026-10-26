@@ -36,7 +36,7 @@ Ordered by impact on "replace Figma for a small team".
 |-----------------|------------------------------------------------------------------------------------------------------|
 | Engine (Rust)   | Serde document model, pages, undo/redo with gesture coalescing, JSON merge-patch edits               |
 | Layout          | Auto layout (direction, gap, padding, alignment, space-between, wrap), hug/fill/fixed, constraints   |
-| Components      | Main components, instances with stable ids, overrides (also on instances nested in a main component, set through the outer instance, and a nested instance swapped through it; they survive main edits, save/load, undo and multiplayer), reset/detach, variants (component sets); a component can't be made to contain itself (instance placement, moves, swaps), swap instance (panel and context menu; overrides on layers with the same name path carry over to the new variant or component), add variant, rename variant properties and values; pasting an instance into another file brings its main component |
+| Components      | Main components, instances with stable ids, overrides (also on instances nested in a main component, set through the outer instance, and a nested instance swapped through it; they survive main edits, save/load, undo and multiplayer), reset/detach, variants (component sets); a component can't be made to contain itself (instance placement, moves, paste, swaps), swap instance (panel and context menu; overrides on layers with the same name path carry over to the new variant or component), add variant, rename variant properties and values; pasting an instance into another file brings its main component |
 | Styles          | Colour and text styles: create, rename, edit in place (`UpdateColorStyle`, `UpdateTextStyle`), delete; style chips with detach in Fill and Text |
 | Canvas          | Pan/zoom, Figma-style picking and drill-down, marquee, move/resize/rotate, smart-guide snapping      |
 | Tools           | Frame, rectangle, ellipse, line, arrow, polygon, star, pen, pencil, text, image, hand                |
@@ -79,7 +79,7 @@ Verified on 2026-10-26 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 130 engine, bridge, rooms and relay tests              | `cargo test --workspace`                     |
+| 133 engine, bridge, rooms and relay tests              | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
@@ -135,7 +135,7 @@ until someone runs it with a real key.
 | Vectors          | Edit mode adds points (click a segment, exact Bézier split), deletes points (select, Delete), toggles sharp/smooth (double-click) and continues open paths with the pen; no bend tool yet; inside auto layout the box refit after an edit is overwritten by the layout; boolean results are flattened (not live) and curves become polylines; text can't be flattened |
 | Masks in code    | A frame or group containing a mask is exported to code as inline SVG                                     |
 | Components       | Layers are matched on a swap by their name path (repeated names pair up in order): an override on a layer the new component lacks, or whose name changed, is dropped; an edit that puts back the main component's value counts as no override |
-| Components       | An instance's component and overrides travel as one record, so of two concurrent changes to it (two swaps, or a swap and a text edit inside it) the later one in the relay's order wins whole; everyone converges, the earlier change is lost |
+| Components       | An instance swapped concurrently by two people can show a mix of both variants' layers (changes merge field by field) until it is next re-synced; everyone, and the relay, sees the same thing. Of two concurrent changes to one instance's component or overrides the later in the relay's order wins as a whole |
 | Multi-resize     | Resizing several rotated layers at once approximates their new boxes                                     |
 | Prototyping      | Smart animate plays as a dissolve; no scroll-to or variables; overlays always render at the frame's design size and don't scroll |
 | Images           | External `http` image URLs render on canvas but are missing from PNG export (assets are fine)            |

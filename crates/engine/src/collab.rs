@@ -170,7 +170,6 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
     doc.variables = serde_json::from_value(v.clone()).map_err(|e| format!("bad variables: {e}"))?;
   }
   repair(doc, &before, &touched);
-  crate::components::resync_swapped(doc, &before, &touched);
   Ok(())
 }
 
