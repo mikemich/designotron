@@ -8,6 +8,7 @@ import path from "node:path";
 
 const URL = process.env.E2E_URL ?? "http://localhost:5173";
 const OUT = process.env.E2E_OUT ?? "test-results";
+const MAX_CLOSE_TRIES = 20;
 fs.mkdirSync(OUT, { recursive: true });
 
 const launch = { headless: true, args: ["--no-sandbox"] };
@@ -306,7 +307,8 @@ try {
   };
   const close = async () => {
     await page.keyboard.press("Escape");
-    while ((await page.locator(".presenter").count()) > 0) {
+    for (let tries = 0; (await page.locator(".presenter").count()) > 0; tries++) {
+      if (tries >= MAX_CLOSE_TRIES) throw new Error(`the player is still open after ${MAX_CLOSE_TRIES} Escape presses`);
       await page.keyboard.press("Escape");
       await page.waitForTimeout(100);
     }
