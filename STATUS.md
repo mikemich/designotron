@@ -142,7 +142,7 @@ until someone runs it with a real key.
 | Security         | API key (API mode) is stored in this browser's localStorage                                              |
 | Input            | No touch/pen support; editor UI accessibility (keyboard-only, screen readers) is minimal                 |
 | Figma            | Import needs the REST API (no `.fig` files); library components become frames; fonts missing locally fall back; FigJam and Slides are not implemented |
-| Plugins          | Run on the editor's thread: a plugin stuck in an infinite loop freezes the tab                           |
+| Plugins          | Run in a sandboxed iframe; browsers that keep it in the editor's process (not Chromium) freeze the tab if a plugin loops forever. A plugin that stops answering is flagged with Stop |
 | Figma API        | Not tested against a real Figma account here (no token); the converter is tested on REST-shaped JSON     |
 
 ## Figma parity snapshot
