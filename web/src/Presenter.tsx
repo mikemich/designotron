@@ -10,6 +10,8 @@ interface Hotspot {
   id: string;
   rect: Rect;
   interactions: Interaction[];
+  /** This hotspot's layer, then its ancestors that have hotspots, innermost first. */
+  chain: string[];
 }
 
 /** An open overlay; `x`/`y` place it on the base frame. */
@@ -229,29 +231,53 @@ function OverlayLayer({
   );
 }
 
-/** A frame's picture plus a hotspot per layer with interactions. */
+/** A frame's picture plus a hotspot per layer with interactions. Hotspots are siblings, so a
+ *  layer without its own click runs its nearest ancestor's click, and pointer hover counts for
+ *  every layer in the chain (entering a child is still hovering the parent). */
 function FrameLayer({ id, hotspots, flash, onAct }: { id: string; hotspots: Hotspot[]; flash: boolean; onAct: (h: Hotspot, it: Interaction) => void }) {
   const svg = useMemo(() => nodeSvg(id), [id]);
+  const byId = useMemo(() => new Map(hotspots.map((h) => [h.id, h])), [hotspots]);
+  const isClick = (i: Interaction) => i.trigger === "onClick" || i.trigger === "onPress";
+  const isHover = (i: Interaction) => i.trigger === "onHover";
+  // How many hotspots of each hover owner's chain the pointer is inside; fire on 0 → 1 only.
+  const inside = useRef(new Map<string, number>());
+  const enter = (h: Hotspot) => {
+    for (const owner of h.chain) {
+      const o = byId.get(owner);
+      const hover = o?.interactions.find(isHover);
+      if (!o || !hover) continue;
+      const n = inside.current.get(owner) ?? 0;
+      inside.current.set(owner, n + 1);
+      if (n === 0) onAct(o, hover);
+    }
+  };
+  const leave = (h: Hotspot) => {
+    // Deferred so moving between a parent and its child (leave, then enter) doesn't re-fire.
+    setTimeout(() => {
+      for (const owner of h.chain) if (inside.current.has(owner)) inside.current.set(owner, Math.max(0, (inside.current.get(owner) ?? 1) - 1));
+    }, 0);
+  };
   return (
     <>
       <div dangerouslySetInnerHTML={{ __html: svg }} />
-      {hotspots.map((h) => {
-        const click = h.interactions.find((i) => i.trigger === "onClick" || i.trigger === "onPress");
-        const hover = h.interactions.find((i) => i.trigger === "onHover");
-        return (
-          <div
-            key={h.id}
-            className={"hotspot" + (flash ? " hint-flash" : "")}
-            data-hotspot={h.id}
-            style={{ left: h.rect.x, top: h.rect.y, width: h.rect.width, height: h.rect.height }}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (click) onAct(h, click);
-            }}
-            onMouseEnter={() => hover && onAct(h, hover)}
-          />
-        );
-      })}
+      {hotspots.map((h) => (
+        <div
+          key={h.id}
+          className={"hotspot" + (flash ? " hint-flash" : "")}
+          data-hotspot={h.id}
+          style={{ left: h.rect.x, top: h.rect.y, width: h.rect.width, height: h.rect.height }}
+          onClick={(e) => {
+            e.stopPropagation();
+            for (const owner of h.chain) {
+              const o = byId.get(owner);
+              const click = o?.interactions.find(isClick);
+              if (o && click) return onAct(o, click);
+            }
+          }}
+          onMouseEnter={() => enter(h)}
+          onMouseLeave={() => leave(h)}
+        />
+      ))}
     </>
   );
 }
@@ -268,15 +294,28 @@ function useHotspots(frameId: string): Hotspot[] {
       .map((n) => n.id);
     const fb = query<{ union: Rect }>({ q: "bounds", ids: [frameId] }).union;
     const items = query<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids }).items;
-    return items
-      .map((it) => ({
-        id: it.id,
-        rect: { x: it.bounds.x - fb.x, y: it.bounds.y - fb.y, width: it.bounds.width, height: it.bounds.height },
-        interactions: doc.nodes[it.id].interactions,
-      }))
-      // Node order in the document is arbitrary: stack bigger hotspots first so a layer inside
-      // another (or the frame itself) is never covered by it.
-      .sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height || (a.id < b.id ? -1 : 1));
+    const withHotspot = new Set(items.map((it) => it.id));
+    // Layer ids from `id` up to (and including) the frame.
+    const lineage = (id: string) => {
+      const out = [id];
+      for (let p = doc.nodes[id]?.parent; p && out[out.length - 1] !== frameId; p = doc.nodes[p]?.parent ?? null) out.push(p);
+      return out;
+    };
+    return (
+      items
+        .map((it) => ({
+          id: it.id,
+          rect: { x: it.bounds.x - fb.x, y: it.bounds.y - fb.y, width: it.bounds.width, height: it.bounds.height },
+          interactions: doc.nodes[it.id].interactions,
+          chain: lineage(it.id).filter((l) => withHotspot.has(l)),
+          depth: lineage(it.id).length,
+        }))
+        // Node order in the document is arbitrary: deeper layers go on top of their ancestors
+        // (so a child that overflows or matches its parent's size still gets the click), and
+        // among layers of the same depth bigger ones go first.
+        .sort((a, b) => a.depth - b.depth || b.rect.width * b.rect.height - a.rect.width * a.rect.height || (a.id < b.id ? -1 : 1))
+        .map(({ depth: _depth, ...h }) => h)
+    );
   }, [frameId]);
 }
 

@@ -270,6 +270,67 @@ try {
   await page.waitForSelector(".presenter .overlay-frame");
   await page.waitForTimeout(3500);
   check("base after-delay Back closes the open modal", (await overlays(page)) === 0 && (await crumb(page)).trim() === "Home", `${await overlays(page)} overlay(s), ${await crumb(page)}`);
+  // Hotspot stacking and inheritance, on their own screen.
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".presenter", { state: "detached" });
+  const rect = (name, x, y, w, h) => ({ type: "rectangle", name, x, y, width: w, height: h, fill: "#94A3B8" });
+  await tool("create_nodes", {
+    nodes: [
+      {
+        type: "frame", name: "Cards", x: 0, y: 1800, width: 390, height: 600, fill: "#FFFFFF",
+        children: [
+          { type: "frame", name: "Card", x: 20, y: 20, width: 300, height: 120, fill: "#E2E8F0", children: [rect("Icon", 10, 10, 40, 40)] },
+          { type: "frame", name: "Hover card", x: 20, y: 160, width: 300, height: 120, fill: "#E2E8F0", children: [rect("Plain button", 200, 60, 80, 40)] },
+          { type: "frame", name: "Layered", x: 20, y: 300, width: 300, height: 100, fill: "#E2E8F0", children: [rect("Layered bg", 0, 0, 300, 100)] },
+        ],
+      },
+    ],
+  });
+  const dc = await doc();
+  const cid = (n) => byName(dc, n).id;
+  // The card navigates on click; its icon only has a hover (which does nothing visible).
+  await tool("set_prototype", { nodeId: cid("Card"), action: "navigate", destinationId: id("Settings") });
+  await tool("set_prototype", { nodeId: cid("Icon"), trigger: "hover", action: "close_overlay" });
+  // The card opens a menu on hover; its button only has a click.
+  await tool("set_prototype", { nodeId: cid("Hover card"), trigger: "hover", action: "open_overlay", destinationId: id("Menu"), overlay: { position: "top_right", background: "none" } });
+  await tool("set_prototype", { nodeId: cid("Plain button"), action: "navigate", destinationId: id("Settings") });
+  // Parent and a same-sized child both clickable: the child, being deeper, wins.
+  await tool("set_prototype", { nodeId: cid("Layered"), action: "open_overlay", destinationId: id("Modal") });
+  await tool("set_prototype", { nodeId: cid("Layered bg"), action: "navigate", destinationId: id("Settings") });
+  const cardsPage = Object.values(dc.pages)[0].id;
+  await page.evaluate(([pg, f]) => window.__dt.dispatch({ op: "setFlowStart", page: pg, id: f }), [cardsPage, cid("Cards")]);
+  const present = async () => {
+    await page.click("button[title='Present']");
+    await page.waitForSelector(".presenter");
+    await page.waitForTimeout(300);
+  };
+  const close = async () => {
+    await page.keyboard.press("Escape");
+    while ((await page.locator(".presenter").count()) > 0) {
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(100);
+    }
+  };
+
+  await present();
+  await page.locator(`.presenter [data-hotspot="${cid("Icon")}"]`).click();
+  await page.waitForTimeout(500);
+  check("click on a hover-only child runs its parent's click", (await crumb(page)).trim() === "Settings", await crumb(page));
+  await close();
+
+  await present();
+  const btn = await box(page, `.presenter [data-hotspot="${cid("Plain button")}"]`);
+  await page.mouse.move(btn.x + btn.width / 2, btn.y + btn.height / 2);
+  await page.waitForTimeout(400);
+  check("hovering a click-only child counts as hovering its parent", (await overlays(page)) === 1, `${await overlays(page)} overlay(s)`);
+  await close();
+
+  await present();
+  await page.locator(`.presenter [data-hotspot="${cid("Layered bg")}"]`).click();
+  await page.waitForTimeout(500);
+  check("deeper layer wins over a same-sized parent", (await crumb(page)).trim() === "Settings" && (await overlays(page)) === 0, `${await crumb(page)}, ${await overlays(page)} overlay(s)`);
+  await close();
+  await page.evaluate((pg) => window.__dt.dispatch({ op: "setFlowStart", page: pg, id: null }), cardsPage);
 } catch (err) {
   failed++;
   console.log("FAIL  exception: " + (err?.stack ?? err));
