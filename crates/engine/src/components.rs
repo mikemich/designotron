@@ -123,6 +123,9 @@ pub fn create_instance(
   if comp.kind != NodeType::Component {
     return None;
   }
+  if would_nest(doc, comp_id, &parent.and_then(|p| enclosing_component(doc, p))) {
+    return None;
+  }
   let id = gen.next("n_");
   let inst = Node {
     id: id.clone(),
@@ -152,15 +155,11 @@ pub fn sync_instance(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
   if doc.get(&info.component_id).is_none() {
     return;
   }
-  // Reuse ids of existing copies so selection (and overrides keyed by them) survive.
+  // Reuse ids of existing copies so selection (and overrides keyed by them) survive. The old
+  // copies are removed by `build` once it has what it needs from them.
   let mut reuse = Reuse::new(doc, inst_id);
-  let children = doc.get(inst_id).map(|n| n.children.clone()).unwrap_or_default();
-  for c in &children {
-    for nid in doc.subtree(c) {
-      doc.nodes.remove(&nid);
-    }
-  }
   build(doc, gen, &mut reuse, inst_id, &info, &info.overrides, &Vec::new(), 0);
+  reuse.remove_old(doc);
 }
 
 /// Records a property edit made on a node that lives in an instance.
@@ -183,10 +182,73 @@ pub fn record_override(doc: &mut Document, node_id: &str, p: &Value) {
   if clean.as_object().map(|m| m.is_empty()).unwrap_or(true) {
     return;
   }
+  // An edit that puts back the main component's value is no override at all (typing a letter
+  // and deleting it again must not pin the text against later changes to the main).
+  let base = {
+    let layer = match key.as_str() {
+      ROOT_KEY => doc.get(&scope).and_then(|i| i.instance.as_ref()).map(|i| i.component_id.clone()),
+      k => Some(k.to_string()),
+    };
+    // Inside a swapped nested instance, its source's overrides apply under the component's layers.
+    let under = match (scopes.len(), doc.get(&scope)) {
+      (l, Some(s)) if l > 1 => match (s.master_id.as_ref(), s.instance.as_ref()) {
+        (Some(src), Some(i)) => source_base(doc, src, &i.component_id).remove(&key),
+        _ => None,
+      },
+      _ => None,
+    };
+    layer
+      .and_then(|l| doc.get(&l))
+      .and_then(|b| serde_json::to_value(b).ok())
+      .map(|mut j| {
+        if let Some(u) = under {
+          patch::merge(&mut j, &u);
+        }
+        j
+      })
+  };
   if let Some(info) = doc.get_mut(&scope).and_then(|i| i.instance.as_mut()) {
-    merge_override(info.overrides.entry(key).or_insert_with(empty), &clean);
+    let entry = info.overrides.entry(key.clone()).or_insert_with(empty);
+    merge_override(entry, &clean);
+    if let Some(b) = base {
+      match prune_equal(entry, &b) {
+        Some(kept) => *entry = kept,
+        None => {
+          info.overrides.remove(&key);
+        }
+      }
+    }
   }
   persist_scopes(doc, &scopes);
+}
+
+/// After changes from collaborators were merged in: instances in `touched` whose component or
+/// swap records changed are rebuilt from that record. Node edits merge field by field, so two
+/// people swapping one instance at once would otherwise leave copies of one variant under
+/// the other. New layers get ids from a generator seeded by the instance, so every peer (and
+/// the relay) ends up with the same ones.
+pub fn resync_swapped(doc: &mut Document, prev: &Document, touched: &[NodeId]) {
+  fn swaps(i: &InstanceInfo) -> Vec<(&NodeId, &Value)> {
+    i.overrides.iter().filter_map(|(k, v)| v.get(SWAP_KEY).map(|s| (k, s))).collect()
+  }
+  for id in touched {
+    let (Some(n), Some(p)) = (doc.get(id), prev.get(id)) else {
+      continue;
+    };
+    let (Some(now), Some(before)) = (n.instance.as_ref(), p.instance.as_ref()) else {
+      continue;
+    };
+    if n.kind != NodeType::Instance || (now.component_id == before.component_id && swaps(now) == swaps(before)) {
+      continue;
+    }
+    if doc.instance_ancestor(id).is_none() {
+      // FNV-1a: stable across builds, unlike the std hasher.
+      let seed = id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
+      sync_instance(doc, id, &mut IdGen::new(seed));
+    }
+  }
 }
 
 pub fn detach_instance(doc: &mut Document, inst_id: &str) {
@@ -232,8 +294,7 @@ pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mu
   let Some(new_name) = doc.get(comp_id).filter(|c| c.kind == NodeType::Component).map(|c| c.name.clone()) else {
     return;
   };
-  // A component can't contain an instance of itself.
-  if comp_id == inst_id || doc.is_ancestor(comp_id, inst_id) {
+  if comp_id == inst_id || doc.is_ancestor(comp_id, inst_id) || would_nest(doc, comp_id, &enclosing_component(doc, inst_id)) {
     return;
   }
   let Some(inst) = doc.get(inst_id).cloned() else { return };
@@ -243,7 +304,7 @@ pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mu
   let follow = inst.name.is_empty() || Some(&inst.name) == old_name.as_ref();
   let scopes = scope_chain(doc, inst_id);
   let Some(parent) = scopes.last().cloned() else {
-    let overrides = remap_overrides(doc, &info.component_id, comp_id, &info.overrides);
+    let overrides = carry_overrides(doc, &info.component_id, comp_id, &info.overrides, &BTreeMap::new());
     if let Some(inst) = doc.get_mut(inst_id) {
       if follow {
         inst.name = new_name;
@@ -257,14 +318,17 @@ pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mu
     return;
   };
   let Some(key) = inst.master_id.clone() else { return };
-  if doc.is_ancestor(comp_id, &key) {
+  if doc.is_ancestor(comp_id, &key) || would_nest(doc, comp_id, &enclosing_component(doc, &key)) {
     return;
   }
   let new_info = match swap_entry(doc, &parent, &key) {
-    Some(swapped) => InstanceInfo {
-      component_id: comp_id.to_string(),
-      overrides: remap_overrides(doc, &swapped.component_id, comp_id, &swapped.overrides),
-    },
+    Some(swapped) => {
+      let base = source_base(doc, &key, &swapped.component_id);
+      InstanceInfo {
+        component_id: comp_id.to_string(),
+        overrides: carry_overrides(doc, &swapped.component_id, comp_id, &swapped.overrides, &base),
+      }
+    }
     None => {
       // First swap: overrides made through the outer instance on this one's layers move
       // into the swap (keyed by the new component's layers).
@@ -280,7 +344,7 @@ pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mu
       }
       InstanceInfo {
         component_id: comp_id.to_string(),
-        overrides: remap_overrides(doc, &key, comp_id, &moved),
+        overrides: carry_overrides(doc, &key, comp_id, &moved, &BTreeMap::new()),
       }
     }
   };
@@ -310,13 +374,17 @@ pub fn is_swapped_nested(doc: &Document, id: &str) -> bool {
 /// True when an instance looks different from its main component: it has overrides of its
 /// own, or (inside another instance) overrides or a swap made through the outer one.
 pub fn has_overrides(doc: &Document, id: &str) -> bool {
-  let Some(n) = doc.get(id) else { return false };
-  if n.instance.as_ref().map(|i| !i.overrides.is_empty()).unwrap_or(false) {
-    return true;
-  }
+  override_count(doc, id) > 0
+}
+
+/// How many layers of instance `id` differ from its main component: those it overrides itself
+/// plus, inside another instance, those overridden (or swapped) through the outer one.
+pub fn override_count(doc: &Document, id: &str) -> usize {
+  let Some(n) = doc.get(id) else { return 0 };
+  let own = n.instance.as_ref().map(|i| i.overrides.len()).unwrap_or(0);
   let scopes = scope_chain(doc, id);
   let Some(store) = scopes.last().and_then(|s| doc.get(s)).and_then(|s| s.instance.as_ref()) else {
-    return false;
+    return own;
   };
   let source_overridden = n
     .master_id
@@ -325,19 +393,88 @@ pub fn has_overrides(doc: &Document, id: &str) -> bool {
     .and_then(|m| m.instance.as_ref())
     .map(|i| !i.overrides.is_empty())
     .unwrap_or(false);
-  if is_swapped_nested(doc, id) && source_overridden {
-    return true;
-  }
-  doc.subtree(id).iter().any(|d| {
-    let Some(m) = doc.get(d).and_then(|x| x.master_id.as_ref()) else {
-      return false;
-    };
-    match store.overrides.get(m) {
-      // The swap itself is shown by the component reference; its name isn't visual.
-      Some(Value::Object(o)) if d == id => o.keys().any(|k| k != SWAP_KEY && k != "name"),
-      Some(_) => true,
-      None => false,
+  let swapped_over_source = is_swapped_nested(doc, id) && source_overridden && own == 0;
+  let through = doc
+    .subtree(id)
+    .iter()
+    .filter(|d| {
+      let Some(m) = doc.get(d).and_then(|x| x.master_id.as_ref()) else {
+        return false;
+      };
+      match store.overrides.get(m) {
+        // The swap itself is shown by the component reference; its name isn't visual.
+        Some(Value::Object(o)) if *d == id => o.keys().any(|k| k != SWAP_KEY && k != "name"),
+        Some(_) => true,
+        None => false,
+      }
+    })
+    .count();
+  own + through + swapped_over_source as usize
+}
+
+/// The component whose layers contain `id` (the nearest one above it, or itself).
+fn enclosing_component(doc: &Document, id: &str) -> Option<NodeId> {
+  std::iter::once(id.to_string())
+    .chain(doc.ancestors(id))
+    .find(|a| doc.get(a).map(|n| n.kind == NodeType::Component).unwrap_or(false))
+}
+
+/// The components instanced by `n` itself: its main component and any it was swapped to
+/// (recorded in its overrides, to any depth).
+fn referenced_components(n: &Node, out: &mut Vec<NodeId>) {
+  fn swaps(overrides: &BTreeMap<NodeId, Value>, out: &mut Vec<NodeId>, depth: usize) {
+    if depth > MAX_SWAP_DEPTH {
+      return;
     }
+    for v in overrides.values() {
+      let Some(si) = v.get(SWAP_KEY).and_then(|s| serde_json::from_value::<InstanceInfo>(s.clone()).ok()) else {
+        continue;
+      };
+      out.push(si.component_id.clone());
+      swaps(&si.overrides, out, depth + 1);
+    }
+  }
+  if let Some(i) = &n.instance {
+    out.push(i.component_id.clone());
+    swaps(&i.overrides, out, 0);
+  }
+}
+
+/// True when `comp` is, or (through the instances inside it) contains, the component `host`:
+/// placing an instance of `comp` inside `host` would make `host` contain itself.
+pub fn would_nest(doc: &Document, comp: &str, host: &Option<NodeId>) -> bool {
+  let Some(host) = host else { return false };
+  let mut seen: HashSet<NodeId> = HashSet::new();
+  let mut stack = vec![comp.to_string()];
+  while let Some(c) = stack.pop() {
+    if c == *host {
+      return true;
+    }
+    if !seen.insert(c.clone()) {
+      continue;
+    }
+    for id in doc.subtree(&c) {
+      if let Some(n) = doc.get(&id) {
+        referenced_components(n, &mut stack);
+      }
+    }
+  }
+  false
+}
+
+/// True when moving `ids` under `parent` would put a component inside itself.
+pub fn would_nest_under(doc: &Document, ids: &[NodeId], parent: Option<&str>) -> bool {
+  let host = parent.and_then(|p| enclosing_component(doc, p));
+  if host.is_none() {
+    return false;
+  }
+  ids.iter().any(|id| {
+    doc.subtree(id).iter().any(|d| {
+      let Some(n) = doc.get(d) else { return false };
+      let mut refs = Vec::new();
+      referenced_components(n, &mut refs);
+      refs.iter().any(|c| would_nest(doc, c, &host)) || (n.kind == NodeType::Component && Some(&n.id) == host.as_ref())
+    })
   })
 }
 
@@ -352,7 +489,9 @@ pub fn repair_masters(doc: &mut Document) {
     .map(|n| n.id.clone())
     .collect();
   for inst in instances {
-    if doc.instance_ancestor(&inst).is_some() {
+    // Only the older-file case: instances nested in a main component. Others (a Figma import's
+    // instances, say) never had layers to link and are left alone.
+    if doc.instance_ancestor(&inst).is_some() || enclosing_component(doc, &inst).is_none() {
       continue;
     }
     let Some(comp) = doc.get(&inst).and_then(|n| n.instance.as_ref()).map(|i| i.component_id.clone()) else {
@@ -367,8 +506,7 @@ pub fn repair_masters(doc: &mut Document) {
     {
       continue;
     }
-    let mut pairs = Vec::new();
-    match_by_position(doc, &inst, &comp, &mut pairs);
+    let pairs = match_layers(doc, &inst, &comp);
     let mut found = BTreeMap::new();
     for (d, m) in pairs {
       let (Some(n), Some(master)) = (doc.get(&d).cloned(), doc.get(&m).cloned()) else {
@@ -423,10 +561,49 @@ fn deep_diff(before: &Value, after: &Value) -> Option<Value> {
           }
         }
       }
+      for k in b.keys().filter(|k| !a.contains_key(*k)) {
+        out.insert(k.clone(), Value::Null);
+      }
       (!out.is_empty()).then_some(Value::Object(out))
     }
     _ => (before != after).then(|| after.clone()),
   }
+}
+
+fn same_layer_kind(doc: &Document, a: &str, b: &str) -> bool {
+  match (doc.get(a), doc.get(b)) {
+    (Some(x), Some(y)) => x.kind == y.kind || (x.kind == NodeType::Frame && y.kind == NodeType::Component),
+    _ => false,
+  }
+}
+
+/// Pairs the layers under `inst` with the ones they copy under `comp`: by path of layer names
+/// (so a layer added or moved in the main since doesn't shift the rest), then by position
+/// for what's left.
+fn match_layers(doc: &Document, inst: &str, comp: &str) -> Vec<(NodeId, NodeId)> {
+  let by_path: HashMap<LayerPath, NodeId> = layer_paths(&doc.nodes, comp)
+    .into_iter()
+    .filter(|(_, p)| !p.is_empty())
+    .map(|(id, p)| (p, id))
+    .collect();
+  let mut out: Vec<(NodeId, NodeId)> = Vec::new();
+  for (d, p) in layer_paths(&doc.nodes, inst) {
+    if p.is_empty() {
+      continue;
+    }
+    if let Some(m) = by_path.get(&p).filter(|m| same_layer_kind(doc, &d, m)) {
+      out.push((d, m.clone()));
+    }
+  }
+  let mut by_pos = Vec::new();
+  match_by_position(doc, inst, comp, &mut by_pos);
+  for (d, m) in by_pos {
+    if !out.iter().any(|(od, om)| *od == d || *om == m) {
+      out.push((d, m));
+    }
+  }
+  out.sort();
+  out
 }
 
 /// Pairs `a`'s descendants with `b`'s where the trees have the same shape.
@@ -436,11 +613,7 @@ fn match_by_position(doc: &Document, a: &str, b: &str, out: &mut Vec<(NodeId, No
     return;
   }
   for (ca, cb) in na.children.iter().zip(&nb.children) {
-    let same_kind = match (doc.get(ca), doc.get(cb)) {
-      (Some(x), Some(y)) => x.kind == y.kind || (x.kind == NodeType::Frame && y.kind == NodeType::Component),
-      _ => false,
-    };
-    if same_kind {
+    if same_layer_kind(doc, ca, cb) {
       out.push((ca.clone(), cb.clone()));
       match_by_position(doc, ca, cb, out);
     }
@@ -539,7 +712,8 @@ fn build(
     prefix,
     cache: None,
   };
-  let mut map = reuse.alloc(doc, gen, &comp_nodes[1..], &mut paths);
+  let mut map = reuse.alloc(doc, gen, &comp_nodes[1..], &mut paths, !swaps.is_empty());
+  reuse.remove_old(doc);
   map.insert(comp.id.clone(), inst_id.to_string());
 
   for cid in comp_nodes.iter().skip(1) {
@@ -662,6 +836,117 @@ fn effective_overrides(doc: &Document, id: &str, depth: usize) -> BTreeMap<NodeI
   out
 }
 
+/// The overrides to keep through a swap away from `from`: those that still change something
+/// (an override that merely repeats the old component's value, like text typed and typed
+/// back, follows the new component), moved onto the layers of `to`. `base` holds what already
+/// applies on top of `from`'s layers.
+fn carry_overrides(
+  doc: &Document,
+  from: &str,
+  to: &str,
+  overrides: &BTreeMap<NodeId, Value>,
+  base: &BTreeMap<NodeId, Value>,
+) -> BTreeMap<NodeId, Value> {
+  let mut real = BTreeMap::new();
+  for (k, v) in overrides {
+    let layer = if k == ROOT_KEY { from } else { k.as_str() };
+    let kept = match doc.get(layer) {
+      Some(n) => {
+        let mut now = serde_json::to_value(n).unwrap_or(Value::Null);
+        if let Some(b) = base.get(k) {
+          patch::merge(&mut now, b);
+        }
+        prune_equal(v, &now)
+      }
+      None => Some(v.clone()),
+    };
+    if let Some(kept) = kept {
+      real.insert(k.clone(), kept);
+    }
+  }
+  remap_overrides(doc, from, to, &real)
+}
+
+/// `patch` without the fields that already hold in `base` (a layer as JSON, so a fill typed
+/// as `{type, color}` counts as the layer's `{type, color, opacity, visible}` one); None when
+/// nothing is left. A swap record always stays.
+fn prune_equal(patch: &Value, base: &Value) -> Option<Value> {
+  let node: Option<Node> = serde_json::from_value(base.clone()).ok();
+  // What `base` becomes with `part` applied, at `path` (None when it doesn't apply).
+  let holds = |path: &[&str], v: &Value| -> bool {
+    let Some(node) = node.as_ref() else {
+      return path
+        .iter()
+        .try_fold(base, |b, k| b.get(*k))
+        .map(|b| same_value(b, v))
+        .unwrap_or(false);
+    };
+    let mut part = v.clone();
+    for k in path.iter().rev() {
+      part = serde_json::json!({ *k: part });
+    }
+    let mut changed = node.clone();
+    if patch::apply(&mut changed, &part).is_err() {
+      return false;
+    }
+    let after = serde_json::to_value(&changed).unwrap_or(Value::Null);
+    let at = |j: &Value| path.iter().try_fold(j.clone(), |b, k| b.get(*k).cloned());
+    match (at(&after), at(base)) {
+      (Some(x), Some(y)) => same_value(&x, &y),
+      (None, None) => true,
+      _ => false,
+    }
+  };
+  let Value::Object(p) = patch else { return Some(patch.clone()) };
+  let mut out = serde_json::Map::new();
+  for (k, v) in p {
+    if k == SWAP_KEY {
+      out.insert(k.clone(), v.clone());
+      continue;
+    }
+    match (v, base.get(k)) {
+      (Value::Object(sub), Some(Value::Object(_))) => {
+        let kept: serde_json::Map<String, Value> = sub
+          .iter()
+          .filter(|(j, w)| !holds(&[k.as_str(), j.as_str()], w))
+          .map(|(j, w)| (j.clone(), w.clone()))
+          .collect();
+        if !kept.is_empty() {
+          out.insert(k.clone(), Value::Object(kept));
+        }
+      }
+      _ => {
+        if !holds(&[k.as_str()], v) {
+          out.insert(k.clone(), v.clone());
+        }
+      }
+    }
+  }
+  (!out.is_empty()).then_some(Value::Object(out))
+}
+
+/// JSON equality that doesn't tell 16 from 16.0.
+fn same_value(a: &Value, b: &Value) -> bool {
+  match (a, b) {
+    (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
+    (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same_value(p, q)),
+    (Value::Object(x), Value::Object(y)) => {
+      x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).map(|w| same_value(v, w)).unwrap_or(false))
+    }
+    _ => a == b,
+  }
+}
+
+/// What a nested instance swapped to `comp` already looks like before the overrides made
+/// through the outer instance: the overrides of its source (`key`, the nested instance in a
+/// main component), moved onto the layers of `comp`.
+fn source_base(doc: &Document, key: &str, comp: &str) -> BTreeMap<NodeId, Value> {
+  match doc.get(key).and_then(|s| s.instance.as_ref()) {
+    Some(src) => remap_overrides(doc, &src.component_id, comp, &effective_overrides(doc, key, 0)),
+    None => BTreeMap::new(),
+  }
+}
+
 /// Re-keys overrides made on the layers under `from` to the layers under `to` with the same
 /// path of names (Figma's rule; repeated names pair up in order). Unmatched ones are dropped.
 fn remap_overrides(doc: &Document, from: &str, to: &str, overrides: &BTreeMap<NodeId, Value>) -> BTreeMap<NodeId, Value> {
@@ -747,48 +1032,83 @@ impl LazyPaths<'_> {
 
 /// Ids of an instance's previous copies, handed out again to the copies that replace them:
 /// first by the layer they copy, then by their path (a swap to another variant keeps ids).
+/// Holds only ids (never a snapshot of the document, which would make every later edit of
+/// the node map copy shared chunks); the old copies' paths are captured, before they're
+/// removed, only when matching by layer isn't enough.
 struct Reuse {
   root: NodeId,
-  old: imbl::OrdMap<NodeId, Node>,
-  by_master: HashMap<NodeId, Vec<NodeId>>,
+  /// The old copies under the instance, still in the document until `remove_old`.
+  old_ids: Vec<NodeId>,
+  /// The first old copy of each layer, and any further ones.
+  by_master: HashMap<NodeId, NodeId>,
+  more: HashMap<NodeId, Vec<NodeId>>,
   old_paths: Option<HashMap<NodeId, LayerPath>>,
   used: HashSet<NodeId>,
 }
 
 impl Reuse {
   fn new(doc: &Document, inst_id: &str) -> Self {
-    let mut by_master: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    for nid in doc.subtree(inst_id).into_iter().skip(1) {
-      if let Some(m) = doc.get(&nid).and_then(|n| n.master_id.clone()) {
-        by_master.entry(m).or_default().push(nid);
+    let mut old_ids = doc.subtree(inst_id);
+    old_ids.remove(0);
+    let mut by_master: HashMap<NodeId, NodeId> = HashMap::with_capacity(old_ids.len());
+    let mut more: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for nid in &old_ids {
+      let Some(m) = doc.get(nid).and_then(|n| n.master_id.as_ref()) else {
+        continue;
+      };
+      match by_master.get(m) {
+        None => {
+          by_master.insert(m.clone(), nid.clone());
+        }
+        Some(_) => more.entry(m.clone()).or_default().push(nid.clone()),
       }
     }
     Reuse {
       root: inst_id.to_string(),
-      old: doc.nodes.clone(),
+      old_ids,
       by_master,
+      more,
       old_paths: None,
       used: HashSet::new(),
     }
   }
 
-  /// Picks an id for the copy of each of `wanted`.
-  fn alloc(&mut self, doc: &Document, gen: &mut IdGen, wanted: &[NodeId], paths: &mut LazyPaths) -> HashMap<NodeId, NodeId> {
-    let mut out = HashMap::new();
+  /// Removes the old copies from the document (once).
+  fn remove_old(&mut self, doc: &mut Document) {
+    for nid in std::mem::take(&mut self.old_ids) {
+      doc.nodes.remove(&nid);
+    }
+  }
+
+  /// Picks an id for the copy of each of `wanted`. `needs_paths` asks for the old copies'
+  /// paths to be kept for later calls (a swapped nested instance re-allocates after the old
+  /// copies are gone).
+  fn alloc(
+    &mut self,
+    doc: &Document,
+    gen: &mut IdGen,
+    wanted: &[NodeId],
+    paths: &mut LazyPaths,
+    needs_paths: bool,
+  ) -> HashMap<NodeId, NodeId> {
+    let mut out = HashMap::with_capacity(wanted.len() + 1);
     let mut pending = Vec::new();
+    if needs_paths || !self.more.is_empty() {
+      self.capture_paths(doc);
+    }
     for cid in wanted {
-      let free: Vec<NodeId> = self
-        .by_master
-        .get(cid)
-        .map(|v| v.iter().filter(|i| !self.used.contains(*i)).cloned().collect())
-        .unwrap_or_default();
-      let pick = match free.len() {
-        0 => None,
-        1 => Some(free[0].clone()),
-        _ => {
+      let pick = match (self.by_master.get(cid), self.more.get(cid)) {
+        (None, _) => None,
+        (Some(first), None) => Some(first).filter(|i| !self.used.contains(*i)).cloned(),
+        (Some(first), Some(rest)) => {
+          let free: Vec<&NodeId> = std::iter::once(first).chain(rest).filter(|i| !self.used.contains(*i)).collect();
           let want = paths.get(doc).get(cid).cloned();
-          let old = self.old_paths();
-          free.iter().find(|i| old.get(*i) == want.as_ref()).or(free.first()).cloned()
+          let old = self.old_paths.as_ref();
+          free
+            .iter()
+            .find(|i| old.and_then(|o| o.get(**i)) == want.as_ref())
+            .or(free.first())
+            .map(|i| (*i).clone())
         }
       };
       match pick {
@@ -802,7 +1122,15 @@ impl Reuse {
     if pending.is_empty() {
       return out;
     }
-    let by_path: HashMap<LayerPath, NodeId> = self.old_paths().iter().map(|(id, p)| (p.clone(), id.clone())).collect();
+    // Layers with no copy of their own take over a copy at the same path (a renamed or
+    // replaced layer in the main component).
+    self.capture_paths(doc);
+    let by_path: HashMap<&LayerPath, &NodeId> = self
+      .old_paths
+      .as_ref()
+      .map(|o| o.iter().map(|(id, p)| (p, id)).collect())
+      .unwrap_or_default();
+    let mut picked = Vec::new();
     for cid in pending {
       let reused = if by_path.is_empty() {
         None
@@ -811,22 +1139,25 @@ impl Reuse {
           .get(doc)
           .get(cid)
           .and_then(|p| by_path.get(p))
-          .filter(|i| !self.used.contains(*i))
-          .cloned()
+          .filter(|i| !self.used.contains(**i) && !picked.contains(**i))
+          .map(|i| (*i).clone())
       };
       let id = reused.unwrap_or_else(|| gen.next("n_"));
-      self.used.insert(id.clone());
+      picked.push(id.clone());
       out.insert(cid.clone(), id);
     }
+    self.used.extend(picked);
     out
   }
 
-  /// Paths of the old copies under the instance (from the document before the re-sync).
-  fn old_paths(&mut self) -> &HashMap<NodeId, LayerPath> {
-    let (root, old) = (&self.root, &self.old);
-    self
-      .old_paths
-      .get_or_insert_with(|| layer_paths(old, root).into_iter().filter(|(_, p)| !p.is_empty()).collect())
+  /// Paths of the old copies under the instance, from the document before they're removed.
+  /// A no-op once they're gone (or already captured).
+  fn capture_paths(&mut self, doc: &Document) {
+    if self.old_paths.is_some() || self.old_ids.is_empty() {
+      return;
+    }
+    let root = &self.root;
+    self.old_paths = Some(layer_paths(&doc.nodes, root).into_iter().filter(|(_, p)| !p.is_empty()).collect());
   }
 }
 
@@ -1016,10 +1347,11 @@ mod tests {
       patch: json!({ "name": "Button" }),
     })
     .unwrap();
-    let home = shape(&mut e, NodeType::Frame, 0.0);
+    // Clear of the components: a frame drawn over one would land inside it.
+    let home = shape(&mut e, NodeType::Frame, 1000.0);
     e.dispatch(Command::Update {
       ids: vec![home.clone()],
-      patch: json!({ "name": "Home", "x": 0.0, "y": 300.0, "width": 400.0, "height": 400.0 }),
+      patch: json!({ "name": "Home", "x": 1000.0, "y": 300.0, "width": 400.0, "height": 400.0 }),
     })
     .unwrap();
     let inst = id(
@@ -1222,9 +1554,11 @@ mod tests {
 
   /// Overrides through variant swaps, nested instances and nested swaps.
   mod overrides {
+    use crate::components::{carry_overrides, has_overrides, override_count};
     use crate::engine::{Command, Engine};
     use crate::model::{NodeType, Paint};
     use serde_json::{json, Value};
+    use std::collections::BTreeMap;
 
     const DEFAULT_FILL: &str = "#111111";
     const HOVER_FILL: &str = "#333333";
@@ -1616,6 +1950,411 @@ mod tests {
       .unwrap();
       assert_eq!(text(&e, &label), "Kept");
       assert_eq!(font_size(&e, &label), 40.0);
+    }
+
+    /// Every copy under `inst` copies a layer of the component the instance points at.
+    fn consistent(e: &Engine, inst: &str) -> bool {
+      let comp = e.doc.get(inst).unwrap().instance.as_ref().unwrap().component_id.clone();
+      e.doc.subtree(inst).iter().skip(1).all(|d| {
+        e.doc
+          .get(d)
+          .and_then(|n| n.master_id.as_ref())
+          .map(|m| e.doc.is_ancestor(&comp, m))
+          .unwrap_or(true)
+      })
+    }
+
+    #[test]
+    fn an_edit_that_puts_back_the_main_value_does_not_pin_it_across_a_swap() {
+      let mut k = kit();
+      let hover_label = named(&k.e, &k.hover, "Label");
+      set_text(&mut k.e, &hover_label, "Buy now");
+      let inst = instance(&mut k.e, &k.default, None);
+      let label = named(&k.e, &inst, "Label");
+      // Typing a letter and deleting it again (a SetText per keystroke), a fill set to what it was.
+      set_text(&mut k.e, &label, "Buyx");
+      set_text(&mut k.e, &label, "Buy");
+      let bg = named(&k.e, &inst, "Bg");
+      fill(&mut k.e, &bg, "#FF0000");
+      fill(&mut k.e, &bg, "#222222");
+      let info = k.e.doc.get(&inst).unwrap().instance.clone().unwrap();
+      assert!(info.overrides.is_empty(), "{:?}", info.overrides);
+      assert!(!has_overrides(&k.e.doc, &inst));
+      variant(&mut k.e, &inst, "Hover");
+      assert_eq!(text(&k.e, &named(&k.e, &inst, "Label")), "Buy now");
+      assert_eq!(fill_of(&k.e, &named(&k.e, &inst, "Bg")), HOVER_BG);
+
+      // A real override still carries over, and one equal to the *old* main is dropped even
+      // when it was recorded before the main changed.
+      let label = named(&k.e, &inst, "Label");
+      set_text(&mut k.e, &label, "Mine");
+      variant(&mut k.e, &inst, "Default");
+      assert_eq!(text(&k.e, &named(&k.e, &inst, "Label")), "Mine");
+      let old: Value = json!({ "text": { "characters": "Buy" } });
+      let id_label = named(&k.e, &k.default, "Label");
+      let mut hand = BTreeMap::new();
+      hand.insert(id_label, old);
+      let carried = carry_overrides(&k.e.doc, &k.default, &k.hover, &hand, &BTreeMap::new());
+      assert!(carried.is_empty(), "{carried:?}");
+    }
+
+    #[test]
+    fn a_no_op_edit_inside_a_nested_instance_is_dropped_too() {
+      let mut k = kit();
+      let (_, card_inst) = card(&mut k);
+      let nested = nested_instance(&k.e, &card_inst);
+      let label = named(&k.e, &nested, "Label");
+      set_text(&mut k.e, &label, "Buyx");
+      set_text(&mut k.e, &label, "Buy");
+      assert!(k.e.doc.get(&card_inst).unwrap().instance.as_ref().unwrap().overrides.is_empty());
+      variant(&mut k.e, &nested, "Hover");
+      assert_eq!(text(&k.e, &named(&k.e, &nested, "Label")), "Buy");
+      let t = named(&k.e, &nested, "Label");
+      set_text(&mut k.e, &t, "Buy!");
+      let t = named(&k.e, &nested, "Label");
+      set_text(&mut k.e, &t, "Buy");
+      assert_eq!(override_count(&k.e.doc, &nested), 0);
+      variant(&mut k.e, &nested, "Default");
+      assert_eq!(fill_of(&k.e, &nested), DEFAULT_FILL);
+    }
+
+    /// Card set (Kind=A / Kind=B), each holding a Button instance; Panel holds a Card A.
+    #[test]
+    fn swaps_inside_a_swapped_nested_instance_persist_and_reset_one_level_at_a_time() {
+      let mut k = kit();
+      let mut cards = vec![];
+      for (i, kind) in ["A", "B"].iter().enumerate() {
+        let f = shape(&mut k.e, NodeType::Frame, 1000.0 + i as f64 * 400.0, None);
+        rename(&mut k.e, &f, "Card");
+        let default = k.default.clone();
+        let b = instance(&mut k.e, &default, Some(&f));
+        rename(&mut k.e, &b, "Btn");
+        let c = id(k.e.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap());
+        rename(&mut k.e, &c, &format!("Kind={kind}"));
+        cards.push(c);
+      }
+      k.e.dispatch(Command::CombineVariants { ids: cards.clone() }).unwrap();
+      let panel_frame = shape(&mut k.e, NodeType::Frame, 3000.0, None);
+      rename(&mut k.e, &panel_frame, "Panel");
+      k.e
+        .dispatch(Command::CreateInstance {
+          component_id: cards[0].clone(),
+          x: 3010.0,
+          y: 10.0,
+          parent: Some(panel_frame.clone()),
+        })
+        .unwrap();
+      let panel = id(k.e.dispatch(Command::CreateComponent { ids: vec![panel_frame] }).unwrap());
+      let p = instance(&mut k.e, &panel, None);
+
+      // Level one: the Card inside the Panel instance becomes Kind=B.
+      let card_n = nested_instance(&k.e, &p);
+      k.e
+        .dispatch(Command::SetVariant {
+          id: card_n.clone(),
+          prop: "Kind".into(),
+          value: "B".into(),
+        })
+        .unwrap();
+      assert_eq!(k.e.doc.get(&card_n).unwrap().instance.as_ref().unwrap().component_id, cards[1]);
+      // Level two: the Button inside that swapped Card becomes Hover, with its own label.
+      let btn = nested_instance(&k.e, &card_n);
+      variant(&mut k.e, &btn, "Hover");
+      let t = named(&k.e, &btn, "Label");
+      set_text(&mut k.e, &t, "Deep");
+      let check = |e: &Engine, why: &str| {
+        let card_n = nested_instance(e, &p);
+        let btn = nested_instance(e, &card_n);
+        assert_eq!(
+          e.doc.get(&card_n).unwrap().instance.as_ref().unwrap().component_id,
+          cards[1],
+          "{why}: card"
+        );
+        assert_eq!(
+          e.doc.get(&btn).unwrap().instance.as_ref().unwrap().component_id,
+          k.hover,
+          "{why}: button"
+        );
+        assert_eq!(text(e, &named(e, &btn, "Label")), "Deep", "{why}: label");
+        assert_eq!(fill_of(e, &btn), HOVER_FILL, "{why}: fill");
+        let mut ids: Vec<&String> = e.doc.nodes.keys().collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), e.doc.nodes.len(), "{why}: ids");
+      };
+      check(&k.e, "after the swaps");
+
+      // Edits to every component involved leave both swaps and the label alone.
+      let default_label = named(&k.e, &k.default, "Label");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![default_label],
+          patch: json!({ "text": { "fontSize": 31 } }),
+        })
+        .unwrap();
+      let hover_bg = named(&k.e, &k.hover, "Bg");
+      fill(&mut k.e, &hover_bg, "#ABCDEF");
+      let kind_b_children = k.e.doc.get(&cards[1]).unwrap().children.clone();
+      assert!(!kind_b_children.is_empty());
+      rename(&mut k.e, &kind_b_children[0], "Btn");
+      let panel_children = k.e.doc.get(&panel).unwrap().children.clone();
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![panel_children[0].clone()],
+          patch: json!({ "x": 15 }),
+        })
+        .unwrap();
+      check(&k.e, "after editing the mains");
+      assert_eq!(fill_of(&k.e, &named(&k.e, &btn_of(&k.e, &p), "Bg")), "#ABCDEF");
+
+      // Saved and opened again.
+      let mut e2 = engine_seeded(21);
+      e2.load(&k.e.to_json()).unwrap();
+      let t = named(&e2, &p, "Label");
+      set_text(&mut e2, &t, "Deep");
+      check(&e2, "after save and load");
+
+      // Reset the Button: back to its source (a Default button, no label override), the Card
+      // keeps its swap. Reset the Card: Kind=A again.
+      let btn = btn_of(&e2, &p);
+      e2.dispatch(Command::ResetInstance { ids: vec![btn.clone()] }).unwrap();
+      let card_n = nested_instance(&e2, &p);
+      let btn = nested_instance(&e2, &card_n);
+      assert_eq!(e2.doc.get(&card_n).unwrap().instance.as_ref().unwrap().component_id, cards[1]);
+      assert_eq!(e2.doc.get(&btn).unwrap().instance.as_ref().unwrap().component_id, k.default);
+      assert_eq!(text(&e2, &named(&e2, &btn, "Label")), "Buy");
+      e2.dispatch(Command::ResetInstance { ids: vec![card_n.clone()] }).unwrap();
+      let card_n = nested_instance(&e2, &p);
+      assert_eq!(e2.doc.get(&card_n).unwrap().instance.as_ref().unwrap().component_id, cards[0]);
+    }
+
+    fn btn_of(e: &Engine, p: &str) -> String {
+      nested_instance(e, &nested_instance(e, p))
+    }
+
+    #[test]
+    fn concurrent_swaps_of_one_instance_converge_on_one_component() {
+      let mut k = kit();
+      // A third component, apart from the set.
+      let f = shape(&mut k.e, NodeType::Frame, 400.0, None);
+      rename(&mut k.e, &f, "Button");
+      fill(&mut k.e, &f, "#555555");
+      let bg = shape(&mut k.e, NodeType::Rectangle, 400.0, Some(&f));
+      rename(&mut k.e, &bg, "Bg");
+      fill(&mut k.e, &bg, "#222222");
+      let t = id(
+        k.e
+          .dispatch(Command::CreateText {
+            x: 410.0,
+            y: 10.0,
+            characters: "Buy".into(),
+            parent: Some(f.clone()),
+          })
+          .unwrap(),
+      );
+      rename(&mut k.e, &t, "Label");
+      let off = id(k.e.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap());
+      // Off looks like Default where Hover doesn't, so B's change leaves those fields alone.
+      let hover_label = named(&k.e, &k.hover, "Label");
+      set_text(&mut k.e, &hover_label, "Buy!");
+      let (default, hover) = (k.default.clone(), k.hover.clone());
+      let mut a = k.e;
+      let i = instance(&mut a, &default, None);
+      let mut b = engine_seeded(32);
+      b.load(&a.to_json()).unwrap();
+      let mut c = engine_seeded(33);
+      c.load(&a.to_json()).unwrap();
+      let base = a.doc.clone();
+      a.dispatch(Command::SwapComponent {
+        id: i.clone(),
+        component_id: hover.clone(),
+      })
+      .unwrap();
+      let da = crate::collab::delta(&base, &a.doc, true);
+      let bbase = b.doc.clone();
+      b.dispatch(Command::SwapComponent {
+        id: i.clone(),
+        component_id: off.clone(),
+      })
+      .unwrap();
+      let db = crate::collab::delta(&bbase, &b.doc, true);
+
+      // The relay orders A's change, then B's; a third peer and the relay's own copy apply both
+      // in that order.
+      c.dispatch(Command::ApplyRemote {
+        delta: da.clone(),
+        local: false,
+      })
+      .unwrap();
+      c.dispatch(Command::ApplyRemote {
+        delta: db.clone(),
+        local: false,
+      })
+      .unwrap();
+      let mut relay_doc = base.clone();
+      crate::collab::apply(&mut relay_doc, &da).unwrap();
+      crate::collab::apply(&mut relay_doc, &db).unwrap();
+
+      for (who, doc) in [("peer", &c.doc), ("relay", &relay_doc)] {
+        let info = doc.get(&i).unwrap().instance.clone().unwrap();
+        assert_eq!(info.component_id, off, "{who}");
+        for d in doc.subtree(&i).iter().skip(1) {
+          let m = doc.get(d).unwrap().master_id.clone().unwrap();
+          assert!(doc.is_ancestor(&off, &m), "{who}: a copy of {m} under the Off instance");
+        }
+        let bg = doc.subtree(&i).into_iter().find(|d| doc.get(d).unwrap().name == "Bg").unwrap();
+        assert!(
+          matches!(doc.get(&bg).unwrap().fills.first(), Some(Paint::Solid { color, .. }) if color.eq_ignore_ascii_case("#222222")),
+          "{who}"
+        );
+        let label = doc.subtree(&i).into_iter().find(|d| doc.get(d).unwrap().name == "Label").unwrap();
+        assert_eq!(doc.get(&label).unwrap().text.as_ref().unwrap().characters, "Buy", "{who}");
+      }
+      assert!(consistent(&c, &i));
+      assert_eq!(c.doc.get(&i).unwrap().instance.as_ref().unwrap().component_id, off);
+    }
+
+    #[test]
+    fn a_component_cannot_end_up_containing_itself() {
+      let mut k = kit();
+      let (card_comp, _) = card(&mut k);
+      let default = k.default.clone();
+      // Placing an instance of the Card inside the Card, directly or through another component.
+      let r = k.e.dispatch(Command::CreateInstance {
+        component_id: card_comp.clone(),
+        x: 0.0,
+        y: 0.0,
+        parent: Some(card_comp.clone()),
+      });
+      assert!(r.is_err());
+      // Wrapper holds an instance of the Card; the Card can't take an instance of Wrapper.
+      let w = shape(&mut k.e, NodeType::Frame, 5000.0, None);
+      rename(&mut k.e, &w, "Wrapper");
+      k.e
+        .dispatch(Command::CreateInstance {
+          component_id: card_comp.clone(),
+          x: 5010.0,
+          y: 10.0,
+          parent: Some(w.clone()),
+        })
+        .unwrap();
+      let wrapper = id(k.e.dispatch(Command::CreateComponent { ids: vec![w] }).unwrap());
+      let r = k.e.dispatch(Command::CreateInstance {
+        component_id: wrapper.clone(),
+        x: 0.0,
+        y: 0.0,
+        parent: Some(card_comp.clone()),
+      });
+      assert!(r.is_err());
+      // Moving an instance of Wrapper (made elsewhere) into the Card is refused too.
+      let loose = instance(&mut k.e, &wrapper, None);
+      let r = k.e.dispatch(Command::MoveToParent {
+        ids: vec![loose.clone()],
+        parent: Some(card_comp.clone()),
+        index: None,
+      });
+      assert!(r.is_err());
+      assert!(!k.e.doc.is_ancestor(&card_comp, &loose));
+      // Swapping the Button inside the Wrapper's Card for the Wrapper itself is refused: no change.
+      let card_in_wrapper = nested_instance(&k.e, &wrapper);
+      let before = k.e.doc.get(&card_in_wrapper).unwrap().instance.clone();
+      k.e
+        .dispatch(Command::SwapComponent {
+          id: card_in_wrapper.clone(),
+          component_id: wrapper.clone(),
+        })
+        .unwrap();
+      assert_eq!(k.e.doc.get(&card_in_wrapper).unwrap().instance, before);
+      // Swapping the Button inside the Card main (an instance of Default) for the Wrapper
+      // would put Wrapper (which holds the Card) inside the Card.
+      let button_in_card = nested_instance(&k.e, &card_comp);
+      k.e
+        .dispatch(Command::SwapComponent {
+          id: button_in_card.clone(),
+          component_id: wrapper.clone(),
+        })
+        .unwrap();
+      assert_eq!(
+        k.e.doc.get(&button_in_card).unwrap().instance.as_ref().unwrap().component_id,
+        default
+      );
+      // Unrelated moves still work.
+      let other = shape(&mut k.e, NodeType::Frame, 7000.0, None);
+      assert!(k
+        .e
+        .dispatch(Command::MoveToParent {
+          ids: vec![loose],
+          parent: Some(other),
+          index: None
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn repair_only_touches_instances_inside_main_components() {
+      let mut k = kit();
+      // A page-level instance whose layers lost their links (a hand-made or imported file).
+      let inst = instance(&mut k.e, &k.default, None);
+      let label = named(&k.e, &inst, "Label");
+      set_text(&mut k.e, &label, "Mine");
+      let mut v: Value = serde_json::from_str(&k.e.to_json()).unwrap();
+      for d in k.e.doc.subtree(&inst).iter().skip(1) {
+        v["nodes"][d]["masterId"] = Value::Null;
+      }
+      let mut e = engine_seeded(41);
+      e.load(&v.to_string()).unwrap();
+      assert!(e
+        .doc
+        .subtree(&inst)
+        .iter()
+        .skip(1)
+        .all(|d| e.doc.get(d).unwrap().master_id.is_none()));
+
+      // The same inside a main component is relinked by layer name, even when the main gained
+      // a layer in front of the others since.
+      let (card_comp, _) = card(&mut k);
+      let nested = nested_instance(&k.e, &card_comp);
+      let nested_label = named(&k.e, &nested, "Label");
+      set_text(&mut k.e, &nested_label, "Kept in main");
+      let mut v: Value = serde_json::from_str(&k.e.to_json()).unwrap();
+      for d in k.e.doc.subtree(&nested).iter().skip(1) {
+        v["nodes"][d]["masterId"] = Value::Null;
+      }
+      // Swap the order of the nested instance's children so position alone would mislink them.
+      let kids = k.e.doc.get(&nested).unwrap().children.clone();
+      let mut rev = kids.clone();
+      rev.reverse();
+      v["nodes"][&nested]["children"] = json!(rev);
+      let mut e = engine_seeded(42);
+      e.load(&v.to_string()).unwrap();
+      for d in e.doc.subtree(&nested).iter().skip(1) {
+        let n = e.doc.get(d).unwrap();
+        let m = n.master_id.clone().expect("relinked");
+        assert_eq!(
+          e.doc.get(&m).unwrap().name,
+          n.name,
+          "{} linked to the layer of the same name",
+          n.name
+        );
+      }
+    }
+
+    #[test]
+    fn the_override_count_covers_nested_and_through_outer_overrides() {
+      let mut k = kit();
+      let (_, card_inst) = card(&mut k);
+      let nested = nested_instance(&k.e, &card_inst);
+      assert_eq!(override_count(&k.e.doc, &card_inst), 0);
+      assert_eq!(override_count(&k.e.doc, &nested), 0);
+      let t = named(&k.e, &nested, "Label");
+      set_text(&mut k.e, &t, "Hi");
+      assert_eq!(override_count(&k.e.doc, &card_inst), 1);
+      assert_eq!(override_count(&k.e.doc, &nested), 1);
+      let t = named(&k.e, &card_inst, "Title");
+      set_text(&mut k.e, &t, "Hello");
+      assert_eq!(override_count(&k.e.doc, &card_inst), 2);
+      let r = k.e.query(crate::engine::Query::OverrideCount { id: nested.clone() }).unwrap();
+      assert_eq!(r["count"], 1);
     }
 
     /// A "Button" set (State=Default / State=Hover, each a frame with "Bg" and "Label").

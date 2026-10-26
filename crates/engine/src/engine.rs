@@ -446,6 +446,10 @@ pub enum Command {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "q", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Query {
+  /// How many layers of an instance differ from its main component.
+  OverrideCount {
+    id: NodeId,
+  },
   Pick {
     x: f64,
     y: f64,
@@ -1698,7 +1702,9 @@ impl Engine {
         let target = ops::frame_at(&self.doc, &self.page, pt, &ids);
         for id in &ids {
           let cur = self.doc.get(id).and_then(|n| n.parent.clone());
-          if self.doc.instance_ancestor(id).is_some() {
+          if self.doc.instance_ancestor(id).is_some()
+            || components::would_nest_under(&self.doc, std::slice::from_ref(id), target.as_deref())
+          {
             continue;
           }
           let in_flow = cur
@@ -1738,6 +1744,9 @@ impl Engine {
       }
       Command::MoveToParent { ids, parent, index } => {
         let ids = ops::paint_order(&self.doc, &ops::top_most(&self.doc, &ids));
+        if components::would_nest_under(&self.doc, &ids, parent.as_deref()) {
+          return Err("a component can't contain an instance of itself".into());
+        }
         let mut idx = index;
         for id in ids.iter().rev() {
           let same_parent = self.doc.get(id).map(|n| n.parent == parent).unwrap_or(false);
@@ -1954,8 +1963,11 @@ impl Engine {
           None => (x, y),
         };
         let page = self.page.clone();
+        if self.doc.get(&component_id).map(|c| c.kind == NodeType::Component) != Some(true) {
+          return Err("not a component".into());
+        }
         let id = components::create_instance(&mut self.doc, &component_id, parent.as_deref(), &page, lx, ly, &mut self.gen)
-          .ok_or("not a component")?;
+          .ok_or("a component can't contain an instance of itself")?;
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
       }
@@ -2504,6 +2516,7 @@ impl Engine {
           .collect();
         json!({ "items": items, "union": self.doc.bounds_of_many(&ids) })
       }
+      Query::OverrideCount { id } => json!({ "count": components::override_count(&self.doc, &id) }),
       Query::FrameAt { x, y, exclude } => json!(ops::frame_at(&self.doc, &self.page, Point::new(x, y), &exclude)),
       Query::SnapPoint { x, y, zoom, exclude } => {
         let (r, guides) = interact::snap_rect(

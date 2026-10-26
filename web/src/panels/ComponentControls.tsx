@@ -4,7 +4,7 @@
 import { useMemo, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Check, ChevronDown, Component, CornerUpLeft, Link2, Plus, Scan } from "lucide-react";
-import { dispatch, useDoc, useStore, zoomToSelection } from "../store";
+import { dispatch, query, useDoc, useStore, zoomToSelection } from "../store";
 import type { Node } from "../types";
 import { IconButton, Popover, Section, SelectField } from "../ui/controls";
 import * as A from "../actions";
@@ -108,6 +108,8 @@ export function ComponentSetSection({ n }: { n: Node }) {
 export function InstanceSection({ n }: { n: Node }) {
   const doc = useDoc();
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  // Layers that differ from the main component, including ones changed through an outer instance.
+  const overrides = useMemo(() => query<{ count: number }>({ q: "overrideCount", id: n.id }).count, [doc, n.id]);
   if (!n.instance) return null;
   const comp = doc.nodes[n.instance.componentId];
   const set = comp ? variantSet(doc, comp) : null;
@@ -158,7 +160,7 @@ export function InstanceSection({ n }: { n: Node }) {
           />
         </div>
       ))}
-      {Object.keys(n.instance.overrides).length > 0 && <div className="muted small">{Object.keys(n.instance.overrides).length} override(s)</div>}
+      {overrides > 0 && <div className="muted small">{overrides === 1 ? "1 override" : `${overrides} overrides`}</div>}
     </Section>
   );
 }

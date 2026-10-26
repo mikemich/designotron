@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::color;
+use crate::components;
 use crate::geom::fmt;
 use crate::model::{
   Action, Align, Document, EffectType, LayoutDirection, Node, NodeType, OverlayPosition, OverlaySettings, Paint, ScaleMode, Sizing,
@@ -267,7 +268,7 @@ impl<'a> Ctx<'a> {
     }
     if self.reuse_components && n.kind == NodeType::Instance && place != Place::Root {
       if let Some(info) = n.instance.as_ref() {
-        if !crate::components::has_overrides(self.doc, id) && self.doc.get(&info.component_id).is_some() {
+        if !components::has_overrides(self.doc, id) && self.doc.get(&info.component_id).is_some() {
           let name = self.component_name(&info.component_id);
           let mut el = El::new("div");
           self.position(&mut el, &n, place);
