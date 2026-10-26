@@ -4,6 +4,7 @@ import { addAsset, readFileAsDataUrl } from "../assets";
 import { screenshotBase64 } from "../exporter";
 import { dispatchOrThrow, getDoc, selection, useStore, FONTS } from "../store";
 import { bridgeChecked, bridgeHttpBase } from "./bridgeClient";
+import { DEFAULT_CSS, emitSpec, planTree, type BoxNode, type Css, type Rect } from "./htmlLayout";
 
 /** Picks what to screenshot when no id is given: selection, else the newest top-level frame. */
 export async function getScreenshot(id?: string, scale = 1) {
@@ -25,6 +26,8 @@ interface ImportInput {
   y?: number;
   parentId?: string;
   name?: string;
+  /** Map flex/grid/block flow to auto layout (default). `false` keeps every layer absolutely positioned. */
+  autoLayout?: boolean;
 }
 
 type Spec = Record<string, any>;
@@ -32,7 +35,7 @@ type Spec = Record<string, any>;
 /** Fetches a live page through the local bridge (no CORS there) and imports it. `typed`:
  *  the person entered the address themselves, so pages on their own machine or network are
  *  allowed (Claude's imports reach only the public internet). */
-export async function importUrl(input: { url: string; width?: number; x?: number; y?: number }, typed = false) {
+export async function importUrl(input: { url: string; width?: number; x?: number; y?: number; autoLayout?: boolean }, typed = false) {
   let url: URL;
   try {
     url = new URL(input.url.includes("://") ? input.url : `https://${input.url}`);
@@ -54,7 +57,7 @@ export async function importUrl(input: { url: string; width?: number; x?: number
   // Resolve relative stylesheets and images against the page. Scripts never run (sandboxed iframe).
   const base = `<base href="${url.href.replace(/"/g, "&quot;")}">`;
   html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => m + base) : `<!doctype html><html><head>${base}</head><body>${html}</body></html>`;
-  return importHtml({ html, width: input.width ?? 1440, x: input.x, y: input.y, name: url.hostname });
+  return importHtml({ html, width: input.width ?? 1440, x: input.x, y: input.y, name: url.hostname, autoLayout: input.autoLayout });
 }
 
 /** Renders HTML in a hidden iframe and converts the box tree into layer specs. */
@@ -82,19 +85,20 @@ export async function importHtml(input: ImportInput) {
     const total = Math.max(1, Math.ceil(body.scrollHeight + (parseFloat(bm.marginTop) || 0) + (parseFloat(bm.marginBottom) || 0)));
     iframe.style.height = `${total}px`;
     const bodyBg = parseBg(win.getComputedStyle(body), win.getComputedStyle(doc.documentElement));
-    const root: Spec = {
-      type: "frame",
-      name: input.name || doc.title || "Imported HTML",
-      x: input.x ?? 0,
-      y: input.y ?? 0,
-      width,
-      height: total,
-      fill: bodyBg ?? "#FFFFFF",
-      clip: true,
-      children: [],
+    // Box tree in page coordinates, then auto layout inference, then create_nodes specs.
+    const children: BoxNode[] = [];
+    for (const child of Array.from(body.childNodes)) children.push(...(await walk(child, win, input.autoLayout !== false)));
+    const rootBox: BoxNode = {
+      kind: "frame",
+      rect: { x: 0, y: 0, w: width, h: total },
+      spec: { type: "frame", name: input.name || doc.title || "Imported HTML", fill: bodyBg ?? "#FFFFFF", clip: true },
+      css: { ...readCss(win.getComputedStyle(body)), inset: [0, 0, 0, 0] },
+      children,
     };
-    const origin = { x: 0, y: 0 };
-    for (const child of Array.from(body.childNodes)) await walk(child, win, root, origin);
+    if (input.autoLayout !== false) planTree(rootBox);
+    const root = emitSpec(rootBox, rootBox.rect, { w: "fixed", h: rootBox.plan?.canHug.h ? "hug" : "fixed" });
+    root.x = input.x ?? 0;
+    root.y = input.y ?? 0;
     const r = dispatchOrThrow({ op: "ai", tool: "create_nodes", input: { parentId: input.parentId, nodes: [root] } });
     return r;
   } finally {
@@ -136,51 +140,29 @@ async function toAsset(url: string): Promise<string> {
   }
 }
 
-async function walk(node: globalThis.Node, win: Window, parent: Spec, origin: { x: number; y: number }) {
+const BLOCKISH = ["block", "list-item", "flow-root", "table-cell", "inline-block"];
+
+/** Converts a DOM node into boxes in page coordinates. Elements without visuals are kept as
+ *  transparent frames only when they group two or more boxes; otherwise their content moves up. */
+async function walk(node: globalThis.Node, win: Window, auto: boolean): Promise<BoxNode[]> {
   if (node.nodeType === Node.TEXT_NODE) {
-    const text = (node.textContent ?? "").replace(/\s+/g, " ");
-    if (!text.trim()) return;
-    const el = node.parentElement!;
-    const cs = win.getComputedStyle(el);
-    const range = node.ownerDocument!.createRange();
-    range.selectNodeContents(node);
-    const r = range.getBoundingClientRect();
-    if (!r.width || !r.height) return;
-    const fontSize = parseFloat(cs.fontSize) || 16;
-    const lh = cs.lineHeight === "normal" ? fontSize * 1.2 : parseFloat(cs.lineHeight);
-    const lines = Math.round(r.height / lh);
-    const family = cs.fontFamily.split(",")[0].replace(/["']/g, "").trim();
-    const spec: Spec = {
-      type: "text",
-      text: cs.textTransform === "uppercase" ? text.trim().toUpperCase() : text.trim(),
-      x: r.left - origin.x,
-      y: r.top - origin.y,
-      fontSize,
-      fontWeight: parseInt(cs.fontWeight) || 400,
-      fontFamily: family,
-      lineHeight: lh,
-      color: cs.color,
-      italic: cs.fontStyle === "italic",
-      textAlign: ["center", "right", "justify"].includes(cs.textAlign) ? cs.textAlign : "left",
-    };
-    if (cs.letterSpacing !== "normal") spec.letterSpacing = parseFloat(cs.letterSpacing) || 0;
-    if (lines > 1) spec.width = Math.ceil(r.width) + 1;
-    parent.children.push(spec);
-    return;
+    const box = textBox(node as Text, win);
+    return box ? [box] : [];
   }
-  if (node.nodeType !== Node.ELEMENT_NODE) return;
+  if (node.nodeType !== Node.ELEMENT_NODE) return [];
   const el = node as HTMLElement;
   const tag = el.tagName.toLowerCase();
-  if (["script", "style", "head", "meta", "link", "title", "noscript"].includes(tag)) return;
+  if (["script", "style", "head", "meta", "link", "title", "noscript"].includes(tag)) return [];
   const cs = win.getComputedStyle(el);
-  if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) === 0) return;
+  if (cs.display === "none" || cs.visibility === "hidden" || parseFloat(cs.opacity) === 0) return [];
   const r = el.getBoundingClientRect();
-  const box = { x: r.left - origin.x, y: r.top - origin.y, width: r.width, height: r.height };
+  const rect = { x: r.left, y: r.top, w: r.width, h: r.height };
+  const css = readCss(cs);
 
   if (tag === "img") {
     const src = (el as HTMLImageElement).currentSrc || (el as HTMLImageElement).src;
-    parent.children.push({ type: "rectangle", name: el.getAttribute("alt") || "Image", ...box, imageUrl: await toAsset(src), cornerRadius: parseFloat(cs.borderTopLeftRadius) || 0 });
-    return;
+    const spec = { type: "rectangle", name: el.getAttribute("alt") || "Image", imageUrl: await toAsset(src), cornerRadius: parseFloat(cs.borderTopLeftRadius) || 0 };
+    return [{ kind: "leaf", rect, css, children: [], spec }];
   }
   if (tag === "svg") {
     const clone = el.cloneNode(true) as SVGElement;
@@ -189,29 +171,28 @@ async function walk(node: globalThis.Node, win: Window, parent: Spec, origin: { 
     clone.setAttribute("height", String(r.height));
     if (!clone.getAttribute("color")) clone.setAttribute("color", cs.color);
     const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(clone.outerHTML.replace(/currentColor/g, cs.color));
-    parent.children.push({ type: "rectangle", name: "Icon", ...box, fills: [{ type: "image", src: "asset:" + addAsset(url), scaleMode: "fit" }] });
-    return;
+    return [{ kind: "leaf", rect, css, children: [], spec: { type: "rectangle", name: "Icon", fills: [{ type: "image", src: "asset:" + addAsset(url), scaleMode: "fit" }] } }];
   }
 
+  const kids: BoxNode[] = [];
+  for (const c of Array.from(el.childNodes)) kids.push(...(await walk(c, win, auto)));
   const bg = parseBg(cs);
   const bgImage = cs.backgroundImage.match(/url\("?([^")]+)"?\)/)?.[1];
   const bw = parseFloat(cs.borderTopWidth) || 0;
   const hasBorder = bw > 0 && cs.borderTopStyle !== "none";
   const shadow = parseShadow(cs.boxShadow);
-  const radius = [cs.borderTopLeftRadius, cs.borderTopRightRadius, cs.borderBottomRightRadius, cs.borderBottomLeftRadius].map((v) => parseFloat(v) || 0);
-  const visual = bg || bgImage || hasBorder || shadow;
-  if (!visual) {
-    for (const c of Array.from(el.childNodes)) await walk(c, win, parent, origin);
-    return;
+  const name = el.id || el.className?.toString().split(" ")[0] || tag;
+  if (!(bg || bgImage || hasBorder || shadow)) {
+    if (!kids.length) return [];
+    const inline = cs.display === "inline" || cs.display === "contents";
+    // With auto layout a padded wrapper stays: its padding is what positions the box inside it.
+    const padded = css.inset.some((v) => v > 0.5);
+    if (!inline && (kids.length > 1 || (auto && padded && kids[0].css.position !== "fixed"))) return [{ kind: "frame", rect, css, children: kids, spec: { type: "frame", name } }];
+    if (!inline && kids.length === 1) adoptSoleChild(kids[0], el, cs, css, rect);
+    return kids;
   }
-  const spec: Spec = {
-    type: "frame",
-    name: el.id || el.className?.toString().split(" ")[0] || tag,
-    ...box,
-    fill: bg ?? "none",
-    children: [],
-    clip: cs.overflow === "hidden",
-  };
+  const radius = [cs.borderTopLeftRadius, cs.borderTopRightRadius, cs.borderBottomRightRadius, cs.borderBottomLeftRadius].map((v) => parseFloat(v) || 0);
+  const spec: Spec = { type: "frame", name, fill: bg ?? "none", clip: cs.overflow === "hidden" };
   if (bgImage) spec.imageUrl = await toAsset(bgImage);
   if (hasBorder) {
     spec.stroke = cs.borderTopColor;
@@ -221,6 +202,88 @@ async function walk(node: globalThis.Node, win: Window, parent: Spec, origin: { 
   if (radius.some((v) => v > 0)) spec.cornerRadius = radius.every((v) => v === radius[0]) ? radius[0] : radius;
   const op = parseFloat(cs.opacity);
   if (op < 1) spec.opacity = op;
-  parent.children.push(spec);
-  for (const c of Array.from(el.childNodes)) await walk(c, win, spec, { x: r.left, y: r.top });
+  return [{ kind: "frame", rect, css, children: kids, spec }];
+}
+
+/** A wrapper that only holds one box hands its place in the layout to that box. Text that is
+ *  the whole content of a block takes the block's content width, so it wraps and aligns the same. */
+function adoptSoleChild(kid: BoxNode, el: HTMLElement, cs: CSSStyleDeclaration, css: Css, rect: Rect) {
+  const outOfFlow = css.position === "absolute" || css.position === "fixed";
+  if (kid.kind === "text" && BLOCKISH.includes(cs.display) && !outOfFlow && kid.css.position === "static") {
+    const left = rect.x + (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.paddingLeft) || 0);
+    const inner = el.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+    if (inner > 0 && kid.rect.x >= left - 1 && kid.rect.x + kid.rect.w <= left + inner + 1) {
+      if (!kid.hugText || inner - kid.rect.w > 1) {
+        kid.rect.x = left;
+        kid.rect.w = inner;
+        kid.hugText = false;
+      }
+      kid.css = { ...css, inset: [0, 0, 0, 0] };
+      return;
+    }
+  }
+  if (outOfFlow) kid.css = { ...kid.css, position: css.position };
+  else if (Math.abs(kid.rect.x - rect.x) < 0.5 && Math.abs(kid.rect.w - rect.w) < 0.5) {
+    kid.css = { ...kid.css, display: css.display, flexGrow: css.flexGrow, alignSelf: css.alignSelf, float: css.float };
+  }
+}
+
+function textBox(node: Text, win: Window): BoxNode | null {
+  const text = (node.textContent ?? "").replace(/\s+/g, " ");
+  if (!text.trim()) return null;
+  const el = node.parentElement!;
+  const cs = win.getComputedStyle(el);
+  const range = node.ownerDocument!.createRange();
+  range.selectNodeContents(node);
+  const r = range.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  const fontSize = parseFloat(cs.fontSize) || 16;
+  const normal = cs.lineHeight === "normal";
+  let lh = normal ? fontSize * 1.2 : parseFloat(cs.lineHeight);
+  const lines = Math.max(1, Math.round(r.height / lh));
+  // With `normal` the rect is the real line pitch, which is slightly more than 1.2 em for most fonts.
+  if (normal) lh = r.height / lines;
+  const family = cs.fontFamily.split(",")[0].replace(/["']/g, "").trim();
+  const spec: Spec = {
+    type: "text",
+    text: cs.textTransform === "uppercase" ? text.trim().toUpperCase() : text.trim(),
+    fontSize,
+    fontWeight: parseInt(cs.fontWeight) || 400,
+    fontFamily: family,
+    lineHeight: lh,
+    color: cs.color,
+    italic: cs.fontStyle === "italic",
+    textAlign: ["center", "right", "justify"].includes(cs.textAlign) ? cs.textAlign : "left",
+  };
+  if (cs.letterSpacing !== "normal") spec.letterSpacing = parseFloat(cs.letterSpacing) || 0;
+  // The engine centres glyphs in each line box (like CSS half-leading), so place the line boxes.
+  const h = lines * lh;
+  const rect = { x: r.left, y: r.top - (h - r.height) / 2, w: lines > 1 ? Math.ceil(r.width) + 1 : r.width, h };
+  return { kind: "text", rect, spec, css: { ...DEFAULT_CSS, display: "inline" }, children: [], hugText: lines === 1 };
+}
+
+function readCss(cs: CSSStyleDeclaration): Css {
+  const px = (v: string) => parseFloat(v) || 0;
+  const tracks = cs.gridTemplateColumns && cs.gridTemplateColumns !== "none" ? cs.gridTemplateColumns.split(/\s+(?![^(]*\))/) : [];
+  return {
+    display: cs.display,
+    position: cs.position,
+    float: cs.float || "none",
+    flexDirection: cs.flexDirection,
+    flexWrap: cs.flexWrap,
+    justifyContent: cs.justifyContent,
+    alignItems: cs.alignItems,
+    alignSelf: cs.alignSelf,
+    flexGrow: px(cs.flexGrow),
+    rowGap: px(cs.rowGap),
+    columnGap: px(cs.columnGap),
+    textAlign: cs.textAlign,
+    gridColumns: tracks.filter((t) => /px$/.test(t)).length,
+    inset: [
+      px(cs.paddingTop) + px(cs.borderTopWidth),
+      px(cs.paddingRight) + px(cs.borderRightWidth),
+      px(cs.paddingBottom) + px(cs.borderBottomWidth),
+      px(cs.paddingLeft) + px(cs.borderLeftWidth),
+    ],
+  };
 }

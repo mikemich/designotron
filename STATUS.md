@@ -26,7 +26,6 @@ Ordered by impact on "replace Figma for a small team".
 | 13 | Plugin sharing                         | Install plugins from a URL or a community list; plugin manifests and permissions |
 | 14 | Canvas gradient and image-crop handles | Edit gradients and crops directly on the canvas                       |
 | 15 | Auto layout extras                     | Min/max width, baseline alignment, per-child margins                  |
-| 16 | Auto layout inference for HTML import  | Map flex/grid containers to auto layout instead of absolute layers    |
 | 17 | Enable the hosted editor               | Workflow exists; repo owner must set Settings → Pages → GitHub Actions |
 | 18 | Desktop app packaging                  | Tauri shell bundling the editor and bridge                            |
 | 19 | Touch and tablet input                 | Pinch zoom, pen pressure                                              |
@@ -51,7 +50,7 @@ Ordered by impact on "replace Figma for a small team".
 | Claude (API)    | In-browser tool loop with the user's key, screenshots fed back to Claude, refusal fallback enabled   |
 | Claude Code     | Bridge spawns the user's `claude` CLI (Pro/Max login) for in-app chat with live tool chips           |
 | MCP             | `designotron` MCP server for Claude Code in any terminal; headless mode edits `design.dtron.json`    |
-| Import          | HTML/CSS to editable layers (`import_html` tool and File menu), live websites by URL (`import_url`)  |
+| Import          | HTML/CSS to editable layers (`import_html` tool and File menu), live websites by URL (`import_url`); flex, grid and stacked blocks become auto layout (`autoLayout: false` keeps absolute layers) |
 | Distribution    | Single `designotron` binary with the editor embedded, release workflow (5 targets, version from the tag), `install.sh` (also installs the background service), `npx designotron` (not on npm yet), Pages workflow, Fly relay deploy workflow |
 | Background bridge | `designotron service install\|uninstall\|status`: launchd agent on macOS, systemd user unit on Linux, with the installing shell's PATH so `claude` is found; running `designotron` while it runs just opens the editor; the Claude panel shows setup steps while the bridge is offline |
 | Growth loops    | Guests who open a shared link see who they're editing with, a "Make my own copy" button (keeps the file as theirs and leaves the room) and a GitHub star link; Share dialog hides the relay field when one is built in, with Copy feedback and the native Invite sheet; link previews (Open Graph/Twitter card, `web/public/og.png`); Star link on the dashboard; Share → Send a copy: a link with the whole file gzipped into its `#fragment` (`web/src/snapshot.ts`, no server; images dropped past ~400 KB), opened as the recipient's own file; view-only links (`#/view/…`, the prototype player with a Remix button and "Made with Designotron"), iframe embed code and an "Open in Designotron" README badge (`web/public/badge.svg`); a narrated demo replay of Claude building a landing page for visitors who haven't connected Claude (`web/src/Demo.tsx`, one undo step); Claude Code plugin marketplace (`/plugin install designotron --marketplace mikemich/designotron`); launch kit in `docs/launch.md` |
@@ -86,6 +85,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
 | React and project export                               | `web/scripts/e2e.mjs`                        |
 | AI `create_nodes`, `get_screenshot`, `import_html`     | `web/scripts/e2e.mjs`                        |
+| HTML import auto layout inference (pure functions)     | `web/src/ai/htmlLayout.test.ts` (`npm test`) |
 | Presenter hotspots and prototype navigation            | `web/scripts/e2e.mjs`                        |
 | Prototype overlays (modal, menu, swap, stack, Escape, view link) | `web/scripts/overlays-e2e.mjs`     |
 | Autosave survives reload, Claude panel opens           | `web/scripts/e2e.mjs`                        |
@@ -138,7 +138,7 @@ until someone runs it with a real key.
 | Multi-resize     | Resizing several rotated layers at once approximates their new boxes                                     |
 | Prototyping      | Smart animate plays as a dissolve; no scroll-to or variables; overlays always render at the frame's design size and don't scroll |
 | Images           | External `http` image URLs render on canvas but are missing from PNG export (assets are fine)            |
-| HTML import      | Produces absolutely positioned layers; flex/grid is not mapped to auto layout                            |
+| HTML import      | Auto layout is only used where the engine reproduces the browser's boxes within 2px: uneven margins between siblings, per-child `align-self`, proportional `flex-grow`, inline text runs, fr-based grid sizing and tables stay absolute or fixed-size |
 | Bridge sync      | If MCP edits happen with no editor open, reopening an older tab overwrites `design.dtron.json`           |
 | Security         | API key (API mode) is stored in this browser's localStorage                                              |
 | Input            | No touch/pen support; editor UI accessibility (keyboard-only, screen readers) is minimal                 |

@@ -177,6 +177,17 @@ try {
     });
   });
   check("import_html converts DOM to layers", imp.ok, imp.ok ? "" : String(imp.result));
+  // Flex rows import as auto layout; autoLayout:false keeps absolute layers.
+  const flexHtml = '<div style="display:flex;gap:12px;padding:16px"><div style="width:80px;height:40px;background:#eee"></div><div style="width:80px;height:40px;background:#ddd"></div></div>';
+  const rows = () => page.evaluate(() => Object.values(window.__dt.doc().nodes).filter((n) => n.layout?.direction === "horizontal" && n.layout.gap === 12).length);
+  const importFlex = (autoLayout, x) => page.evaluate(([html, autoLayout, x]) => window.__dt.tool("import_html", { html, width: 400, x, y: 950, autoLayout }), [flexHtml, autoLayout, x]);
+  const rowsBefore = await rows();
+  await importFlex(false, 2200);
+  const afterAbs = await rows();
+  await importFlex(true, 2700);
+  const afterAuto = await rows();
+  check("import_html maps flex to auto layout", afterAuto === afterAbs + 1, `${afterAuto - afterAbs} new row(s)`);
+  check("import_html autoLayout:false keeps absolute layers", afterAbs === rowsBefore);
 
   // Prototype player.
   await page.keyboard.press("Escape");

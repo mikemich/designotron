@@ -59,7 +59,8 @@ fn spec_schema() -> Value {
           "padding": { "description": "number, [vertical, horizontal] or [top, right, bottom, left]", "type": ["number", "array"] },
           "align": { "type": "string", "enum": ["start", "center", "end", "space-between"], "description": "Main axis" },
           "crossAlign": { "type": "string", "enum": ["start", "center", "end"] },
-          "wrap": { "type": "boolean" }
+          "wrap": { "type": "boolean" },
+          "counterGap": { "type": "number", "description": "Gap between wrapped rows (default: gap)" }
         }
       },
       "absolute": { "type": "boolean", "description": "Ignore parent auto layout" },
@@ -226,12 +227,12 @@ pub fn tool_defs() -> Value {
     {
       "name": "import_url",
       "description": "Load a live web page (through the local bridge) and convert it into editable layers. Good for redesigning an existing site.",
-      "input_schema": { "type": "object", "properties": { "url": { "type": "string" }, "width": { "type": "number", "description": "Viewport width, default 1440" }, "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["url"] }
+      "input_schema": { "type": "object", "properties": { "url": { "type": "string" }, "width": { "type": "number", "description": "Viewport width, default 1440" }, "x": { "type": "number" }, "y": { "type": "number" }, "autoLayout": { "type": "boolean", "description": "Map flex, grid and stacked blocks to auto layout (default true); false keeps absolutely positioned layers" } }, "required": ["url"] }
     },
     {
       "name": "import_html",
-      "description": "Render an HTML+CSS snippet (inline styles or <style>) at a width and convert it into editable layers. Good for complex layouts.",
-      "input_schema": { "type": "object", "properties": { "html": { "type": "string" }, "width": { "type": "number" }, "x": { "type": "number" }, "y": { "type": "number" }, "parentId": { "type": "string" }, "name": { "type": "string" } }, "required": ["html"] }
+      "description": "Render an HTML+CSS snippet (inline styles or <style>) at a width and convert it into editable layers, with flex/grid/stacked blocks mapped to auto layout. Good for complex layouts.",
+      "input_schema": { "type": "object", "properties": { "html": { "type": "string" }, "width": { "type": "number" }, "x": { "type": "number" }, "y": { "type": "number" }, "parentId": { "type": "string" }, "name": { "type": "string" }, "autoLayout": { "type": "boolean", "description": "Map flex, grid and stacked blocks to auto layout (default true); false keeps absolutely positioned layers" } }, "required": ["html"] }
     }
   ])
 }
@@ -999,6 +1000,9 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
         al.gap = g;
         al.counter_gap = g;
       }
+      if let Some(g) = num(l.get("counterGap")) {
+        al.counter_gap = g;
+      }
       if let Some(p) = l.get("padding") {
         let [t, r, b, lft] = parse_box(p);
         al.padding_top = t;
@@ -1496,6 +1500,30 @@ mod tests {
     // One AI call = one undo step.
     e.dispatch(Command::Undo).unwrap();
     assert!(e.doc.get(&root).is_none());
+  }
+
+  #[test]
+  fn wrap_layout_takes_a_separate_row_gap() {
+    let mut e = engine();
+    let cell = json!({ "type": "rectangle", "width": 100, "height": 50 });
+    let input = json!({ "nodes": [{
+      "type": "frame", "width": 250, "height": "hug",
+      "layout": { "direction": "horizontal", "gap": 10, "counterGap": 30, "padding": 0, "wrap": true },
+      "children": [cell, cell, cell]
+    }]});
+    let r = e
+      .dispatch(Command::Ai {
+        tool: "create_nodes".into(),
+        input,
+      })
+      .unwrap();
+    let root = r["created"][0]["id"].as_str().unwrap().to_string();
+    let f = e.doc.get(&root).unwrap();
+    let al = f.layout.as_ref().unwrap();
+    assert_eq!((al.gap, al.counter_gap), (10.0, 30.0));
+    let third = e.doc.get(&f.children[2]).unwrap();
+    assert_eq!((third.x, third.y), (0.0, 80.0));
+    assert_eq!(f.height, 130.0);
   }
 
   #[test]

@@ -9,7 +9,8 @@
     "wasm": "cd .. && cargo build -p designotron-engine-wasm --target wasm32-unknown-unknown --release && wasm-bindgen --target web --out-dir web/src/wasm/pkg target/wasm32-unknown-unknown/release/designotron_engine_wasm.wasm",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b",
-    "e2e": "node scripts/e2e.mjs"
+    "e2e": "node scripts/e2e.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.135.0",
