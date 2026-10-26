@@ -87,17 +87,26 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     }
   };
 
-  // Delayed interactions on the frame (or overlay) on top.
+  // Delayed interactions run once per screen visit and once per overlay: the base frame's timer
+  // depends only on the history entry (so closing an overlay doesn't restart it), and each
+  // overlay's timer only on its own key.
   const top = overlays.length ? overlays[overlays.length - 1] : null;
-  const topId = top?.id ?? current.id;
-  useEffect(() => {
-    const n = getDoc().nodes[topId];
+  const runDelayed = (id: string, from: Rect) => {
+    const n = getDoc().nodes[id];
     const delayed = n?.interactions.find((i) => i.trigger === "afterDelay");
-    if (!delayed || !n) return;
-    const from = top ? { x: top.x, y: top.y, width: n.width, height: n.height } : { x: 0, y: 0, width: n.width, height: n.height };
+    if (!delayed) return;
     const t = setTimeout(() => go(delayed, from), delayed.delayMs || 800);
     return () => clearTimeout(t);
-  }, [topId, top?.key, current.id]);
+  };
+  useEffect(() => {
+    const n = getDoc().nodes[current.id];
+    if (n) return runDelayed(current.id, { x: 0, y: 0, width: n.width, height: n.height });
+  }, [history.length, current.id]);
+  useEffect(() => {
+    if (!top) return;
+    const n = getDoc().nodes[top.id];
+    if (n) return runDelayed(top.id, { x: top.x, y: top.y, width: n.width, height: n.height });
+  }, [top?.key]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -259,6 +268,6 @@ function isDescendant(id: string, ancestor: string): boolean {
 /** Prototype links come from shared files: only web, email and phone links may open (never
  *  `javascript:` or `data:`). Mirrors the engine's `safe_link`. */
 export function safeLink(url: string): string | null {
-  const u = url.replace(/[\u0000- \u007f]/g, "");
+  const u = url.replace(/[\u0000-\u0020\u007f]/g, "");
   return /^(https?:\/\/|mailto:|tel:)/i.test(u) ? u : null;
 }

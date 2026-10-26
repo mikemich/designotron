@@ -221,6 +221,17 @@ try {
   check("outside click ignored when turned off", (await overlays(page)) === 1);
   await page.keyboard.press("Escape");
   check("Escape still closes it", (await overlays(page)) === 0);
+  // After-delay on the first frame opens the overlay once; closing it must not re-fire the timer.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(100);
+  await tool("set_prototype", { nodeId: id("Home"), trigger: "delay", action: "open_overlay", destinationId: id("Modal") });
+  await page.click("button[title='Present']");
+  await page.waitForSelector(".presenter");
+  await page.waitForSelector(".presenter .overlay-frame", { timeout: 4000 });
+  check("after-delay opens the overlay", (await overlays(page)) === 1);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(2500);
+  check("closing it doesn't re-fire the base timer", (await overlays(page)) === 0, `${await overlays(page)} overlay(s) after 2.5s`);
 } catch (err) {
   failed++;
   console.log("FAIL  exception: " + (err?.stack ?? err));

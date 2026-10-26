@@ -15,7 +15,7 @@ use crate::text::TextMeasurer;
 const PX: &str = "px";
 
 /// The generated project's `src/App.tsx`: screen history plus a stack of overlays.
-const APP_TSX: &str = r#"import { useEffect, useState, type CSSProperties } from "react";
+const APP_TSX: &str = r#"import { useEffect, useRef, useState, type CSSProperties } from "react";
 __IMPORTS__
 type Navigate = (screen: string, overlay?: Record<string, unknown>) => void;
 type Overlay = { screen: string; position?: string; x?: number; y?: number; background?: string | null; closeOnClickOutside?: boolean };
@@ -46,11 +46,22 @@ export default function App() {
   const [overlays, setOverlays] = useState<Overlay[]>([]);
   const current = history[history.length - 1];
   const Screen = screens[current];
+  const host = useRef<HTMLDivElement>(null);
   const closeTop = () => setOverlays((o) => o.slice(0, -1));
+  // Manual offsets are relative to the screen holding the trigger; from inside an overlay that is
+  // the overlay's own frame, so add where that overlay currently sits.
+  const placed = (opts?: Record<string, unknown>) => {
+    if (opts?.position !== "manual" || !overlays.length) return opts;
+    const layer = host.current?.querySelector(`[data-overlay="${overlays.length - 1}"]`);
+    if (!host.current || !layer) return opts;
+    const a = host.current.getBoundingClientRect();
+    const b = layer.getBoundingClientRect();
+    return { ...opts, x: Number(opts.x ?? 0) + b.left - a.left, y: Number(opts.y ?? 0) + b.top - a.top };
+  };
   const onNavigate: Navigate = (s, opts) => {
     if (s === "close-overlay") return closeTop();
-    if (s.startsWith("overlay:")) return setOverlays((o) => [...o, { ...opts, screen: s.slice(8) } as Overlay]);
-    if (s.startsWith("swap-overlay:")) return setOverlays((o) => [...o.slice(0, -1), { ...opts, screen: s.slice(13) } as Overlay]);
+    if (s.startsWith("overlay:")) return setOverlays((o) => [...o, { ...placed(opts), screen: s.slice(8) } as Overlay]);
+    if (s.startsWith("swap-overlay:")) return setOverlays((o) => [...o.slice(0, -1), { ...placed(opts), screen: s.slice(13) } as Overlay]);
     if (s === "back" && overlays.length) return closeTop();
     setOverlays([]);
     setHistory((h) => (s === "back" ? (h.length > 1 ? h.slice(0, -1) : h) : [...h, s]));
@@ -65,7 +76,7 @@ export default function App() {
   const phone = phoneScreens.has(current);
   return (
     <div className={phone ? "min-h-screen flex items-start justify-center bg-neutral-100 py-10" : "min-h-screen flex justify-center"}>
-      <div className="relative w-full" style={{ maxWidth: widths[current] }}>
+      <div ref={host} className="relative w-full" style={{ maxWidth: widths[current] }}>
         {Screen ? <Screen onNavigate={onNavigate} /> : null}
         {overlays.map((o, i) => {
           const Layer = screens[o.screen];
@@ -80,6 +91,7 @@ export default function App() {
               }}
             >
               <div
+                data-overlay={i}
                 className={manual ? "absolute" : undefined}
                 style={{ width: widths[o.screen], maxWidth: "100%", ...(manual ? { left: o.x, top: o.y } : {}) }}
                 onClick={(e) => e.stopPropagation()}
@@ -1574,6 +1586,8 @@ mod tests {
     let files = export_project(&doc, &HeuristicMeasurer);
     let app = &files.iter().find(|f| f.path == "src/App.tsx").unwrap().content;
     assert!(app.contains("s.startsWith(\"overlay:\")") && app.contains("e.key === \"Escape\""));
+    // Manual offsets from inside an overlay are shifted by that overlay's position.
+    assert!(app.contains("getBoundingClientRect") && app.contains("data-overlay={i}"));
   }
 
   #[test]

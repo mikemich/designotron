@@ -970,7 +970,6 @@ a.btn {
 }
 .presenter .overlay-frame {
   position: absolute;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
 }
 .presenter .hint-flash {
   background: rgba(13, 153, 255, 0.25);

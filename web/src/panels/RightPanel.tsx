@@ -6,7 +6,7 @@ import { ReviewPanel } from "./ReviewPanel";
 import { AppPanel } from "./AppPanel";
 import { IconButton, NumberField, Section, SelectField } from "../ui/controls";
 import type { Interaction, Node, OverlaySettings } from "../types";
-import { DEFAULT_OVERLAY, newInteraction } from "../prototype";
+import { DEFAULT_OVERLAY, newInteraction, overlayDim } from "../prototype";
 import { exportProjectZip, nodeSvg } from "../exporter";
 import { inlineAssets } from "../assets";
 import { askClaude } from "../ai/chatState";
@@ -198,7 +198,7 @@ function OverlayEditor({ value: o, onChange }: { value: OverlaySettings; onChang
       {bg && (
         <div className="row">
           <label className="swatch" title="Background colour">
-            <i style={{ background: bg.color, opacity: bg.opacity }} />
+            <i style={{ background: overlayDim(o) }} />
             <input type="color" value={bg.color.slice(0, 7)} onChange={(e) => set({ background: { ...bg, color: e.target.value.toUpperCase() } })} style={{ position: "absolute", opacity: 0, width: 0, height: 0 }} />
           </label>
           <NumberField label="%" title="Background opacity" value={Math.round(bg.opacity * 100)} min={0} max={100} precision={0} onChange={(v) => set({ background: { ...bg, opacity: v / 100 } })} />
