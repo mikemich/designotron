@@ -108,6 +108,56 @@ describe("planContainer", () => {
   });
 });
 
+describe("hug sizes", () => {
+  // Three text lines 17.5px tall: the engine rounds each up to 18, so a hugging section would be 1.5px too tall.
+  const section = (y: number, lineH: number) => {
+    const lines = [0, 1, 2].map((i) => text(20, y + 8 + i * lineH, 100, lineH));
+    return frame(0, y, 300, 16 + 3 * lineH, { inset: [8, 8, 8, 8] }, lines);
+  };
+  const page = (n: number, lineH: number) => {
+    const h = 16 + 3 * lineH;
+    return frame(0, 0, 300, n * h + (n - 1) * 10, {}, Array.from({ length: n }, (_, i) => section(i * (h + 10), lineH)));
+  };
+
+  it("does not accept hugging when the simulated size is off", () => {
+    const root = page(30, 17.5);
+    planTree(root);
+    const first = root.children[0].plan!;
+    expect(first.canHug.h).toBe(false);
+    expect(first.hug.h).toBe(16 + 3 * 18);
+    const spec = emitSpec(root, root.rect);
+    // Fixed heights keep the browser's 68.5, so the stack cannot drift.
+    expect(spec.children.every((c: any) => c.height === 68.5)).toBe(true);
+  });
+
+  it("accepts hugging when the size matches, and parents use the simulated size", () => {
+    const root = page(30, 18);
+    planTree(root);
+    expect(root.children.every((c) => c.plan!.canHug.h)).toBe(true);
+    const spec = emitSpec(root, root.rect);
+    expect(spec.children.every((c: any) => c.height === "hug")).toBe(true);
+  });
+
+  it("keeps the last section of a long stack within 2px", () => {
+    const root = page(30, 17.5);
+    planTree(root);
+    const plan = root.plan!;
+    // Re-run the engine simulation with the sizes the plan chose.
+    const items = plan.flow.map((c) => {
+      const s = plan.sizing.get(c)!;
+      return { main: s.h === "hug" ? c.plan!.hug.h : c.rect.h, cross: c.rect.w, fillMain: false, fillCross: s.w === "fill" };
+    });
+    const sim = simulate(plan.layout, items, root.rect.w, root.rect.h, false, false);
+    const last = plan.flow[plan.flow.length - 1];
+    expect(Math.abs(sim.rects[sim.rects.length - 1].y - last.rect.y)).toBeLessThanOrEqual(2);
+  });
+
+  it("rejects gaps that disagree", () => {
+    const col = frame(0, 0, 400, 300, {}, [box(0, 0, 100, 50), box(0, 58, 100, 50), box(0, 114, 100, 50)]);
+    expect(planContainer(col)).toBeNull();
+  });
+});
+
 describe("emitSpec", () => {
   const tree = () => frame(0, 0, 400, 100, { display: "flex", columnGap: 8 }, [box(0, 0, 100, 100), box(108, 0, 100, 100)]);
 

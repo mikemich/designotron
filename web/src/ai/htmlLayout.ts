@@ -8,6 +8,9 @@ export type Spec = Record<string, any>;
 
 /** Max distance (px) between the browser's box and the engine's for a layout to be accepted. */
 export const TOL = 2;
+/** Max distance (px) between a hugging frame's simulated size and the browser's. Tighter than
+ *  TOL because a parent stacks its children's sizes, so per-child errors add up. */
+export const HUG_TOL = 0.5;
 /** Extra trailing space (px) beyond CSS padding that still counts as padding (a last child's margin). */
 const SLACK = 64;
 
@@ -66,8 +69,10 @@ export interface Plan {
   /** In-flow children in layout order. */
   flow: BoxNode[];
   sizing: Map<BoxNode, { w: Size; h: Size }>;
-  /** Whether the engine's hug size matches the browser's on each axis. */
+  /** Whether the engine's hug size matches the browser's on each axis (within HUG_TOL). */
   canHug: { w: boolean; h: boolean };
+  /** The size the engine gives this frame when it hugs, so parents lay out against what they get. */
+  hug: { w: number; h: number };
 }
 
 export const DEFAULT_CSS: Css = {
@@ -295,7 +300,7 @@ function tryStack(node: BoxNode, flowDom: BoxNode[], horizontal: boolean): Plan 
     const mainPad = mainPadding(align, first, last, cssS, cssE);
     if (!mainPad) continue;
     for (const crossAlign of crossAligns) {
-      for (const useGrow of growers.length ? [true, false] : [false]) {
+      for (const [useGrow, useHug] of variants(growers.length > 0)) {
         const fillCross = flow.map((c, i) => stretches(c, node, horizontal) && crossFits(crossOf(rects[i]), crossSize, cssCS, cssCE));
         const crossPad = crossPadding(crossAlign, flow.map((_, i) => crossOf(rects[i])), fillCross, crossSize, cssCS, cssCE);
         if (!crossPad) continue;
@@ -313,8 +318,8 @@ function tryStack(node: BoxNode, flowDom: BoxNode[], horizontal: boolean): Plan 
         const sizing = new Map<BoxNode, { w: Size; h: Size }>();
         flow.forEach((c, i) => {
           const fm = useGrow && growers.includes(c);
-          const main: Size = fm ? "fill" : hugs(c, horizontal, node, true) ? "hug" : "fixed";
-          const cross: Size = fillCross[i] ? "fill" : hugs(c, !horizontal, node, false) ? "hug" : "fixed";
+          const main: Size = fm ? "fill" : useHug && hugs(c, horizontal, node, true) ? "hug" : "fixed";
+          const cross: Size = fillCross[i] ? "fill" : useHug && hugs(c, !horizontal, node, false) ? "hug" : "fixed";
           sizing.set(c, horizontal ? { w: main, h: cross } : { w: cross, h: main });
         });
         const plan = validate(node, flow, layout, sizing);
@@ -373,11 +378,13 @@ function tryWrap(node: BoxNode, flowDom: BoxNode[]): Plan | null {
         crossAlign,
         wrap: true,
       };
-      const sizing = new Map<BoxNode, { w: Size; h: Size }>();
-      for (const ch of flow) sizing.set(ch, { w: hugs(ch, true, node, true) ? "hug" : "fixed", h: hugs(ch, false, node, false) ? "hug" : "fixed" });
-      const plan = validate(node, flow, layout, sizing);
-      // The engine only wraps frames with a fixed (or fill) width.
-      if (plan) return { ...plan, canHug: { w: false, h: plan.canHug.h } };
+      for (const useHug of [true, false]) {
+        const sizing = new Map<BoxNode, { w: Size; h: Size }>();
+        for (const ch of flow) sizing.set(ch, { w: useHug && hugs(ch, true, node, true) ? "hug" : "fixed", h: useHug && hugs(ch, false, node, false) ? "hug" : "fixed" });
+        const plan = validate(node, flow, layout, sizing);
+        // The engine only wraps frames with a fixed (or fill) width.
+        if (plan) return { ...plan, canHug: { w: false, h: plan.canHug.h }, hug: { w: W, h: plan.hug.h } };
+      }
     }
   }
   return null;
@@ -388,7 +395,7 @@ function validate(node: BoxNode, flow: BoxNode[], layout: Layout, sizing: Map<Bo
   const horizontal = layout.direction === "horizontal";
   const items: SimItem[] = flow.map((c) => {
     const s = sizing.get(c)!;
-    const [w, h] = predictedSize(c);
+    const [w, h] = predictedSize(c, s);
     return horizontal
       ? { main: w, cross: h, fillMain: s.w === "fill", fillCross: s.h === "fill" }
       : { main: h, cross: w, fillMain: s.h === "fill", fillCross: s.w === "fill" };
@@ -408,20 +415,28 @@ function validate(node: BoxNode, flow: BoxNode[], layout: Layout, sizing: Map<Bo
   // Hugging: the engine's content size must match the browser's (and not undo fill children).
   const hugMain = simulate(layout, items, W, H, true, false);
   const hugCross = simulate(layout, items, W, H, false, true);
-  const mainOk = !items.some((i) => i.fillMain) && Math.abs((horizontal ? hugMain.w : hugMain.h) - (horizontal ? W : H)) <= TOL;
+  const mainOk = !items.some((i) => i.fillMain) && Math.abs((horizontal ? hugMain.w : hugMain.h) - (horizontal ? W : H)) <= HUG_TOL;
   // When every child fills the cross axis the engine hugs their own content, which we can't predict.
-  const crossOk = !items.every((i) => i.fillCross) && Math.abs((horizontal ? hugCross.h : hugCross.w) - (horizontal ? H : W)) <= TOL && rectsMatch(hugCross.rects, flow.map((c) => relRect(c, node)));
-  return { layout, flow, sizing, canHug: horizontal ? { w: mainOk, h: crossOk } : { w: crossOk, h: mainOk } };
+  const crossOk = !items.every((i) => i.fillCross) && Math.abs((horizontal ? hugCross.h : hugCross.w) - (horizontal ? H : W)) <= HUG_TOL && rectsMatch(hugCross.rects, flow.map((c) => relRect(c, node)));
+  const hug = horizontal ? { w: hugMain.w, h: hugCross.h } : { w: hugCross.w, h: hugMain.h };
+  return { layout, flow, sizing, canHug: horizontal ? { w: mainOk, h: crossOk } : { w: crossOk, h: mainOk }, hug };
 }
 
 function rectsMatch(a: Rect[], b: Rect[]) {
   return a.every((r, i) => Math.abs(r.x - b[i].x) <= TOL && Math.abs(r.y - b[i].y) <= TOL);
 }
 
-/** The size the engine will give a child: auto-width text rounds up; hugging frames match. */
-function predictedSize(c: BoxNode): [number, number] {
+/** The size the engine will give a child: auto-width text rounds up, and a hugging frame gets its
+ *  simulated hug size (not the browser's), so errors show up in the parent's check instead of piling up. */
+function predictedSize(c: BoxNode, s: { w: Size; h: Size }): [number, number] {
   if (c.kind === "text") return [c.hugText ? Math.ceil(c.rect.w) : c.rect.w, Math.ceil(c.rect.h - 0.01)];
-  return [c.rect.w, c.rect.h];
+  const hug = c.plan?.hug;
+  return [s.w === "hug" && hug ? hug.w : c.rect.w, s.h === "hug" && hug ? hug.h : c.rect.h];
+}
+
+/** Sizing variants to try, preferred first: [grow children fill, children hug]. */
+function variants(canGrow: boolean): [boolean, boolean][] {
+  return canGrow ? [[true, true], [true, false], [false, true], [false, false]] : [[false, true], [false, false]];
 }
 
 /** Main-axis alignment candidates from CSS, then the purely geometric fallback (start). */
@@ -511,10 +526,11 @@ function crossPadding(
 /** Picks the gap between consecutive children: CSS gap if it fits, else their (rounded) common gap. */
 function pickGap(gaps: number[], cssGap: number): number | null {
   if (!gaps.length) return cssGap;
-  if (gaps.every((g) => Math.abs(g - cssGap) <= TOL / 2)) return cssGap;
   const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-  if (gaps.some((g) => Math.abs(g - mean) > TOL / 2)) return null;
-  return Math.abs(mean - Math.round(mean)) < 0.3 ? Math.round(mean) : mean;
+  // The gaps must agree closely: the engine applies one gap, and the error repeats at every child.
+  if (gaps.some((g) => Math.abs(g - mean) > HUG_TOL)) return null;
+  if (Math.abs(mean - cssGap) <= 0.1) return cssGap;
+  return Math.abs(mean - Math.round(mean)) < 0.05 ? Math.round(mean) : mean;
 }
 
 /** Whether a child stretches across its parent's cross axis in CSS. */

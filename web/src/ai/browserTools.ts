@@ -146,7 +146,7 @@ const BLOCKISH = ["block", "list-item", "flow-root", "table-cell", "inline-block
  *  transparent frames only when they group two or more boxes; otherwise their content moves up. */
 async function walk(node: globalThis.Node, win: Window, auto: boolean): Promise<BoxNode[]> {
   if (node.nodeType === Node.TEXT_NODE) {
-    const box = textBox(node as Text, win);
+    const box = textBox(node as Text, win, auto);
     return box ? [box] : [];
   }
   if (node.nodeType !== Node.ELEMENT_NODE) return [];
@@ -184,10 +184,12 @@ async function walk(node: globalThis.Node, win: Window, auto: boolean): Promise<
   const name = el.id || el.className?.toString().split(" ")[0] || tag;
   if (!(bg || bgImage || hasBorder || shadow)) {
     if (!kids.length) return [];
+    // Without auto layout every visual-less element dissolves into its parent (the original import).
+    if (!auto) return kids;
     const inline = cs.display === "inline" || cs.display === "contents";
     // With auto layout a padded wrapper stays: its padding is what positions the box inside it.
     const padded = css.inset.some((v) => v > 0.5);
-    if (!inline && (kids.length > 1 || (auto && padded && kids[0].css.position !== "fixed"))) return [{ kind: "frame", rect, css, children: kids, spec: { type: "frame", name } }];
+    if (!inline && (kids.length > 1 || (padded && kids[0].css.position !== "fixed"))) return [{ kind: "frame", rect, css, children: kids, spec: { type: "frame", name } }];
     if (!inline && kids.length === 1) adoptSoleChild(kids[0], el, cs, css, rect);
     return kids;
   }
@@ -228,7 +230,7 @@ function adoptSoleChild(kid: BoxNode, el: HTMLElement, cs: CSSStyleDeclaration, 
   }
 }
 
-function textBox(node: Text, win: Window): BoxNode | null {
+function textBox(node: Text, win: Window, auto: boolean): BoxNode | null {
   const text = (node.textContent ?? "").replace(/\s+/g, " ");
   if (!text.trim()) return null;
   const el = node.parentElement!;
@@ -238,11 +240,24 @@ function textBox(node: Text, win: Window): BoxNode | null {
   const r = range.getBoundingClientRect();
   if (!r.width || !r.height) return null;
   const fontSize = parseFloat(cs.fontSize) || 16;
-  const normal = cs.lineHeight === "normal";
-  let lh = normal ? fontSize * 1.2 : parseFloat(cs.lineHeight);
-  const lines = Math.max(1, Math.round(r.height / lh));
-  // With `normal` the rect is the real line pitch, which is slightly more than 1.2 em for most fonts.
-  if (normal) lh = r.height / lines;
+  let lh = cs.lineHeight === "normal" ? fontSize * 1.2 : parseFloat(cs.lineHeight);
+  let lines = Math.round(r.height / lh);
+  // Auto layout needs exact line boxes: count the lines from the browser's line rects (a tall
+  // line-height makes height / lh undercount) and take `normal` line pitch from them.
+  let top = r.top;
+  let contentH = r.height;
+  if (auto) {
+    const rects = Array.from(range.getClientRects()).filter((q) => q.width > 0 && q.height > 0).sort((p, q) => p.top - q.top);
+    if (rects.length) {
+      const tops = [rects[0].top];
+      for (const q of rects) if (q.top - tops[tops.length - 1] > 1) tops.push(q.top);
+      lines = tops.length;
+      contentH = rects[0].height;
+      top = rects[0].top;
+      if (cs.lineHeight === "normal") lh = lines > 1 ? (tops[lines - 1] - tops[0]) / (lines - 1) : contentH;
+    }
+    lines = Math.max(1, lines);
+  }
   const family = cs.fontFamily.split(",")[0].replace(/["']/g, "").trim();
   const spec: Spec = {
     type: "text",
@@ -256,10 +271,10 @@ function textBox(node: Text, win: Window): BoxNode | null {
     textAlign: ["center", "right", "justify"].includes(cs.textAlign) ? cs.textAlign : "left",
   };
   if (cs.letterSpacing !== "normal") spec.letterSpacing = parseFloat(cs.letterSpacing) || 0;
-  // The engine centres glyphs in each line box (like CSS half-leading), so place the line boxes.
-  const h = lines * lh;
-  const rect = { x: r.left, y: r.top - (h - r.height) / 2, w: lines > 1 ? Math.ceil(r.width) + 1 : r.width, h };
-  return { kind: "text", rect, spec, css: { ...DEFAULT_CSS, display: "inline" }, children: [], hugText: lines === 1 };
+  const w = lines > 1 ? Math.ceil(r.width) + 1 : r.width;
+  // The engine centres glyphs in each line box (like CSS half-leading), so auto layout places line boxes.
+  const rect = auto ? { x: r.left, y: top - (lh - contentH) / 2, w, h: lines * lh } : { x: r.left, y: r.top, w, h: r.height };
+  return { kind: "text", rect, spec, css: { ...DEFAULT_CSS, display: "inline" }, children: [], hugText: lines <= 1 };
 }
 
 function readCss(cs: CSSStyleDeclaration): Css {

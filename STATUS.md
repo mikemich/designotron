@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-10-18. Keep this file current: move items between sections in the same
+Last updated: 2026-10-26. Keep this file current: move items between sections in the same
 change that finishes, starts or breaks them.
 
 ## In progress
