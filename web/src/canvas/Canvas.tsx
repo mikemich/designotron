@@ -25,6 +25,13 @@ import { useDemo } from "../Demo";
 import { Menu, type MenuItem } from "../ui/controls";
 import { isOverlayLink, newInteraction } from "../prototype";
 
+/** Half-size (screen px) of a vector anchor's hit area; it shrinks to a quarter of the gap to a close
+ *  neighbour (never below the minimum) so the middle of a short segment can still take a point. */
+const ANCHOR_HIT = 4;
+const ANCHOR_HIT_MIN = 1;
+/** Below this screen distance to a neighbouring anchor, control handles show only for selected anchors. */
+const CROWDED_ANCHOR_GAP = 12;
+
 interface BoundsItem {
   id: string;
   matrix: Mat;
@@ -1166,8 +1173,21 @@ function VectorPoints({
     subpaths.forEach((sp, si) =>
       sp.points.forEach((p, pi) => {
         const a = toScreen(v, apply(m, p));
-        const hasOut = p.outX || p.outY;
-        const hasIn = p.inX || p.inY;
+        const on = isSel(si, pi);
+        // The anchor is drawn 8px wide, but its hit area shrinks next to a close neighbour so
+        // the middle of a short segment stays free to take a new point.
+        const pts = sp.points;
+        const near = [pts[pi - 1] ?? (sp.closed ? pts[pts.length - 1] : undefined), pts[pi + 1] ?? (sp.closed ? pts[0] : undefined)];
+        const gap = Math.min(
+          ...near.filter((q) => q && q !== p).map((q) => {
+            const b = toScreen(v, apply(m, q!));
+            return Math.hypot(b.x - a.x, b.y - a.y);
+          }),
+        );
+        // Control handles of unselected anchors would cover a short segment; select the anchor to see them.
+        const crowded = gap < CROWDED_ANCHOR_GAP && !on;
+        const hasOut = (p.outX || p.outY) && !crowded;
+        const hasIn = (p.inX || p.inY) && !crowded;
         if (hasOut) {
           const o = toScreen(v, apply(m, { x: p.x + p.outX, y: p.y + p.outY }));
           handles.push(<line key={`lo${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
@@ -1178,21 +1198,23 @@ function VectorPoints({
           handles.push(<line key={`li${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
           handles.push(<circle key={`i${si}-${pi}`} data-vpt={`${si}:${pi}:in`} className="handle" cx={o.x} cy={o.y} r={3.5} fill="white" stroke="#0d99ff" />);
         }
-        const on = isSel(si, pi);
+        const hit = Math.max(ANCHOR_HIT_MIN, Math.min(ANCHOR_HIT, gap / 4));
         anchors.push(
-          <rect
-            key={`a${si}-${pi}`}
-            data-vpt={`${si}:${pi}:anchor`}
-            className={"handle vector-anchor" + (on ? " selected" : "")}
-            x={a.x - 4}
-            y={a.y - 4}
-            width={8}
-            height={8}
-            rx={on ? 1 : 0}
-            fill={on ? "#0d99ff" : "white"}
-            stroke={on ? "white" : "#0d99ff"}
-            strokeWidth={on ? 1.5 : 1}
-          />,
+          <g key={`a${si}-${pi}`}>
+            <rect
+              className={"vector-anchor" + (on ? " selected" : "")}
+              x={a.x - 4}
+              y={a.y - 4}
+              width={8}
+              height={8}
+              rx={on ? 1 : 0}
+              fill={on ? "#0d99ff" : "white"}
+              stroke={on ? "white" : "#0d99ff"}
+              strokeWidth={on ? 1.5 : 1}
+              pointerEvents="none"
+            />
+            <rect data-vpt={`${si}:${pi}:anchor`} className="handle" x={a.x - hit} y={a.y - hit} width={hit * 2} height={hit * 2} fill="transparent" />
+          </g>,
         );
       }),
     );

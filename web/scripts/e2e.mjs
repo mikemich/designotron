@@ -157,6 +157,22 @@ try {
   check("vector edit: Delete removes the selected point, undo restores it", removed === 3 && (await penCount()) === 4);
   await page.keyboard.press("Escape");
 
+  // A path whose anchors are 4.5 screen px apart still takes a point in the middle of a segment
+  // (at any zoom: the spacing is in screen pixels).
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("p");
+  const tiny = { x: canvas.x + 520, y: canvas.y + canvas.height - 120 };
+  for (const [dx, dy] of [[0, 0], [4, 2], [8, 0], [12, 2]]) await page.mouse.click(tiny.x + dx, tiny.y + dy);
+  await page.keyboard.press("Enter");
+  const tinyId = (await state()).selection[0];
+  const tinyCount = async () => (await doc()).nodes[tinyId]?.vector.subpaths[0].points.length;
+  await page.mouse.dblclick(tiny.x, tiny.y);
+  await page.mouse.move(tiny.x + 2, tiny.y + 1);
+  const tinyHover = await page.locator(".vector-hover-point").count();
+  await page.mouse.click(tiny.x + 2, tiny.y + 1);
+  check("vector edit: a segment shorter than 10px takes a point in its middle", (await tinyCount()) === 5 && tinyHover === 1, `${await tinyCount()} points, hover ${tinyHover}`);
+  await page.keyboard.press("Escape");
+
   // Vector edit mode inside a frame: marquee from the frame's background, stale selections.
   {
     const dsp = (cmd) => page.evaluate((c) => window.__dt.dispatch(c), cmd);

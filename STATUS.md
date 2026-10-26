@@ -36,7 +36,7 @@ Ordered by impact on "replace Figma for a small team".
 |-----------------|------------------------------------------------------------------------------------------------------|
 | Engine (Rust)   | Serde document model, pages, undo/redo with gesture coalescing, JSON merge-patch edits               |
 | Layout          | Auto layout (direction, gap, padding, alignment, space-between, wrap), hug/fill/fixed, constraints   |
-| Components      | Main components, instances with stable ids, overrides (also on instances nested in a main component, set through the outer instance, and a nested instance swapped through it; they survive main edits, save/load, undo and multiplayer), reset/detach, variants (component sets); a component can't be made to contain itself (instance placement, moves, paste, swaps), swap instance (panel and context menu; overrides on layers with the same name path carry over to the new variant or component), add variant, rename variant properties and values; pasting an instance into another file brings its main component |
+| Components      | Main components, instances with stable ids, overrides (also on instances nested in a main component, set through the outer instance, and a nested instance swapped through it; they survive main edits, save/load, undo and multiplayer), reset/detach, variants (component sets); a component can't be made to contain itself (instance placement, moves, paste, swaps; pasting a copy of a main into its own main is fine, it becomes a new component), swap instance (panel and context menu; overrides on layers with the same name path carry over to the new variant or component), add variant, rename variant properties and values; pasting an instance into another file brings its main component |
 | Styles          | Colour and text styles: create, rename, edit in place (`UpdateColorStyle`, `UpdateTextStyle`), delete; style chips with detach in Fill and Text |
 | Canvas          | Pan/zoom, Figma-style picking and drill-down, marquee, move/resize/rotate, smart-guide snapping      |
 | Tools           | Frame, rectangle, ellipse, line, arrow, polygon, star, pen, pencil, text, image, hand                |
@@ -79,7 +79,7 @@ Verified on 2026-10-26 in this repo's environment (headless Chromium, Claude Cod
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 162 engine, bridge, rooms and relay tests              | `cargo test --workspace`                     |
+| 165 engine, bridge, rooms and relay tests              | `cargo test --workspace`                     |
 | Files dashboard, sample file, canvas render            | `web/scripts/e2e.mjs`                        |
 | Draw rectangle, drag, undo, property updates           | `web/scripts/e2e.mjs`                        |
 | Text tool, Shift+A auto layout, ⌥⌘K component, pen    | `web/scripts/e2e.mjs`                        |
@@ -132,7 +132,7 @@ until someone runs it with a real key.
 | Headless text    | Bridge headless mode measures text with a heuristic, so layout can differ slightly from the editor       |
 | Strokes          | Inside/outside alignment is exact for rectangles/ellipses; other shapes clip or fall back to center      |
 | Effects          | Background blur is not drawn on the canvas (exported to code as `backdrop-filter`)                       |
-| Vectors          | Edit mode adds points (click a segment, exact Bézier split), deletes points (select, Delete), toggles sharp/smooth (double-click) and continues open paths with the pen; no bend tool yet; inside auto layout the box refit after an edit is overwritten by the layout; boolean results are flattened (not live) and curves become polylines; text can't be flattened |
+| Vectors          | Edit mode adds points (click a segment, exact Bézier split; segments only a few pixels long still take one in their middle, because anchors there shrink their hit area and hide their control handles until selected), deletes points (select, Delete), toggles sharp/smooth (double-click) and continues open paths with the pen; no bend tool yet; inside auto layout the box refit after an edit is overwritten by the layout; boolean results are flattened (not live) and curves become polylines; text can't be flattened |
 | Masks in code    | A frame or group containing a mask is exported to code as inline SVG                                     |
 | Components       | Layers are matched on a swap by their name path (repeated names pair up in order): an override on a layer the new component lacks, or whose name changed, is dropped; an edit that puts back the main component's value counts as no override |
 | Components       | An instance swapped concurrently by two people can show a mix of both variants' layers (changes merge field by field) until it is next re-synced; everyone, and the relay, sees the same thing. Of two concurrent changes to one instance's component or overrides the later in the relay's order wins as a whole |
