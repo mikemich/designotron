@@ -87,26 +87,20 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     }
   };
 
-  // Delayed interactions run once per screen visit and once per overlay: the base frame's timer
-  // depends only on the history entry (so closing an overlay doesn't restart it), and each
-  // overlay's timer only on its own key.
+  // Timers call `go` through a ref so they never act on a stale render (e.g. "after delay → Back"
+  // firing while a modal is open must close the modal).
+  const goRef = useRef(go);
+  goRef.current = go;
   const top = overlays.length ? overlays[overlays.length - 1] : null;
-  const runDelayed = (id: string, from: Rect) => {
-    const n = getDoc().nodes[id];
-    const delayed = n?.interactions.find((i) => i.trigger === "afterDelay");
-    if (!delayed) return;
-    const t = setTimeout(() => go(delayed, from), delayed.delayMs || 800);
-    return () => clearTimeout(t);
-  };
+  // The base frame's delayed interaction runs once per visit to the frame; each overlay starts
+  // its own once, when it opens (see OverlayLayer), so closing an overlay never restarts either.
   useEffect(() => {
     const n = getDoc().nodes[current.id];
-    if (n) return runDelayed(current.id, { x: 0, y: 0, width: n.width, height: n.height });
+    const delayed = n?.interactions.find((i) => i.trigger === "afterDelay");
+    if (!n || !delayed) return;
+    const t = setTimeout(() => goRef.current(delayed, { x: 0, y: 0, width: n.width, height: n.height }), delayed.delayMs || 800);
+    return () => clearTimeout(t);
   }, [history.length, current.id]);
-  useEffect(() => {
-    if (!top) return;
-    const n = getDoc().nodes[top.id];
-    if (n) return runDelayed(top.id, { x: top.x, y: top.y, width: n.width, height: n.height });
-  }, [top?.key]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -177,6 +171,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
                 isTop={i === overlays.length - 1}
                 onClose={() => setOverlays((l) => l.slice(0, -1))}
                 onAct={(h, it) => go(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y })}
+                onDelay={(it, from) => goRef.current(it, from)}
               />
             ))}
           </div>
@@ -188,9 +183,29 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
 
 /** One overlay: a click-catching (optionally dimmed) backdrop over the frame and the overlay
  *  frame at its position. Only the topmost overlay's backdrop closes on click. */
-function OverlayLayer({ overlay: o, isTop, onClose, onAct }: { overlay: OpenOverlay; isTop: boolean; onClose: () => void; onAct: (h: Hotspot, it: Interaction) => void }) {
+function OverlayLayer({
+  overlay: o,
+  isTop,
+  onClose,
+  onAct,
+  onDelay,
+}: {
+  overlay: OpenOverlay;
+  isTop: boolean;
+  onClose: () => void;
+  onAct: (h: Hotspot, it: Interaction) => void;
+  onDelay: (it: Interaction, from: Rect) => void;
+}) {
   const n = getDoc().nodes[o.id];
   const hotspots = useHotspots(o.id);
+  // Layers are keyed by the overlay's key, so this runs once per opening, not whenever it is on top.
+  useEffect(() => {
+    const node = getDoc().nodes[o.id];
+    const delayed = node?.interactions.find((i) => i.trigger === "afterDelay");
+    if (!node || !delayed) return;
+    const t = setTimeout(() => onDelay(delayed, { x: o.x, y: o.y, width: node.width, height: node.height }), delayed.delayMs || 800);
+    return () => clearTimeout(t);
+  }, []);
   if (!n) return null;
   const a = ANIM[o.transition];
   return (

@@ -232,6 +232,41 @@ try {
   await page.keyboard.press("Escape");
   await page.waitForTimeout(2500);
   check("closing it doesn't re-fire the base timer", (await overlays(page)) === 0, `${await overlays(page)} overlay(s) after 2.5s`);
+  // A: an overlay's own after-delay runs once per opening. Parent opens Menu after a delay;
+  // closing Menu must not bring it back when Parent is on top again.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(100);
+  await page.evaluate((i) => window.__dt.dispatch({ op: "update", ids: [i], patch: { interactions: [] } }), id("Home"));
+  const parent = await tool("create_nodes", { nodes: [{ type: "frame", name: "Parent", x: 0, y: 1400, width: 300, height: 200, fill: "#FFFFFF", cornerRadius: 16 }] });
+  const parentId = byName(await doc(), "Parent").id;
+  check("parent overlay frame built", parent.ok);
+  await tool("set_prototype", { nodeId: parentId, trigger: "delay", action: "open_overlay", destinationId: id("Menu"), overlay: { position: "top_right", background: "none" } });
+  await tool("set_prototype", { nodeId: ids["Open modal"], clear: true, action: "open_overlay", destinationId: parentId });
+  await page.click("button[title='Present']");
+  await page.waitForSelector(".presenter");
+  await page.locator(`.presenter [data-hotspot="${ids["Open modal"]}"]`).click();
+  await page.waitForFunction(() => document.querySelectorAll(".presenter .overlay-backdrop").length === 2, null, { timeout: 4000 });
+  check("overlay's after-delay opens the nested overlay", true);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(2500);
+  check("closing the nested overlay doesn't re-fire its parent's timer", (await overlays(page)) === 1, `${await overlays(page)} overlay(s) after 2.5s`);
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+
+  // B: a base-frame after-delay Back, firing while a modal is open, closes the modal.
+  await tool("set_prototype", { nodeId: ids["Open modal"], clear: true, action: "open_overlay", destinationId: id("Modal") });
+  await tool("set_prototype", { nodeId: id("Home"), trigger: "delay", action: "back" });
+  // Long enough to open the modal first.
+  await page.evaluate((i) => {
+    const n = window.__dt.doc().nodes[i];
+    window.__dt.dispatch({ op: "update", ids: [i], patch: { interactions: n.interactions.map((x) => ({ ...x, delayMs: 3000 })) } });
+  }, id("Home"));
+  await page.click("button[title='Present']");
+  await page.waitForSelector(".presenter");
+  await page.locator(`.presenter [data-hotspot="${ids["Open modal"]}"]`).click();
+  await page.waitForSelector(".presenter .overlay-frame");
+  await page.waitForTimeout(3500);
+  check("base after-delay Back closes the open modal", (await overlays(page)) === 0 && (await crumb(page)).trim() === "Home", `${await overlays(page)} overlay(s), ${await crumb(page)}`);
 } catch (err) {
   failed++;
   console.log("FAIL  exception: " + (err?.stack ?? err));
