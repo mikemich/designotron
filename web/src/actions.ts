@@ -43,6 +43,46 @@ export const distribute = (horizontal: boolean) => dispatch({ op: "distribute", 
 export const flip = (horizontal: boolean) => dispatch({ op: "flip", ids: selection(), horizontal });
 export const nudge = (dx: number, dy: number) => dispatch({ op: "nudge", ids: selection(), dx, dy });
 
+// ---------- Vector edit mode ----------
+
+/** Selected anchors of the vector being edited that still exist (undo can remove some). */
+export function vectorPoints(): [number, number][] {
+  const st = useStore.getState();
+  const sps = st.editingVector ? getDoc().nodes[st.editingVector]?.vector?.subpaths : null;
+  return sps ? st.vectorPoints.filter(([s, i]) => i < (sps[s]?.points.length ?? 0)) : [];
+}
+
+/** Deletes the selected anchors; deleting all but one deletes the layer and leaves edit mode. */
+export function deleteVectorPoints() {
+  const id = useStore.getState().editingVector;
+  const points = vectorPoints();
+  if (!id || !points.length) return;
+  const r = dispatch<{ deleted: boolean }>({ op: "deleteVectorPoints", id, points });
+  useStore.setState(r?.deleted ? { editingVector: null } : { vectorPoints: [] });
+  if (r?.deleted) toast("Path deleted: it needs at least two points");
+}
+
+export function nudgeVectorPoints(dx: number, dy: number) {
+  const id = useStore.getState().editingVector;
+  const points = vectorPoints();
+  if (id && points.length) dispatch({ op: "moveVectorPoints", id, points, dx, dy });
+}
+
+export function selectAllVectorPoints() {
+  const id = useStore.getState().editingVector;
+  const sps = id ? getDoc().nodes[id]?.vector?.subpaths ?? [] : [];
+  useStore.setState({ vectorPoints: sps.flatMap((sp, s) => sp.points.map((_, i) => [s, i] as [number, number])) });
+}
+
+/** Makes an anchor sharp if it has handles, else smooth. */
+export function toggleVectorPointSmooth(sub: number, index: number) {
+  const id = useStore.getState().editingVector;
+  const p = id ? getDoc().nodes[id]?.vector?.subpaths[sub]?.points[index] : null;
+  if (!id || !p) return;
+  const smooth = !(p.inX || p.inY || p.outX || p.outY);
+  dispatch({ op: "setVectorPointsSmooth", id, points: [[sub, index]], smooth });
+}
+
 /** Runs several edits as one undo step. */
 function oneStep(fn: () => void) {
   dispatch({ op: "beginGesture" });

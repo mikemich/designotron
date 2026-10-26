@@ -14,15 +14,17 @@ use crate::interact::{self, Handle};
 use crate::layout;
 use crate::model::{
   AutoLayout, ColorStyle, Document, Interaction, LayoutDirection, Node, NodeId, NodeType, Page, Paint, RulerGuide, Sizing, SubPath,
-  TextStyle, VectorPoint,
+  TextStyle, VectorData, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render::{self, Mode, RenderOptions};
 use crate::text::TextMeasurer;
-use crate::{ai, codegen, patch};
+use crate::{ai, codegen, patch, vector_edit};
 
 const MAX_HISTORY: usize = 300;
 pub const CLIPBOARD_TAG: &str = "designotron/nodes";
+/// Screen pixels from a path within which vector edit mode offers to add a point.
+const VECTOR_SEGMENT_TOLERANCE: f64 = 6.0;
 
 /// One undo step: the state before it and the document right after it. Undo applies the
 /// reverse of before→after to the *current* document, so collaborators' later edits stay.
@@ -180,6 +182,48 @@ pub enum Command {
     points: Vec<VectorPoint>,
     closed: bool,
     parent: Option<NodeId>,
+  },
+  /// Vector edit mode: inserts an anchor on segment `seg` of subpath `sub` at curve
+  /// parameter `t` without changing the shape.
+  InsertVectorPoint {
+    id: NodeId,
+    sub: usize,
+    seg: usize,
+    t: f64,
+  },
+  /// Deletes anchors (`[subpath, index]` pairs), joining their neighbours. Deleting all
+  /// but one anchor deletes the layer.
+  DeleteVectorPoints {
+    id: NodeId,
+    points: Vec<[usize; 2]>,
+  },
+  /// Makes anchors smooth (handles along their neighbours) or sharp (no handles).
+  SetVectorPointsSmooth {
+    id: NodeId,
+    points: Vec<[usize; 2]>,
+    smooth: bool,
+  },
+  /// Moves anchors with their handles by a page-space delta.
+  MoveVectorPoints {
+    id: NodeId,
+    points: Vec<[usize; 2]>,
+    dx: f64,
+    dy: f64,
+  },
+  /// Continues an open subpath from its start (`prepend`) or end with page-space anchors,
+  /// listed in drawing order outwards from that end; `close` joins it to its other end.
+  ExtendVector {
+    id: NodeId,
+    sub: usize,
+    #[serde(default)]
+    prepend: bool,
+    points: Vec<VectorPoint>,
+    #[serde(default)]
+    close: bool,
+  },
+  /// Refits a vector's box to its path without moving it on the page (after point drags).
+  FitVectorBounds {
+    id: NodeId,
   },
   CreateImage {
     src: String,
@@ -439,6 +483,14 @@ pub enum Query {
     zoom: f64,
     #[serde(default)]
     exclude: Vec<NodeId>,
+  },
+  /// Vector edit mode: the point on vector `id`'s path nearest to a page point, within a
+  /// few screen pixels: `{sub, seg, t, x, y}` (page coordinates) or null.
+  VectorSegmentAt {
+    id: NodeId,
+    x: f64,
+    y: f64,
+    zoom: f64,
   },
   /// Comment threads on a page with resolved page positions.
   Comments {
@@ -1092,6 +1144,23 @@ impl Engine {
       .collect();
   }
 
+  /// Edits an editable (non-raw) vector's path in place, then optionally refits its box and
+  /// records the change as an override when the vector is inside an instance.
+  fn edit_vector<T>(&mut self, id: &str, fit: bool, f: impl FnOnce(&mut VectorData) -> Result<T, String>) -> Result<T, String> {
+    let n = self.doc.get_mut(id).ok_or("no such layer")?;
+    let v = match n.vector.as_mut() {
+      Some(v) if n.kind == NodeType::Vector && v.raw.is_none() => v,
+      _ => return Err("not an editable vector".into()),
+    };
+    let out = f(v)?;
+    if fit {
+      vector_edit::fit_bounds(n);
+    }
+    let p = json!({ "vector": n.vector, "x": n.x, "y": n.y, "width": n.width, "height": n.height });
+    components::record_override(&mut self.doc, id, &p);
+    Ok(out)
+  }
+
   /// Inserts a vector built from page-space subpaths, styled like `style`, under `parent`.
   fn insert_vector(&mut self, style: &Node, page_sps: Vec<SubPath>, parent: Option<NodeId>, index: Option<usize>, name: &str) -> NodeId {
     let inv = parent.as_deref().map(|p| self.doc.abs_matrix(p).invert()).unwrap_or_default();
@@ -1399,6 +1468,58 @@ impl Engine {
         self.doc.insert(n, parent.as_deref(), &page, None);
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
+      }
+      Command::InsertVectorPoint { id, sub, seg, t } => {
+        let index = self.edit_vector(&id, false, |v| {
+          let sp = v.subpaths.get_mut(sub).ok_or("no such subpath")?;
+          vector_edit::insert_point(sp, seg, t)
+        })?;
+        Ok(json!({ "index": index }))
+      }
+      Command::DeleteVectorPoints { id, points } => {
+        let mut left = true;
+        self.edit_vector(&id, true, |v| {
+          left = vector_edit::delete_points(v, &points);
+          Ok(())
+        })?;
+        if !left {
+          if self.doc.instance_ancestor(&id).is_some() {
+            return Err("a path inside an instance needs at least two points".into());
+          }
+          ops::delete(&mut self.doc, std::slice::from_ref(&id));
+        }
+        Ok(json!({ "deleted": !left }))
+      }
+      Command::SetVectorPointsSmooth { id, points, smooth } => {
+        self.edit_vector(&id, true, |v| {
+          vector_edit::set_smooth(v, &points, smooth);
+          Ok(())
+        })?;
+        Ok(json!({}))
+      }
+      Command::MoveVectorPoints { id, points, dx, dy } => {
+        let d = self.doc.abs_matrix(&id).invert().apply_vec(Point::new(dx, dy));
+        self.edit_vector(&id, true, |v| {
+          vector_edit::move_points(v, &points, d.x, d.y);
+          Ok(())
+        })?;
+        Ok(json!({}))
+      }
+      Command::ExtendVector {
+        id,
+        sub,
+        prepend,
+        points,
+        close,
+      } => {
+        let local = vector_edit::to_local(&points, &self.doc.abs_matrix(&id).invert());
+        self.edit_vector(&id, true, |v| vector_edit::extend(v, sub, prepend, &local, close))?;
+        self.selection = vec![id];
+        Ok(json!({}))
+      }
+      Command::FitVectorBounds { id } => {
+        self.edit_vector(&id, true, |_| Ok(()))?;
+        Ok(json!({}))
       }
       Command::CreateImage {
         src,
@@ -2366,6 +2487,20 @@ impl Engine {
           zoom,
         );
         json!({ "x": r.x, "y": r.y, "guides": guides })
+      }
+      Query::VectorSegmentAt { id, x, y, zoom } => {
+        let Some(v) = self.doc.get(&id).and_then(|n| n.vector.as_ref()) else {
+          return Ok(Value::Null);
+        };
+        let m = self.doc.abs_matrix(&id);
+        let local = m.invert().apply(Point::new(x, y));
+        match vector_edit::nearest_segment(v, local, VECTOR_SEGMENT_TOLERANCE / zoom.max(1e-6)) {
+          Some(h) => {
+            let p = m.apply(Point::new(h.x, h.y));
+            json!({ "sub": h.sub, "seg": h.seg, "t": h.t, "x": p.x, "y": p.y })
+          }
+          None => Value::Null,
+        }
       }
       Query::Comments { page, include_resolved } => crate::comments::list(&self.doc, page.as_deref(), include_resolved),
       Query::GridOverlay { page } => crate::grids::overlay(&self.doc, page.as_deref().unwrap_or(&self.page)),
@@ -3394,5 +3529,202 @@ mod tests {
     .unwrap();
     drag(&mut e, &c, 80.0, 0.0);
     assert_eq!(e.doc.get(&list).unwrap().children, vec![d, c]);
+  }
+
+  mod vector_editing {
+    use super::*;
+
+    #[test]
+    fn inserting_a_point_keeps_the_path_and_undoes() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      let before = e.doc.get(&id).unwrap().clone();
+      let d_before = crate::shapes::vector_d(&before);
+      let r = e
+        .dispatch(Command::InsertVectorPoint {
+          id: id.clone(),
+          sub: 0,
+          seg: 0,
+          t: 0.5,
+        })
+        .unwrap();
+      assert_eq!(r["index"], 1);
+      let n = e.doc.get(&id).unwrap();
+      assert_eq!(points(&e, &id).len(), 4);
+      assert_eq!((n.x, n.y, n.width, n.height), (before.x, before.y, before.width, before.height));
+      assert_ne!(crate::shapes::vector_d(n), d_before);
+      e.dispatch(Command::Undo).unwrap();
+      assert_eq!(crate::shapes::vector_d(e.doc.get(&id).unwrap()), d_before);
+      e.dispatch(Command::Redo).unwrap();
+      assert_eq!(points(&e, &id).len(), 4);
+    }
+
+    #[test]
+    fn deleting_points_refits_the_box_and_undoes() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      let abs = |e: &Engine| {
+        let m = e.doc.abs_matrix(&id);
+        points(e, &id).iter().map(|p| m.apply(Point::new(p.x, p.y))).collect::<Vec<_>>()
+      };
+      let before = abs(&e);
+      let r = e
+        .dispatch(Command::DeleteVectorPoints {
+          id: id.clone(),
+          points: vec![[0, 1]],
+        })
+        .unwrap();
+      assert_eq!(r["deleted"], false);
+      let after = abs(&e);
+      assert_eq!(after.len(), 2);
+      for (a, b) in [before[0], before[2]].iter().zip(&after) {
+        assert!((a.x - b.x).abs() < 1e-9 && (a.y - b.y).abs() < 1e-9, "points stay put on the page");
+      }
+      let n = e.doc.get(&id).unwrap();
+      assert_eq!(
+        (n.x, n.y, n.width, n.height),
+        (100.0, 100.0, 100.0, 1.0),
+        "box fits the shorter path"
+      );
+      e.dispatch(Command::Undo).unwrap();
+      assert_eq!(points(&e, &id).len(), 3);
+      assert_eq!(e.doc.get(&id).unwrap().height, 50.0);
+    }
+
+    #[test]
+    fn deleting_a_closed_paths_point_keeps_it_closed() {
+      let mut e = engine();
+      let id = path(&mut e, true);
+      e.dispatch(Command::InsertVectorPoint {
+        id: id.clone(),
+        sub: 0,
+        seg: 2,
+        t: 0.5,
+      })
+      .unwrap();
+      e.dispatch(Command::DeleteVectorPoints {
+        id: id.clone(),
+        points: vec![[0, 1]],
+      })
+      .unwrap();
+      let sp = &e.doc.get(&id).unwrap().vector.as_ref().unwrap().subpaths[0];
+      assert!(sp.closed && sp.points.len() == 3);
+    }
+
+    #[test]
+    fn deleting_all_but_one_point_deletes_the_layer() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      let r = e
+        .dispatch(Command::DeleteVectorPoints {
+          id: id.clone(),
+          points: vec![[0, 0], [0, 1]],
+        })
+        .unwrap();
+      assert_eq!(r["deleted"], true);
+      assert!(e.doc.get(&id).is_none());
+      e.dispatch(Command::Undo).unwrap();
+      assert_eq!(points(&e, &id).len(), 3);
+    }
+
+    #[test]
+    fn smooth_move_and_extend_are_single_steps() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      e.dispatch(Command::SetVectorPointsSmooth {
+        id: id.clone(),
+        points: vec![[0, 1]],
+        smooth: true,
+      })
+      .unwrap();
+      assert!(vector_edit::is_smooth(&points(&e, &id)[1]));
+      e.dispatch(Command::MoveVectorPoints {
+        id: id.clone(),
+        points: vec![[0, 1]],
+        dx: 0.0,
+        dy: 10.0,
+      })
+      .unwrap();
+      let m = e.doc.abs_matrix(&id);
+      let p = points(&e, &id)[1];
+      assert_eq!(m.apply(Point::new(p.x, p.y)), Point::new(150.0, 160.0));
+      e.dispatch(Command::ExtendVector {
+        id: id.clone(),
+        sub: 0,
+        prepend: false,
+        points: vec![VectorPoint::at(200.0, 200.0)],
+        close: true,
+      })
+      .unwrap();
+      let sp = e.doc.get(&id).unwrap().vector.clone().unwrap().subpaths[0].clone();
+      assert!(sp.closed && sp.points.len() == 4);
+      assert_eq!(e.doc.get(&id).unwrap().y + e.doc.get(&id).unwrap().height, 200.0);
+      for _ in 0..3 {
+        e.dispatch(Command::Undo).unwrap();
+      }
+      assert!(!vector_edit::is_smooth(&points(&e, &id)[1]));
+      assert_eq!(points(&e, &id).len(), 3);
+    }
+
+    #[test]
+    fn segment_query_finds_the_path_under_the_pointer() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      // The first segment runs from (100,100) to (150,150).
+      let q = |e: &Engine, x: f64, y: f64, zoom: f64| {
+        e.query(Query::VectorSegmentAt {
+          id: id.clone(),
+          x,
+          y,
+          zoom,
+        })
+        .unwrap()
+      };
+      let hit = q(&e, 127.0, 123.0, 1.0);
+      assert_eq!((hit["sub"].as_u64(), hit["seg"].as_u64()), (Some(0), Some(0)));
+      assert!((hit["t"].as_f64().unwrap() - 0.5).abs() < 1e-3, "{hit}");
+      assert!((hit["x"].as_f64().unwrap() - 125.0).abs() < 1e-3);
+      assert!(q(&e, 127.0, 123.0, 0.1).is_object(), "tolerance grows when zoomed out");
+      assert!(q(&e, 140.0, 110.0, 1.0).is_null());
+      e.dispatch(Command::InsertVectorPoint {
+        id: id.clone(),
+        sub: 0,
+        seg: 0,
+        t: hit["t"].as_f64().unwrap(),
+      })
+      .unwrap();
+      let p = points(&e, &id)[1];
+      let m = e.doc.abs_matrix(&id);
+      let a = m.apply(Point::new(p.x, p.y));
+      assert!((a.x - 125.0).abs() < 1e-3 && (a.y - 125.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn raw_paths_are_not_editable() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      e.doc.get_mut(&id).unwrap().vector.as_mut().unwrap().raw = Some(Default::default());
+      assert!(e.dispatch(Command::DeleteVectorPoints { id, points: vec![[0, 0]] }).is_err());
+    }
+
+    /// A V-shaped path through (100,100), (150,150), (200,100), optionally closed.
+    fn path(e: &mut Engine, closed: bool) -> String {
+      let r = e
+        .dispatch(Command::CreateVector {
+          points: vec![
+            VectorPoint::at(100.0, 100.0),
+            VectorPoint::at(150.0, 150.0),
+            VectorPoint::at(200.0, 100.0),
+          ],
+          closed,
+          parent: None,
+        })
+        .unwrap();
+      id_of(&r)
+    }
+
+    fn points(e: &Engine, id: &str) -> Vec<VectorPoint> {
+      e.doc.get(id).unwrap().vector.as_ref().unwrap().subpaths[0].points.clone()
+    }
   }
 }

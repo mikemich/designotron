@@ -143,6 +143,20 @@ try {
   st = await state();
   check("pen tool creates vector", (await doc()).nodes[st.selection[0]]?.type === "vector");
 
+  // Vector edit mode: click a segment to add a point (it stays selected), delete it, undo.
+  const penId = st.selection[0];
+  const penCount = async () => (await doc()).nodes[penId]?.vector.subpaths[0].points.length;
+  const segMid = { x: canvas.x + 250, y: canvas.y + canvas.height - 230 };
+  await page.mouse.dblclick(segMid.x, segMid.y);
+  await page.mouse.click(segMid.x, segMid.y);
+  const added = await penCount();
+  check("vector edit: click on a segment adds a point", added === 4 && (await page.locator(".vector-anchor.selected").count()) === 1, `${added} points`);
+  await page.keyboard.press("Delete");
+  const removed = await penCount();
+  await page.keyboard.press("Control+z");
+  check("vector edit: Delete removes the selected point, undo restores it", removed === 3 && (await penCount()) === 4);
+  await page.keyboard.press("Escape");
+
   // Code export.
   const welcome = Object.values(await doc()).length && Object.values((await doc()).nodes).find((n) => n.name === "Welcome");
   const react = await page.evaluate((id) => window.__dt.query({ q: "exportReact", id }), welcome.id);

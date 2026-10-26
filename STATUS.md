@@ -21,7 +21,7 @@ Ordered by impact on "replace Figma for a small team".
 | 7  | Faster painting of huge files          | Engine and DOM updates are incremental; a canvas/WebGL renderer would cut paint cost at 10k+ layers |
 | 8  | Figma import extras                    | `.fig` binary files, variables/styles from the Figma API, library components |
 | 9  | Variable extras                        | Aliases in the editor UI, scoping, per-page modes, prototyping with variables |
-| 10 | Vector editing completeness            | Add/delete points, bend tool, renormalise bounds after edits          |
+| 10 | Vector editing completeness            | Bend tool, join/split paths, corner radius per point                  |
 | 12 | Smart animate                          | Interpolate matching layers between frames (currently a dissolve)     |
 | 13 | Plugin sharing                         | Install plugins from a URL or a community list; plugin manifests and permissions |
 | 14 | Canvas gradient and image-crop handles | Edit gradients and crops directly on the canvas                       |
@@ -40,7 +40,7 @@ Ordered by impact on "replace Figma for a small team".
 | Styles          | Colour and text styles: create, rename, edit in place (`UpdateColorStyle`, `UpdateTextStyle`), delete; style chips with detach in Fill and Text |
 | Canvas          | Pan/zoom, Figma-style picking and drill-down, marquee, move/resize/rotate, smart-guide snapping      |
 | Tools           | Frame, rectangle, ellipse, line, arrow, polygon, star, pen, pencil, text, image, hand                |
-| Editing         | In-place text editing, vector point/handle editing, alt-drag duplicate, drop into frames, clipboard  |
+| Editing         | In-place text editing, vector point/handle editing (add, delete, sharp/smooth, marquee select, box refits after edits), alt-drag duplicate, drop into frames, clipboard  |
 | Panels          | Layers tree (drag reorder, rename, lock, hide), pages, assets, design/prototype/code tabs            |
 | Styling         | Multiple fills/strokes, solid/linear/radial/image paints, effects (shadows, blurs), blend, opacity    |
 | Tokens          | Colour styles and text styles with apply/propagate                                                   |
@@ -132,7 +132,7 @@ until someone runs it with a real key.
 | Headless text    | Bridge headless mode measures text with a heuristic, so layout can differ slightly from the editor       |
 | Strokes          | Inside/outside alignment is exact for rectangles/ellipses; other shapes clip or fall back to center      |
 | Effects          | Background blur is not drawn on the canvas (exported to code as `backdrop-filter`)                       |
-| Vectors          | Can move points and handles, cannot add/delete points; boolean results are flattened (not live) and curves become polylines; text can't be flattened |
+| Vectors          | Edit mode adds points (click a segment, exact Bézier split), deletes points (select, Delete), toggles sharp/smooth (double-click) and continues open paths with the pen; no bend tool yet; boolean results are flattened (not live) and curves become polylines; text can't be flattened |
 | Masks in code    | A frame or group containing a mask is exported to code as inline SVG                                     |
 | Components       | Overrides on nested instances through an outer instance are not preserved; variant swap drops overrides  |
 | Multi-resize     | Resizing several rotated layers at once approximates their new boxes                                     |

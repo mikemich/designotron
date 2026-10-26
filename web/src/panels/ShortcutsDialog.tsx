@@ -37,6 +37,21 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
     ],
   },
   {
+    title: "Vector editing",
+    items: [
+      ["Edit a path's points", "Double-click"],
+      ["Add a point", "Click the path"],
+      ["Select points", `Click, ${SHIFT}click, drag`],
+      ["Select all points", `${MOD}A`],
+      ["Delete points", "Delete / Backspace"],
+      ["Move points", "Drag or arrows"],
+      ["Sharp / smooth point", "Double-click a point"],
+      ["Move one handle only", `${ALT}drag`],
+      ["Continue an open path", "Pen on its end"],
+      ["Done", "Esc / Enter"],
+    ],
+  },
+  {
     title: "View",
     items: [
       ["Zoom to fit / selection", `${SHIFT}1 / ${SHIFT}2`],

@@ -115,6 +115,8 @@ interface Store {
   hover: string | null;
   editingText: string | null;
   editingVector: string | null;
+  /** Anchors selected in vector edit mode, as [subpath, index]. */
+  vectorPoints: [number, number][];
   guides: Guide[];
   marquee: Rect | null;
   rightTab: RightTab;
@@ -166,6 +168,7 @@ export const useStore = create<Store>(() => ({
   hover: null,
   editingText: null,
   editingVector: null,
+  vectorPoints: [],
   guides: [],
   marquee: null,
   rightTab: "design",
@@ -245,6 +248,11 @@ export function sync() {
   useStore.setState({ rev, es, dirty: true });
   listeners.forEach((l) => l());
 }
+
+// Point selection belongs to one vector edit session.
+useStore.subscribe((s, prev) => {
+  if (s.editingVector !== prev.editingVector && s.vectorPoints.length) useStore.setState({ vectorPoints: [] });
+});
 
 export function toast(text: string, kind: "info" | "error" = "info") {
   useStore.setState({ toast: { text, kind } });
@@ -360,4 +368,6 @@ export function zoomBy(factor: number, cx?: number, cy?: number) {
   query: (q: Record<string, unknown>) => query(q),
   zoomToFit: () => zoomToFit(),
   edit: (id: string) => useStore.setState({ editingText: id }),
+  viewport: () => useStore.getState().viewport,
+  vectorEdit: () => ({ id: useStore.getState().editingVector, points: useStore.getState().vectorPoints }),
 };

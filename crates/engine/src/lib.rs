@@ -25,6 +25,7 @@ pub mod render;
 pub mod shapes;
 pub mod text;
 pub mod variables;
+pub mod vector_edit;
 
 pub use engine::{Command, Engine, Query};
 pub use model::Document;

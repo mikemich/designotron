@@ -18,7 +18,7 @@ import { GridOverlay, PageGuides, Rulers } from "./Rulers";
 import { CommentLayer } from "./Comments";
 import { RemoteCursors, RemoteSelections } from "./RemoteCursors";
 import { reportCursor } from "../collab";
-import { insertImageFile, openDtronFile } from "../actions";
+import { insertImageFile, openDtronFile, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu } from "./contextMenu";
 import { useDemo } from "../Demo";
 import { Menu, type MenuItem } from "../ui/controls";
@@ -41,8 +41,28 @@ type Drag =
   | { kind: "draw"; start: Pt; cur: Pt }
   | { kind: "pencil"; points: Pt[] }
   | { kind: "penHandle"; index: number }
-  | { kind: "vector"; id: string; sub: number; idx: number; part: "anchor" | "in" | "out"; startLocal: Pt; start: Node }
+  | { kind: "vector"; id: string; sub: number; idx: number; part: "anchor" | "in" | "out"; pts: [number, number][]; startLocal: Pt; start: Node; moved: boolean }
+  | { kind: "vmarquee"; id: string; start: Pt; base: [number, number][]; onSelf: boolean; moved: boolean }
   | { kind: "link"; from: string; cur: Pt };
+
+/** The point on a path nearest the pointer (`vectorSegmentAt` query, page coordinates). */
+interface SegmentHit {
+  sub: number;
+  seg: number;
+  t: number;
+  x: number;
+  y: number;
+}
+
+/** The open path end the pen tool continues from, with its outgoing handle (page space). */
+interface PenFrom {
+  id: string;
+  sub: number;
+  prepend: boolean;
+  anchor: VectorPoint;
+  /** The path's other end: clicking it closes the path. */
+  other: Pt | null;
+}
 
 const HANDLE_CURSORS: Record<Handle, string> = {
   n: "ns-resize",
@@ -93,6 +113,12 @@ export function Canvas() {
   const [draw, setDraw] = useState<{ start: Pt; cur: Pt } | null>(null);
   const [pen, setPen] = useState<VectorPoint[]>([]);
   const [penCursor, setPenCursor] = useState<Pt | null>(null);
+  // Pen continuing an open path from one of its ends.
+  const [penFrom, setPenFrom] = useState<PenFrom | null>(null);
+  // Vector edit mode: the point on the path under the pointer (where a click adds an anchor).
+  const [vHover, setVHover] = useState<SegmentHit | null>(null);
+  const lastInsert = useRef<{ key: string; time: number } | null>(null);
+  const vectorPts = useStore((s) => s.vectorPoints);
   const [pencil, setPencil] = useState<Pt[] | null>(null);
   const [link, setLink] = useState<{ from: string; cur: Pt } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
@@ -233,6 +259,7 @@ export function Canvas() {
   useEffect(() => {
     if (tool !== "pen") {
       if (pen.length) setPen([]);
+      if (penFrom) setPenFrom(null);
       return;
     }
     const onKey = (e: KeyboardEvent) => {
@@ -243,9 +270,10 @@ export function Canvas() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [tool, pen]);
+  }, [tool, pen, penFrom]);
 
   useEffect(() => {
+    setVHover(null);
     if (!editingVector) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" || e.key === "Enter") useStore.setState({ editingVector: null });
@@ -265,9 +293,47 @@ export function Canvas() {
   const zoom = () => useStore.getState().viewport.zoom;
 
   function finishPen(closed: boolean) {
-    if (pen.length >= 2) dispatch({ op: "createVector", points: pen, closed, parent: null });
+    if (penFrom) {
+      if (pen.length || closed) dispatch({ op: "extendVector", id: penFrom.id, sub: penFrom.sub, prepend: penFrom.prepend, points: pen, close: closed });
+      setPenFrom(null);
+    } else if (pen.length >= 2) dispatch({ op: "createVector", points: pen, closed, parent: null });
     setPen([]);
     setTool("move");
+  }
+
+  /** Starts dragging an anchor (with the other selected anchors) or a handle of the edited vector. */
+  function startVectorDrag(id: string, sub: number, idx: number, part: "anchor" | "in" | "out", p: Pt) {
+    const n = getDoc().nodes[id];
+    const m = query<{ items: BoundsItem[] }>({ q: "bounds", ids: [id] }).items[0];
+    const pts = part === "anchor" ? vectorPoints() : [];
+    drag.current = { kind: "vector", id, sub, idx, part, pts, startLocal: apply(invert(m.matrix), p), start: n, moved: false };
+  }
+
+  /** An open end of a selected (or edited) path that `near` accepts, for the pen to continue. */
+  function openEndAt(near: (q: Pt) => boolean): PenFrom | null {
+    const doc = getDoc();
+    const ids = [...new Set([...(editingVector ? [editingVector] : []), ...selection()])];
+    for (const id of ids) {
+      const n = doc.nodes[id];
+      if (n?.type !== "vector" || !n.vector || n.vector.raw) continue;
+      const m = query<{ items: BoundsItem[] }>({ q: "bounds", ids: [id] }).items[0]?.matrix;
+      if (!m) continue;
+      const vec = (q: Pt) => ({ x: m.a * q.x + m.c * q.y, y: m.b * q.x + m.d * q.y });
+      for (const [sub, sp] of n.vector.subpaths.entries()) {
+        if (sp.closed || sp.points.length < 2) continue;
+        const first = sp.points[0];
+        const last = sp.points[sp.points.length - 1];
+        for (const prepend of [false, true]) {
+          const end = prepend ? first : last;
+          const a = apply(m, end);
+          if (!near(a)) continue;
+          // The handle pointing away from the path, so the preview curves like the result.
+          const h = vec(prepend ? { x: end.inX, y: end.inY } : { x: end.outX, y: end.outY });
+          return { id, sub, prepend, anchor: { x: a.x, y: a.y, inX: 0, inY: 0, outX: h.x, outY: h.y }, other: apply(m, prepend ? last : first) };
+        }
+      }
+    }
+    return null;
   }
 
   function startMove(e: React.PointerEvent, p: Pt, id: string | null) {
@@ -322,11 +388,41 @@ export function Canvas() {
     const vpt = target.getAttribute("data-vpt");
     if (vpt && editingVector) {
       const [sub, idx, part] = vpt.split(":");
-      const n = getDoc().nodes[editingVector];
-      const m = query<{ items: BoundsItem[] }>({ q: "bounds", ids: [editingVector] }).items[0];
+      if (part === "anchor") {
+        const key: [number, number] = [+sub, +idx];
+        const cur = vectorPoints();
+        const has = cur.some(([s, i]) => s === key[0] && i === key[1]);
+        if (e.shiftKey) {
+          useStore.setState({ vectorPoints: has ? cur.filter(([s, i]) => s !== key[0] || i !== key[1]) : [...cur, key] });
+          if (has) return;
+        } else if (!has) useStore.setState({ vectorPoints: [key] });
+      }
       dispatch({ op: "beginGesture" });
-      drag.current = { kind: "vector", id: editingVector, sub: +sub, idx: +idx, part: part as any, startLocal: apply(invert(m.matrix), p), start: n };
+      startVectorDrag(editingVector, +sub, +idx, part as "anchor" | "in" | "out", p);
       return;
+    }
+    if (editingVector && tool === "move") {
+      // Click on the path: add an anchor there (and drag it, all one undo step).
+      const hit = query<SegmentHit | null>({ q: "vectorSegmentAt", id: editingVector, x: p.x, y: p.y, zoom: zoom() });
+      if (hit) {
+        dispatch({ op: "beginGesture" });
+        const r = dispatch<{ index: number }>({ op: "insertVectorPoint", id: editingVector, sub: hit.sub, seg: hit.seg, t: hit.t });
+        if (!r) {
+          dispatch({ op: "endGesture" });
+          return;
+        }
+        useStore.setState({ vectorPoints: [[hit.sub, r.index]] });
+        lastInsert.current = { key: `${hit.sub}:${r.index}`, time: Date.now() };
+        setVHover(null);
+        startVectorDrag(editingVector, hit.sub, r.index, "anchor", p);
+        return;
+      }
+      // Anywhere but another layer: select anchors with a marquee (a plain click clears them).
+      const id = query<string | null>({ q: "pick", x: p.x, y: p.y, zoom: zoom(), deep: false });
+      if (!id || id === editingVector) {
+        drag.current = { kind: "vmarquee", id: editingVector, start: p, base: e.shiftKey ? vectorPoints() : [], onSelf: id === editingVector, moved: false };
+        return;
+      }
     }
     const labelId = target.getAttribute("data-label");
     if (labelId) {
@@ -348,11 +444,25 @@ export function Canvas() {
         break;
       }
       case "pen": {
-        if (pen.length >= 2) {
-          const first = toScreen(st.viewport, pen[0]);
-          const l = local(e);
-          if (Math.hypot(first.x - l.x, first.y - l.y) < 8) {
+        const l = local(e);
+        const near = (q: Pt) => {
+          const s = toScreen(st.viewport, q);
+          return Math.hypot(s.x - l.x, s.y - l.y) < 8;
+        };
+        if (penFrom) {
+          // Clicking the path's other end closes it.
+          if (penFrom.other && near(penFrom.other)) {
             finishPen(true);
+            return;
+          }
+        } else if (pen.length >= 2 && near(pen[0])) {
+          finishPen(true);
+          return;
+        } else if (!pen.length) {
+          // Clicking an open end of a selected path continues it.
+          const end = openEndAt(near);
+          if (end) {
+            setPenFrom(end);
             return;
           }
         }
@@ -380,6 +490,13 @@ export function Canvas() {
     const p = pagePt(e);
     reportCursor(p);
     if (!d) {
+      if (editingVector && tool === "move") {
+        const onPoint = (e.target as Element).hasAttribute?.("data-vpt");
+        const hit = onPoint ? null : query<SegmentHit | null>({ q: "vectorSegmentAt", id: editingVector, x: p.x, y: p.y, zoom: zoom() });
+        if (hit?.x !== vHover?.x || hit?.y !== vHover?.y) setVHover(hit);
+        if (useStore.getState().hover) useStore.setState({ hover: null });
+        return;
+      }
       if (tool === "move" && !useStore.getState().editingText) {
         const id = query<string | null>({ q: "pick", x: p.x, y: p.y, zoom: zoom(), deep: e.metaKey || e.ctrlKey });
         if (id !== useStore.getState().hover) useStore.setState({ hover: id });
@@ -465,12 +582,23 @@ export function Canvas() {
         const lp = apply(invert(m.matrix), p);
         const dx = lp.x - d.startLocal.x;
         const dy = lp.y - d.startLocal.y;
+        if (!d.moved) {
+          if (Math.hypot(dx, dy) * zoom() < 2) return;
+          d.moved = true;
+        }
         const vec = structuredClone(d.start.vector!);
         const pt = vec.subpaths[d.sub].points[d.idx];
         const orig = d.start.vector!.subpaths[d.sub].points[d.idx];
         if (d.part === "anchor") {
-          pt.x = orig.x + dx;
-          pt.y = orig.y + dy;
+          // Every selected anchor moves together (the dragged one is always among them).
+          const moving = d.pts.some(([s, i]) => s === d.sub && i === d.idx) ? d.pts : [[d.sub, d.idx] as [number, number]];
+          for (const [s, i] of moving) {
+            const o = d.start.vector!.subpaths[s]?.points[i];
+            const q = vec.subpaths[s]?.points[i];
+            if (!o || !q) continue;
+            q.x = o.x + dx;
+            q.y = o.y + dy;
+          }
         } else if (d.part === "out") {
           pt.outX = orig.outX + dx;
           pt.outY = orig.outY + dy;
@@ -487,6 +615,25 @@ export function Canvas() {
           }
         }
         dispatch({ op: "update", ids: [d.id], patch: { vector: vec } }, { quiet: true });
+        break;
+      }
+      case "vmarquee": {
+        if (!d.moved && Math.hypot(p.x - d.start.x, p.y - d.start.y) * zoom() < 3) return;
+        d.moved = true;
+        const r: Rect = { x: Math.min(d.start.x, p.x), y: Math.min(d.start.y, p.y), width: Math.abs(p.x - d.start.x), height: Math.abs(p.y - d.start.y) };
+        useStore.setState({ marquee: r });
+        const n = getDoc().nodes[d.id];
+        const m = query<{ items: BoundsItem[] }>({ q: "bounds", ids: [d.id] }).items[0]?.matrix;
+        if (!n?.vector || !m) break;
+        const inside: [number, number][] = [];
+        n.vector.subpaths.forEach((sp, s) =>
+          sp.points.forEach((pt, i) => {
+            const a = apply(m, pt);
+            if (a.x >= r.x && a.x <= r.x + r.width && a.y >= r.y && a.y <= r.y + r.height) inside.push([s, i]);
+          }),
+        );
+        const fresh = inside.filter(([s, i]) => !d.base.some(([bs, bi]) => bs === s && bi === i));
+        useStore.setState({ vectorPoints: [...d.base, ...fresh] });
         break;
       }
       case "link":
@@ -514,9 +661,24 @@ export function Canvas() {
         break;
       case "resize":
       case "rotate":
-      case "vector":
         dispatch({ op: "endGesture" });
         useStore.setState({ guides: [] });
+        break;
+      case "vector":
+        // Points may have left the layer's box: refit it in the same undo step.
+        if (d.moved) dispatch({ op: "fitVectorBounds", id: d.id }, { quiet: true });
+        dispatch({ op: "endGesture" });
+        break;
+      case "vmarquee":
+        useStore.setState({ marquee: null });
+        if (!d.moved && !e.shiftKey) {
+          // A click off the path clears the anchors, or leaves edit mode when none are selected.
+          if (vectorPoints().length || d.onSelf) useStore.setState({ vectorPoints: [] });
+          else {
+            useStore.setState({ editingVector: null });
+            dispatch({ op: "select", ids: [] });
+          }
+        }
         break;
       case "marquee":
         useStore.setState({ marquee: null });
@@ -623,6 +785,15 @@ export function Canvas() {
   }
 
   function onDoubleClick(e: React.MouseEvent) {
+    const vpt = (e.target as Element).getAttribute?.("data-vpt");
+    if (vpt && editingVector) {
+      // Double-click an anchor: sharp / smooth (not the one the first click just added).
+      const [sub, idx, part] = vpt.split(":");
+      const li = lastInsert.current;
+      const fresh = li && li.key === `${sub}:${idx}` && Date.now() - li.time < 600;
+      if (part === "anchor" && !fresh) toggleVectorPointSmooth(+sub, +idx);
+      return;
+    }
     const p = pagePt(e);
     const z = zoom();
     const doc = getDoc();
@@ -730,7 +901,7 @@ export function Canvas() {
     return out;
   }
 
-  const cursor = panning ? "grabbing" : keys.space || tool === "hand" ? "grab" : tool === "move" ? "default" : tool === "text" ? "text" : "crosshair";
+  const cursor = panning ? "grabbing" : keys.space || tool === "hand" ? "grab" : tool === "move" ? (vHover ? "crosshair" : "default") : tool === "text" ? "text" : "crosshair";
   const empty = !pageObj?.children.length;
 
   return (
@@ -746,6 +917,7 @@ export function Canvas() {
       onPointerLeave={() => {
         reportCursor(null);
         if (!drag.current) useStore.setState({ hover: null });
+        setVHover(null);
       }}
       onDoubleClick={onDoubleClick}
       onContextMenu={onContextMenu}
@@ -778,7 +950,8 @@ export function Canvas() {
         })}
         {dropTarget && <DropOutline id={dropTarget} v={v} />}
         {hoverItem && <polygon points={polyPoints(corners(v, hoverItem.matrix, hoverItem.width, hoverItem.height))} fill="none" stroke="#0d99ff" strokeWidth={1.5} />}
-        {selItems.items.map((it) => (
+        {/* Vector edit mode draws the path itself instead of the layer's box. */}
+        {!editingVector && selItems.items.map((it) => (
           <polygon key={it.id} points={polyPoints(corners(v, it.matrix, it.width, it.height))} fill="none" stroke={doc.nodes[it.id]?.type === "component" || doc.nodes[it.id]?.instance ? "#9747ff" : "#0d99ff"} strokeWidth={1} />
         ))}
         {box && sel.length > 1 && <polygon points={polyPoints(box)} fill="none" stroke="#0d99ff" strokeWidth={1} />}
@@ -842,8 +1015,8 @@ export function Canvas() {
         {marquee && <polygon points={polyPoints(rectCorners(v, marquee))} fill="rgba(13,153,255,0.08)" stroke="#0d99ff" strokeWidth={1} />}
         {draw && <DrawPreview tool={tool} start={draw.start} cur={draw.cur} v={v} />}
         {pencil && <polyline points={polyPoints(pencil.map((p) => toScreen(v, p)))} fill="none" stroke="#0d99ff" strokeWidth={1.5} />}
-        {pen.length > 0 && <PenPreview pts={pen} cursor={penCursor} v={v} />}
-        {vectorNode?.vector && vectorM && <VectorPoints node={vectorNode} m={vectorM} v={v} />}
+        {(pen.length > 0 || penFrom) && <PenPreview pts={penFrom ? [penFrom.anchor, ...pen] : pen} cursor={penCursor} v={v} />}
+        {vectorNode?.vector && vectorM && <VectorPoints node={vectorNode} m={vectorM} v={v} selected={vectorPts} hover={vHover} />}
       </svg>
       <CommentLayer v={v} />
       <RemoteCursors v={v} />
@@ -929,27 +1102,99 @@ function PenPreview({ pts, cursor, v }: { pts: VectorPoint[]; cursor: Pt | null;
   );
 }
 
-function VectorPoints({ node, m, v }: { node: Node; m: Mat; v: { x: number; y: number; zoom: number } }) {
-  const items: JSX.Element[] = [];
-  node.vector!.subpaths.forEach((sp, si) =>
+/** Screen-space path data for subpaths in a node's local space. */
+function screenPathD(subpaths: { points: VectorPoint[]; closed: boolean }[], m: Mat, v: { x: number; y: number; zoom: number }): string {
+  const sc = (q: Pt) => toScreen(v, apply(m, q));
+  return subpaths
+    .filter((sp) => sp.points.length)
+    .map((sp) => {
+      const pts = sp.points;
+      const seg = (a: VectorPoint, b: VectorPoint) => {
+        const c1 = sc({ x: a.x + a.outX, y: a.y + a.outY });
+        const c2 = sc({ x: b.x + b.inX, y: b.y + b.inY });
+        const e = sc(b);
+        return ` C${c1.x} ${c1.y} ${c2.x} ${c2.y} ${e.x} ${e.y}`;
+      };
+      const s0 = sc(pts[0]);
+      let d = `M${s0.x} ${s0.y}`;
+      for (let i = 1; i < pts.length; i++) d += seg(pts[i - 1], pts[i]);
+      if (sp.closed && pts.length > 1) d += seg(pts[pts.length - 1], pts[0]) + " Z";
+      return d;
+    })
+    .join(" ");
+}
+
+/** Vector edit mode overlay: path outline, the segment under the pointer, handles and anchors. */
+function VectorPoints({
+  node,
+  m,
+  v,
+  selected,
+  hover,
+}: {
+  node: Node;
+  m: Mat;
+  v: { x: number; y: number; zoom: number };
+  selected: [number, number][];
+  hover: SegmentHit | null;
+}) {
+  const subpaths = node.vector!.subpaths;
+  const isSel = (si: number, pi: number) => selected.some(([s, i]) => s === si && i === pi);
+  const handles: JSX.Element[] = [];
+  const anchors: JSX.Element[] = [];
+  subpaths.forEach((sp, si) =>
     sp.points.forEach((p, pi) => {
       const a = toScreen(v, apply(m, p));
       const hasOut = p.outX || p.outY;
       const hasIn = p.inX || p.inY;
       if (hasOut) {
         const o = toScreen(v, apply(m, { x: p.x + p.outX, y: p.y + p.outY }));
-        items.push(<line key={`lo${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
-        items.push(<circle key={`o${si}-${pi}`} data-vpt={`${si}:${pi}:out`} className="handle" cx={o.x} cy={o.y} r={4} fill="white" stroke="#0d99ff" />);
+        handles.push(<line key={`lo${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
+        handles.push(<circle key={`o${si}-${pi}`} data-vpt={`${si}:${pi}:out`} className="handle" cx={o.x} cy={o.y} r={3.5} fill="white" stroke="#0d99ff" />);
       }
       if (hasIn) {
         const o = toScreen(v, apply(m, { x: p.x + p.inX, y: p.y + p.inY }));
-        items.push(<line key={`li${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
-        items.push(<circle key={`i${si}-${pi}`} data-vpt={`${si}:${pi}:in`} className="handle" cx={o.x} cy={o.y} r={4} fill="white" stroke="#0d99ff" />);
+        handles.push(<line key={`li${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
+        handles.push(<circle key={`i${si}-${pi}`} data-vpt={`${si}:${pi}:in`} className="handle" cx={o.x} cy={o.y} r={3.5} fill="white" stroke="#0d99ff" />);
       }
-      items.push(<rect key={`a${si}-${pi}`} data-vpt={`${si}:${pi}:anchor`} className="handle" x={a.x - 4} y={a.y - 4} width={8} height={8} fill="white" stroke="#0d99ff" />);
+      const on = isSel(si, pi);
+      anchors.push(
+        <rect
+          key={`a${si}-${pi}`}
+          data-vpt={`${si}:${pi}:anchor`}
+          className={"handle vector-anchor" + (on ? " selected" : "")}
+          x={a.x - 4}
+          y={a.y - 4}
+          width={8}
+          height={8}
+          rx={on ? 1 : 0}
+          fill={on ? "#0d99ff" : "white"}
+          stroke={on ? "white" : "#0d99ff"}
+          strokeWidth={on ? 1.5 : 1}
+        />,
+      );
     }),
   );
-  return <g>{items}</g>;
+  const hoverSp = hover ? subpaths[hover.sub] : null;
+  const hoverSeg =
+    hover && hoverSp && hoverSp.points.length > 1
+      ? screenPathD([{ points: [hoverSp.points[hover.seg], hoverSp.points[(hover.seg + 1) % hoverSp.points.length]], closed: false }], m, v)
+      : null;
+  const hp = hover ? toScreen(v, hover) : null;
+  return (
+    <g>
+      <path d={screenPathD(subpaths, m, v)} fill="none" stroke="#0d99ff" strokeWidth={1} />
+      {hoverSeg && <path className="vector-hover-segment" d={hoverSeg} fill="none" stroke="#0d99ff" strokeWidth={2.5} />}
+      {handles}
+      {anchors}
+      {hp && (
+        <g className="vector-hover-point" pointerEvents="none">
+          <circle cx={hp.x} cy={hp.y} r={4.5} fill="white" stroke="#0d99ff" strokeWidth={1.5} />
+          <path d={`M${hp.x - 2} ${hp.y}H${hp.x + 2}M${hp.x} ${hp.y - 2}V${hp.y + 2}`} stroke="#0d99ff" strokeWidth={1.2} />
+        </g>
+      )}
+    </g>
+  );
 }
 
 /** The zoom level, shown briefly while it changes (the toolbar always has it). */

@@ -29,7 +29,7 @@ export function installShortcuts(): () => void {
       if (e.altKey && e.code === "KeyM") return run(A.useAsMask);
       if (k === "y") return run(A.redo);
       if (k === "d") return run(A.duplicate);
-      if (k === "a") return run(A.selectAll);
+      if (k === "a") return run(st.editingVector ? A.selectAllVectorPoints : A.selectAll);
       if (k === "s") return run(A.saveDtron);
       if (k === "/") return run(() => useStore.setState({ chatOpen: !st.chatOpen }));
       if (k === "g" && e.altKey) return run(A.frameSelection);
@@ -76,19 +76,22 @@ export function installShortcuts(): () => void {
     }
 
     const step = e.shiftKey ? 10 : 1;
+    // Vector edit mode: arrows move the selected anchors instead of the layer.
+    const pts = st.editingVector ? A.vectorPoints().length > 0 : false;
+    const move = (dx: number, dy: number) => (pts ? A.nudgeVectorPoints(dx, dy) : A.nudge(dx, dy));
     switch (e.key) {
       case "ArrowLeft":
-        return has && run(() => A.nudge(-step, 0));
+        return has && run(() => move(-step, 0));
       case "ArrowRight":
-        return has && run(() => A.nudge(step, 0));
+        return has && run(() => move(step, 0));
       case "ArrowUp":
-        return has && run(() => A.nudge(0, -step));
+        return has && run(() => move(0, -step));
       case "ArrowDown":
-        return has && run(() => A.nudge(0, step));
+        return has && run(() => move(0, step));
       case "Delete":
       case "Backspace":
-        // Editing vector points: never delete the whole layer.
-        if (st.editingVector) return;
+        // Editing vector points: delete the selected anchors, never the whole layer at once.
+        if (st.editingVector) return run(A.deleteVectorPoints);
         return has && run(A.deleteSelection);
       case "Escape":
         if (st.editingVector) return run(() => useStore.setState({ editingVector: null }));
