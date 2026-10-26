@@ -6,13 +6,94 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::color;
 use crate::geom::fmt;
 use crate::model::{
-  Action, Align, Document, EffectType, LayoutDirection, Node, NodeType, Paint, ScaleMode, Sizing, StrokeAlign, TextAlignH, TextAutoResize,
-  TextCase, TextDecoration,
+  Action, Align, Document, EffectType, LayoutDirection, Node, NodeType, OverlayPosition, OverlaySettings, Paint, ScaleMode, Sizing,
+  StrokeAlign, TextAlignH, TextAutoResize, TextCase, TextDecoration,
 };
 use crate::render::{esc, export_svg, font_stack};
 use crate::text::TextMeasurer;
 
 const PX: &str = "px";
+
+/// The generated project's `src/App.tsx`: screen history plus a stack of overlays.
+const APP_TSX: &str = r#"import { useEffect, useState, type CSSProperties } from "react";
+__IMPORTS__
+type Navigate = (screen: string, overlay?: Record<string, unknown>) => void;
+type Overlay = { screen: string; position?: string; x?: number; y?: number; background?: string | null; closeOnClickOutside?: boolean };
+
+const screens: Record<string, (props: { onNavigate?: Navigate }) => JSX.Element> = {
+__MAP__};
+
+// Design widths: screens fill the window up to these; overlays render at them.
+const widths: Record<string, number> = { __WIDTHS__ };
+
+// Phone-sized screens are shown centred on a backdrop; wider ones fill the window.
+const phoneScreens = new Set<string>([__PHONES__]);
+
+// Where an overlay sits on the screen underneath it.
+const placement: Record<string, CSSProperties> = {
+  center: { alignItems: "center", justifyContent: "center" },
+  topLeft: { alignItems: "flex-start", justifyContent: "flex-start" },
+  topCenter: { alignItems: "flex-start", justifyContent: "center" },
+  topRight: { alignItems: "flex-start", justifyContent: "flex-end" },
+  bottomLeft: { alignItems: "flex-end", justifyContent: "flex-start" },
+  bottomCenter: { alignItems: "flex-end", justifyContent: "center" },
+  bottomRight: { alignItems: "flex-end", justifyContent: "flex-end" },
+};
+
+export default function App() {
+  const [history, setHistory] = useState<string[]>([__START__]);
+  // Open overlays (modals, menus, sheets), topmost last.
+  const [overlays, setOverlays] = useState<Overlay[]>([]);
+  const current = history[history.length - 1];
+  const Screen = screens[current];
+  const closeTop = () => setOverlays((o) => o.slice(0, -1));
+  const onNavigate: Navigate = (s, opts) => {
+    if (s === "close-overlay") return closeTop();
+    if (s.startsWith("overlay:")) return setOverlays((o) => [...o, { ...opts, screen: s.slice(8) } as Overlay]);
+    if (s.startsWith("swap-overlay:")) return setOverlays((o) => [...o.slice(0, -1), { ...opts, screen: s.slice(13) } as Overlay]);
+    if (s === "back" && overlays.length) return closeTop();
+    setOverlays([]);
+    setHistory((h) => (s === "back" ? (h.length > 1 ? h.slice(0, -1) : h) : [...h, s]));
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeTop();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  const phone = phoneScreens.has(current);
+  return (
+    <div className={phone ? "min-h-screen flex items-start justify-center bg-neutral-100 py-10" : "min-h-screen flex justify-center"}>
+      <div className="relative w-full" style={{ maxWidth: widths[current] }}>
+        {Screen ? <Screen onNavigate={onNavigate} /> : null}
+        {overlays.map((o, i) => {
+          const Layer = screens[o.screen];
+          const manual = o.position === "manual";
+          return Layer ? (
+            <div
+              key={i}
+              className="absolute inset-0 flex overflow-hidden"
+              style={{ background: o.background ?? "transparent", ...placement[o.position ?? "center"] }}
+              onClick={() => {
+                if (i === overlays.length - 1 && o.closeOnClickOutside !== false) closeTop();
+              }}
+            >
+              <div
+                className={manual ? "absolute" : undefined}
+                style={{ width: widths[o.screen], maxWidth: "100%", ...(manual ? { left: o.x, top: o.y } : {}) }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <Layer onNavigate={onNavigate} />
+              </div>
+            </div>
+          ) : null;
+        })}
+      </div>
+    </div>
+  );
+}
+"#;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Place {
@@ -44,7 +125,11 @@ struct El {
   /// Name of a component to reference instead of inlining (`<Button />`).
   component_ref: Option<String>,
   comment: Option<String>,
+  /// `onNavigate` target: a screen name, "back", "overlay:<Screen>", "swap-overlay:<Screen>"
+  /// or "close-overlay".
   navigate: Option<String>,
+  /// Overlay placement passed as `onNavigate`'s second argument.
+  overlay: Option<serde_json::Value>,
   url: Option<String>,
   is_component_root: bool,
   /// Extra HTML attributes (src, alt, type).
@@ -63,6 +148,7 @@ impl El {
       component_ref: None,
       comment: None,
       navigate: None,
+      overlay: None,
       url: None,
       is_component_root: false,
       attrs: vec![],
@@ -361,13 +447,42 @@ impl<'a> Ctx<'a> {
             el.navigate = Some(name.clone());
           }
         }
+        Action::Back => el.navigate = Some("back".into()),
+        Action::OpenOverlay | Action::SwapOverlay => {
+          if let Some(name) = i.destination.as_ref().and_then(|d| self.screen_names.get(d)) {
+            let kind = if i.action == Action::OpenOverlay {
+              "overlay"
+            } else {
+              "swap-overlay"
+            };
+            el.navigate = Some(format!("{kind}:{name}"));
+            el.overlay = Some(self.overlay_opts(n, &i.overlay));
+          }
+        }
+        Action::CloseOverlay => el.navigate = Some("close-overlay".into()),
         Action::OpenUrl => el.url = i.url.as_deref().and_then(crate::model::safe_link),
-        _ => {}
+        Action::ScrollTo => {}
       }
     }
     if el.navigate.is_some() || el.url.is_some() {
       el.s("cursor", "pointer");
     }
+  }
+
+  /// What `App.tsx` needs to place an overlay; manual offsets become a point on the screen.
+  fn overlay_opts(&self, n: &Node, o: &OverlaySettings) -> serde_json::Value {
+    let mut v = serde_json::json!({
+      "position": serde_json::to_value(o.position).unwrap_or_default(),
+      "closeOnClickOutside": o.close_on_click_outside,
+      "background": o.background.as_ref().map(|b| color::css_with_opacity(&b.color, b.opacity)),
+    });
+    if o.position == OverlayPosition::Manual {
+      let at = self.doc.abs_bounds(&n.id);
+      let screen = self.doc.abs_bounds(&self.doc.top_level_of(&n.id));
+      v["x"] = serde_json::json!((at.x - screen.x + o.offset_x).round());
+      v["y"] = serde_json::json!((at.y - screen.y + o.offset_y).round());
+    }
+    v
   }
 
   fn position(&self, el: &mut El, n: &Node, place: Place) {
@@ -896,8 +1011,9 @@ fn jsx(el: &El, depth: usize, out: &mut String) {
     class_attr = format!("\"{class_attr}\"");
   }
   let handler = if let Some(screen) = &el.navigate {
+    let opts = el.overlay.as_ref().map(|o| format!(", {o}")).unwrap_or_default();
     format!(
-      " onClick={{() => onNavigate?.({})}}",
+      " onClick={{() => onNavigate?.({}{opts})}}",
       serde_json::to_string(screen).unwrap_or_default()
     )
   } else if let Some(url) = &el.url {
@@ -1081,7 +1197,7 @@ fn screen_fn(name: &str, el: &El, export_default: bool) -> String {
   let mut body = String::new();
   jsx(el, 2, &mut body);
   format!(
-    "{}function {name}({{ onNavigate }}: {{ onNavigate?: (screen: string) => void }}) {{\n  return (\n{body}  );\n}}\n",
+    "{}function {name}({{ onNavigate }}: {{ onNavigate?: {NAVIGATE} }}) {{\n  return (\n{body}  );\n}}\n",
     if export_default { "export default " } else { "export " }
   )
 }
@@ -1121,7 +1237,10 @@ fn component_fns(ctx: &mut Ctx) -> String {
   out
 }
 
-const PROPS: &str = "{ className?: string; onClick?: () => void; onNavigate?: (screen: string) => void }";
+const PROPS: &str =
+  "{ className?: string; onClick?: () => void; onNavigate?: (screen: string, overlay?: Record<string, unknown>) => void }";
+/// Type of the `onNavigate` prop; the second argument places overlays (see `App.tsx`).
+const NAVIGATE: &str = "(screen: string, overlay?: Record<string, unknown>) => void";
 
 fn variants(doc: &Document, set: &Node) -> Vec<Node> {
   set
@@ -1216,7 +1335,7 @@ fn set_fn(ctx: &Ctx, set: &Node, name: &str) -> String {
   let default_fn = ctx.components.get(&first.id).cloned().unwrap_or_default();
   body.push_str(&format!("  return <{default_fn} {{...rest}} />;\n"));
   format!(
-    "export function {name}({{ {}, ...rest }}: {{ {}; className?: string; onClick?: () => void; onNavigate?: (screen: string) => void }}) {{\n{body}}}\n\n",
+    "export function {name}({{ {}, ...rest }}: {{ {}; className?: string; onClick?: () => void; onNavigate?: {NAVIGATE} }}) {{\n{body}}}\n\n",
     params.join(", "),
     types.join("; ")
   )
@@ -1276,12 +1395,18 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
     .filter(|(id, _)| doc.get(id).map(|n| n.width < 600.0).unwrap_or(false))
     .map(|(_, n)| format!("{n:?}"))
     .collect();
+  let widths: Vec<String> = screens
+    .iter()
+    .filter_map(|(id, n)| doc.get(id).map(|f| format!("{n}: {}", fmt(f.width))))
+    .collect();
   files.push(ProjectFile {
     path: "src/App.tsx".into(),
-    content: format!(
-      "import {{ useState }} from \"react\";\n{imports}\nconst screens: Record<string, (props: {{ onNavigate?: (s: string) => void }}) => JSX.Element> = {{\n{map}}};\n\n// Phone-sized screens are shown centred on a backdrop; wider ones fill the window.\nconst phoneScreens = new Set<string>([{phones}]);\n\nexport default function App() {{\n  const [history, setHistory] = useState<string[]>([{start:?}]);\n  const current = history[history.length - 1];\n  const Screen = screens[current];\n  const onNavigate = (s: string) => setHistory((h) => (s === \"back\" ? h.slice(0, -1) : [...h, s]));\n  const phone = phoneScreens.has(current);\n  return (\n    <div className={{phone ? \"min-h-screen flex items-start justify-center bg-neutral-100 py-10\" : \"min-h-screen flex justify-center\"}}>\n      {{Screen ? <Screen onNavigate={{onNavigate}} /> : null}}\n    </div>\n  );\n}}\n",
-      phones = phones.join(", ")
-    ),
+    content: APP_TSX
+      .replace("__IMPORTS__", &imports)
+      .replace("__MAP__", &map)
+      .replace("__WIDTHS__", &widths.join(", "))
+      .replace("__PHONES__", &phones.join(", "))
+      .replace("__START__", &format!("{start:?}")),
   });
   let fonts = google_fonts_link(doc);
   files.push(ProjectFile {
@@ -1341,7 +1466,7 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   files.push(ProjectFile {
     path: "CLAUDE.md".into(),
     content: format!(
-      "# {title}\n\nThis project was generated from a Designotron design. `design.dtron.json` is the design source.\n\n- Screens live in `src/screens/`, one per top-level frame. Reusable components are in `src/components.tsx`.\n- Layout is generated from auto layout (flexbox) and absolute positioning; refactor toward responsive layouts where it makes sense.\n- Prototype links became `onNavigate(\"Screen\")` calls handled in `src/App.tsx`.\n- If the Designotron bridge is running, its MCP server (`designotron`) can read the live design: use `get_document`, `get_node` and `get_screenshot` to check details.\n"
+      "# {title}\n\nThis project was generated from a Designotron design. `design.dtron.json` is the design source.\n\n- Screens live in `src/screens/`, one per top-level frame. Reusable components are in `src/components.tsx`.\n- Layout is generated from auto layout (flexbox) and absolute positioning; refactor toward responsive layouts where it makes sense.\n- Prototype links became `onNavigate(\"Screen\")` calls handled in `src/App.tsx`; overlays (`\"overlay:Screen\"`, `\"swap-overlay:Screen\"`, `\"close-overlay\"`) open on top of the current screen, and Escape closes the topmost.\n- If the Designotron bridge is running, its MCP server (`designotron`) can read the live design: use `get_document`, `get_node` and `get_screenshot` to check details.\n"
     ),
   });
   files.push(ProjectFile {
@@ -1417,7 +1542,60 @@ mod tests {
     assert!(paths.contains(&"src/screens/ProductDetail.tsx"));
     assert!(paths.contains(&"package.json"));
     let app = &files.iter().find(|f| f.path == "src/App.tsx").unwrap().content;
-    assert!(app.contains("\"Home\""));
+    assert!(app.contains("useState<string[]>([\"Home\"])"));
+    assert!(
+      app.contains("const widths: Record<string, number> = { Home: 390, ProductDetail: 100 };"),
+      "{app}"
+    );
+    assert!(!app.contains("__"), "unfilled placeholder: {app}");
+  }
+
+  #[test]
+  fn overlays_become_navigate_calls_with_placement() {
+    let mut doc = sample();
+    let page = doc.pages[0].id.clone();
+    let mut close = crate::ops::default_node(NodeType::Rectangle, "close".into(), "Close".into());
+    close.interactions.push(Interaction {
+      action: Action::CloseOverlay,
+      ..Default::default()
+    });
+    doc.insert(close, Some("detail"), &page, None);
+    let btn = doc.get_mut("btn").unwrap();
+    btn.interactions[0].action = Action::OpenOverlay;
+    btn.interactions[0].overlay.position = OverlayPosition::TopRight;
+    let react = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(
+      react.contains(
+        r#"onNavigate?.("overlay:ProductDetail", {"background":"rgba(0, 0, 0, 0.3)","closeOnClickOutside":true,"position":"topRight"})"#
+      ),
+      "{react}"
+    );
+    assert!(export_react(&doc, "detail", &HeuristicMeasurer).contains(r#"onNavigate?.("close-overlay")"#));
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let app = &files.iter().find(|f| f.path == "src/App.tsx").unwrap().content;
+    assert!(app.contains("s.startsWith(\"overlay:\")") && app.contains("e.key === \"Escape\""));
+  }
+
+  #[test]
+  fn manual_overlay_is_placed_from_the_trigger() {
+    let mut doc = sample();
+    let btn = doc.get_mut("btn").unwrap();
+    btn.x = 20.0;
+    btn.y = 30.0;
+    btn.interactions[0].action = Action::SwapOverlay;
+    btn.interactions[0].overlay.position = OverlayPosition::Manual;
+    btn.interactions[0].overlay.offset_y = 40.0;
+    btn.interactions[0].overlay.background = None;
+    let ctx = Ctx::new(&doc, &HeuristicMeasurer, false);
+    let b = doc.get("btn").unwrap();
+    let opts = ctx.overlay_opts(b, &b.interactions[0].overlay);
+    assert_eq!(opts["position"], "manual");
+    assert_eq!(opts["background"], serde_json::Value::Null);
+    let at = doc.abs_bounds("btn");
+    assert_eq!(
+      (opts["x"].as_f64(), opts["y"].as_f64()),
+      (Some(at.x.round()), Some((at.y + 40.0).round()))
+    );
   }
 
   #[test]

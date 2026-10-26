@@ -952,6 +952,26 @@ a.btn {
   position: absolute;
   cursor: pointer;
 }
+.overlay-settings {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+/* Prototype overlays: a stack of backdrops over the frame, each with its overlay frame. */
+.presenter .overlays {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+}
+.presenter .overlay-backdrop {
+  position: absolute;
+  inset: 0;
+}
+.presenter .overlay-frame {
+  position: absolute;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
 .presenter .hint-flash {
   background: rgba(13, 153, 255, 0.25);
   outline: 2px solid var(--select);

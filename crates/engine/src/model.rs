@@ -866,8 +866,12 @@ pub enum Action {
   Back,
   OpenUrl,
   ScrollTo,
+  /// Show `destination` on top of the current frame (see `Interaction::overlay`).
   OpenOverlay,
+  /// Close the topmost overlay.
   CloseOverlay,
+  /// Replace the topmost overlay with `destination` (opens it when none is open).
+  SwapOverlay,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -893,6 +897,64 @@ pub struct Interaction {
   pub url: Option<String>,
   pub transition: Transition,
   pub duration_ms: f64,
+  /// Placement and behaviour of the overlay for `OpenOverlay` / `SwapOverlay`.
+  pub overlay: OverlaySettings,
+}
+
+/// Where an overlay sits on the frame underneath it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum OverlayPosition {
+  #[default]
+  Center,
+  TopLeft,
+  TopCenter,
+  TopRight,
+  BottomLeft,
+  BottomCenter,
+  BottomRight,
+  /// `offsetX` / `offsetY` from the top-left of the layer that opened it.
+  Manual,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OverlaySettings {
+  pub position: OverlayPosition,
+  pub offset_x: f64,
+  pub offset_y: f64,
+  pub close_on_click_outside: bool,
+  /// Dims the frame underneath; `None` leaves it undimmed.
+  pub background: Option<OverlayBackground>,
+}
+
+impl Default for OverlaySettings {
+  fn default() -> Self {
+    OverlaySettings {
+      position: OverlayPosition::Center,
+      offset_x: 0.0,
+      offset_y: 0.0,
+      close_on_click_outside: true,
+      background: Some(OverlayBackground::default()),
+    }
+  }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OverlayBackground {
+  /// Hex colour, e.g. "#000000".
+  pub color: String,
+  pub opacity: f64,
+}
+
+impl Default for OverlayBackground {
+  fn default() -> Self {
+    OverlayBackground {
+      color: "#000000".into(),
+      opacity: 0.3,
+    }
+  }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1010,5 +1072,35 @@ mod link_tests {
     ] {
       assert!(safe_link(bad).is_none(), "{bad}");
     }
+  }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+  use super::*;
+
+  #[test]
+  fn old_interactions_load_with_overlay_defaults() {
+    let i: Interaction =
+      serde_json::from_str(r#"{"trigger":"onClick","action":"navigate","destination":"a","transition":"dissolve"}"#).unwrap();
+    assert_eq!(i.overlay, OverlaySettings::default());
+    assert!(i.overlay.close_on_click_outside);
+    assert_eq!(i.overlay.background.as_ref().map(|b| b.opacity), Some(0.3));
+  }
+
+  #[test]
+  fn overlay_settings_round_trip_in_camel_case() {
+    let i: Interaction = serde_json::from_value(serde_json::json!({
+      "action": "swapOverlay", "destination": "m",
+      "overlay": { "position": "topRight", "closeOnClickOutside": false, "background": null }
+    }))
+    .unwrap();
+    assert_eq!(i.action, Action::SwapOverlay);
+    assert_eq!(i.overlay.position, OverlayPosition::TopRight);
+    assert!(!i.overlay.close_on_click_outside);
+    assert!(i.overlay.background.is_none());
+    let v = serde_json::to_value(&i).unwrap();
+    assert_eq!(v["overlay"]["closeOnClickOutside"], false);
+    assert_eq!(v["overlay"]["offsetX"], 0.0);
   }
 }

@@ -95,11 +95,25 @@ export interface VectorPoint {
 export interface Interaction {
   trigger: "onClick" | "onHover" | "onPress" | "afterDelay";
   delayMs: number;
-  action: "navigate" | "back" | "openUrl" | "scrollTo" | "openOverlay" | "closeOverlay";
+  action: "navigate" | "back" | "openUrl" | "scrollTo" | "openOverlay" | "closeOverlay" | "swapOverlay";
   destination: string | null;
   url: string | null;
   transition: "instant" | "dissolve" | "smartAnimate" | "slideLeft" | "slideRight" | "slideUp" | "slideDown";
   durationMs: number;
+  /** Placement and behaviour for openOverlay / swapOverlay. */
+  overlay: OverlaySettings;
+}
+
+export type OverlayPosition = "center" | "topLeft" | "topCenter" | "topRight" | "bottomLeft" | "bottomCenter" | "bottomRight" | "manual";
+
+export interface OverlaySettings {
+  position: OverlayPosition;
+  /** Manual position: offset from the top-left of the layer that opened the overlay. */
+  offsetX: number;
+  offsetY: number;
+  closeOnClickOutside: boolean;
+  /** Dims the frame underneath; null leaves it undimmed. */
+  background: { color: string; opacity: number } | null;
 }
 
 export interface Node {

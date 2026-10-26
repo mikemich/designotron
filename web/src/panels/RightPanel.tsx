@@ -4,8 +4,9 @@ import { dispatch, getDoc, query, useDoc, useSelection, useStore, type RightTab 
 import { DesignPanel } from "./DesignPanel";
 import { ReviewPanel } from "./ReviewPanel";
 import { AppPanel } from "./AppPanel";
-import { IconButton, Section, SelectField } from "../ui/controls";
-import type { Interaction, Node } from "../types";
+import { IconButton, NumberField, Section, SelectField } from "../ui/controls";
+import type { Interaction, Node, OverlaySettings } from "../types";
+import { DEFAULT_OVERLAY, newInteraction } from "../prototype";
 import { exportProjectZip, nodeSvg } from "../exporter";
 import { inlineAssets } from "../assets";
 import { askClaude } from "../ai/chatState";
@@ -41,16 +42,6 @@ export function RightPanel() {
   );
 }
 
-const DEFAULT_INTERACTION: Interaction = {
-  trigger: "onClick",
-  delayMs: 800,
-  action: "navigate",
-  destination: null,
-  url: null,
-  transition: "dissolve",
-  durationMs: 300,
-};
-
 function PrototypePanel() {
   const doc = useDoc();
   const nodes = useSelection();
@@ -74,14 +65,14 @@ function PrototypePanel() {
           <Play size={13} /> Present
         </button>
         <div className="muted small" style={{ marginTop: 8 }}>
-          Select a layer and drag the blue handle on its right edge onto a frame to link them.
+          Select a layer and drag the blue handle on its right edge onto a frame to link them. Choose Open overlay to show a frame (a modal or menu) on top instead.
         </div>
       </Section>
       {n && (
         <Section
           title="Interactions"
           actions={
-            <IconButton title="Add interaction" onClick={() => dispatch({ op: "setInteractions", id: n.id, interactions: [...n.interactions, { ...DEFAULT_INTERACTION, destination: frames.find((f) => f.id !== n.id)?.id ?? null }] })}>
+            <IconButton title="Add interaction" onClick={() => dispatch({ op: "setInteractions", id: n.id, interactions: [...n.interactions, newInteraction(frames.find((f) => f.id !== n.id)?.id ?? null)] })}>
               <Plus size={14} />
             </IconButton>
           }
@@ -104,6 +95,7 @@ function PrototypePanel() {
 function InteractionEditor({ node, index, frames }: { node: Node; index: number; frames: Node[] }) {
   const it = node.interactions[index];
   const set = (patch: Partial<Interaction>) => dispatch({ op: "setInteractions", id: node.id, interactions: node.interactions.map((x, i) => (i === index ? { ...x, ...patch } : x)) });
+  const overlay = it.action === "openOverlay" || it.action === "swapOverlay";
   return (
     <div style={{ background: "var(--panel-2)", borderRadius: 6, padding: 8, marginBottom: 8 }}>
       <div className="row">
@@ -126,21 +118,28 @@ function InteractionEditor({ node, index, frames }: { node: Node; index: number;
           value={it.action}
           options={[
             { value: "navigate", label: "Navigate to" },
+            { value: "openOverlay", label: "Open overlay" },
+            { value: "swapOverlay", label: "Swap overlay" },
+            { value: "closeOverlay", label: "Close overlay" },
             { value: "back", label: "Back" },
             { value: "openUrl", label: "Open link" },
           ]}
           onChange={(action) => set({ action })}
         />
       </div>
-      {it.action === "navigate" && (
+      {(it.action === "navigate" || overlay) && (
         <div className="row">
-          <SelectField value={it.destination ?? ""} options={[{ value: "", label: "Choose frame…" }, ...frames.map((f) => ({ value: f.id, label: f.name }))]} onChange={(destination) => set({ destination: destination || null })} />
+          <SelectField
+            value={it.destination ?? ""}
+            options={[{ value: "", label: overlay ? "Choose overlay frame…" : "Choose frame…" }, ...frames.filter((f) => !overlay || f.id !== node.id).map((f) => ({ value: f.id, label: f.name }))]}
+            onChange={(destination) => set({ destination: destination || null })}
+          />
         </div>
       )}
       {it.action === "openUrl" && (
         <input className="textinput" placeholder="https://" defaultValue={it.url ?? ""} onKeyDown={(e) => e.stopPropagation()} onBlur={(e) => set({ url: e.target.value })} />
       )}
-      {it.action === "navigate" && (
+      {(it.action === "navigate" || overlay) && (
         <div className="row">
           <SelectField
             value={it.transition}
@@ -155,6 +154,54 @@ function InteractionEditor({ node, index, frames }: { node: Node; index: number;
             ]}
             onChange={(transition) => set({ transition })}
           />
+        </div>
+      )}
+      {overlay && <OverlayEditor value={it.overlay ?? DEFAULT_OVERLAY} onChange={(o) => set({ overlay: o })} />}
+    </div>
+  );
+}
+
+const OVERLAY_POSITIONS: { value: OverlaySettings["position"]; label: string }[] = [
+  { value: "center", label: "Center" },
+  { value: "topLeft", label: "Top left" },
+  { value: "topCenter", label: "Top center" },
+  { value: "topRight", label: "Top right" },
+  { value: "bottomLeft", label: "Bottom left" },
+  { value: "bottomCenter", label: "Bottom center" },
+  { value: "bottomRight", label: "Bottom right" },
+  { value: "manual", label: "Manual" },
+];
+
+/** Overlay position, click-outside and background dimming for Open / Swap overlay. */
+function OverlayEditor({ value: o, onChange }: { value: OverlaySettings; onChange: (o: OverlaySettings) => void }) {
+  const set = (patch: Partial<OverlaySettings>) => onChange({ ...o, ...patch });
+  const bg = o.background;
+  return (
+    <div className="overlay-settings">
+      <div className="row">
+        <SelectField title="Overlay position" value={o.position} options={OVERLAY_POSITIONS.map((p) => ({ ...p, label: `Position: ${p.label}` }))} onChange={(position) => set({ position })} />
+      </div>
+      {o.position === "manual" && (
+        <div className="row" title="Offset from the top-left of this layer">
+          <NumberField label="X" value={o.offsetX} onChange={(offsetX) => set({ offsetX })} />
+          <NumberField label="Y" value={o.offsetY} onChange={(offsetY) => set({ offsetY })} />
+        </div>
+      )}
+      <label className="row" style={{ cursor: "pointer" }}>
+        <input type="checkbox" checked={o.closeOnClickOutside} onChange={(e) => set({ closeOnClickOutside: e.target.checked })} />
+        Close when clicking outside
+      </label>
+      <label className="row" style={{ cursor: "pointer" }}>
+        <input type="checkbox" checked={!!bg} onChange={(e) => set({ background: e.target.checked ? (DEFAULT_OVERLAY.background ?? null) : null })} />
+        Background
+      </label>
+      {bg && (
+        <div className="row">
+          <label className="swatch" title="Background colour">
+            <i style={{ background: bg.color, opacity: bg.opacity }} />
+            <input type="color" value={bg.color.slice(0, 7)} onChange={(e) => set({ background: { ...bg, color: e.target.value.toUpperCase() } })} style={{ position: "absolute", opacity: 0, width: 0, height: 0 }} />
+          </label>
+          <NumberField label="%" title="Background opacity" value={Math.round(bg.opacity * 100)} min={0} max={100} precision={0} onChange={(v) => set({ background: { ...bg, opacity: v / 100 } })} />
         </div>
       )}
     </div>

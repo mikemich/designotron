@@ -45,7 +45,7 @@ Ordered by impact on "replace Figma for a small team".
 | Panels          | Layers tree (drag reorder, rename, lock, hide), pages, assets, design/prototype/code tabs            |
 | Styling         | Multiple fills/strokes, solid/linear/radial/image paints, effects (shadows, blurs), blend, opacity    |
 | Tokens          | Colour styles and text styles with apply/propagate                                                   |
-| Prototyping     | Click/hover/press/delay triggers, navigate/back/URL, transitions, flow start, presenter mode         |
+| Prototyping     | Click/hover/press/delay triggers, navigate/back/URL, transitions, flow start, presenter mode; overlays (open/close/swap, 8 positions, close on outside click, background dim; stack, Escape and Back close the top one; dashed links on the canvas; AI `set_prototype`; same player in view links and embeds; code export keeps them as an overlay stack in `App.tsx`) |
 | Export          | PNG/JPG/SVG (fonts embedded), React + Tailwind, HTML, full Vite project zip with working navigation  |
 | Files           | Dashboard, IndexedDB autosave with thumbnails, `.dtron` open/save, sample file                       |
 | Claude (API)    | In-browser tool loop with the user's key, screenshots fed back to Claude, refusal fallback enabled   |
@@ -87,6 +87,7 @@ Verified on 2026-10-18 in this repo's environment (headless Chromium, Claude Cod
 | React and project export                               | `web/scripts/e2e.mjs`                        |
 | AI `create_nodes`, `get_screenshot`, `import_html`     | `web/scripts/e2e.mjs`                        |
 | Presenter hotspots and prototype navigation            | `web/scripts/e2e.mjs`                        |
+| Prototype overlays (modal, menu, swap, stack, Escape, view link) | `web/scripts/overlays-e2e.mjs`     |
 | Autosave survives reload, Claude panel opens           | `web/scripts/e2e.mjs`                        |
 | Templates, tour, empty prompt, ⌘B on a word, Review fixes | `web/scripts/e2e.mjs`                     |
 | Chat image attachment and quick actions menu           | `web/scripts/e2e.mjs`                        |
@@ -135,7 +136,7 @@ until someone runs it with a real key.
 | Masks in code    | A frame or group containing a mask is exported to code as inline SVG                                     |
 | Components       | Overrides on nested instances through an outer instance are not preserved; variant swap drops overrides  |
 | Multi-resize     | Resizing several rotated layers at once approximates their new boxes                                     |
-| Prototyping      | Smart animate plays as a dissolve; no overlays, scroll-to or variables                                   |
+| Prototyping      | Smart animate plays as a dissolve; no scroll-to or variables; overlays always render at the frame's design size and don't scroll |
 | Images           | External `http` image URLs render on canvas but are missing from PNG export (assets are fine)            |
 | HTML import      | Produces absolutely positioned layers; flex/grid is not mapped to auto layout                            |
 | Bridge sync      | If MCP edits happen with no editor open, reopening an older tab overwrites `design.dtron.json`           |
@@ -155,7 +156,7 @@ until someone runs it with a real key.
 | Components and variants    | Yes         | Nested override limits                  |
 | Styles                     | Partial     | Colour + text; no effect/grid styles    |
 | Variables                  | Yes         | Modes, bindings, CSS variables; no aliasing UI |
-| Prototyping                | Partial     | No smart animate/overlays               |
+| Prototyping                | Partial     | No smart animate/scroll-to              |
 | Export                     | Yes         | Plus code export Figma lacks            |
 | Dev Mode / inspect         | Partial     | Code tab, notes                         |
 | Multiplayer, comments      | Yes         | Online via relay or LAN; comments Claude can resolve |

@@ -10,9 +10,9 @@ use crate::codegen;
 use crate::engine::{Command, Engine};
 use crate::geom::Point;
 use crate::model::{
-  Action, Align, AutoLayout, Effect, EffectType, GradientStop, Interaction, LayoutDirection, Node, NodeId, NodeType, Paint, RawPath,
-  ScaleMode, Sizing, StrokeAlign, SubPath, TextAlignH, TextAlignV, TextAutoResize, TextCase, TextDecoration, Transition, Trigger,
-  VectorData, VectorPoint,
+  Action, Align, AutoLayout, Effect, EffectType, GradientStop, Interaction, LayoutDirection, Node, NodeId, NodeType, OverlayBackground,
+  OverlayPosition, OverlaySettings, Paint, RawPath, ScaleMode, Sizing, StrokeAlign, SubPath, TextAlignH, TextAlignV, TextAutoResize,
+  TextCase, TextDecoration, Transition, Trigger, VectorData, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render;
@@ -134,10 +134,18 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "set_prototype",
-      "description": "Add a prototype interaction: clicking nodeId navigates to destinationId (a top-level frame), goes back, or opens a URL.",
+      "description": "Add a prototype interaction: clicking nodeId navigates to destinationId (a top-level frame), goes back, opens a URL, or works with overlays. open_overlay shows destinationId (a top-level frame, e.g. a modal, menu or sheet) on top of the current screen; close_overlay closes the topmost overlay (put it on a close button inside the overlay); swap_overlay replaces the topmost overlay with destinationId. Overlays default to centred, a 30% black dimmed background and closing when clicking outside; change that with `overlay`.",
       "input_schema": { "type": "object", "properties": {
         "nodeId": { "type": "string" }, "destinationId": { "type": "string" },
-        "action": { "type": "string", "enum": ["navigate", "back", "open_url"] }, "url": { "type": "string" },
+        "action": { "type": "string", "enum": ["navigate", "back", "open_url", "open_overlay", "close_overlay", "swap_overlay"] }, "url": { "type": "string" },
+        "overlay": { "type": "object", "description": "For open_overlay / swap_overlay", "properties": {
+          "position": { "type": "string", "enum": ["center", "top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right", "manual"] },
+          "offsetX": { "type": "number", "description": "manual: x from the top-left of nodeId" },
+          "offsetY": { "type": "number", "description": "manual: y from the top-left of nodeId" },
+          "closeOnClickOutside": { "type": "boolean" },
+          "background": { "type": ["string", "null"], "description": "Dim colour behind the overlay (hex, default #000000); null or \"none\" for no dimming" },
+          "backgroundOpacity": { "type": "number", "description": "0-1, default 0.3" }
+        } },
         "trigger": { "type": "string", "enum": ["click", "hover", "press", "delay"] },
         "transition": { "type": "string", "enum": ["instant", "dissolve", "smart_animate", "slide_left", "slide_right", "slide_up", "slide_down"] },
         "clear": { "type": "boolean", "description": "Remove existing interactions first" }
@@ -407,8 +415,24 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       let action = match input.get("action").and_then(|v| v.as_str()).unwrap_or("navigate") {
         "back" => Action::Back,
         "open_url" => Action::OpenUrl,
+        "open_overlay" => Action::OpenOverlay,
+        "close_overlay" => Action::CloseOverlay,
+        "swap_overlay" => Action::SwapOverlay,
         _ => Action::Navigate,
       };
+      let destination = input.get("destinationId").and_then(|v| v.as_str()).map(String::from);
+      if matches!(action, Action::OpenOverlay | Action::SwapOverlay) {
+        let d = destination.as_deref().ok_or("destinationId (the overlay frame) is required")?;
+        if e
+          .doc
+          .get(d)
+          .map(|n| n.parent.is_some() || !matches!(n.kind, NodeType::Frame | NodeType::Component))
+          .unwrap_or(true)
+        {
+          return Err("destinationId must be a top-level frame".into());
+        }
+      }
+      let overlay = overlay_settings(input.get("overlay"))?;
       let trigger = match input.get("trigger").and_then(|v| v.as_str()).unwrap_or("click") {
         "hover" => Trigger::OnHover,
         "press" => Trigger::OnPress,
@@ -432,10 +456,11 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         trigger,
         delay_ms: 800.0,
         action,
-        destination: input.get("destinationId").and_then(|v| v.as_str()).map(String::from),
+        destination,
         url: input.get("url").and_then(|v| v.as_str()).map(String::from),
         transition,
         duration_ms: 300.0,
+        overlay,
       });
       Ok(json!({ "ok": true }))
     }
@@ -1361,6 +1386,47 @@ pub fn diff_patch(before: &Node, after: &Node) -> Value {
   Value::Object(out)
 }
 
+/// `set_prototype`'s `overlay` options; anything left out keeps Figma's defaults.
+fn overlay_settings(v: Option<&Value>) -> Result<OverlaySettings, String> {
+  let mut s = OverlaySettings::default();
+  let Some(v) = v.filter(|v| !v.is_null()) else { return Ok(s) };
+  if let Some(p) = v.get("position").and_then(|p| p.as_str()) {
+    s.position = match p.replace(['_', '-', ' '], "").to_lowercase().as_str() {
+      "center" | "centre" => OverlayPosition::Center,
+      "topleft" => OverlayPosition::TopLeft,
+      "topcenter" | "top" => OverlayPosition::TopCenter,
+      "topright" => OverlayPosition::TopRight,
+      "bottomleft" => OverlayPosition::BottomLeft,
+      "bottomcenter" | "bottom" => OverlayPosition::BottomCenter,
+      "bottomright" => OverlayPosition::BottomRight,
+      "manual" => OverlayPosition::Manual,
+      _ => return Err(format!("unknown overlay position '{p}'")),
+    };
+  }
+  s.offset_x = num(v.get("offsetX")).unwrap_or(0.0);
+  s.offset_y = num(v.get("offsetY")).unwrap_or(0.0);
+  if let Some(c) = v.get("closeOnClickOutside").and_then(|c| c.as_bool()) {
+    s.close_on_click_outside = c;
+  }
+  match v.get("background") {
+    Some(Value::Null) => s.background = None,
+    Some(Value::String(c)) if c.eq_ignore_ascii_case("none") => s.background = None,
+    Some(Value::String(c)) => {
+      let rgba = crate::color::parse(c).ok_or_else(|| format!("background '{c}' is not a colour"))?;
+      // A colour with alpha ("#0000004D") carries its own opacity.
+      s.background = Some(OverlayBackground {
+        color: rgba.hex6(),
+        opacity: if rgba.a < 0.999 { rgba.a } else { 0.3 },
+      });
+    }
+    _ => {}
+  }
+  if let (Some(b), Some(o)) = (s.background.as_mut(), num(v.get("backgroundOpacity"))) {
+    b.opacity = o.clamp(0.0, 1.0);
+  }
+  Ok(s)
+}
+
 fn num(v: Option<&Value>) -> Option<f64> {
   v.and_then(|v| v.as_f64())
 }
@@ -1490,6 +1556,98 @@ mod tests {
     assert!(names.contains(&"create_nodes") && names.contains(&"get_screenshot"));
     for d in defs.as_array().unwrap() {
       assert_eq!(d["input_schema"]["type"], "object");
+    }
+  }
+
+  mod overlays {
+    use super::*;
+    use crate::model::{OverlayPosition, OverlaySettings};
+
+    #[test]
+    fn open_overlay_with_defaults() {
+      let (mut e, ids) = screens();
+      let (home, modal, btn) = (&ids[0], &ids[1], &ids[3]);
+      e.dispatch(Command::Ai {
+        tool: "set_prototype".into(),
+        input: json!({ "nodeId": btn, "action": "open_overlay", "destinationId": modal }),
+      })
+      .unwrap();
+      let i = &e.doc.get(btn).unwrap().interactions[0];
+      assert_eq!(i.action, Action::OpenOverlay);
+      assert_eq!(i.destination.as_deref(), Some(modal.as_str()));
+      assert_eq!(i.overlay, OverlaySettings::default());
+      // One undo step, like every AI call.
+      e.dispatch(Command::Undo).unwrap();
+      assert!(e.doc.get(btn).unwrap().interactions.is_empty());
+      assert!(e.doc.get(home).is_some());
+    }
+
+    #[test]
+    fn overlay_options_close_and_swap() {
+      let (mut e, ids) = screens();
+      let (modal, menu, btn) = (&ids[1], &ids[2], &ids[3]);
+      execute(
+        &mut e,
+        "set_prototype",
+        &json!({ "nodeId": btn, "action": "open_overlay", "destinationId": menu,
+          "overlay": { "position": "top_right", "closeOnClickOutside": false, "background": "none" } }),
+      )
+      .unwrap();
+      execute(
+        &mut e,
+        "set_prototype",
+        &json!({ "nodeId": btn, "action": "swap_overlay", "destinationId": modal,
+          "overlay": { "position": "manual", "offsetX": 12, "offsetY": -4, "background": "#1E293B", "backgroundOpacity": 0.6 } }),
+      )
+      .unwrap();
+      execute(&mut e, "set_prototype", &json!({ "nodeId": modal, "action": "close_overlay" })).unwrap();
+      let b = e.doc.get(btn).unwrap();
+      let open = &b.interactions[0].overlay;
+      assert_eq!(open.position, OverlayPosition::TopRight);
+      assert!(!open.close_on_click_outside);
+      assert!(open.background.is_none());
+      let swap = &b.interactions[1];
+      assert_eq!(swap.action, Action::SwapOverlay);
+      assert_eq!(swap.overlay.position, OverlayPosition::Manual);
+      assert_eq!((swap.overlay.offset_x, swap.overlay.offset_y), (12.0, -4.0));
+      let bg = swap.overlay.background.as_ref().unwrap();
+      assert_eq!((bg.color.as_str(), bg.opacity), ("#1E293B", 0.6));
+      assert_eq!(e.doc.get(modal).unwrap().interactions[0].action, Action::CloseOverlay);
+    }
+
+    #[test]
+    fn overlay_needs_a_top_level_frame() {
+      let (mut e, ids) = screens();
+      let btn = &ids[3];
+      for input in [
+        json!({ "nodeId": btn, "action": "open_overlay" }),
+        json!({ "nodeId": btn, "action": "open_overlay", "destinationId": btn }),
+        json!({ "nodeId": btn, "action": "swap_overlay", "destinationId": "missing" }),
+        json!({ "nodeId": btn, "action": "open_overlay", "destinationId": ids[1], "overlay": { "position": "middle" } }),
+      ] {
+        assert!(execute(&mut e, "set_prototype", &input).is_err(), "{input}");
+      }
+      assert!(e.doc.get(btn).unwrap().interactions.is_empty());
+    }
+
+    /// Home (with a button), Modal and Menu frames: ids [home, modal, menu, button].
+    fn screens() -> (Engine, Vec<String>) {
+      let mut e = engine();
+      let r = execute(
+        &mut e,
+        "create_nodes",
+        &json!({ "nodes": [
+          { "type": "frame", "name": "Home", "width": 390, "height": 844,
+            "children": [{ "type": "rectangle", "name": "Open", "width": 120, "height": 40 }] },
+          { "type": "frame", "name": "Modal", "x": 500, "width": 300, "height": 200 },
+          { "type": "frame", "name": "Menu", "x": 900, "width": 200, "height": 240 }
+        ] }),
+      )
+      .unwrap();
+      let id = |i: usize| r["created"][i]["id"].as_str().unwrap().to_string();
+      let home = id(0);
+      let btn = e.doc.get(&home).unwrap().children[0].clone();
+      (e, vec![home, id(1), id(2), btn])
     }
   }
 }

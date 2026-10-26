@@ -22,6 +22,7 @@ import { insertImageFile, openDtronFile } from "../actions";
 import { canvasMenu } from "./contextMenu";
 import { useDemo } from "../Demo";
 import { Menu, type MenuItem } from "../ui/controls";
+import { isOverlayLink, newInteraction } from "../prototype";
 
 interface BoundsItem {
   id: string;
@@ -541,7 +542,7 @@ export function Canvas() {
           dispatch({
             op: "addInteraction",
             id: d.from,
-            interaction: { trigger: "onClick", delayMs: 800, action: "navigate", destination: top, url: null, transition: "dissolve", durationMs: 300 },
+            interaction: newInteraction(top),
           });
         }
         break;
@@ -705,20 +706,24 @@ export function Canvas() {
 
   const protoLinks = rightTab === "prototype" ? collectLinks() : [];
   function collectLinks() {
-    const out: { from: Pt; to: Pt; selected: boolean }[] = [];
-    const ids = Object.values(doc.nodes).filter((n) => n.page === page && n.interactions.some((i) => i.action === "navigate" && i.destination));
+    // Overlay links (open/swap overlay) are drawn dashed.
+    const out: { from: Pt; to: Pt; selected: boolean; overlay: boolean }[] = [];
+    const linked = (i: Node["interactions"][number]) => (i.action === "navigate" || isOverlayLink(i)) && !!i.destination;
+    const ids = Object.values(doc.nodes).filter((n) => n.page === page && n.interactions.some(linked));
     if (!ids.length) return out;
     const fromB = query<{ items: BoundsItem[] }>({ q: "bounds", ids: ids.map((n) => n.id) }).items;
     for (const n of ids) {
       const fb = fromB.find((b) => b.id === n.id);
       if (!fb) continue;
       for (const i of n.interactions) {
+        if (!linked(i)) continue;
         const tb = topFrames.find((t) => t.id === i.destination);
         if (!tb) continue;
         out.push({
           from: toScreen(v, { x: fb.bounds.x + fb.bounds.width, y: fb.bounds.y + fb.bounds.height / 2 }),
           to: toScreen(v, { x: tb.bounds.x, y: tb.bounds.y + Math.min(40, tb.bounds.height / 2) }),
           selected: sel.includes(n.id),
+          overlay: isOverlayLink(i),
         });
       }
     }
@@ -798,9 +803,15 @@ export function Canvas() {
         )}
         {rightTab === "prototype" &&
           protoLinks.map((l, i) => (
-            <g key={i}>
-              <path d={`M${l.from.x} ${l.from.y} C${l.from.x + 60} ${l.from.y} ${l.to.x - 60} ${l.to.y} ${l.to.x} ${l.to.y}`} fill="none" stroke={l.selected ? "#0d99ff" : "#0d99ff88"} strokeWidth={2} />
-              <circle cx={l.to.x} cy={l.to.y} r={4} fill="#0d99ff" />
+            <g key={i} data-proto-link={l.overlay ? "overlay" : "navigate"}>
+              <path
+                d={`M${l.from.x} ${l.from.y} C${l.from.x + 60} ${l.from.y} ${l.to.x - 60} ${l.to.y} ${l.to.x} ${l.to.y}`}
+                fill="none"
+                stroke={l.selected ? "#0d99ff" : "#0d99ff88"}
+                strokeWidth={2}
+                strokeDasharray={l.overlay ? "6 4" : undefined}
+              />
+              {l.overlay ? <rect x={l.to.x - 4} y={l.to.y - 4} width={8} height={8} rx={1.5} fill="#0d99ff" /> : <circle cx={l.to.x} cy={l.to.y} r={4} fill="#0d99ff" />}
             </g>
           ))}
         {rightTab === "prototype" && single && (

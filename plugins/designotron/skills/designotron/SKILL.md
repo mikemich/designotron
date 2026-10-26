@@ -33,7 +33,7 @@ then open the editor at http://127.0.0.1:5174 (or https://mikemich.github.io/des
 4. Use real copy, consistent spacing (multiples of 4 or 8) and a small palette. Define
    colours and type as styles or variables (`define_styles`, `define_variables`) when you
    create a design system.
-5. Link screens with `set_prototype` when the person asks for a flow or prototype.
+5. Link screens with `set_prototype` when the person asks for a flow or prototype (`open_overlay` / `swap_overlay` / `close_overlay` for modals, menus and sheets).
 6. Check your work: take a screenshot of what you made (`get_screenshot` when available),
    compare it with what was asked, and fix spacing, alignment and contrast. `lint_design`
    finds common problems and `fix_issues` applies the fixes.

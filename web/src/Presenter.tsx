@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { getDoc, query, toast, useStore } from "./store";
 import { nodeSvg } from "./exporter";
-import type { Interaction, Rect } from "./types";
+import type { Interaction, OverlaySettings, Rect } from "./types";
 import { REPO_URL } from "./panels/GuestBar";
+import { DEFAULT_OVERLAY, overlayDim, overlayOrigin } from "./prototype";
 
 interface Hotspot {
   id: string;
@@ -11,10 +12,33 @@ interface Hotspot {
   interactions: Interaction[];
 }
 
-/** Prototype player: renders a frame and turns interactions into hotspots. With `remixUrl` it
- *  is the view-only player for view links and embeds: no close, a Remix button instead. */
+/** An open overlay; `x`/`y` place it on the base frame. */
+interface OpenOverlay {
+  key: number;
+  id: string;
+  settings: OverlaySettings;
+  transition: Interaction["transition"];
+  x: number;
+  y: number;
+}
+
+const ANIM: Record<string, string> = {
+  dissolve: "dt-dissolve",
+  smartAnimate: "dt-dissolve",
+  slideLeft: "dt-slide-left",
+  slideRight: "dt-slide-right",
+  slideUp: "dt-slide-up",
+  slideDown: "dt-slide-down",
+};
+
+/** Prototype player: renders a frame and turns interactions into hotspots, with overlays
+ *  (modals, menus) stacked on top. With `remixUrl` it is the view-only player for view links
+ *  and embeds: no close, a Remix button instead. */
 export function Presenter({ start, remixUrl }: { start: string; remixUrl?: string }) {
   const [history, setHistory] = useState<{ id: string; transition: Interaction["transition"] }[]>([{ id: start, transition: "instant" }]);
+  // Open overlays, topmost last. Navigating to another frame closes them all.
+  const [overlays, setOverlays] = useState<OpenOverlay[]>([]);
+  const overlayKey = useRef(0);
   const [flash, setFlash] = useState(false);
   const current = history[history.length - 1];
   const doc = getDoc();
@@ -23,21 +47,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     const page = doc.pages.find((p) => p.id === frame?.page);
     return (page?.children ?? []).filter((id) => ["frame", "component"].includes(doc.nodes[id]?.type));
   }, [current.id]);
-
-  const svg = useMemo(() => (frame ? nodeSvg(frame.id) : ""), [current.id]);
-  const hotspots = useMemo<Hotspot[]>(() => {
-    if (!frame) return [];
-    const ids = Object.values(doc.nodes)
-      .filter((n) => n.interactions.length && (n.id === frame.id || isDescendant(n.id, frame.id)))
-      .map((n) => n.id);
-    const fb = query<{ union: Rect }>({ q: "bounds", ids: [frame.id] }).union;
-    const items = query<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids }).items;
-    return items.map((it) => ({
-      id: it.id,
-      rect: { x: it.bounds.x - fb.x, y: it.bounds.y - fb.y, width: it.bounds.width, height: it.bounds.height },
-      interactions: doc.nodes[it.id].interactions,
-    }));
-  }, [current.id]);
+  const baseHotspots = useHotspots(current.id);
 
   const [scale, setScale] = useState(1);
   useEffect(() => {
@@ -48,58 +58,82 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     return () => window.removeEventListener("resize", fit);
   }, [current.id]);
 
-  const go = (it: Interaction) => {
-    if (it.action === "back") setHistory((h) => (h.length > 1 ? h.slice(0, -1) : h));
+  const navigate = (id: string, transition: Interaction["transition"]) => {
+    setOverlays([]);
+    setHistory((h) => [...h, { id, transition }]);
+  };
+  // Back closes the topmost overlay before leaving the frame.
+  const back = () => {
+    if (overlays.length) setOverlays((o) => o.slice(0, -1));
+    else setHistory((h) => (h.length > 1 ? h.slice(0, -1) : h));
+  };
+
+  /** Runs an interaction; `from` is the triggering layer's rect on the base frame. */
+  const go = (it: Interaction, from: Rect) => {
+    if (it.action === "back") back();
     else if (it.action === "openUrl" && it.url) {
       const url = safeLink(it.url);
       if (url) window.open(url, "_blank", "noopener,noreferrer");
       else toast("This prototype link isn't a web, email or phone link, so it wasn't opened", "error");
+    } else if (it.action === "navigate" && it.destination && doc.nodes[it.destination]) navigate(it.destination, it.transition);
+    else if (it.action === "closeOverlay") setOverlays((o) => o.slice(0, -1));
+    else if ((it.action === "openOverlay" || it.action === "swapOverlay") && it.destination && frame) {
+      const dest = doc.nodes[it.destination];
+      if (!dest) return;
+      const settings = it.overlay ?? DEFAULT_OVERLAY;
+      const at = overlayOrigin(settings, frame, dest, from);
+      const next: OpenOverlay = { key: ++overlayKey.current, id: dest.id, settings, transition: it.transition, x: at.x, y: at.y };
+      setOverlays((o) => (it.action === "swapOverlay" ? [...o.slice(0, -1), next] : [...o, next]));
     }
-    else if (it.action === "navigate" && it.destination && doc.nodes[it.destination]) setHistory((h) => [...h, { id: it.destination!, transition: it.transition }]);
   };
 
-  // Delayed interactions on the frame itself.
+  // Delayed interactions on the frame (or overlay) on top.
+  const top = overlays.length ? overlays[overlays.length - 1] : null;
+  const topId = top?.id ?? current.id;
   useEffect(() => {
-    const delayed = frame?.interactions.find((i) => i.trigger === "afterDelay");
-    if (!delayed) return;
-    const t = setTimeout(() => go(delayed), delayed.delayMs || 800);
+    const n = getDoc().nodes[topId];
+    const delayed = n?.interactions.find((i) => i.trigger === "afterDelay");
+    if (!delayed || !n) return;
+    const from = top ? { x: top.x, y: top.y, width: n.width, height: n.height } : { x: 0, y: 0, width: n.width, height: n.height };
+    const t = setTimeout(() => go(delayed, from), delayed.delayMs || 800);
     return () => clearTimeout(t);
-  }, [current.id]);
+  }, [topId, top?.key, current.id]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !remixUrl) useStore.setState({ presenting: null });
+      if (e.key === "Escape") {
+        if (overlays.length) setOverlays((o) => o.slice(0, -1));
+        else if (!remixUrl) useStore.setState({ presenting: null });
+      }
       const i = frames.indexOf(current.id);
-      if (e.key === "ArrowRight" && i < frames.length - 1) setHistory((h) => [...h, { id: frames[i + 1], transition: "slideLeft" }]);
-      if (e.key === "ArrowLeft" && i > 0) setHistory((h) => [...h, { id: frames[i - 1], transition: "slideRight" }]);
+      if (e.key === "ArrowRight" && i < frames.length - 1) navigate(frames[i + 1], "slideLeft");
+      if (e.key === "ArrowLeft" && i > 0) navigate(frames[i - 1], "slideRight");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [current.id, frames]);
+  }, [current.id, frames, overlays.length]);
 
   if (!frame) return null;
-  const anim: Record<string, string> = {
-    dissolve: "dt-dissolve",
-    smartAnimate: "dt-dissolve",
-    slideLeft: "dt-slide-left",
-    slideRight: "dt-slide-right",
-    slideUp: "dt-slide-up",
-    slideDown: "dt-slide-down",
-  };
-  const a = anim[current.transition];
+  const a = ANIM[current.transition];
+  const onBaseClick = (h: Hotspot, it: Interaction) => go(it, h.rect);
   return (
-    <div className="presenter" onClick={() => !hotspots.length || (setFlash(true), setTimeout(() => setFlash(false), 400))}>
+    <div className="presenter" onClick={() => !baseHotspots.length || (setFlash(true), setTimeout(() => setFlash(false), 400))}>
       <div className="bar" onClick={(e) => e.stopPropagation()}>
-        <button className="tbtn" title="Previous frame" onClick={() => setHistory((h) => (h.length > 1 ? h.slice(0, -1) : h))}>
+        <button className="tbtn" title="Back" onClick={back}>
           <ChevronLeft size={16} />
         </button>
         <span className="muted" style={{ padding: "0 8px" }}>
           {frame.name}
+          {top ? ` › ${doc.nodes[top.id]?.name ?? ""}` : ""}
         </span>
-        <button className="tbtn" title="Next frame" onClick={() => {
-          const i = frames.indexOf(current.id);
-          if (i < frames.length - 1) setHistory((h) => [...h, { id: frames[i + 1], transition: "slideLeft" }]);
-        }}>
+        <button
+          className="tbtn"
+          title="Next frame"
+          onClick={() => {
+            const i = frames.indexOf(current.id);
+            if (i < frames.length - 1) navigate(frames[i + 1], "slideLeft");
+          }}
+        >
           <ChevronRight size={16} />
         </button>
         {remixUrl ? (
@@ -117,33 +151,103 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
           </button>
         )}
       </div>
-      <div style={{ overflow: "hidden", width: frame.width * scale, height: frame.height * scale }}>
+      <div style={{ position: "relative", overflow: "hidden", width: frame.width * scale, height: frame.height * scale }}>
         <div
           key={history.length}
           className="stage"
           style={{ width: frame.width, height: frame.height, transform: `scale(${scale})`, transformOrigin: "0 0", animation: a ? `${a} 300ms ease-out` : undefined }}
         >
-          <div dangerouslySetInnerHTML={{ __html: svg }} />
-          {hotspots.map((h) => {
-            const click = h.interactions.find((i) => i.trigger === "onClick" || i.trigger === "onPress");
-            const hover = h.interactions.find((i) => i.trigger === "onHover");
-            return (
-              <div
-                key={h.id}
-                className={"hotspot" + (flash ? " hint-flash" : "")}
-                style={{ left: h.rect.x, top: h.rect.y, width: h.rect.width, height: h.rect.height }}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (click) go(click);
-                }}
-                onMouseEnter={() => hover && go(hover)}
-              />
-            );
-          })}
+          <FrameLayer id={current.id} hotspots={baseHotspots} flash={flash} onAct={onBaseClick} />
         </div>
+        {overlays.length > 0 && (
+          <div className="overlays" style={{ width: frame.width, height: frame.height, transform: `scale(${scale})` }}>
+            {overlays.map((o, i) => (
+              <OverlayLayer
+                key={o.key}
+                overlay={o}
+                isTop={i === overlays.length - 1}
+                onClose={() => setOverlays((l) => l.slice(0, -1))}
+                onAct={(h, it) => go(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y })}
+              />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+/** One overlay: a click-catching (optionally dimmed) backdrop over the frame and the overlay
+ *  frame at its position. Only the topmost overlay's backdrop closes on click. */
+function OverlayLayer({ overlay: o, isTop, onClose, onAct }: { overlay: OpenOverlay; isTop: boolean; onClose: () => void; onAct: (h: Hotspot, it: Interaction) => void }) {
+  const n = getDoc().nodes[o.id];
+  const hotspots = useHotspots(o.id);
+  if (!n) return null;
+  const a = ANIM[o.transition];
+  return (
+    <div
+      className="overlay-backdrop"
+      data-overlay={o.id}
+      style={{ background: overlayDim(o.settings), animation: "dt-dissolve 200ms ease-out" }}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (isTop && o.settings.closeOnClickOutside) onClose();
+      }}
+    >
+      <div
+        className="overlay-frame"
+        style={{ left: o.x, top: o.y, width: n.width, height: n.height, animation: a ? `${a} 300ms ease-out` : undefined }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <FrameLayer id={o.id} hotspots={hotspots} flash={false} onAct={onAct} />
+      </div>
+    </div>
+  );
+}
+
+/** A frame's picture plus a hotspot per layer with interactions. */
+function FrameLayer({ id, hotspots, flash, onAct }: { id: string; hotspots: Hotspot[]; flash: boolean; onAct: (h: Hotspot, it: Interaction) => void }) {
+  const svg = useMemo(() => nodeSvg(id), [id]);
+  return (
+    <>
+      <div dangerouslySetInnerHTML={{ __html: svg }} />
+      {hotspots.map((h) => {
+        const click = h.interactions.find((i) => i.trigger === "onClick" || i.trigger === "onPress");
+        const hover = h.interactions.find((i) => i.trigger === "onHover");
+        return (
+          <div
+            key={h.id}
+            className={"hotspot" + (flash ? " hint-flash" : "")}
+            data-hotspot={h.id}
+            style={{ left: h.rect.x, top: h.rect.y, width: h.rect.width, height: h.rect.height }}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (click) onAct(h, click);
+            }}
+            onMouseEnter={() => hover && onAct(h, hover)}
+          />
+        );
+      })}
+    </>
+  );
+}
+
+/** Hotspots of a frame's layers, in frame coordinates. */
+function useHotspots(frameId: string): Hotspot[] {
+  return useMemo<Hotspot[]>(() => {
+    const doc = getDoc();
+    if (!doc.nodes[frameId]) return [];
+    const ids = Object.values(doc.nodes)
+      .filter((n) => n.interactions.length && (n.id === frameId || isDescendant(n.id, frameId)))
+      .map((n) => n.id);
+    const fb = query<{ union: Rect }>({ q: "bounds", ids: [frameId] }).union;
+    const items = query<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids }).items;
+    return items.map((it) => ({
+      id: it.id,
+      rect: { x: it.bounds.x - fb.x, y: it.bounds.y - fb.y, width: it.bounds.width, height: it.bounds.height },
+      interactions: doc.nodes[it.id].interactions,
+    }));
+  }, [frameId]);
 }
 
 function isDescendant(id: string, ancestor: string): boolean {
@@ -155,6 +259,6 @@ function isDescendant(id: string, ancestor: string): boolean {
 /** Prototype links come from shared files: only web, email and phone links may open (never
  *  `javascript:` or `data:`). Mirrors the engine's `safe_link`. */
 export function safeLink(url: string): string | null {
-  const u = url.replace(/[\u0000-\u0020\u007f]/g, "");
+  const u = url.replace(/[\u0000- \u007f]/g, "");
   return /^(https?:\/\/|mailto:|tel:)/i.test(u) ? u : null;
 }
