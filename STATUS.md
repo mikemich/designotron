@@ -36,7 +36,7 @@ Ordered by impact on "replace Figma for a small team".
 |-----------------|------------------------------------------------------------------------------------------------------|
 | Engine (Rust)   | Serde document model, pages, undo/redo with gesture coalescing, JSON merge-patch edits               |
 | Layout          | Auto layout (direction, gap, padding, alignment, space-between, wrap), hug/fill/fixed, constraints   |
-| Components      | Main components, instances with stable ids, overrides, reset/detach, variants (component sets); swap instance (panel and context menu), add variant, rename variant properties and values; pasting an instance into another file brings its main component |
+| Components      | Main components, instances with stable ids, overrides (also on instances nested in a main component, set through the outer instance, and a nested instance swapped through it; they survive main edits, save/load, undo and multiplayer), reset/detach, variants (component sets); swap instance (panel and context menu; overrides on layers with the same name path carry over to the new variant or component), add variant, rename variant properties and values; pasting an instance into another file brings its main component |
 | Styles          | Colour and text styles: create, rename, edit in place (`UpdateColorStyle`, `UpdateTextStyle`), delete; style chips with detach in Fill and Text |
 | Canvas          | Pan/zoom, Figma-style picking and drill-down, marquee, move/resize/rotate, smart-guide snapping      |
 | Tools           | Frame, rectangle, ellipse, line, arrow, polygon, star, pen, pencil, text, image, hand                |
@@ -134,7 +134,7 @@ until someone runs it with a real key.
 | Effects          | Background blur is not drawn on the canvas (exported to code as `backdrop-filter`)                       |
 | Vectors          | Edit mode adds points (click a segment, exact Bézier split), deletes points (select, Delete), toggles sharp/smooth (double-click) and continues open paths with the pen; no bend tool yet; inside auto layout the box refit after an edit is overwritten by the layout; boolean results are flattened (not live) and curves become polylines; text can't be flattened |
 | Masks in code    | A frame or group containing a mask is exported to code as inline SVG                                     |
-| Components       | Overrides on nested instances through an outer instance are not preserved; variant swap drops overrides  |
+| Components       | Layers are matched on a swap by their name path (repeated names pair up in order): an override on a layer the new component lacks, or whose name changed, is dropped |
 | Multi-resize     | Resizing several rotated layers at once approximates their new boxes                                     |
 | Prototyping      | Smart animate plays as a dissolve; no scroll-to or variables; overlays always render at the frame's design size and don't scroll |
 | Images           | External `http` image URLs render on canvas but are missing from PNG export (assets are fine)            |
@@ -153,7 +153,7 @@ until someone runs it with a real key.
 | Frames, shapes, text, pen  | Yes         |                                         |
 | Auto layout                | Mostly      | No min/max, baseline                    |
 | Constraints                | Yes         |                                         |
-| Components and variants    | Yes         | Nested override limits                  |
+| Components and variants    | Yes         | Overrides follow layer names on swap    |
 | Styles                     | Partial     | Colour + text; no effect/grid styles    |
 | Variables                  | Yes         | Modes, bindings, CSS variables; no aliasing UI |
 | Prototyping                | Partial     | No smart animate/scroll-to              |

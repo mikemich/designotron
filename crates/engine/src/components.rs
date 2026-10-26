@@ -3,10 +3,16 @@
 //! Instances own real child nodes (copies of the main component) so rendering,
 //! hit-testing and code generation treat them like frames. Each copied node
 //! remembers its `master_id`; edits made inside an instance are recorded as
-//! overrides on the outermost instance and re-applied whenever it re-syncs.
+//! overrides on the outermost instance (keyed by that `master_id`) and re-applied
+//! whenever it re-syncs, so they survive edits to any main component involved.
+//!
+//! A nested instance swapped through an outer one (another variant or component) is
+//! recorded as an `instance` entry in the outer instance's override for it; that record
+//! holds the overrides for the swapped instance's own layers. Swapping keeps overrides
+//! on layers whose path of names exists in the new component.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use serde_json::Value;
@@ -16,6 +22,12 @@ use crate::model::{ComponentInfo, Document, InstanceInfo, Node, NodeId, NodeType
 use crate::patch;
 
 pub const ROOT_KEY: &str = "__root";
+
+/// Key, inside an override, of a nested instance's swap record (its `InstanceInfo`).
+const SWAP_KEY: &str = "instance";
+
+/// How deep swaps recorded inside swaps are followed (guards against cyclic files).
+const MAX_SWAP_DEPTH: usize = 16;
 
 /// Root keys that position an instance rather than override it.
 const ROOT_LOCAL_KEYS: &[&str] = &[
@@ -75,9 +87,17 @@ pub fn create_component(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) -> 
       id
     }
   };
+  // Layers inside nested instances keep their link to the component they copy.
   for nid in doc.subtree(&target) {
-    if let Some(n) = doc.get_mut(&nid) {
-      n.master_id = None;
+    let in_instance = doc
+      .ancestors(&nid)
+      .iter()
+      .take_while(|a| **a != target)
+      .any(|a| doc.get(a).map(|n| n.kind == NodeType::Instance).unwrap_or(false));
+    if !in_instance {
+      if let Some(n) = doc.get_mut(&nid) {
+        n.master_id = None;
+      }
     }
   }
   let n = doc.get_mut(&target)?;
@@ -124,31 +144,403 @@ pub fn create_instance(
 }
 
 /// Rebuilds an instance's children from its main component and re-applies overrides.
+/// Nested instances swapped through it are rebuilt from the component they were swapped to.
 pub fn sync_instance(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
-  let Some(inst) = doc.get(inst_id).cloned() else { return };
-  let Some(info) = inst.instance.clone() else { return };
-  let Some(comp) = doc.get(&info.component_id).cloned() else { return };
-
-  // Reuse ids of existing copies so selection survives a re-sync.
-  let mut existing: HashMap<NodeId, NodeId> = HashMap::new();
-  for nid in doc.subtree(inst_id).into_iter().skip(1) {
-    if let Some(m) = doc.get(&nid).and_then(|n| n.master_id.clone()) {
-      existing.insert(m, nid);
-    }
+  let Some(info) = doc.get(inst_id).and_then(|n| n.instance.clone()) else {
+    return;
+  };
+  if doc.get(&info.component_id).is_none() {
+    return;
   }
-  for c in &inst.children {
+  // Reuse ids of existing copies so selection (and overrides keyed by them) survive.
+  let mut reuse = Reuse::new(doc, inst_id);
+  let children = doc.get(inst_id).map(|n| n.children.clone()).unwrap_or_default();
+  for c in &children {
     for nid in doc.subtree(c) {
       doc.nodes.remove(&nid);
     }
   }
+  build(doc, gen, &mut reuse, inst_id, &info, &info.overrides, &Vec::new(), 0);
+}
 
-  let comp_nodes = doc.subtree(&info.component_id);
-  let mut map: HashMap<NodeId, NodeId> = HashMap::new();
-  for cid in comp_nodes.iter().skip(1) {
-    let new_id = existing.get(cid).cloned().unwrap_or_else(|| gen.next("n_"));
-    map.insert(cid.clone(), new_id);
+/// Records a property edit made on a node that lives in an instance.
+pub fn record_override(doc: &mut Document, node_id: &str, p: &Value) {
+  let Some(n) = doc.get(node_id) else { return };
+  let scopes = scope_chain(doc, node_id);
+  let (scope, key, clean) = match (scopes.last(), n.master_id.clone()) {
+    (None, _) if n.kind == NodeType::Instance => {
+      let mut clean = patch::sanitize(p);
+      if let Value::Object(m) = &mut clean {
+        for k in ROOT_LOCAL_KEYS {
+          m.remove(*k);
+        }
+      }
+      (node_id.to_string(), ROOT_KEY.to_string(), clean)
+    }
+    (Some(s), Some(mid)) => (s.clone(), mid, patch::sanitize(p)),
+    _ => return,
+  };
+  if clean.as_object().map(|m| m.is_empty()).unwrap_or(true) {
+    return;
   }
-  map.insert(info.component_id.clone(), inst_id.to_string());
+  if let Some(info) = doc.get_mut(&scope).and_then(|i| i.instance.as_mut()) {
+    merge_override(info.overrides.entry(key).or_insert_with(empty), &clean);
+  }
+  persist_scopes(doc, &scopes);
+}
+
+pub fn detach_instance(doc: &mut Document, inst_id: &str) {
+  for nid in doc.subtree(inst_id) {
+    if let Some(n) = doc.get_mut(&nid) {
+      n.master_id = None;
+      if nid == inst_id {
+        n.kind = NodeType::Frame;
+        n.instance = None;
+      }
+    }
+  }
+}
+
+/// Clears an instance's overrides. Inside another instance, this clears the overrides (and
+/// any swap) made on it through the outer instance, so it matches its main component again.
+pub fn reset_overrides(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
+  let scopes = scope_chain(doc, inst_id);
+  let Some(parent) = scopes.last() else {
+    if let Some(info) = doc.get_mut(inst_id).and_then(|i| i.instance.as_mut()) {
+      info.overrides.clear();
+    }
+    sync_instance(doc, inst_id, gen);
+    return;
+  };
+  let masters: HashSet<NodeId> = doc
+    .subtree(inst_id)
+    .iter()
+    .filter_map(|d| doc.get(d).and_then(|n| n.master_id.clone()))
+    .collect();
+  if let Some(info) = doc.get_mut(parent).and_then(|i| i.instance.as_mut()) {
+    info.overrides.retain(|k, _| !masters.contains(k));
+  }
+  persist_scopes(doc, &scopes);
+  sync_instance(doc, &scopes[0], gen);
+}
+
+/// Points an instance at another component (variant swap or instance swap). Overrides on
+/// layers that exist in both components, matched by their path of layer names, carry over;
+/// everything else follows the new component. An instance inside another instance is
+/// swapped through the outer one, so the swap survives the outer instance re-syncing.
+pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mut IdGen) {
+  let Some(new_name) = doc.get(comp_id).filter(|c| c.kind == NodeType::Component).map(|c| c.name.clone()) else {
+    return;
+  };
+  // A component can't contain an instance of itself.
+  if comp_id == inst_id || doc.is_ancestor(comp_id, inst_id) {
+    return;
+  }
+  let Some(inst) = doc.get(inst_id).cloned() else { return };
+  let Some(info) = inst.instance.clone() else { return };
+  let old_name = doc.get(&info.component_id).map(|c| c.name.clone());
+  // An instance still named after its component follows the swap; a name of its own stays.
+  let follow = inst.name.is_empty() || Some(&inst.name) == old_name.as_ref();
+  let scopes = scope_chain(doc, inst_id);
+  let Some(parent) = scopes.last().cloned() else {
+    let overrides = remap_overrides(doc, &info.component_id, comp_id, &info.overrides);
+    if let Some(inst) = doc.get_mut(inst_id) {
+      if follow {
+        inst.name = new_name;
+      }
+      inst.instance = Some(InstanceInfo {
+        component_id: comp_id.to_string(),
+        overrides,
+      });
+    }
+    sync_instance(doc, inst_id, gen);
+    return;
+  };
+  let Some(key) = inst.master_id.clone() else { return };
+  if doc.is_ancestor(comp_id, &key) {
+    return;
+  }
+  let new_info = match swap_entry(doc, &parent, &key) {
+    Some(swapped) => InstanceInfo {
+      component_id: comp_id.to_string(),
+      overrides: remap_overrides(doc, &swapped.component_id, comp_id, &swapped.overrides),
+    },
+    None => {
+      // First swap: overrides made through the outer instance on this one's layers move
+      // into the swap (keyed by the new component's layers).
+      let region: HashSet<NodeId> = doc.subtree(&key).into_iter().skip(1).collect();
+      let mut moved = BTreeMap::new();
+      if let Some(info) = doc.get_mut(&parent).and_then(|i| i.instance.as_mut()) {
+        let keys: Vec<NodeId> = info.overrides.keys().filter(|k| region.contains(*k)).cloned().collect();
+        for k in keys {
+          if let Some(v) = info.overrides.remove(&k) {
+            moved.insert(k, v);
+          }
+        }
+      }
+      InstanceInfo {
+        component_id: comp_id.to_string(),
+        overrides: remap_overrides(doc, &key, comp_id, &moved),
+      }
+    }
+  };
+  if let Some(info) = doc.get_mut(&parent).and_then(|i| i.instance.as_mut()) {
+    let entry = info.overrides.entry(key).or_insert_with(empty);
+    if let Value::Object(m) = entry {
+      m.insert(SWAP_KEY.into(), serde_json::to_value(&new_info).unwrap_or(Value::Null));
+      if follow {
+        m.insert("name".into(), Value::String(new_name));
+      }
+    }
+  }
+  persist_scopes(doc, &scopes);
+  sync_instance(doc, &scopes[0], gen);
+}
+
+/// True for an instance inside another instance that was swapped through it: it no longer
+/// follows its own main component's changes via the outer one, so it re-syncs on its own.
+pub fn is_swapped_nested(doc: &Document, id: &str) -> bool {
+  let scopes = scope_chain(doc, id);
+  match (scopes.last(), doc.get(id).and_then(|n| n.master_id.as_ref())) {
+    (Some(s), Some(m)) => swap_entry(doc, s, m).is_some(),
+    _ => false,
+  }
+}
+
+/// True when an instance looks different from its main component: it has overrides of its
+/// own, or (inside another instance) overrides or a swap made through the outer one.
+pub fn has_overrides(doc: &Document, id: &str) -> bool {
+  let Some(n) = doc.get(id) else { return false };
+  if n.instance.as_ref().map(|i| !i.overrides.is_empty()).unwrap_or(false) {
+    return true;
+  }
+  let scopes = scope_chain(doc, id);
+  let Some(store) = scopes.last().and_then(|s| doc.get(s)).and_then(|s| s.instance.as_ref()) else {
+    return false;
+  };
+  let source_overridden = n
+    .master_id
+    .as_ref()
+    .and_then(|m| doc.get(m))
+    .and_then(|m| m.instance.as_ref())
+    .map(|i| !i.overrides.is_empty())
+    .unwrap_or(false);
+  if is_swapped_nested(doc, id) && source_overridden {
+    return true;
+  }
+  doc.subtree(id).iter().any(|d| {
+    let Some(m) = doc.get(d).and_then(|x| x.master_id.as_ref()) else {
+      return false;
+    };
+    match store.overrides.get(m) {
+      // The swap itself is shown by the component reference; its name isn't visual.
+      Some(Value::Object(o)) if d == id => o.keys().any(|k| k != SWAP_KEY && k != "name"),
+      Some(_) => true,
+      None => false,
+    }
+  })
+}
+
+/// Links layers inside instances that lost their `master_id` (instances nested in main
+/// components made by older versions) back to the layers they copy, matched by position,
+/// and records how they differ as overrides, so they keep following their main component.
+pub fn repair_masters(doc: &mut Document) {
+  let instances: Vec<NodeId> = doc
+    .nodes
+    .values()
+    .filter(|n| n.kind == NodeType::Instance)
+    .map(|n| n.id.clone())
+    .collect();
+  for inst in instances {
+    if doc.instance_ancestor(&inst).is_some() {
+      continue;
+    }
+    let Some(comp) = doc.get(&inst).and_then(|n| n.instance.as_ref()).map(|i| i.component_id.clone()) else {
+      continue;
+    };
+    if doc.get(&comp).is_none()
+      || doc
+        .subtree(&inst)
+        .iter()
+        .skip(1)
+        .all(|d| doc.get(d).map(|n| n.master_id.is_some()).unwrap_or(true))
+    {
+      continue;
+    }
+    let mut pairs = Vec::new();
+    match_by_position(doc, &inst, &comp, &mut pairs);
+    let mut found = BTreeMap::new();
+    for (d, m) in pairs {
+      let (Some(n), Some(master)) = (doc.get(&d).cloned(), doc.get(&m).cloned()) else {
+        continue;
+      };
+      if n.master_id.is_some() {
+        continue;
+      }
+      let mut base = master;
+      base.id = n.id.clone();
+      base.parent = n.parent.clone();
+      base.children = n.children.clone();
+      base.page = n.page.clone();
+      base.component = None;
+      base.instance = n.instance.clone();
+      base.master_id = None;
+      base.kind = n.kind;
+      // Layout places copies; only what the user changed is an override.
+      (base.x, base.y, base.width, base.height) = (n.x, n.y, n.width, n.height);
+      let before = serde_json::to_value(&base).unwrap_or(Value::Null);
+      let after = serde_json::to_value(&n).unwrap_or(Value::Null);
+      if let Some(diff) = deep_diff(&before, &after) {
+        found.insert(m.clone(), diff);
+      }
+      if let Some(n) = doc.get_mut(&d) {
+        n.master_id = Some(m);
+      }
+    }
+    if let Some(info) = doc.get_mut(&inst).and_then(|i| i.instance.as_mut()) {
+      for (k, v) in found {
+        info.overrides.entry(k).or_insert(v);
+      }
+    }
+  }
+}
+
+/// A merge patch turning `before` into `after`, descending into objects so a changed text
+/// records only its changed fields (None when they're equal).
+fn deep_diff(before: &Value, after: &Value) -> Option<Value> {
+  match (before, after) {
+    (Value::Object(b), Value::Object(a)) => {
+      let mut out = serde_json::Map::new();
+      for (k, v) in a {
+        match b.get(k) {
+          Some(old) => {
+            if let Some(d) = deep_diff(old, v) {
+              out.insert(k.clone(), d);
+            }
+          }
+          None => {
+            out.insert(k.clone(), v.clone());
+          }
+        }
+      }
+      (!out.is_empty()).then_some(Value::Object(out))
+    }
+    _ => (before != after).then(|| after.clone()),
+  }
+}
+
+/// Pairs `a`'s descendants with `b`'s where the trees have the same shape.
+fn match_by_position(doc: &Document, a: &str, b: &str, out: &mut Vec<(NodeId, NodeId)>) {
+  let (Some(na), Some(nb)) = (doc.get(a), doc.get(b)) else { return };
+  if na.children.len() != nb.children.len() {
+    return;
+  }
+  for (ca, cb) in na.children.iter().zip(&nb.children) {
+    let same_kind = match (doc.get(ca), doc.get(cb)) {
+      (Some(x), Some(y)) => x.kind == y.kind || (x.kind == NodeType::Frame && y.kind == NodeType::Component),
+      _ => false,
+    };
+    if same_kind {
+      out.push((ca.clone(), cb.clone()));
+      match_by_position(doc, ca, cb, out);
+    }
+  }
+}
+
+/// The instances whose override maps hold edits for the layers under `id`, outermost first:
+/// the outermost instance around it, then each nested instance swapped through the previous
+/// one (a swapped instance keeps the overrides for its own layers in its swap record).
+fn scope_chain(doc: &Document, id: &str) -> Vec<NodeId> {
+  let mut scopes: Vec<NodeId> = Vec::new();
+  for a in doc.ancestors(id).into_iter().rev() {
+    let Some(n) = doc.get(&a) else { continue };
+    if n.kind != NodeType::Instance {
+      continue;
+    }
+    let nested_swap = match (scopes.last(), n.master_id.as_ref()) {
+      (None, _) => true,
+      (Some(s), Some(m)) => swap_entry(doc, s, m).is_some(),
+      (Some(_), None) => false,
+    };
+    if nested_swap {
+      scopes.push(a);
+    }
+  }
+  scopes
+}
+
+/// The swap recorded in `scope`'s overrides for the nested instance copied from `master`.
+fn swap_entry(doc: &Document, scope: &str, master: &str) -> Option<InstanceInfo> {
+  let v = doc.get(scope)?.instance.as_ref()?.overrides.get(master)?.get(SWAP_KEY)?;
+  serde_json::from_value(v.clone()).ok()
+}
+
+/// Writes each nested scope's instance info back into the swap record of the scope above.
+fn persist_scopes(doc: &mut Document, scopes: &[NodeId]) {
+  for i in (1..scopes.len()).rev() {
+    let Some(child) = doc.get(&scopes[i]) else { continue };
+    let (Some(info), Some(key)) = (child.instance.clone(), child.master_id.clone()) else {
+      continue;
+    };
+    if let Some(parent) = doc.get_mut(&scopes[i - 1]).and_then(|p| p.instance.as_mut()) {
+      if let Value::Object(m) = parent.overrides.entry(key).or_insert_with(empty) {
+        m.insert(SWAP_KEY.into(), serde_json::to_value(&info).unwrap_or(Value::Null));
+      }
+    }
+  }
+}
+
+/// Copies `info`'s component under `inst_id` (whose old children are already removed),
+/// then applies `overrides`. Nested instances with a swap record are built from the
+/// component they were swapped to. `prefix` is `inst_id`'s layer path in the outermost
+/// instance (for reusing ids by path).
+#[allow(clippy::too_many_arguments)]
+fn build(
+  doc: &mut Document,
+  gen: &mut IdGen,
+  reuse: &mut Reuse,
+  inst_id: &str,
+  info: &InstanceInfo,
+  overrides: &BTreeMap<NodeId, Value>,
+  prefix: &LayerPath,
+  depth: usize,
+) {
+  let Some(inst) = doc.get(inst_id).cloned() else { return };
+  let Some(comp) = doc.get(&info.component_id).cloned() else { return };
+
+  // Nested instances swapped through this one.
+  let mut swaps: HashMap<NodeId, InstanceInfo> = HashMap::new();
+  if depth < MAX_SWAP_DEPTH {
+    for (k, v) in overrides {
+      let Some(si) = v.get(SWAP_KEY).and_then(|s| serde_json::from_value::<InstanceInfo>(s.clone()).ok()) else {
+        continue;
+      };
+      let nested = doc.get(k).map(|n| n.kind == NodeType::Instance).unwrap_or(false);
+      let target_ok = doc.get(&si.component_id).map(|c| c.kind == NodeType::Component).unwrap_or(false);
+      if nested && target_ok && *k != comp.id && !doc.is_ancestor(&si.component_id, k) {
+        swaps.insert(k.clone(), si);
+      }
+    }
+  }
+  // The component's layers in pre-order, without the layers of swapped nested instances.
+  let mut comp_nodes = Vec::new();
+  let mut stack = vec![comp.id.clone()];
+  while let Some(cur) = stack.pop() {
+    let Some(n) = doc.get(&cur) else { continue };
+    if cur == comp.id || !swaps.contains_key(&cur) {
+      for c in n.children.iter().rev() {
+        stack.push(c.clone());
+      }
+    }
+    comp_nodes.push(cur);
+  }
+  let mut paths = LazyPaths {
+    root: comp.id.clone(),
+    prefix,
+    cache: None,
+  };
+  let mut map = reuse.alloc(doc, gen, &comp_nodes[1..], &mut paths);
+  map.insert(comp.id.clone(), inst_id.to_string());
 
   for cid in comp_nodes.iter().skip(1) {
     let Some(src) = doc.get(cid).cloned() else { continue };
@@ -161,6 +553,10 @@ pub fn sync_instance(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
     n.component = None;
     if n.kind == NodeType::Component {
       n.kind = NodeType::Frame;
+    }
+    if let Some(si) = swaps.get(cid) {
+      n.children.clear();
+      n.instance = Some(si.clone());
     }
     doc.nodes.insert(n.id.clone(), n);
   }
@@ -191,90 +587,247 @@ pub fn sync_instance(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
   root.children = comp.children.iter().filter_map(|c| map.get(c).cloned()).collect();
   doc.nodes.insert(root.id.clone(), root);
 
-  for (mid, p) in &info.overrides {
+  let mut swapped: Vec<(&NodeId, &InstanceInfo)> = swaps.iter().collect();
+  swapped.sort_by(|a, b| a.0.cmp(b.0));
+  for (cid, si) in swapped {
+    let Some(nid) = map.get(cid).cloned() else { continue };
+    let nested = nested_overrides(doc, cid, si, depth + 1);
+    let mut child_prefix = prefix.clone();
+    child_prefix.extend(paths.get(doc).get(cid).cloned().unwrap_or_default());
+    build(doc, gen, reuse, &nid, si, &nested, &child_prefix, depth + 1);
+  }
+
+  for (mid, p) in overrides {
     let target = if mid == ROOT_KEY {
       Some(inst_id.to_string())
     } else {
       map.get(mid).cloned()
     };
-    if let Some(t) = target {
-      if let Some(n) = doc.get_mut(&t) {
-        let _ = patch::apply(n, p);
-      }
+    if let Some(n) = target.and_then(|t| doc.get_mut(&t)) {
+      let _ = patch::apply(n, p);
     }
   }
 }
 
-/// Records a property edit made on a node that lives in an instance.
-pub fn record_override(doc: &mut Document, node_id: &str, p: &Value) {
-  let Some(n) = doc.get(node_id) else { return };
-  let outer = doc
-    .ancestors(node_id)
+/// The overrides a swapped nested instance applies: those that shaped its source (the nested
+/// instance in the main component), moved onto the new component by layer path, under the
+/// ones made through the outer instance.
+fn nested_overrides(doc: &Document, source: &str, swapped: &InstanceInfo, depth: usize) -> BTreeMap<NodeId, Value> {
+  let mut out = match doc.get(source).and_then(|s| s.instance.as_ref()) {
+    Some(src) => {
+      let base = effective_overrides(doc, source, depth);
+      remap_overrides(doc, &src.component_id, &swapped.component_id, &base)
+    }
+    None => BTreeMap::new(),
+  };
+  for (k, v) in &swapped.overrides {
+    merge_override(out.entry(k.clone()).or_insert_with(empty), v);
+  }
+  out
+}
+
+/// Everything that makes instance `id` differ from its main component, keyed by the
+/// component's layers: its own overrides or, inside another instance, its source's plus
+/// those made through the outer instance.
+fn effective_overrides(doc: &Document, id: &str, depth: usize) -> BTreeMap<NodeId, Value> {
+  let Some(n) = doc.get(id) else { return BTreeMap::new() };
+  let Some(info) = n.instance.as_ref() else { return BTreeMap::new() };
+  let scopes = scope_chain(doc, id);
+  let (Some(parent), Some(master)) = (scopes.last(), n.master_id.as_ref()) else {
+    return info.overrides.clone();
+  };
+  if depth >= MAX_SWAP_DEPTH {
+    return info.overrides.clone();
+  }
+  if swap_entry(doc, parent, master).is_some() {
+    return nested_overrides(doc, master, info, depth + 1);
+  }
+  let mut out = effective_overrides(doc, master, depth + 1);
+  let Some(store) = doc.get(parent).and_then(|p| p.instance.as_ref()) else {
+    return out;
+  };
+  let region: HashSet<NodeId> = doc.subtree(master).into_iter().skip(1).collect();
+  let through: BTreeMap<NodeId, Value> = store
+    .overrides
+    .iter()
+    .filter(|(k, _)| region.contains(*k))
+    .map(|(k, v)| (k.clone(), v.clone()))
+    .collect();
+  for (k, v) in remap_overrides(doc, master, &info.component_id, &through) {
+    merge_override(out.entry(k).or_insert_with(empty), &v);
+  }
+  if let Some(p) = store.overrides.get(master) {
+    merge_override(out.entry(ROOT_KEY.to_string()).or_insert_with(empty), &patch::sanitize(p));
+  }
+  out
+}
+
+/// Re-keys overrides made on the layers under `from` to the layers under `to` with the same
+/// path of names (Figma's rule; repeated names pair up in order). Unmatched ones are dropped.
+fn remap_overrides(doc: &Document, from: &str, to: &str, overrides: &BTreeMap<NodeId, Value>) -> BTreeMap<NodeId, Value> {
+  if from == to || overrides.is_empty() {
+    return overrides.clone();
+  }
+  let from_paths = layer_paths(&doc.nodes, from);
+  let to_ids: HashMap<LayerPath, NodeId> = layer_paths(&doc.nodes, to)
     .into_iter()
-    .rev()
-    .find(|a| doc.get(a).map(|x| x.kind == NodeType::Instance).unwrap_or(false));
-  let (inst_id, key, clean) = if n.kind == NodeType::Instance && outer.is_none() {
-    let mut clean = patch::sanitize(p);
-    if let Value::Object(m) = &mut clean {
-      for k in ROOT_LOCAL_KEYS {
-        m.remove(*k);
+    .filter(|(_, p)| !p.is_empty())
+    .map(|(id, p)| (p, id))
+    .collect();
+  let mut out = BTreeMap::new();
+  for (k, v) in overrides {
+    let key = if k == ROOT_KEY {
+      Some(k.clone())
+    } else {
+      from_paths.get(k).and_then(|p| to_ids.get(p)).cloned()
+    };
+    if let Some(key) = key {
+      merge_override(out.entry(key).or_insert_with(empty), v);
+    }
+  }
+  out
+}
+
+/// Each layer's path under `root`: (name, how many earlier siblings share it) per level.
+fn layer_paths(nodes: &imbl::OrdMap<NodeId, Node>, root: &str) -> HashMap<NodeId, LayerPath> {
+  let mut out = HashMap::new();
+  let mut stack = vec![(root.to_string(), Vec::new())];
+  while let Some((id, path)) = stack.pop() {
+    let Some(n) = nodes.get(&id) else { continue };
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    for c in &n.children {
+      let Some(cn) = nodes.get(c) else { continue };
+      let nth = seen.entry(cn.name.as_str()).or_insert(0);
+      let mut p: LayerPath = path.clone();
+      p.push((cn.name.clone(), *nth));
+      *nth += 1;
+      stack.push((c.clone(), p));
+    }
+    out.insert(id, path);
+  }
+  out
+}
+
+/// Merges an override patch into a recorded one; a swap record is replaced, not merged.
+fn merge_override(entry: &mut Value, p: &Value) {
+  patch::merge(entry, p);
+  if let (Value::Object(e), Some(s)) = (entry, p.get(SWAP_KEY)) {
+    e.insert(SWAP_KEY.into(), s.clone());
+  }
+}
+
+fn empty() -> Value {
+  Value::Object(Default::default())
+}
+
+type LayerPath = Vec<(String, usize)>;
+
+/// Layer paths under a component, computed only when ids can't be reused by master.
+struct LazyPaths<'a> {
+  root: NodeId,
+  prefix: &'a LayerPath,
+  cache: Option<HashMap<NodeId, LayerPath>>,
+}
+
+impl LazyPaths<'_> {
+  fn get(&mut self, doc: &Document) -> &HashMap<NodeId, LayerPath> {
+    let (root, prefix) = (&self.root, self.prefix);
+    self.cache.get_or_insert_with(|| {
+      layer_paths(&doc.nodes, root)
+        .into_iter()
+        .map(|(id, p)| {
+          let mut full = prefix.clone();
+          full.extend(p);
+          (id, full)
+        })
+        .collect()
+    })
+  }
+}
+
+/// Ids of an instance's previous copies, handed out again to the copies that replace them:
+/// first by the layer they copy, then by their path (a swap to another variant keeps ids).
+struct Reuse {
+  root: NodeId,
+  old: imbl::OrdMap<NodeId, Node>,
+  by_master: HashMap<NodeId, Vec<NodeId>>,
+  old_paths: Option<HashMap<NodeId, LayerPath>>,
+  used: HashSet<NodeId>,
+}
+
+impl Reuse {
+  fn new(doc: &Document, inst_id: &str) -> Self {
+    let mut by_master: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for nid in doc.subtree(inst_id).into_iter().skip(1) {
+      if let Some(m) = doc.get(&nid).and_then(|n| n.master_id.clone()) {
+        by_master.entry(m).or_default().push(nid);
       }
     }
-    (node_id.to_string(), ROOT_KEY.to_string(), clean)
-  } else if let (Some(inst), Some(mid)) = (outer, n.master_id.clone()) {
-    (inst, mid, patch::sanitize(p))
-  } else {
-    return;
-  };
-  if clean.as_object().map(|m| m.is_empty()).unwrap_or(true) {
-    return;
+    Reuse {
+      root: inst_id.to_string(),
+      old: doc.nodes.clone(),
+      by_master,
+      old_paths: None,
+      used: HashSet::new(),
+    }
   }
-  if let Some(info) = doc.get_mut(&inst_id).and_then(|i| i.instance.as_mut()) {
-    let entry = info.overrides.entry(key).or_insert_with(|| Value::Object(Default::default()));
-    patch::merge(entry, &clean);
-  }
-}
 
-pub fn detach_instance(doc: &mut Document, inst_id: &str) {
-  for nid in doc.subtree(inst_id) {
-    if let Some(n) = doc.get_mut(&nid) {
-      n.master_id = None;
-      if nid == inst_id {
-        n.kind = NodeType::Frame;
-        n.instance = None;
+  /// Picks an id for the copy of each of `wanted`.
+  fn alloc(&mut self, doc: &Document, gen: &mut IdGen, wanted: &[NodeId], paths: &mut LazyPaths) -> HashMap<NodeId, NodeId> {
+    let mut out = HashMap::new();
+    let mut pending = Vec::new();
+    for cid in wanted {
+      let free: Vec<NodeId> = self
+        .by_master
+        .get(cid)
+        .map(|v| v.iter().filter(|i| !self.used.contains(*i)).cloned().collect())
+        .unwrap_or_default();
+      let pick = match free.len() {
+        0 => None,
+        1 => Some(free[0].clone()),
+        _ => {
+          let want = paths.get(doc).get(cid).cloned();
+          let old = self.old_paths();
+          free.iter().find(|i| old.get(*i) == want.as_ref()).or(free.first()).cloned()
+        }
+      };
+      match pick {
+        Some(id) => {
+          self.used.insert(id.clone());
+          out.insert(cid.clone(), id);
+        }
+        None => pending.push(cid),
       }
     }
-  }
-}
-
-pub fn reset_overrides(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
-  if let Some(info) = doc.get_mut(inst_id).and_then(|i| i.instance.as_mut()) {
-    info.overrides.clear();
-  }
-  sync_instance(doc, inst_id, gen);
-}
-
-/// Points an instance at another component (variant swap), dropping child overrides.
-pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mut IdGen) {
-  let Some(new_name) = doc.get(comp_id).filter(|c| c.kind == NodeType::Component).map(|c| c.name.clone()) else {
-    return;
-  };
-  let old_name = doc
-    .get(inst_id)
-    .and_then(|i| i.instance.as_ref())
-    .and_then(|info| doc.get(&info.component_id))
-    .map(|c| c.name.clone());
-  if let Some(inst) = doc.get_mut(inst_id) {
-    // An instance still named after its component follows the swap; a name of its own stays.
-    if inst.name.is_empty() || Some(&inst.name) == old_name.as_ref() {
-      inst.name = new_name;
+    if pending.is_empty() {
+      return out;
     }
-    if let Some(info) = inst.instance.as_mut() {
-      info.component_id = comp_id.to_string();
-      info.overrides.retain(|k, _| k == ROOT_KEY);
+    let by_path: HashMap<LayerPath, NodeId> = self.old_paths().iter().map(|(id, p)| (p.clone(), id.clone())).collect();
+    for cid in pending {
+      let reused = if by_path.is_empty() {
+        None
+      } else {
+        paths
+          .get(doc)
+          .get(cid)
+          .and_then(|p| by_path.get(p))
+          .filter(|i| !self.used.contains(*i))
+          .cloned()
+      };
+      let id = reused.unwrap_or_else(|| gen.next("n_"));
+      self.used.insert(id.clone());
+      out.insert(cid.clone(), id);
     }
+    out
   }
-  sync_instance(doc, inst_id, gen);
+
+  /// Paths of the old copies under the instance (from the document before the re-sync).
+  fn old_paths(&mut self) -> &HashMap<NodeId, LayerPath> {
+    let (root, old) = (&self.root, &self.old);
+    self
+      .old_paths
+      .get_or_insert_with(|| layer_paths(old, root).into_iter().filter(|(_, p)| !p.is_empty()).collect())
+  }
 }
 
 /// Groups components into a component set and derives variant properties from names.
@@ -665,5 +1218,590 @@ mod tests {
     let (set, props, _) = combine(&["Card", "Card"]);
     assert_eq!(set, "Card");
     assert_eq!(props, vec![prop("Property 1", "Variant 1"), prop("Property 1", "Variant 2")]);
+  }
+
+  /// Overrides through variant swaps, nested instances and nested swaps.
+  mod overrides {
+    use crate::engine::{Command, Engine};
+    use crate::model::{NodeType, Paint};
+    use serde_json::{json, Value};
+
+    const DEFAULT_FILL: &str = "#111111";
+    const HOVER_FILL: &str = "#333333";
+    const HOVER_BG: &str = "#444444";
+
+    #[test]
+    fn variant_swap_keeps_overrides_and_follows_the_rest() {
+      let mut k = kit();
+      let inst = instance(&mut k.e, &k.default, None);
+      let label = named(&k.e, &inst, "Label");
+      let bg = named(&k.e, &inst, "Bg");
+      set_text(&mut k.e, &label, "Checkout");
+      fill(&mut k.e, &bg, "#FF0000");
+
+      variant(&mut k.e, &inst, "Hover");
+      assert_eq!(k.e.doc.get(&inst).unwrap().instance.as_ref().unwrap().component_id, k.hover);
+      assert_eq!(named(&k.e, &inst, "Label"), label, "corresponding layers keep their ids");
+      assert_eq!(text(&k.e, &label), "Checkout", "text override kept");
+      assert_eq!(fill_of(&k.e, &bg), "#FF0000", "fill override kept");
+      assert_eq!(fill_of(&k.e, &inst), HOVER_FILL, "root fill follows the new variant");
+      assert_eq!(font_size(&k.e, &label), 20.0, "font size follows the new variant");
+
+      // Later edits to the new variant still reach the instance; overrides stay on top.
+      let hover_label = named(&k.e, &k.hover, "Label");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![hover_label],
+          patch: json!({ "text": { "fontSize": 24 } }),
+        })
+        .unwrap();
+      assert_eq!(font_size(&k.e, &label), 24.0);
+      assert_eq!(text(&k.e, &label), "Checkout");
+
+      variant(&mut k.e, &inst, "Default");
+      assert_eq!(text(&k.e, &label), "Checkout");
+      assert_eq!(fill_of(&k.e, &bg), "#FF0000");
+      assert_eq!(fill_of(&k.e, &inst), DEFAULT_FILL);
+      assert_eq!(font_size(&k.e, &label), 16.0);
+
+      // Undo returns to the hover variant with the same overrides.
+      k.e.dispatch(Command::Undo).unwrap();
+      assert_eq!(fill_of(&k.e, &inst), HOVER_FILL);
+      assert_eq!(text(&k.e, &label), "Checkout");
+    }
+
+    #[test]
+    fn swap_matches_repeated_names_in_order() {
+      let mut e = engine();
+      let make = |e: &mut Engine, x: f64, name: &str| {
+        let f = shape(e, NodeType::Frame, x, None);
+        rename(e, &f, name);
+        for _ in 0..2 {
+          let d = shape(e, NodeType::Rectangle, x, Some(&f));
+          rename(e, &d, "Dot");
+        }
+        id(e.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap())
+      };
+      let a = make(&mut e, 0.0, "A");
+      let b = make(&mut e, 300.0, "B");
+      let inst = instance(&mut e, &a, None);
+      let second = e.doc.get(&inst).unwrap().children[1].clone();
+      fill(&mut e, &second, "#00FF00");
+      e.dispatch(Command::SwapComponent {
+        id: inst.clone(),
+        component_id: b,
+      })
+      .unwrap();
+      let kids = e.doc.get(&inst).unwrap().children.clone();
+      assert_eq!(fill_of(&e, &kids[1]), "#00FF00");
+      assert_ne!(fill_of(&e, &kids[0]), "#00FF00");
+    }
+
+    #[test]
+    fn nested_override_survives_main_component_edits() {
+      let mut k = kit();
+      let (card, card_inst) = card(&mut k);
+      let nested = nested_instance(&k.e, &card_inst);
+      let label = named(&k.e, &nested, "Label");
+      set_text(&mut k.e, &label, "Nested");
+      fill(&mut k.e, &nested, "#ABCDEF");
+
+      // Edit the Card main component.
+      let title = named(&k.e, &card, "Title");
+      set_text(&mut k.e, &title, "Pricing");
+      assert_eq!(text(&k.e, &named(&k.e, &card_inst, "Title")), "Pricing");
+      assert_eq!(text(&k.e, &label), "Nested");
+      assert_eq!(fill_of(&k.e, &nested), "#ABCDEF");
+
+      // Edit the Button main component: the change reaches the nested copy, the override stays.
+      let main_label = named(&k.e, &k.default, "Label");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![main_label],
+          patch: json!({ "text": { "fontSize": 30 } }),
+        })
+        .unwrap();
+      assert_eq!(font_size(&k.e, &label), 30.0);
+      assert_eq!(text(&k.e, &label), "Nested");
+
+      // Undo/redo of the override itself.
+      k.e.dispatch(Command::Undo).unwrap();
+      k.e.dispatch(Command::Undo).unwrap();
+      assert_eq!(text(&k.e, &label), "Nested");
+      k.e.dispatch(Command::Undo).unwrap();
+      k.e.dispatch(Command::Undo).unwrap();
+      assert_eq!(text(&k.e, &label), "Buy");
+      k.e.dispatch(Command::Redo).unwrap();
+      assert_eq!(text(&k.e, &label), "Nested");
+      k.e.dispatch(Command::Redo).unwrap();
+      k.e.dispatch(Command::Redo).unwrap();
+      k.e.dispatch(Command::Redo).unwrap();
+      assert_eq!(font_size(&k.e, &label), 30.0);
+
+      // Saved and opened again, then the main component is edited once more.
+      let mut e2 = engine_seeded(8);
+      e2.load(&k.e.to_json()).unwrap();
+      assert_eq!(text(&e2, &label), "Nested");
+      set_text(&mut e2, &title, "Plans");
+      assert_eq!(text(&e2, &named(&e2, &card_inst, "Title")), "Plans");
+      assert_eq!(text(&e2, &label), "Nested");
+      assert_eq!(fill_of(&e2, &nested), "#ABCDEF");
+
+      // Resetting the nested instance drops what was changed through the card.
+      e2.dispatch(Command::ResetInstance { ids: vec![nested.clone()] }).unwrap();
+      assert_eq!(text(&e2, &label), "Buy");
+      assert_eq!(fill_of(&e2, &nested), DEFAULT_FILL);
+      assert_eq!(text(&e2, &named(&e2, &card_inst, "Title")), "Plans");
+    }
+
+    #[test]
+    fn nested_swap_through_an_outer_instance_persists() {
+      let mut k = kit();
+      let (card, card_inst) = card(&mut k);
+      let nested = nested_instance(&k.e, &card_inst);
+      let label = named(&k.e, &nested, "Label");
+      set_text(&mut k.e, &label, "Nested");
+      let target = named(&k.e, &nested, "Bg");
+      fill(&mut k.e, &target, "#FF0000");
+
+      variant(&mut k.e, &nested, "Hover");
+      let info = k.e.doc.get(&nested).unwrap().instance.clone().unwrap();
+      assert_eq!(info.component_id, k.hover);
+      assert_eq!(k.e.doc.get(&nested).unwrap().name, "State=Hover");
+      assert_eq!(fill_of(&k.e, &nested), HOVER_FILL);
+      assert_eq!(
+        text(&k.e, &named(&k.e, &nested, "Label")),
+        "Nested",
+        "override carried into the swap"
+      );
+      assert_eq!(fill_of(&k.e, &named(&k.e, &nested, "Bg")), "#FF0000");
+      assert_eq!(font_size(&k.e, &named(&k.e, &nested, "Label")), 20.0);
+
+      // The Card main component changes: the swap and its overrides stay.
+      let target = named(&k.e, &card, "Title");
+      set_text(&mut k.e, &target, "Pricing");
+      assert_eq!(k.e.doc.get(&nested).unwrap().instance.as_ref().unwrap().component_id, k.hover);
+      assert_eq!(text(&k.e, &named(&k.e, &nested, "Label")), "Nested");
+
+      // The variant it was swapped to changes: the nested copy follows.
+      let hover_label = named(&k.e, &k.hover, "Label");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![hover_label],
+          patch: json!({ "text": { "fontSize": 26 } }),
+        })
+        .unwrap();
+      assert_eq!(font_size(&k.e, &named(&k.e, &nested, "Label")), 26.0);
+      assert_eq!(text(&k.e, &named(&k.e, &nested, "Label")), "Nested");
+
+      // Overrides made after the swap are kept too.
+      let label = named(&k.e, &nested, "Label");
+      set_text(&mut k.e, &label, "Deep");
+      let target = named(&k.e, &card, "Title");
+      set_text(&mut k.e, &target, "Plans");
+      assert_eq!(text(&k.e, &named(&k.e, &nested, "Label")), "Deep");
+
+      // Saved and opened again.
+      let mut e2 = engine_seeded(8);
+      e2.load(&k.e.to_json()).unwrap();
+      let target = named(&e2, &card, "Title");
+      set_text(&mut e2, &target, "Again");
+      assert_eq!(e2.doc.get(&nested).unwrap().instance.as_ref().unwrap().component_id, k.hover);
+      assert_eq!(text(&e2, &named(&e2, &nested, "Label")), "Deep");
+      assert_eq!(fill_of(&e2, &named(&e2, &nested, "Bg")), "#FF0000");
+
+      // Swapping the nested instance back keeps the overrides; resetting drops the swap.
+      variant(&mut e2, &nested, "Default");
+      assert_eq!(fill_of(&e2, &nested), DEFAULT_FILL);
+      assert_eq!(text(&e2, &named(&e2, &nested, "Label")), "Deep");
+      variant(&mut e2, &nested, "Hover");
+      e2.dispatch(Command::ResetInstance { ids: vec![nested.clone()] }).unwrap();
+      assert_eq!(e2.doc.get(&nested).unwrap().instance.as_ref().unwrap().component_id, k.default);
+      assert_eq!(text(&e2, &named(&e2, &nested, "Label")), "Buy");
+
+      // Undo brings the swap back.
+      e2.dispatch(Command::Undo).unwrap();
+      assert_eq!(e2.doc.get(&nested).unwrap().instance.as_ref().unwrap().component_id, k.hover);
+      assert_eq!(text(&e2, &named(&e2, &nested, "Label")), "Deep");
+    }
+
+    #[test]
+    fn nested_overrides_and_swaps_sync_to_collaborators() {
+      let mut k = kit();
+      let (card, card_inst) = card(&mut k);
+      let mut b = engine_seeded(9);
+      b.load(&k.e.to_json()).unwrap();
+      let base = k.e.doc.clone();
+      let nested = nested_instance(&k.e, &card_inst);
+      let target = named(&k.e, &nested, "Label");
+      set_text(&mut k.e, &target, "Shared");
+      variant(&mut k.e, &nested, "Hover");
+      b.dispatch(Command::ApplyRemote {
+        delta: crate::collab::delta(&base, &k.e.doc, true),
+        local: false,
+      })
+      .unwrap();
+      assert_eq!(b.doc.get(&nested).unwrap().instance.as_ref().unwrap().component_id, k.hover);
+      assert_eq!(text(&b, &named(&b, &nested, "Label")), "Shared");
+      // The collaborator edits the Card main component: both survive on their side.
+      let target = named(&b, &card, "Title");
+      set_text(&mut b, &target, "Theirs");
+      assert_eq!(b.doc.get(&nested).unwrap().instance.as_ref().unwrap().component_id, k.hover);
+      assert_eq!(text(&b, &named(&b, &nested, "Label")), "Shared");
+      assert_eq!(fill_of(&b, &nested), HOVER_FILL);
+    }
+
+    #[test]
+    fn instances_in_main_components_from_older_files_are_relinked() {
+      let mut k = kit();
+      let (card, card_inst) = card(&mut k);
+      let in_card = nested_instance(&k.e, &card);
+      let main_label = named(&k.e, &in_card, "Label");
+      set_text(&mut k.e, &main_label, "In card");
+      // Older versions dropped these links (and so recorded no overrides).
+      let mut v: Value = serde_json::from_str(&k.e.to_json()).unwrap();
+      for nid in k.e.doc.subtree(&in_card).into_iter().skip(1) {
+        v["nodes"][&nid]["masterId"] = Value::Null;
+      }
+      v["nodes"][&in_card]["instance"]["overrides"] = json!({});
+      let mut e = engine_seeded(10);
+      e.load(&v.to_string()).unwrap();
+      assert!(e.doc.get(&main_label).unwrap().master_id.is_some());
+      let label = named(&e, &nested_instance(&e, &card_inst), "Label");
+      set_text(&mut e, &label, "Through card");
+      // Editing the Button main re-syncs the copy in the card without losing either text.
+      let button_label = named(&e, &k.default, "Label");
+      e.dispatch(Command::Update {
+        ids: vec![button_label],
+        patch: json!({ "text": { "fontSize": 18 } }),
+      })
+      .unwrap();
+      assert_eq!(text(&e, &main_label), "In card");
+      assert_eq!(font_size(&e, &main_label), 18.0);
+      assert_eq!(text(&e, &label), "Through card");
+      assert_eq!(font_size(&e, &label), 18.0);
+    }
+
+    #[test]
+    fn swap_keeps_visibility_opacity_strokes_effects_and_resets_cleanly() {
+      let mut k = kit();
+      let inst = instance(&mut k.e, &k.default, None);
+      let bg = named(&k.e, &inst, "Bg");
+      let label = named(&k.e, &inst, "Label");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![bg.clone()],
+          patch: json!({
+            "opacity": 0.5,
+            "strokes": [{ "type": "solid", "color": "#00FF00" }],
+            "strokeWeight": 3,
+            "effects": [{ "type": "dropShadow", "color": "#000000", "x": 1, "y": 2, "blur": 3, "spread": 0, "visible": true }],
+          }),
+        })
+        .unwrap();
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![label.clone()],
+          patch: json!({ "visible": false }),
+        })
+        .unwrap();
+      variant(&mut k.e, &inst, "Hover");
+      let bg = named(&k.e, &inst, "Bg");
+      let n = k.e.doc.get(&bg).unwrap();
+      assert_eq!(n.opacity, 0.5);
+      assert_eq!(n.stroke_weight, 3.0);
+      assert_eq!(n.strokes.len(), 1);
+      assert_eq!(n.effects.len(), 1);
+      assert_eq!(
+        fill_of(&k.e, &bg),
+        HOVER_BG,
+        "the fill was not overridden, so it follows the variant"
+      );
+      assert!(!k.e.doc.get(&named(&k.e, &inst, "Label")).unwrap().visible);
+
+      // Reset returns to the main component's look, keeping the chosen variant.
+      k.e.dispatch(Command::ResetInstance { ids: vec![inst.clone()] }).unwrap();
+      let n = k.e.doc.get(&named(&k.e, &inst, "Bg")).unwrap();
+      assert_eq!((n.opacity, n.strokes.len(), n.effects.len()), (1.0, 0, 0));
+      assert!(k.e.doc.get(&named(&k.e, &inst, "Label")).unwrap().visible);
+      assert_eq!(k.e.doc.get(&inst).unwrap().instance.as_ref().unwrap().component_id, k.hover);
+    }
+
+    #[test]
+    fn swap_drops_overrides_on_layers_the_new_component_lacks() {
+      let mut k = kit();
+      let inst = instance(&mut k.e, &k.default, None);
+      let bg = named(&k.e, &inst, "Bg");
+      fill(&mut k.e, &bg, "#FF0000");
+      // A component whose only layer has another name.
+      let other = shape(&mut k.e, NodeType::Frame, 2000.0, None);
+      let layer = shape(&mut k.e, NodeType::Rectangle, 2000.0, Some(&other));
+      rename(&mut k.e, &layer, "Panel");
+      let other = id(k.e.dispatch(Command::CreateComponent { ids: vec![other] }).unwrap());
+      k.e
+        .dispatch(Command::SwapComponent {
+          id: inst.clone(),
+          component_id: other,
+        })
+        .unwrap();
+      let panel = named(&k.e, &inst, "Panel");
+      assert_ne!(fill_of(&k.e, &panel), "#FF0000");
+      let info = k.e.doc.get(&inst).unwrap().instance.clone().unwrap();
+      assert!(info.overrides.is_empty(), "{:?}", info.overrides);
+    }
+
+    #[test]
+    fn overrides_two_instances_deep_survive_edits_and_saves() {
+      let mut k = kit();
+      let (_, card_inst) = card(&mut k);
+      let card_comp = k.e.doc.get(&card_inst).unwrap().instance.as_ref().unwrap().component_id.clone();
+      // A "Panel" component holding a Card instance.
+      let f = shape(&mut k.e, NodeType::Frame, 3000.0, None);
+      rename(&mut k.e, &f, "Panel");
+      k.e
+        .dispatch(Command::CreateInstance {
+          component_id: card_comp,
+          x: 3010.0,
+          y: 10.0,
+          parent: Some(f.clone()),
+        })
+        .unwrap();
+      let panel = id(k.e.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap());
+      let panel_inst = id(
+        k.e
+          .dispatch(Command::CreateInstance {
+            component_id: panel,
+            x: 3500.0,
+            y: 900.0,
+            parent: None,
+          })
+          .unwrap(),
+      );
+      let label = {
+        let button = nested_instance(&k.e, &nested_instance(&k.e, &panel_inst));
+        named(&k.e, &button, "Label")
+      };
+      set_text(&mut k.e, &label, "Deep label");
+      let button_label = named(&k.e, &k.default, "Label");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![button_label],
+          patch: json!({ "text": { "fontSize": 33 } }),
+        })
+        .unwrap();
+      assert_eq!(text(&k.e, &label), "Deep label");
+      assert_eq!(font_size(&k.e, &label), 33.0);
+
+      let mut e2 = engine_seeded(11);
+      e2.load(&k.e.to_json()).unwrap();
+      let title = named(&e2, &panel_inst, "Title");
+      set_text(&mut e2, &title, "Changed");
+      assert_eq!(text(&e2, &label), "Deep label");
+    }
+
+    #[test]
+    fn files_without_swap_records_load_and_keep_their_overrides() {
+      let mut k = kit();
+      let inst = instance(&mut k.e, &k.default, None);
+      let label = named(&k.e, &inst, "Label");
+      set_text(&mut k.e, &label, "Kept");
+      let json = k.e.to_json();
+      let mut e = engine_seeded(12);
+      e.load(&json).unwrap();
+      let label_main = named(&e, &k.default, "Label");
+      e.dispatch(Command::Update {
+        ids: vec![label_main],
+        patch: json!({ "text": { "fontSize": 40 } }),
+      })
+      .unwrap();
+      assert_eq!(text(&e, &label), "Kept");
+      assert_eq!(font_size(&e, &label), 40.0);
+    }
+
+    /// A "Button" set (State=Default / State=Hover, each a frame with "Bg" and "Label").
+    struct Kit {
+      e: Engine,
+      default: String,
+      hover: String,
+    }
+
+    fn kit() -> Kit {
+      let mut e = engine();
+      let make = |e: &mut Engine, x: f64, root_fill: &str, bg_fill: &str, size: f64| {
+        let f = shape(e, NodeType::Frame, x, None);
+        rename(e, &f, "Button");
+        fill(e, &f, root_fill);
+        let bg = shape(e, NodeType::Rectangle, x, Some(&f));
+        rename(e, &bg, "Bg");
+        fill(e, &bg, bg_fill);
+        let t = id(
+          e.dispatch(Command::CreateText {
+            x: x + 10.0,
+            y: 10.0,
+            characters: "Buy".into(),
+            parent: Some(f.clone()),
+          })
+          .unwrap(),
+        );
+        rename(e, &t, "Label");
+        e.dispatch(Command::Update {
+          ids: vec![t],
+          patch: json!({ "text": { "fontSize": size } }),
+        })
+        .unwrap();
+        id(e.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap())
+      };
+      let default = make(&mut e, 0.0, DEFAULT_FILL, "#222222", 16.0);
+      let hover = make(&mut e, 200.0, HOVER_FILL, HOVER_BG, 20.0);
+      rename(&mut e, &default, "State=Default");
+      rename(&mut e, &hover, "State=Hover");
+      e.dispatch(Command::CombineVariants {
+        ids: vec![default.clone(), hover.clone()],
+      })
+      .unwrap();
+      Kit { e, default, hover }
+    }
+
+    /// A "Card" component (a "Title" text and a Button instance) and an instance of it.
+    fn card(k: &mut Kit) -> (String, String) {
+      let f = shape(&mut k.e, NodeType::Frame, 1000.0, None);
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![f.clone()],
+          patch: json!({ "name": "Card", "y": 300, "width": 300, "height": 200 }),
+        })
+        .unwrap();
+      let t = id(
+        k.e
+          .dispatch(Command::CreateText {
+            x: 1010.0,
+            y: 310.0,
+            characters: "Welcome".into(),
+            parent: Some(f.clone()),
+          })
+          .unwrap(),
+      );
+      rename(&mut k.e, &t, "Title");
+      let default = k.default.clone();
+      instance(&mut k.e, &default, Some(&f));
+      let card = id(k.e.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap());
+      let inst = id(
+        k.e
+          .dispatch(Command::CreateInstance {
+            component_id: card.clone(),
+            x: 600.0,
+            y: 300.0,
+            parent: None,
+          })
+          .unwrap(),
+      );
+      (card, inst)
+    }
+
+    fn engine() -> Engine {
+      engine_seeded(7)
+    }
+
+    /// Another editor session; each has its own id seed, as in the app.
+    fn engine_seeded(seed: u64) -> Engine {
+      Engine::new(Box::new(crate::text::HeuristicMeasurer), seed)
+    }
+
+    fn id(v: Value) -> String {
+      v["id"].as_str().unwrap().to_string()
+    }
+
+    fn shape(e: &mut Engine, kind: NodeType, x: f64, parent: Option<&str>) -> String {
+      id(
+        e.dispatch(Command::CreateShape {
+          kind,
+          x,
+          y: 0.0,
+          width: 100.0,
+          height: 40.0,
+          parent: parent.map(String::from),
+        })
+        .unwrap(),
+      )
+    }
+
+    fn instance(e: &mut Engine, comp: &str, parent: Option<&str>) -> String {
+      id(
+        e.dispatch(Command::CreateInstance {
+          component_id: comp.to_string(),
+          x: 0.0,
+          y: 500.0,
+          parent: parent.map(String::from),
+        })
+        .unwrap(),
+      )
+    }
+
+    fn rename(e: &mut Engine, id: &str, name: &str) {
+      e.dispatch(Command::Update {
+        ids: vec![id.to_string()],
+        patch: json!({ "name": name }),
+      })
+      .unwrap();
+    }
+
+    fn fill(e: &mut Engine, id: &str, color: &str) {
+      e.dispatch(Command::Update {
+        ids: vec![id.to_string()],
+        patch: json!({ "fills": [{ "type": "solid", "color": color }] }),
+      })
+      .unwrap();
+    }
+
+    fn set_text(e: &mut Engine, id: &str, s: &str) {
+      e.dispatch(Command::SetText {
+        id: id.to_string(),
+        characters: s.to_string(),
+      })
+      .unwrap();
+    }
+
+    fn variant(e: &mut Engine, id: &str, value: &str) {
+      e.dispatch(Command::SetVariant {
+        id: id.to_string(),
+        prop: "State".into(),
+        value: value.into(),
+      })
+      .unwrap();
+    }
+
+    /// The first layer named `name` under `root`.
+    fn named(e: &Engine, root: &str, name: &str) -> String {
+      e.doc
+        .subtree(root)
+        .into_iter()
+        .skip(1)
+        .find(|i| e.doc.get(i).map(|n| n.name == name).unwrap_or(false))
+        .unwrap_or_else(|| panic!("no {name} under {root}"))
+    }
+
+    fn nested_instance(e: &Engine, root: &str) -> String {
+      e.doc
+        .subtree(root)
+        .into_iter()
+        .skip(1)
+        .find(|i| e.doc.get(i).map(|n| n.kind == NodeType::Instance).unwrap_or(false))
+        .unwrap()
+    }
+
+    fn text(e: &Engine, id: &str) -> String {
+      e.doc.get(id).unwrap().text.as_ref().unwrap().characters.clone()
+    }
+
+    fn font_size(e: &Engine, id: &str) -> f64 {
+      e.doc.get(id).unwrap().text.as_ref().unwrap().font_size
+    }
+
+    fn fill_of(e: &Engine, id: &str) -> String {
+      match e.doc.get(id).unwrap().fills.first() {
+        Some(Paint::Solid { color, .. }) => color.to_uppercase(),
+        other => format!("{other:?}"),
+      }
+    }
   }
 }

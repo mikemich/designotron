@@ -612,6 +612,7 @@ impl Engine {
     // Files and links can come from anyone: never let a parent cycle hang layout or rendering.
     let ids: Vec<NodeId> = doc.nodes.keys().cloned().collect();
     doc.break_parent_cycles(&ids);
+    components::repair_masters(&mut doc);
     self.page = doc.pages[0].id.clone();
     self.doc = doc;
     self.selection.clear();
@@ -1088,10 +1089,26 @@ impl Engine {
         .filter(|n| n.instance.as_ref().map(|i| changed.contains(&i.component_id)).unwrap_or(false))
         .map(|n| n.id.clone())
         .collect();
+      // Copies inside other instances follow through their outermost instance; one swapped
+      // through it no longer comes from that instance's main, so it re-syncs the outermost.
+      let mut outers: Vec<NodeId> = Vec::new();
       for id in instances {
         if self.doc.instance_ancestor(&id).is_none() {
           components::sync_instance(&mut self.doc, &id, &mut self.gen);
+        } else if components::is_swapped_nested(&self.doc, &id) {
+          let outer = self
+            .doc
+            .ancestors(&id)
+            .into_iter()
+            .rev()
+            .find(|a| self.doc.get(a).map(|n| n.kind == NodeType::Instance).unwrap_or(false));
+          if let Some(o) = outer.filter(|o| !outers.contains(o)) {
+            outers.push(o);
+          }
         }
+      }
+      for id in outers {
+        components::sync_instance(&mut self.doc, &id, &mut self.gen);
       }
     }
     // Instances just synced from their mains resolve variables in their own mode context.
