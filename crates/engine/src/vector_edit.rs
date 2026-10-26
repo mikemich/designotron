@@ -289,13 +289,16 @@ pub fn nearest_segment(v: &VectorData, p: Point, tol: f64) -> Option<SegmentHit>
 }
 
 /// True when `h` lies within `tol` of an end anchor of its segment, where a click should
-/// grab the anchor instead of inserting a duplicate point on top of it.
+/// grab the anchor instead of inserting a duplicate point on top of it. `tol` is capped at a
+/// quarter of the segment's chord so a short segment keeps a middle that can take a point;
+/// hits clamped onto an end (a click beyond an open path's end) sit at distance 0 and still count.
 pub fn near_segment_end(v: &VectorData, h: &SegmentHit, tol: f64) -> bool {
   let Some(sp) = v.subpaths.get(h.sub) else { return false };
   if h.seg >= segment_count(sp) {
     return false;
   }
   let c = segment(sp, h.seg);
+  let tol = tol.min((c[3].x - c[0].x).hypot(c[3].y - c[0].y) / 4.0);
   [c[0], c[3]].iter().any(|q| (q.x - h.x).hypot(q.y - h.y) <= tol)
 }
 

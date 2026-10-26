@@ -25,7 +25,8 @@ const MAX_HISTORY: usize = 300;
 pub const CLIPBOARD_TAG: &str = "designotron/nodes";
 /// Screen pixels from a path within which vector edit mode offers to add a point.
 const VECTOR_SEGMENT_TOLERANCE: f64 = 6.0;
-/// A hit this close (screen px) to a segment's end anchor is the anchor's, not the segment's.
+/// A hit this close (screen px) to a segment's end anchor is the anchor's, not the segment's
+/// (never more than a quarter of the segment's length, so short segments still take points).
 const VECTOR_ANCHOR_MARGIN: f64 = 5.0;
 
 /// One undo step: the state before it and the document right after it. Undo applies the
@@ -3834,6 +3835,51 @@ mod tests {
       // The margin is in screen pixels, so zooming in frees the segment next to the anchor.
       assert!(q(&e, 103.0, 103.0, 4.0).is_object());
       assert!(q(&e, 127.0, 123.0, 1.0).is_object());
+    }
+
+    #[test]
+    fn short_segments_take_points_in_their_middle() {
+      let mut e = engine();
+      let r = e
+        .dispatch(Command::CreateVector {
+          points: vec![
+            VectorPoint::at(100.0, 100.0),
+            VectorPoint::at(104.0, 100.0),
+            VectorPoint::at(108.0, 100.0),
+          ],
+          closed: false,
+          parent: None,
+        })
+        .unwrap();
+      let id = id_of(&r);
+      let q = |e: &Engine, x: f64, y: f64, zoom: f64| {
+        e.query(Query::VectorSegmentAt {
+          id: id.clone(),
+          x,
+          y,
+          zoom,
+        })
+        .unwrap()
+      };
+      // A 4px segment at 100% zoom: its middle takes a point, its ends belong to the anchors.
+      let hit = q(&e, 102.0, 101.0, 1.0);
+      assert_eq!((hit["sub"].as_u64(), hit["seg"].as_u64()), (Some(0), Some(0)), "{hit}");
+      assert!((hit["t"].as_f64().unwrap() - 0.5).abs() < 1e-3);
+      assert!(q(&e, 106.0, 100.0, 1.0).is_object(), "the next segment too");
+      assert!(q(&e, 100.0, 100.0, 1.0).is_null());
+      assert!(q(&e, 104.0, 100.0, 1.0).is_null(), "the shared anchor");
+      // Clicks beyond the open path's ends still return null, whatever the segment length.
+      assert!(q(&e, 95.0, 100.0, 1.0).is_null(), "5px before the start");
+      assert!(q(&e, 113.0, 100.0, 1.0).is_null(), "5px past the end");
+      assert!(q(&e, 108.0, 100.0, 1.0).is_null());
+      e.dispatch(Command::InsertVectorPoint {
+        id: id.clone(),
+        sub: 0,
+        seg: 0,
+        t: hit["t"].as_f64().unwrap(),
+      })
+      .unwrap();
+      assert_eq!(points(&e, &id).len(), 4);
     }
 
     #[test]
