@@ -25,6 +25,8 @@ const MAX_HISTORY: usize = 300;
 pub const CLIPBOARD_TAG: &str = "designotron/nodes";
 /// Screen pixels from a path within which vector edit mode offers to add a point.
 const VECTOR_SEGMENT_TOLERANCE: f64 = 6.0;
+/// A hit this close (screen px) to a segment's end anchor is the anchor's, not the segment's.
+const VECTOR_ANCHOR_MARGIN: f64 = 5.0;
 
 /// One undo step: the state before it and the document right after it. Undo applies the
 /// reverse of before→after to the *current* document, so collaborators' later edits stay.
@@ -1477,15 +1479,24 @@ impl Engine {
         Ok(json!({ "index": index }))
       }
       Command::DeleteVectorPoints { id, points } => {
+        // Decide on a copy first: a refused delete must leave the path (and any open
+        // gesture or recorded override) untouched.
+        let would_leave = match self.doc.get(&id) {
+          Some(n) => match n.vector.as_ref() {
+            Some(v) if n.kind == NodeType::Vector && v.raw.is_none() => vector_edit::delete_points(&mut v.clone(), &points),
+            _ => return Err("not an editable vector".into()),
+          },
+          None => return Err("no such layer".into()),
+        };
+        if !would_leave && self.doc.instance_ancestor(&id).is_some() {
+          return Err("a path inside an instance needs at least two points".into());
+        }
         let mut left = true;
         self.edit_vector(&id, true, |v| {
           left = vector_edit::delete_points(v, &points);
           Ok(())
         })?;
         if !left {
-          if self.doc.instance_ancestor(&id).is_some() {
-            return Err("a path inside an instance needs at least two points".into());
-          }
           ops::delete(&mut self.doc, std::slice::from_ref(&id));
         }
         Ok(json!({ "deleted": !left }))
@@ -2494,7 +2505,9 @@ impl Engine {
         };
         let m = self.doc.abs_matrix(&id);
         let local = m.invert().apply(Point::new(x, y));
-        match vector_edit::nearest_segment(v, local, VECTOR_SEGMENT_TOLERANCE / zoom.max(1e-6)) {
+        let z = zoom.max(1e-6);
+        match vector_edit::nearest_segment(v, local, VECTOR_SEGMENT_TOLERANCE / z) {
+          Some(h) if vector_edit::near_segment_end(v, &h, VECTOR_ANCHOR_MARGIN / z) => Value::Null,
           Some(h) => {
             let p = m.apply(Point::new(h.x, h.y));
             json!({ "sub": h.sub, "seg": h.seg, "t": h.t, "x": p.x, "y": p.y })
@@ -3684,7 +3697,8 @@ mod tests {
       assert_eq!((hit["sub"].as_u64(), hit["seg"].as_u64()), (Some(0), Some(0)));
       assert!((hit["t"].as_f64().unwrap() - 0.5).abs() < 1e-3, "{hit}");
       assert!((hit["x"].as_f64().unwrap() - 125.0).abs() < 1e-3);
-      assert!(q(&e, 127.0, 123.0, 0.1).is_object(), "tolerance grows when zoomed out");
+      assert!(q(&e, 130.0, 120.0, 1.0).is_null());
+      assert!(q(&e, 130.0, 120.0, 0.5).is_object(), "tolerance grows when zoomed out");
       assert!(q(&e, 140.0, 110.0, 1.0).is_null());
       e.dispatch(Command::InsertVectorPoint {
         id: id.clone(),
@@ -3697,6 +3711,83 @@ mod tests {
       let m = e.doc.abs_matrix(&id);
       let a = m.apply(Point::new(p.x, p.y));
       assert!((a.x - 125.0).abs() < 1e-3 && (a.y - 125.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn segment_query_ignores_hits_on_the_anchors() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      let q = |e: &Engine, x: f64, y: f64, zoom: f64| {
+        e.query(Query::VectorSegmentAt {
+          id: id.clone(),
+          x,
+          y,
+          zoom,
+        })
+        .unwrap()
+      };
+      // On, just beside and just past the open path's ends: the anchor owns the click.
+      assert!(q(&e, 100.0, 100.0, 1.0).is_null());
+      assert!(q(&e, 103.0, 103.0, 1.0).is_null());
+      assert!(q(&e, 96.0, 97.0, 1.0).is_null(), "past the start");
+      assert!(q(&e, 203.0, 98.0, 1.0).is_null(), "past the end");
+      assert!(q(&e, 150.0, 150.0, 1.0).is_null(), "an inner anchor too");
+      // The margin is in screen pixels, so zooming in frees the segment next to the anchor.
+      assert!(q(&e, 103.0, 103.0, 4.0).is_object());
+      assert!(q(&e, 127.0, 123.0, 1.0).is_object());
+    }
+
+    #[test]
+    fn nearest_segment_skips_far_segments_without_changing_hits() {
+      let mut e = engine();
+      let id = path(&mut e, true);
+      let v = e.doc.get(&id).unwrap().vector.clone().unwrap();
+      // Node-local points are (0,0), (50,50), (100,0); the closing segment runs back along y = 0.
+      let h = vector_edit::nearest_segment(&v, Point::new(50.0, 3.0), 6.0).unwrap();
+      assert_eq!((h.sub, h.seg), (0, 2));
+      assert!((h.t - 0.5).abs() < 1e-6 && (h.dist - 3.0).abs() < 1e-6);
+      assert!(vector_edit::nearest_segment(&v, Point::new(50.0, -9.0), 6.0).is_none());
+    }
+
+    #[test]
+    fn refused_delete_in_an_instance_leaves_no_trace_in_an_open_gesture() {
+      let mut e = engine();
+      let vec = path(&mut e, false);
+      let comp = id_of(&e.dispatch(Command::CreateComponent { ids: vec![vec] }).unwrap());
+      let inst = id_of(
+        &e.dispatch(Command::CreateInstance {
+          component_id: comp,
+          x: 400.0,
+          y: 0.0,
+          parent: None,
+        })
+        .unwrap(),
+      );
+      let inner = e
+        .doc
+        .subtree(&inst)
+        .into_iter()
+        .find(|i| e.doc.get(i).map(|n| n.kind == NodeType::Vector).unwrap_or(false))
+        .expect("the instance has a vector");
+      let before = e.doc.clone();
+      let undo_depth = e.past.len();
+      e.dispatch(Command::BeginGesture).unwrap();
+      let err = e.dispatch(Command::DeleteVectorPoints {
+        id: inner.clone(),
+        points: vec![[0, 0], [0, 1]],
+      });
+      assert!(err.is_err());
+      assert_eq!(points(&e, &inner).len(), 3, "the path was not touched");
+      e.dispatch(Command::EndGesture).unwrap();
+      assert!(e.doc == before, "the refused delete left nothing behind");
+      assert_eq!(e.past.len(), undo_depth, "and no undo step");
+      // A delete that keeps two points is still allowed inside the instance.
+      e.dispatch(Command::DeleteVectorPoints {
+        id: inner.clone(),
+        points: vec![[0, 1]],
+      })
+      .unwrap();
+      assert_eq!(points(&e, &inner).len(), 2);
     }
 
     #[test]

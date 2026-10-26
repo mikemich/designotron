@@ -157,6 +157,94 @@ try {
   check("vector edit: Delete removes the selected point, undo restores it", removed === 3 && (await penCount()) === 4);
   await page.keyboard.press("Escape");
 
+  // Vector edit mode inside a frame: marquee from the frame's background, stale selections.
+  {
+    const dsp = (cmd) => page.evaluate((c) => window.__dt.dispatch(c), cmd);
+    const fid = (await dsp({ op: "createShape", kind: "frame", x: 3000, y: 3000, width: 400, height: 300, parent: null })).id;
+    const vid = (
+      await dsp({
+        op: "createVector",
+        points: [
+          { x: 3100, y: 3100, inX: 0, inY: 0, outX: 0, outY: 0 },
+          { x: 3200, y: 3180, inX: 0, inY: 0, outX: 0, outY: 0 },
+          { x: 3300, y: 3100, inX: 0, inY: 0, outX: 0, outY: 0 },
+        ],
+        closed: false,
+        parent: fid,
+      })
+    ).id;
+    const rid = (await dsp({ op: "createShape", kind: "rectangle", x: 3110, y: 3190, width: 80, height: 30, parent: fid })).id;
+    await dsp({ op: "select", ids: [vid] });
+    await page.keyboard.press("Shift+2");
+    await page.waitForTimeout(300);
+    const scr = async (x, y) => {
+      const vp = await page.evaluate(() => window.__dt.viewport());
+      const box = await page.locator("#dt-canvas").boundingBox();
+      return { x: box.x + vp.x + x * vp.zoom, y: box.y + vp.y + y * vp.zoom };
+    };
+    const ve = () => page.evaluate(() => window.__dt.vectorEdit());
+    const nPts = async () => (await doc()).nodes[vid].vector.subpaths[0].points.length;
+    const at = await scr(3150, 3140);
+    await page.mouse.dblclick(at.x, at.y);
+    check("vector in a frame: double-click enters edit mode", (await ve()).id === vid);
+
+    // Stale selections: insert (selected), undo, Delete must not remove another point.
+    await page.mouse.click(at.x, at.y);
+    const grown = await nPts();
+    const selAfterInsert = (await ve()).points.length;
+    await page.keyboard.press("Control+z");
+    check("vector edit: undo clears the point selection", grown === 4 && selAfterInsert === 1 && (await nPts()) === 3 && (await ve()).points.length === 0);
+    await page.keyboard.press("Delete");
+    check("vector edit: Delete after undo removes nothing", (await nPts()) === 3 && (await ve()).id === vid);
+    // A remote-style change to the path (anchor count changes) drops the selection too.
+    const a0 = await scr(3100, 3100);
+    await page.mouse.click(a0.x, a0.y);
+    const hadSel = (await ve()).points.length === 1;
+    await dsp({ op: "insertVectorPoint", id: vid, sub: 0, seg: 1, t: 0.5 });
+    check("vector edit: changed anchor count drops the selection", hadSel && (await ve()).points.length === 0);
+    await page.keyboard.press("Control+z");
+
+    // Marquee starting on the frame background selects anchors and does not move the frame.
+    const frameBefore = (await doc()).nodes[fid];
+    const m0 = await scr(3090, 3070);
+    const m1 = await scr(3215, 3195);
+    await page.mouse.move(m0.x, m0.y);
+    await page.mouse.down();
+    await page.mouse.move((m0.x + m1.x) / 2, (m0.y + m1.y) / 2, { steps: 4 });
+    await page.mouse.move(m1.x, m1.y, { steps: 4 });
+    await page.mouse.up();
+    const frameAfter = (await doc()).nodes[fid];
+    check(
+      "vector edit: marquee from the frame background selects anchors",
+      (await ve()).id === vid && (await ve()).points.length === 2 && frameAfter.x === frameBefore.x && frameAfter.y === frameBefore.y,
+      JSON.stringify((await ve()).points),
+    );
+    // Arrow keys with anchors selected move them; with none selected they leave the layer alone.
+    const x0 = (await doc()).nodes[vid].x;
+    await page.keyboard.press("ArrowRight");
+    const moved = (await doc()).nodes[vid].x === x0 + 1;
+    const bg = await scr(3250, 3205);
+    await page.mouse.click(bg.x, bg.y);
+    check("vector edit: click beside the path clears the points, stays in edit mode", (await ve()).id === vid && (await ve()).points.length === 0);
+    const xBefore = (await doc()).nodes[vid].x;
+    await page.keyboard.press("ArrowRight");
+    check("vector edit: arrows move selected anchors only, never the whole layer", (await doc()).nodes[vid].x === xBefore && moved);
+    // Clicking another layer leaves edit mode and selects it.
+    const rc = await scr(3150, 3205);
+    await page.mouse.click(rc.x, rc.y);
+    check("vector edit: clicking another layer exits and selects it", (await ve()).id === null && (await state()).selection[0] === rid);
+    // Finally empty canvas with nothing selected leaves edit mode and deselects.
+    await dsp({ op: "select", ids: [vid] });
+    await page.mouse.dblclick(at.x, at.y);
+    await page.waitForTimeout(100);
+    const entered = (await ve()).id === vid;
+    const out = await scr(3260, 3205);
+    await page.mouse.click(out.x, out.y);
+    check("vector edit: a click on the frame background keeps the session", entered && (await ve()).id === vid);
+    await page.keyboard.press("Escape");
+    await dsp({ op: "select", ids: [] });
+  }
+
   // Code export.
   const welcome = Object.values(await doc()).length && Object.values((await doc()).nodes).find((n) => n.name === "Welcome");
   const react = await page.evaluate((id) => window.__dt.query({ q: "exportReact", id }), welcome.id);

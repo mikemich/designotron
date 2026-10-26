@@ -3,6 +3,7 @@ import type { Handle, Mat, Node, Rect, VectorPoint } from "../types";
 import {
   dispatch,
   getDoc,
+  pointerDrag,
   query,
   renderPageIncremental,
   screenToPage,
@@ -42,7 +43,7 @@ type Drag =
   | { kind: "pencil"; points: Pt[] }
   | { kind: "penHandle"; index: number }
   | { kind: "vector"; id: string; sub: number; idx: number; part: "anchor" | "in" | "out"; pts: [number, number][]; startLocal: Pt; start: Node; moved: boolean }
-  | { kind: "vmarquee"; id: string; start: Pt; base: [number, number][]; onSelf: boolean; moved: boolean }
+  | { kind: "vmarquee"; id: string; start: Pt; base: [number, number][]; hitId: string | null; moved: boolean }
   | { kind: "link"; from: string; cur: Pt };
 
 /** The point on a path nearest the pointer (`vectorSegmentAt` query, page coordinates). */
@@ -417,12 +418,11 @@ export function Canvas() {
         startVectorDrag(editingVector, hit.sub, r.index, "anchor", p);
         return;
       }
-      // Anywhere but another layer: select anchors with a marquee (a plain click clears them).
-      const id = query<string | null>({ q: "pick", x: p.x, y: p.y, zoom: zoom(), deep: false });
-      if (!id || id === editingVector) {
-        drag.current = { kind: "vmarquee", id: editingVector, start: p, base: e.shiftKey ? vectorPoints() : [], onSelf: id === editingVector, moved: false };
-        return;
-      }
+      // Anywhere else: select anchors with a marquee. A plain click is decided on release,
+      // from the layer under it (a frame behind the path must not take the drag).
+      const hitId = query<string | null>({ q: "pick", x: p.x, y: p.y, zoom: zoom(), deep: false });
+      drag.current = { kind: "vmarquee", id: editingVector, start: p, base: e.shiftKey ? vectorPoints() : [], hitId, moved: false };
+      return;
     }
     const labelId = target.getAttribute("data-label");
     if (labelId) {
@@ -632,7 +632,8 @@ export function Canvas() {
             if (a.x >= r.x && a.x <= r.x + r.width && a.y >= r.y && a.y <= r.y + r.height) inside.push([s, i]);
           }),
         );
-        const fresh = inside.filter(([s, i]) => !d.base.some(([bs, bi]) => bs === s && bi === i));
+        const baseKeys = new Set(d.base.map(([s, i]) => `${s}:${i}`));
+        const fresh = inside.filter(([s, i]) => !baseKeys.has(`${s}:${i}`));
         useStore.setState({ vectorPoints: [...d.base, ...fresh] });
         break;
       }
@@ -672,8 +673,15 @@ export function Canvas() {
       case "vmarquee":
         useStore.setState({ marquee: null });
         if (!d.moved && !e.shiftKey) {
-          // A click off the path clears the anchors, or leaves edit mode when none are selected.
-          if (vectorPoints().length || d.onSelf) useStore.setState({ vectorPoints: [] });
+          // A click off the path clears the anchors. Another layer under it takes over the
+          // selection; empty canvas with no anchors selected leaves edit mode.
+          const nodes = getDoc().nodes;
+          const ancestors = new Set<string>([d.id]);
+          for (let a = nodes[d.id]?.parent; a; a = nodes[a]?.parent) ancestors.add(a);
+          if (d.hitId && !ancestors.has(d.hitId)) {
+            useStore.setState({ editingVector: null });
+            dispatch({ op: "select", ids: [d.hitId] });
+          } else if (vectorPoints().length || d.hitId) useStore.setState({ vectorPoints: [] });
           else {
             useStore.setState({ editingVector: null });
             dispatch({ op: "select", ids: [] });
@@ -911,9 +919,18 @@ export function Canvas() {
       className="canvas"
       tabIndex={0}
       style={{ background: pageObj?.background ?? "#1a1a1a", cursor }}
-      onPointerDown={onPointerDown}
+      onPointerDown={(e) => {
+        onPointerDown(e);
+        pointerDrag.active = !!drag.current;
+      }}
       onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
+      onPointerUp={(e) => {
+        onPointerUp(e);
+        pointerDrag.active = false;
+      }}
+      onPointerCancel={() => {
+        pointerDrag.active = false;
+      }}
       onPointerLeave={() => {
         reportCursor(null);
         if (!drag.current) useStore.setState({ hover: null });
@@ -1139,42 +1156,49 @@ function VectorPoints({
   hover: SegmentHit | null;
 }) {
   const subpaths = node.vector!.subpaths;
-  const isSel = (si: number, pi: number) => selected.some(([s, i]) => s === si && i === pi);
-  const handles: JSX.Element[] = [];
-  const anchors: JSX.Element[] = [];
-  subpaths.forEach((sp, si) =>
-    sp.points.forEach((p, pi) => {
-      const a = toScreen(v, apply(m, p));
-      const hasOut = p.outX || p.outY;
-      const hasIn = p.inX || p.inY;
-      if (hasOut) {
-        const o = toScreen(v, apply(m, { x: p.x + p.outX, y: p.y + p.outY }));
-        handles.push(<line key={`lo${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
-        handles.push(<circle key={`o${si}-${pi}`} data-vpt={`${si}:${pi}:out`} className="handle" cx={o.x} cy={o.y} r={3.5} fill="white" stroke="#0d99ff" />);
-      }
-      if (hasIn) {
-        const o = toScreen(v, apply(m, { x: p.x + p.inX, y: p.y + p.inY }));
-        handles.push(<line key={`li${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
-        handles.push(<circle key={`i${si}-${pi}`} data-vpt={`${si}:${pi}:in`} className="handle" cx={o.x} cy={o.y} r={3.5} fill="white" stroke="#0d99ff" />);
-      }
-      const on = isSel(si, pi);
-      anchors.push(
-        <rect
-          key={`a${si}-${pi}`}
-          data-vpt={`${si}:${pi}:anchor`}
-          className={"handle vector-anchor" + (on ? " selected" : "")}
-          x={a.x - 4}
-          y={a.y - 4}
-          width={8}
-          height={8}
-          rx={on ? 1 : 0}
-          fill={on ? "#0d99ff" : "white"}
-          stroke={on ? "white" : "#0d99ff"}
-          strokeWidth={on ? 1.5 : 1}
-        />,
-      );
-    }),
-  );
+  // The path and its anchors only change with the document, view or selection, not with the
+  // hover indicator that moves on every pointer move.
+  const base = useMemo(() => {
+    const keys = new Set(selected.map(([s, i]) => `${s}:${i}`));
+    const isSel = (si: number, pi: number) => keys.has(`${si}:${pi}`);
+    const handles: JSX.Element[] = [];
+    const anchors: JSX.Element[] = [];
+    subpaths.forEach((sp, si) =>
+      sp.points.forEach((p, pi) => {
+        const a = toScreen(v, apply(m, p));
+        const hasOut = p.outX || p.outY;
+        const hasIn = p.inX || p.inY;
+        if (hasOut) {
+          const o = toScreen(v, apply(m, { x: p.x + p.outX, y: p.y + p.outY }));
+          handles.push(<line key={`lo${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
+          handles.push(<circle key={`o${si}-${pi}`} data-vpt={`${si}:${pi}:out`} className="handle" cx={o.x} cy={o.y} r={3.5} fill="white" stroke="#0d99ff" />);
+        }
+        if (hasIn) {
+          const o = toScreen(v, apply(m, { x: p.x + p.inX, y: p.y + p.inY }));
+          handles.push(<line key={`li${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
+          handles.push(<circle key={`i${si}-${pi}`} data-vpt={`${si}:${pi}:in`} className="handle" cx={o.x} cy={o.y} r={3.5} fill="white" stroke="#0d99ff" />);
+        }
+        const on = isSel(si, pi);
+        anchors.push(
+          <rect
+            key={`a${si}-${pi}`}
+            data-vpt={`${si}:${pi}:anchor`}
+            className={"handle vector-anchor" + (on ? " selected" : "")}
+            x={a.x - 4}
+            y={a.y - 4}
+            width={8}
+            height={8}
+            rx={on ? 1 : 0}
+            fill={on ? "#0d99ff" : "white"}
+            stroke={on ? "white" : "#0d99ff"}
+            strokeWidth={on ? 1.5 : 1}
+          />,
+        );
+      }),
+    );
+    return { handles, anchors, d: screenPathD(subpaths, m, v) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subpaths, m.a, m.b, m.c, m.d, m.e, m.f, v.x, v.y, v.zoom, selected]);
   const hoverSp = hover ? subpaths[hover.sub] : null;
   const hoverSeg =
     hover && hoverSp && hoverSp.points.length > 1
@@ -1183,10 +1207,10 @@ function VectorPoints({
   const hp = hover ? toScreen(v, hover) : null;
   return (
     <g>
-      <path d={screenPathD(subpaths, m, v)} fill="none" stroke="#0d99ff" strokeWidth={1} />
+      <path d={base.d} fill="none" stroke="#0d99ff" strokeWidth={1} />
       {hoverSeg && <path className="vector-hover-segment" d={hoverSeg} fill="none" stroke="#0d99ff" strokeWidth={2.5} />}
-      {handles}
-      {anchors}
+      {base.handles}
+      {base.anchors}
       {hp && (
         <g className="vector-hover-point" pointerEvents="none">
           <circle cx={hp.x} cy={hp.y} r={4.5} fill="white" stroke="#0d99ff" strokeWidth={1.5} />

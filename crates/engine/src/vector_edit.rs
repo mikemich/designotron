@@ -235,6 +235,16 @@ pub fn nearest_segment(v: &VectorData, p: Point, tol: f64) -> Option<SegmentHit>
   for (si, sp) in v.subpaths.iter().enumerate() {
     for seg in 0..segment_count(sp) {
       let c = segment(sp, seg);
+      // A cubic stays inside the hull of its control points: skip far-away segments.
+      let (x0, x1) = c
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), q| (lo.min(q.x), hi.max(q.x)));
+      let (y0, y1) = c
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), q| (lo.min(q.y), hi.max(q.y)));
+      if p.x < x0 - tol || p.x > x1 + tol || p.y < y0 - tol || p.y > y1 + tol {
+        continue;
+      }
       let dist_at = |t: f64| {
         let q = cubic_at(&c, t);
         (q.x - p.x).hypot(q.y - p.y)
@@ -276,6 +286,17 @@ pub fn nearest_segment(v: &VectorData, p: Point, tol: f64) -> Option<SegmentHit>
     }
   }
   best
+}
+
+/// True when `h` lies within `tol` of an end anchor of its segment, where a click should
+/// grab the anchor instead of inserting a duplicate point on top of it.
+pub fn near_segment_end(v: &VectorData, h: &SegmentHit, tol: f64) -> bool {
+  let Some(sp) = v.subpaths.get(h.sub) else { return false };
+  if h.seg >= segment_count(sp) {
+    return false;
+  }
+  let c = segment(sp, h.seg);
+  [c[0], c[3]].iter().any(|q| (q.x - h.x).hypot(q.y - h.y) <= tol)
 }
 
 /// Exact bounds of the path (curve extrema, not handles).

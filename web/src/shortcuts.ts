@@ -1,6 +1,6 @@
 import * as A from "./actions";
 import { copySelection, pasteHere } from "./canvas/contextMenu";
-import { selection, setTool, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
+import { pointerDrag, selection, setTool, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
 import { useShortcuts } from "./panels/ShortcutsDialog";
 
 function isTyping(e: KeyboardEvent): boolean {
@@ -29,7 +29,7 @@ export function installShortcuts(): () => void {
       if (e.altKey && e.code === "KeyM") return run(A.useAsMask);
       if (k === "y") return run(A.redo);
       if (k === "d") return run(A.duplicate);
-      if (k === "a") return run(st.editingVector ? A.selectAllVectorPoints : A.selectAll);
+      if (k === "a") return run(st.editingVector ? () => !pointerDrag.active && A.selectAllVectorPoints() : A.selectAll);
       if (k === "s") return run(A.saveDtron);
       if (k === "/") return run(() => useStore.setState({ chatOpen: !st.chatOpen }));
       if (k === "g" && e.altKey) return run(A.frameSelection);
@@ -78,7 +78,11 @@ export function installShortcuts(): () => void {
     const step = e.shiftKey ? 10 : 1;
     // Vector edit mode: arrows move the selected anchors instead of the layer.
     const pts = st.editingVector ? A.vectorPoints().length > 0 : false;
-    const move = (dx: number, dy: number) => (pts ? A.nudgeVectorPoints(dx, dy) : A.nudge(dx, dy));
+    // With no anchor selected they do nothing (not the whole layer); during a drag, nothing.
+    const move = (dx: number, dy: number) => {
+      if (!st.editingVector) return A.nudge(dx, dy);
+      if (pts && !pointerDrag.active) A.nudgeVectorPoints(dx, dy);
+    };
     switch (e.key) {
       case "ArrowLeft":
         return has && run(() => move(-step, 0));
@@ -91,7 +95,7 @@ export function installShortcuts(): () => void {
       case "Delete":
       case "Backspace":
         // Editing vector points: delete the selected anchors, never the whole layer at once.
-        if (st.editingVector) return run(A.deleteVectorPoints);
+        if (st.editingVector) return run(() => !pointerDrag.active && A.deleteVectorPoints());
         return has && run(A.deleteSelection);
       case "Escape":
         if (st.editingVector) return run(() => useStore.setState({ editingVector: null }));

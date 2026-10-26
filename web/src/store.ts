@@ -246,12 +246,31 @@ export function sync() {
   if (rev === st.rev) return;
   const es: EngineState = JSON.parse(e.state());
   useStore.setState({ rev, es, dirty: true });
+  dropStalePoints();
   listeners.forEach((l) => l());
 }
 
-// Point selection belongs to one vector edit session.
+/** True while a pointer drag is in progress on the canvas (keyboard edits must wait). */
+export const pointerDrag = { active: false };
+
+// Point selection belongs to one vector edit session and is made of indices, so it must not
+// outlive a change in the path's shape: undo/redo, or a collaborator adding/removing anchors.
+let pathShape: string | null = null;
+function shapeOf(id: string | null): string | null {
+  const sps = id ? getDoc().nodes[id]?.vector?.subpaths : null;
+  return sps ? sps.map((sp) => `${sp.points.length}${sp.closed ? "c" : "o"}`).join(",") : null;
+}
+function dropStalePoints() {
+  const st = useStore.getState();
+  const shape = shapeOf(st.editingVector);
+  if (shape !== pathShape && st.vectorPoints.length) useStore.setState({ vectorPoints: [] });
+  pathShape = shape;
+}
 useStore.subscribe((s, prev) => {
-  if (s.editingVector !== prev.editingVector && s.vectorPoints.length) useStore.setState({ vectorPoints: [] });
+  if (s.editingVector !== prev.editingVector) {
+    pathShape = shapeOf(s.editingVector);
+    if (s.vectorPoints.length) useStore.setState({ vectorPoints: [] });
+  }
 });
 
 export function toast(text: string, kind: "info" | "error" = "info") {
@@ -267,6 +286,7 @@ export function dispatch<T = any>(cmd: Record<string, unknown>, opts: { quiet?: 
   try {
     const r = JSON.parse(getEngine().dispatch(JSON.stringify(cmd)));
     sync();
+    if ((cmd.op === "undo" || cmd.op === "redo") && useStore.getState().vectorPoints.length) useStore.setState({ vectorPoints: [] });
     return r;
   } catch (err) {
     if (!opts.quiet) toast(String(err), "error");

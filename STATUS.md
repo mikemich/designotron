@@ -132,7 +132,7 @@ until someone runs it with a real key.
 | Headless text    | Bridge headless mode measures text with a heuristic, so layout can differ slightly from the editor       |
 | Strokes          | Inside/outside alignment is exact for rectangles/ellipses; other shapes clip or fall back to center      |
 | Effects          | Background blur is not drawn on the canvas (exported to code as `backdrop-filter`)                       |
-| Vectors          | Edit mode adds points (click a segment, exact Bézier split), deletes points (select, Delete), toggles sharp/smooth (double-click) and continues open paths with the pen; no bend tool yet; boolean results are flattened (not live) and curves become polylines; text can't be flattened |
+| Vectors          | Edit mode adds points (click a segment, exact Bézier split), deletes points (select, Delete), toggles sharp/smooth (double-click) and continues open paths with the pen; no bend tool yet; inside auto layout the box refit after an edit is overwritten by the layout; boolean results are flattened (not live) and curves become polylines; text can't be flattened |
 | Masks in code    | A frame or group containing a mask is exported to code as inline SVG                                     |
 | Components       | Overrides on nested instances through an outer instance are not preserved; variant swap drops overrides  |
 | Multi-resize     | Resizing several rotated layers at once approximates their new boxes                                     |
