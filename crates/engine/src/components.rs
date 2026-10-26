@@ -440,8 +440,9 @@ pub fn would_nest_any(doc: &Document, comps: Vec<NodeId>, host: &Option<NodeId>)
   false
 }
 
-/// True when putting `nodes` (an instance of a component, or layers holding some) under
-/// `parent` would put a component inside itself.
+/// True when putting copies of `nodes` under `parent` would put a component inside itself:
+/// some node is an instance of (or holds one of) a component that reaches the main component
+/// around `parent`. Copies of a main component are new components, so they never count.
 pub fn would_nest_nodes(doc: &Document, nodes: &[&Node], parent: Option<&str>) -> bool {
   let host = parent.and_then(|p| enclosing_component(doc, p));
   if host.is_none() {
@@ -450,9 +451,6 @@ pub fn would_nest_nodes(doc: &Document, nodes: &[&Node], parent: Option<&str>) -
   let mut refs = Vec::new();
   for n in nodes {
     referenced_components(n, &mut refs);
-    if n.kind == NodeType::Component && Some(&n.id) == host.as_ref() {
-      return true;
-    }
   }
   would_nest_any(doc, refs, &host)
 }
@@ -461,7 +459,10 @@ pub fn would_nest_nodes(doc: &Document, nodes: &[&Node], parent: Option<&str>) -
 pub fn would_nest_under(doc: &Document, ids: &[NodeId], parent: Option<&str>) -> bool {
   let subtree: Vec<NodeId> = ids.iter().flat_map(|id| doc.subtree(id)).collect();
   let nodes: Vec<&Node> = subtree.iter().filter_map(|d| doc.get(d)).collect();
-  would_nest_nodes(doc, &nodes, parent)
+  // Moving a main component into its own layers.
+  let host = parent.and_then(|p| enclosing_component(doc, p));
+  (host.is_some() && nodes.iter().any(|n| n.kind == NodeType::Component && Some(&n.id) == host.as_ref()))
+    || would_nest_nodes(doc, &nodes, parent)
 }
 
 /// Links layers inside instances that lost their `master_id` (instances nested in main
@@ -2287,6 +2288,49 @@ mod tests {
           y: None
         })
         .is_ok());
+    }
+
+    #[test]
+    fn pasting_a_copy_of_a_main_into_its_own_main_is_allowed() {
+      let mut k = kit();
+      let (card_comp, card_inst) = card(&mut k);
+      // The copy is a new component, so nothing refers back to the main it lands in.
+      let data = k.e.copy(std::slice::from_ref(&card_comp));
+      let (comps, nodes) = (k.e.doc.components().len(), k.e.doc.nodes.len());
+      let r = k
+        .e
+        .dispatch(Command::Paste {
+          data,
+          parent: Some(card_comp.clone()),
+          x: None,
+          y: None,
+        })
+        .unwrap();
+      let copy = r["created"][0].as_str().unwrap().to_string();
+      assert_ne!(copy, card_comp);
+      assert_eq!(k.e.doc.get(&copy).unwrap().kind, NodeType::Component);
+      assert!(k.e.doc.is_ancestor(&card_comp, &copy));
+      assert_eq!(k.e.doc.components().len(), comps + 1);
+      assert!(k.e.doc.nodes.len() > nodes);
+      // Instances of the main still can't go in, and neither can a layer holding one.
+      let data = k.e.copy(std::slice::from_ref(&card_inst));
+      let r = k.e.dispatch(Command::Paste {
+        data,
+        parent: Some(card_comp.clone()),
+        x: None,
+        y: None,
+      });
+      assert!(r.is_err());
+      let holder = shape(&mut k.e, NodeType::Frame, 9000.0, None);
+      instance(&mut k.e, &card_comp, Some(&holder));
+      let data = k.e.copy(std::slice::from_ref(&holder));
+      let r = k.e.dispatch(Command::Paste {
+        data,
+        parent: Some(card_comp),
+        x: None,
+        y: None,
+      });
+      assert!(r.is_err());
     }
 
     #[test]
