@@ -31,6 +31,8 @@ const ANCHOR_HIT = 4;
 const ANCHOR_HIT_MIN = 1;
 /** Below this screen distance to a neighbouring anchor, control handles show only for selected anchors. */
 const CROWDED_ANCHOR_GAP = 12;
+/** Segments shorter than this (screen px) are duplicate anchors, not neighbours. */
+const MIN_SEGMENT_GAP = 0.5;
 
 interface BoundsItem {
   id: string;
@@ -1170,20 +1172,23 @@ function VectorPoints({
     const isSel = (si: number, pi: number) => keys.has(`${si}:${pi}`);
     const handles: JSX.Element[] = [];
     const anchors: JSX.Element[] = [];
-    subpaths.forEach((sp, si) =>
-      sp.points.forEach((p, pi) => {
+    subpaths.forEach((sp, si) => {
+      const pts = sp.points;
+      // Screen length of the control polygon of the segment after each anchor (its chord when
+      // straight); the polygon, unlike the chord, stays long for a curve between close anchors.
+      const segLen = pts.map((a, i) => {
+        const b = pts[i + 1] ?? (sp.closed ? pts[0] : undefined);
+        if (!b || b === a) return Infinity;
+        const [p0, c1, c2, p3] = [a, { x: a.x + a.outX, y: a.y + a.outY }, { x: b.x + b.inX, y: b.y + b.inY }, b].map((q) => toScreen(v, apply(m, q)));
+        return Math.hypot(c1.x - p0.x, c1.y - p0.y) + Math.hypot(c2.x - c1.x, c2.y - c1.y) + Math.hypot(p3.x - c2.x, p3.y - c2.y);
+      });
+      pts.forEach((p, pi) => {
         const a = toScreen(v, apply(m, p));
         const on = isSel(si, pi);
         // The anchor is drawn 8px wide, but its hit area shrinks next to a close neighbour so
-        // the middle of a short segment stays free to take a new point.
-        const pts = sp.points;
-        const near = [pts[pi - 1] ?? (sp.closed ? pts[pts.length - 1] : undefined), pts[pi + 1] ?? (sp.closed ? pts[0] : undefined)];
-        const gap = Math.min(
-          ...near.filter((q) => q && q !== p).map((q) => {
-            const b = toScreen(v, apply(m, q!));
-            return Math.hypot(b.x - a.x, b.y - a.y);
-          }),
-        );
+        // the middle of a short segment stays free to take a new point. Coincident neighbours
+        // (zero-length segments) don't count: those anchors just overlap.
+        const gap = Math.min(...[segLen[pi], segLen[(pi + pts.length - 1) % pts.length]].filter((len) => len >= MIN_SEGMENT_GAP));
         // Control handles of unselected anchors would cover a short segment; select the anchor to see them.
         const crowded = gap < CROWDED_ANCHOR_GAP && !on;
         const hasOut = (p.outX || p.outY) && !crowded;
@@ -1216,8 +1221,8 @@ function VectorPoints({
             <rect data-vpt={`${si}:${pi}:anchor`} className="handle" x={a.x - hit} y={a.y - hit} width={hit * 2} height={hit * 2} fill="transparent" />
           </g>,
         );
-      }),
-    );
+      });
+    });
     return { handles, anchors, d: screenPathD(subpaths, m, v) };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subpaths, m.a, m.b, m.c, m.d, m.e, m.f, v.x, v.y, v.zoom, selected]);

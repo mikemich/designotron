@@ -3883,6 +3883,48 @@ mod tests {
     }
 
     #[test]
+    fn a_long_curve_between_close_anchors_keeps_the_full_margin() {
+      let mut e = engine();
+      // A horseshoe: anchors 4px apart, handles 144px long, so the segment is a few hundred px.
+      let (p0, p3) = ((100.0, 100.0), (104.0, 100.0));
+      let (c1, c2) = ((20.0, -20.0), (184.0, -20.0));
+      let mut a = VectorPoint::at(p0.0, p0.1);
+      (a.out_x, a.out_y) = (c1.0 - p0.0, c1.1 - p0.1);
+      let mut b = VectorPoint::at(p3.0, p3.1);
+      (b.in_x, b.in_y) = (c2.0 - p3.0, c2.1 - p3.1);
+      let r = e
+        .dispatch(Command::CreateVector {
+          points: vec![a, b],
+          closed: false,
+          parent: None,
+        })
+        .unwrap();
+      let id = id_of(&r);
+      let at = |t: f64| {
+        let u = 1.0 - t;
+        let f = |p: f64, c1: f64, c2: f64, q: f64| u * u * u * p + 3.0 * u * u * t * c1 + 3.0 * u * t * t * c2 + t * t * t * q;
+        (f(p0.0, c1.0, c2.0, p3.0), f(p0.1, c1.1, c2.1, p3.1))
+      };
+      let q = |e: &Engine, (x, y): (f64, f64)| {
+        e.query(Query::VectorSegmentAt {
+          id: id.clone(),
+          x,
+          y,
+          zoom: 1.0,
+        })
+        .unwrap()
+      };
+      // 4px along the curve from either end is still the anchor's; the middle takes a point.
+      let near = at(0.01);
+      assert!((near.0 - p0.0).hypot(near.1 - p0.1) < 5.0);
+      assert!(q(&e, near).is_null());
+      let near = at(0.99);
+      assert!((near.0 - p3.0).hypot(near.1 - p3.1) < 5.0);
+      assert!(q(&e, near).is_null());
+      assert!(q(&e, at(0.5)).is_object());
+    }
+
+    #[test]
     fn nearest_segment_skips_far_segments_without_changing_hits() {
       let mut e = engine();
       let id = path(&mut e, true);

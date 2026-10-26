@@ -69,10 +69,10 @@ pub fn new_document(ids: &mut IdGen, name: &str) -> Document {
 /// diffing against the map it last saw, so a name costs what changed since the last one
 /// instead of a scan of the whole document. Derived data: it is never saved, compared or
 /// merged, and a clone carries a copy (which shares storage).
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub struct NameCache(Mutex<NameIndex>);
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 struct NameIndex {
   seen: imbl::OrdMap<NodeId, Node>,
   /// Layers whose name starts with the base, for every base asked about so far.
@@ -82,6 +82,12 @@ struct NameIndex {
 impl Clone for NameCache {
   fn clone(&self) -> Self {
     NameCache(Mutex::new(self.lock().clone()))
+  }
+}
+
+impl std::fmt::Debug for NameCache {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_tuple("NameCache").field(&self.lock().counts).finish()
   }
 }
 

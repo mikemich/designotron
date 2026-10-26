@@ -164,6 +164,7 @@ try {
   const tiny = { x: canvas.x + 520, y: canvas.y + canvas.height - 120 };
   for (const [dx, dy] of [[0, 0], [4, 2], [8, 0], [12, 2]]) await page.mouse.click(tiny.x + dx, tiny.y + dy);
   await page.keyboard.press("Enter");
+  const ve = () => page.evaluate(() => window.__dt.vectorEdit());
   const tinyId = (await state()).selection[0];
   const tinyCount = async () => (await doc()).nodes[tinyId]?.vector.subpaths[0].points.length;
   await page.mouse.dblclick(tiny.x, tiny.y);
@@ -171,6 +172,52 @@ try {
   const tinyHover = await page.locator(".vector-hover-point").count();
   await page.mouse.click(tiny.x + 2, tiny.y + 1);
   check("vector edit: a segment shorter than 10px takes a point in its middle", (await tinyCount()) === 5 && tinyHover === 1, `${await tinyCount()} points, hover ${tinyHover}`);
+  await page.keyboard.press("Escape");
+
+  // "Short" means the segment's length, not its chord: a horseshoe with anchors 4px apart keeps full
+  // anchors and its handles; coincident anchors (zero-length segments) stay grabbable off-centre.
+  // A frame of its own, at 100% and centred, so nothing else is under the pointer.
+  const play = (await page.evaluate((c) => window.__dt.dispatch(c), { op: "createShape", kind: "frame", x: 9000, y: 9000, width: 800, height: 600, parent: null })).id;
+  await page.evaluate((ids) => window.__dt.dispatch({ op: "select", ids }), [play]);
+  await page.keyboard.press("Shift+2");
+  await page.keyboard.press("Shift+0");
+  await page.waitForTimeout(300);
+  const vp = await page.evaluate(() => window.__dt.viewport());
+  const makeVector = async (pts) => {
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Escape");
+    const doc2 = pts.map(([cx, cy, o = {}]) => {
+      const h = Object.fromEntries(Object.entries(o).map(([k, d]) => [k, d / vp.zoom]));
+      return { x: (cx - canvas.x - vp.x) / vp.zoom, y: (cy - canvas.y - vp.y) / vp.zoom, inX: 0, inY: 0, outX: 0, outY: 0, ...h };
+    });
+    const id2 = (await page.evaluate((c) => window.__dt.dispatch(c), { op: "createVector", points: doc2, closed: false, parent: play })).id;
+    await page.evaluate((ids) => window.__dt.dispatch({ op: "select", ids }), [id2]);
+    return id2;
+  };
+  const vpts = async (vid2) => (await doc()).nodes[vid2].vector.subpaths[0].points;
+  const horse = { x: canvas.x + canvas.width / 2, y: canvas.y + canvas.height / 2 + 100 };
+  const hid = await makeVector([
+    [horse.x, horse.y, { outX: -80, outY: -120 }],
+    [horse.x + 4, horse.y, { inX: 80, inY: -120 }],
+  ]);
+  await page.mouse.dblclick(horse.x + 2, horse.y - 90);
+  const anchorW = await page.$$eval("[data-vpt$=':anchor']", (els) => els.map((el) => +el.getAttribute("width")));
+  const handleN = await page.locator("[data-vpt$=':in'], [data-vpt$=':out']").count();
+  check("vector edit: a long curve between close anchors keeps 8px anchors and its handles", (await ve()).id === hid && anchorW.length === 2 && anchorW.every((w) => w === 8) && handleN === 2, `widths ${anchorW}, ${handleN} handles`);
+  await page.keyboard.press("Escape");
+
+  const dup = { x: canvas.x + canvas.width / 2 - 200, y: canvas.y + canvas.height / 2 - 150 };
+  const did = await makeVector([[dup.x, dup.y], [dup.x + 100, dup.y], [dup.x + 100, dup.y], [dup.x + 200, dup.y + 50]]);
+  await page.mouse.dblclick(dup.x + 50, dup.y);
+  const dupBefore = await vpts(did);
+  await page.mouse.move(dup.x + 103, dup.y + 3);
+  await page.mouse.down();
+  await page.mouse.move(dup.x + 120, dup.y + 20, { steps: 5 });
+  await page.mouse.up();
+  const dupAfter = await vpts(did);
+  // The box refits after a move, so compare each anchor's offset from the path's last anchor.
+  const dupMoved = dupAfter.map((q, i) => Math.hypot(q.x - dupAfter[3].x - (dupBefore[i].x - dupBefore[3].x), q.y - dupAfter[3].y - (dupBefore[i].y - dupBefore[3].y)) * vp.zoom);
+  check("vector edit: a duplicated anchor can be grabbed 3px off-centre", (await ve()).id === did && dupAfter.length === 4 && dupMoved[0] < 0.01 && dupMoved[1] + dupMoved[2] > 10, dupMoved.map((d) => d.toFixed(1)).join(","));
   await page.keyboard.press("Escape");
 
   // Vector edit mode inside a frame: marquee from the frame's background, stale selections.

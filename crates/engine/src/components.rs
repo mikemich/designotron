@@ -445,6 +445,20 @@ pub fn would_nest_any(doc: &Document, comps: Vec<NodeId>, host: &Option<NodeId>)
 /// around `parent`. Copies of a main component are new components, so they never count.
 pub fn would_nest_nodes(doc: &Document, nodes: &[&Node], parent: Option<&str>) -> bool {
   let host = parent.and_then(|p| enclosing_component(doc, p));
+  nests_in(doc, nodes, &host)
+}
+
+/// True when moving `ids` under `parent` would put a component inside itself.
+pub fn would_nest_under(doc: &Document, ids: &[NodeId], parent: Option<&str>) -> bool {
+  let subtree: Vec<NodeId> = ids.iter().flat_map(|id| doc.subtree(id)).collect();
+  let nodes: Vec<&Node> = subtree.iter().filter_map(|d| doc.get(d)).collect();
+  let host = parent.and_then(|p| enclosing_component(doc, p));
+  // Moving a main component into its own layers, or something that holds an instance of it.
+  nodes.iter().any(|n| n.kind == NodeType::Component && Some(&n.id) == host.as_ref()) || nests_in(doc, &nodes, &host)
+}
+
+/// Whether any component the `nodes` instance reaches the `host` main component.
+fn nests_in(doc: &Document, nodes: &[&Node], host: &Option<NodeId>) -> bool {
   if host.is_none() {
     return false;
   }
@@ -452,17 +466,7 @@ pub fn would_nest_nodes(doc: &Document, nodes: &[&Node], parent: Option<&str>) -
   for n in nodes {
     referenced_components(n, &mut refs);
   }
-  would_nest_any(doc, refs, &host)
-}
-
-/// True when moving `ids` under `parent` would put a component inside itself.
-pub fn would_nest_under(doc: &Document, ids: &[NodeId], parent: Option<&str>) -> bool {
-  let subtree: Vec<NodeId> = ids.iter().flat_map(|id| doc.subtree(id)).collect();
-  let nodes: Vec<&Node> = subtree.iter().filter_map(|d| doc.get(d)).collect();
-  // Moving a main component into its own layers.
-  let host = parent.and_then(|p| enclosing_component(doc, p));
-  (host.is_some() && nodes.iter().any(|n| n.kind == NodeType::Component && Some(&n.id) == host.as_ref()))
-    || would_nest_nodes(doc, &nodes, parent)
+  would_nest_any(doc, refs, host)
 }
 
 /// Links layers inside instances that lost their `master_id` (instances nested in main
