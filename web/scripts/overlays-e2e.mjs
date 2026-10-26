@@ -250,8 +250,9 @@ try {
   await page.keyboard.press("Escape");
   await page.waitForTimeout(2500);
   check("closing the nested overlay doesn't re-fire its parent's timer", (await overlays(page)) === 1, `${await overlays(page)} overlay(s) after 2.5s`);
-  await page.keyboard.press("Escape");
-  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape"); // Parent
+  await page.keyboard.press("Escape"); // the player
+  await page.waitForSelector(".presenter", { state: "detached" });
 
   // B: a base-frame after-delay Back, firing while a modal is open, closes the modal.
   await tool("set_prototype", { nodeId: ids["Open modal"], clear: true, action: "open_overlay", destinationId: id("Modal") });
@@ -263,6 +264,8 @@ try {
   }, id("Home"));
   await page.click("button[title='Present']");
   await page.waitForSelector(".presenter");
+  // The frame's own after-delay interaction must not leave a click-swallowing hotspot over its children.
+  check("after-delay on a frame makes no hotspot", (await page.locator(`.presenter [data-hotspot="${id("Home")}"]`).count()) === 0);
   await page.locator(`.presenter [data-hotspot="${ids["Open modal"]}"]`).click();
   await page.waitForSelector(".presenter .overlay-frame");
   await page.waitForTimeout(3500);

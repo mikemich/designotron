@@ -262,15 +262,21 @@ function useHotspots(frameId: string): Hotspot[] {
     const doc = getDoc();
     if (!doc.nodes[frameId]) return [];
     const ids = Object.values(doc.nodes)
-      .filter((n) => n.interactions.length && (n.id === frameId || isDescendant(n.id, frameId)))
+      // Only layers with something to click or hover get a hotspot: an after-delay interaction on
+      // the frame itself must not put a click-swallowing layer over its children.
+      .filter((n) => n.interactions.some((i) => i.trigger !== "afterDelay") && (n.id === frameId || isDescendant(n.id, frameId)))
       .map((n) => n.id);
     const fb = query<{ union: Rect }>({ q: "bounds", ids: [frameId] }).union;
     const items = query<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids }).items;
-    return items.map((it) => ({
-      id: it.id,
-      rect: { x: it.bounds.x - fb.x, y: it.bounds.y - fb.y, width: it.bounds.width, height: it.bounds.height },
-      interactions: doc.nodes[it.id].interactions,
-    }));
+    return items
+      .map((it) => ({
+        id: it.id,
+        rect: { x: it.bounds.x - fb.x, y: it.bounds.y - fb.y, width: it.bounds.width, height: it.bounds.height },
+        interactions: doc.nodes[it.id].interactions,
+      }))
+      // Node order in the document is arbitrary: stack bigger hotspots first so a layer inside
+      // another (or the frame itself) is never covered by it.
+      .sort((a, b) => b.rect.width * b.rect.height - a.rect.width * a.rect.height || (a.id < b.id ? -1 : 1));
   }, [frameId]);
 }
 
