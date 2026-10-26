@@ -1,6 +1,9 @@
 //! Tree navigation and structural edits on a [`Document`].
 
 use std::collections::HashMap;
+use std::sync::{Mutex, MutexGuard};
+
+use imbl::ordmap::DiffItem;
 
 use crate::geom::{local_matrix, Mat, Point, Rect};
 use crate::model::{Document, Node, NodeId, NodeType, Page, Styles, SCHEMA_VERSION};
@@ -58,6 +61,67 @@ pub fn new_document(ids: &mut IdGen, name: &str) -> Document {
     styles: Styles::default(),
     variables: Vec::new(),
     comments: Default::default(),
+    names: Default::default(),
+  }
+}
+
+/// How many layers each `next_name` base matches, kept in step with `Document::nodes` by
+/// diffing against the map it last saw, so a name costs what changed since the last one
+/// instead of a scan of the whole document. Derived data: it is never saved, compared or
+/// merged, and a clone carries a copy (which shares storage).
+#[derive(Default, Debug)]
+pub struct NameCache(Mutex<NameIndex>);
+
+#[derive(Default, Clone, Debug)]
+struct NameIndex {
+  seen: imbl::OrdMap<NodeId, Node>,
+  /// Layers whose name starts with the base, for every base asked about so far.
+  counts: HashMap<String, usize>,
+}
+
+impl Clone for NameCache {
+  fn clone(&self) -> Self {
+    NameCache(Mutex::new(self.lock().clone()))
+  }
+}
+
+impl PartialEq for NameCache {
+  fn eq(&self, _: &Self) -> bool {
+    true
+  }
+}
+
+impl NameCache {
+  fn lock(&self) -> MutexGuard<'_, NameIndex> {
+    self.0.lock().unwrap_or_else(|e| e.into_inner())
+  }
+}
+
+impl NameIndex {
+  fn sync(&mut self, nodes: &imbl::OrdMap<NodeId, Node>) {
+    if self.seen.ptr_eq(nodes) {
+      return;
+    }
+    let counts = &mut self.counts;
+    for item in self.seen.diff(nodes) {
+      match item {
+        DiffItem::Add(_, n) => counts
+          .iter_mut()
+          .filter(|(b, _)| n.name.starts_with(b.as_str()))
+          .for_each(|(_, c)| *c += 1),
+        DiffItem::Remove(_, n) => counts
+          .iter_mut()
+          .filter(|(b, _)| n.name.starts_with(b.as_str()))
+          .for_each(|(_, c)| *c -= 1),
+        DiffItem::Update { old: (_, o), new: (_, n) } if o.name != n.name => {
+          for (b, c) in counts.iter_mut() {
+            *c = *c + usize::from(n.name.starts_with(b.as_str())) - usize::from(o.name.starts_with(b.as_str()));
+          }
+        }
+        DiffItem::Update { .. } => {}
+      }
+    }
+    self.seen = nodes.clone();
   }
 }
 
@@ -350,9 +414,17 @@ impl Document {
     self.nodes.values().filter(|n| n.kind == NodeType::Component).collect()
   }
 
-  /// Unique layer name like "Rectangle 3".
+  /// Unique layer name like "Rectangle 3": the base plus one more than the number of layers
+  /// whose name starts with it. The first ask for a base scans the document; after that the
+  /// count follows the nodes that changed since the last ask.
   pub fn next_name(&self, base: &str) -> String {
-    let count = self.nodes.values().filter(|n| n.name.starts_with(base)).count();
+    let mut index = self.names.lock();
+    index.sync(&self.nodes);
+    let index = &mut *index;
+    let count = *index
+      .counts
+      .entry(base.to_string())
+      .or_insert_with(|| index.seen.values().filter(|n| n.name.starts_with(base)).count());
     format!("{base} {}", count + 1)
   }
 }
@@ -437,5 +509,53 @@ mod tests {
     );
     doc.reparent("a", Some("b"), None, true);
     assert_eq!(doc.get("a").unwrap().parent, None);
+  }
+
+  /// `cargo test --release -p designotron-engine bench_unnamed_imports -- --ignored --nocapture`
+  #[test]
+  #[ignore]
+  fn bench_unnamed_imports() {
+    use std::time::Instant;
+    let import = |existing: usize, added: usize| {
+      let mut ids = IdGen::new(7);
+      let mut doc = new_document(&mut ids, "t");
+      let page = doc.pages[0].id.clone();
+      for i in 0..existing {
+        doc.insert(
+          Node {
+            id: format!("e{i}"),
+            name: format!("Layer {i}"),
+            ..Default::default()
+          },
+          None,
+          &page,
+          None,
+        );
+      }
+      let t = Instant::now();
+      for i in 0..added {
+        let name = doc.next_name("Text");
+        doc.insert(
+          Node {
+            id: format!("t{i}"),
+            name,
+            kind: NodeType::Text,
+            ..Default::default()
+          },
+          None,
+          &page,
+          None,
+        );
+      }
+      let ms = t.elapsed().as_secs_f64() * 1000.0;
+      println!("import {added:>5} unnamed layers into {existing:>5}-layer doc: {ms:>9.1} ms");
+      ms
+    };
+    let small = import(100, 5_000);
+    let large = import(10_000, 5_000);
+    println!(
+      "10000-layer / 100-layer time: {:.2} (about 1 when the document size doesn't matter)",
+      large / small
+    );
   }
 }

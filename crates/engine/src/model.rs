@@ -27,6 +27,9 @@ pub struct Document {
   /// Comment threads pinned to the canvas (keyed by id so collaborators merge cleanly).
   #[serde(default)]
   pub comments: BTreeMap<String, Comment>,
+  /// Layer-name counts behind `next_name`; derived from `nodes`, so never saved or compared.
+  #[serde(skip)]
+  pub(crate) names: crate::doc::NameCache,
 }
 
 /// A comment thread: a pin on a page, optionally attached to a layer so it follows it.

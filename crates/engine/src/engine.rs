@@ -3019,6 +3019,71 @@ mod tests {
   }
 
   #[test]
+  fn layer_names_match_the_full_scan_through_edits_and_undo() {
+    // The count `next_name` replaced: every layer whose name starts with the base.
+    let scan = |e: &Engine, base: &str| format!("{base} {}", e.doc.nodes.values().filter(|n| n.name.starts_with(base)).count() + 1);
+    let check = |e: &Engine, step: &str| {
+      for base in ["Rectangle", "Ellipse", "Text", "Rect", "R", "Frame", "Copy", ""] {
+        assert_eq!(e.doc.next_name(base), scan(e, base), "{step}: base {base:?}");
+      }
+    };
+    let mut e = engine();
+    check(&e, "empty");
+    let a = rect(&mut e, 0.0, 0.0, 10.0, 10.0, None);
+    let b = rect(&mut e, 20.0, 0.0, 10.0, 10.0, None);
+    check(&e, "created");
+    let name = e.doc.next_name("Rectangle");
+    assert_eq!(name, "Rectangle 3");
+    e.dispatch(Command::Update {
+      ids: vec![a.clone()],
+      patch: json!({ "name": "Rect copy" }),
+    })
+    .unwrap();
+    check(&e, "renamed");
+    e.dispatch(Command::Duplicate { ids: vec![b.clone()] }).unwrap();
+    check(&e, "duplicated");
+    e.dispatch(Command::Delete { ids: vec![b.clone()] }).unwrap();
+    check(&e, "deleted");
+    e.dispatch(Command::Undo).unwrap();
+    check(&e, "undone delete");
+    e.dispatch(Command::Undo).unwrap();
+    e.dispatch(Command::Undo).unwrap();
+    check(&e, "undone rename");
+    e.dispatch(Command::Redo).unwrap();
+    check(&e, "redone");
+    ai(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "text", "text": "Hi" }, { "type": "text", "text": "Yo" }, { "type": "ellipse" }, { "type": "ellipse", "name": "Ellipse 9" }] }),
+    );
+    check(&e, "ai created");
+    // Different bases asked in between keep their own counts as the document changes.
+    assert_eq!(e.doc.next_name("Ellipse"), scan(&e, "Ellipse"));
+    rect(&mut e, 0.0, 50.0, 10.0, 10.0, None);
+    assert_eq!(e.doc.next_name("Ellipse"), scan(&e, "Ellipse"));
+    // Loading another document, a clone and a remote change all start from the right count.
+    let snapshot: Value = serde_json::from_str(&e.to_json()).unwrap();
+    assert!(snapshot.get("names").is_none(), "the cache is not saved");
+    let copy = e.doc.clone();
+    e.dispatch(Command::Delete { ids: vec![a] }).unwrap();
+    assert_eq!(
+      copy.next_name("Rect"),
+      scan(
+        &Engine {
+          doc: copy.clone(),
+          ..engine()
+        },
+        "Rect"
+      )
+    );
+    check(&e, "deleted again");
+    e.dispatch(Command::ReplaceDocument { doc: snapshot }).unwrap();
+    check(&e, "replaced");
+    e.dispatch(Command::Undo).unwrap();
+    check(&e, "undone replace");
+  }
+
+  #[test]
   fn replace_document_is_undoable() {
     let mut e = engine();
     let before = e.to_json();
