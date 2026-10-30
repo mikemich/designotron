@@ -652,6 +652,7 @@ impl Import<'_> {
             self.doc.get_mut(&inst).unwrap().instance = Some(InstanceInfo {
               component_id: c,
               overrides: BTreeMap::new(),
+              ..Default::default()
             })
           }
           (None, None) => self.detach(&inst),
@@ -733,6 +734,7 @@ impl Import<'_> {
         n.instance = Some(InstanceInfo {
           component_id: comp,
           overrides,
+          ..Default::default()
         });
       }
     }

@@ -37,6 +37,7 @@ import { exportNode } from "../exporter";
 import * as A from "../actions";
 import { Popover } from "../ui/controls";
 import { ComponentSetSection, InstanceSection, MainComponentSection } from "./ComponentControls";
+import { LayerPropsSection } from "./PropertyControls";
 import { ApplyStyleButton, StyleChip } from "./StyleControls";
 
 const begin = () => dispatch({ op: "beginGesture" });
@@ -154,8 +155,15 @@ function ComponentSection({ nodes }: { nodes: Node[] }) {
   const n = nodes[0];
   if (n.type === "component") return <MainComponentSection n={n} />;
   if (n.type === "componentSet") return <ComponentSetSection n={n} />;
-  if (n.type === "instance" && n.instance) return <InstanceSection n={n} />;
-  return null;
+  if (n.type === "instance" && n.instance) {
+    return (
+      <>
+        <InstanceSection n={n} />
+        <LayerPropsSection n={n} />
+      </>
+    );
+  }
+  return <LayerPropsSection n={n} />;
 }
 
 function AlignSection() {

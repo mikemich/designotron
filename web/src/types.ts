@@ -120,6 +120,25 @@ export interface OverlaySettings {
   background: { color: string; opacity: number } | null;
 }
 
+export type PropKind = "boolean" | "text" | "instanceSwap";
+
+/** A component property (on a main component, or on its set for variants). */
+export interface PropDef {
+  id: string;
+  name: string;
+  kind: PropKind;
+  /** true/false, the text, or the id of the default component (instance swap). */
+  default: boolean | string;
+  /** Instance swap: the components it offers (empty: every component). */
+  options?: string[];
+}
+
+export interface PropRefs {
+  visible?: string;
+  characters?: string;
+  swap?: string;
+}
+
 export interface Node {
   id: string;
   type: NodeType;
@@ -160,8 +179,17 @@ export interface Node {
   text: TextProps | null;
   vector: { subpaths: { points: VectorPoint[]; closed: boolean }[]; raw: { d: string; viewBox: number[] } | null } | null;
   shape: { pointCount: number; innerRadius: number; startCap: string; endCap: string } | null;
-  component: { description: string; variantProps: Record<string, string> } | null;
-  instance: { componentId: string; overrides: Record<string, unknown> } | null;
+  component: { description: string; variantProps: Record<string, string>; props?: PropDef[] } | null;
+  instance: {
+    componentId: string;
+    overrides: Record<string, unknown>;
+    /** Values set on the component's boolean and text properties (property id → value). */
+    propValues?: Record<string, boolean | string>;
+    /** Nested in a main component: show its properties on instances of the outer component. */
+    exposeProps?: boolean;
+  } | null;
+  /** Component properties this layer of a main component is bound to (property ids). */
+  propRefs?: PropRefs | null;
   masterId: string | null;
   fillStyle: string | null;
   textStyle: string | null;

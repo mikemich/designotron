@@ -389,6 +389,10 @@ pub enum Command {
     prop: String,
     value: String,
   },
+  /// Component properties: define them, bind layers, set instance values (see `props.rs`).
+  ComponentProps {
+    edit: crate::props::PropsOp,
+  },
   Align {
     ids: Vec<NodeId>,
     how: AlignHow,
@@ -461,6 +465,11 @@ pub enum Command {
 pub enum Query {
   /// How many layers of an instance differ from its main component.
   OverrideCount {
+    id: NodeId,
+  },
+  /// Component properties for the design panel: of a main component or set, the controls of
+  /// an instance, or what a layer of a main component can bind to.
+  ComponentProps {
     id: NodeId,
   },
   Pick {
@@ -1211,8 +1220,25 @@ impl Engine {
         imbl::ordmap::DiffItem::Remove(k, _) => (prev, k),
       };
       for id in std::iter::once(k.clone()).chain(doc.ancestors(k)) {
-        if !comps.contains(&id) && self.doc.get(&id).map(|n| n.kind == NodeType::Component).unwrap_or(false) {
-          comps.push(id);
+        match self.doc.get(&id) {
+          Some(n) if n.kind == NodeType::Component => {
+            if !comps.contains(&id) {
+              comps.push(id);
+            }
+          }
+          // A set's properties belong to every variant.
+          Some(n) if n.kind == NodeType::ComponentSet && id == *k => {
+            for c in n
+              .children
+              .iter()
+              .filter(|c| self.doc.get(c).map(|c| c.kind == NodeType::Component).unwrap_or(false))
+            {
+              if !comps.contains(c) {
+                comps.push(c.clone());
+              }
+            }
+          }
+          _ => {}
         }
       }
     }
@@ -2098,6 +2124,7 @@ impl Engine {
         components::swap_component(&mut self.doc, &id, &component_id, &mut self.gen);
         Ok(json!({}))
       }
+      Command::ComponentProps { edit } => crate::props::apply_op(&mut self.doc, &mut self.gen, edit),
       Command::SetVariant { id, prop, value } => {
         let comp = self
           .doc
@@ -2654,6 +2681,7 @@ impl Engine {
         ))
       }
       Query::OverrideCount { id } => json!({ "count": components::override_count(&self.doc, &id) }),
+      Query::ComponentProps { id } => crate::props::describe(&self.doc, &id),
       Query::FrameAt { x, y, exclude } => json!(ops::frame_at(&self.doc, &self.page, Point::new(x, y), &exclude, true)),
       Query::SnapPoint { x, y, zoom, exclude } => {
         let (r, guides, _) = interact::snap_rect(

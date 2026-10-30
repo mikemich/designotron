@@ -4,12 +4,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::color;
+use serde_json::json;
+
 use crate::components;
 use crate::geom::fmt;
 use crate::model::{
-  Action, Align, Document, EffectType, LayoutDirection, Node, NodeType, OverlayPosition, OverlaySettings, Paint, ScaleMode, Sizing,
-  StrokeAlign, TextAlignH, TextAutoResize, TextCase, TextDecoration,
+  Action, Align, Document, EffectType, InstanceInfo, LayoutDirection, Node, NodeId, NodeType, OverlayPosition, OverlaySettings, Paint,
+  PropKind, ScaleMode, Sizing, StrokeAlign, TextAlignH, TextAutoResize, TextCase, TextDecoration,
 };
+use crate::props;
 use crate::render::{esc, export_svg_geometry, font_stack};
 use crate::text::TextMeasurer;
 
@@ -147,6 +150,14 @@ struct El {
   is_component_root: bool,
   /// Extra HTML attributes (src, alt, type).
   attrs: Vec<(String, String)>,
+  /// Attributes whose value is a JSX expression (`icon={false}`).
+  expr_attrs: Vec<(String, String)>,
+  /// Component property that shows or hides this element (a boolean prop).
+  show_if: Option<String>,
+  /// Component property that holds this element's text.
+  text_prop: Option<String>,
+  /// Component property that can replace this element (an instance swap prop).
+  slot: Option<String>,
 }
 
 impl El {
@@ -165,6 +176,10 @@ impl El {
       url: None,
       is_component_root: false,
       attrs: vec![],
+      expr_attrs: vec![],
+      show_if: None,
+      text_prop: None,
+      slot: None,
     }
   }
 
@@ -188,6 +203,33 @@ struct Ctx<'a> {
   reuse_components: bool,
   /// One h1 per screen.
   h1_used: bool,
+  /// The main component whose function is being built (its layers use its properties).
+  cur_comp: Option<NodeId>,
+  /// Properties the function being built uses, in order.
+  used_props: Vec<UsedProp>,
+}
+
+/// Props an instance sets on its component: string attributes and expression attributes.
+#[derive(Default)]
+struct PropArgs {
+  attrs: Vec<(String, String)>,
+  exprs: Vec<(String, String)>,
+}
+
+/// The prop names a layer's component properties go by in the function being built.
+#[derive(Default)]
+struct BoundProps {
+  visible: Option<String>,
+  characters: Option<String>,
+  swap: Option<String>,
+}
+
+/// A component property a generated function takes as a prop.
+struct UsedProp {
+  ident: String,
+  kind: PropKind,
+  /// What the main component shows (`true`, a text; none for a swap slot).
+  default: serde_json::Value,
 }
 
 impl<'a> Ctx<'a> {
@@ -202,6 +244,8 @@ impl<'a> Ctx<'a> {
       used_names: BTreeSet::new(),
       reuse_components,
       h1_used: false,
+      cur_comp: None,
+      used_props: Vec::new(),
     };
     for p in &doc.pages {
       for id in &p.children {
@@ -263,12 +307,17 @@ impl<'a> Ctx<'a> {
 
   fn build(&mut self, id: &str, place: Place) -> Option<El> {
     let n = self.doc.get(id)?.clone();
-    if !n.visible {
+    // Layers a component property controls are written as expressions in the component's function.
+    let bound = self.bound_props(&n);
+    if !n.visible && bound.visible.is_none() {
       return None;
     }
     if self.reuse_components && n.kind == NodeType::Instance && place != Place::Root {
       if let Some(info) = n.instance.as_ref() {
-        if !components::has_overrides(self.doc, id) && self.doc.get(&info.component_id).is_some() {
+        // Property values and swapped icons become props; any other override inlines the instance.
+        let args = self.prop_args(&n);
+        let plain = !components::has_overrides(self.doc, id);
+        if (plain || args.is_some()) && self.doc.get(&info.component_id).is_some() {
           let name = self.component_name(&info.component_id);
           let mut el = El::new("div");
           self.position(&mut el, &n, place);
@@ -282,6 +331,11 @@ impl<'a> Ctx<'a> {
             }
             None => el.component_ref = Some(name),
           }
+          let PropArgs { attrs, exprs } = args.unwrap_or_default();
+          el.attrs.extend(attrs);
+          el.expr_attrs.extend(exprs);
+          el.show_if = bound.visible.clone();
+          el.slot = bound.swap.clone();
           self.interactions(&mut el, &n);
           return Some(el);
         }
@@ -322,6 +376,11 @@ impl<'a> Ctx<'a> {
     };
     if el.tag == "button" {
       el.attrs.push(("type".into(), "button".into()));
+    }
+    el.show_if = bound.visible.clone();
+    if let Some(p) = bound.characters.clone() {
+      el.text_prop = Some(p);
+      el.spans.clear();
     }
     if n.kind == NodeType::Group {
       el.comment = Some(n.name.clone());
@@ -401,6 +460,81 @@ impl<'a> Ctx<'a> {
     }
     self.interactions(&mut el, &n);
     Some(el)
+  }
+
+  /// The prop names of the component properties `n` is bound to, when it is a layer of the
+  /// component function being built (registering them as used by it).
+  fn bound_props(&mut self, n: &Node) -> BoundProps {
+    let mut out = BoundProps::default();
+    let (Some(refs), Some(comp)) = (&n.prop_refs, self.cur_comp.clone()) else {
+      return out;
+    };
+    if !self.reuse_components || self.doc.instance_ancestor(&n.id).is_some() {
+      return out;
+    }
+    let defs = props::props_of(self.doc, &comp);
+    let mut take = |id: &Option<String>, field: &str| -> Option<String> {
+      let def = defs.iter().find(|d| Some(&d.id) == id.as_ref())?;
+      let ident = prop_ident(&def.name);
+      if !self.used_props.iter().any(|u| u.ident == ident) {
+        let default = match field {
+          "visible" => json!(n.visible),
+          "characters" => json!(n.text.as_ref().map(|t| t.characters.clone()).unwrap_or_default()),
+          _ => serde_json::Value::Null,
+        };
+        self.used_props.push(UsedProp {
+          ident: ident.clone(),
+          kind: def.kind,
+          default,
+        });
+      }
+      Some(ident)
+    };
+    out.visible = take(&refs.visible, "visible");
+    out.characters = take(&refs.characters, "characters");
+    out.swap = take(&refs.swap, "swap");
+    out
+  }
+
+  /// The props an instance sets on its component.
+  /// None when it has overrides that props can't express.
+  fn prop_args(&mut self, n: &Node) -> Option<PropArgs> {
+    let info = n.instance.as_ref()?;
+    let has_overrides = components::has_overrides(self.doc, &n.id);
+    let defs = props::props_of(self.doc, &info.component_id);
+    if defs.is_empty() || self.doc.instance_ancestor(&n.id).is_some() {
+      return (!has_overrides).then(Default::default);
+    }
+    let mut attrs = Vec::new();
+    let mut exprs = Vec::new();
+    for (key, v) in &info.overrides {
+      // Only a swap recorded for a layer an instance swap property controls.
+      let def = self
+        .doc
+        .get(key)
+        .and_then(|m| m.prop_refs.as_ref())
+        .and_then(|r| r.swap.as_ref())
+        .and_then(|p| defs.iter().find(|d| &d.id == p))?;
+      let obj = v.as_object()?;
+      if obj.keys().any(|k| k != components::SWAP_KEY && k != "name") {
+        return None;
+      }
+      let swap: InstanceInfo = serde_json::from_value(obj.get(components::SWAP_KEY)?.clone()).ok()?;
+      if !swap.overrides.is_empty() || !swap.prop_values.is_empty() {
+        return None;
+      }
+      let name = self.component_name(&swap.component_id);
+      exprs.push((prop_ident(&def.name), format!("<{name} />")));
+    }
+    for (pid, v) in &info.prop_values {
+      let Some(def) = defs.iter().find(|d| &d.id == pid) else { continue };
+      match v {
+        serde_json::Value::Bool(b) => exprs.push((prop_ident(&def.name), b.to_string())),
+        serde_json::Value::String(t) => attrs.push((prop_ident(&def.name), t.clone())),
+        _ => {}
+      }
+    }
+    Some(PropArgs { attrs, exprs })
   }
 
   /// h1 for the first large heading of a screen, h2/h3 for smaller ones.
@@ -1140,6 +1274,19 @@ fn tw_padding(v: &str) -> String {
 }
 
 fn jsx(el: &El, depth: usize, out: &mut String) {
+  match &el.show_if {
+    // A swap slot writes its own condition.
+    Some(cond) if el.slot.is_none() => {
+      let pad = "  ".repeat(depth);
+      out.push_str(&format!("{pad}{{{cond} && (\n"));
+      jsx_el(el, depth + 1, out);
+      out.push_str(&format!("{pad})}}\n"));
+    }
+    _ => jsx_el(el, depth, out),
+  }
+}
+
+fn jsx_el(el: &El, depth: usize, out: &mut String) {
   let pad = "  ".repeat(depth);
   if let Some(c) = &el.comment {
     out.push_str(&format!("{pad}{{/* {} */}}\n", c.replace("*/", "")));
@@ -1175,14 +1322,34 @@ fn jsx(el: &El, depth: usize, out: &mut String) {
       .map(|(k, v)| format!(" {k}={}", serde_json::to_string(v).unwrap_or_default()))
       .collect::<String>()
   );
+  let handler = format!(
+    "{handler}{}",
+    el.expr_attrs.iter().map(|(k, v)| format!(" {k}={{{v}}}")).collect::<String>()
+  );
   if let Some(name) = &el.component_ref {
-    out.push_str(&format!("{pad}<{name} className={class_attr}{handler} />\n"));
+    match &el.slot {
+      Some(slot) => {
+        let expr = format!("{slot} ?? <{name} className={class_attr}{handler} />");
+        match &el.show_if {
+          Some(cond) => out.push_str(&format!("{pad}{{{cond} && ({expr})}}\n")),
+          None => out.push_str(&format!("{pad}{{{expr}}}\n")),
+        }
+      }
+      None => out.push_str(&format!("{pad}<{name} className={class_attr}{handler} />\n")),
+    }
     return;
   }
   if let Some(svg) = &el.raw {
     out.push_str(&format!(
       "{pad}<div className={class_attr}{handler} dangerouslySetInnerHTML={{{{ __html: {} }}}} />\n",
       serde_json::to_string(svg).unwrap_or_default()
+    ));
+    return;
+  }
+  if let Some(prop) = &el.text_prop {
+    out.push_str(&format!(
+      "{pad}<{tag} className={class_attr}{handler}>{{{prop}}}</{tag}>\n",
+      tag = el.tag
     ));
     return;
   }
@@ -1364,13 +1531,18 @@ fn component_fns(ctx: &mut Ctx) -> String {
     }
     for (id, name) in pending {
       done.insert(id.clone());
-      if let Some(el) = ctx.build(&id, Place::ComponentRoot) {
+      ctx.cur_comp = Some(id.clone());
+      ctx.used_props.clear();
+      let built = ctx.build(&id, Place::ComponentRoot);
+      ctx.cur_comp = None;
+      if let Some(el) = built {
         let mut body = String::new();
         jsx(&el, 2, &mut body);
         // Variants are reached through their set's component.
         let export = if ctx.variant_set(&id).is_some() { "" } else { "export " };
+        let (params, types) = prop_params(&ctx.used_props);
         out.push_str(&format!(
-          "{export}function {name}({{ className, onClick, onNavigate }}: {PROPS}) {{\n  void onNavigate;\n  return (\n{body}  );\n}}\n\n"
+          "{export}function {name}({{ {params}className, onClick, onNavigate }}: {PROPS_OPEN}{types} }}) {{\n  void onNavigate;\n  return (\n{body}  );\n}}\n\n"
         ));
       }
     }
@@ -1383,8 +1555,29 @@ fn component_fns(ctx: &mut Ctx) -> String {
   out
 }
 
-const PROPS: &str =
-  "{ className?: string; onClick?: () => void; onNavigate?: (screen: string, overlay?: Record<string, unknown>) => void }";
+/// Start of the props type of a component function; component property props follow it.
+const PROPS_OPEN: &str =
+  "{ className?: string; onClick?: () => void; onNavigate?: (screen: string, overlay?: Record<string, unknown>) => void;";
+
+/// Destructuring entries (with defaults) and type members for the component properties a
+/// function uses: `icon = true, label = "Buy", ` and ` icon?: boolean; label?: string;`.
+fn prop_params(used: &[UsedProp]) -> (String, String) {
+  let mut params = String::new();
+  let mut types = String::new();
+  for u in used {
+    let ty = match u.kind {
+      PropKind::Boolean => "boolean",
+      PropKind::Text => "string",
+      PropKind::InstanceSwap => "React.ReactNode",
+    };
+    match u.kind {
+      PropKind::InstanceSwap => params.push_str(&format!("{}, ", u.ident)),
+      _ => params.push_str(&format!("{} = {}, ", u.ident, u.default)),
+    }
+    types.push_str(&format!(" {}?: {ty};", u.ident));
+  }
+  (params, types)
+}
 /// Type of the `onNavigate` prop; the second argument places overlays (see `App.tsx`).
 const NAVIGATE: &str = "(screen: string, overlay?: Record<string, unknown>) => void";
 
@@ -1448,7 +1641,7 @@ fn set_fn(ctx: &Ctx, set: &Node, name: &str) -> String {
       None => prop_ident(k),
     })
     .collect();
-  let types: Vec<String> = keys
+  let mut types: Vec<String> = keys
     .iter()
     .map(|k| {
       let mut values: Vec<String> = Vec::new();
@@ -1466,6 +1659,15 @@ fn set_fn(ctx: &Ctx, set: &Node, name: &str) -> String {
       )
     })
     .collect();
+  // Component properties are shared by the variants, which pick them up through `...rest`.
+  for d in props::props_of(ctx.doc, &set.id) {
+    let ty = match d.kind {
+      PropKind::Boolean => "boolean",
+      PropKind::Text => "string",
+      PropKind::InstanceSwap => "React.ReactNode",
+    };
+    types.push(format!("{}?: {ty}", prop_ident(&d.name)));
+  }
   let mut body = String::new();
   for v in vs.iter().skip(1) {
     let Some(fname) = ctx.components.get(&v.id) else { continue };

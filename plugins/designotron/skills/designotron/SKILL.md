@@ -29,7 +29,9 @@ then open the editor at http://127.0.0.1:5174 (or https://mikemich.github.io/des
    mobile) placed to the right of existing content. Use auto layout (`add_auto_layout`, or
    `layout` in `create_nodes`) for anything list- or stack-shaped so it resizes cleanly.
 3. Make repeated elements components (`create_component`) and use instances
-   (`create_instance`); combine states into variants with `combine_variants`.
+   (`create_instance`); combine states into variants with `combine_variants`. Give
+   components Boolean (show/hide a layer), Text and Instance swap properties with
+   `set_component_props`; instances set them, and code export turns them into React props.
 4. Use real copy, consistent spacing (multiples of 4 or 8) and a small palette. Define
    colours and type as styles or variables (`define_styles`, `define_variables`) when you
    create a design system.

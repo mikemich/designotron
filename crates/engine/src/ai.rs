@@ -141,6 +141,11 @@ pub fn tool_defs() -> Value {
       "input_schema": { "type": "object", "properties": { "componentId": { "type": "string" }, "parentId": { "type": "string" }, "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["componentId"] }
     },
     {
+      "name": "set_component_props",
+      "description": "Component properties, like Figma's: define Boolean (hides/shows a layer), Text (a text layer's characters) and Instance swap (which component a nested instance is) properties on a main component or component set, bind its layers to them, and set values on instances. `ops` run in order as one undo step: {op:'add', component, name, kind:'boolean'|'text'|'instanceSwap', default?, bind?:layerId} (bind makes it from that layer of the main component and starts from its state; instance swap needs a default component id); {op:'update', component, prop, name?, default?, options?:[componentId]} (a new default changes the bound layers of the main component); {op:'delete', component, prop}; {op:'bind', node:layerId, field:'visible'|'characters'|'swap', prop|null}; {op:'set', instance, prop, value|null} (null restores the main component's value; swap takes a component id); {op:'expose', instance, expose:boolean} (an instance inside a main component shows its properties on instances of the outer component). `component` is a main component or set id (a variant's properties are its set's); `prop` is a property id or name. Properties show in get_nodes (`component.props`, `propRefs` on layers, `componentProps` on components and instances) and become React props in code export.",
+      "input_schema": { "type": "object", "properties": { "ops": { "type": "array", "items": { "type": "object", "properties": { "op": { "type": "string", "enum": ["add", "update", "delete", "bind", "set", "expose"] } }, "required": ["op"] } } }, "required": ["ops"] }
+    },
+    {
       "name": "set_prototype",
       "description": "Add a prototype interaction: clicking nodeId navigates to destinationId (a top-level frame), goes back, opens a URL, or works with overlays. open_overlay shows destinationId (a top-level frame, e.g. a modal, menu or sheet) on top of the current screen; close_overlay closes the topmost overlay (put it on a close button inside the overlay); swap_overlay replaces the topmost overlay with destinationId. Overlays default to centred, a 30% black dimmed background and closing when clicking outside; change that with `overlay`.",
       "input_schema": { "type": "object", "properties": {
@@ -335,6 +340,10 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
             if let Value::Object(m) = &mut v {
               m.insert("outline".into(), outline(e, id, depth));
               m.insert("absoluteBounds".into(), json!(e.doc.abs_bounds(id)));
+              let props = crate::props::describe(&e.doc, id);
+              if matches!(props["mode"].as_str(), Some("main" | "instance")) {
+                m.insert("componentProps".into(), props);
+              }
             }
             v
           }
@@ -414,6 +423,16 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       let id = crate::components::create_instance(&mut e.doc, &comp, parent.as_deref(), &page, x, y, &mut e.gen)
         .ok_or("componentId is not a component")?;
       Ok(json!({ "id": id }))
+    }
+    "set_component_props" => {
+      let ops = input.get("ops").and_then(|v| v.as_array()).ok_or("ops must be an array")?;
+      let mut results = Vec::new();
+      for op in ops {
+        let op = resolve_prop_names(e, op);
+        let edit: crate::props::PropsOp = serde_json::from_value(op).map_err(|er| format!("invalid op: {er}"))?;
+        results.push(e.dispatch_inner(Command::ComponentProps { edit })?);
+      }
+      Ok(json!({ "results": results }))
     }
     "set_prototype" => {
       let id = input.get("nodeId").and_then(|v| v.as_str()).ok_or("nodeId required")?;
@@ -605,6 +624,31 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
   }
 }
 
+/// Lets a property op name its property instead of giving its id.
+fn resolve_prop_names(e: &Engine, op: &Value) -> Value {
+  let mut op = op.clone();
+  let anchor = ["component", "instance", "node"]
+    .iter()
+    .find_map(|k| op.get(*k).and_then(|v| v.as_str()));
+  let comp = anchor.and_then(|a| match e.doc.get(a) {
+    Some(n) if n.instance.is_some() => n.instance.as_ref().map(|i| i.component_id.clone()),
+    Some(n) => crate::components::enclosing_component(&e.doc, &n.id),
+    None => None,
+  });
+  let by_name = comp.and_then(|c| {
+    let want = op.get("prop").and_then(|v| v.as_str())?.to_string();
+    let defs = crate::props::props_of(&e.doc, &c);
+    if defs.iter().any(|d| d.id == want) {
+      return None;
+    }
+    defs.into_iter().find(|d| d.name == want).map(|d| d.id)
+  });
+  if let (Some(id), Value::Object(m)) = (by_name, &mut op) {
+    m.insert("prop".into(), json!(id));
+  }
+  op
+}
+
 fn arrange(e: &mut Engine, input: &Value) -> Result<Value, String> {
   let ids = str_list(input.get("ids"));
   let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
@@ -675,12 +719,24 @@ pub fn summary(e: &Engine, depth: usize) -> Value {
     "currentPage": e.page,
     "selection": e.selection.iter().filter_map(|s| e.doc.get(s)).map(|n| json!({ "id": n.id, "type": n.kind, "name": n.name })).collect::<Vec<_>>(),
     "layers": roots.iter().map(|r| outline(e, r, depth)).collect::<Vec<_>>(),
-    "components": e.doc.components().iter().map(|c| json!({ "id": c.id, "name": c.name, "width": c.width, "height": c.height })).collect::<Vec<_>>(),
+    "components": e.doc.components().iter().map(|c| component_summary(e, c)).collect::<Vec<_>>(),
     "colorStyles": e.doc.styles.colors,
     "variables": crate::variables::summary(&e.doc),
     "openComments": e.doc.comments.values().filter(|c| !c.resolved).count(),
     "nextFreeX": roots.iter().map(|r| e.doc.abs_bounds(r).right()).fold(0.0, f64::max) + if roots.is_empty() { 0.0 } else { 100.0 },
   })
+}
+
+fn component_summary(e: &Engine, c: &Node) -> Value {
+  let mut m = json!({ "id": c.id, "name": c.name, "width": c.width, "height": c.height });
+  let props = crate::props::props_of(&e.doc, &c.id);
+  if !props.is_empty() {
+    m["props"] = json!(props
+      .iter()
+      .map(|p| json!({ "id": p.id, "name": p.name, "kind": p.kind }))
+      .collect::<Vec<_>>());
+  }
+  m
 }
 
 fn outline(e: &Engine, id: &str, depth: usize) -> Value {
@@ -724,6 +780,9 @@ fn outline(e: &Engine, id: &str, depth: usize) -> Value {
   }
   if let Some(i) = &n.instance {
     m.insert("componentId".into(), json!(i.component_id));
+    if let Some(values) = crate::props::values_summary(&e.doc, n) {
+      m.insert("props".into(), values);
+    }
   }
   if !n.children.is_empty() {
     if depth > 0 {

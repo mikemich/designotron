@@ -208,3 +208,80 @@
 .wf-style-edit .field {
   flex: none;
 }
+
+/* Component properties (PropertyControls) */
+.wf-purple-text {
+  color: #c4a5ff;
+}
+.wf-indent {
+  margin-left: 19px;
+}
+.wf-gap-b {
+  margin-bottom: 6px;
+}
+.wf-check {
+  gap: 6px;
+  cursor: pointer;
+  margin-bottom: 4px;
+}
+.wf-instance-props {
+  margin: 8px 0 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.wf-group-head {
+  margin: 8px 0 4px;
+}
+.wf-ctl > .field,
+.wf-ctl > .wf-ctl-bool {
+  flex: 1;
+  min-width: 0;
+}
+.wf-ctl .field.wf-inline .wf-lbl {
+  width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-ctl-bool {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  cursor: pointer;
+}
+.wf-prop-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-bound {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 5px;
+  background: var(--panel-2);
+  border: 1px solid #5b4a82;
+}
+.wf-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.field.wf-apply {
+  flex: 1;
+  gap: 6px;
+  padding: 0 8px;
+  text-align: left;
+}
+.wf-create {
+  padding: 4px;
+}
+.wf-create .textinput {
+  width: 100%;
+}

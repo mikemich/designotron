@@ -260,6 +260,9 @@ pub struct Node {
   pub bindings: BTreeMap<String, String>,
   /// Collection id → mode id for this layer and its descendants.
   pub variable_modes: BTreeMap<String, String>,
+  /// Component properties this layer of a main component is bound to.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub prop_refs: Option<PropRefs>,
 }
 
 impl Default for Node {
@@ -315,6 +318,7 @@ impl Default for Node {
       is_mask: false,
       bindings: BTreeMap::new(),
       variable_modes: BTreeMap::new(),
+      prop_refs: None,
     }
   }
 }
@@ -859,6 +863,55 @@ pub struct ComponentInfo {
   pub description: String,
   /// Variant properties when the component lives in a component set, e.g. {"Size": "Large"}.
   pub variant_props: BTreeMap<String, String>,
+  /// Component properties (boolean, text, instance swap). On a component set they are shared
+  /// by every variant, so they live on the set; a standalone component holds its own.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub props: Vec<PropDef>,
+}
+
+/// A component property: layers of the main component bind to it, instances give it a value.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PropDef {
+  pub id: String,
+  pub name: String,
+  pub kind: PropKind,
+  /// `true`/`false`, the text, or (instance swap) the id of the default component. Once a layer
+  /// is bound, the bound layer's own state in each main component is what instances start from.
+  pub default: serde_json::Value,
+  /// Instance swap: the components an instance may be swapped to (empty: any).
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub options: Vec<NodeId>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PropKind {
+  #[default]
+  Boolean,
+  Text,
+  InstanceSwap,
+}
+
+/// The component properties a layer of a main component is bound to (property ids).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PropRefs {
+  /// Boolean property controlling the layer's visibility.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub visible: Option<String>,
+  /// Text property controlling a text layer's characters.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub characters: Option<String>,
+  /// Instance swap property controlling which component a nested instance is.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub swap: Option<String>,
+}
+
+impl PropRefs {
+  pub fn is_empty(&self) -> bool {
+    self.visible.is_none() && self.characters.is_none() && self.swap.is_none()
+  }
 }
 
 impl Node {
@@ -874,6 +927,14 @@ pub struct InstanceInfo {
   pub component_id: NodeId,
   /// Property overrides keyed by the master node id inside the component.
   pub overrides: BTreeMap<NodeId, serde_json::Value>,
+  /// Values set on the component's boolean and text properties (property id → value);
+  /// properties without an entry keep what the main component shows.
+  #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+  pub prop_values: BTreeMap<String, serde_json::Value>,
+  /// For an instance nested in a main component: show its properties on instances of the
+  /// outer component too.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub expose_props: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]

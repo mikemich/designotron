@@ -20,11 +20,12 @@ use serde_json::Value;
 use crate::doc::IdGen;
 use crate::model::{ComponentInfo, Document, InstanceInfo, Node, NodeId, NodeType};
 use crate::patch;
+use crate::props;
 
 pub const ROOT_KEY: &str = "__root";
 
 /// Key, inside an override, of a nested instance's swap record (its `InstanceInfo`).
-const SWAP_KEY: &str = "instance";
+pub(crate) const SWAP_KEY: &str = "instance";
 
 /// How deep swaps recorded inside swaps are followed (guards against cyclic files).
 const MAX_SWAP_DEPTH: usize = 16;
@@ -49,6 +50,14 @@ const ROOT_LOCAL_KEYS: &[&str] = &[
 /// Fingerprint of a component subtree; changes whenever the component is edited.
 pub fn fingerprint(doc: &Document, comp_id: &str) -> u64 {
   let mut h = DefaultHasher::new();
+  // Variants share the properties of their set.
+  if let Some(set) = doc.get(comp_id).and_then(|c| c.parent.as_ref()).and_then(|p| doc.get(p)) {
+    if set.kind == NodeType::ComponentSet {
+      if let Ok(s) = serde_json::to_string(&set.component) {
+        s.hash(&mut h);
+      }
+    }
+  }
   for nid in doc.subtree(comp_id) {
     if let Some(n) = doc.get(&nid) {
       if let Ok(s) = serde_json::to_string(&strip_position(n, nid == comp_id)) {
@@ -138,6 +147,7 @@ pub fn create_instance(
     instance: Some(InstanceInfo {
       component_id: comp_id.to_string(),
       overrides: BTreeMap::new(),
+      ..Default::default()
     }),
     ..Default::default()
   };
@@ -164,6 +174,9 @@ pub fn sync_instance(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
 
 /// Records a property edit made on a node that lives in an instance.
 pub fn record_override(doc: &mut Document, node_id: &str, p: &Value) {
+  // Edits to a layer a component property controls change the property instead.
+  let redirected = props::redirect_edit(doc, node_id, p);
+  let p = &redirected;
   let Some(n) = doc.get(node_id) else { return };
   let scopes = scope_chain(doc, node_id);
   let (scope, key, clean) = match (scopes.last(), n.master_id.clone()) {
@@ -226,6 +239,8 @@ pub fn detach_instance(doc: &mut Document, inst_id: &str) {
   for nid in doc.subtree(inst_id) {
     if let Some(n) = doc.get_mut(&nid) {
       n.master_id = None;
+      // Layers keep what the properties made of them, but no longer follow any property.
+      n.prop_refs = None;
       if nid == inst_id {
         n.kind = NodeType::Frame;
         n.instance = None;
@@ -241,6 +256,7 @@ pub fn reset_overrides(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
   let Some(parent) = scopes.last() else {
     if let Some(info) = doc.get_mut(inst_id).and_then(|i| i.instance.as_mut()) {
       info.overrides.clear();
+      info.prop_values.clear();
     }
     sync_instance(doc, inst_id, gen);
     return;
@@ -276,6 +292,7 @@ pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mu
   let scopes = scope_chain(doc, inst_id);
   let Some(parent) = scopes.last().cloned() else {
     let overrides = carry_overrides(doc, &info.component_id, comp_id, &info.overrides, &BTreeMap::new());
+    let prop_values = props::carry_values(doc, &info.component_id, comp_id, &info.prop_values);
     if let Some(inst) = doc.get_mut(inst_id) {
       if follow {
         inst.name = new_name;
@@ -283,6 +300,8 @@ pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mu
       inst.instance = Some(InstanceInfo {
         component_id: comp_id.to_string(),
         overrides,
+        prop_values,
+        expose_props: info.expose_props,
       });
     }
     sync_instance(doc, inst_id, gen);
@@ -300,6 +319,8 @@ pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mu
       InstanceInfo {
         component_id: comp_id.to_string(),
         overrides: carry_overrides(doc, &swapped.component_id, comp_id, &swapped.overrides, &base),
+        prop_values: props::carry_values(doc, &swapped.component_id, comp_id, &swapped.prop_values),
+        expose_props: swapped.expose_props,
       }
     }
     None => {
@@ -307,6 +328,9 @@ pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mu
       // into the swap (keyed by the new component's layers).
       let region: HashSet<NodeId> = doc.subtree(&key).into_iter().skip(1).collect();
       let mut moved = BTreeMap::new();
+      // Property values set on it (in its main component and through the outer instance).
+      let source = doc.get(&key).and_then(|n| n.instance.clone()).unwrap_or_default();
+      let mut values = source.prop_values.clone();
       if let Some(info) = doc.get_mut(&parent).and_then(|i| i.instance.as_mut()) {
         let keys: Vec<NodeId> = info.overrides.keys().filter(|k| region.contains(*k)).cloned().collect();
         for k in keys {
@@ -314,10 +338,17 @@ pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mu
             moved.insert(k, v);
           }
         }
+        if let Some(Value::Object(m)) = info.overrides.get_mut(&key) {
+          if let Some(Value::Object(set)) = m.remove(props::PROPS_KEY) {
+            values.extend(set);
+          }
+        }
       }
       InstanceInfo {
         component_id: comp_id.to_string(),
         overrides: carry_overrides(doc, &key, comp_id, &moved, &BTreeMap::new()),
+        prop_values: props::carry_values(doc, &source.component_id, comp_id, &values),
+        expose_props: source.expose_props,
       }
     }
   };
@@ -386,7 +417,7 @@ pub fn override_count(doc: &Document, id: &str) -> usize {
 }
 
 /// The component whose layers contain `id` (the nearest one above it, or itself).
-fn enclosing_component(doc: &Document, id: &str) -> Option<NodeId> {
+pub(crate) fn enclosing_component(doc: &Document, id: &str) -> Option<NodeId> {
   std::iter::once(id.to_string())
     .chain(doc.ancestors(id))
     .find(|a| doc.get(a).map(|n| n.kind == NodeType::Component).unwrap_or(false))
@@ -614,7 +645,7 @@ fn match_by_position(doc: &Document, a: &str, b: &str, out: &mut Vec<(NodeId, No
 /// The instances whose override maps hold edits for the layers under `id`, outermost first:
 /// the outermost instance around it, then each nested instance swapped through the previous
 /// one (a swapped instance keeps the overrides for its own layers in its swap record).
-fn scope_chain(doc: &Document, id: &str) -> Vec<NodeId> {
+pub(crate) fn scope_chain(doc: &Document, id: &str) -> Vec<NodeId> {
   let mut scopes: Vec<NodeId> = Vec::new();
   for a in doc.ancestors(id).into_iter().rev() {
     let Some(n) = doc.get(&a) else { continue };
@@ -634,13 +665,13 @@ fn scope_chain(doc: &Document, id: &str) -> Vec<NodeId> {
 }
 
 /// The swap recorded in `scope`'s overrides for the nested instance copied from `master`.
-fn swap_entry(doc: &Document, scope: &str, master: &str) -> Option<InstanceInfo> {
+pub(crate) fn swap_entry(doc: &Document, scope: &str, master: &str) -> Option<InstanceInfo> {
   let v = doc.get(scope)?.instance.as_ref()?.overrides.get(master)?.get(SWAP_KEY)?;
   serde_json::from_value(v.clone()).ok()
 }
 
 /// Writes each nested scope's instance info back into the swap record of the scope above.
-fn persist_scopes(doc: &mut Document, scopes: &[NodeId]) {
+pub(crate) fn persist_scopes(doc: &mut Document, scopes: &[NodeId]) {
   for i in (1..scopes.len()).rev() {
     let Some(child) = doc.get(&scopes[i]) else { continue };
     let (Some(info), Some(key)) = (child.instance.clone(), child.master_id.clone()) else {
@@ -707,8 +738,10 @@ fn build(
   reuse.remove_old(doc);
   map.insert(comp.id.clone(), inst_id.to_string());
 
+  let mut bound = false;
   for cid in comp_nodes.iter().skip(1) {
     let Some(src) = doc.get(cid).cloned() else { continue };
+    bound |= src.prop_refs.is_some();
     let mut n = src.clone();
     n.id = map[cid].clone();
     n.parent = src.parent.as_ref().and_then(|p| map.get(p).cloned());
@@ -748,6 +781,7 @@ fn build(
   root.export_settings = inst.export_settings.clone();
   root.component = None;
   root.master_id = inst.master_id.clone();
+  root.prop_refs = inst.prop_refs.clone();
   root.instance = Some(info.clone());
   root.children = comp.children.iter().filter_map(|c| map.get(c).cloned()).collect();
   doc.nodes.insert(root.id.clone(), root);
@@ -771,6 +805,12 @@ fn build(
     if let Some(n) = target.and_then(|t| doc.get_mut(&t)) {
       let _ = patch::apply(n, p);
     }
+  }
+
+  // Component property values win over everything else on the layers they control.
+  if bound {
+    let skip: HashSet<NodeId> = swaps.keys().filter_map(|k| map.get(k).cloned()).collect();
+    props::apply_values(doc, inst_id, info, overrides, &skip);
   }
 }
 
@@ -891,7 +931,7 @@ fn prune_equal(patch: &Value, base: &Value) -> Option<Value> {
   let Value::Object(p) = patch else { return Some(patch.clone()) };
   let mut out = serde_json::Map::new();
   for (k, v) in p {
-    if k == SWAP_KEY {
+    if k == SWAP_KEY || k == props::PROPS_KEY {
       out.insert(k.clone(), v.clone());
       continue;
     }
@@ -992,7 +1032,7 @@ fn merge_override(entry: &mut Value, p: &Value) {
   }
 }
 
-fn empty() -> Value {
+pub(crate) fn empty() -> Value {
   Value::Object(Default::default())
 }
 
@@ -1185,6 +1225,7 @@ pub fn combine_as_variants(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) 
     set.stroke_dash = vec![6.0, 4.0];
     set.corner_radius = 6.0;
   }
+  props::merge_into_set(doc, &comps, &set_id);
   Some(set_id)
 }
 

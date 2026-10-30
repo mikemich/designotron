@@ -22,6 +22,7 @@ import {
   variantsOf,
 } from "../componentOps";
 import { InlineInput } from "./InlineInput";
+import { InstanceProps, PropertiesSection } from "./PropertyControls";
 import "./workflow.css";
 
 const PURPLE = "#c4a5ff";
@@ -31,6 +32,15 @@ export function MainComponentSection({ n }: { n: Node }) {
   const doc = useDoc();
   const set = variantSet(doc, n);
   const props = Object.entries(n.component?.variantProps ?? {});
+  return (
+    <>
+      <MainComponentBody n={n} set={set} props={props} />
+      <PropertiesSection n={n} />
+    </>
+  );
+}
+
+function MainComponentBody({ n, set, props }: { n: Node; set: Node | null; props: [string, string][] }) {
   return (
     <Section
       title={<span style={{ color: PURPLE }}>❖ {set ? "Variant" : "Main component"}</span>}
@@ -76,6 +86,15 @@ export function ComponentSetSection({ n }: { n: Node }) {
   const doc = useDoc();
   const props = setProperties(doc, n);
   const count = variantsOf(doc, n).length;
+  return (
+    <>
+      <ComponentSetBody n={n} props={props} count={count} />
+      <PropertiesSection n={n} />
+    </>
+  );
+}
+
+function ComponentSetBody({ n, props, count }: { n: Node; props: { name: string; values: string[] }[]; count: number }) {
   return (
     <Section title={<span style={{ color: PURPLE }}>❖ Component set</span>}>
       {props.length === 0 && <div className="muted small">No variant properties.</div>}
@@ -160,6 +179,7 @@ export function InstanceSection({ n }: { n: Node }) {
           />
         </div>
       ))}
+      <InstanceProps n={n} />
       {overrides > 0 && <div className="muted small">{overrides === 1 ? "1 override" : `${overrides} overrides`}</div>}
     </Section>
   );
