@@ -1057,7 +1057,7 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
       }
     }
     if let Some(spans) = s.get("spans").and_then(|v| v.as_array()) {
-      let (characters, runs) = spans_to_runs(spans);
+      let (characters, runs) = spans_to_runs(spans)?;
       if creating && s.get("name").is_none() {
         n.name = characters.chars().take(40).collect();
       }
@@ -1196,7 +1196,7 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
 }
 
 /// `[{text, fontWeight, ...}]` to characters plus style runs.
-fn spans_to_runs(spans: &[Value]) -> (String, Vec<crate::model::TextRun>) {
+fn spans_to_runs(spans: &[Value]) -> Result<(String, Vec<crate::model::TextRun>), String> {
   let mut text = String::new();
   let mut runs = Vec::new();
   for sp in spans {
@@ -1219,12 +1219,15 @@ fn spans_to_runs(spans: &[Value]) -> (String, Vec<crate::model::TextRun>) {
       color: sp.get("color").and_then(|v| v.as_str()).map(crate::color::normalize),
       decoration,
       letter_spacing: num(sp.get("letterSpacing")),
-      link: sp.get("link").and_then(|v| v.as_str()).map(String::from),
+      link: match sp.get("link").and_then(|v| v.as_str()) {
+        Some(url) => Some(crate::model::safe_link(url).ok_or("a span link must be an http(s), mailto: or tel: link")?),
+        None => None,
+      },
     });
   }
   let len = text.chars().count();
   crate::text::normalize_runs(&mut runs, len);
-  (text, runs)
+  Ok((text, runs))
 }
 
 fn apply_dimension(n: &mut Node, v: Option<&Value>, horizontal: bool) {

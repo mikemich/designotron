@@ -358,12 +358,13 @@ function MinMaxFields({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         </div>
       )}
       {open && (
-        <div className="grid2" data-testid="size-limits">
+        <div className="grid2 size-limits" data-testid="size-limits">
           {LIMITS.map((l) => (
             <NumberField
               key={l.key}
               value={common(nodes, (n) => n[l.key] ?? null)}
-              autoText={l.label}
+              label={l.label}
+              autoText="None"
               title={l.title}
               min={0}
               onChange={(v) => update(ids, { [l.key]: v > 0 ? v : null })}

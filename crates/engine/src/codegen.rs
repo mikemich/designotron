@@ -598,10 +598,16 @@ impl<'a> Ctx<'a> {
     // Auto-width text only wraps at its max width if whitespace may collapse into line breaks.
     let auto_w = n.text.as_ref().is_some_and(|t| t.auto_resize == TextAutoResize::Width);
     if auto_w && n.max_width.is_some() {
+      // Only `pre` becomes `pre-wrap`: a one-line `nowrap` (max lines 1) keeps its ellipsis.
+      let mut wraps = false;
       for (k, v) in el.styles.iter_mut() {
-        if k == "white-space" {
+        if k == "white-space" && v == "pre" {
           *v = "pre-wrap".into();
+          wraps = true;
         }
+      }
+      if wraps {
+        el.s("overflow-wrap", "anywhere");
       }
     }
   }
@@ -842,6 +848,10 @@ impl<'a> Ctx<'a> {
           "pre-wrap"
         },
       );
+      // Long words break like they do on the canvas instead of overflowing.
+      if t.auto_resize != TextAutoResize::Width {
+        el.s("overflow-wrap", "anywhere");
+      }
     }
     // Paragraph spacing: one block per paragraph (a truncated text stays one block).
     if t.paragraph_spacing != 0.0 && t.characters.contains('\n') && limit.is_none() {
@@ -939,7 +949,14 @@ fn text_spans(t: &crate::model::TextProps) -> Vec<Span> {
       if let Some(c) = &r.color {
         styles.push(("color".into(), color::css_with_opacity(c, 1.0)));
       }
-      if let Some(d) = r.decoration {
+      let link = r.link.as_deref().and_then(crate::model::safe_link);
+      // One decoration per span: an explicit one wins, a link underlines only when the range
+      // (or its layer) has none.
+      let deco = match r.decoration.unwrap_or(t.decoration) {
+        TextDecoration::None if link.is_some() => Some(TextDecoration::Underline),
+        _ => r.decoration,
+      };
+      if let Some(d) = deco {
         let v = match d {
           TextDecoration::None => "none",
           TextDecoration::Underline => "underline",
@@ -950,12 +967,8 @@ fn text_spans(t: &crate::model::TextProps) -> Vec<Span> {
       if let Some(v) = r.letter_spacing {
         styles.push(("letter-spacing".into(), px(v)));
       }
-      let link = r.link.as_deref().and_then(crate::model::safe_link);
       if link.is_some() {
-        // Browsers colour and underline links themselves; keep the design's look.
-        if r.decoration.is_none() {
-          styles.push(("text-decoration".into(), "underline".into()));
-        }
+        // Browsers colour links themselves; keep the design's look.
         if r.color.is_none() {
           styles.push(("color".into(), "inherit".into()));
         }
@@ -1865,6 +1878,43 @@ mod tests {
     assert!(html.contains("min-width: 120px") && html.contains("max-height: 64px"));
     assert!(html.contains("margin-top: 12px"));
     assert!(html.contains("<a href=\"https://example.com/docs\""));
+  }
+
+  #[test]
+  fn links_keep_a_range_decoration_and_wrapping_text_breaks_long_words() {
+    let mut doc = sample();
+    let page = doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Text, "s".into(), "S".into());
+    {
+      let p = t.text.as_mut().unwrap();
+      p.characters = "struck link here".into();
+      p.decoration = crate::model::TextDecoration::Strikethrough;
+      p.auto_resize = TextAutoResize::Height;
+      p.max_lines = Some(1);
+      p.runs = vec![crate::model::TextRun {
+        start: 7,
+        end: 11,
+        link: Some("https://example.com".into()),
+        ..Default::default()
+      }];
+    }
+    t.max_width = Some(240.0);
+    doc.insert(t, Some("home"), &page, None);
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    let a = html.split("<a href").nth(1).unwrap().split('>').next().unwrap();
+    assert!(!a.contains("underline"), "a link on struck text keeps the strike: {a}");
+    // One line with a max width keeps its ellipsis rules.
+    assert!(
+      html.contains("white-space: nowrap") && html.contains("text-overflow: ellipsis"),
+      "{html}"
+    );
+    // Wrapping text breaks long words.
+    let mut w = crate::ops::default_node(NodeType::Text, "w".into(), "W".into());
+    w.text.as_mut().unwrap().characters = "Pneumonoultramicroscopicsilicovolcanoconiosis".into();
+    w.text.as_mut().unwrap().auto_resize = TextAutoResize::Height;
+    doc.insert(w, Some("home"), &page, None);
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(src.contains("[overflow-wrap:anywhere]"), "{src}");
   }
 
   #[test]

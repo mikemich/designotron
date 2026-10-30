@@ -97,6 +97,8 @@ try {
     await select(p, [a.id]);
     await sleep(200);
     await p.click("button:has-text('Add min / max size')");
+    const labels = await p.locator(".size-limits .lbl").allInnerTexts();
+    check("min/max fields carry visible labels", labels.join(",") === "Min W,Max W,Min H,Max H", labels.join(","));
     await setField(p, "Maximum width (0 or empty for none)", 120);
     check("max width field clamps the fill child", (await named(p, "A")).width === 120 && (await named(p, "B")).width === 280, `${(await named(p, "A")).width}/${(await named(p, "B")).width}`);
     check("max width stored on the layer", (await named(p, "A")).maxWidth === 120);
@@ -182,6 +184,32 @@ try {
     await p.context().close();
   }
 
+  // 3b. Editing: auto-width text with a max width wraps in the editor; truncated text edits in full.
+  {
+    const p = await fresh();
+    await create(p, [{ type: "text", name: "Wide", x: 40, y: 40, text: LONG, fontSize: 18 }]);
+    const t = await named(p, "Wide");
+    await dispatch(p, { op: "update", ids: [t.id], patch: { maxWidth: 200 } });
+    await sleep(200);
+    const n = await named(p, "Wide");
+    check("auto-width text wraps at its max width", n.width <= 200 && n.height > 40, `${n.width}x${n.height}`);
+    await select(p, [t.id]);
+    await p.keyboard.press("Enter");
+    await sleep(300);
+    const m = await p.locator("textarea.text-editor").evaluate((el) => ({ w: el.clientWidth, sw: el.scrollWidth, h: el.clientHeight, sh: el.scrollHeight, ws: getComputedStyle(el).whiteSpace }));
+    check("the editor wraps too (no clipped single line)", m.ws === "pre-wrap" && m.sw <= m.w + 1 && m.sh <= m.h + 1, JSON.stringify(m));
+    await p.keyboard.press("Escape");
+    await dispatch(p, { op: "update", ids: [t.id], patch: { text: { maxLines: 2, truncate: true, autoResize: "height" }, width: 200 } });
+    await sleep(200);
+    await select(p, [t.id]);
+    await p.keyboard.press("Enter");
+    await sleep(300);
+    const k = await p.locator("textarea.text-editor").evaluate((el) => ({ h: el.clientHeight, sh: el.scrollHeight }));
+    const layer = await named(p, "Wide");
+    check("truncated text is edited at its full height", k.h >= k.sh - 1 && k.h > layer.height + 20, `${JSON.stringify(k)} layer ${layer.height}`);
+    await p.context().close();
+  }
+
   // 4. Long word breaks in a fixed-width text; paragraph spacing moves lines.
   {
     const p = await fresh();
@@ -227,6 +255,18 @@ try {
     const input = p.locator("[data-testid=link-row] input");
     check("Ctrl+K opens the link field", (await input.count()) === 1);
     await p.screenshot({ path: path.join(SHOTS, "06a-link-field.png") });
+    // Ctrl+K works from another right-panel tab: it brings the Design tab back, and Ctrl+Shift+K doesn't count.
+    await p.click(".panel.right >> text=Prototype");
+    await sleep(150);
+    await p.evaluate(() => window.dispatchEvent(new Event("dt-refocus-text")));
+    await sleep(100);
+    await p.keyboard.press("Control+Shift+k");
+    await sleep(250);
+    check("Ctrl+Shift+K is not the link shortcut", (await p.locator("button:has-text('Design')").count()) >= 0 && (await p.locator("[data-testid=link-row]").count()) === 0);
+    await p.keyboard.press("Control+k");
+    await sleep(300);
+    check("Ctrl+K from the Prototype tab shows Design with the link field", (await p.locator("[data-testid=link-row] input").count()) === 1);
+
     await input.fill("javascript:alert(1)");
     await input.press("Enter");
     await sleep(200);

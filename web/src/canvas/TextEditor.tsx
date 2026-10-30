@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { dispatch, getDoc, query, styleTextSelection, useStore } from "../store";
 import type { Mat } from "../types";
 import { cssColor } from "../ui/color";
@@ -47,6 +47,15 @@ export function TextEditor({ id }: { id: string }) {
     };
   }, [id]);
 
+  // Truncated text is cut on the canvas but edited in full: size the editor to all of it.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    const tp = getDoc().nodes[id]?.text;
+    if (!el || !tp || !(tp.truncate || tp.maxLines != null)) return;
+    el.style.height = "0px";
+    el.style.height = `${Math.max(getDoc().nodes[id].height, el.scrollHeight)}px`;
+  });
+
   if (!node || !node.text) return null;
   const t = node.text;
   const m = query<{ items: { matrix: Mat }[] }>({ q: "bounds", ids: [id] }).items[0]?.matrix;
@@ -55,6 +64,7 @@ export function TextEditor({ id }: { id: string }) {
   const fill = node.fills.find((f) => f.visible);
   const color = fill?.type === "solid" ? cssColor(fill.color, fill.opacity) : "#000";
   const lh = t.lineHeight ?? t.fontSize * 1.2;
+  const wrapsAtMax = t.autoResize === "width" && !!node.maxWidth;
   const finish = () => useStore.setState({ editingText: null });
   const trackSelection = (ta: HTMLTextAreaElement) => {
     const before = (i: number) => Array.from(ta.value.slice(0, i)).length;
@@ -77,14 +87,16 @@ export function TextEditor({ id }: { id: string }) {
         left: 0,
         top: 0,
         transform,
-        width: Math.max(node.width, 4) + (t.autoResize === "width" ? t.fontSize : 0),
+        // Auto-width text with a max width wraps there, like the layer does.
+        width: wrapsAtMax ? node.maxWidth! : Math.max(node.width, 4) + (t.autoResize === "width" ? t.fontSize : 0),
         height: Math.max(node.height, lh),
         font: `${t.italic ? "italic " : ""}${t.fontWeight} ${t.fontSize}px/${lh}px "${t.fontFamily}", sans-serif`,
         letterSpacing: t.letterSpacing,
         color,
         textAlign: t.alignH === "justify" ? "left" : t.alignH,
         textTransform: t.case === "upper" ? "uppercase" : t.case === "lower" ? "lowercase" : t.case === "title" ? "capitalize" : "none",
-        whiteSpace: t.autoResize === "width" ? "pre" : "pre-wrap",
+        whiteSpace: t.autoResize === "width" && !wrapsAtMax ? "pre" : "pre-wrap",
+        overflowWrap: "anywhere",
       }}
       onChange={(e) => dispatch({ op: "setText", id, characters: e.target.value }, { quiet: true })}
       onSelect={(e) => trackSelection(e.currentTarget)}
@@ -112,11 +124,13 @@ export function TextEditor({ id }: { id: string }) {
           styleTextSelection(style);
           return;
         }
-        if (mod && k === "k") {
+        if (mod && !e.shiftKey && !e.altKey && k === "k") {
           // Link the selected characters: the Design panel's link field takes over.
           e.preventDefault();
           trackSelection(e.currentTarget);
-          window.dispatchEvent(new Event("dt-link"));
+          // The field lives in the Design tab: show it, then let it mount before asking it to open.
+          useStore.setState({ rightTab: "design" });
+          setTimeout(() => window.dispatchEvent(new Event("dt-link")), 50);
           return;
         }
         if (e.key === "Escape" || (e.key === "Enter" && (e.metaKey || e.ctrlKey))) {

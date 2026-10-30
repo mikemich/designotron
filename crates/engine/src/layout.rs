@@ -163,31 +163,40 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
   let mut main_size = if horizontal { frame.width } else { frame.height };
   let mut cross_size = if horizontal { frame.height } else { frame.width };
   let wrap = al.wrap && horizontal && main_sizing != Sizing::Hug;
-  let ax = Axes {
+  let mut ax = Axes {
     horizontal,
     wrap,
     pad_main: pad_main_start + pad_main_end,
     pad_cross: pad_cross_start + pad_cross_end,
     gap_total,
   };
-  // Baseline alignment only exists across a single row.
-  let baseline = al.counter_align == Align::Baseline && horizontal && !wrap;
+  // A hugging frame with wrap and a max width wraps once its content passes the max.
+  let wrap_at_max = al.wrap && horizontal && main_sizing == Sizing::Hug && main_bounds.1.is_finite();
   let mut offsets: Vec<f64> = vec![0.0; n];
 
   // Widths settle before heights (wrapping text grows taller when narrower), so a vertical
   // layout resolves its cross axis (width) first and a horizontal one its main axis.
+  let mut wrap = wrap;
   if horizontal {
-    main_pass(doc, m, &ax, &mut items, &mut main_size, main_sizing, main_bounds);
-    if baseline {
+    if main_pass(doc, m, &ax, &mut items, &mut main_size, main_sizing, main_bounds, wrap_at_max) {
+      wrap = true;
+      ax.wrap = true;
+    }
+    // Baseline alignment only exists across a single row.
+    if al.counter_align == Align::Baseline && !wrap {
       offsets = baseline_offsets(doc, m, &items);
     }
     cross_pass(doc, m, &ax, &mut items, &mut cross_size, cross_sizing, cross_bounds, &offsets);
   } else {
     cross_pass(doc, m, &ax, &mut items, &mut cross_size, cross_sizing, cross_bounds, &offsets);
-    main_pass(doc, m, &ax, &mut items, &mut main_size, main_sizing, main_bounds);
+    main_pass(doc, m, &ax, &mut items, &mut main_size, main_sizing, main_bounds, false);
   }
+  let baseline = al.counter_align == Align::Baseline && horizontal && !wrap;
 
   if wrap {
+    if main_sizing == Sizing::Hug {
+      doc.get_mut(id).unwrap().width = main_size.max(1.0);
+    }
     arrange_wrapped(doc, id, &items, main_size, cross_sizing == Sizing::Hug);
     return;
   }
@@ -258,6 +267,9 @@ fn item_of(doc: &Document, cid: &str, horizontal: bool) -> Item {
 }
 
 /// Resolves the frame's size along the main axis and the main size of its fill children.
+/// Returns true when a hugging frame is held back by its max width and `wrap_at_max` asks its
+/// children to wrap into rows instead of sharing the width.
+#[allow(clippy::too_many_arguments)]
 fn main_pass(
   doc: &mut Document,
   m: &dyn TextMeasurer,
@@ -266,7 +278,8 @@ fn main_pass(
   main_size: &mut f64,
   sizing: Sizing,
   limits: (f64, f64),
-) {
+  wrap_at_max: bool,
+) -> bool {
   let horizontal = ax.horizontal;
   if sizing == Sizing::Hug {
     // Fill children can't fill a frame that hugs them: they hug their own content instead.
@@ -280,12 +293,16 @@ fn main_pass(
     let natural = items.iter().map(|i| i.main).sum::<f64>() + ax.gap_total + ax.pad_main;
     *main_size = clamp_to(natural, limits);
     // Held back by a maximum (or pushed out by a minimum): fill children share what is left.
+    if *main_size < natural && wrap_at_max {
+      return true;
+    }
     if *main_size != natural {
       share_main(doc, m, ax, items, *main_size - ax.pad_main);
     }
   } else if !ax.wrap {
     share_main(doc, m, ax, items, *main_size - ax.pad_main);
   }
+  false
 }
 
 /// Splits `inner` (main axis, padding excluded) between the fill children after the fixed
@@ -941,6 +958,40 @@ mod tests {
     doc.get_mut("f").unwrap().layout.as_mut().unwrap().counter_align = Align::Start;
     relayout_all(&mut doc, &HeuristicMeasurer);
     assert_eq!(doc.get("small").unwrap().y, 0.0);
+  }
+
+  #[test]
+  fn hug_frame_with_wrap_wraps_at_its_max_width() {
+    let (mut doc, page) = setup();
+    let mut r = row("f", 0.0, Sizing::Hug);
+    r.sizing_v = Sizing::Hug;
+    r.layout.as_mut().unwrap().wrap = true;
+    r.layout.as_mut().unwrap().counter_gap = 5.0;
+    r.max_width = Some(200.0);
+    doc.insert(r, None, &page, None);
+    for i in 0..5 {
+      let n = Node {
+        id: format!("c{i}"),
+        width: 60.0,
+        height: 20.0,
+        ..Default::default()
+      };
+      doc.insert(n, Some("f"), &page, None);
+    }
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    let f = doc.get("f").unwrap();
+    assert_eq!(f.width, 200.0, "held at the max");
+    // Three children fit a 200 px row, two go to the next.
+    assert_eq!(doc.get("c2").unwrap().y, 0.0);
+    assert_eq!(doc.get("c3").unwrap().y, 25.0);
+    assert_eq!(doc.get("c3").unwrap().x, 0.0);
+    assert_eq!(f.height, 45.0);
+    // Under the max it stays one row and hugs.
+    doc.get_mut("f").unwrap().max_width = Some(400.0);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    let f = doc.get("f").unwrap();
+    assert_eq!((f.width, f.height), (300.0, 20.0));
+    assert_eq!(doc.get("c4").unwrap().x, 240.0);
   }
 
   #[test]

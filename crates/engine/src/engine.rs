@@ -1659,6 +1659,8 @@ impl Engine {
       }
       Command::Paste { data, parent, x, y } => self.paste(&data, parent, x, y),
       Command::Update { ids, patch: p } => {
+        // Before anything records the patch (as an instance override, say).
+        let p = without_unsafe_links(p);
         crate::variables::unbind_for_patch(&mut self.doc, &ids, &p);
         for id in &ids {
           let before = self.doc.get(id).cloned().ok_or_else(|| format!("no node {id}"))?;
@@ -2749,6 +2751,25 @@ impl Engine {
   pub fn measurer(&self) -> &dyn TextMeasurer {
     self.measurer.as_ref()
   }
+}
+
+/// A patch with the unsafe links of its text runs removed (runs left with no style go too).
+fn without_unsafe_links(mut p: Value) -> Value {
+  let Some(runs) = p.pointer_mut("/text/runs").and_then(|r| r.as_array_mut()) else {
+    return p;
+  };
+  for r in runs.iter_mut() {
+    let bad = r
+      .get("link")
+      .is_some_and(|l| l.as_str().is_none_or(|l| crate::model::safe_link(l).is_none()));
+    if bad {
+      if let Some(o) = r.as_object_mut() {
+        o.remove("link");
+      }
+    }
+  }
+  runs.retain(|r| r.as_object().is_none_or(|o| o.keys().any(|k| k != "start" && k != "end")));
+  p
 }
 
 /// Removes links a text's runs may not carry (anything but http(s), mailto and tel), so a
@@ -4128,6 +4149,61 @@ mod tests {
     let t = e.doc.get(&id).unwrap().text.clone().unwrap();
     assert_eq!(t.runs.len(), 1);
     assert_eq!(t.runs[0].link.as_deref(), Some("tel:+123"));
+  }
+
+  #[test]
+  fn unsafe_links_never_reach_instance_overrides_or_create_nodes() {
+    let mut e = engine();
+    // create_nodes spans are checked.
+    let r = e.dispatch(Command::Ai {
+      tool: "create_nodes".into(),
+      input: json!({ "nodes": [{ "type": "text", "name": "Bad", "spans": [{ "text": "x", "link": "javascript:alert(1)" }] }] }),
+    });
+    assert!(r.is_err(), "{r:?}");
+    let ok = ai(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "text", "name": "Good", "spans": [{ "text": "go", "link": "https://example.com" }] }] }),
+    );
+    let good = ok["created"][0]["id"].as_str().or(ok["created"][0].as_str()).unwrap().to_string();
+    assert_eq!(
+      e.doc.get(&good).unwrap().text.as_ref().unwrap().runs[0].link.as_deref(),
+      Some("https://example.com")
+    );
+    // A patch on a layer inside an instance is stored as an override: it must be clean first.
+    let comp = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "Label".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let main = id_of(&e.dispatch(Command::CreateComponent { ids: vec![comp] }).unwrap());
+    let inst = id_of(
+      &e.dispatch(Command::CreateInstance {
+        component_id: main,
+        x: 300.0,
+        y: 0.0,
+        parent: None,
+        anchor: None,
+        into_components: false,
+      })
+      .unwrap(),
+    );
+    let inner = e.doc.get(&inst).unwrap().children[0].clone();
+    update_ids(
+      &mut e,
+      vec![inner.clone()],
+      json!({ "text": { "runs": [{ "start": 0, "end": 3, "link": "javascript:alert(1)" }, { "start": 3, "end": 5, "link": "tel:+1" }] } }),
+    );
+    let stored = serde_json::to_string(&e.doc.get(&inst).unwrap().instance).unwrap();
+    assert!(!stored.contains("javascript"), "{stored}");
+    assert!(stored.contains("tel:+1"), "{stored}");
+    assert!(!serde_json::to_string(&e.doc.get(&inner).unwrap().text)
+      .unwrap()
+      .contains("javascript"));
   }
 
   #[test]

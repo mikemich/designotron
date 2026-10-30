@@ -773,16 +773,19 @@ fn span_attrs(s: &SpanStyle, base: &SpanStyle, color: impl Fn(&str) -> String) -
   if s.letter_spacing != base.letter_spacing {
     a.push_str(&format!(" letter-spacing=\"{}\"", fmt(s.letter_spacing)));
   }
-  if s.decoration != base.decoration {
-    a.push_str(match s.decoration {
+  // One decoration per span, written once (a repeated attribute makes the SVG invalid). An
+  // explicit decoration wins; a link only adds an underline to a span that has none.
+  let deco = if s.decoration == TextDecoration::None && s.link.as_deref().and_then(crate::model::safe_link).is_some() {
+    TextDecoration::Underline
+  } else {
+    s.decoration
+  };
+  if deco != base.decoration {
+    a.push_str(match deco {
       TextDecoration::None => " text-decoration=\"none\"",
       TextDecoration::Underline => " text-decoration=\"underline\"",
       TextDecoration::Strikethrough => " text-decoration=\"line-through\"",
     });
-  }
-  // Links read as links: underlined unless the range already has its own decoration.
-  if s.decoration == TextDecoration::None && s.link.as_deref().and_then(crate::model::safe_link).is_some() {
-    a.push_str(" text-decoration=\"underline\"");
   }
   if let Some(c) = &s.color {
     a.push_str(&format!(" fill=\"{}\"", color(c)));
@@ -971,6 +974,49 @@ mod tests {
     crate::layout::relayout_all(&mut doc, &HeuristicMeasurer);
     let svg = render(&doc);
     assert!(svg.contains('\u{2026}'), "{svg}");
+  }
+
+  #[test]
+  fn exported_text_never_repeats_an_attribute() {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Text, "t".into(), "T".into());
+    {
+      let p = t.text.as_mut().unwrap();
+      p.characters = "Underlined with a link and struck link".into();
+      p.decoration = crate::model::TextDecoration::Underline;
+      p.runs = vec![
+        // Explicit "none" on a link range: one attribute, the explicit one's underline-for-link wins over none.
+        crate::model::TextRun {
+          start: 16,
+          end: 20,
+          decoration: Some(crate::model::TextDecoration::None),
+          link: Some("https://example.com".into()),
+          ..Default::default()
+        },
+        crate::model::TextRun {
+          start: 31,
+          end: 37,
+          decoration: Some(crate::model::TextDecoration::Strikethrough),
+          link: Some("https://example.com".into()),
+          ..Default::default()
+        },
+      ];
+    }
+    doc.insert(t, None, &page, None);
+    let svg = export_svg(&doc, "t", &HeuristicMeasurer);
+    // No tag may carry the same attribute twice (browsers reject the whole SVG).
+    for tag in svg.split('<').skip(1) {
+      let tag = tag.split('>').next().unwrap();
+      let mut seen = std::collections::HashSet::new();
+      for attr in tag.split(' ').filter_map(|a| a.split_once("=\"").map(|(k, _)| k)) {
+        assert!(seen.insert(attr), "{attr} repeated in <{tag}>");
+      }
+    }
+    // The struck link keeps its strike-through; the link on an underlined text stays underlined.
+    assert!(svg.contains("text-decoration=\"line-through\""), "{svg}");
+    assert!(!svg.contains("text-decoration=\"none\""), "{svg}");
   }
 
   #[test]

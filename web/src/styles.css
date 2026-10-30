@@ -2065,3 +2065,10 @@ body:has(.phone-note) .toast {
     justify-content: center;
   }
 }
+
+/* Min/max size fields carry their names ("Min W") as labels, not placeholders. */
+.size-limits .field .lbl {
+  width: 40px;
+  font-size: 10px;
+  cursor: default;
+}
