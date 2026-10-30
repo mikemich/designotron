@@ -167,6 +167,99 @@ try {
     check("the unsaved layer survives the reload", (await layerNames(page)).includes("Unsaved"));
     await page.context().close();
   }
+
+  // 4. A write that fails (quota) is not "saved": the label says so, the copy in localStorage
+  // keeps the edit, closing asks first, and a later write that works clears it all.
+  {
+    const page = await open(() => {
+      const put = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (...a) {
+        if (window.__failPut) throw new DOMException("quota", "QuotaExceededError");
+        return put.apply(this, a);
+      };
+    });
+    await addRect(page, "Kept", 0, 0, "#ff0000");
+    await sleep(1500);
+    await page.evaluate(() => (window.__failPut = true));
+    await page.mouse.click(700, 500);
+    await addRect(page, "AfterQuota", 200, 0, "#00ff00");
+    await sleep(2500);
+    const text = await label(page);
+    check("a failed write is not reported as saved", !text.includes("Saved locally") && text.includes("Not saved"), text);
+    const recovery = () => page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("dt:recover")).length);
+    check("a failed write keeps a recovery copy", (await recovery()) === 1);
+    let dialog = null;
+    page.on("dialog", async (d) => {
+      dialog = d.type();
+      await d.accept();
+    });
+    await page.evaluate(() => (window.__failPut = false));
+    await sleep(5500);
+    check("the save is retried and succeeds", (await label(page)).includes("Saved locally") && (await stored(page)).includes("AfterQuota"), await label(page));
+    check("a successful retry clears the recovery copy", (await recovery()) === 0);
+    await page.evaluate(() => (window.__failPut = true));
+    await addRect(page, "Lost?", 400, 0, "#0000ff");
+    await sleep(2500);
+    await page.reload();
+    await page.waitForSelector("#dt-canvas");
+    await sleep(800);
+    check("closing after a failed write asks first", dialog === "beforeunload", String(dialog));
+    check("the edit made after the failure survives via the recovery copy", (await layerNames(page)).includes("Lost?"));
+    await page.context().close();
+  }
+
+  // 5. Steady edits can't postpone saving for ever.
+  {
+    const page = await open(() => {
+      window.__puts = [];
+      const put = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (v, k) {
+        if (String(k).startsWith("dt:file:")) window.__puts.push(performance.now());
+        return put.call(this, v, k);
+      };
+    });
+    await addRect(page, "R", 0, 0, "#ff0000");
+    await sleep(2000);
+    const id = await page.evaluate(() => Object.values(window.__dt.doc().nodes).find((n) => n.name === "R").id);
+    await page.evaluate(() => (window.__puts = []));
+    for (let i = 0; i < 40; i++) {
+      await page.evaluate((a) => window.__dt.dispatch({ op: "update", ids: [a.id], patch: { x: a.i * 3 } }), { id, i });
+      await sleep(300);
+    }
+    const n = await page.evaluate(() => window.__puts.length);
+    check("edits every 300 ms for 12 s are saved along the way", n >= 2, `${n} saves`);
+    await page.context().close();
+  }
+
+  // 6. Opening a file and not touching it writes nothing (fonts loading re-run layout).
+  {
+    const page = await open(() => {
+      window.__puts = [];
+      const put = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (v, k) {
+        window.__puts.push(String(k).slice(0, 12));
+        return put.call(this, v, k);
+      };
+    });
+    await page.evaluate(() =>
+      window.__dt.dispatch({
+        op: "ai",
+        tool: "create_nodes",
+        input: { nodes: [{ type: "text", name: "T1", x: 0, y: 0, text: "Hello serif", fontFamily: "Playfair Display", fontSize: 32 }] },
+      }),
+    );
+    await sleep(3000);
+    await page.reload();
+    await page.waitForSelector("#dt-canvas");
+    await sleep(5000);
+    const puts = await page.evaluate(() => window.__puts);
+    check("reopening without editing writes no file", puts.length === 0, JSON.stringify(puts));
+    await page.evaluate(() => window.__dt.dispatch({ op: "relayout" }));
+    await sleep(1500);
+    check("a relayout that changes nothing writes no file", (await page.evaluate(() => window.__puts.length)) === 0);
+    check("the label stays Saved locally", (await label(page)).includes("Saved locally"));
+    await page.context().close();
+  }
 } catch (err) {
   check("unexpected exception", false, String(err));
 } finally {

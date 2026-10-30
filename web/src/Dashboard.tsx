@@ -26,7 +26,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   const engineError = useBoot((s) => s.error);
   /** The file being created while the engine loads ("new" or a template id). */
   const [opening, setOpening] = useState<string | null>(null);
-  const refresh = () => listFiles().then(setFiles);
+  const refresh = () => listFiles().then(setFiles, () => {});
   useEffect(() => {
     refresh();
   }, []);

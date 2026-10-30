@@ -847,11 +847,15 @@ impl Engine {
   pub fn dispatch(&mut self, cmd: Command) -> Result<Value, String> {
     match cmd {
       Command::Relayout => {
+        let prev = self.doc.clone();
         layout::relayout_all(&mut self.doc, self.measurer.as_ref());
         // Text measurement may have changed (fonts loaded): repaint everything.
         self.render_cache = RenderCache::default();
         self.rev += 1;
-        self.doc_rev += 1;
+        // Fonts finishing to load re-run this on every open: only a real change is an edit.
+        if prev != self.doc {
+          self.doc_rev += 1;
+        }
         return Ok(json!({}));
       }
       Command::Undo => {
@@ -984,8 +988,11 @@ impl Engine {
       Command::CancelGesture => {
         let gesture = self.gesture.take();
         if let Some(base) = self.gesture_undo.take().or(gesture) {
+          let prev = self.doc.clone();
           self.restore(base);
-          self.doc_rev += 1;
+          if prev != self.doc {
+            self.doc_rev += 1;
+          }
         }
         self.rev += 1;
         return Ok(json!({}));
@@ -2947,6 +2954,25 @@ mod tests {
     let after_undo = e.doc_rev;
     e.dispatch(Command::Redo).unwrap();
     assert!(e.doc_rev > after_undo, "redo changes the document");
+  }
+
+  #[test]
+  fn doc_rev_ignores_relayout_that_changes_nothing() {
+    let mut e = engine();
+    rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    ai(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "text", "name": "T", "text": "Hello", "x": 0, "y": 80 }] }),
+    );
+    e.dispatch(Command::Relayout).unwrap();
+    let base = e.doc_rev;
+    e.dispatch(Command::Relayout).unwrap();
+    e.dispatch(Command::Relayout).unwrap();
+    assert_eq!(e.doc_rev, base, "a relayout of a laid-out document is not an edit");
+    e.dispatch(Command::BeginGesture).unwrap();
+    e.dispatch(Command::CancelGesture).unwrap();
+    assert_eq!(e.doc_rev, base, "cancelling a gesture that changed nothing is not an edit");
   }
 
   #[test]

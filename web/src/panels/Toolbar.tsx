@@ -38,6 +38,7 @@ import type { Tool } from "../types";
 import { ALT, Menu, MOD, SHIFT, type MenuItem } from "../ui/controls";
 import { runPlugin, usePlugins } from "../plugins";
 import { useCollab } from "../collab";
+import { persistentStorage } from "../files";
 import { claudeReady, useChat } from "../ai/chatState";
 import { useShortcuts } from "./ShortcutsDialog";
 import { useImport } from "./ImportDialog";
@@ -300,7 +301,15 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
             dispatch({ op: "setDocName", name: e.target.value.trim() })
           }
         />
-        <span className="small save-state">{saveFailed ? "Not saved, retrying" : dirty ? "Saving…" : "Saved locally"}</span>
+        <span className="small save-state">
+          {saveFailed
+            ? "Not saved, retrying"
+            : !persistentStorage()
+              ? "Not saved (browser storage unavailable)"
+              : dirty
+                ? "Saving…"
+                : "Saved locally"}
+        </span>
       </div>
       <div className="group">
         <button

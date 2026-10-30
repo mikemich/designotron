@@ -29,24 +29,34 @@ const INDEX = "dt:index";
 // IndexedDB can be missing or throw (private windows, sandboxed previews); fall back to memory.
 const memory = new Map<string, unknown>();
 let idbOk = true;
+// Set once IndexedDB has served a read or write. After that a failing write is a real
+// failure (quota, a full disk) that callers must see, not a sign that IndexedDB is missing.
+let idbWorked = false;
 
 async function get(key: string): Promise<unknown> {
   if (idbOk) {
     try {
-      return await idbGet(key);
-    } catch {
+      const v = await idbGet(key);
+      idbWorked = true;
+      return v;
+    } catch (err) {
+      // Reading nothing back would let a caller write back an empty index over the real one.
+      if (idbWorked) throw err;
       idbOk = false;
     }
   }
   return memory.get(key);
 }
 
+/** Rejects when a write to a working IndexedDB fails: the data is not stored. */
 async function set(key: string, value: unknown): Promise<void> {
   memory.set(key, value);
   if (idbOk) {
     try {
       await idbSet(key, value);
-    } catch {
+      idbWorked = true;
+    } catch (err) {
+      if (idbWorked) throw err;
       idbOk = false;
     }
   }
@@ -57,7 +67,8 @@ async function del(key: string): Promise<void> {
   if (idbOk) {
     try {
       await idbDel(key);
-    } catch {
+    } catch (err) {
+      if (idbWorked) throw err;
       idbOk = false;
     }
   }
