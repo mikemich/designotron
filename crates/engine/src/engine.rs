@@ -3098,9 +3098,23 @@ mod tests {
     let a = rect(&mut e, 100.0, 50.0, 40.0, 20.0, None);
     let b = rect(&mut e, 300.0, 50.0, 40.0, 20.0, None);
     let bounds = |r: &Value, id: &str| -> Vec<f64> { r["bounds"][id].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect() };
+    let t = ai(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "F", "x": 0, "y": 300, "width": 100, "height": 100, "children": [
+      { "type": "text", "text": "one" }, { "type": "text", "text": "two" }] }] }),
+    )["created"][0]["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
     let first = e.render_incremental(&page, &[]);
     assert_eq!(bounds(&first, &a), vec![100.0, 50.0, 40.0, 20.0]);
     assert_eq!(bounds(&first, &b), vec![300.0, 50.0, 40.0, 20.0]);
+    assert_eq!(
+      (first["texts"][&a].as_u64(), first["texts"][&t].as_u64()),
+      (Some(0), Some(2)),
+      "text layers are counted per root"
+    );
     // A drop shadow reaches past the box and the bounds say so.
     e.dispatch(Command::Update {
       ids: vec![a.clone()],

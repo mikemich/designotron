@@ -11,6 +11,11 @@ use crate::shapes;
 use crate::text::{layout_of_node, SpanStyle, TextMeasurer};
 use crate::{color, model};
 
+/// Size classes of canvas text (px, rounded up to the next step): about 1.25x apart, so the
+/// editor's level of detail switches rarely while zooming. Mirrors `TEXT_SIZE_STEPS` in
+/// `web/src/canvas/Canvas.tsx`.
+pub const TEXT_SIZE_STEPS: [u32; 20] = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 96, 128, 192, 256];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
   Canvas,
@@ -761,8 +766,8 @@ impl<'a> Renderer<'a> {
     out
   }
 
-  /// Canvas only: the text's size (its largest span, rounded up) for a class the editor
-  /// hides with one CSS rule when the text is too small to read, showing its `greek_bar`s.
+  /// Canvas only: the text's size class (see `TEXT_SIZE_STEPS`), so the editor can hide text too
+  /// small to read, and show its `greek_bar`s, by switching one class on the canvas.
   fn lod_size(&self, t: &model::TextProps, lay: &crate::text::TextLayout) -> Option<u32> {
     if self.opts.mode != Mode::Canvas {
       return None;
@@ -772,7 +777,14 @@ impl<'a> Renderer<'a> {
       .iter()
       .flat_map(|l| l.segments.iter().map(|sg| sg.style.size))
       .fold(t.font_size, f64::max);
-    Some((size.ceil() as u32).clamp(1, 255))
+    let steps = &TEXT_SIZE_STEPS;
+    Some(
+      steps
+        .iter()
+        .copied()
+        .find(|&s| f64::from(s) >= size)
+        .unwrap_or(steps[steps.len() - 1]),
+    )
   }
 }
 
@@ -1098,9 +1110,9 @@ mod tests {
     crate::layout::relayout_all(&mut doc, &HeuristicMeasurer);
     let opts = |mode| RenderOptions { mode, hidden: &[] };
     let svg = render_root(&doc, "t", &HeuristicMeasurer, opts(Mode::Canvas));
-    assert!(svg.contains("<text class=\"s14\""), "size 13.2 rounds up to 14: {svg}");
+    assert!(svg.contains("<text class=\"s16\""), "size 13.2 is in the 16 class: {svg}");
     let path = svg
-      .split("<path class=\"gk g14\" d=\"")
+      .split("<path class=\"gk g16\" d=\"")
       .nth(1)
       .expect("greek bars")
       .split('"')

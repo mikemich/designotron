@@ -81,6 +81,16 @@ must never be committed.
   canvas render cache (`render_incremental`) and the JS document copy (`doc_delta`) all work
   from that diff. Only `get_mut` nodes you actually change (use `Document::update_where`), and
   never add per-mutation or per-frame work that scans every node.
+- Big files on the canvas: `render_incremental` also returns each root's painted bounds and text
+  count; `Canvas.tsx` hides roots outside the view (`display="none"`) and draws text under 5 px
+  (and, while zooming a page with 400+ texts in view, all text) as the bars `render.rs` emits next
+  to every text layer, by switching a `lod-<level>` class on `.dt-content`. Never rewrite the
+  canvas stylesheet per frame: that restyles every element.
+- Saving: autosave writes one IndexedDB record per top-level layer plus a manifest at
+  `dt:file:<id>` (`persist.rs` plans the changed layers from the node diff, `saveDelta` in
+  `files.ts` stores them in one transaction); single-record files from older versions still load
+  and are converted by their first edit. `onDocChange` listeners run only when `docRev` moves, so
+  selecting never serialises or re-queries the document.
 - Room logic lives in `crates/rooms`, used by the bridge (one LAN room) and `crates/relay`
   (many online rooms keyed by an unguessable id). The relay only stores and relays
   documents: never add tools, MCP or Claude to it.

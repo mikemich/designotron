@@ -94,11 +94,22 @@ const ZOOM_TEXT_BUDGET = 400;
 /** Roots this far (screen px) outside the canvas still stay in the DOM, so panning doesn't pop. */
 const CULL_MARGIN = 300;
 
-/** CSS that hides text of sizes 1..`k` px (see `lod_size` in render.rs) and shows its bars. */
-function lodCss(k: number): string {
-  if (k <= 0) return "";
-  const sizes = Array.from({ length: Math.min(k, 255) }, (_, i) => i + 1);
-  return `${sizes.map((n) => `.dt-content text.s${n}`).join(",")}{display:none}${sizes.map((n) => `.dt-content path.g${n}`).join(",")}{display:inline}`;
+/** Size classes of canvas text, as in `TEXT_SIZE_STEPS` in render.rs. */
+const TEXT_SIZE_STEPS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 96, 128, 192, 256];
+
+/** For each level `lod-L` on the canvas, text of the size classes up to step L is hidden and
+ * its bars shown. The sheet never changes: rewriting one makes the browser restyle every
+ * element, while switching a class on the canvas only restyles the text. */
+const LOD_CSS = TEXT_SIZE_STEPS.map((_, level) => {
+  const upTo = TEXT_SIZE_STEPS.slice(0, level + 1);
+  return `${upTo.map((n) => `.dt-content.lod-${level} text.s${n}`).join(",")}{display:none}${upTo.map((n) => `.dt-content.lod-${level} path.g${n}`).join(",")}{display:inline}`;
+}).join("");
+
+/** The highest `lod-L` level whose text classes are all under MIN_TEXT_PX at this zoom (-1: none). */
+function lodLevel(zoom: number): number {
+  let level = -1;
+  while (level + 1 < TEXT_SIZE_STEPS.length && TEXT_SIZE_STEPS[level + 1] * zoom < MIN_TEXT_PX) level++;
+  return level;
 }
 
 const keys = { space: false };
@@ -253,9 +264,11 @@ export function Canvas() {
   // Panning and zooming change what is in view; zooming also switches the cheap look.
   useLayoutEffect(applyView, [v.x, v.y, v.zoom, size.w, size.h, zooming]);
 
-  // Text up to this many px in size is under MIN_TEXT_PX on screen.
-  const lodMax = Math.ceil(MIN_TEXT_PX / v.zoom) - 1;
-  const lodStyle = useMemo(() => lodCss(lodMax), [lodMax]);
+  // The text level of detail follows the zoom once it settles: switching it restyles every
+  // text layer, and while zooming a big page they are already drawn as bars (`zoom-lod`).
+  const lodRef = useRef(-1);
+  if (!zooming) lodRef.current = lodLevel(v.zoom);
+  const lod = lodRef.current;
   const selKey = sel.join(",");
   const selItems = useMemo(() => query<{ items: BoundsItem[]; union: Rect | null }>({ q: "bounds", ids: sel }), [rev, selKey]);
   const hoverItem = useMemo(() => (hover && !sel.includes(hover) ? query<{ items: BoundsItem[] }>({ q: "bounds", ids: [hover] }).items[0] : null), [rev, hover, sel]);
@@ -1058,8 +1071,8 @@ export function Canvas() {
       onDragOver={(e) => e.preventDefault()}
       onDrop={onDrop}
     >
-      <svg className="dt-content" xmlns="http://www.w3.org/2000/svg" width={size.w || undefined} height={size.h || undefined}>
-        <style>{lodStyle}</style>
+      <svg className={"dt-content" + (lod >= 0 ? ` lod-${lod}` : "")} xmlns="http://www.w3.org/2000/svg" width={size.w || undefined} height={size.h || undefined}>
+        <style>{LOD_CSS}</style>
         <g ref={contentRef} transform={`translate(${v.x} ${v.y}) scale(${v.zoom})`} />
       </svg>
       <svg className="overlay" width={size.w || undefined} height={size.h || undefined}>
