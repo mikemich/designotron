@@ -55,11 +55,39 @@ const INDEX = "dt:index";
 // IndexedDB can be missing or throw (private windows, sandboxed previews); fall back to memory.
 const memory = new Map<string, unknown>();
 let idbOk = true;
-// Set once IndexedDB has served a read or write. After that a failing write is a real
-// failure (quota, a full disk) that callers must see, not a sign that IndexedDB is missing.
+// Set once IndexedDB has opened or served a read or write. After that a failing read or write
+// is a real failure (a transient error, quota, a full disk) that callers must see, not a sign
+// that IndexedDB is missing.
 let idbWorked = false;
 
+/** Opens the database once (as idb-keyval will) so that only a failed *open* means IndexedDB is
+ * missing; a read that fails on a cold load then reaches the caller instead of reading as
+ * "no such file". */
+let opened: Promise<void> | null = null;
+function ensureOpen(): Promise<void> {
+  opened ??= new Promise<void>((resolve) => {
+    try {
+      const req = indexedDB.open("keyval-store");
+      req.onupgradeneeded = () => req.result.createObjectStore("keyval");
+      req.onsuccess = () => {
+        req.result.close();
+        idbWorked = true;
+        resolve();
+      };
+      req.onerror = () => {
+        idbOk = false;
+        resolve();
+      };
+    } catch {
+      idbOk = false;
+      resolve();
+    }
+  });
+  return opened;
+}
+
 async function get(key: string): Promise<unknown> {
+  await ensureOpen();
   if (idbOk) {
     try {
       const v = await idbGet(key);
@@ -76,6 +104,7 @@ async function get(key: string): Promise<unknown> {
 
 /** Rejects when a write to a working IndexedDB fails: the data is not stored. */
 async function set(key: string, value: unknown): Promise<void> {
+  await ensureOpen();
   memory.set(key, value);
   if (idbOk) {
     try {
@@ -89,6 +118,7 @@ async function set(key: string, value: unknown): Promise<void> {
 }
 
 async function del(key: string): Promise<void> {
+  await ensureOpen();
   memory.delete(key);
   if (idbOk) {
     try {
@@ -104,6 +134,7 @@ async function del(key: string): Promise<void> {
 // the data out of `memory` while IndexedDB works (a copy there would double a big file's RAM).
 
 async function getMany(keys: string[]): Promise<unknown[]> {
+  await ensureOpen();
   if (idbOk) {
     try {
       const v = await idbGetMany(keys);
@@ -118,6 +149,7 @@ async function getMany(keys: string[]): Promise<unknown[]> {
 }
 
 async function setMany(entries: [string, unknown][]): Promise<void> {
+  await ensureOpen();
   if (idbOk) {
     try {
       await idbSetMany(entries);
@@ -132,6 +164,7 @@ async function setMany(entries: [string, unknown][]): Promise<void> {
 }
 
 async function delMany(keys: string[]): Promise<void> {
+  await ensureOpen();
   for (const k of keys) memory.delete(k);
   if (idbOk) {
     try {
@@ -292,6 +325,9 @@ async function loadLayered(id: string, first: Manifest): Promise<string> {
 }
 
 export async function deleteFile(id: string) {
+  // The index first: if that write fails nothing was deleted, instead of a listed file whose
+  // data is gone.
+  await writeIndex((idx) => idx.filter((f) => f.id !== id));
   for (const v of await listVersions(id)) await del(`dt:version:${id}:${v.id}`);
   await del("dt:versions:" + id);
   const rec = (await get(fileKey(id))) as StoredFile | Manifest | undefined;
@@ -299,7 +335,6 @@ export async function deleteFile(id: string) {
   layered.delete(id);
   await del("dt:file:" + id);
   clearRecovery(id);
-  await writeIndex((idx) => idx.filter((f) => f.id !== id));
 }
 
 export async function renameFile(id: string, name: string) {
