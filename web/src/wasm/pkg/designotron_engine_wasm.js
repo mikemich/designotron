@@ -115,11 +115,13 @@ export class WasmEngine {
     }
     /**
      * Starts the collaboration baseline at the current document; `ordered` when the relay
-     * acknowledges changes in order (see `Engine::collab_reset`).
+     * acknowledges changes in order, `granular` when it also takes pages, styles and variables
+     * per id (see `Engine::collab_reset`).
      * @param {boolean} ordered
+     * @param {boolean} granular
      */
-    collabReset(ordered) {
-        wasm.wasmengine_collabReset(this.__wbg_ptr, ordered);
+    collabReset(ordered, granular) {
+        wasm.wasmengine_collabReset(this.__wbg_ptr, ordered, granular);
     }
     /**
      * JSON array of this editor's unacknowledged and unsent changes, oldest first.
@@ -136,6 +138,15 @@ export class WasmEngine {
         } finally {
             wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
         }
+    }
+    /**
+     * Whether this engine reads and writes pages, styles and variables per id in deltas (what
+     * an editor tells the room it can do when joining).
+     * @returns {boolean}
+     */
+    collabGranular() {
+        const ret = wasm.wasmengine_collabGranular(this.__wbg_ptr);
+        return ret !== 0;
     }
     /**
      * JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.

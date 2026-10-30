@@ -8,13 +8,19 @@ export class WasmEngine {
   collabDelta(): string;
   /**
    * Starts the collaboration baseline at the current document; `ordered` when the relay
-   * acknowledges changes in order (see `Engine::collab_reset`).
+   * acknowledges changes in order, `granular` when it also takes pages, styles and variables
+   * per id (see `Engine::collab_reset`).
    */
-  collabReset(ordered: boolean): void;
+  collabReset(ordered: boolean, granular: boolean): void;
   /**
    * JSON array of this editor's unacknowledged and unsent changes, oldest first.
    */
   collabUnsent(): string;
+  /**
+   * Whether this engine reads and writes pages, styles and variables per id in deltas (what
+   * an editor tells the room it can do when joining).
+   */
+  collabGranular(): boolean;
   /**
    * JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
    */
@@ -45,7 +51,8 @@ export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_wasmengine_free: (a: number, b: number) => void;
   readonly wasmengine_collabDelta: (a: number) => [number, number];
-  readonly wasmengine_collabReset: (a: number, b: number) => void;
+  readonly wasmengine_collabGranular: (a: number) => number;
+  readonly wasmengine_collabReset: (a: number, b: number, c: number) => void;
   readonly wasmengine_collabUnsent: (a: number) => [number, number];
   readonly wasmengine_dispatch: (a: number, b: number, c: number) => [number, number, number, number];
   readonly wasmengine_docDelta: (a: number, b: number) => [number, number];
