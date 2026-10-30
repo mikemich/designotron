@@ -5,6 +5,11 @@
 //! Layers changed in place travel as per-property patches (`patch`), so two people editing
 //! different properties of one layer both keep their change; a relay that orders every
 //! change (see `designotron-rooms`) makes everyone converge on the same document.
+//!
+//! Pages, styles and variables travel per id too (`granular` deltas), so two people editing
+//! different styles, variables or pages at the same moment both keep their change. Older
+//! peers send and understand the whole lists (`pages`, `styles`, `variables`); `apply`
+//! takes either form and `legacy` turns a granular delta into the old one.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,8 +23,10 @@ use crate::variables::{Collection, Variable};
 /// Changes from `base` to `doc` as JSON: added nodes in full (`nodes`), changed ones as
 /// per-property `patch`es (whole nodes when `patches` is false, for peers that predate
 /// patches), removed nodes and comments, plus the document-level fields that differ
-/// (name, pages, styles, variables).
-pub fn delta(base: &Document, doc: &Document, patches: bool) -> Value {
+/// (name, pages, styles, variables). With `granular`, pages, styles and variables are sent
+/// as per-id changes (`pageChanges`, `colorStyles`, `textStyles`, `collectionChanges`,
+/// `variableChanges`: see `ListDelta`); otherwise as whole lists, for peers that predate them.
+pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> Value {
   let mut nodes = Map::new();
   let mut patch = Map::new();
   let mut removed = Vec::new();
@@ -49,27 +56,212 @@ pub fn delta(base: &Document, doc: &Document, patches: bool) -> Value {
   if base.name != doc.name {
     o.insert("name".into(), json!(doc.name));
   }
-  if base.pages != doc.pages {
-    o.insert("pages".into(), json!(doc.pages));
-  }
-  if base.styles != doc.styles {
-    o.insert("styles".into(), json!(doc.styles));
-  }
-  if base.variables != doc.variables {
-    o.insert("variables".into(), json!(doc.variables));
+  if granular {
+    granular_parts(base, doc, o);
+  } else {
+    if base.pages != doc.pages {
+      o.insert("pages".into(), json!(doc.pages));
+    }
+    if base.styles != doc.styles {
+      o.insert("styles".into(), json!(doc.styles));
+    }
+    if base.variables != doc.variables {
+      o.insert("variables".into(), json!(doc.variables));
+    }
   }
   out
 }
 
+/// The wire keys of the per-id form of pages, styles and variables.
+const GRANULAR_KEYS: [&str; 5] = ["pageChanges", "colorStyles", "textStyles", "collectionChanges", "variableChanges"];
+
+/// True when a delta uses the per-id form of pages, styles or variables.
+pub fn is_granular(d: &Value) -> bool {
+  GRANULAR_KEYS.iter().any(|k| d.get(*k).is_some())
+}
+
+/// A granular delta in the whole-list form older peers understand, with the lists taken from
+/// `doc` (the room's document, after applying the delta). `None` when `d` is not granular.
+pub fn legacy(d: &Value, doc: &Document) -> Option<Value> {
+  if !is_granular(d) {
+    return None;
+  }
+  let mut out = d.clone();
+  let o = out.as_object_mut()?;
+  let has = |o: &Map<String, Value>, keys: &[&str]| keys.iter().any(|k| o.contains_key(*k));
+  let pages = has(o, &["pageChanges"]);
+  let styles = has(o, &["colorStyles", "textStyles"]);
+  let vars = has(o, &["collectionChanges", "variableChanges"]);
+  for k in GRANULAR_KEYS {
+    o.remove(k);
+  }
+  if pages {
+    o.insert("pages".into(), json!(doc.pages));
+  }
+  if styles {
+    o.insert("styles".into(), json!(doc.styles));
+  }
+  if vars {
+    o.insert("variables".into(), json!(doc.variables));
+  }
+  Some(out)
+}
+
+/// Adds the per-id changes of pages, styles and variables from `base` to `doc` to `o`.
+fn granular_parts(base: &Document, doc: &Document, o: &mut Map<String, Value>) {
+  let mut put = |k: &str, d: Option<Value>| {
+    if let Some(d) = d {
+      o.insert(k.into(), d);
+    }
+  };
+  put("pageChanges", ListDelta::of(&base.pages, &doc.pages, |p| &p.id, &[]));
+  put(
+    "colorStyles",
+    ListDelta::of(&base.styles.colors, &doc.styles.colors, |s| &s.id, &[]),
+  );
+  put("textStyles", ListDelta::of(&base.styles.texts, &doc.styles.texts, |s| &s.id, &[]));
+  // Collections without their variables; a new collection travels whole, with them.
+  let bare = |l: &[Collection]| -> Vec<Collection> { l.iter().cloned().map(|c| Collection { variables: vec![], ..c }).collect() };
+  if let Some(mut d) = ListDelta::of(&bare(&base.variables), &bare(&doc.variables), |c| &c.id, &[]) {
+    if let Some(add) = d.get_mut("add").and_then(|a| a.as_object_mut()) {
+      for c in &doc.variables {
+        if let Some(slot) = add.get_mut(&c.id) {
+          *slot = json!(c);
+        }
+      }
+    }
+    put("collectionChanges", Some(d));
+  }
+  // Variables of collections both sides have; a mode's value is merged on its own.
+  let mut vars = Map::new();
+  for c in &doc.variables {
+    if let Some(b) = base.variables.iter().find(|b| b.id == c.id) {
+      if let Some(d) = ListDelta::of(&b.variables, &c.variables, |v| &v.id, &["values"]) {
+        vars.insert(c.id.clone(), d);
+      }
+    }
+  }
+  if !vars.is_empty() {
+    put("variableChanges", Some(Value::Object(vars)));
+  }
+}
+
+/// Changes to a list of items keyed by id, as JSON:
+/// `{add: {id: item}, patch: {id: {field: value | null}}, del: [id], order: [id]}`, each part
+/// only when not empty. Items are added whole and edited field by field (a `nested` field is
+/// itself merged key by key: a variable's per-mode values); an item someone deleted meanwhile
+/// stays deleted. `order` (the sender's whole order) is only sent when the order differs from
+/// "removed ones gone, new ones last"; on arrival, ids it doesn't list (added by others
+/// meanwhile) keep their relative order after it.
+struct ListDelta;
+
+impl ListDelta {
+  fn of<T: Serialize>(base: &[T], new: &[T], id: impl Fn(&T) -> &String, nested: &[&str]) -> Option<Value> {
+    let (mut add, mut patch) = (Map::new(), Map::new());
+    for n in new {
+      match base.iter().find(|b| id(b) == id(n)) {
+        None => {
+          add.insert(id(n).clone(), serde_json::to_value(n).unwrap_or(Value::Null));
+        }
+        Some(b) => {
+          let p = fields_patch(b, n, nested);
+          if !p.is_empty() {
+            patch.insert(id(n).clone(), Value::Object(p));
+          }
+        }
+      }
+    }
+    let del: Vec<&String> = base.iter().map(&id).filter(|b| !new.iter().any(|n| id(n) == *b)).collect();
+    // What a receiver of the base list ends up with without `order` (it adds in key order).
+    let expected = base.iter().map(&id).filter(|b| !del.contains(b)).chain(add.keys());
+    let ids: Vec<&String> = new.iter().map(&id).collect();
+    let in_order = expected.eq(ids.iter().copied());
+    let mut out = Map::new();
+    for (k, v) in [("add", add), ("patch", patch)] {
+      if !v.is_empty() {
+        out.insert(k.into(), Value::Object(v));
+      }
+    }
+    if !del.is_empty() {
+      out.insert("del".into(), json!(del));
+    }
+    if !in_order {
+      out.insert("order".into(), json!(ids));
+    }
+    (!out.is_empty()).then_some(Value::Object(out))
+  }
+
+  /// Applies `d` (see `of`) to `cur`.
+  fn apply<T: Serialize + DeserializeOwned>(
+    cur: &mut Vec<T>,
+    d: &Value,
+    id: impl Fn(&T) -> &String,
+    nested: &[&str],
+    what: &str,
+  ) -> Result<(), String> {
+    if let Some(add) = d.get("add").and_then(|v| v.as_object()) {
+      for (k, v) in add {
+        let item: T = serde_json::from_value(v.clone()).map_err(|e| format!("bad {what} {k}: {e}"))?;
+        match cur.iter().position(|x| id(x) == k) {
+          Some(i) => cur[i] = item,
+          None => cur.push(item),
+        }
+      }
+    }
+    if let Some(patch) = d.get("patch").and_then(|v| v.as_object()) {
+      for (k, p) in patch {
+        let (Some(i), Some(p)) = (cur.iter().position(|x| id(x) == k), p.as_object()) else {
+          continue;
+        };
+        cur[i] = patch_fields(&cur[i], p, nested).map_err(|e| format!("bad {what} patch {k}: {e}"))?;
+      }
+    }
+    if let Some(del) = d.get("del").and_then(|v| v.as_array()) {
+      cur.retain(|x| !del.iter().any(|k| k.as_str() == Some(id(x).as_str())));
+    }
+    if let Some(order) = d.get("order").and_then(|v| v.as_array()) {
+      let rank = |x: &T| order.iter().position(|k| k.as_str() == Some(id(x).as_str())).unwrap_or(usize::MAX);
+      cur.sort_by_key(rank); // stable: unlisted items keep their order, after the listed ones
+    }
+    Ok(())
+  }
+}
+
 /// The properties of `new` that differ from `old` (`null` for ones `new` leaves out).
 fn node_patch(old: &Node, new: &Node) -> Map<String, Value> {
+  fields_patch(old, new, &[])
+}
+
+/// `node` with the properties in `patch` replaced (`null` resets one to its default).
+fn patch_node(node: &Node, patch: &Map<String, Value>) -> Result<Node, String> {
+  patch_fields(node, patch, &[])
+}
+
+/// The serialised fields of `new` that differ from `old`, `null` for ones `new` leaves out.
+/// A `nested` field that is an object on both sides is diffed key by key (`null` removes one).
+fn fields_patch<T: Serialize>(old: &T, new: &T, nested: &[&str]) -> Map<String, Value> {
   let (Ok(Value::Object(o)), Ok(Value::Object(n))) = (serde_json::to_value(old), serde_json::to_value(new)) else {
     return Map::new();
   };
   let mut out = Map::new();
   for (k, v) in &n {
-    if o.get(k) != Some(v) {
-      out.insert(k.clone(), v.clone());
+    if o.get(k) == Some(v) {
+      continue;
+    }
+    match (nested.contains(&k.as_str()), o.get(k), v) {
+      (true, Some(Value::Object(ov)), Value::Object(nv)) => {
+        let mut sub = Map::new();
+        for (sk, sv) in nv.iter().filter(|(sk, sv)| ov.get(*sk) != Some(*sv)) {
+          sub.insert(sk.clone(), sv.clone());
+        }
+        for sk in ov.keys().filter(|sk| !nv.contains_key(*sk)) {
+          sub.insert(sk.clone(), Value::Null);
+        }
+        out.insert(k.clone(), Value::Object(sub));
+      }
+      _ => {
+        out.insert(k.clone(), v.clone());
+      }
     }
   }
   for k in o.keys().filter(|k| !n.contains_key(*k)) {
@@ -78,15 +270,29 @@ fn node_patch(old: &Node, new: &Node) -> Map<String, Value> {
   out
 }
 
-/// `node` with the properties in `patch` replaced (`null` resets one to its default).
-fn patch_node(node: &Node, patch: &Map<String, Value>) -> Result<Node, String> {
-  let mut v = serde_json::to_value(node).map_err(|e| e.to_string())?;
-  let o = v.as_object_mut().ok_or("bad node")?;
+/// `item` with the fields in `patch` replaced (`null` resets one to its default); a `nested`
+/// object is merged key by key.
+fn patch_fields<T: Serialize + DeserializeOwned>(item: &T, patch: &Map<String, Value>, nested: &[&str]) -> Result<T, String> {
+  let mut v = serde_json::to_value(item).map_err(|e| e.to_string())?;
+  let o = v.as_object_mut().ok_or("bad item")?;
   for (k, val) in patch {
-    if val.is_null() {
-      o.remove(k);
-    } else {
-      o.insert(k.clone(), val.clone());
+    let nest = nested.contains(&k.as_str());
+    match (nest, o.get_mut(k), val) {
+      (_, _, Value::Null) => {
+        o.remove(k);
+      }
+      (true, Some(Value::Object(cur)), Value::Object(sub)) => {
+        for (sk, sv) in sub {
+          if sv.is_null() {
+            cur.remove(sk);
+          } else {
+            cur.insert(sk.clone(), sv.clone());
+          }
+        }
+      }
+      _ => {
+        o.insert(k.clone(), val.clone());
+      }
     }
   }
   serde_json::from_value(v).map_err(|e| e.to_string())
@@ -110,6 +316,7 @@ pub fn is_empty(d: &Value) -> bool {
     && empty("comments")
     && empty("commentsRemoved")
     && ["name", "pages", "styles", "variables"].iter().all(|k| d.get(*k).is_none())
+    && !is_granular(d)
 }
 
 /// Applies a peer's delta, then repairs the tree around everything it touched.
@@ -172,7 +379,43 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
   if let Some(v) = d.get("variables") {
     doc.variables = serde_json::from_value(v.clone()).map_err(|e| format!("bad variables: {e}"))?;
   }
+  apply_granular(doc, d)?;
   repair(doc, &before, &touched);
+  Ok(())
+}
+
+/// Applies the per-id changes of pages, styles and variables in `d`, if it has any.
+fn apply_granular(doc: &mut Document, d: &Value) -> Result<(), String> {
+  if let Some(c) = d.get("pageChanges") {
+    ListDelta::apply(&mut doc.pages, c, |p| &p.id, &[], "page")?;
+  }
+  if let Some(c) = d.get("colorStyles") {
+    ListDelta::apply(&mut doc.styles.colors, c, |s| &s.id, &[], "colour style")?;
+  }
+  if let Some(c) = d.get("textStyles") {
+    ListDelta::apply(&mut doc.styles.texts, c, |s| &s.id, &[], "text style")?;
+  }
+  if let Some(c) = d.get("collectionChanges") {
+    // Collections change without their variables, which have their own changes below.
+    let kept: BTreeMap<String, Vec<Variable>> = doc.variables.iter().map(|c| (c.id.clone(), c.variables.clone())).collect();
+    for c in doc.variables.iter_mut() {
+      c.variables.clear();
+    }
+    let done = ListDelta::apply(&mut doc.variables, c, |c| &c.id, &[], "collection");
+    for c in doc.variables.iter_mut() {
+      if let Some(v) = kept.get(&c.id) {
+        c.variables = v.clone();
+      }
+    }
+    done?;
+  }
+  if let Some(vars) = d.get("variableChanges").and_then(|v| v.as_object()) {
+    for (id, c) in vars {
+      if let Some(coll) = doc.variables.iter_mut().find(|x| x.id == *id) {
+        ListDelta::apply(&mut coll.variables, c, |v| &v.id, &["values"], "variable")?;
+      }
+    }
+  }
   Ok(())
 }
 
@@ -520,8 +763,8 @@ mod tests {
     let ra = rect(&mut a, 10.0, Some(frame.clone()));
     let rb = rect(&mut b, 50.0, Some(frame.clone()));
     // Each side's frame lists only its own new child; merging must keep both.
-    let da = delta(&base, &a.doc, true);
-    let db = delta(&base, &b.doc, true);
+    let da = delta(&base, &a.doc, true, true);
+    let db = delta(&base, &b.doc, true, true);
     apply(&mut a.doc, &db).unwrap();
     apply(&mut b.doc, &da).unwrap();
     for d in [&a.doc, &b.doc] {
@@ -575,7 +818,7 @@ mod tests {
     let base_b = b.doc.clone();
     let theirs = rect(&mut b, 300.0, None);
     a.dispatch(Command::ApplyRemote {
-      delta: delta(&base_b, &b.doc, true),
+      delta: delta(&base_b, &b.doc, true, true),
       local: false,
     })
     .unwrap();
@@ -604,7 +847,7 @@ mod tests {
           // Seeds differ in more than the low bit (the id generator ignores it).
           let mut e = engine(10 + 2 * i as u64);
           e.load(&json).unwrap();
-          e.collab_reset(true);
+          e.collab_reset(true, true);
           e
         })
         .collect();
@@ -828,7 +1071,7 @@ mod tests {
       editors: vec![a, b],
     };
     for e in room.editors.iter_mut() {
-      e.collab_reset(true);
+      e.collab_reset(true, true);
     }
     set(&mut room.editors[0], &id, json!({ "text": { "characters": "Goodbye" } }));
     sync(&mut room, 0);
@@ -906,6 +1149,312 @@ mod tests {
     assert_eq!(vars[0].values["m"], json!(1.0), "my edit is undone");
   }
 
+  /// Both editors send at the same moment; each hears the other's change before its own ack.
+  fn concurrent(room: &mut Room) {
+    let from_a = room.send(0);
+    let from_b = room.send(1);
+    for m in [from_b[0].clone(), from_a[0].clone(), from_a[1].clone(), from_b[1].clone()] {
+      room.receive(m);
+    }
+  }
+
+  fn assert_documents_converged(room: &Room) {
+    for e in &room.editors {
+      assert_eq!(e.doc.pages, room.doc.pages);
+      assert_eq!(e.doc.styles, room.doc.styles);
+      assert_eq!(e.doc.variables, room.doc.variables);
+    }
+  }
+
+  #[test]
+  fn concurrent_edits_to_different_styles_both_survive() {
+    let (mut room, _) = Room::new(2);
+    for i in 0..2 {
+      room.editors[0]
+        .dispatch(Command::AddColorStyle {
+          name: format!("Colour {i}"),
+          color: "#111111".into(),
+        })
+        .unwrap();
+    }
+    sync(&mut room, 0);
+    let ids: Vec<String> = room.editors[0].doc.styles.colors.iter().map(|s| s.id.clone()).collect();
+    let text = room.editors[0]
+      .dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "Body".into(),
+        parent: None,
+      })
+      .unwrap()["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    room.editors[0]
+      .dispatch(Command::AddTextStyle {
+        name: "Body".into(),
+        from: text,
+      })
+      .unwrap();
+    sync(&mut room, 0);
+    let body = room.editors[0].doc.styles.texts[0].id.clone();
+    room.editors[0]
+      .dispatch(Command::UpdateColorStyle {
+        id: ids[0].clone(),
+        name: None,
+        color: Some("#AA0000".into()),
+      })
+      .unwrap();
+    room.editors[1]
+      .dispatch(Command::UpdateColorStyle {
+        id: ids[1].clone(),
+        name: Some("Renamed".into()),
+        color: None,
+      })
+      .unwrap();
+    // A third change by B at the same moment: a new style.
+    room.editors[1]
+      .dispatch(Command::AddColorStyle {
+        name: "Third".into(),
+        color: "#333333".into(),
+      })
+      .unwrap();
+    concurrent(&mut room);
+    assert_documents_converged(&room);
+    let c = &room.doc.styles.colors;
+    assert_eq!(c.len(), 3);
+    assert_eq!(c.iter().find(|s| s.id == ids[0]).unwrap().color, "#AA0000");
+    assert_eq!(c.iter().find(|s| s.id == ids[1]).unwrap().name, "Renamed");
+    assert!(c.iter().any(|s| s.name == "Third"));
+    assert_eq!(room.doc.styles.texts[0].id, body);
+    // One person deleting a style while the other edits another one.
+    room.editors[0].dispatch(Command::DeleteStyle { id: ids[0].clone() }).unwrap();
+    room.editors[1]
+      .dispatch(Command::UpdateColorStyle {
+        id: ids[1].clone(),
+        name: None,
+        color: Some("#00BB00".into()),
+      })
+      .unwrap();
+    concurrent(&mut room);
+    assert_documents_converged(&room);
+    assert_eq!(room.doc.styles.colors.len(), 2);
+    assert_eq!(room.doc.styles.colors.iter().find(|s| s.id == ids[1]).unwrap().color, "#00BB00");
+  }
+
+  fn variable(id: &str, values: &[(&str, f64)]) -> Variable {
+    Variable {
+      id: id.into(),
+      name: id.into(),
+      values: values.iter().map(|(m, v)| (m.to_string(), json!(v))).collect(),
+      ..Default::default()
+    }
+  }
+
+  fn collection(id: &str, vars: Vec<Variable>) -> Collection {
+    Collection {
+      id: id.into(),
+      name: id.into(),
+      modes: ["m1", "m2"]
+        .iter()
+        .map(|m| crate::variables::VarMode {
+          id: m.to_string(),
+          name: m.to_string(),
+        })
+        .collect(),
+      variables: vars,
+    }
+  }
+
+  #[test]
+  fn concurrent_edits_to_different_variables_and_modes_both_survive() {
+    let (mut room, _) = Room::new(2);
+    room.editors[0]
+      .dispatch(Command::SetVariables {
+        collections: vec![
+          collection(
+            "c1",
+            vec![variable("a", &[("m1", 1.0), ("m2", 1.0)]), variable("b", &[("m1", 1.0)])],
+          ),
+          collection("c2", vec![variable("x", &[("m1", 1.0)])]),
+        ],
+      })
+      .unwrap();
+    sync(&mut room, 0);
+    let edit = |room: &mut Room, i: usize, f: &dyn Fn(&mut Vec<Collection>)| {
+      let mut cs = room.editors[i].doc.variables.clone();
+      f(&mut cs);
+      room.editors[i].dispatch(Command::SetVariables { collections: cs }).unwrap();
+    };
+    // Different variables, and different modes of one variable, and a different collection.
+    edit(&mut room, 0, &|cs| {
+      cs[0].variables[0].values.insert("m1".into(), json!(5.0));
+      cs[1].variables.push(variable("y", &[("m1", 7.0)]));
+    });
+    edit(&mut room, 1, &|cs| {
+      cs[0].variables[0].values.insert("m2".into(), json!(6.0));
+      cs[0].variables[1].values.insert("m1".into(), json!(8.0));
+      cs[0].variables.push(variable("c", &[("m1", 3.0)]));
+    });
+    concurrent(&mut room);
+    assert_documents_converged(&room);
+    let c1 = &room.doc.variables[0].variables;
+    assert_eq!(c1[0].values["m1"], json!(5.0));
+    assert_eq!(c1[0].values["m2"], json!(6.0));
+    assert_eq!(c1[1].values["m1"], json!(8.0));
+    assert_eq!(c1.len(), 3, "the new variable is kept");
+    assert_eq!(room.doc.variables[1].variables.len(), 2);
+    // A removed mode value and a removed variable.
+    edit(&mut room, 0, &|cs| {
+      cs[0].variables[0].values.remove("m2");
+    });
+    edit(&mut room, 1, &|cs| {
+      cs[0].variables.retain(|v| v.id != "b");
+      cs[1].name = "Renamed".into();
+    });
+    concurrent(&mut room);
+    assert_documents_converged(&room);
+    assert!(!room.doc.variables[0].variables[0].values.contains_key("m2"));
+    assert_eq!(room.doc.variables[0].variables.len(), 2);
+    assert_eq!(room.doc.variables[1].name, "Renamed");
+    // A new collection travels with its variables; a removed one is gone.
+    edit(&mut room, 0, &|cs| cs.push(collection("c3", vec![variable("z", &[("m1", 2.0)])])));
+    edit(&mut room, 1, &|cs| cs.retain(|c| c.id != "c2"));
+    concurrent(&mut room);
+    assert_documents_converged(&room);
+    let ids: Vec<&str> = room.doc.variables.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["c1", "c3"]);
+    assert_eq!(room.doc.variables[1].variables[0].id, "z");
+  }
+
+  #[test]
+  fn concurrent_page_edits_keep_both_and_the_page_order() {
+    let (mut room, _) = Room::new(2);
+    for _ in 0..2 {
+      room.editors[0].dispatch(Command::AddPage { name: None }).unwrap();
+    }
+    sync(&mut room, 0);
+    let ids: Vec<String> = room.editors[0].doc.pages.iter().map(|p| p.id.clone()).collect();
+    assert_eq!(ids.len(), 3);
+    room.editors[0]
+      .dispatch(Command::RenamePage {
+        id: ids[0].clone(),
+        name: "One".into(),
+      })
+      .unwrap();
+    room.editors[1]
+      .dispatch(Command::RenamePage {
+        id: ids[1].clone(),
+        name: "Two".into(),
+      })
+      .unwrap();
+    room.editors[1]
+      .dispatch(Command::SetPageBackground {
+        id: ids[2].clone(),
+        color: "#101010".into(),
+      })
+      .unwrap();
+    concurrent(&mut room);
+    assert_documents_converged(&room);
+    let names: Vec<&str> = room.doc.pages.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(&names[..2], ["One", "Two"]);
+    assert_eq!(room.doc.pages[2].background, "#101010");
+    // One person reorders the pages while the other renames one.
+    room.editors[0].doc.pages.swap(0, 2);
+    room.editors[1]
+      .dispatch(Command::RenamePage {
+        id: ids[1].clone(),
+        name: "Second".into(),
+      })
+      .unwrap();
+    concurrent(&mut room);
+    assert_documents_converged(&room);
+    let order: Vec<&str> = room.doc.pages.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(order, [ids[2].as_str(), ids[1].as_str(), ids[0].as_str()]);
+    assert_eq!(room.doc.pages[1].name, "Second");
+  }
+
+  #[test]
+  fn whole_list_deltas_from_older_peers_still_apply() {
+    let mut a = engine(1);
+    let mut start = engine(2);
+    start.load(&a.to_json()).unwrap();
+    a.dispatch(Command::AddPage { name: Some("Old".into()) }).unwrap();
+    a.dispatch(Command::AddColorStyle {
+      name: "Brand".into(),
+      color: "#123456".into(),
+    })
+    .unwrap();
+    a.dispatch(Command::SetVariables {
+      collections: vec![collection("c", vec![variable("v", &[("m1", 4.0)])])],
+    })
+    .unwrap();
+    let base = start.doc.clone();
+    let old = delta(&base, &a.doc, true, false);
+    assert!(!is_granular(&old));
+    for k in ["pages", "styles", "variables"] {
+      assert!(old.get(k).is_some(), "{k}");
+    }
+    let mut b = engine(2);
+    b.load(&start.to_json()).unwrap();
+    apply(&mut b.doc, &old).unwrap();
+    assert_eq!(
+      (&b.doc.pages, &b.doc.styles, &b.doc.variables),
+      (&a.doc.pages, &a.doc.styles, &a.doc.variables)
+    );
+    // The per-id form of the same change builds the same lists, and has none of the whole ones.
+    let new = delta(&base, &a.doc, true, true);
+    assert!(is_granular(&new));
+    for k in ["pages", "styles", "variables"] {
+      assert!(new.get(k).is_none(), "{k}");
+    }
+    let mut c = engine(3);
+    c.load(&start.to_json()).unwrap();
+    apply(&mut c.doc, &new).unwrap();
+    assert_eq!(
+      (&c.doc.pages, &c.doc.styles, &c.doc.variables),
+      (&a.doc.pages, &a.doc.styles, &a.doc.variables)
+    );
+    // A relay hands older peers the whole lists of its merged document.
+    let down = legacy(&new, &c.doc).unwrap();
+    assert!(!is_granular(&down));
+    let mut d = engine(4);
+    d.load(&start.to_json()).unwrap();
+    apply(&mut d.doc, &down).unwrap();
+    assert_eq!(
+      (&d.doc.pages, &d.doc.styles, &d.doc.variables),
+      (&a.doc.pages, &a.doc.styles, &a.doc.variables)
+    );
+    assert!(legacy(&old, &c.doc).is_none());
+    // Nothing changed: nothing sent, in either form.
+    assert!(is_empty(&delta(&a.doc, &a.doc, true, true)));
+  }
+
+  #[test]
+  fn a_granular_delta_only_names_what_changed() {
+    let mut a = engine(1);
+    for n in ["One", "Two"] {
+      a.dispatch(Command::AddColorStyle {
+        name: n.into(),
+        color: "#111111".into(),
+      })
+      .unwrap();
+    }
+    let base = a.doc.clone();
+    let id = a.doc.styles.colors[1].id.clone();
+    a.dispatch(Command::UpdateColorStyle {
+      id: id.clone(),
+      name: None,
+      color: Some("#222222".into()),
+    })
+    .unwrap();
+    let d = delta(&base, &a.doc, true, true);
+    assert_eq!(d["colorStyles"].as_object().unwrap().keys().collect::<Vec<_>>(), ["patch"]);
+    assert_eq!(d["colorStyles"]["patch"].as_object().unwrap().keys().collect::<Vec<_>>(), [&id]);
+    assert_eq!(d["colorStyles"]["patch"][&id], json!({ "color": "#222222" }));
+    assert!(d.get("textStyles").is_none() && d.get("pageChanges").is_none() && d.get("collectionChanges").is_none());
+  }
+
   #[test]
   fn undo_reorder_keeps_layers_a_peer_added_meanwhile() {
     let (mut room, first) = Room::new(2);
@@ -949,7 +1498,7 @@ mod tests {
     let base_b = b.doc.clone();
     rect(&mut b, 0.0, None);
     a.dispatch(Command::ApplyRemote {
-      delta: delta(&base_b, &b.doc, true),
+      delta: delta(&base_b, &b.doc, true, true),
       local: false,
     })
     .unwrap();

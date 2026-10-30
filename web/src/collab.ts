@@ -5,6 +5,7 @@
 import { create } from "zustand";
 import { allAssets, loadAssets, referencedAssets } from "./assets";
 import { bridgeChecked, bridgeHttpBase } from "./ai/bridgeClient";
+import { reportFailure } from "./errors";
 import { dispatch, getDoc, getEngine, newEngine, onDocChange, toast, useStore, zoomToFit } from "./store";
 import { deleteFile, newFileId, saveFile } from "./files";
 import { userName } from "./canvas/Comments";
@@ -151,6 +152,9 @@ let applying = false;
 /** The relay acknowledges our changes in the order it applies everyone's (newer relays):
  *  the engine then keeps unacknowledged changes on top, so everyone converges. */
 let ordered = false;
+/** The room takes pages, styles and variables per id, so edits to different ones merge
+ *  (older relays: whole lists, last writer wins). */
+let granular = false;
 /** The relay said the owner stopped sharing this room. */
 let roomEnded = false;
 let flushQueued = false;
@@ -172,6 +176,9 @@ let dropConnection: (() => void) | null = null;
 const sentAssets = new Set<string>();
 let unsubscribe: (() => void) | null = null;
 
+/** Delta keys of pages, styles and variables sent per id (see `collab::delta`). */
+const GRANULAR_KEYS = ["pageChanges", "colorStyles", "textStyles", "collectionChanges", "variableChanges"];
+
 function isEmptyDelta(d: any): boolean {
   return (
     !Object.keys(d.nodes ?? {}).length &&
@@ -179,7 +186,7 @@ function isEmptyDelta(d: any): boolean {
     !(d.removed ?? []).length &&
     !Object.keys(d.comments ?? {}).length &&
     !(d.commentsRemoved ?? []).length &&
-    !["name", "pages", "styles", "variables"].some((k) => k in d)
+    !["name", "pages", "styles", "variables", ...GRANULAR_KEYS].some((k) => k in d)
   );
 }
 
@@ -223,7 +230,7 @@ function loadShared(doc: unknown, assets: Record<string, string>, fit = true) {
   for (const id of Object.keys(assets ?? {})) sentAssets.add(id);
   getEngine().load(JSON.stringify(doc));
   dispatch({ op: "relayout" });
-  getEngine().collabReset(ordered);
+  getEngine().collabReset(ordered, granular);
   if (fit) requestAnimationFrame(zoomToFit);
 }
 
@@ -237,8 +244,9 @@ function onMessage(m: any) {
       // Edits the room never got (made while disconnected, or sent but not acknowledged).
       const unsent: unknown[] = joinedOnce && m.doc ? JSON.parse(getEngine().collabUnsent()) : [];
       ordered = !!m.ordered;
+      granular = !!m.granular;
       if (m.doc) loadShared(m.doc, m.assets, !joinedOnce);
-      else getEngine().collabReset(ordered);
+      else getEngine().collabReset(ordered, granular);
       // Put them back on top of the room's copy; the flush below sends them, so nothing made
       // offline is lost.
       applying = true;
@@ -369,7 +377,7 @@ function connect(join: Record<string, unknown>) {
       if (heardPong && lastPing > lastHeard && now - lastHeard > SILENT_MS && now - lastPing >= PING_MS / 2 - 500) return lost();
       if (now - lastPing >= PING_MS - 500) ping();
     }, PING_MS / 2);
-    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, ...join }));
+    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, granular: true, ...join }));
   };
   socket.onmessage = (e) => ws === socket && onMessage(JSON.parse(e.data));
   socket.onclose = lost;
@@ -490,7 +498,14 @@ export async function remixShared(): Promise<void> {
   const name = `${getDoc().name || "Shared design"} (my copy)`;
   dispatch({ op: "setDocName", name });
   const id = fileId ?? newFileId();
-  await saveFile(id, name, getEngine().save());
+  let saved = true;
+  try {
+    await saveFile(id, name, getEngine().save());
+  } catch (e) {
+    // Still editable here, and autosave keeps trying; the room has been left either way.
+    saved = false;
+    reportFailure("save your copy", e);
+  }
   // Opening the link again joins with a fresh copy instead of this one.
   try {
     if (token) localStorage.removeItem(`dt:collab:${token}`);
@@ -500,7 +515,7 @@ export async function remixShared(): Promise<void> {
   // Drop ?room= so a reload doesn't join again.
   history.replaceState(null, "", `${location.pathname}#/file/${id}`);
   if (id !== fileId) dispatchEvent(new HashChangeEvent("hashchange"));
-  toast("It's your own file now: changes stay with you and nobody else sees them.");
+  if (saved) toast("It's your own file now: changes stay with you and nobody else sees them.");
 }
 
 /** Guest who opened a link after sharing ended: drops the empty placeholder file and goes
@@ -516,7 +531,13 @@ export async function leaveEndedRoom(): Promise<void> {
     /* ignore */
   }
   // Deleted first, so the file list it goes to doesn't show it.
-  if (fileId) await deleteFile(fileId);
+  if (fileId) {
+    try {
+      await deleteFile(fileId);
+    } catch (e) {
+      reportFailure("remove the empty file", e);
+    }
+  }
   history.replaceState(null, "", `${location.pathname}#/`);
   dispatchEvent(new HashChangeEvent("hashchange"));
 }

@@ -87,7 +87,10 @@ must never be committed.
 - Multiplayer (`collab.rs` in engine and bridge): peers exchange `collab::delta` JSON; remote
   changes enter through `Command::ApplyRemote` and never join local history. Undo/redo use
   `collab::revert`, so a step only reverses its own changes. Any new document-level field must
-  be handled in `collab::delta`, `apply` and `revert`. The LAN share listener serves only the
+  be handled in `collab::delta`, `apply` and `revert`. Pages, styles and variables travel per id
+  (`pageChanges`, `colorStyles`, `textStyles`, `collectionChanges`, `variableChanges`) when the
+  room says `granular` in its welcome; the relay turns them into the old whole lists for editors
+  that didn't join with `granular:true`. The LAN share listener serves only the
   editor and `/collab/ws` behind the token; never add MCP, chat or fetch routes to it.
 - The canvas patches one `<g data-root>` per top-level layer; a root whose only change is its
   position gets a transform update instead of new markup. `.canvas` uses `contain: strict` and

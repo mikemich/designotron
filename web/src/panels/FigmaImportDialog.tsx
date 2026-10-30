@@ -4,6 +4,7 @@ import { getDoc, useStore, toast } from "../store";
 import { deleteFile } from "../files";
 import { importFigmaJson, importFigmaUrl, type ImportResult } from "../figma";
 import { useDialog } from "../ui/controls";
+import { reportFailure } from "../errors";
 
 const TOKEN_KEY = "dt:figmaToken";
 const readToken = () => {
@@ -28,7 +29,11 @@ export function FigmaImportDialog() {
     useStore.setState({ figmaOpen: false });
     // Cancelled from the dashboard: don't leave an empty "Untitled" file behind.
     if (figmaOpen === "new" && fileId && getDoc().pages.every((p) => p.children.length === 0)) {
-      await deleteFile(fileId);
+      try {
+        await deleteFile(fileId);
+      } catch (e) {
+        reportFailure("remove the empty file", e);
+      }
       location.hash = "#/";
     }
   };

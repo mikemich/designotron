@@ -1838,7 +1838,7 @@ mod tests {
       set_text(&mut k.e, &target, "Shared");
       variant(&mut k.e, &nested, "Hover");
       b.dispatch(Command::ApplyRemote {
-        delta: crate::collab::delta(&base, &k.e.doc, true),
+        delta: crate::collab::delta(&base, &k.e.doc, true, true),
         local: false,
       })
       .unwrap();
@@ -2231,14 +2231,14 @@ mod tests {
         component_id: hover.clone(),
       })
       .unwrap();
-      let da = crate::collab::delta(&base, &a.doc, true);
+      let da = crate::collab::delta(&base, &a.doc, true, true);
       let bbase = b.doc.clone();
       b.dispatch(Command::SwapComponent {
         id: i.clone(),
         component_id: off.clone(),
       })
       .unwrap();
-      let db = crate::collab::delta(&bbase, &b.doc, true);
+      let db = crate::collab::delta(&bbase, &b.doc, true, true);
 
       // The relay orders A's change, then B's; a third peer and the relay's own copy apply both
       // in that order.

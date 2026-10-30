@@ -76,6 +76,18 @@ export async function copyLink(): Promise<{ url: string; withoutImages: boolean 
 /** Copy (remix) and view-only links for the same encoded file. */
 export const copyUrl = (data: string) => linkBase() + PREFIX + data;
 export const viewUrl = (data: string) => linkBase() + VIEW + data;
+/** The Remix link of the view-only player. The player is already running on this editor, so
+ *  Remix opens a copy here, not on the hosted editor a localhost page's share links use; only
+ *  a `dt:editorUrl` override (a choice made on purpose) sends a localhost page elsewhere. */
+export function remixUrl(data: string): string {
+  let override = false;
+  try {
+    override = !!localStorage.getItem("dt:editorUrl")?.trim();
+  } catch {
+    /* no storage: no override */
+  }
+  return (isLocalPage() && override ? linkBase() : hereBase()) + PREFIX + data;
+}
 /** The same links on this editor, to try them without leaving it. */
 export const previewUrl = (kind: "copy" | "view", data: string) => hereBase() + (kind === "copy" ? PREFIX : VIEW) + data;
 

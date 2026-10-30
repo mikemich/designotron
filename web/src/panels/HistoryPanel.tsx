@@ -3,6 +3,7 @@ import { Copy, History, RotateCcw, Trash2 } from "lucide-react";
 import { dispatchOrThrow, getDoc, getEngine, toast, useStore } from "../store";
 import { deleteVersion, listVersions, loadVersion, newFileId, renameVersion, saveFile, saveVersion, type Version } from "../files";
 import { IconButton, Section } from "../ui/controls";
+import { attempt, reportFailure } from "../errors";
 
 /** Saves an automatic version when the last one is older than this. */
 export const AUTO_VERSION_MS = 10 * 60 * 1000;
@@ -22,7 +23,7 @@ export function HistoryPanel() {
   const [name, setName] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
   const refresh = () => {
-    if (fileId) listVersions(fileId).then(setVersions);
+    if (fileId) listVersions(fileId).then(setVersions, (e) => reportFailure("read the versions", e));
   };
   useEffect(() => {
     refresh();
@@ -30,28 +31,34 @@ export function HistoryPanel() {
   if (!fileId) return null;
 
   const save = async () => {
-    await saveVersion(fileId, name.trim() || `Version ${versions.filter((v) => !v.auto).length + 1}`, getEngine().save());
-    setName("");
+    const saved = await attempt("save the version", () =>
+      saveVersion(fileId, name.trim() || `Version ${versions.filter((v) => !v.auto).length + 1}`, getEngine().save()),
+    );
+    if (saved) setName("");
     refresh();
   };
   const restore = async (v: Version) => {
-    const json = await loadVersion(fileId, v.id);
-    if (!json) return toast("That version could not be read", "error");
-    await saveVersion(fileId, `Before restoring “${v.name}”`, getEngine().save(), true);
-    // The file keeps its current name: a version is about the design, not what it's called.
-    const doc = JSON.parse(json);
-    doc.name = getDoc().name;
-    dispatchOrThrow({ op: "replaceDocument", doc });
-    toast(`Restored “${v.name}”. Undo to go back.`);
+    await attempt("restore the version", async () => {
+      const json = await loadVersion(fileId, v.id);
+      if (!json) return toast("That version could not be read", "error");
+      await saveVersion(fileId, `Before restoring “${v.name}”`, getEngine().save(), true);
+      // The file keeps its current name: a version is about the design, not what it's called.
+      const doc = JSON.parse(json);
+      doc.name = getDoc().name;
+      dispatchOrThrow({ op: "replaceDocument", doc });
+      toast(`Restored “${v.name}”. Undo to go back.`);
+    });
     refresh();
   };
   const duplicate = async (v: Version) => {
-    const json = await loadVersion(fileId, v.id);
-    if (!json) return;
-    const doc = JSON.parse(json);
-    doc.name = `${getDoc().name} (${v.name})`;
-    await saveFile(newFileId(), doc.name, JSON.stringify(doc));
-    toast(`Saved “${doc.name}” to your files`);
+    await attempt("duplicate the version", async () => {
+      const json = await loadVersion(fileId, v.id);
+      if (!json) return toast("That version could not be read", "error");
+      const doc = JSON.parse(json);
+      doc.name = `${getDoc().name} (${v.name})`;
+      await saveFile(newFileId(), doc.name, JSON.stringify(doc));
+      toast(`Saved “${doc.name}” to your files`);
+    });
   };
 
   return (
@@ -93,7 +100,7 @@ export function HistoryPanel() {
                 }}
                 onBlur={async (e) => {
                   setRenaming(null);
-                  if (e.target.value.trim()) await renameVersion(fileId, v.id, e.target.value.trim());
+                  if (e.target.value.trim()) await attempt("rename the version", () => renameVersion(fileId, v.id, e.target.value.trim()));
                   refresh();
                 }}
               />
@@ -110,7 +117,7 @@ export function HistoryPanel() {
           <IconButton title="Duplicate as a new file" onClick={() => duplicate(v)}>
             <Copy size={13} />
           </IconButton>
-          <IconButton title="Delete" onClick={() => deleteVersion(fileId, v.id).then(refresh)}>
+          <IconButton title="Delete" onClick={() => attempt("delete the version", () => deleteVersion(fileId, v.id)).then(refresh)}>
             <Trash2 size={13} />
           </IconButton>
         </div>

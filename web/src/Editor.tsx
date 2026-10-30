@@ -34,6 +34,7 @@ import {
 import { AUTO_VERSION_MS } from "./panels/HistoryPanel";
 import { nodeSvg, svgToPngBlob } from "./exporter";
 import { readFileAsDataUrl } from "./assets";
+import { failureText, reportFailure } from "./errors";
 
 /** Largest document (in characters) copied to localStorage when closing: the quota is about
  * 5 MB, and a bigger copy only fails after a slow synchronous write. */
@@ -41,7 +42,7 @@ const MAX_RECOVERY_CHARS = 4_500_000;
 
 /** A prompt for Claude to send once the next file has opened (from the start screen). */
 let askOnOpen: string | null = null;
-export function askWhenOpen(prompt: string) {
+export function askWhenOpen(prompt: string | null) {
   askOnOpen = prompt;
 }
 
@@ -62,18 +63,41 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const shareOpen = useCollab((s) => s.dialogOpen);
   const [ready, setReady] = useState(false);
   const [missing, setMissing] = useState(false);
+  /** Why the file couldn't be read right now (it may well be in this browser); retried by a button. */
+  const [readError, setReadError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const [stale, setStale] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    setReadError(null);
+    setMissing(false);
     (async () => {
-      await bootEngine();
+      try {
+        await bootEngine();
+      } catch (err) {
+        if (!cancelled) setReadError(failureText("load the editor", err));
+        return;
+      }
       // loadFile also loads the file's images. A copy kept while the page was closing is
       // newer than the last IndexedDB save.
-      const stored = await loadFile(fileId).catch(() => null);
+      let stored: string | null = null;
+      let readFailed: unknown = null;
+      try {
+        stored = await loadFile(fileId);
+      } catch (err) {
+        readFailed = err ?? new Error("storage failed");
+      }
       const recovered = readRecovery(fileId);
       const json = recovered ?? stored;
       if (cancelled) return;
+      // Storage failed and there is no recovery copy: the file may well be here, so don't
+      // claim it isn't.
+      if (readFailed && recovered === null) {
+        console.error(readFailed);
+        setReadError(failureText("read this file", readFailed));
+        return;
+      }
       // A link to a file that isn't in this browser (deleted, or from another device).
       if (json === null) {
         setMissing(true);
@@ -109,7 +133,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       stopDemo();
       if (useCollab.getState().role) stopSharing();
     };
-  }, [fileId]);
+  }, [fileId, attempt]);
 
   useEffect(() => installShortcuts(), []);
 
@@ -145,7 +169,10 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     // Layer count for the debounce, refreshed now and then rather than per change.
     let layers = { n: 0, at: 0 };
     // A file without versions gets its first autosave one interval from now, not on the first save.
-    listVersions(fileId).then((v) => (lastVersion = v[0]?.createdAt ?? Date.now()));
+    listVersions(fileId).then(
+      (v) => (lastVersion = v[0]?.createdAt ?? Date.now()),
+      (err) => reportFailure("read this file's versions", err),
+    );
     // Another tab saving this file makes this tab's copy stale: stop autosaving here so it
     // can't overwrite the newer work, and offer a reload.
     const tabs = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("dt-files");
@@ -367,6 +394,23 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     };
   }, [ready, fileId]);
 
+  if (readError)
+    return (
+      <div className="empty-hint" role="alert">
+        <div>{readError}</div>
+        <div className="muted small" style={{ marginTop: 6 }}>
+          Nothing was changed or deleted. Try again in a moment.
+        </div>
+        <div className="row" style={{ marginTop: 12, justifyContent: "center" }}>
+          <button className="btn primary" onClick={() => setAttempt((n) => n + 1)}>
+            Try again
+          </button>
+          <button className="btn" onClick={onHome}>
+            Back to your files
+          </button>
+        </div>
+      </div>
+    );
   if (missing)
     return (
       <div className="empty-hint">

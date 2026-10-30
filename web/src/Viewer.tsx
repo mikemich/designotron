@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { loadAssets } from "./assets";
 import { Presenter } from "./Presenter";
 import { startFrame } from "./prototype";
-import { copyUrl, decodeFile } from "./snapshot";
+import { decodeFile, remixUrl } from "./snapshot";
 import { bootEngine, dispatch, getDoc, getEngine, newEngine } from "./store";
 
 /** View links (#/view/…) and embeds: plays the design read-only, nothing is saved. */
@@ -48,5 +48,5 @@ export function Viewer({ data }: { data: string }) {
         </a>
       </div>
     );
-  return <Presenter start={state.start} remixUrl={copyUrl(data)} />;
+  return <Presenter start={state.start} remixUrl={remixUrl(data)} />;
 }

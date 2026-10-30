@@ -7,6 +7,7 @@ import { bootEngine, getEngine, newEngine, dispatch, toast, useBoot, useStore } 
 import { TEMPLATES, type Template } from "./templates";
 import { persistentStorage } from "./files";
 import { Menu, type MenuItem } from "./ui/controls";
+import { attempt, reportFailure } from "./errors";
 
 /** "just now", "5 minutes ago", "yesterday", or a date. */
 function edited(t: number): string {
@@ -36,24 +37,33 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   const designWithClaude = async (prompt: string) => {
     if (!prompt.trim() || opening) return;
     askWhenOpen(prompt.trim());
-    await create(null, "claude");
+    if (!(await create(null, "claude"))) askWhenOpen(null);
   };
 
-  const create = async (template: Template | null, key?: string) => {
+  /** Creates and opens a file; false when it couldn't be created. */
+  const create = async (template: Template | null, key?: string): Promise<boolean> => {
     setOpening(key ?? template?.id ?? "new");
     try {
-      await bootEngine();
-    } catch {
+      try {
+        await bootEngine();
+      } catch {
+        return false; // the engine error box offers a retry
+      }
+      newEngine();
+      if (template) template.build();
+      else dispatch({ op: "setDocName", name: "Untitled" });
+      const id = newFileId();
+      const json = getEngine().save();
+      await saveFile(id, JSON.parse(json).name, json);
+      onOpen(id);
+      return true;
+    } catch (err) {
+      // Storage refused the new file: stay here instead of waiting on "Loading editor…".
+      reportFailure("create the file", err);
+      return false;
+    } finally {
       setOpening(null);
-      return;
     }
-    newEngine();
-    if (template) template.build();
-    else dispatch({ op: "setDocName", name: "Untitled" });
-    const id = newFileId();
-    const json = getEngine().save();
-    await saveFile(id, JSON.parse(json).name, json);
-    onOpen(id);
   };
 
   const importFile = async () => {
@@ -83,7 +93,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
           className="btn"
           onClick={async () => {
             useStore.setState({ figmaOpen: "new" });
-            await create(null);
+            if (!(await create(null))) useStore.setState({ figmaOpen: false });
           }}
         >
           <Figma size={14} /> Import from Figma
@@ -175,18 +185,24 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
                       onClick: async () => {
                         const name = window.prompt("File name", f.name);
                         if (name) {
-                          await renameFile(f.id, name);
+                          await attempt("rename the file", () => renameFile(f.id, name));
                           refresh();
                         }
                       },
                     },
-                    { label: "Duplicate", onClick: async () => (await duplicateFile(f.id), refresh()) },
+                    {
+                      label: "Duplicate",
+                      onClick: async () => {
+                        await attempt("duplicate the file", () => duplicateFile(f.id));
+                        refresh();
+                      },
+                    },
                     { sep: true },
                     {
                       label: "Delete",
                       onClick: async () => {
                         if (window.confirm(`Delete “${f.name}”? This cannot be undone.`)) {
-                          await deleteFile(f.id);
+                          await attempt("delete the file", () => deleteFile(f.id));
                           refresh();
                         }
                       },

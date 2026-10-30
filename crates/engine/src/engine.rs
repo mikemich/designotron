@@ -610,6 +610,8 @@ pub struct Engine {
   /// it equals the room's.
   collab_confirmed: Option<Document>,
   collab_pending: std::collections::VecDeque<Value>,
+  /// The room understands pages, styles and variables as per-id changes.
+  collab_granular: bool,
 }
 
 /// Per-root SVG from the last canvas render, and the document it was made from.
@@ -645,6 +647,7 @@ impl Engine {
       collab_synced: None,
       collab_confirmed: None,
       collab_pending: Default::default(),
+      collab_granular: false,
     }
   }
 
@@ -728,7 +731,7 @@ impl Engine {
   pub fn collab_delta(&mut self) -> Value {
     let ordered = self.collab_confirmed.is_some();
     let out = match &self.collab_synced {
-      Some(base) => crate::collab::delta(base, &self.doc, ordered),
+      Some(base) => crate::collab::delta(base, &self.doc, ordered, self.collab_granular),
       None => json!({ "full": self.doc }),
     };
     self.collab_synced = Some(self.doc.clone());
@@ -740,8 +743,10 @@ impl Engine {
 
   /// Starts a collaboration baseline at the current document without producing a delta.
   /// `ordered`: the relay acknowledges every change in the order it applies them (and
-  /// understands per-property patches).
-  pub fn collab_reset(&mut self, ordered: bool) {
+  /// understands per-property patches). `granular`: it also understands pages, styles and
+  /// variables as per-id changes (`collab::delta`).
+  pub fn collab_reset(&mut self, ordered: bool, granular: bool) {
+    self.collab_granular = ordered && granular;
     self.collab_synced = Some(self.doc.clone());
     self.collab_confirmed = ordered.then(|| self.doc.clone());
     self.collab_pending.clear();
@@ -752,7 +757,7 @@ impl Engine {
   pub fn collab_unsent(&mut self) -> Value {
     let mut out: Vec<Value> = self.collab_pending.drain(..).collect();
     if let Some(base) = &self.collab_synced {
-      let d = crate::collab::delta(base, &self.doc, self.collab_confirmed.is_some());
+      let d = crate::collab::delta(base, &self.doc, self.collab_confirmed.is_some(), self.collab_granular);
       if !crate::collab::is_empty(&d) {
         out.push(d);
       }
@@ -3125,7 +3130,7 @@ mod tests {
     let before = e.doc_rev;
     let mut moved = e.doc.clone();
     moved.get_mut(&a).unwrap().x = 77.0;
-    let theirs = crate::collab::delta(&e.doc, &moved, false);
+    let theirs = crate::collab::delta(&e.doc, &moved, false, false);
     e.dispatch(Command::ApplyRemote {
       delta: theirs,
       local: false,

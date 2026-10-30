@@ -8,7 +8,11 @@
 //! Protocol (JSON text frames):
 //! - client → `{type:"join", name, color, doc?, assets?, reset?}`; the first join with a
 //!   document (or one with `reset`) sets the room's document.
-//! - server → `{type:"welcome", you, doc|null, assets, peers, ordered:true}`
+//! - client → `{type:"join", …, granular:true}` when the editor can read pages, styles and
+//!   variables as per-id changes (see `collab::delta`).
+//! - server → `{type:"welcome", you, doc|null, assets, peers, ordered:true, granular:true}`
+//!   (`granular`: this room takes per-id changes; editors that sent none get the whole lists
+//!   instead, taken from the room's document)
 //! - client ↔ `{type:"delta", delta, assets?}`, `{type:"presence", presence}`
 //! - server → `{type:"ack", rejected?}` to the sender of each delta, at its place in the
 //!   order the room applied changes (`ordered`): editors keep their own unacknowledged
@@ -171,6 +175,8 @@ struct Peer {
   name: String,
   color: String,
   presence: Value,
+  /// Reads per-id changes of pages, styles and variables.
+  granular: bool,
 }
 
 /// The sending half of one connection.
@@ -206,6 +212,8 @@ struct Incoming<'a> {
   assets: Option<&'a RawValue>,
   #[serde(default)]
   reset: bool,
+  #[serde(default)]
+  granular: bool,
   #[serde(borrow, default)]
   delta: Option<&'a RawValue>,
   #[serde(borrow, default)]
@@ -222,6 +230,8 @@ struct Welcome<'a> {
   peers: Vec<PeerInfo<'a>>,
   /// Deltas are acknowledged in order (see the protocol above).
   ordered: bool,
+  /// Pages, styles and variables may travel as per-id changes (see the protocol above).
+  granular: bool,
 }
 
 #[derive(Serialize)]
@@ -737,6 +747,7 @@ impl Rooms {
         })
         .collect(),
       ordered: true,
+      granular: true,
     };
     out.send(serde_json::to_string(&welcome).unwrap_or_default());
     if adopt && !r.peers.is_empty() {
@@ -755,6 +766,7 @@ impl Rooms {
         name: name.clone(),
         color: color.clone(),
         presence: Value::Null,
+        granular: m.granular,
       },
     );
     self.people.fetch_add(1, Ordering::Relaxed);
@@ -814,7 +826,24 @@ impl Rooms {
       delta: raw,
       assets: if keep { m.assets } else { None },
     };
-    self.broadcast(r, id, &out, false);
+    let older = r.peers.iter().any(|(pid, p)| *pid != id && !p.granular);
+    let whole = designotron_engine::collab::legacy(&delta, r.doc.as_ref().unwrap())
+      .filter(|_| older)
+      .and_then(|w| serde_json::value::to_raw_value(&w).ok());
+    match &whole {
+      // Peers that predate per-id changes get the room's whole lists instead.
+      Some(whole) => {
+        let old = DeltaOut { delta: whole, ..out };
+        let (new, old) = (
+          Arc::new(serde_json::to_string(&out).unwrap_or_default()),
+          Arc::new(serde_json::to_string(&old).unwrap_or_default()),
+        );
+        for (_, p) in r.peers.iter().filter(|(pid, _)| **pid != id) {
+          self.deliver(&p.out, if p.granular { &new } else { &old }, false);
+        }
+      }
+      None => self.broadcast(r, id, &out, false),
+    }
     self.ack(r, id, false);
     if assets.is_some() && !keep {
       return Step::Warn(format!(

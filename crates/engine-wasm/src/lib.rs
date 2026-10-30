@@ -75,10 +75,11 @@ impl WasmEngine {
   }
 
   /// Starts the collaboration baseline at the current document; `ordered` when the relay
-  /// acknowledges changes in order (see `Engine::collab_reset`).
+  /// acknowledges changes in order, `granular` when it also takes pages, styles and variables
+  /// per id (see `Engine::collab_reset`).
   #[wasm_bindgen(js_name = collabReset)]
-  pub fn collab_reset(&mut self, ordered: bool) {
-    self.inner.collab_reset(ordered);
+  pub fn collab_reset(&mut self, ordered: bool, granular: bool) {
+    self.inner.collab_reset(ordered, granular);
   }
 
   /// JSON array of this editor's unacknowledged and unsent changes, oldest first.

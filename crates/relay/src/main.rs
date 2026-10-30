@@ -554,6 +554,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn per_id_changes_reach_older_editors_as_whole_lists() {
+      let (addr, _) = start(None).await;
+      let room = designotron_rooms::random_token();
+      let granular = |name: &str, doc: Option<serde_json::Value>| {
+        let mut m = json!({ "type": "join", "name": name, "granular": true });
+        if let Some(d) = doc {
+          m["doc"] = d;
+        }
+        Message::Text(m.to_string())
+      };
+      let mut a = connect(addr, &room, None).await.unwrap();
+      a.send(granular("Ana", Some(doc()))).await.unwrap();
+      let welcome = next_json(&mut a).await;
+      assert_eq!(
+        (welcome["ordered"].as_bool(), welcome["granular"].as_bool()),
+        (Some(true), Some(true))
+      );
+      let mut old = connect(addr, &room, None).await.unwrap();
+      join(&mut old, None).await; // an editor that never says it reads per-id changes
+      let mut new = connect(addr, &room, None).await.unwrap();
+      new.send(granular("Cy", None)).await.unwrap();
+      next_json(&mut new).await;
+      let style = json!({ "id": "s1", "name": "Brand", "color": "#112233" });
+      let change = json!({ "type": "delta", "delta": { "nodes": {}, "removed": [], "colorStyles": { "add": { "s1": style } } } });
+      a.send(Message::Text(change.to_string())).await.unwrap();
+      let (to_new, to_old) = (next_delta(&mut new).await, next_delta(&mut old).await);
+      assert!(to_new["colorStyles"].is_object() && to_new.get("styles").is_none());
+      assert_eq!(to_old["styles"]["colors"][0]["name"], "Brand");
+      assert!(to_old.get("colorStyles").is_none());
+      // The room's file has it for late joiners.
+      let mut late = connect(addr, &room, None).await.unwrap();
+      assert_eq!(join(&mut late, None).await["doc"]["styles"]["colors"][0]["id"], "s1");
+    }
+
+    #[tokio::test]
     async fn bridge_paths_are_not_answered_with_the_editor() {
       let dir = temp_dir("static");
       std::fs::create_dir_all(&dir).unwrap();
@@ -872,6 +907,16 @@ mod tests {
     loop {
       if let Message::Text(t) = ws.next().await.unwrap().unwrap() {
         return serde_json::from_str(&t).unwrap();
+      }
+    }
+  }
+
+  /// The next delta, skipping peers joining and the like.
+  async fn next_delta(ws: &mut Ws) -> serde_json::Value {
+    loop {
+      let m = next_json(ws).await;
+      if m["type"] == "delta" {
+        return m["delta"].clone();
       }
     }
   }
