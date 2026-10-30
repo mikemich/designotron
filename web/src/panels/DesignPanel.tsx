@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlignCenterHorizontal,
   AlignCenterVertical,
@@ -10,16 +10,20 @@ import {
   AlignVerticalSpaceBetween,
   ArrowDown,
   ArrowRight,
+  Baseline,
   Bold,
   Eye,
   EyeOff,
   Italic,
+  Link as LinkIcon,
   Minus,
+  Pilcrow,
   Plus,
   RotateCw,
   Scan,
   Strikethrough,
   Underline,
+  Unlink,
   WrapText,
   Variable,
   Radius,
@@ -261,6 +265,7 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           />
         </div>
       )}
+      {(sizeable || isText) && <MinMaxFields nodes={nodes} ids={ids} />}
       <div className="grid2">
         <NumberField label={<RotateCw size={11} />} value={common(nodes, (n) => n.rotation)} suffix="°" onChange={(rotation) => update(ids, { rotation })} onScrubStart={begin} onScrubEnd={end} title="Rotation" />
         {radiusable && !corners && (
@@ -331,6 +336,45 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   );
 }
 
+const LIMITS = [
+  { key: "minWidth", label: "Min W", title: "Minimum width (0 or empty for none)" },
+  { key: "maxWidth", label: "Max W", title: "Maximum width (0 or empty for none)" },
+  { key: "minHeight", label: "Min H", title: "Minimum height (0 or empty for none)" },
+  { key: "maxHeight", label: "Max H", title: "Maximum height (0 or empty for none)" },
+] as const;
+
+/** Min and max width/height: hug and fill stop at them, auto-width text wraps at the max. */
+function MinMaxFields({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
+  const anySet = nodes.some((n) => LIMITS.some((l) => n[l.key] != null));
+  const [shown, setShown] = useState(false);
+  const open = shown || anySet;
+  return (
+    <>
+      {!anySet && (
+        <div className="row" style={{ marginBottom: open ? 6 : 0 }}>
+          <button className="link-btn" style={{ fontSize: 11 }} onClick={() => setShown(!shown)}>
+            {shown ? "Hide min / max size" : "Add min / max size"}
+          </button>
+        </div>
+      )}
+      {open && (
+        <div className="grid2" data-testid="size-limits">
+          {LIMITS.map((l) => (
+            <NumberField
+              key={l.key}
+              value={common(nodes, (n) => n[l.key] ?? null)}
+              autoText={l.label}
+              title={l.title}
+              min={0}
+              onChange={(v) => update(ids, { [l.key]: v > 0 ? v : null })}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const frames = nodes.every((n) => ["frame", "component", "instance"].includes(n.type));
   if (!frames && nodes.length > 1) return null;
@@ -363,14 +407,28 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
       <div className="row">
         <Seg
           value={common(nodes, (n) => n.layout!.direction)}
-          onChange={(direction) => set({ direction })}
+          // Wrap and baseline alignment only exist in horizontal layouts: leaving one drops them.
+          onChange={(direction) => set(direction === "vertical" ? { direction, wrap: false, ...(al.counterAlign === "baseline" ? { counterAlign: "start" } : {}) } : { direction })}
           options={[
             { value: "vertical", label: <ArrowDown size={13} />, title: "Vertical" },
             { value: "horizontal", label: <ArrowRight size={13} />, title: "Horizontal" },
           ]}
         />
-        <IconButton title="Wrap" on={al.wrap} onClick={() => set({ wrap: !al.wrap, direction: "horizontal" })}>
+        <IconButton
+          title={horizontal ? "Wrap" : "Wrap needs a horizontal layout: switch the direction first"}
+          on={al.wrap && horizontal}
+          disabled={!horizontal}
+          onClick={() => set({ wrap: !al.wrap, ...(!al.wrap && al.counterAlign === "baseline" ? { counterAlign: "start" } : {}) })}
+        >
           <WrapText size={13} />
+        </IconButton>
+        <IconButton
+          title={horizontal && !al.wrap ? "Align text baselines" : "Baseline alignment needs a horizontal layout without wrap"}
+          on={al.counterAlign === "baseline"}
+          disabled={!horizontal || al.wrap}
+          onClick={() => set({ counterAlign: al.counterAlign === "baseline" ? "start" : "baseline" })}
+        >
+          <Baseline size={13} />
         </IconButton>
       </div>
       <div className="row" style={{ alignItems: "flex-start" }}>
@@ -479,6 +537,7 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const sel = useStore((s) => s.textSel);
   const editing = useStore((s) => s.editingText);
   const partial = !!sel && sel.id === editing && sel.end > sel.start;
+  const truncating = nodes.every((n) => !!n.text!.truncate || n.text!.maxLines != null);
   return (
     <Section title={partial ? `Text · ${sel!.end - sel!.start} characters selected` : "Text"} actions={<ApplyStyleButton kind="text" ids={ids} />}>
       <StyleChip kind="text" nodes={nodes} ids={ids} />
@@ -504,6 +563,17 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           onScrubEnd={end}
         />
         <NumberField label="|A|" title="Letter spacing" value={r("letterSpacing") as Maybe<number>} step={0.1} onChange={(letterSpacing) => set({ letterSpacing })} onScrubStart={begin} onScrubEnd={end} />
+      </div>
+      <div className="grid2">
+        <NumberField
+          label={<Pilcrow size={11} />}
+          title="Paragraph spacing (between lines separated by Enter)"
+          min={0}
+          value={t((n) => n.text!.paragraphSpacing ?? 0) as Maybe<number>}
+          onChange={(paragraphSpacing) => set({ paragraphSpacing })}
+          onScrubStart={begin}
+          onScrubEnd={end}
+        />
       </div>
       <div className="row">
         <Seg
@@ -537,6 +607,37 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           ]}
         />
       </div>
+      <div className="row" style={{ flexWrap: "wrap" }}>
+        <label className="row" style={{ cursor: "pointer", margin: 0 }} title="Cut text that doesn't fit and end it with an ellipsis">
+          <input
+            type="checkbox"
+            checked={truncating}
+            onChange={(e) =>
+              set(
+                e.target.checked
+                  ? // Auto-size text has no box to cut at, so start with one line.
+                    { truncate: true, maxLines: nodes.every((n) => n.text!.autoResize === "none") ? null : 1 }
+                  : { truncate: false, maxLines: null },
+              )
+            }
+          />
+          Truncate text
+        </label>
+        {truncating && (
+          <div style={{ width: 96 }}>
+            <NumberField
+              label="≡"
+              title="Maximum lines (0 or empty: the lines that fit a fixed box)"
+              autoText="No limit"
+              min={0}
+              value={t((n) => n.text!.maxLines ?? null) as Maybe<number> | null}
+              onChange={(v) => set({ truncate: true, maxLines: v > 0 ? Math.round(v) : null })}
+            />
+          </div>
+        )}
+      </div>
+      {editing && sel && sel.id === editing && <LinkRow nodes={nodes} sel={sel} />}
+      <LinkList nodes={nodes} />
       <div className="row">
         <IconButton title="Bold" on={nodes.every((n) => n.text!.fontWeight >= 700)} onClick={() => set({ fontWeight: nodes[0].text!.fontWeight >= 700 ? 400 : 700 })}>
           <Bold size={13} />
@@ -562,6 +663,109 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         />
       </div>
     </Section>
+  );
+}
+
+/** Turns what was typed into a link: a bare address gets https://, other schemes are left to the engine to accept or refuse. */
+function normalizeUrl(raw: string): string {
+  const url = raw.trim();
+  return url && !/^[a-z][a-z0-9+.-]*:/i.test(url) ? `https://${url}` : url;
+}
+
+/** Link of the text range under `pos`, with that range. */
+function linkAt(node: Node, pos: number) {
+  return (node.text!.runs ?? []).find((r) => r.link && r.start <= pos && pos < r.end);
+}
+
+/** While editing text with characters selected: set or remove the link on the selection (Ctrl+K). */
+function LinkRow({ nodes, sel }: { nodes: Node[]; sel: { id: string; start: number; end: number } }) {
+  const node = nodes.find((n) => n.id === sel.id);
+  const current = node ? linkAt(node, sel.start)?.link ?? "" : "";
+  const ranged = sel.end > sel.start;
+  const [value, setValue] = useState(current);
+  const [open, setOpen] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => setValue(current), [current, sel.start, sel.end]);
+  useEffect(() => {
+    // Ctrl+K in the text editor.
+    const show = () => {
+      setOpen(true);
+      requestAnimationFrame(() => input.current?.select());
+    };
+    window.addEventListener("dt-link", show);
+    return () => window.removeEventListener("dt-link", show);
+  }, []);
+  // The engine refuses unsafe links; the field stays open (with the engine's message as a toast) until one is accepted.
+  const run = (style: Record<string, unknown>, clear: string[]) => {
+    if (!dispatch({ op: "styleText", id: sel.id, start: sel.start, end: sel.end, style, clear })) return;
+    setOpen(false);
+    requestAnimationFrame(() => window.dispatchEvent(new Event("dt-refocus-text")));
+  };
+  const apply = () => {
+    const url = normalizeUrl(value);
+    if (url) run({ link: url }, []);
+  };
+  const remove = () => run({}, ["link"]);
+  return (
+    <div className="row" style={{ flexWrap: "wrap" }} data-testid="link-row">
+      <IconButton title={`${ranged ? "Link the selected text" : "Select text to link"} (${MOD}K)`} on={open || !!current} disabled={!ranged} onClick={() => setOpen(!open)}>
+        <LinkIcon size={13} />
+      </IconButton>
+      {ranged && !open && current && <span className="muted small" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }} title={current}>{current}</span>}
+      {ranged && open && (
+        <>
+          <input
+            ref={input}
+            className="textinput"
+            style={{ flex: 1, minWidth: 0, padding: "4px 8px" }}
+            placeholder="https://example.com"
+            value={value}
+            autoFocus
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") apply();
+              if (e.key === "Escape") {
+                setOpen(false);
+                window.dispatchEvent(new Event("dt-refocus-text"));
+              }
+            }}
+          />
+          <button className="btn" onClick={apply}>
+            Apply
+          </button>
+          {current && (
+            <IconButton title="Remove link" onClick={remove}>
+              <Unlink size={13} />
+            </IconButton>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Links the text carries, each with the words it covers and a way to remove it. */
+function LinkList({ nodes }: { nodes: Node[] }) {
+  if (nodes.length !== 1) return null;
+  const n = nodes[0];
+  const links = (n.text!.runs ?? []).filter((r) => r.link);
+  if (!links.length) return null;
+  const chars = Array.from(n.text!.characters);
+  return (
+    <div style={{ marginBottom: 6 }} data-testid="link-list">
+      {links.map((r) => (
+        <div className="row" key={`${r.start}-${r.end}`} style={{ marginBottom: 2 }}>
+          <LinkIcon size={11} />
+          <span className="small" style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={`${chars.slice(r.start, r.end).join("")} → ${r.link}`}>
+            {chars.slice(r.start, r.end).join("")} <span className="muted">{r.link}</span>
+          </span>
+          <IconButton title="Remove link" onClick={() => dispatch({ op: "styleText", id: n.id, start: r.start, end: r.end, style: {}, clear: ["link"] })}>
+            <Unlink size={12} />
+          </IconButton>
+        </div>
+      ))}
+    </div>
   );
 }
 

@@ -8,7 +8,7 @@ use crate::model::{
   Document, Effect, EffectType, Node, NodeId, NodeType, Paint, ScaleMode, StrokeAlign, StrokeCap, TextAlignH, TextAlignV, TextDecoration,
 };
 use crate::shapes;
-use crate::text::{layout_for_node, SpanStyle, TextMeasurer};
+use crate::text::{layout_of_node, SpanStyle, TextMeasurer};
 use crate::{color, model};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -187,7 +187,7 @@ fn text_box(n: &Node, m: &dyn TextMeasurer) -> Rect {
   if t.auto_resize != crate::model::TextAutoResize::None {
     return Rect::new(0.0, 0.0, n.width, n.height);
   }
-  let lay = layout_for_node(t, n.width, m);
+  let lay = layout_of_node(n, t, m);
   let dx = (lay.width - n.width).max(0.0);
   let dy = (lay.height - n.height).max(0.0);
   // Overflow runs away from the anchored edge, so follow the alignment.
@@ -688,7 +688,7 @@ impl<'a> Renderer<'a> {
 
   fn text(&mut self, n: &Node) -> String {
     let Some(t) = n.text.as_ref() else { return String::new() };
-    let lay = layout_for_node(t, n.width, self.m);
+    let lay = layout_of_node(n, t, self.m);
     let fill = n
       .fills
       .iter()
@@ -721,8 +721,8 @@ impl<'a> Renderer<'a> {
     );
     let _ = lh;
     let base = SpanStyle::base(t);
-    let mut top = offset;
     for line in &lay.lines {
+      let top = offset + line.top;
       let mixed_size = line.segments.iter().any(|sg| sg.style.size != base.size);
       if mixed_size {
         // Mixed sizes share an alphabetic baseline (central would centre each span).
@@ -745,7 +745,6 @@ impl<'a> Renderer<'a> {
         }
       }
       out.push_str("</tspan>");
-      top += line.height;
     }
     out.push_str("</text>");
     out
@@ -780,6 +779,10 @@ fn span_attrs(s: &SpanStyle, base: &SpanStyle, color: impl Fn(&str) -> String) -
       TextDecoration::Underline => " text-decoration=\"underline\"",
       TextDecoration::Strikethrough => " text-decoration=\"line-through\"",
     });
+  }
+  // Links read as links: underlined unless the range already has its own decoration.
+  if s.decoration == TextDecoration::None && s.link.as_deref().and_then(crate::model::safe_link).is_some() {
+    a.push_str(" text-decoration=\"underline\"");
   }
   if let Some(c) = &s.color {
     a.push_str(&format!(" fill=\"{}\"", color(c)));
@@ -914,6 +917,60 @@ mod tests {
     let out = export_svg(&doc, "f", &HeuristicMeasurer);
     assert!(out.starts_with("<svg"));
     assert!(!out.contains("data-id"));
+  }
+
+  #[test]
+  fn text_shows_links_paragraph_spacing_and_truncation() {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Text, "t".into(), "T".into());
+    {
+      let p = t.text.as_mut().unwrap();
+      p.characters = "Go here\nThen there and back again to the very start".into();
+      p.paragraph_spacing = 10.0;
+      p.runs = vec![
+        crate::model::TextRun {
+          start: 3,
+          end: 7,
+          link: Some("https://example.com".into()),
+          ..Default::default()
+        },
+        crate::model::TextRun {
+          start: 13,
+          end: 18,
+          link: Some("javascript:alert(1)".into()),
+          ..Default::default()
+        },
+      ];
+    }
+    t.width = 120.0;
+    doc.insert(t, None, &page, None);
+    let render = |doc: &Document| {
+      render_page(
+        doc,
+        &page,
+        &HeuristicMeasurer,
+        RenderOptions {
+          mode: Mode::Canvas,
+          hidden: &[],
+        },
+      )
+    };
+    crate::layout::relayout_all(&mut doc, &HeuristicMeasurer);
+    let svg = render(&doc);
+    // Only the safe link is underlined; the canvas never makes it a clickable anchor.
+    assert_eq!(svg.matches("text-decoration=\"underline\"").count(), 1, "{svg}");
+    assert!(!svg.contains("<a ") && !svg.contains("javascript"));
+    // The second paragraph starts one line plus the spacing below the first.
+    let lh = 16.0 * 1.2;
+    assert!(svg.contains(&format!("y=\"{}\"", fmt(lh / 2.0))), "{svg}");
+    assert!(svg.contains(&format!("y=\"{}\"", fmt(lh + 10.0 + lh / 2.0))), "{svg}");
+    assert!(!svg.contains('\u{2026}'));
+    doc.get_mut("t").unwrap().text.as_mut().unwrap().max_lines = Some(1);
+    crate::layout::relayout_all(&mut doc, &HeuristicMeasurer);
+    let svg = render(&doc);
+    assert!(svg.contains('\u{2026}'), "{svg}");
   }
 
   #[test]

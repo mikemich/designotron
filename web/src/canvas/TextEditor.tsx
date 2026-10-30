@@ -112,6 +112,13 @@ export function TextEditor({ id }: { id: string }) {
           styleTextSelection(style);
           return;
         }
+        if (mod && k === "k") {
+          // Link the selected characters: the Design panel's link field takes over.
+          e.preventDefault();
+          trackSelection(e.currentTarget);
+          window.dispatchEvent(new Event("dt-link"));
+          return;
+        }
         if (e.key === "Escape" || (e.key === "Enter" && (e.metaKey || e.ctrlKey))) {
           e.preventDefault();
           finish();

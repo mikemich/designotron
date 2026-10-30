@@ -1678,6 +1678,7 @@ impl Engine {
               components::record_override(&mut self.doc, id, &runs);
             }
           }
+          drop_unsafe_links(self.doc.get_mut(id).unwrap());
           let after = self.doc.get(id).unwrap().clone();
           if after.kind.is_frame_like() && (after.width != before.width || after.height != before.height) {
             layout::apply_constraints(&mut self.doc, id, before.width, before.height);
@@ -1720,11 +1721,14 @@ impl Engine {
         let t = self.doc.get(&id).and_then(|n| n.text.clone()).ok_or("not a text layer")?;
         let len = t.characters.chars().count();
         let mut patch_run: crate::model::TextRun = serde_json::from_value(style).map_err(|e| format!("invalid text style: {e}"))?;
+        if let Some(l) = patch_run.link.as_mut() {
+          *l = crate::model::safe_link(l).ok_or("a link must start with http://, https://, mailto: or tel:")?;
+        }
         if let Some(c) = patch_run.color.as_mut() {
           *c = crate::color::normalize(c);
         }
         let clear: Vec<&str> = clear.iter().map(|s| s.as_str()).collect();
-        let runs = if start == 0 && end >= len && clear.is_empty() {
+        let runs = if start == 0 && end >= len && clear.is_empty() && patch_run.link.is_none() {
           // Whole text: fold the style into the base props instead of a run.
           let mut tp = t.clone();
           fold_into_base(&mut tp, &patch_run);
@@ -2001,10 +2005,34 @@ impl Engine {
       }
       Command::RemoveAutoLayout { ids } => {
         for id in ids {
+          // Fill and hug only mean something inside auto layout: children keep the size they
+          // have as fixed. The frame itself keeps Fill when its own parent is auto layout.
+          let in_flow = self
+            .doc
+            .get(&id)
+            .and_then(|n| n.parent.as_ref())
+            .and_then(|p| self.doc.get(p))
+            .map(|p| p.layout.is_some())
+            .unwrap_or(false);
+          let children = self.doc.get(&id).map(|n| n.children.clone()).unwrap_or_default();
+          for c in children {
+            if let Some(cn) = self.doc.get_mut(&c) {
+              if cn.sizing_h == Sizing::Fill {
+                cn.sizing_h = Sizing::Fixed;
+              }
+              if cn.sizing_v == Sizing::Fill {
+                cn.sizing_v = Sizing::Fixed;
+              }
+            }
+          }
           if let Some(n) = self.doc.get_mut(&id) {
             n.layout = None;
-            n.sizing_h = Sizing::Fixed;
-            n.sizing_v = Sizing::Fixed;
+            if n.sizing_h != Sizing::Fill || !in_flow {
+              n.sizing_h = Sizing::Fixed;
+            }
+            if n.sizing_v != Sizing::Fill || !in_flow {
+              n.sizing_v = Sizing::Fixed;
+            }
           }
         }
         Ok(json!({}))
@@ -2723,6 +2751,26 @@ impl Engine {
   }
 }
 
+/// Removes links a text's runs may not carry (anything but http(s), mailto and tel), so a
+/// patch from an AI tool, a plugin or a peer can't plant a `javascript:` link.
+fn drop_unsafe_links(n: &mut Node) {
+  let Some(t) = n.text.as_mut() else { return };
+  if t
+    .runs
+    .iter()
+    .all(|r| r.link.as_deref().is_none_or(|l| crate::model::safe_link(l).is_some()))
+  {
+    return;
+  }
+  for r in t.runs.iter_mut() {
+    if r.link.as_deref().is_some_and(|l| crate::model::safe_link(l).is_none()) {
+      r.link = None;
+    }
+  }
+  let len = t.characters.chars().count();
+  crate::text::normalize_runs(&mut t.runs, len);
+}
+
 /// Applies a run's overrides to the base text props.
 fn fold_into_base(t: &mut crate::model::TextProps, r: &crate::model::TextRun) {
   if let Some(v) = &r.font_family {
@@ -2881,6 +2929,10 @@ mod tests {
 
   fn id_of(v: &Value) -> String {
     v["id"].as_str().unwrap().to_string()
+  }
+
+  fn update_ids(e: &mut Engine, ids: Vec<NodeId>, patch: Value) {
+    e.dispatch(Command::Update { ids, patch }).unwrap();
   }
 
   fn rect(e: &mut Engine, x: f64, y: f64, w: f64, h: f64, parent: Option<NodeId>) -> String {
@@ -3966,6 +4018,146 @@ mod tests {
     assert_eq!(e.doc.get(&id).unwrap().text.as_ref().unwrap().runs[0].color, None);
     update(&mut e, json!({ "text": { "italic": false } }));
     assert!(e.doc.get(&id).unwrap().text.as_ref().unwrap().runs.is_empty());
+  }
+
+  #[test]
+  fn removing_auto_layout_makes_fill_children_fixed() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    let b = rect(&mut e, 100.0, 0.0, 50.0, 50.0, None);
+    let f = id_of(
+      &e.dispatch(Command::AddAutoLayout {
+        ids: vec![a.clone(), b.clone()],
+      })
+      .unwrap(),
+    );
+    update_ids(&mut e, vec![f.clone()], json!({ "sizingH": "fixed", "width": 300 }));
+    update_ids(&mut e, vec![a.clone()], json!({ "sizingH": "fill", "sizingV": "fill" }));
+    let w = e.doc.get(&a).unwrap().width;
+    assert!(w > 100.0, "fill child stretched: {w}");
+    e.dispatch(Command::RemoveAutoLayout { ids: vec![f.clone()] }).unwrap();
+    let c = e.doc.get(&a).unwrap();
+    assert_eq!((c.sizing_h, c.sizing_v), (Sizing::Fixed, Sizing::Fixed), "no hidden fill");
+    assert_eq!(c.width, w, "keeps the size it had");
+    let fr = e.doc.get(&f).unwrap();
+    assert!(fr.layout.is_none());
+    assert_eq!((fr.sizing_h, fr.sizing_v), (Sizing::Fixed, Sizing::Fixed));
+    // Undo brings the layout and the fill sizing back in one step.
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.get(&a).unwrap().sizing_h, Sizing::Fill);
+    assert!(e.doc.get(&f).unwrap().layout.is_some());
+  }
+
+  #[test]
+  fn removing_auto_layout_keeps_fill_in_an_auto_layout_parent() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    let inner = id_of(&e.dispatch(Command::AddAutoLayout { ids: vec![a.clone()] }).unwrap());
+    let other = rect(&mut e, 200.0, 0.0, 50.0, 50.0, None);
+    let outer = id_of(
+      &e.dispatch(Command::AddAutoLayout {
+        ids: vec![inner.clone(), other],
+      })
+      .unwrap(),
+    );
+    update_ids(&mut e, vec![inner.clone()], json!({ "sizingH": "fill" }));
+    e.dispatch(Command::RemoveAutoLayout { ids: vec![inner.clone()] }).unwrap();
+    assert!(e.doc.get(&outer).unwrap().layout.is_some());
+    assert_eq!(e.doc.get(&inner).unwrap().sizing_h, Sizing::Fill, "still fills its parent");
+    assert_eq!(e.doc.get(&inner).unwrap().sizing_v, Sizing::Fixed);
+  }
+
+  #[test]
+  fn text_links_are_restricted_to_safe_urls() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "Read the docs now".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let link = |e: &mut Engine, start: usize, end: usize, url: &str| {
+      e.dispatch(Command::StyleText {
+        id: id.clone(),
+        start,
+        end,
+        style: json!({ "link": url }),
+        clear: vec![],
+      })
+    };
+    for bad in [
+      "javascript:alert(1)",
+      "data:text/html,x",
+      "file:///etc/passwd",
+      "ftp://x",
+      "example.com",
+    ] {
+      assert!(link(&mut e, 9, 13, bad).is_err(), "{bad}");
+    }
+    assert!(e.doc.get(&id).unwrap().text.as_ref().unwrap().runs.is_empty());
+    link(&mut e, 9, 13, " https://example.com/docs ").unwrap();
+    let t = e.doc.get(&id).unwrap().text.clone().unwrap();
+    assert_eq!(t.runs.len(), 1);
+    assert_eq!((t.runs[0].start, t.runs[0].end), (9, 13));
+    assert_eq!(t.runs[0].link.as_deref(), Some("https://example.com/docs"));
+    // The whole text can carry a link too, and it can be removed again.
+    link(&mut e, 0, 99, "mailto:hi@example.com").unwrap();
+    let t = e.doc.get(&id).unwrap().text.clone().unwrap();
+    assert_eq!((t.runs[0].start, t.runs[0].end), (0, 17));
+    e.dispatch(Command::StyleText {
+      id: id.clone(),
+      start: 0,
+      end: 17,
+      style: json!({}),
+      clear: vec!["link".into()],
+    })
+    .unwrap();
+    assert!(e.doc.get(&id).unwrap().text.as_ref().unwrap().runs.is_empty());
+    // A raw patch (AI tool, plugin, peer) can't plant a script link either.
+    update_ids(
+      &mut e,
+      vec![id.clone()],
+      json!({ "text": { "runs": [
+        { "start": 0, "end": 4, "link": "javascript:alert(1)" },
+        { "start": 5, "end": 8, "link": "tel:+123", "fontWeight": 700 }
+      ] } }),
+    );
+    let t = e.doc.get(&id).unwrap().text.clone().unwrap();
+    assert_eq!(t.runs.len(), 1);
+    assert_eq!(t.runs[0].link.as_deref(), Some("tel:+123"));
+  }
+
+  #[test]
+  fn truncation_renders_an_ellipsis() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "one two three four five six seven eight nine ten eleven twelve".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    update_ids(
+      &mut e,
+      vec![id.clone()],
+      json!({ "width": 100, "text": { "autoResize": "height" } }),
+    );
+    let tall = e.doc.get(&id).unwrap().height;
+    update_ids(&mut e, vec![id.clone()], json!({ "text": { "maxLines": 2 } }));
+    let n = e.doc.get(&id).unwrap();
+    assert_eq!(n.height, (2.0_f64 * 16.0 * 1.2).ceil(), "two lines tall");
+    assert!(n.height < tall);
+    let svg = e.render(&e.page.clone(), &[]);
+    assert!(svg.contains('\u{2026}'), "{svg}");
+    // Clearing the limit brings the text back.
+    update_ids(&mut e, vec![id.clone()], json!({ "text": { "maxLines": null } }));
+    assert_eq!(e.doc.get(&id).unwrap().height, tall);
+    assert!(!e.render(&e.page.clone(), &[]).contains('\u{2026}'));
   }
 
   #[test]

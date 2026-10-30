@@ -227,8 +227,15 @@ pub struct Node {
   /// Opt out of the parent's auto layout flow.
   pub absolute_position: bool,
   pub constraints: Constraints,
+  /// Size limits honoured by auto layout (hug and fill) and by text.
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub min_width: Option<f64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub max_width: Option<f64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub min_height: Option<f64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub max_height: Option<f64>,
 
   pub text: Option<TextProps>,
   pub vector: Option<VectorData>,
@@ -291,6 +298,8 @@ impl Default for Node {
       constraints: Constraints::default(),
       min_width: None,
       max_width: None,
+      min_height: None,
+      max_height: None,
       text: None,
       vector: None,
       shape: None,
@@ -515,6 +524,8 @@ pub enum Align {
   Center,
   End,
   SpaceBetween,
+  /// Cross axis of a horizontal layout only: first text baselines line up.
+  Baseline,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -528,7 +539,8 @@ pub struct AutoLayout {
   pub padding_left: f64,
   /// Main-axis distribution.
   pub primary_align: Align,
-  /// Cross-axis alignment (`SpaceBetween` is treated as `Start`).
+  /// Cross-axis alignment (`SpaceBetween` is treated as `Start`, `Baseline` needs a
+  /// horizontal layout without wrap).
   pub counter_align: Align,
   pub wrap: bool,
   pub counter_gap: f64,
@@ -646,6 +658,13 @@ pub struct TextProps {
   pub case: TextCase,
   /// Style overrides for character ranges (mixed styles), sorted and non-overlapping.
   pub runs: Vec<TextRun>,
+  /// Show at most this many lines; the last one ends in "…" when text is cut.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub max_lines: Option<u32>,
+  /// Cut text that doesn't fit with "…". Without `max_lines`, a fixed-size box shows the lines
+  /// that fit its height.
+  #[serde(skip_serializing_if = "is_false")]
+  pub truncate: bool,
 }
 
 /// Overrides the text layer's base style for characters `start..end` (char offsets).
@@ -714,8 +733,14 @@ impl Default for TextProps {
       decoration: TextDecoration::None,
       case: TextCase::Original,
       runs: Vec::new(),
+      max_lines: None,
+      truncate: false,
     }
   }
+}
+
+fn is_false(b: &bool) -> bool {
+  !*b
 }
 
 impl TextProps {
@@ -1105,5 +1130,40 @@ mod interaction_tests {
     let v = serde_json::to_value(&i).unwrap();
     assert_eq!(v["overlay"]["closeOnClickOutside"], false);
     assert_eq!(v["overlay"]["offsetX"], 0.0);
+  }
+}
+
+#[cfg(test)]
+mod w2c_tests {
+  use super::*;
+
+  #[test]
+  fn files_from_before_size_limits_and_truncation_load_and_save_unchanged() {
+    // A text layer and a frame as an older version wrote them: none of the new keys.
+    let old = r#"{"id":"n1","type":"text","name":"Hi","page":"p","width":120,"height":20,"minWidth":null,
+      "text":{"characters":"Hello","fontFamily":"Inter","fontSize":16,"fontWeight":400,"italic":false,
+      "lineHeight":null,"letterSpacing":0,"paragraphSpacing":4,"alignH":"left","alignV":"top",
+      "autoResize":"width","decoration":"none","case":"original","runs":[{"start":0,"end":2,"link":"https://example.com"}]},
+      "layout":{"direction":"horizontal","counterAlign":"center"}}"#;
+    let n: Node = serde_json::from_str(old).unwrap();
+    assert_eq!((n.min_width, n.max_width, n.min_height, n.max_height), (None, None, None, None));
+    let t = n.text.as_ref().unwrap();
+    assert_eq!((t.max_lines, t.truncate, t.paragraph_spacing), (None, false, 4.0));
+    assert_eq!(n.layout.as_ref().unwrap().counter_align, Align::Center);
+    let out = serde_json::to_value(&n).unwrap();
+    for key in ["minWidth", "maxWidth", "minHeight", "maxHeight"] {
+      assert!(out.get(key).is_none(), "{key} is only written when set");
+    }
+    assert!(out["text"].get("maxLines").is_none() && out["text"].get("truncate").is_none());
+    // New values round-trip.
+    let mut n = n;
+    n.min_height = Some(40.0);
+    n.max_width = Some(300.0);
+    n.text.as_mut().unwrap().max_lines = Some(2);
+    n.text.as_mut().unwrap().truncate = true;
+    n.layout.as_mut().unwrap().counter_align = Align::Baseline;
+    let back: Node = serde_json::from_value(serde_json::to_value(&n).unwrap()).unwrap();
+    assert_eq!(back, n);
+    assert_eq!(serde_json::to_value(&n).unwrap()["layout"]["counterAlign"], "baseline");
   }
 }

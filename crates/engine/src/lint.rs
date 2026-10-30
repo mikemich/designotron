@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::color::{self, Rgba};
 use crate::model::{Document, Node, NodeId, NodeType, Paint, TextAutoResize, Trigger};
-use crate::text::{layout_for_node, TextMeasurer};
+use crate::text::{layout_of_node, TextMeasurer};
 
 const MIN_TEXT: f64 = 12.0;
 const MIN_TAP: f64 = 44.0;
@@ -141,7 +141,7 @@ fn check_text(doc: &Document, n: &Node, page_bg: &str, m: &dyn TextMeasurer, out
     }
   }
   if t.auto_resize == TextAutoResize::None {
-    let lay = layout_for_node(t, n.width, m);
+    let lay = layout_of_node(n, t, m);
     if lay.height > n.height + 1.0 {
       out.push(issue(
         n,

@@ -272,6 +272,7 @@ impl<'a> Ctx<'a> {
           let name = self.component_name(&info.component_id);
           let mut el = El::new("div");
           self.position(&mut el, &n, place);
+          self.limits(&mut el, &n);
           match self.variant_set(&info.component_id).and_then(|s| self.sets.get(&s.id).cloned()) {
             Some(set_name) => {
               el.component_ref = Some(set_name);
@@ -327,6 +328,7 @@ impl<'a> Ctx<'a> {
     }
     el.is_component_root = place == Place::ComponentRoot;
     self.position(&mut el, &n, place);
+    self.limits(&mut el, &n);
     self.visual(&mut el, &n);
     self.bind_vars(&mut el, &n);
     if el.tag == "img" {
@@ -367,7 +369,7 @@ impl<'a> Ctx<'a> {
         el.s("padding", pad.iter().map(|p| px(*p)).collect::<Vec<_>>().join(" "));
       }
       let justify = match al.primary_align {
-        Align::Start => None,
+        Align::Start | Align::Baseline => None,
         Align::Center => Some("center"),
         Align::End => Some("flex-end"),
         Align::SpaceBetween => Some("space-between"),
@@ -378,6 +380,7 @@ impl<'a> Ctx<'a> {
       let items = match al.counter_align {
         Align::Center => "center",
         Align::End => "flex-end",
+        Align::Baseline if al.direction == LayoutDirection::Horizontal && !al.wrap => "baseline",
         _ => "flex-start",
       };
       el.s("align-items", items);
@@ -569,6 +572,37 @@ impl<'a> Ctx<'a> {
     }
     if n.rotation != 0.0 && !vectorish {
       el.s("transform", format!("rotate({}deg)", fmt(n.rotation)));
+    }
+  }
+
+  /// Min and max size limits (`min-w-`, `max-w-`, `min-h-`, `max-h-` in Tailwind). They replace
+  /// what `position` already emitted for the same property (a fill child's `min-width: 0`).
+  fn limits(&self, el: &mut El, n: &Node) {
+    let set = |el: &mut El, k: &str, v: f64| {
+      let v = px(v);
+      match el.styles.iter_mut().find(|(key, _)| key == k) {
+        Some(e) => e.1 = v,
+        None => el.s(k, v),
+      }
+    };
+    for (key, v) in [
+      ("min-width", n.min_width),
+      ("max-width", n.max_width),
+      ("min-height", n.min_height),
+      ("max-height", n.max_height),
+    ] {
+      if let Some(v) = v {
+        set(el, key, v);
+      }
+    }
+    // Auto-width text only wraps at its max width if whitespace may collapse into line breaks.
+    let auto_w = n.text.as_ref().is_some_and(|t| t.auto_resize == TextAutoResize::Width);
+    if auto_w && n.max_width.is_some() {
+      for (k, v) in el.styles.iter_mut() {
+        if k == "white-space" {
+          *v = "pre-wrap".into();
+        }
+      }
     }
   }
 
@@ -783,16 +817,79 @@ impl<'a> Ctx<'a> {
       TextCase::Lower => el.s("text-transform", "lowercase"),
       TextCase::Title => el.s("text-transform", "capitalize"),
     }
-    el.s(
-      "white-space",
-      if t.auto_resize == TextAutoResize::Width {
-        "pre"
-      } else {
-        "pre-wrap"
-      },
-    );
+    // Truncation: one line is `truncate`, several are `line-clamp-N`.
+    let limit = crate::text::line_limit(&t, Some(n.height));
+    match limit {
+      Some(1) => {
+        el.s("overflow", "hidden");
+        el.s("text-overflow", "ellipsis");
+        el.s("white-space", "nowrap");
+      }
+      Some(k) => {
+        el.s("overflow", "hidden");
+        el.s("display", "-webkit-box");
+        el.s("-webkit-line-clamp", k.to_string());
+        el.s("-webkit-box-orient", "vertical");
+      }
+      None => {}
+    }
+    if limit != Some(1) {
+      el.s(
+        "white-space",
+        if t.auto_resize == TextAutoResize::Width {
+          "pre"
+        } else {
+          "pre-wrap"
+        },
+      );
+    }
+    // Paragraph spacing: one block per paragraph (a truncated text stays one block).
+    if t.paragraph_spacing != 0.0 && t.characters.contains('\n') && limit.is_none() {
+      let paras = split_paragraphs(&t.characters, std::mem::take(&mut el.spans));
+      el.text = None;
+      for (i, (text, spans)) in paras.into_iter().enumerate() {
+        let mut p = El::new("span");
+        p.s("display", "block");
+        if i > 0 {
+          p.s("margin-top", px(t.paragraph_spacing));
+        }
+        if text.is_empty() && spans.is_empty() {
+          // An empty paragraph still takes a line.
+          p.s("min-height", px(t.line_height_px()));
+        }
+        if spans.is_empty() {
+          p.text = Some(text);
+        } else {
+          p.spans = spans;
+        }
+        el.children.push(p);
+      }
+    }
     el
   }
+}
+
+/// Splits a text (plain, or as styled spans) at its line breaks into paragraphs.
+fn split_paragraphs(text: &str, spans: Vec<Span>) -> Vec<(String, Vec<Span>)> {
+  if spans.is_empty() {
+    return text.split('\n').map(|p| (p.to_string(), vec![])).collect();
+  }
+  let mut out: Vec<(String, Vec<Span>)> = vec![(String::new(), vec![])];
+  for sp in spans {
+    for (i, part) in sp.text.split('\n').enumerate() {
+      if i > 0 {
+        out.push((String::new(), vec![]));
+      }
+      if !part.is_empty() {
+        out.last_mut().unwrap().1.push(Span {
+          text: part.to_string(),
+          styles: sp.styles.clone(),
+          link: sp.link.clone(),
+        });
+      }
+    }
+  }
+  out
 }
 
 /// The image URL when a rectangle is just an image (one visible image fill).
@@ -853,10 +950,20 @@ fn text_spans(t: &crate::model::TextProps) -> Vec<Span> {
       if let Some(v) = r.letter_spacing {
         styles.push(("letter-spacing".into(), px(v)));
       }
+      let link = r.link.as_deref().and_then(crate::model::safe_link);
+      if link.is_some() {
+        // Browsers colour and underline links themselves; keep the design's look.
+        if r.decoration.is_none() {
+          styles.push(("text-decoration".into(), "underline".into()));
+        }
+        if r.color.is_none() {
+          styles.push(("color".into(), "inherit".into()));
+        }
+      }
       out.push(Span {
         text: chars[start..end].iter().collect(),
         styles,
-        link: r.link.as_deref().and_then(crate::model::safe_link),
+        link,
       });
     }
     pos = pos.max(end);
@@ -962,7 +1069,16 @@ fn tw_class(k: &str, v: &str) -> String {
     ("width", "100%") => "w-full".into(),
     ("object-fit", "cover") => "object-cover".into(),
     ("object-fit", "contain") => "object-contain".into(),
+    ("text-overflow", "ellipsis") => "truncate".into(),
+    ("white-space", "nowrap") | ("display", "-webkit-box") | ("-webkit-box-orient", "vertical") => String::new(),
+    ("-webkit-line-clamp", n) if n.parse::<u32>().is_ok_and(|n| (1..=6).contains(&n)) => format!("line-clamp-{n}"),
+    ("-webkit-line-clamp", n) => format!("line-clamp-[{n}]"),
+    ("color", "inherit") => "text-inherit".into(),
+    ("display", "block") => "block".into(),
+    ("margin-top", _) => format!("mt-[{a}]"),
     ("max-width", _) => format!("max-w-[{a}]"),
+    ("min-width", _) => format!("min-w-[{a}]"),
+    ("max-height", _) => format!("max-h-[{a}]"),
     ("min-height", _) => format!("min-h-[{a}]"),
     ("left", _) => format!("left-[{a}]"),
     ("top", _) => format!("top-[{a}]"),
@@ -1066,7 +1182,7 @@ fn jsx(el: &El, depth: usize, out: &mut String) {
         let classes: Vec<String> = sp.styles.iter().map(|(k, v)| tw_class(k, v)).collect();
         match (&sp.link, classes.is_empty()) {
           (Some(href), _) => format!(
-            "<a href={} className=\"{}\">{txt}</a>",
+            "<a href={} target=\"_blank\" rel=\"noopener noreferrer\" className=\"{}\">{txt}</a>",
             serde_json::to_string(href).unwrap_or_default(),
             classes.join(" ")
           ),
@@ -1139,7 +1255,11 @@ fn html(el: &El, depth: usize, out: &mut String) {
         let st: String = sp.styles.iter().map(|(k, v)| format!("{k}: {v}; ")).collect();
         let st = esc(st.trim_end());
         match (&sp.link, st.is_empty()) {
-          (Some(href), _) => format!("<a href=\"{}\" style=\"{st}\">{}</a>", esc(href), esc(&sp.text)),
+          (Some(href), _) => format!(
+            "<a href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"{st}\">{}</a>",
+            esc(href),
+            esc(&sp.text)
+          ),
           (None, true) => esc(&sp.text),
           (None, false) => format!("<span style=\"{st}\">{}</span>", esc(&sp.text)),
         }
@@ -1666,6 +1786,98 @@ mod tests {
     assert!(src.contains("w-full max-w-[390px] min-h-[844px]"), "{src}");
     let html = export_html(&doc, "home", &HeuristicMeasurer);
     assert!(html.contains("<img style=") && html.contains("<button style=\"border: 0;"));
+  }
+
+  #[test]
+  fn min_max_truncation_paragraphs_and_links_export() {
+    let mut doc = sample();
+    let page = doc.pages[0].id.clone();
+    {
+      let b = doc.get_mut("btn").unwrap();
+      b.min_width = Some(120.0);
+      b.max_width = Some(300.0);
+      b.min_height = Some(40.0);
+      b.max_height = Some(64.0);
+    }
+    let mut clamp = crate::ops::default_node(NodeType::Text, "clamp".into(), "Clamp".into());
+    clamp.width = 200.0;
+    {
+      let t = clamp.text.as_mut().unwrap();
+      t.characters = "A long description that goes on".into();
+      t.auto_resize = TextAutoResize::Height;
+      t.max_lines = Some(2);
+    }
+    doc.insert(clamp, Some("home"), &page, None);
+    let mut one = crate::ops::default_node(NodeType::Text, "one".into(), "One".into());
+    one.text.as_mut().unwrap().characters = "Single line title".into();
+    one.text.as_mut().unwrap().max_lines = Some(1);
+    doc.insert(one, Some("home"), &page, None);
+    let mut paras = crate::ops::default_node(NodeType::Text, "paras".into(), "Paras".into());
+    {
+      let t = paras.text.as_mut().unwrap();
+      t.characters = "First\n\nSecond".into();
+      t.paragraph_spacing = 12.0;
+    }
+    doc.insert(paras, Some("home"), &page, None);
+    let mut link = crate::ops::default_node(NodeType::Text, "link".into(), "Link".into());
+    {
+      let t = link.text.as_mut().unwrap();
+      t.characters = "See docs or this".into();
+      t.runs = vec![
+        crate::model::TextRun {
+          start: 4,
+          end: 8,
+          link: Some("https://example.com/docs".into()),
+          ..Default::default()
+        },
+        crate::model::TextRun {
+          start: 12,
+          end: 16,
+          link: Some("javascript:alert(1)".into()),
+          ..Default::default()
+        },
+      ];
+    }
+    doc.insert(link, Some("home"), &page, None);
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    for class in [
+      "min-w-[120px]",
+      "max-w-[300px]",
+      "min-h-[40px]",
+      "max-h-[64px]",
+      "line-clamp-2",
+      "truncate",
+      "mt-[12px]",
+    ] {
+      assert!(src.contains(class), "{class} in {src}");
+    }
+    assert!(!src.contains("javascript:"), "{src}");
+    assert!(
+      src.contains("<a href=\"https://example.com/docs\" target=\"_blank\" rel=\"noopener noreferrer\""),
+      "{src}"
+    );
+    assert!(src.contains("underline"));
+    // Paragraphs become blocks, so the gap survives in the page.
+    assert!(src.contains("{\"First\"}") && src.contains("{\"Second\"}"));
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(html.contains("-webkit-line-clamp: 2"), "{html}");
+    assert!(html.contains("text-overflow: ellipsis"));
+    assert!(html.contains("min-width: 120px") && html.contains("max-height: 64px"));
+    assert!(html.contains("margin-top: 12px"));
+    assert!(html.contains("<a href=\"https://example.com/docs\""));
+  }
+
+  #[test]
+  fn baseline_alignment_exports_align_items_baseline() {
+    let mut doc = sample();
+    {
+      let home = doc.get_mut("home").unwrap();
+      let al = home.layout.as_mut().unwrap();
+      al.direction = crate::model::LayoutDirection::Horizontal;
+      al.counter_align = crate::model::Align::Baseline;
+    }
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(src.contains("[align-items:baseline]"), "{src}");
   }
 
   #[test]

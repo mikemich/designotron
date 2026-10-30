@@ -38,7 +38,7 @@ export interface Effect {
 }
 
 export type Sizing = "fixed" | "hug" | "fill";
-export type Align = "start" | "center" | "end" | "spaceBetween";
+export type Align = "start" | "center" | "end" | "spaceBetween" | "baseline";
 
 export interface AutoLayout {
   direction: "horizontal" | "vertical";
@@ -68,6 +68,10 @@ export interface TextProps {
   decoration: "none" | "underline" | "strikethrough";
   case: "original" | "upper" | "lower" | "title";
   runs: TextRun[];
+  /** Show at most this many lines; the last ends in "…" when text is cut. */
+  maxLines?: number | null;
+  /** Cut text that doesn't fit with "…" (fixed-size boxes show the lines that fit). */
+  truncate?: boolean;
 }
 
 export interface TextRun {
@@ -147,6 +151,11 @@ export interface Node {
   sizingH: Sizing;
   sizingV: Sizing;
   absolutePosition: boolean;
+  /** Size limits for auto layout and text (absent when unset). */
+  minWidth?: number | null;
+  maxWidth?: number | null;
+  minHeight?: number | null;
+  maxHeight?: number | null;
   constraints: { horizontal: string; vertical: string };
   text: TextProps | null;
   vector: { subpaths: { points: VectorPoint[]; closed: boolean }[]; raw: { d: string; viewBox: number[] } | null } | null;

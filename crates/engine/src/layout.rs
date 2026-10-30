@@ -1,8 +1,8 @@
 //! Auto layout, hug/fill sizing, text auto-resize, group bounds and constraints.
 
 use crate::geom::Rect;
-use crate::model::{Align, ConstraintH, ConstraintV, Document, LayoutDirection, NodeId, NodeType, Sizing, TextAutoResize};
-use crate::text::{layout_for_node, TextMeasurer};
+use crate::model::{Align, ConstraintH, ConstraintV, Document, LayoutDirection, Node, NodeId, NodeType, Sizing, TextAutoResize};
+use crate::text::{first_baseline, layout_for_box, layout_of_node, TextMeasurer};
 
 /// Recomputes derived geometry for every page.
 pub fn relayout_all(doc: &mut Document, m: &dyn TextMeasurer) {
@@ -45,17 +45,34 @@ fn size_text(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
   if n.sizing_h == Sizing::Fill && props.auto_resize == TextAutoResize::Width && parent_has_layout(doc, id) {
     props.auto_resize = TextAutoResize::Height;
   }
-  let lay = layout_for_node(&props, n.width, m);
+  let lay = layout_of_node(n, &props, m);
+  let min_w = bounds(n, true).0;
+  let (min_h, max_h) = bounds(n, false);
   let n = doc.get_mut(id).unwrap();
   match props.auto_resize {
     TextAutoResize::Width => {
-      n.width = lay.width.ceil().max(1.0);
-      n.height = lay.height.ceil().max(1.0);
+      n.width = clamp_to(lay.width.ceil(), (min_w, f64::INFINITY)).max(1.0);
+      n.height = clamp_to(lay.height.ceil(), (min_h, max_h)).max(1.0);
     }
-    TextAutoResize::Height => n.height = lay.height.ceil().max(1.0),
+    TextAutoResize::Height => n.height = clamp_to(lay.height.ceil(), (min_h, max_h)).max(1.0),
     TextAutoResize::None => {}
   }
   n.text = Some(props);
+}
+
+/// The (min, max) size limits of a layer along one axis.
+fn bounds(n: &Node, horizontal: bool) -> (f64, f64) {
+  let (lo, hi) = if horizontal {
+    (n.min_width, n.max_width)
+  } else {
+    (n.min_height, n.max_height)
+  };
+  (lo.unwrap_or(0.0), hi.unwrap_or(f64::INFINITY))
+}
+
+/// Limits a size to its bounds; the minimum wins when they cross.
+fn clamp_to(v: f64, (lo, hi): (f64, f64)) -> f64 {
+  v.min(hi).max(lo)
 }
 
 fn parent_has_layout(doc: &Document, id: &str) -> bool {
@@ -102,6 +119,16 @@ struct Item {
   fill_counter: bool,
 }
 
+/// Geometry shared by the passes of one `arrange`.
+struct Axes {
+  horizontal: bool,
+  wrap: bool,
+  /// Padding along the main and the cross axis (both sides added).
+  pad_main: f64,
+  pad_cross: f64,
+  gap_total: f64,
+}
+
 fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
   let frame = doc.get(id).unwrap().clone();
   let al = frame.layout.clone().unwrap();
@@ -116,6 +143,8 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
   } else {
     (frame.sizing_v, frame.sizing_h)
   };
+  let main_bounds = bounds(&frame, horizontal);
+  let cross_bounds = bounds(&frame, !horizontal);
   let flow: Vec<NodeId> = frame
     .children
     .iter()
@@ -123,23 +152,7 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
     .cloned()
     .collect();
 
-  let item_of = |doc: &Document, cid: &str| -> Item {
-    let c = doc.get(cid).unwrap();
-    let (main, counter) = if horizontal { (c.width, c.height) } else { (c.height, c.width) };
-    let (sm, sc) = if horizontal {
-      (c.sizing_h, c.sizing_v)
-    } else {
-      (c.sizing_v, c.sizing_h)
-    };
-    Item {
-      id: cid.to_string(),
-      main,
-      counter,
-      fill_main: sm == Sizing::Fill,
-      fill_counter: sc == Sizing::Fill,
-    }
-  };
-  let mut items: Vec<Item> = flow.iter().map(|c| item_of(doc, c)).collect();
+  let mut items: Vec<Item> = flow.iter().map(|c| item_of(doc, c, horizontal)).collect();
   let n = items.len();
   let gap_total = if n > 1 && al.primary_align != Align::SpaceBetween {
     al.gap * (n as f64 - 1.0)
@@ -147,75 +160,45 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
     0.0
   };
 
-  // Main axis frame size.
   let mut main_size = if horizontal { frame.width } else { frame.height };
   let mut cross_size = if horizontal { frame.height } else { frame.width };
   let wrap = al.wrap && horizontal && main_sizing != Sizing::Hug;
+  let ax = Axes {
+    horizontal,
+    wrap,
+    pad_main: pad_main_start + pad_main_end,
+    pad_cross: pad_cross_start + pad_cross_end,
+    gap_total,
+  };
+  // Baseline alignment only exists across a single row.
+  let baseline = al.counter_align == Align::Baseline && horizontal && !wrap;
+  let mut offsets: Vec<f64> = vec![0.0; n];
 
-  if main_sizing == Sizing::Hug {
-    // Fill children can't fill a frame that hugs them: they hug their own content instead.
-    for it in items.iter_mut().filter(|i| i.fill_main) {
-      let size = hug_size(doc, &it.id, horizontal, m);
-      set_size(doc, &it.id, horizontal, Some(size), None);
-      layout_node(doc, &it.id, m);
-      *it = item_of(doc, &it.id);
-      it.main = size;
+  // Widths settle before heights (wrapping text grows taller when narrower), so a vertical
+  // layout resolves its cross axis (width) first and a horizontal one its main axis.
+  if horizontal {
+    main_pass(doc, m, &ax, &mut items, &mut main_size, main_sizing, main_bounds);
+    if baseline {
+      offsets = baseline_offsets(doc, m, &items);
     }
-    let sum: f64 = items.iter().map(|i| i.main).sum();
-    main_size = sum + gap_total + pad_main_start + pad_main_end;
-  } else if !wrap {
-    let inner = main_size - pad_main_start - pad_main_end;
-    let fixed: f64 = items.iter().filter(|i| !i.fill_main).map(|i| i.main).sum();
-    let fills = items.iter().filter(|i| i.fill_main).count();
-    if fills > 0 {
-      let each = ((inner - fixed - gap_total) / fills as f64).max(1.0);
-      for it in items.iter_mut().filter(|i| i.fill_main) {
-        it.main = each;
-        set_size(doc, &it.id, horizontal, Some(each), None);
-        layout_node(doc, &it.id, m);
-        *it = item_of(doc, &it.id);
-        it.main = each;
-      }
-    }
-  }
-
-  // Cross axis. A hugging frame wraps its other children and fill children stretch to
-  // match; when every child fills, the frame hugs their own content.
-  let hug_cross = cross_sizing == Sizing::Hug;
-  if hug_cross && !wrap {
-    let fixed = items.iter().filter(|i| !i.fill_counter).map(|i| i.counter).reduce(f64::max);
-    let max_c = match fixed {
-      Some(c) => c,
-      None => {
-        let fills: Vec<NodeId> = items.iter().filter(|i| i.fill_counter).map(|i| i.id.clone()).collect();
-        fills.iter().map(|c| hug_size(doc, c, !horizontal, m)).fold(0.0, f64::max)
-      }
-    };
-    cross_size = max_c + pad_cross_start + pad_cross_end;
-  }
-  let inner_cross_fixed = cross_size - pad_cross_start - pad_cross_end;
-  if !(hug_cross && wrap) {
-    for it in items.iter_mut().filter(|i| i.fill_counter) {
-      set_size(doc, &it.id, horizontal, None, Some(inner_cross_fixed.max(1.0)));
-      layout_node(doc, &it.id, m);
-      let main = it.main;
-      *it = item_of(doc, &it.id);
-      it.main = main;
-    }
+    cross_pass(doc, m, &ax, &mut items, &mut cross_size, cross_sizing, cross_bounds, &offsets);
+  } else {
+    cross_pass(doc, m, &ax, &mut items, &mut cross_size, cross_sizing, cross_bounds, &offsets);
+    main_pass(doc, m, &ax, &mut items, &mut main_size, main_sizing, main_bounds);
   }
 
   if wrap {
-    arrange_wrapped(doc, id, &items, main_size, hug_cross);
+    arrange_wrapped(doc, id, &items, main_size, cross_sizing == Sizing::Hug);
     return;
   }
 
   // Position items.
-  let inner_main = main_size - pad_main_start - pad_main_end;
-  let inner_cross = cross_size - pad_cross_start - pad_cross_end;
+  let inner_main = main_size - ax.pad_main;
+  let inner_cross = cross_size - ax.pad_cross;
   let used: f64 = items.iter().map(|i| i.main).sum::<f64>() + gap_total;
   let free = inner_main - used;
   let (mut cursor, gap) = match al.primary_align {
-    Align::Start => (pad_main_start, al.gap),
+    Align::Start | Align::Baseline => (pad_main_start, al.gap),
     Align::Center => (pad_main_start + free / 2.0, al.gap),
     Align::End => (pad_main_start + free, al.gap),
     Align::SpaceBetween => {
@@ -227,10 +210,11 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
       (pad_main_start, g)
     }
   };
-  for it in &items {
+  for (i, it) in items.iter().enumerate() {
     let cross = match al.counter_align {
       Align::Center => pad_cross_start + (inner_cross - it.counter) / 2.0,
       Align::End => pad_cross_start + inner_cross - it.counter,
+      Align::Baseline if baseline => pad_cross_start + offsets[i],
       _ => pad_cross_start,
     };
     if let Some(c) = doc.get_mut(&it.id) {
@@ -256,9 +240,188 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
   }
 }
 
+fn item_of(doc: &Document, cid: &str, horizontal: bool) -> Item {
+  let c = doc.get(cid).unwrap();
+  let (main, counter) = if horizontal { (c.width, c.height) } else { (c.height, c.width) };
+  let (sm, sc) = if horizontal {
+    (c.sizing_h, c.sizing_v)
+  } else {
+    (c.sizing_v, c.sizing_h)
+  };
+  Item {
+    id: cid.to_string(),
+    main,
+    counter,
+    fill_main: sm == Sizing::Fill,
+    fill_counter: sc == Sizing::Fill,
+  }
+}
+
+/// Resolves the frame's size along the main axis and the main size of its fill children.
+fn main_pass(
+  doc: &mut Document,
+  m: &dyn TextMeasurer,
+  ax: &Axes,
+  items: &mut [Item],
+  main_size: &mut f64,
+  sizing: Sizing,
+  limits: (f64, f64),
+) {
+  let horizontal = ax.horizontal;
+  if sizing == Sizing::Hug {
+    // Fill children can't fill a frame that hugs them: they hug their own content instead.
+    for it in items.iter_mut().filter(|i| i.fill_main) {
+      let size = hug_size(doc, &it.id, horizontal, m);
+      set_size(doc, &it.id, horizontal, Some(size), None);
+      layout_node(doc, &it.id, m);
+      *it = item_of(doc, &it.id, horizontal);
+      it.main = size;
+    }
+    let natural = items.iter().map(|i| i.main).sum::<f64>() + ax.gap_total + ax.pad_main;
+    *main_size = clamp_to(natural, limits);
+    // Held back by a maximum (or pushed out by a minimum): fill children share what is left.
+    if *main_size != natural {
+      share_main(doc, m, ax, items, *main_size - ax.pad_main);
+    }
+  } else if !ax.wrap {
+    share_main(doc, m, ax, items, *main_size - ax.pad_main);
+  }
+}
+
+/// Splits `inner` (main axis, padding excluded) between the fill children after the fixed
+/// ones and the gaps. A child that would pass its max or min size keeps that size and the
+/// others share the rest.
+fn share_main(doc: &mut Document, m: &dyn TextMeasurer, ax: &Axes, items: &mut [Item], inner: f64) {
+  let fixed: f64 = items.iter().filter(|i| !i.fill_main).map(|i| i.main).sum();
+  let fills: Vec<usize> = (0..items.len()).filter(|i| items[*i].fill_main).collect();
+  if fills.is_empty() {
+    return;
+  }
+  let limits: Vec<(f64, f64)> = fills
+    .iter()
+    .map(|i| bounds(doc.get(&items[*i].id).unwrap(), ax.horizontal))
+    .collect();
+  let mut size: Vec<Option<f64>> = vec![None; fills.len()];
+  let avail = inner - fixed - ax.gap_total;
+  loop {
+    let held: f64 = size.iter().flatten().sum();
+    let open = size.iter().filter(|s| s.is_none()).count();
+    if open == 0 {
+      break;
+    }
+    let each = ((avail - held) / open as f64).max(1.0);
+    let mut frozen = false;
+    for (j, s) in size.iter_mut().enumerate().filter(|(_, s)| s.is_none()) {
+      let (lo, hi) = limits[j];
+      if each > hi {
+        *s = Some(hi.max(lo));
+        frozen = true;
+      } else if each < lo {
+        *s = Some(lo);
+        frozen = true;
+      }
+    }
+    if !frozen {
+      for s in size.iter_mut().filter(|s| s.is_none()) {
+        *s = Some(each);
+      }
+      break;
+    }
+  }
+  for (j, i) in fills.iter().enumerate() {
+    let each = size[j].unwrap_or(1.0).max(1.0);
+    let it = &mut items[*i];
+    set_size(doc, &it.id, ax.horizontal, Some(each), None);
+    layout_node(doc, &it.id, m);
+    *it = item_of(doc, &it.id, ax.horizontal);
+    it.main = each;
+  }
+}
+
+/// Resolves the frame's size along the cross axis and the cross size of its fill children. A
+/// hugging frame wraps its other children and fill children stretch to match; when every
+/// child fills, the frame hugs their own content.
+#[allow(clippy::too_many_arguments)]
+fn cross_pass(
+  doc: &mut Document,
+  m: &dyn TextMeasurer,
+  ax: &Axes,
+  items: &mut [Item],
+  cross_size: &mut f64,
+  sizing: Sizing,
+  limits: (f64, f64),
+  offsets: &[f64],
+) {
+  let horizontal = ax.horizontal;
+  let hug_cross = sizing == Sizing::Hug;
+  if hug_cross && !ax.wrap {
+    let fixed = items
+      .iter()
+      .enumerate()
+      .filter(|(_, i)| !i.fill_counter)
+      .map(|(k, i)| i.counter + offsets[k])
+      .reduce(f64::max);
+    let max_c = match fixed {
+      Some(c) => c,
+      None => {
+        let fills: Vec<NodeId> = items.iter().filter(|i| i.fill_counter).map(|i| i.id.clone()).collect();
+        fills.iter().map(|c| hug_size(doc, c, !horizontal, m)).fold(0.0, f64::max)
+      }
+    };
+    *cross_size = clamp_to(max_c + ax.pad_cross, limits);
+  }
+  let inner_cross = (*cross_size - ax.pad_cross).max(1.0);
+  if !(hug_cross && ax.wrap) {
+    for it in items.iter_mut().filter(|i| i.fill_counter) {
+      let size = clamp_to(inner_cross, bounds(doc.get(&it.id).unwrap(), !horizontal));
+      set_size(doc, &it.id, horizontal, None, Some(size));
+      layout_node(doc, &it.id, m);
+      *it = item_of(doc, &it.id, horizontal);
+    }
+  }
+}
+
+/// How far each item sits below the row's top so their first baselines line up (items that
+/// stretch across the row keep offset 0 and don't take part).
+fn baseline_offsets(doc: &Document, m: &dyn TextMeasurer, items: &[Item]) -> Vec<f64> {
+  let bases: Vec<Option<f64>> = items
+    .iter()
+    .map(|i| {
+      if i.fill_counter {
+        None
+      } else {
+        Some(baseline_of(doc, &i.id, m, 0))
+      }
+    })
+    .collect();
+  let top = bases.iter().flatten().cloned().fold(0.0, f64::max);
+  bases.iter().map(|b| b.map(|b| top - b).unwrap_or(0.0)).collect()
+}
+
+/// First baseline of a layer measured from its top: text has one, a frame takes its first
+/// flowing child's, anything else sits on its bottom edge.
+fn baseline_of(doc: &Document, id: &str, m: &dyn TextMeasurer, depth: usize) -> f64 {
+  let Some(n) = doc.get(id) else { return 0.0 };
+  if let (NodeType::Text, Some(t)) = (n.kind, n.text.as_ref()) {
+    return first_baseline(n, t, m);
+  }
+  if depth < 8 && n.kind.is_frame_like() && n.layout.is_some() {
+    let first = n
+      .children
+      .iter()
+      .filter_map(|c| doc.get(c))
+      .find(|c| c.visible && !c.absolute_position);
+    if let Some(c) = first {
+      return c.y + baseline_of(doc, &c.id, m, depth + 1);
+    }
+  }
+  n.height
+}
+
 /// Size a fill child would have if it hugged its content along one axis (used when its
 /// parent hugs): text measures unwrapped (or at its width, for height), auto layout frames
-/// lay out as hug, and other layers have no content to hug so they keep their size.
+/// lay out as hug, and other layers have no content to hug so they keep their size. The
+/// result stays within the child's min and max size.
 fn hug_size(doc: &mut Document, id: &str, horizontal: bool, m: &dyn TextMeasurer) -> f64 {
   let Some(n) = doc.get(id).cloned() else { return 1.0 };
   let size = match (n.kind, n.text.clone()) {
@@ -266,7 +429,7 @@ fn hug_size(doc: &mut Document, id: &str, horizontal: bool, m: &dyn TextMeasurer
       if horizontal {
         t.auto_resize = TextAutoResize::Width;
       }
-      let lay = layout_for_node(&t, n.width, m);
+      let lay = layout_for_box(&t, n.width, Some(n.height), None, m);
       if horizontal {
         lay.width.ceil()
       } else {
@@ -294,14 +457,7 @@ fn hug_size(doc: &mut Document, id: &str, horizontal: bool, m: &dyn TextMeasurer
     _ if horizontal => n.width,
     _ => n.height,
   };
-  if horizontal {
-    size
-      .max(n.min_width.unwrap_or(0.0))
-      .min(n.max_width.unwrap_or(f64::INFINITY))
-      .max(1.0)
-  } else {
-    size.max(1.0)
-  }
+  clamp_to(size, bounds(&n, horizontal)).max(1.0)
 }
 
 fn arrange_wrapped(doc: &mut Document, id: &str, items: &[Item], width: f64, hug_cross: bool) {
@@ -347,7 +503,8 @@ fn arrange_wrapped(doc: &mut Document, id: &str, items: &[Item], width: f64, hug
   }
   if hug_cross {
     let h = y - al.counter_gap + al.padding_bottom;
-    doc.get_mut(id).unwrap().height = h.max(1.0);
+    let f = doc.get_mut(id).unwrap();
+    f.height = clamp_to(h, (f.min_height.unwrap_or(0.0), f.max_height.unwrap_or(f64::INFINITY))).max(1.0);
   }
 }
 
@@ -581,6 +738,209 @@ mod tests {
     relayout_all(&mut doc, &HeuristicMeasurer);
     assert_eq!(doc.get("body").unwrap().width, 30.0);
     assert_eq!(doc.get("row").unwrap().width, 10.0 + 50.0 + 10.0 + 30.0 + 10.0);
+  }
+
+  fn row(id: &str, width: f64, sizing_h: Sizing) -> Node {
+    Node {
+      id: id.into(),
+      kind: NodeType::Frame,
+      width,
+      height: 100.0,
+      layout: Some(AutoLayout {
+        direction: LayoutDirection::Horizontal,
+        gap: 0.0,
+        padding_top: 0.0,
+        padding_right: 0.0,
+        padding_bottom: 0.0,
+        padding_left: 0.0,
+        ..Default::default()
+      }),
+      sizing_h,
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn fill_clamps_at_max_and_min() {
+    let (mut doc, page) = setup();
+    doc.insert(row("f", 300.0, Sizing::Fixed), None, &page, None);
+    for (i, (min, max)) in [(None, Some(50.0)), (None, None), (Some(160.0), None)].into_iter().enumerate() {
+      let n = Node {
+        id: format!("c{i}"),
+        sizing_h: Sizing::Fill,
+        min_width: min,
+        max_width: max,
+        ..Default::default()
+      };
+      doc.insert(n, Some("f"), &page, None);
+    }
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    // c0 stops at its max, c2 keeps its min; the middle one gets what remains.
+    assert_eq!(doc.get("c0").unwrap().width, 50.0);
+    assert_eq!(doc.get("c2").unwrap().width, 160.0);
+    assert_eq!(doc.get("c1").unwrap().width, 90.0);
+    assert_eq!(doc.get("c1").unwrap().x, 50.0);
+    assert_eq!(doc.get("c2").unwrap().x, 140.0);
+    // Only a max on every fill child leaves free space instead of stretching them.
+    doc.get_mut("c1").unwrap().max_width = Some(30.0);
+    doc.get_mut("c2").unwrap().min_width = None;
+    doc.get_mut("c2").unwrap().max_width = Some(40.0);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert_eq!(
+      [
+        doc.get("c0").unwrap().width,
+        doc.get("c1").unwrap().width,
+        doc.get("c2").unwrap().width
+      ],
+      [50.0, 30.0, 40.0]
+    );
+  }
+
+  #[test]
+  fn hug_respects_min_and_max() {
+    let (mut doc, page) = setup();
+    doc.insert(row("f", 0.0, Sizing::Hug), None, &page, None);
+    {
+      let f = doc.get_mut("f").unwrap();
+      f.min_width = Some(120.0);
+      f.sizing_v = Sizing::Hug;
+      f.min_height = Some(60.0);
+    }
+    let kid = Node {
+      id: "k".into(),
+      width: 40.0,
+      height: 20.0,
+      ..Default::default()
+    };
+    doc.insert(kid, Some("f"), &page, None);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    let f = doc.get("f").unwrap();
+    assert_eq!((f.width, f.height), (120.0, 60.0), "grows to its minimum");
+    // A max below the content holds it back, and a fill child wraps inside what is left.
+    let props = crate::model::TextProps {
+      characters: "a fairly long sentence that needs several lines".into(),
+      ..Default::default()
+    };
+    let label = Node {
+      id: "l".into(),
+      kind: NodeType::Text,
+      sizing_h: Sizing::Fill,
+      text: Some(props),
+      ..Default::default()
+    };
+    doc.insert(label, Some("f"), &page, None);
+    {
+      let f = doc.get_mut("f").unwrap();
+      f.min_width = None;
+      f.min_height = None;
+      f.max_width = Some(200.0);
+    }
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    let f = doc.get("f").unwrap();
+    assert_eq!(f.width, 200.0);
+    assert_eq!(doc.get("l").unwrap().width, 160.0, "text fills what the fixed child leaves");
+    assert!(doc.get("l").unwrap().height > 20.0, "and wraps");
+    assert_eq!(f.height, doc.get("l").unwrap().height.max(20.0));
+  }
+
+  #[test]
+  fn vertical_hug_card_wraps_text_at_max_width() {
+    let (mut doc, page) = setup();
+    let card = Node {
+      id: "card".into(),
+      kind: NodeType::Frame,
+      layout: Some(AutoLayout {
+        padding_top: 0.0,
+        padding_right: 0.0,
+        padding_bottom: 0.0,
+        padding_left: 0.0,
+        ..Default::default()
+      }),
+      sizing_h: Sizing::Hug,
+      sizing_v: Sizing::Hug,
+      max_width: Some(150.0),
+      ..Default::default()
+    };
+    doc.insert(card, None, &page, None);
+    let props = crate::model::TextProps {
+      characters: "a fairly long sentence that needs several lines".into(),
+      ..Default::default()
+    };
+    let label = Node {
+      id: "l".into(),
+      kind: NodeType::Text,
+      sizing_h: Sizing::Fill,
+      text: Some(props),
+      ..Default::default()
+    };
+    doc.insert(label, Some("card"), &page, None);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    let (card, l) = (doc.get("card").unwrap(), doc.get("l").unwrap());
+    assert_eq!(card.width, 150.0);
+    assert_eq!(l.width, 150.0);
+    assert!(l.height > 19.2 * 2.0);
+    assert_eq!(card.height, l.height, "the card is as tall as the wrapped text");
+  }
+
+  #[test]
+  fn text_max_width_wraps_auto_width_text() {
+    let (mut doc, page) = setup();
+    let props = crate::model::TextProps {
+      characters: "a fairly long sentence that needs several lines".into(),
+      ..Default::default()
+    };
+    let t = Node {
+      id: "t".into(),
+      kind: NodeType::Text,
+      text: Some(props),
+      max_width: Some(120.0),
+      ..Default::default()
+    };
+    doc.insert(t, None, &page, None);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    let t = doc.get("t").unwrap();
+    assert!(t.width <= 120.0 && t.width > 60.0, "{}", t.width);
+    assert!(t.height > 19.2 * 2.0);
+  }
+
+  #[test]
+  fn baseline_aligns_texts_of_different_sizes() {
+    let (mut doc, page) = setup();
+    let mut r = row("f", 0.0, Sizing::Hug);
+    r.sizing_v = Sizing::Hug;
+    r.layout.as_mut().unwrap().counter_align = Align::Baseline;
+    doc.insert(r, None, &page, None);
+    for (id, size) in [("big", 40.0), ("small", 14.0)] {
+      let props = crate::model::TextProps {
+        characters: "Hg".into(),
+        font_size: size,
+        ..Default::default()
+      };
+      let t = Node {
+        id: id.into(),
+        kind: NodeType::Text,
+        text: Some(props),
+        ..Default::default()
+      };
+      doc.insert(t, Some("f"), &page, None);
+    }
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    let m = HeuristicMeasurer;
+    let base = |id: &str| {
+      let n = doc.get(id).unwrap();
+      n.y + first_baseline(n, n.text.as_ref().unwrap(), &m)
+    };
+    assert!((base("big") - base("small")).abs() < 0.01, "{} vs {}", base("big"), base("small"));
+    assert!(doc.get("small").unwrap().y > doc.get("big").unwrap().y, "the small text sits lower");
+    assert_eq!(doc.get("big").unwrap().y, 0.0);
+    // The row is as tall as the lowest bottom edge.
+    let f = doc.get("f").unwrap();
+    let small = doc.get("small").unwrap();
+    assert_eq!(f.height, (small.y + small.height).max(doc.get("big").unwrap().height));
+    // Start alignment puts both on top again.
+    doc.get_mut("f").unwrap().layout.as_mut().unwrap().counter_align = Align::Start;
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert_eq!(doc.get("small").unwrap().y, 0.0);
   }
 
   #[test]

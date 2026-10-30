@@ -1,7 +1,7 @@
 //! Text measurement, mixed-style runs and line breaking. The browser build
 //! measures with a real canvas; native builds (bridge, tests) use a width heuristic.
 
-use crate::model::{TextAutoResize, TextDecoration, TextProps, TextRun};
+use crate::model::{Node, TextAutoResize, TextDecoration, TextProps, TextRun};
 
 pub struct FontSpec<'a> {
   pub family: &'a str,
@@ -105,6 +105,8 @@ pub struct TextLine {
   pub text: String,
   pub width: f64,
   pub height: f64,
+  /// Top of the line inside the layout, including paragraph spacing above it.
+  pub top: f64,
   pub segments: Vec<Segment>,
 }
 
@@ -123,8 +125,26 @@ struct Piece {
   style: usize,
 }
 
-/// Breaks text into lines. `max_width` of `None` disables wrapping.
+/// Breaks text into lines. `max_width` of `None` disables wrapping. Does not truncate.
 pub fn layout_text(props: &TextProps, max_width: Option<f64>, m: &dyn TextMeasurer) -> TextLayout {
+  layout_limited(props, max_width, None, m)
+}
+
+/// Number of lines a text may show, or `None` for all. `max_lines` always limits; `truncate`
+/// alone limits fixed-size text to the lines that fit its height.
+pub fn line_limit(props: &TextProps, height: Option<f64>) -> Option<usize> {
+  if let Some(n) = props.max_lines {
+    return Some(n.max(1) as usize);
+  }
+  match (props.truncate, props.auto_resize, height) {
+    (true, TextAutoResize::None, Some(h)) => Some(((h / props.line_height_px().max(1.0)).floor() as usize).max(1)),
+    _ => None,
+  }
+}
+
+/// Lays out a text with an optional line limit; the last visible line ends in "…" when text
+/// was cut.
+pub fn layout_limited(props: &TextProps, max_width: Option<f64>, limit: Option<usize>, m: &dyn TextMeasurer) -> TextLayout {
   let text = props.display_text();
   let chars: Vec<char> = text.chars().collect();
   let (styles, char_style) = resolve_styles(props, chars.len());
@@ -132,9 +152,11 @@ pub fn layout_text(props: &TextProps, max_width: Option<f64>, m: &dyn TextMeasur
   let base_lh = props.line_height_px();
 
   let mut lines: Vec<TextLine> = Vec::new();
+  // Index of each paragraph's first line.
+  let mut para_starts: Vec<usize> = Vec::new();
   let mut offset = 0;
-  let paragraphs: Vec<&str> = text.split('\n').collect();
-  for para in &paragraphs {
+  for para in text.split('\n') {
+    para_starts.push(lines.len());
     let n = para.chars().count();
     let words = split_words(&chars[offset..offset + n], &char_style[offset..offset + n]);
     offset += n + 1;
@@ -153,9 +175,13 @@ pub fn layout_text(props: &TextProps, max_width: Option<f64>, m: &dyn TextMeasur
     };
     for word in words {
       let word_w: f64 = word.iter().map(measure).sum();
-      let fits = match max_width {
-        Some(mw) if mw > 0.0 => cur.is_empty() || cur_w + trimmed_width(&word) <= mw + 0.01,
-        _ => true,
+      let mw = max_width.filter(|w| *w > 0.0).unwrap_or(f64::INFINITY);
+      let word_fit_w = trimmed_width(&word);
+      // A word wider than the whole line never fits, even alone on a line.
+      let fits = if cur.is_empty() {
+        word_fit_w <= mw + 0.01
+      } else {
+        cur_w + word_fit_w <= mw + 0.01
       };
       if fits {
         cur_w += word_w;
@@ -164,10 +190,12 @@ pub fn layout_text(props: &TextProps, max_width: Option<f64>, m: &dyn TextMeasur
         }
         continue;
       }
-      lines.push(make_line(std::mem::take(&mut cur), &styles, m, lh_of, base_lh));
-      // Overlong words break by character.
-      let mw = max_width.unwrap_or(f64::INFINITY);
-      if word_w > mw {
+      if !cur.is_empty() {
+        lines.push(make_line(std::mem::take(&mut cur), &styles, m, lh_of, base_lh));
+      }
+      cur_w = 0.0;
+      if word_fit_w > mw + 0.01 {
+        // Overlong words break by character.
         for piece in word {
           for c in piece.text.chars() {
             let p = Piece {
@@ -190,14 +218,80 @@ pub fn layout_text(props: &TextProps, max_width: Option<f64>, m: &dyn TextMeasur
     }
     lines.push(make_line(cur, &styles, m, lh_of, base_lh));
   }
+  if let Some(limit) = limit.filter(|l| *l < lines.len()) {
+    // Blank lines after the limit are no content: nothing is cut then.
+    let cut = lines[limit..].iter().any(|l| !l.text.is_empty());
+    lines.truncate(limit);
+    if cut {
+      ellipsize(lines.last_mut().unwrap(), max_width, &styles[0], m);
+    }
+  }
+  // Stack the lines, adding paragraph spacing before every paragraph but the first.
+  let mut top = 0.0;
+  let mut next_para = 1;
+  for (i, line) in lines.iter_mut().enumerate() {
+    if para_starts.get(next_para) == Some(&i) {
+      top += props.paragraph_spacing;
+      next_para += 1;
+    }
+    line.top = top;
+    top += line.height;
+  }
   let width = lines.iter().map(|l| l.width).fold(0.0, f64::max);
-  let height = lines.iter().map(|l| l.height).sum::<f64>() + (paragraphs.len().max(1) as f64 - 1.0) * props.paragraph_spacing;
   TextLayout {
     lines,
     width,
-    height,
+    height: top,
     line_height: base_lh,
   }
+}
+
+/// Replaces the end of a line with "…" so the line, ellipsis included, fits `max_width`.
+fn ellipsize(line: &mut TextLine, max_width: Option<f64>, base: &SpanStyle, m: &dyn TextMeasurer) {
+  const ELLIPSIS: char = '\u{2026}';
+  let style = line.segments.last().map(|s| s.style.clone()).unwrap_or_else(|| base.clone());
+  let ell = m.measure(&ELLIPSIS.to_string(), &style.font());
+  let width = |segs: &[Segment]| segs.iter().map(|s| s.width).sum::<f64>();
+  // Spaces before the cut would only make a gap before the ellipsis.
+  let trim_spaces = |segs: &mut Vec<Segment>| {
+    while let Some(last) = segs.last_mut() {
+      let t = last.text.trim_end().to_string();
+      if t.is_empty() {
+        segs.pop();
+      } else {
+        if t.len() != last.text.len() {
+          last.width = m.measure(&t, &last.style.font());
+          last.text = t;
+        }
+        break;
+      }
+    }
+  };
+  trim_spaces(&mut line.segments);
+  if let Some(mw) = max_width.filter(|w| *w > 0.0) {
+    while width(&line.segments) + ell > mw + 0.01 {
+      let Some(last) = line.segments.last_mut() else { break };
+      last.text.pop();
+      last.width = m.measure(&last.text, &last.style.font());
+      if last.text.is_empty() {
+        line.segments.pop();
+      }
+      trim_spaces(&mut line.segments);
+    }
+  }
+  match line.segments.last_mut() {
+    Some(last) if last.style == style => {
+      last.text.push(ELLIPSIS);
+      last.width = m.measure(&last.text, &style.font());
+    }
+    _ => line.segments.push(Segment {
+      text: ELLIPSIS.to_string(),
+      width: ell,
+      style,
+    }),
+  }
+  line.text = line.segments.iter().map(|s| s.text.as_str()).collect();
+  line.width = width(&line.segments);
 }
 
 /// Style table and per-character style index for the text.
@@ -269,16 +363,48 @@ fn make_line(pieces: Vec<Piece>, styles: &[SpanStyle], m: &dyn TextMeasurer, lh_
     text: segments.iter().map(|s| s.text.as_str()).collect(),
     width: segments.iter().map(|s| s.width).sum(),
     height: height.max(base_lh),
+    top: 0.0,
     segments,
   }
 }
 
-/// Lays out a text node for its current box, honouring auto-resize.
-pub fn layout_for_node(props: &TextProps, width: f64, m: &dyn TextMeasurer) -> TextLayout {
+/// Lays out a text for its box: auto-resize, line limit and, for auto-width text, the wrap
+/// width its layer's `max_width` imposes.
+pub fn layout_for_box(props: &TextProps, width: f64, height: Option<f64>, max_width: Option<f64>, m: &dyn TextMeasurer) -> TextLayout {
+  let limit = line_limit(props, height);
   match props.auto_resize {
-    TextAutoResize::Width => layout_text(props, None, m),
-    TextAutoResize::Height | TextAutoResize::None => layout_text(props, Some(width), m),
+    TextAutoResize::Width => {
+      let lay = layout_limited(props, None, limit, m);
+      match max_width {
+        Some(mx) if lay.width > mx => layout_limited(props, Some(mx.max(1.0)), limit, m),
+        _ => lay,
+      }
+    }
+    TextAutoResize::Height | TextAutoResize::None => layout_limited(props, Some(width), limit, m),
   }
+}
+
+/// Layout of a text node in its current box.
+pub fn layout_of_node(n: &Node, props: &TextProps, m: &dyn TextMeasurer) -> TextLayout {
+  layout_for_box(props, n.width, Some(n.height), n.max_width, m)
+}
+
+/// Distance from the top of a text node to its first baseline (what baseline alignment lines
+/// up): the line centre plus 0.35 em, as the renderer places mixed sizes.
+pub fn first_baseline(n: &Node, props: &TextProps, m: &dyn TextMeasurer) -> f64 {
+  let lay = layout_of_node(n, props, m);
+  let offset = match props.align_v {
+    crate::model::TextAlignV::Top => 0.0,
+    crate::model::TextAlignV::Middle => (n.height - lay.height) / 2.0,
+    crate::model::TextAlignV::Bottom => n.height - lay.height,
+  };
+  let Some(line) = lay.lines.first() else { return n.height };
+  let size = if line.segments.is_empty() {
+    props.font_size
+  } else {
+    line.segments.iter().map(|s| s.style.size).fold(0.0, f64::max)
+  };
+  offset + line.top + line.height / 2.0 + 0.35 * size
 }
 
 // ---------- Editing runs ----------
@@ -440,6 +566,95 @@ mod tests {
     let l = layout_text(&props, Some(80.0), &HeuristicMeasurer);
     assert!(l.lines.len() > 1);
     assert!(l.lines.iter().all(|x| x.width <= 80.0 + 0.01 || !x.text.contains(' ')));
+  }
+
+  #[test]
+  fn long_word_breaks_by_character() {
+    let props = TextProps {
+      characters: "Supercalifragilisticexpialidocious and more".into(),
+      ..Default::default()
+    };
+    let l = layout_text(&props, Some(120.0), &HeuristicMeasurer);
+    assert_eq!(l.lines.len(), 3, "{:?}", l.lines.iter().map(|x| &x.text).collect::<Vec<_>>());
+    assert!(l.lines.iter().all(|x| x.width <= 120.01), "no line passes the box");
+    assert!(l.lines[0].width > 100.0, "the first line is filled before breaking");
+    assert!(l.lines[0].text.starts_with("Super") && l.lines[1].text.starts_with("ti"));
+    assert_eq!(l.lines[2].text, "and more");
+    // A word that fits on its own line still moves down as a whole.
+    let props = TextProps {
+      characters: "abcdef ghijklm".into(),
+      ..Default::default()
+    };
+    let l = layout_text(&props, Some(80.0), &HeuristicMeasurer);
+    assert_eq!(l.lines.iter().map(|x| x.text.as_str()).collect::<Vec<_>>(), ["abcdef", "ghijklm"]);
+  }
+
+  #[test]
+  fn max_lines_cut_with_ellipsis() {
+    let mut props = TextProps {
+      characters: "one two three four five six seven eight nine ten eleven twelve".into(),
+      ..Default::default()
+    };
+    let all = layout_text(&props, Some(100.0), &HeuristicMeasurer);
+    assert!(all.lines.len() > 3);
+    props.max_lines = Some(2);
+    let l = layout_limited(&props, Some(100.0), line_limit(&props, None), &HeuristicMeasurer);
+    assert_eq!(l.lines.len(), 2);
+    assert_eq!(l.height, 2.0 * 16.0 * 1.2);
+    assert!(l.lines[1].text.ends_with('\u{2026}'), "{}", l.lines[1].text);
+    assert!(!l.lines[0].text.contains('\u{2026}'));
+    assert!(l.lines[1].width <= 100.01, "ellipsis included in the width");
+    // Text that fits is left alone.
+    props.max_lines = Some(20);
+    let l = layout_limited(&props, Some(100.0), line_limit(&props, None), &HeuristicMeasurer);
+    assert_eq!(l.lines.len(), all.lines.len());
+    assert!(l.lines.iter().all(|x| !x.text.contains('\u{2026}')));
+  }
+
+  #[test]
+  fn truncate_in_a_fixed_box_shows_the_lines_that_fit() {
+    let props = TextProps {
+      characters: "one two three four five six seven eight nine ten eleven twelve".into(),
+      truncate: true,
+      auto_resize: TextAutoResize::None,
+      ..Default::default()
+    };
+    // 60 px tall at 19.2 px per line: three lines.
+    assert_eq!(line_limit(&props, Some(60.0)), Some(3));
+    assert_eq!(line_limit(&props, Some(5.0)), Some(1), "always at least one line");
+    let l = layout_for_box(&props, 100.0, Some(60.0), None, &HeuristicMeasurer);
+    assert_eq!(l.lines.len(), 3);
+    assert!(l.lines[2].text.ends_with('\u{2026}'));
+    // Without a fixed height there is nothing to cut at.
+    let auto = TextProps {
+      auto_resize: TextAutoResize::Height,
+      ..props.clone()
+    };
+    assert_eq!(line_limit(&auto, Some(60.0)), None);
+  }
+
+  #[test]
+  fn paragraph_spacing_separates_paragraphs() {
+    let props = TextProps {
+      characters: "a\nb\n\nc".into(),
+      paragraph_spacing: 10.0,
+      ..Default::default()
+    };
+    let l = layout_text(&props, None, &HeuristicMeasurer);
+    let lh = 16.0 * 1.2;
+    let tops: Vec<f64> = l.lines.iter().map(|x| x.top).collect();
+    assert_eq!(tops, vec![0.0, lh + 10.0, 2.0 * (lh + 10.0), 3.0 * (lh + 10.0)]);
+    assert_eq!(l.height, 4.0 * lh + 30.0);
+    // Wrapped lines inside one paragraph get no extra space.
+    let props = TextProps {
+      characters: "one two three four five six\nnext".into(),
+      paragraph_spacing: 10.0,
+      ..Default::default()
+    };
+    let l = layout_text(&props, Some(60.0), &HeuristicMeasurer);
+    assert!(l.lines.len() > 2);
+    assert_eq!(l.lines[1].top, lh);
+    assert_eq!(l.height, l.lines.len() as f64 * lh + 10.0);
   }
 
   #[test]

@@ -58,12 +58,19 @@ fn spec_schema() -> Value {
           "gap": { "type": "number" },
           "padding": { "description": "number, [vertical, horizontal] or [top, right, bottom, left]", "type": ["number", "array"] },
           "align": { "type": "string", "enum": ["start", "center", "end", "space-between"], "description": "Main axis" },
-          "crossAlign": { "type": "string", "enum": ["start", "center", "end"] },
+          "crossAlign": { "type": "string", "enum": ["start", "center", "end", "baseline"], "description": "Cross axis; baseline lines up the first text baselines of a horizontal layout" },
           "wrap": { "type": "boolean" },
           "counterGap": { "type": "number", "description": "Gap between wrapped rows (default: gap)" }
         }
       },
       "absolute": { "type": "boolean", "description": "Ignore parent auto layout" },
+      "minWidth": { "type": "number", "description": "Minimum width for hug/fill in auto layout (0 clears)" },
+      "maxWidth": { "type": "number", "description": "Maximum width; auto-width text wraps at it (0 clears)" },
+      "minHeight": { "type": "number" },
+      "maxHeight": { "type": "number" },
+      "maxLines": { "type": "number", "description": "Text: show at most this many lines, ending in an ellipsis when cut" },
+      "truncate": { "type": "boolean", "description": "Text: cut what doesn't fit with an ellipsis" },
+      "paragraphSpacing": { "type": "number", "description": "Text: extra space between paragraphs (lines split by newline)" },
       "text": { "type": "string", "description": "Text content (type text)" },
       "spans": { "type": "array", "description": "Mixed-style text instead of `text`: [{text, fontWeight, italic, color, fontSize, fontFamily, decoration, link}]", "items": { "type": "object" } },
       "fontSize": { "type": "number" },
@@ -857,6 +864,16 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
   if let Some(v) = s.get("absolute").and_then(|v| v.as_bool()) {
     n.absolute_position = v;
   }
+  for (key, slot) in [
+    ("minWidth", &mut n.min_width),
+    ("maxWidth", &mut n.max_width),
+    ("minHeight", &mut n.min_height),
+    ("maxHeight", &mut n.max_height),
+  ] {
+    if let Some(v) = s.get(key) {
+      *slot = num(Some(v)).filter(|v| *v > 0.0);
+    }
+  }
   if let Some(b) = s.get("bind").and_then(|v| v.as_object()) {
     for (prop, var) in b {
       if crate::variables::property_kind(prop).is_none() {
@@ -1109,6 +1126,15 @@ pub fn apply_spec(n: &mut Node, s: &Value, creating: bool) -> Result<(), String>
         _ => TextAutoResize::Width,
       };
     }
+    if let Some(v) = s.get("maxLines") {
+      t.max_lines = num(Some(v)).filter(|v| *v >= 1.0).map(|v| v as u32);
+    }
+    if let Some(v) = s.get("truncate").and_then(|v| v.as_bool()) {
+      t.truncate = v;
+    }
+    if let Some(v) = num(s.get("paragraphSpacing")) {
+      t.paragraph_spacing = v.max(0.0);
+    }
   }
   if let Some(d) = s.get("svgPath").and_then(|v| v.as_str()) {
     let vb = s
@@ -1229,6 +1255,7 @@ fn parse_align(s: &str) -> Align {
     "center" | "middle" => Align::Center,
     "end" | "right" | "bottom" | "flex-end" => Align::End,
     "space-between" | "between" => Align::SpaceBetween,
+    "baseline" => Align::Baseline,
     _ => Align::Start,
   }
 }
