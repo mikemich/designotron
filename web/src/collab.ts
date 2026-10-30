@@ -363,9 +363,10 @@ function connect(join: Record<string, unknown>) {
     stopHeartbeat();
     heartbeat = setInterval(() => {
       const now = Date.now();
-      // Dead only when a ping went out and nothing at all came back since. (Timers in hidden
-      // tabs can run a minute late: lateness alone says nothing about the connection.)
-      if (heardPong && lastPing > lastHeard && now - lastPing > SILENT_MS) return lost();
+      // Dead: nothing heard for SILENT_MS, and a ping that has had time to be answered is
+      // still unanswered. (Timers in hidden tabs can run a minute late: lateness alone says
+      // nothing about the connection, and pings keep going out meanwhile.)
+      if (heardPong && lastPing > lastHeard && now - lastHeard > SILENT_MS && now - lastPing >= PING_MS / 2 - 500) return lost();
       if (now - lastPing >= PING_MS - 500) ping();
     }, PING_MS / 2);
     socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, ...join }));

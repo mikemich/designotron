@@ -220,6 +220,42 @@ try {
   await sleep(75000);
   const ss = await slow.evaluate(() => ({ sockets: window.__sockets, status: window.__dt.collab().status }));
   check("hidden-tab timer lateness does not reconnect", ss.sockets === 1 && ss.status === "live", JSON.stringify(ss));
+  // A connection that stays "open" but goes silent (a dropped network) is replaced within ~30 s.
+  const dead = await newPage("Dana");
+  await dead.addInitScript(() => {
+    window.__mute = false;
+    window.__sockets = 0;
+    const Orig = WebSocket;
+    window.WebSocket = class extends Orig {
+      constructor(...a) {
+        super(...a);
+        if (!String(a[0]).includes("/ws?room")) return;
+        window.__sockets++;
+        const send = this.send.bind(this);
+        this.send = (d) => !window.__mute && send(d);
+        const desc = Object.getOwnPropertyDescriptor(Orig.prototype, "onmessage");
+        Object.defineProperty(this, "onmessage", {
+          set(f) {
+            desc.set.call(this, f && ((e) => !window.__mute && f(e)));
+          },
+          get() {
+            return desc.get.call(this);
+          },
+        });
+      }
+    };
+  });
+  await shareRoom(dead);
+  await sleep(12000); // at least one pong heard
+  await dead.evaluate(() => (window.__mute = true));
+  const t0 = Date.now();
+  let noticed = 0;
+  while (Date.now() - t0 < 45000 && !noticed) {
+    await sleep(1000);
+    const d = await dead.evaluate(() => ({ st: window.__dt.collab().status, n: window.__sockets }));
+    if (d.st !== "live" || d.n > 1) noticed = Date.now() - t0;
+  }
+  check("a silent connection is noticed within ~40 s", noticed > 0 && noticed < 40000, `${noticed} ms`);
 } catch (e) {
   failed++;
   console.log("FAIL  script error:", e.stack ?? e);
