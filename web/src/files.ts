@@ -1,8 +1,14 @@
 // Local file storage (IndexedDB) and the portable `.dtron` file format.
 
-import { get as idbGet, set as idbSet, del as idbDel, getMany as idbGetMany, setMany as idbSetMany, delMany as idbDelMany } from "idb-keyval";
+import {
+  createStore,
+  get as idbGet,
+  set as idbSet,
+  del as idbDel,
+  getMany as idbGetMany,
+} from "idb-keyval";
 import { allAssets, assetDataUrl, loadAssets, referencedAssets } from "./assets";
-import { documentLoads } from "./store";
+import { documentLoads, toast } from "./store";
 
 export interface FileMeta {
   id: string;
@@ -23,10 +29,14 @@ interface Manifest {
   v: 2;
   /** Counts saves, so a reader can tell the records it read belong together. */
   seq: number;
+  /** The tab (page load) that wrote this manifest: a tab only builds on what it wrote itself. */
+  writer: string;
   /** Document-level fields as a JSON object (everything but `nodes`). */
   meta: string;
   /** Stored layers, with the image assets each one uses. */
   roots: Record<string, string[]>;
+  /** Names of the stored layers, to say which ones can't be read back. */
+  names?: Record<string, string>;
   /** Image assets stored for this file, one record each. */
   assets: string[];
 }
@@ -39,7 +49,17 @@ export interface SavePlan {
   meta: string;
   /** Layer id -> its nodes as the body of a JSON object. */
   dirty: Record<string, string>;
+  /** Layer id -> name, for the layers in `dirty`. */
+  names: Record<string, string>;
   removed: string[];
+}
+
+/** The stored file isn't the one this tab last wrote (another tab or writer saved since), so a
+ * save that only adds changes would build on the wrong thing: write the whole file instead. */
+export class StaleStorageError extends Error {
+  constructor() {
+    super("The stored file was changed by another writer");
+  }
 }
 
 /** Portable file wrapper written by "Save as .dtron" and read by the bridge. */
@@ -59,6 +79,9 @@ let idbOk = true;
 // is a real failure (a transient error, quota, a full disk) that callers must see, not a sign
 // that IndexedDB is missing.
 let idbWorked = false;
+// Set once a write has landed. Some browsers (older Safari in private mode) open IndexedDB and
+// fail every write; until one has worked a failing write means falling back to memory.
+let idbWrote = false;
 
 /** Opens the database once (as idb-keyval will) so that only a failed *open* means IndexedDB is
  * missing; a read that fails on a cold load then reaches the caller instead of reading as
@@ -71,6 +94,7 @@ function ensureOpen(): Promise<void> {
       req.onupgradeneeded = () => req.result.createObjectStore("keyval");
       req.onsuccess = () => {
         req.result.close();
+        // Reads work (even if every write fails); see idbWrote.
         idbWorked = true;
         resolve();
       };
@@ -109,9 +133,9 @@ async function set(key: string, value: unknown): Promise<void> {
   if (idbOk) {
     try {
       await idbSet(key, value);
-      idbWorked = true;
+      idbWrote = true;
     } catch (err) {
-      if (idbWorked) throw err;
+      if (idbWrote) throw err;
       idbOk = false;
     }
   }
@@ -123,15 +147,17 @@ async function del(key: string): Promise<void> {
   if (idbOk) {
     try {
       await idbDel(key);
+      idbWrote = true;
     } catch (err) {
-      if (idbWorked) throw err;
+      if (idbWrote) throw err;
       idbOk = false;
     }
   }
 }
 
-// The batch forms write several records in one transaction: all land or none does. They keep
-// the data out of `memory` while IndexedDB works (a copy there would double a big file's RAM).
+// The batch forms read or write several records in one transaction: all land or none does.
+// They keep the data out of `memory` while IndexedDB works (a copy there would double a big
+// file's RAM).
 
 async function getMany(keys: string[]): Promise<unknown[]> {
   await ensureOpen();
@@ -148,32 +174,60 @@ async function getMany(keys: string[]): Promise<unknown[]> {
   return keys.map((k) => memory.get(k));
 }
 
-async function setMany(entries: [string, unknown][]): Promise<void> {
-  await ensureOpen();
-  if (idbOk) {
-    try {
-      await idbSetMany(entries);
-      idbWorked = true;
-      return;
-    } catch (err) {
-      if (idbWorked) throw err;
-      idbOk = false;
-    }
-  }
-  for (const [k, v] of entries) memory.set(k, v);
+/** What a read-modify-write of the stored records decided: records to write and to delete. */
+interface Writes {
+  put: [string, unknown][];
+  del: string[];
 }
 
-async function delMany(keys: string[]): Promise<void> {
+const keyval = createStore("keyval-store", "keyval");
+
+/**
+ * Reads `readKeys`, lets `decide` (synchronously) choose what to write and delete from what
+ * it found, and applies that, all in one transaction: no other writer can land in between,
+ * and either everything is applied or nothing is. `decide` may throw to abort.
+ */
+async function transact(readKeys: string[], decide: (found: unknown[]) => Writes): Promise<void> {
   await ensureOpen();
-  for (const k of keys) memory.delete(k);
   if (idbOk) {
     try {
-      await idbDelMany(keys);
+      await keyval(
+        "readwrite",
+        (os) =>
+          new Promise<void>((resolve, reject) => {
+            const tx = os.transaction;
+            tx.oncomplete = () => resolve();
+            tx.onabort = () => reject(tx.error ?? new Error("transaction aborted"));
+            const found: unknown[] = new Array(readKeys.length);
+            let left = readKeys.length;
+            readKeys.forEach((k, i) => {
+              const req = os.get(k);
+              req.onsuccess = () => {
+                found[i] = req.result;
+                if (--left > 0) return;
+                try {
+                  const w = decide(found);
+                  for (const [key, value] of w.put) os.put(value, key);
+                  for (const key of w.del) os.delete(key);
+                } catch (err) {
+                  reject(err);
+                  tx.abort();
+                }
+              };
+            });
+          }),
+      );
+      idbWrote = true;
+      return;
     } catch (err) {
-      if (idbWorked) throw err;
+      // A decision to give up (or a broken store that has worked before) is the caller's.
+      if (err instanceof StaleStorageError || idbWrote) throw err;
       idbOk = false;
     }
   }
+  const w = decide(readKeys.map((k) => memory.get(k)));
+  for (const [k, v] of w.put) memory.set(k, v);
+  for (const k of w.del) memory.delete(k);
 }
 
 /** False when files only live in memory for this session. */
@@ -208,12 +262,33 @@ const fileKey = (id: string) => "dt:file:" + id;
 const rootKey = (id: string, root: string) => `dt:root:${id}:${root}`;
 const assetKey = (id: string, asset: string) => `dt:asset:${id}:${asset}`;
 
-/** What is known to be stored in the layered form for files opened or saved in this session. */
-const layered = new Map<string, { seq: number; roots: Record<string, string[]>; assets: Set<string> }>();
+/** What is known to be stored in the layered form for files opened or saved in this session:
+ * the manifest this tab last read or wrote (writer and seq identify it) and what it lists. */
+interface Known {
+  seq: number;
+  writer: string;
+  roots: Record<string, string[]>;
+  names: Record<string, string>;
+  assets: Set<string>;
+  /** Size of each layer's records, in characters, and of the document-level record. */
+  sizes: Record<string, number>;
+  metaSize: number;
+}
+const layered = new Map<string, Known>();
+
+/** This page load, for telling manifests apart. */
+const WRITER = Math.random().toString(36).slice(2) + Date.now().toString(36);
 
 /** Whether the next `saveDelta` for this file can build on what is stored (else it must be `full`). */
 export function canSaveDelta(id: string): boolean {
   return layered.has(id);
+}
+
+/** About how many characters the whole document is as JSON, from what was stored; null when
+ * the file hasn't been stored in the layered form yet. */
+export function storedSize(id: string): number | null {
+  const k = layered.get(id);
+  return k ? k.metaSize + Object.values(k.sizes).reduce((a, b) => a + b, 0) : null;
 }
 
 const isManifest = (v: unknown): v is Manifest => (v as Manifest | undefined)?.v === 2;
@@ -222,11 +297,12 @@ const isManifest = (v: unknown): v is Manifest => (v as Manifest | undefined)?.v
 export async function saveFile(id: string, name: string, docJson: string, thumbnail?: string) {
   const used = new Set(referencedAssets(docJson));
   const assets = Object.fromEntries(Object.entries(allAssets()).filter(([k]) => used.has(k)));
-  await set(fileKey(id), { doc: docJson, assets } satisfies StoredFile);
-  // The layered records it replaces are garbage now.
-  const old = layered.get(id);
   layered.delete(id);
-  if (old) await delMany(layeredKeys(id, old.roots, old.assets)).catch(() => {});
+  // Whatever layered records the file has now go in the same transaction as the new record.
+  await transact([fileKey(id)], ([stored]) => ({
+    put: [[fileKey(id), { doc: docJson, assets } satisfies StoredFile]],
+    del: isManifest(stored) ? layeredKeys(id, stored.roots, stored.assets) : [],
+  }));
   await writeIndex((idx) => {
     const rest = idx.filter((f) => f.id !== id);
     const prev = idx.find((f) => f.id === id);
@@ -235,44 +311,81 @@ export async function saveFile(id: string, name: string, docJson: string, thumbn
 }
 
 /**
- * Stores a save from `persistPlan`: the layers that changed plus the document-level fields,
- * in one transaction. Cost follows what changed, not the size of the file. Throws when the
- * write didn't land (nothing is changed then); the plan can be retried or superseded.
+ * Stores a save from `persistPlan`: the layers that changed plus the document-level fields.
+ * One transaction reads the stored manifest, works out which layers the file has from it, writes
+ * the changed layers and the new manifest and deletes the records the old manifest listed and
+ * the new one doesn't. Cost follows what changed, not the size of the file.
+ *
+ * It only builds on the manifest this tab last wrote (a `StaleStorageError` otherwise, after
+ * which the caller makes a `full` plan: the last writer's document wins whole, never a mix).
+ * Throws when the write didn't land (nothing is changed then).
  */
 export async function saveDelta(id: string, name: string, plan: SavePlan) {
   const state = layered.get(id);
-  if (!plan.full && !state) throw new Error("nothing stored to build on");
+  if (!plan.full && !state) throw new StaleStorageError();
+  // This tab's view of the stored file once the write lands, for a write started before it
+  // does: it is only right if this one lands, and a failure forgets it.
+  const sizes: Record<string, number> = plan.full ? {} : { ...state!.sizes };
   const roots: Record<string, string[]> = plan.full ? {} : { ...state!.roots };
-  for (const r of plan.removed) delete roots[r];
-  const entries: [string, unknown][] = [];
+  const names: Record<string, string> = plan.full ? {} : { ...state!.names };
+  for (const r of plan.removed) {
+    delete roots[r];
+    delete names[r];
+    delete sizes[r];
+  }
+  const rootAssets: Record<string, string[]> = {};
   for (const [r, body] of Object.entries(plan.dirty)) {
-    roots[r] = referencedAssets(body);
-    entries.push([rootKey(id, r), body]);
+    rootAssets[r] = referencedAssets(body);
+    roots[r] = rootAssets[r];
+    names[r] = plan.names[r] ?? names[r] ?? "";
+    sizes[r] = body.length;
   }
-  const used = new Set(Object.values(roots).flat());
-  const had = state?.assets ?? new Set<string>();
-  const stored = new Set<string>();
-  for (const a of used) {
-    if (had.has(a)) stored.add(a);
-    else {
-      const url = assetDataUrl(a);
-      if (url) {
-        entries.push([assetKey(id, a), url]);
-        stored.add(a);
-      }
-    }
-  }
+  const expected = state ? { seq: state.seq, writer: state.writer } : null;
   const seq = (state?.seq ?? 0) + 1;
-  entries.push([fileKey(id), { v: 2, seq, meta: plan.meta, roots, assets: [...stored] } satisfies Manifest]);
-  await setMany(entries);
-  // Records of layers and images the file no longer has (best effort: leftovers are harmless).
-  const gone = layeredKeys(
-    id,
-    Object.fromEntries(Object.entries(state?.roots ?? {}).filter(([r]) => !(r in roots))),
-    new Set([...had].filter((a) => !stored.has(a))),
-  );
-  layered.set(id, { seq, roots, assets: stored });
-  if (gone.length) await delMany(gone).catch(() => {});
+  const known: Known = { seq, writer: WRITER, roots, names, assets: new Set(), sizes, metaSize: plan.meta.length };
+  // Optimistic: a write begun before this one lands builds on this.
+  layered.set(id, known);
+  try {
+    await transact([fileKey(id)], ([stored]) => {
+      const m = isManifest(stored) ? stored : null;
+      if (!plan.full && (!m || !expected || m.seq !== expected.seq || m.writer !== expected.writer)) throw new StaleStorageError();
+      // What is stored, less what goes, plus what changed.
+      const nextRoots: Record<string, string[]> = plan.full ? {} : { ...m!.roots };
+      const nextNames: Record<string, string> = plan.full ? {} : { ...(m!.names ?? {}) };
+      for (const r of plan.removed) {
+        delete nextRoots[r];
+        delete nextNames[r];
+      }
+      const put: [string, unknown][] = [];
+      for (const [r, body] of Object.entries(plan.dirty)) {
+        nextRoots[r] = rootAssets[r];
+        nextNames[r] = names[r];
+        put.push([rootKey(id, r), body]);
+      }
+      const had = new Set(m?.assets ?? []);
+      const nextAssets = new Set<string>();
+      for (const a of new Set(Object.values(nextRoots).flat())) {
+        if (had.has(a)) nextAssets.add(a);
+        else {
+          const url = assetDataUrl(a);
+          if (url) {
+            put.push([assetKey(id, a), url]);
+            nextAssets.add(a);
+          }
+        }
+      }
+      put.push([fileKey(id), { v: 2, seq: (m?.seq ?? 0) + 1, writer: WRITER, meta: plan.meta, roots: nextRoots, names: nextNames, assets: [...nextAssets] } satisfies Manifest]);
+      // Records the stored manifest listed and the new one doesn't, deleted with the write.
+      const goneRoots = Object.fromEntries(Object.entries(m?.roots ?? {}).filter(([r]) => !(r in nextRoots)));
+      known.assets = nextAssets;
+      known.seq = (m?.seq ?? 0) + 1;
+      return { put, del: layeredKeys(id, goneRoots, (m?.assets ?? []).filter((a) => !nextAssets.has(a))) };
+    });
+  } catch (err) {
+    // Unknown what is stored now (or known to be somebody else's): the next save starts over.
+    layered.delete(id);
+    throw err;
+  }
   await writeIndex((idx) => {
     const rest = idx.filter((f) => f.id !== id);
     const prev = idx.find((f) => f.id === id);
@@ -299,7 +412,11 @@ export async function loadFile(id: string): Promise<string | null> {
   return f.doc;
 }
 
-/** Assembles a document from its layer records, which must all belong to one save. */
+/**
+ * Assembles a document from its layer records, which must all belong to one save. A record that
+ * is missing doesn't make the file unopenable: the layers that are there open, the ones that
+ * aren't are named in a toast, and the next save rewrites the whole file (which repairs it).
+ */
 async function loadLayered(id: string, first: Manifest): Promise<string> {
   let m = first;
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -309,17 +426,43 @@ async function loadLayered(id: string, first: Manifest): Promise<string> {
     const again = values[values.length - 1] as Manifest | undefined;
     // Another tab saved between reading the manifest and the layers: start over from its manifest.
     if (!isManifest(again)) throw new Error("This file's storage changed while it was opening.");
-    if (again.seq !== m.seq) {
+    if (again.seq !== m.seq || again.writer !== m.writer) {
       m = again;
       continue;
     }
-    const bodies = values.slice(0, rootIds.length) as (string | undefined)[];
-    const missing = bodies.findIndex((b) => typeof b !== "string");
-    if (missing >= 0) throw new Error("This file is damaged: a stored layer is missing.");
+    const found = values.slice(0, rootIds.length) as (string | undefined)[];
     const urls = values.slice(rootIds.length, rootIds.length + m.assets.length) as (string | undefined)[];
     loadAssets(Object.fromEntries(m.assets.flatMap((a, i) => (urls[i] ? [[a, urls[i]!]] : []))));
-    layered.set(id, { seq: m.seq, roots: m.roots, assets: new Set(m.assets) });
-    return `${m.meta.slice(0, -1)},"nodes":{${bodies.join(",")}}}`;
+    const sizes: Record<string, number> = {};
+    const bodies: string[] = [];
+    const lost: string[] = [];
+    found.forEach((b, i) => {
+      if (typeof b === "string") {
+        bodies.push(b);
+        sizes[rootIds[i]] = b.length;
+      } else lost.push(rootIds[i]);
+    });
+    let meta = m.meta;
+    if (lost.length) {
+      // Pages mustn't list layers that aren't there.
+      const doc = JSON.parse(meta);
+      for (const page of doc.pages ?? []) page.children = (page.children ?? []).filter((c: string) => !lost.includes(c));
+      meta = JSON.stringify(doc);
+      toast(`Couldn't read ${lost.map((r) => `“${m.names?.[r] ?? r}”`).join(", ")} from this file; ${lost.length === 1 ? "it is" : "they are"} missing. The rest opened.`, "error");
+      // Not what the stored manifest says: the next save writes everything.
+      layered.delete(id);
+    } else {
+      layered.set(id, {
+        seq: m.seq,
+        writer: m.writer,
+        roots: m.roots,
+        names: m.names ?? {},
+        assets: new Set(m.assets),
+        sizes,
+        metaSize: m.meta.length,
+      });
+    }
+    return `${meta.slice(0, -1)},"nodes":{${bodies.join(",")}}}`;
   }
   throw new Error("This file is being saved elsewhere; try again.");
 }
@@ -330,10 +473,11 @@ export async function deleteFile(id: string) {
   await writeIndex((idx) => idx.filter((f) => f.id !== id));
   for (const v of await listVersions(id)) await del(`dt:version:${id}:${v.id}`);
   await del("dt:versions:" + id);
-  const rec = (await get(fileKey(id))) as StoredFile | Manifest | undefined;
-  if (isManifest(rec)) await delMany(layeredKeys(id, rec.roots, rec.assets));
   layered.delete(id);
-  await del("dt:file:" + id);
+  await transact([fileKey(id)], ([stored]) => ({
+    put: [],
+    del: [fileKey(id), ...(isManifest(stored) ? layeredKeys(id, stored.roots, stored.assets) : [])],
+  }));
   clearRecovery(id);
 }
 
@@ -341,7 +485,10 @@ export async function renameFile(id: string, name: string) {
   const rec = (await get(fileKey(id))) as StoredFile | Manifest | undefined;
   if (isManifest(rec)) {
     // Only the document-level record carries the name.
-    await set(fileKey(id), { ...rec, meta: JSON.stringify({ ...JSON.parse(rec.meta), name }) } satisfies Manifest);
+    await transact([fileKey(id)], ([stored]) => {
+      if (!isManifest(stored)) throw new Error("This file changed while it was being renamed.");
+      return { put: [[fileKey(id), { ...stored, meta: JSON.stringify({ ...JSON.parse(stored.meta), name }) } satisfies Manifest]], del: [] };
+    });
     await writeIndex((idx) => idx.map((f) => (f.id === id ? { ...f, name, updatedAt: Date.now() } : f)));
     return;
   }

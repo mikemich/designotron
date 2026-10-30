@@ -115,6 +115,138 @@ const frame = (name, x, extra = {}) => ({
   ...extra,
 });
 
+// Overlapping writes: each scenario ends by reopening the stored file, which must open (never
+// "damaged") and equal what one of the writers had.
+const RELAY = process.env.E2E_RELAY ?? "";
+const sortKeys = (v) => (Array.isArray(v) ? v.map(sortKeys) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])])) : v);
+const rig = async (ctxIn) => {
+  const c = ctxIn ?? (await browser.newContext({ viewport: { width: 1400, height: 900 } }));
+  if (!ctxIn)
+    await c.route(
+      (u) => !/^(127\.0\.0\.1|localhost)$/.test(new globalThis.URL(u).hostname) && !/^(data|blob):/.test(u.toString()),
+      (r) => r.abort(),
+    );
+  const pg = await c.newPage();
+  await pg.addInitScript(() => {
+    try {
+      localStorage.setItem("dt:tour-done", "1");
+    } catch {
+      /* no storage */
+    }
+  });
+  pg.on("pageerror", (e) => errors.push(String(e)));
+  pg.on("dialog", (d) => d.accept().catch(() => {}));
+  const R = {
+    c,
+    pg,
+    tool: (n, i) => pg.evaluate(([n, i]) => window.__dt.tool(n, i), [n, i]),
+    dispatch: (cmd) => pg.evaluate((x) => window.__dt.dispatch(x), cmd),
+    byName: async (name) => Object.values(await pg.evaluate(() => window.__dt.doc().nodes)).find((n) => n.name === name),
+    canon: () =>
+      pg.evaluate(() => {
+        const sort = (v) => (Array.isArray(v) ? v.map(sort) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sort(v[k])])) : v);
+        return JSON.stringify(sort(window.__dt.doc()));
+      }),
+    label: () => pg.locator(".save-state").textContent().catch(() => ""),
+    fileId: () => pg.evaluate(() => location.hash.match(/#\/file\/(\w+)/)?.[1]),
+    async settle() {
+      for (let i = 0; i < 30 && (await R.label()).includes("Saved locally"); i++) await sleep(30);
+      for (let i = 0; i < 600 && !(await R.label()).includes("Saved locally"); i++) await sleep(50);
+      await sleep(300);
+    },
+    async newFile(url = URL_) {
+      await pg.goto(url);
+      await pg.waitForSelector("button:has-text('New design file')");
+      await pg.click("button:has-text('New design file')");
+      await pg.waitForSelector("#dt-canvas");
+      await sleep(400);
+    },
+    // The stored file as canonical JSON (either form), or "ERR ...".
+    stored: (id) =>
+      pg.evaluate(async (id) => {
+        const db = await new Promise((r) => {
+          const q = indexedDB.open("keyval-store");
+          q.onsuccess = () => r(q.result);
+        });
+        const get = (k) =>
+          new Promise((res) => {
+            const q = db.transaction("keyval").objectStore("keyval").get(k);
+            q.onsuccess = () => res(q.result);
+          });
+        const sort = (v) => (Array.isArray(v) ? v.map(sort) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sort(v[k])])) : v);
+        const m = await get("dt:file:" + id);
+        db.close();
+        if (!m) return "ERR no record";
+        if (m.v !== 2) return JSON.stringify(sort(JSON.parse(m.doc)));
+        const db2 = await new Promise((r) => {
+          const q = indexedDB.open("keyval-store");
+          q.onsuccess = () => r(q.result);
+        });
+        const bodies = [];
+        for (const r of Object.keys(m.roots)) {
+          const b = await new Promise((res) => {
+            const q = db2.transaction("keyval").objectStore("keyval").get(`dt:root:${id}:${r}`);
+            q.onsuccess = () => res(q.result);
+          });
+          if (typeof b !== "string") return "ERR missing root " + r;
+          bodies.push(b);
+        }
+        db2.close();
+        return JSON.stringify(sort(JSON.parse(`${m.meta.slice(0, -1)},"nodes":{${bodies.join(",")}}}`)));
+      }, id),
+    // Opens the file afresh and returns its canonical JSON, or "ERR <screen text>".
+    async reopen(url) {
+      await pg.goto(url);
+      await pg.waitForSelector("#dt-canvas, .empty-hint", { timeout: 60000 });
+      await sleep(800);
+      return (await pg.locator(".empty-hint").count()) ? "ERR " + (await pg.locator(".empty-hint").innerText()) : R.canon();
+    },
+  };
+  return R;
+};
+// Runs `fn` on the first manifest write after `arm`.
+const armOnManifestPut = (R) =>
+  R.pg.evaluate(() => {
+    if (window.__hooked) return;
+    window.__hooked = true;
+    const orig = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (v, k) {
+      const r = orig.call(this, v, k);
+      if (window.__armFn && String(k).startsWith("dt:file:") && v && v.v === 2) {
+        const f = window.__armFn;
+        window.__armFn = null;
+        queueMicrotask(f);
+      }
+      return r;
+    };
+  });
+const nodes4 = (heavy = 2) => [frame("A", 0), frame("B", 400), frame("C", 800), { ...frame("H", 1200), children: [...frame("H", 0).children, ...Array.from({ length: Math.max(0, heavy - 2) }, (_, i) => ({ type: "rectangle", name: `H r${i}`, x: (i % 50) * 5, y: 100 + Math.floor(i / 50) * 5, width: 4, height: 4, fill: "#00FF00" }))] }];
+const overlapCase = async (name, heavy, arm, step, after) => {
+  const R = await rig();
+  await R.newFile();
+  await R.tool("create_nodes", { nodes: nodes4(heavy) });
+  await R.settle();
+  const id = await R.fileId();
+  await armOnManifestPut(R);
+  await R.pg.evaluate(arm);
+  await step(R);
+  await sleep(3000);
+  if (after) await after(R);
+  // (Leaving for the files list: what the editor held at that moment.)
+  const want = (await R.pg.evaluate(() => window.__expected ?? null)) ?? (await R.canon());
+  const stored = await R.stored(id);
+  const reopened = await R.reopen(URL_ + "/?r=" + Date.now() + "#/file/" + id);
+  check(`${name}: the stored file equals the editor's`, stored === want, stored.startsWith("ERR") ? stored : "differs");
+  check(`${name}: it reopens undamaged and equal`, reopened === want, reopened.startsWith("ERR") ? reopened.slice(0, 120) : "differs");
+  await R.c.close();
+};
+const undoAndHide = () => {
+  window.__armFn = () => {
+    window.__dt.dispatch({ op: "undo" });
+    window.dispatchEvent(new Event("pagehide"));
+  };
+};
+
 try {
   await open();
 
@@ -365,6 +497,188 @@ try {
     const left = await keys();
     check("deleting a layered file removes every record", !left.some((k) => k.startsWith("dt:root:flegacy1:") || k === "dt:file:flegacy1"), left.filter((k) => k.includes("flegacy1")).join(","));
     check("other files are untouched", (await page.locator(".file-card").count()) === cards - 1);
+  }
+
+  // 9. Overlapping writes: undo during a save, two tabs, and a copy made while a save runs.
+  {
+    await overlapCase(
+      "delete C, then undo and pagehide during the write",
+      2,
+      undoAndHide,
+      async (R) => R.dispatch({ op: "delete", ids: [(await R.byName("C")).id] }),
+      async (R) => {
+        await R.dispatch({ op: "update", ids: [(await R.byName("A")).id], patch: { x: 5 } });
+        await R.settle();
+      },
+    );
+    await overlapCase(
+      "move B, then undo and pagehide during the write",
+      2,
+      undoAndHide,
+      async (R) => R.dispatch({ op: "update", ids: [(await R.byName("B")).id], patch: { y: 333 } }),
+      async (R) => {
+        await R.dispatch({ op: "update", ids: [(await R.byName("A")).id], patch: { x: 5 } });
+        await R.settle();
+      },
+    );
+    await overlapCase(
+      "edit H and delete C, then undo and leave for the files list during the write",
+      3000,
+      () => {
+        window.__armFn = () => {
+          window.__dt.dispatch({ op: "undo" });
+          const sort = (v) => (Array.isArray(v) ? v.map(sort) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sort(v[k])])) : v);
+          window.__expected = JSON.stringify(sort(window.__dt.doc()));
+          history.replaceState(null, "", location.pathname + "#/");
+          dispatchEvent(new HashChangeEvent("hashchange"));
+        };
+      },
+      async (R) => {
+        const h = await R.byName("H");
+        await R.dispatch({ op: "update", ids: [h.id], patch: { y: 50 } });
+        await R.dispatch({ op: "delete", ids: [(await R.byName("C")).id] });
+      },
+      async (R) => {
+        // Back in the file: whatever the editor holds now was saved on the way out.
+        await R.pg.waitForSelector("button:has-text('New design file')");
+      },
+    );
+  }
+  {
+    // Two tabs of one file hide at the same moment, each with its own change.
+    for (let rep = 0; rep < 3; rep++) {
+      const A = await rig();
+      await A.newFile();
+      await A.tool("create_nodes", { nodes: nodes4(400) });
+      await A.settle();
+      const id = await A.fileId();
+      const B = await rig(A.c);
+      await B.pg.goto(URL_ + "/#/file/" + id);
+      await B.pg.waitForSelector("#dt-canvas");
+      await sleep(1500);
+      const cId = (await A.byName("C")).id;
+      const bId = (await B.byName("B")).id;
+      await Promise.all([
+        A.pg.evaluate((x) => {
+          window.__dt.dispatch({ op: "delete", ids: [x] });
+          window.dispatchEvent(new Event("pagehide"));
+        }, cId),
+        B.pg.evaluate((x) => {
+          window.__dt.dispatch({ op: "update", ids: [x], patch: { y: 77 } });
+          window.dispatchEvent(new Event("pagehide"));
+        }, bId),
+      ]);
+      await sleep(3500);
+      const da = await A.canon();
+      const db = await B.canon();
+      const stored = await A.stored(id);
+      const again = await (await rig(A.c)).reopen(URL_ + "/?r=" + Date.now() + "#/file/" + id);
+      check(`two tabs hiding together #${rep + 1}: the stored file is one tab's document`, stored === da || stored === db, stored.startsWith("ERR") ? stored : "a mix");
+      check(`two tabs hiding together #${rep + 1}: it reopens undamaged`, !again.startsWith("ERR") && (again === da || again === db), again.slice(0, 100));
+      await A.c.close();
+    }
+  }
+  {
+    // A layer record that is missing doesn't make the file unopenable.
+    const R = await rig();
+    await R.newFile();
+    await R.tool("create_nodes", { nodes: nodes4(2) });
+    await R.settle();
+    await sleep(500);
+    const id = await R.fileId();
+    const cId = (await R.byName("C")).id;
+    await R.pg.evaluate(
+      ([id, cId]) =>
+        new Promise((res) => {
+          const q = indexedDB.open("keyval-store");
+          q.onsuccess = () => {
+            const tx = q.result.transaction("keyval", "readwrite");
+            tx.objectStore("keyval").delete(`dt:root:${id}:${cId}`);
+            tx.oncomplete = () => (q.result.close(), res(null));
+          };
+        }),
+      [id, cId],
+    );
+    const got = await R.reopen(URL_ + "/?r=" + Date.now() + "#/file/" + id);
+    check("a missing layer record: the rest of the file opens", !got.startsWith("ERR") && (await R.byName("A"))?.name === "A" && !(await R.byName("C")));
+    check("and the toast names the layer", (await R.pg.locator(".toast").innerText().catch(() => "")).includes("\u201cC\u201d"));
+    await R.dispatch({ op: "update", ids: [(await R.byName("A")).id], patch: { x: 9 } });
+    await R.settle();
+    const healed = await R.reopen(URL_ + "/?r=" + Date.now() + "#/file/" + id);
+    check("the next save repairs the file", !healed.startsWith("ERR") && (await R.byName("A")).x === 9);
+    await R.c.close();
+  }
+  {
+    // IndexedDB that opens but fails every write (older Safari in a private window): files live in memory.
+    const R = await rig();
+    await R.pg.addInitScript(() => {
+      IDBObjectStore.prototype.put = function () {
+        throw new DOMException("no writes here", "QuotaExceededError");
+      };
+    });
+    await R.newFile();
+    await R.tool("create_nodes", { nodes: nodes4(2) });
+    await sleep(2500);
+    const ok = (await R.pg.locator(".empty-hint").count()) === 0 && (await R.byName("B"))?.name === "B";
+    check("writes that always fail fall back to memory instead of breaking the editor", ok);
+    check("and the label says the browser storage is unavailable", (await R.label()).includes("storage unavailable"), await R.label());
+    await R.c.close();
+  }
+  if (RELAY) {
+    // A guest makes their own copy of a shared file while an autosave lands during the copy's write.
+    for (const racy of [false, true]) {
+      const O = await rig();
+      await O.newFile(RELAY);
+      await O.tool("create_nodes", { nodes: [frame("A", 0), frame("B", 400), frame("C", 800)] });
+      await O.settle();
+      await O.pg.click(".tbtn[title='Share for live editing']");
+      await O.pg.fill(".share-dialog input.textinput >> nth=0", "Owner");
+      if (await O.pg.locator(".share-dialog input.mono").count()) await O.pg.fill(".share-dialog input.mono", RELAY);
+      else if (await O.pg.locator("text=Use a different relay").count()) {
+        await O.pg.click("text=Use a different relay");
+        await O.pg.fill(".share-dialog input.mono", RELAY);
+      }
+      await O.pg.click("button:has-text('Share online')");
+      await O.pg.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 10000 });
+      const link = await O.pg.evaluate(() => window.__dt.collab().link);
+      const G = await rig();
+      await G.pg.goto(link);
+      await G.pg.waitForFunction(() => window.__dt?.collab?.().status === "live", null, { timeout: 15000 });
+      await sleep(1500);
+      await G.dispatch({ op: "update", ids: [(await G.byName("A")).id], patch: { y: 40 } });
+      await G.settle();
+      if (racy)
+        await G.pg.evaluate(() => {
+          const orig = IDBObjectStore.prototype.put;
+          IDBObjectStore.prototype.put = function (v, k) {
+            const r = orig.call(this, v, k);
+            if (!window.__fired && String(k).startsWith("dt:file:") && v && typeof v.doc === "string") {
+              window.__fired = true;
+              queueMicrotask(() => {
+                const n = Object.values(window.__dt.doc().nodes).find((x) => x.name === "B");
+                window.__dt.dispatch({ op: "update", ids: [n.id], patch: { y: 66 } });
+                window.dispatchEvent(new Event("pagehide"));
+              });
+            }
+            return r;
+          };
+        });
+      await G.pg.click("button:has-text('Skip')", { timeout: 3000 }).catch(() => {});
+      await G.pg.click("button:has-text('Make my own copy')");
+      await sleep(2500);
+      await G.dispatch({ op: "update", ids: [(await G.byName("C")).id], patch: { y: 77 } });
+      await G.settle();
+      await sleep(500);
+      const want = await G.canon();
+      const id2 = await G.fileId();
+      const stored = await G.stored(id2);
+      const got = await G.reopen(G.pg.url());
+      const tag = `copy of a shared file${racy ? " with an autosave during its write" : ""}`;
+      check(`${tag}: stored equal`, stored === want, stored.startsWith("ERR") ? stored : "differs");
+      check(`${tag}: reopens undamaged and equal`, got === want, got.slice(0, 100));
+      await O.c.close();
+      await G.c.close();
+    }
   }
 
   check("no page errors", errors.length === 0, errors.join(" | "));

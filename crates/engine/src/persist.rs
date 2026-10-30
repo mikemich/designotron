@@ -7,12 +7,15 @@
 //! the document as of the last stored write (`base`); `plan` diffs against it (O(changes):
 //! the node map is persistent) and `commit` moves the baseline once the write has landed.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use imbl::ordmap::DiffItem;
 use serde_json::Value;
 
 use crate::model::{Document, NodeId};
+
+/// Plans handed out and not yet written, kept so a later plan can include what they changed.
+const MAX_OUTSTANDING: usize = 8;
 
 /// What to write for one save.
 pub struct Plan {
@@ -24,6 +27,8 @@ pub struct Plan {
   pub meta: String,
   /// Top-level layers to (re)write, see `Persist::chunk`.
   pub dirty: Vec<NodeId>,
+  /// Names of the layers in `dirty`, for reporting a layer that can't be read back.
+  pub names: BTreeMap<NodeId, String>,
   /// Layers that are stored but no longer top-level (deleted, or moved into another layer).
   pub removed: Vec<NodeId>,
 }
@@ -32,8 +37,13 @@ pub struct Plan {
 pub struct Persist {
   /// The document as of the last write that landed; `None` until one has (or was adopted).
   base: Option<Document>,
-  /// The document each handed-out plan was made from, for `chunk` and `commit`.
-  pending: Option<(u64, Document)>,
+  /// The document of every plan handed out and not yet superseded by a landed write, oldest
+  /// first. A write that was started may land or not (or land after a later one), so a plan
+  /// must cover what any of them changed: a layer deleted by one and brought back by an undo
+  /// is unchanged against the baseline, yet the earlier write may have removed it.
+  outstanding: Vec<(u64, Document)>,
+  /// A plan was dropped from `outstanding`: only a full write is safe.
+  lost_track: bool,
   next: u64,
   committed: u64,
 }
@@ -42,6 +52,8 @@ impl Persist {
   /// Treats `doc` as what storage holds (a file just read from it).
   pub fn adopt(&mut self, doc: &Document) {
     self.base = Some(doc.clone());
+    self.outstanding.clear();
+    self.lost_track = false;
   }
 
   /// Forgets the baseline: the next plan writes everything.
@@ -49,61 +61,55 @@ impl Persist {
     self.base = None;
   }
 
-  /// What to write so storage matches `doc`: the layers that changed since the baseline
-  /// (all of them without one, or when `force_full`).
+  /// What to write so storage matches `doc`: the layers that changed since the baseline or
+  /// since any outstanding plan (all of them without a baseline, or when `force_full`).
   pub fn plan(&mut self, doc: &Document, force_full: bool) -> Plan {
     self.next += 1;
     let token = self.next;
-    self.pending = Some((token, doc.clone()));
     let meta = meta_json(doc);
-    let base = if force_full { None } else { self.base.as_ref() };
-    let Some(prev) = base else {
-      let dirty = doc.nodes.values().filter(|n| n.parent.is_none()).map(|n| n.id.clone()).collect();
-      return Plan {
-        token,
-        full: true,
-        meta,
-        dirty,
-        removed: vec![],
-      };
-    };
+    let full = force_full || self.base.is_none() || self.lost_track;
     let mut dirty: BTreeSet<NodeId> = BTreeSet::new();
     let mut removed: BTreeSet<NodeId> = BTreeSet::new();
-    for item in prev.nodes.diff(&doc.nodes) {
-      let id: &str = match &item {
-        DiffItem::Add(k, _) => k,
-        DiffItem::Update { new: (k, _), .. } => k,
-        DiffItem::Remove(k, _) => k,
-      };
-      // A node that is gone, or no longer top-level, takes its stored record with it.
-      if prev.get(id).is_some_and(|n| n.parent.is_none()) && doc.get(id).is_none_or(|n| n.parent.is_some()) {
-        removed.insert(id.to_string());
+    if full {
+      dirty.extend(doc.nodes.values().filter(|n| n.parent.is_none()).map(|n| n.id.clone()));
+    } else {
+      let bases = self.base.iter().chain(self.outstanding.iter().map(|(_, d)| d));
+      for prev in bases {
+        changes(prev, doc, &mut dirty, &mut removed);
       }
-      // A removed node changed its parent's child list, so its layer is dirty through that.
-      if !matches!(item, DiffItem::Remove(..)) {
-        let root = doc.ancestors(id).last().cloned().unwrap_or_else(|| id.to_string());
-        dirty.insert(root);
-      }
+      // Only layers that exist (a missing ancestor id would name nothing).
+      dirty.retain(|r| doc.get(r).is_some_and(|n| n.parent.is_none()));
     }
-    // Only layers that exist (a missing ancestor id would name nothing).
-    dirty.retain(|r| doc.get(r).is_some_and(|n| n.parent.is_none()));
+    self.outstanding.push((token, doc.clone()));
+    if self.outstanding.len() > MAX_OUTSTANDING {
+      self.outstanding.remove(0);
+      self.lost_track = true;
+    }
+    if full {
+      // The write replaces everything stored, whatever it was.
+      self.lost_track = false;
+    }
+    let names = dirty
+      .iter()
+      .filter_map(|r| doc.get(r).map(|n| (r.clone(), n.name.clone())))
+      .collect();
     Plan {
       token,
-      full: false,
+      full,
       meta,
       dirty: dirty.into_iter().collect(),
+      names,
       removed: removed.into_iter().collect(),
     }
   }
 
   /// The nodes of a top-level layer's tree from the document plan `token` was made from, as
   /// the body of a JSON object (`"id":{...},"id2":{...}`), ready to be joined with others.
-  /// Empty when a newer plan has replaced that one (the caller starts over).
+  /// Empty when that plan is no longer kept.
   pub fn chunk(&self, token: u64, root: &str) -> String {
-    let Some((t, doc)) = &self.pending else { return String::new() };
-    if *t != token {
+    let Some((_, doc)) = self.outstanding.iter().find(|(t, _)| *t == token) else {
       return String::new();
-    }
+    };
     let mut out = String::new();
     let mut stack = vec![root.to_string()];
     while let Some(id) = stack.pop() {
@@ -125,11 +131,33 @@ impl Persist {
     if token <= self.committed {
       return;
     }
-    if let Some((t, doc)) = &self.pending {
-      if *t == token {
-        self.base = Some(doc.clone());
-        self.committed = token;
-      }
+    if let Some(i) = self.outstanding.iter().position(|(t, _)| *t == token) {
+      self.base = Some(self.outstanding[i].1.clone());
+      self.committed = token;
+      // Plans older than the one that landed are covered by it (storage is at least as new);
+      // later ones may still be in flight.
+      self.outstanding.drain(..=i);
+    }
+  }
+}
+
+/// Adds to `dirty` the top-level layers whose tree differs between `prev` and `doc`, and to
+/// `removed` the layers that were top-level in `prev` and no longer are.
+fn changes(prev: &Document, doc: &Document, dirty: &mut BTreeSet<NodeId>, removed: &mut BTreeSet<NodeId>) {
+  for item in prev.nodes.diff(&doc.nodes) {
+    let id: &str = match &item {
+      DiffItem::Add(k, _) => k,
+      DiffItem::Update { new: (k, _), .. } => k,
+      DiffItem::Remove(k, _) => k,
+    };
+    // A node that is gone, or no longer top-level, takes its stored record with it.
+    if prev.get(id).is_some_and(|n| n.parent.is_none()) && doc.get(id).is_none_or(|n| n.parent.is_some()) {
+      removed.insert(id.to_string());
+    }
+    // A removed node changed its parent's child list, so its layer is dirty through that.
+    if !matches!(item, DiffItem::Remove(..)) {
+      let root = doc.ancestors(id).last().cloned().unwrap_or_else(|| id.to_string());
+      dirty.insert(root);
     }
   }
 }
@@ -343,11 +371,63 @@ mod tests {
     })
     .unwrap();
     let second = p.plan(&e.doc, false);
-    assert_eq!(p.chunk(first.token, &a), "", "a superseded plan has no chunks");
+    assert!(
+      p.chunk(first.token, &a).contains(&a),
+      "an older plan keeps its chunks until it is covered"
+    );
     assert!(p.chunk(second.token, &a).contains(&a));
     p.commit(second.token);
+    assert_eq!(p.chunk(first.token, &a), "", "a landed write covers the plans before it");
     p.commit(first.token);
     let third = p.plan(&e.doc, false);
     assert!(third.dirty.is_empty(), "the newer plan stays committed");
+  }
+
+  #[test]
+  fn a_plan_includes_what_an_unfinished_one_changed_even_if_it_was_undone() {
+    let mut e = engine();
+    let mut p = Persist::default();
+    let mut store = Store::default();
+    let a = frame_with_cards(&mut e, "A", 0.0, 2);
+    let c = frame_with_cards(&mut e, "C", 800.0, 2);
+    save(&mut p, &e, &mut store, false);
+    e.dispatch(Command::Delete { ids: vec![c.clone()] }).unwrap();
+    let first = p.plan(&e.doc, false);
+    assert_eq!(first.removed, vec![c.clone()]);
+    // The write of `first` is in flight; the delete is undone and a second plan is made.
+    e.dispatch(Command::Undo).unwrap();
+    let second = p.plan(&e.doc, false);
+    assert!(
+      second.dirty.contains(&c),
+      "C may have been removed by the first write: {:?}",
+      second.dirty
+    );
+    assert!(!second.dirty.contains(&a));
+    assert_eq!(second.names.get(&c).map(String::as_str), Some("C"));
+    // Both writes land in order: the stored layers are those of the document.
+    for plan in [&first, &second] {
+      for r in &plan.removed {
+        store.chunks.remove(r);
+      }
+      for r in &plan.dirty {
+        store.chunks.insert(r.clone(), p.chunk(plan.token, r));
+      }
+      store.meta = plan.meta.clone();
+    }
+    assert_stored(&e, &store, "after both writes");
+  }
+
+  #[test]
+  fn too_many_unfinished_plans_force_a_full_write() {
+    let mut e = engine();
+    let mut p = Persist::default();
+    let mut store = Store::default();
+    frame_with_cards(&mut e, "A", 0.0, 1);
+    save(&mut p, &e, &mut store, false);
+    for _ in 0..=MAX_OUTSTANDING {
+      p.plan(&e.doc, false);
+    }
+    assert!(p.plan(&e.doc, false).full);
+    assert!(!p.plan(&e.doc, false).full, "a full plan starts over");
   }
 }

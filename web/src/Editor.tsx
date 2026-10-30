@@ -28,6 +28,8 @@ import {
   persistentStorage,
   readRecovery,
   saveDelta,
+  StaleStorageError,
+  storedSize,
   saveThumbnail,
   saveVersion,
   writeRecovery,
@@ -41,9 +43,8 @@ import { failureText, reportFailure } from "./errors";
 /** Largest document (in characters) copied to localStorage when closing: the quota is about
  * 5 MB, and a bigger copy only fails after a slow synchronous write. */
 const MAX_RECOVERY_CHARS = 4_500_000;
-/** Files with more layers than this are never copied: serialising them just to find out the
- * copy is too big would stall the page for longer than the copy is worth. */
-const MAX_RECOVERY_LAYERS = 4200;
+/** Characters of JSON per layer for guessing the size of a file not yet stored in layers. */
+const GUESS_CHARS_PER_LAYER = 1100;
 /** Longest stretch (ms) of one task spent collecting what to save. */
 const SAVE_SLICE_MS = 8;
 
@@ -212,7 +213,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         const p = JSON.parse(engine.persistPlan(!canSaveDelta(fileId)));
         const dirty: Record<string, string> = {};
         for (const root of p.dirty as string[]) dirty[root] = engine.persistChunk(p.token, root);
-        lastSnap = { plan: { token: p.token, full: p.full, meta: p.meta, dirty, removed: p.removed }, name: getDoc().name, rev };
+        lastSnap = { plan: { token: p.token, full: p.full, meta: p.meta, dirty, names: p.names, removed: p.removed }, name: getDoc().name, rev };
       }
       return lastSnap!;
     };
@@ -241,7 +242,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           }
         }
         if (superseded) continue;
-        lastSnap = { plan: { token: p.token, full: p.full, meta: p.meta, dirty, removed: p.removed }, name: getDoc().name, rev };
+        lastSnap = { plan: { token: p.token, full: p.full, meta: p.meta, dirty, names: p.names, removed: p.removed }, name: getDoc().name, rev };
         return lastSnap;
       }
     };
@@ -253,7 +254,9 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       const rev = docRev();
       if (recoveryTried === rev) return recoveryRev === rev;
       recoveryTried = rev;
-      if (Object.keys(getDoc().nodes).length <= MAX_RECOVERY_LAYERS) {
+      // From the size of what was stored (or a guess), so a big file isn't serialised just to
+      // find out its copy is too big for localStorage.
+      if ((storedSize(fileId) ?? Object.keys(getDoc().nodes).length * GUESS_CHARS_PER_LAYER) <= MAX_RECOVERY_CHARS) {
         const json = engine.save();
         if (json.length <= MAX_RECOVERY_CHARS && writeRecovery(fileId, json)) {
           recoveryRev = rev;
@@ -274,6 +277,24 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       }
     };
 
+    // Writes a snapshot and tells the engine it landed. If the stored file isn't the one this tab
+    // last wrote (another tab or writer saved it since), the whole document is written over it
+    // instead: the last writer wins, whole, never a mix. Returns what was written.
+    const write = async (snap: Snapshot): Promise<Snapshot> => {
+      try {
+        await saveDelta(fileId, snap.name, snap.plan);
+        engine.persistCommit(snap.plan.token);
+        return snap;
+      } catch (err) {
+        if (!(err instanceof StaleStorageError)) throw err;
+        lastSnap = null;
+        const whole = snapshot();
+        await saveDelta(fileId, whole.name, whole.plan);
+        engine.persistCommit(whole.plan.token);
+        return whole;
+      }
+    };
+
     // Runs saves until nothing newer than the last one is left. A call while one is running
     // changes nothing: the running loop takes another pass.
     const flush = async () => {
@@ -284,13 +305,13 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         while (!stale && (final || (!closed && docRev() !== useStore.getState().savedDocRev && startedRev < docRev()))) {
           // The engine was replaced under this editor: its revisions mean nothing here.
           if (!final && getEngine() !== engine) break;
-          const snap = final ?? (await snapshotInSlices());
+          let snap = final ?? (await snapshotInSlices());
           final = null;
           pendingSince = null;
           startedRev = Math.max(startedRev, snap.rev);
           try {
-            await saveDelta(fileId, snap.name, snap.plan);
-            engine.persistCommit(snap.plan.token);
+            snap = await write(snap);
+            startedRev = Math.max(startedRev, snap.rev);
           } catch (err) {
             // Not stored (quota, disk): stay dirty, keep what the recovery copy can hold, try again.
             console.error(err);
@@ -409,11 +430,10 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       } else {
         // A save is running: don't queue behind it. IndexedDB runs write transactions on
         // the store in the order they were made, so this one lands after it.
-        saveDelta(fileId, snap.name, snap.plan).then(
-          () => {
-            engine.persistCommit(snap.plan.token);
-            dropRecovery(snap);
-            if (!closed && getEngine() === engine && snap.rev > useStore.getState().savedDocRev) markSaved(snap.rev);
+        write(snap).then(
+          (done) => {
+            dropRecovery(done);
+            if (!closed && getEngine() === engine && done.rev > useStore.getState().savedDocRev) markSaved(done.rev);
           },
           (err) => {
             console.error(err);

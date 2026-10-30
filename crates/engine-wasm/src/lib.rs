@@ -167,8 +167,8 @@ impl WasmEngine {
   }
 
   /// What to write to storage so it matches the document: JSON
-  /// `{token, full, meta, dirty: [layer ids], removed: [layer ids]}` (see `persist::Plan`).
-  /// Fetch each dirty layer's records with `persistChunk` (they stay available until the next plan).
+  /// `{token, full, meta, dirty: [layer ids], names: {layer id: name}, removed: [layer ids]}` (see `persist::Plan`).
+  /// Fetch each dirty layer's records with `persistChunk` (they stay available until a write that is at least as new has landed).
   #[wasm_bindgen(js_name = persistPlan)]
   pub fn persist_plan(&mut self, force_full: bool) -> String {
     let plan = self.persist.plan(&self.inner.doc, force_full);
@@ -177,13 +177,14 @@ impl WasmEngine {
       "full": plan.full,
       "meta": plan.meta,
       "dirty": plan.dirty,
+      "names": plan.names,
       "removed": plan.removed,
     })
     .to_string()
   }
 
   /// The nodes of one top-level layer's tree from plan `token` of `persistPlan`, as the body
-  /// of a JSON object (`"id":{...},...`); empty if a newer plan has replaced it.
+  /// of a JSON object (`"id":{...},...`); empty if the plan is no longer kept.
   #[wasm_bindgen(js_name = persistChunk)]
   pub fn persist_chunk(&self, token: f64, root: &str) -> String {
     self.persist.chunk(token as u64, root)
