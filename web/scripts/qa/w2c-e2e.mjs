@@ -1,7 +1,7 @@
 // Auto layout and text completeness: min/max size fields (edit + undo), truncation, paragraph
 // spacing, links on text ranges (Ctrl+K, safe schemes only), baseline alignment, removing auto
 // layout and the Wrap toggle.
-// Usage: E2E_URL=http://localhost:5214 node scripts/qa/w2c-e2e.mjs (dev server running).
+// Usage: E2E_URL=http://localhost:5173 node scripts/qa/w2c-e2e.mjs (dev server running).
 // Screenshots go to E2E_SHOTS (default: the system temp dir) for a human to look at.
 
 import { chromium } from "playwright-core";
@@ -9,7 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const URL = process.env.E2E_URL ?? "http://localhost:5214";
+const URL = process.env.E2E_URL ?? "http://localhost:5173";
 const SHOTS = process.env.E2E_SHOTS ?? path.join(os.tmpdir(), "w2c-shots");
 fs.mkdirSync(SHOTS, { recursive: true });
 const launch = { headless: true, args: ["--no-sandbox"] };
