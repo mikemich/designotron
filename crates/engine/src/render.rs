@@ -711,8 +711,10 @@ impl<'a> Renderer<'a> {
       TextDecoration::Underline => " text-decoration=\"underline\"",
       TextDecoration::Strikethrough => " text-decoration=\"line-through\"",
     };
+    let lod_size = self.lod_size(t, &lay);
+    let lod = lod_size.map(|s| format!(" class=\"s{s}\"")).unwrap_or_default();
     let mut out = format!(
-      "<text fill=\"{fill}\" font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\"{}{} text-anchor=\"{anchor}\" dominant-baseline=\"central\"{deco} style=\"white-space:pre\">",
+      "<text{lod} fill=\"{fill}\" font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\"{}{} text-anchor=\"{anchor}\" dominant-baseline=\"central\"{deco} style=\"white-space:pre\">",
       esc(&font_stack(&t.font_family)),
       fmt(t.font_size),
       t.font_weight,
@@ -721,8 +723,12 @@ impl<'a> Renderer<'a> {
     );
     let _ = lh;
     let base = SpanStyle::base(t);
+    let mut bars = String::new();
     for line in &lay.lines {
       let top = offset + line.top;
+      if self.opts.mode == Mode::Canvas {
+        bars.push_str(&greek_bar(line, base.size, top, n.width, t.align_h));
+      }
       let mixed_size = line.segments.iter().any(|sg| sg.style.size != base.size);
       if mixed_size {
         // Mixed sizes share an alphabetic baseline (central would centre each span).
@@ -747,8 +753,49 @@ impl<'a> Renderer<'a> {
       out.push_str("</tspan>");
     }
     out.push_str("</text>");
+    if let (Some(size), false) = (lod_size, bars.is_empty() || fill == "none") {
+      out.push_str(&format!(
+        "<path class=\"gk g{size}\" d=\"{bars}\" fill=\"{fill}\" fill-opacity=\"0.5\"/>"
+      ));
+    }
     out
   }
+
+  /// Canvas only: the text's size (its largest span, rounded up) for a class the editor
+  /// hides with one CSS rule when the text is too small to read, showing its `greek_bar`s.
+  fn lod_size(&self, t: &model::TextProps, lay: &crate::text::TextLayout) -> Option<u32> {
+    if self.opts.mode != Mode::Canvas {
+      return None;
+    }
+    let size = lay
+      .lines
+      .iter()
+      .flat_map(|l| l.segments.iter().map(|sg| sg.style.size))
+      .fold(t.font_size, f64::max);
+    Some((size.ceil() as u32).clamp(1, 255))
+  }
+}
+
+/// A bar standing in for one line of text, as path data (empty for a blank line).
+fn greek_bar(line: &crate::text::TextLine, base_size: f64, top: f64, width: f64, align: TextAlignH) -> String {
+  if line.text.trim().is_empty() || line.width <= 0.0 {
+    return String::new();
+  }
+  let size = line.segments.iter().map(|sg| sg.style.size).fold(base_size, f64::max);
+  let x = match align {
+    TextAlignH::Left | TextAlignH::Justify => 0.0,
+    TextAlignH::Center => (width - line.width) / 2.0,
+    TextAlignH::Right => width - line.width,
+  };
+  let h = (size * 0.5).max(1.0);
+  format!(
+    "M{} {}h{}v{}h{}z",
+    fmt(x),
+    fmt(top + line.height / 2.0 - h / 2.0),
+    fmt(line.width),
+    fmt(h),
+    fmt(-line.width)
+  )
 }
 
 /// SVG attributes for the parts of a span style that differ from the base.
@@ -1034,6 +1081,34 @@ mod tests {
       1,
       "a plain link underlines: {svg}"
     );
+  }
+
+  #[test]
+  fn canvas_text_carries_a_size_class_and_greek_bars_that_export_leaves_out() {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Text, "t".into(), "T".into());
+    {
+      let p = t.text.as_mut().unwrap();
+      p.characters = "Hello\n\nworld".into();
+      p.font_size = 13.2;
+    }
+    doc.insert(t, None, &page, None);
+    crate::layout::relayout_all(&mut doc, &HeuristicMeasurer);
+    let opts = |mode| RenderOptions { mode, hidden: &[] };
+    let svg = render_root(&doc, "t", &HeuristicMeasurer, opts(Mode::Canvas));
+    assert!(svg.contains("<text class=\"s14\""), "size 13.2 rounds up to 14: {svg}");
+    let path = svg
+      .split("<path class=\"gk g14\" d=\"")
+      .nth(1)
+      .expect("greek bars")
+      .split('"')
+      .next()
+      .unwrap();
+    assert_eq!(path.matches('M').count(), 2, "one bar per non-blank line: {path}");
+    let out = export_svg(&doc, "t", &HeuristicMeasurer);
+    assert!(!out.contains("class=") && !out.contains("<path"), "export is unchanged: {out}");
   }
 
   #[test]

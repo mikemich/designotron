@@ -1,6 +1,7 @@
 //! WebAssembly bindings for the Designotron engine. All structured data
 //! crosses the boundary as JSON strings to keep the surface small.
 
+use designotron_engine::persist::Persist;
 use designotron_engine::text::{FontSpec, TextMeasurer};
 use designotron_engine::{Command, Engine, Query};
 use wasm_bindgen::prelude::*;
@@ -24,6 +25,7 @@ impl TextMeasurer for CanvasMeasurer {
 #[wasm_bindgen]
 pub struct WasmEngine {
   inner: Engine,
+  persist: Persist,
 }
 
 #[wasm_bindgen]
@@ -32,6 +34,7 @@ impl WasmEngine {
   pub fn new(seed: f64) -> WasmEngine {
     WasmEngine {
       inner: Engine::new(Box::new(CanvasMeasurer), seed as u64),
+      persist: Persist::default(),
     }
   }
 
@@ -109,5 +112,40 @@ impl WasmEngine {
       self.inner.reset_render_cache();
     }
     self.inner.render_incremental(page, &hidden).to_string()
+  }
+
+  /// What to write to storage so it matches the document: JSON
+  /// `{token, full, meta, dirty: [layer ids], removed: [layer ids]}` (see `persist::Plan`).
+  /// Fetch each dirty layer's records with `persistChunk` (they stay available until the next plan).
+  #[wasm_bindgen(js_name = persistPlan)]
+  pub fn persist_plan(&mut self, force_full: bool) -> String {
+    let plan = self.persist.plan(&self.inner.doc, force_full);
+    serde_json::json!({
+      "token": plan.token,
+      "full": plan.full,
+      "meta": plan.meta,
+      "dirty": plan.dirty,
+      "removed": plan.removed,
+    })
+    .to_string()
+  }
+
+  /// The nodes of one top-level layer's tree from plan `token` of `persistPlan`, as the body
+  /// of a JSON object (`"id":{...},...`); empty if a newer plan has replaced it.
+  #[wasm_bindgen(js_name = persistChunk)]
+  pub fn persist_chunk(&self, token: f64, root: &str) -> String {
+    self.persist.chunk(token as u64, root)
+  }
+
+  /// Storage now holds the document of plan `token`.
+  #[wasm_bindgen(js_name = persistCommit)]
+  pub fn persist_commit(&mut self, token: f64) {
+    self.persist.commit(token as u64);
+  }
+
+  /// The document just loaded is exactly what storage holds: later plans cover only changes.
+  #[wasm_bindgen(js_name = persistAdopt)]
+  pub fn persist_adopt(&mut self) {
+    self.persist.adopt(&self.inner.doc);
   }
 }

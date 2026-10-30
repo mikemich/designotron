@@ -23,6 +23,7 @@ pub mod model;
 pub mod ops;
 pub mod patch;
 pub mod paths;
+pub mod persist;
 pub mod props;
 pub mod render;
 pub mod shapes;

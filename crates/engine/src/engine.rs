@@ -573,6 +573,11 @@ pub enum Query {
   },
 }
 
+/// `[x, y, width, height]`, the form rects take towards the editor.
+fn rect_array(r: &Rect) -> [f64; 4] {
+  [r.x, r.y, r.width, r.height]
+}
+
 fn one() -> f64 {
   1.0
 }
@@ -621,6 +626,8 @@ struct RenderCache {
   hidden: Vec<NodeId>,
   doc: Option<Document>,
   roots: HashMap<NodeId, String>,
+  /// Everything each root paints, in page coordinates (what the canvas culls against).
+  bounds: HashMap<NodeId, Rect>,
 }
 
 impl Engine {
@@ -780,8 +787,10 @@ impl Engine {
   }
 
   /// Canvas render that re-renders only top-level layers changed since the last call.
-  /// Returns `{order: [root ids], changed: {id: svg}}`, or `{full: svg}` when the page
-  /// uses top-level masks (which span roots).
+  /// Returns `{order: [root ids], changed: {id: svg}, moved: {id: transform}, bounds: {id: [x, y,
+  /// w, h]}, texts: {id: count}}` (`bounds` is what a root paints in page coordinates and `texts`
+  /// its number of text layers, for the roots that changed or moved), or `{full: svg}` when the
+  /// page uses top-level masks (which span roots).
   pub fn render_incremental(&mut self, page: &str, hidden: &[NodeId]) -> Value {
     let roots = self.doc.page(page).map(|p| p.children.clone()).unwrap_or_default();
     if roots
@@ -795,6 +804,8 @@ impl Engine {
     let mut dirty: Vec<NodeId> = Vec::new();
     // Roots whose only change is the root's own position: the client just updates a transform.
     let mut moved = serde_json::Map::new();
+    let mut bounds = serde_json::Map::new();
+    let mut texts = serde_json::Map::new();
     match &cache.doc {
       Some(prev) if cache.page == page => {
         for (root, ids) in self.changed_by_root(prev) {
@@ -803,8 +814,13 @@ impl Engine {
             && cache.roots.contains_key(&root)
             && !hidden.iter().any(|h| self.doc.ancestors(h).last() == Some(&root) || *h == root)
           {
-            if let Some(n) = self.doc.get(&root) {
+            if let (Some(n), Some(old)) = (self.doc.get(&root), prev.get(&root)) {
               moved.insert(root.clone(), json!(self.doc.local_matrix(n).svg()));
+              if let Some(b) = cache.bounds.get_mut(&root) {
+                b.x += n.x - old.x;
+                b.y += n.y - old.y;
+                bounds.insert(root.clone(), json!(rect_array(b)));
+              }
             }
           } else {
             dirty.push(root);
@@ -819,7 +835,10 @@ impl Engine {
           }
         }
       }
-      _ => cache.roots.clear(),
+      _ => {
+        cache.roots.clear();
+        cache.bounds.clear();
+      }
     }
     let mut changed = serde_json::Map::new();
     for r in &roots {
@@ -833,17 +852,22 @@ impl Engine {
             hidden,
           },
         );
+        texts.insert(r.clone(), json!(svg.matches("<text").count()));
         changed.insert(r.clone(), json!(svg));
         cache.roots.insert(r.clone(), svg);
         moved.remove(r);
+        let b = render::render_bounds(&self.doc, r, self.measurer.as_ref());
+        bounds.insert(r.clone(), json!(rect_array(&b)));
+        cache.bounds.insert(r.clone(), b);
       }
     }
     cache.roots.retain(|k, _| roots.contains(k));
+    cache.bounds.retain(|k, _| roots.contains(k));
     cache.doc = Some(self.doc.clone());
     cache.page = page.to_string();
     cache.hidden = hidden.to_vec();
     self.render_cache = cache;
-    json!({ "order": roots, "changed": changed, "moved": moved })
+    json!({ "order": roots, "changed": changed, "moved": moved, "bounds": bounds, "texts": texts })
   }
 
   pub fn render(&self, page: &str, hidden: &[NodeId]) -> String {
@@ -3065,6 +3089,42 @@ mod tests {
     e.dispatch(Command::Undo).unwrap();
     set(&mut e, None).unwrap();
     assert_eq!(e.doc.pages[0].flow_start, None);
+  }
+
+  #[test]
+  fn incremental_render_reports_what_each_root_paints() {
+    let mut e = engine();
+    let page = e.doc.pages[0].id.clone();
+    let a = rect(&mut e, 100.0, 50.0, 40.0, 20.0, None);
+    let b = rect(&mut e, 300.0, 50.0, 40.0, 20.0, None);
+    let bounds = |r: &Value, id: &str| -> Vec<f64> { r["bounds"][id].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect() };
+    let first = e.render_incremental(&page, &[]);
+    assert_eq!(bounds(&first, &a), vec![100.0, 50.0, 40.0, 20.0]);
+    assert_eq!(bounds(&first, &b), vec![300.0, 50.0, 40.0, 20.0]);
+    // A drop shadow reaches past the box and the bounds say so.
+    e.dispatch(Command::Update {
+      ids: vec![a.clone()],
+      patch: json!({ "effects": [{ "type": "dropShadow", "x": 0, "y": 10, "blur": 10, "spread": 0, "color": "#000000", "visible": true }] }),
+    })
+    .unwrap();
+    let second = e.render_incremental(&page, &[]);
+    assert!(second["changed"].get(&a).is_some() && second["changed"].get(&b).is_none());
+    assert!(second["bounds"].get(&b).is_none(), "untouched roots keep the bounds the editor has");
+    let shadowed = bounds(&second, &a);
+    assert!(shadowed[0] < 100.0 && shadowed[3] > 20.0, "{shadowed:?}");
+    // Moving a root only shifts its bounds.
+    e.dispatch(Command::Update {
+      ids: vec![a.clone()],
+      patch: json!({ "x": 130.0, "y": 80.0 }),
+    })
+    .unwrap();
+    let third = e.render_incremental(&page, &[]);
+    assert!(third["moved"].get(&a).is_some());
+    let moved = bounds(&third, &a);
+    assert_eq!(
+      (moved[0] - shadowed[0], moved[1] - shadowed[1], moved[2], moved[3]),
+      (30.0, 30.0, shadowed[2], shadowed[3])
+    );
   }
 
   #[test]
