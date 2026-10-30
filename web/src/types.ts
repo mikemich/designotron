@@ -286,6 +286,23 @@ export interface Guide {
   y2: number;
 }
 
+/** An equal-spacing hint or measured distance: a segment along one axis and its length. */
+export interface Gap {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  value: number;
+}
+
+/** Alt-hover distances from the selection to the layer under the pointer (`measure` query). */
+export interface Measurement {
+  target: string;
+  lines: Gap[];
+  /** Dashed projections joining a distance line to the layer it ends at. */
+  extends: Guide[];
+}
+
 export type Handle = "n" | "s" | "e" | "w" | "ne" | "nw" | "se" | "sw";
 
 export type Tool =

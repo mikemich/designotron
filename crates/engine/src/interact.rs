@@ -1,6 +1,8 @@
 //! Canvas interaction math: hit-testing, Figma-style selection picking,
 //! marquee selection, smart-guide snapping and resize.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::doc::IdGen;
@@ -172,43 +174,62 @@ pub struct Guide {
   pub y2: f64,
 }
 
+/// An equal-spacing hint or a measured distance: a segment along one axis and its length.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct Gap {
+  pub x1: f64,
+  pub y1: f64,
+  pub x2: f64,
+  pub y2: f64,
+  pub value: f64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct Snap {
   pub dx: f64,
   pub dy: f64,
   pub guides: Vec<Guide>,
+  /// Equal gaps between siblings the move snapped to.
+  #[serde(default)]
+  pub gaps: Vec<Gap>,
 }
 
 /// What moving nodes may snap to: sibling/parent/top-level frame rects, plus
 /// page guides and layout grid lines as (position, span start, span end).
 struct Targets {
   rects: Vec<Rect>,
+  /// Siblings of the moving nodes, for equal-spacing snaps.
+  siblings: Vec<Rect>,
   xs: Vec<(f64, f64, f64)>,
   ys: Vec<(f64, f64, f64)>,
 }
 
 fn snap_targets(doc: &Document, page: &str, moving: &[NodeId]) -> Targets {
-  let excluded: Vec<NodeId> = moving.iter().flat_map(|m| doc.subtree(m)).collect();
-  let mut ids: Vec<NodeId> = Vec::new();
-  if let Some(first) = moving.first() {
-    ids.extend(doc.siblings_of(first));
-    if let Some(p) = doc.get(first).and_then(|n| n.parent.clone()) {
-      ids.push(p);
-    }
+  let excluded: HashSet<NodeId> = moving.iter().flat_map(|m| doc.subtree(m)).collect();
+  let sibling_ids: Vec<NodeId> = moving.first().map(|first| doc.siblings_of(first)).unwrap_or_default();
+  let mut ids: Vec<&NodeId> = sibling_ids.iter().collect();
+  if let Some(parent) = moving.first().and_then(|first| doc.get(first)).and_then(|n| n.parent.as_ref()) {
+    ids.push(parent);
   }
   if let Some(pg) = doc.page(page) {
-    ids.extend(pg.children.iter().cloned());
+    ids.extend(pg.children.iter());
   }
-  ids.sort();
-  ids.dedup();
-  let rects = ids
-    .into_iter()
-    .filter(|i| !excluded.contains(i))
-    .filter(|i| doc.get(i).map(|n| n.visible).unwrap_or(false))
-    .map(|i| doc.abs_bounds(&i))
-    .collect();
+  let is_sibling: HashSet<&NodeId> = sibling_ids.iter().collect();
+  let mut seen: HashSet<&NodeId> = HashSet::new();
+  let (mut rects, mut siblings) = (Vec::new(), Vec::new());
+  for id in ids {
+    if excluded.contains(id) || !seen.insert(id) || !doc.get(id).is_some_and(|n| n.visible) {
+      continue;
+    }
+    let r = doc.abs_bounds(id);
+    if is_sibling.contains(id) {
+      siblings.push(r);
+    }
+    rects.push(r);
+  }
   let mut t = Targets {
     rects,
+    siblings,
     xs: Vec::new(),
     ys: Vec::new(),
   };
@@ -238,30 +259,67 @@ fn snap_targets(doc: &Document, page: &str, moving: &[NodeId]) -> Targets {
   t
 }
 
-/// Snaps a page-space move delta of `ids` to nearby edges and centres.
+/// Snaps a page-space move delta of `ids` to nearby edges, centres and equal gaps between siblings.
 pub fn snap_move(doc: &Document, page: &str, ids: &[NodeId], dx: f64, dy: f64, zoom: f64) -> Snap {
   let Some(start) = doc.bounds_of_many(ids) else {
-    return Snap { dx, dy, guides: vec![] };
+    return Snap {
+      dx,
+      dy,
+      ..Default::default()
+    };
   };
   let moved = Rect::new(start.x + dx, start.y + dy, start.width, start.height);
   let targets = snap_targets(doc, page, ids);
   let thr = 6.0 / zoom.max(0.01);
-  let (sx, sy) = best_snap(&moved, &targets, thr, [true, true, true, true]);
+  let (mut sx, mut sy) = best_snap(&moved, &targets, thr, [true, true, true, true]);
+  let hx = spacing_hit(&targets.siblings, Axis::X, &moved, Edge::Both, thr).filter(|h| closer(h.delta, sx));
+  let hy = spacing_hit(&targets.siblings, Axis::Y, &moved, Edge::Both, thr).filter(|h| closer(h.delta, sy));
+  let (ex, ey) = (sx.is_some() && hx.is_none(), sy.is_some() && hy.is_none());
+  if let Some(h) = &hx {
+    sx = Some(h.delta);
+  }
+  if let Some(h) = &hy {
+    sy = Some(h.delta);
+  }
   let mut out = Snap {
     dx: sx.map(|s| dx + s).unwrap_or_else(|| (start.x + dx).round() - start.x),
     dy: sy.map(|s| dy + s).unwrap_or_else(|| (start.y + dy).round() - start.y),
-    guides: vec![],
+    ..Default::default()
   };
   let fin = Rect::new(start.x + out.dx, start.y + out.dy, start.width, start.height);
-  out.guides = guides_for(&fin, &targets, sx.is_some(), sy.is_some());
+  out.guides = guides_for(&fin, &targets, ex, ey);
+  out.gaps = hx.into_iter().chain(hy).flat_map(|h| h.gaps).collect();
   out
 }
 
 /// Snaps an axis-aligned rect whose `edges` [left, right, top, bottom] are moving.
-pub fn snap_rect(doc: &Document, page: &str, exclude: &[NodeId], r: Rect, edges: [bool; 4], zoom: f64) -> (Rect, Vec<Guide>) {
+/// Also returns the equal gaps it snapped to.
+pub fn snap_rect(doc: &Document, page: &str, exclude: &[NodeId], r: Rect, edges: [bool; 4], zoom: f64) -> (Rect, Vec<Guide>, Vec<Gap>) {
   let targets = snap_targets(doc, page, exclude);
   let thr = 6.0 / zoom.max(0.01);
-  let (sx, sy) = best_snap(&r, &targets, thr, edges);
+  let (mut sx, mut sy) = best_snap(&r, &targets, thr, edges);
+  // A zero-size rect is a point (drawing tools): no spacing there.
+  let spaced = r.width > 0.0 || r.height > 0.0;
+  let one_edge = |lo: bool, hi: bool| match (lo, hi) {
+    (true, false) => Some(Edge::Lo),
+    (false, true) => Some(Edge::Hi),
+    _ => None,
+  };
+  let hx = one_edge(edges[0], edges[1])
+    .filter(|_| spaced)
+    .and_then(|e| spacing_hit(&targets.siblings, Axis::X, &r, e, thr))
+    .filter(|h| closer(h.delta, sx));
+  let hy = one_edge(edges[2], edges[3])
+    .filter(|_| spaced)
+    .and_then(|e| spacing_hit(&targets.siblings, Axis::Y, &r, e, thr))
+    .filter(|h| closer(h.delta, sy));
+  let (ex, ey) = (sx.is_some() && hx.is_none(), sy.is_some() && hy.is_none());
+  if let Some(h) = &hx {
+    sx = Some(h.delta);
+  }
+  if let Some(h) = &hy {
+    sy = Some(h.delta);
+  }
   let mut out = r;
   if let Some(s) = sx {
     if edges[0] {
@@ -279,8 +337,190 @@ pub fn snap_rect(doc: &Document, page: &str, exclude: &[NodeId], r: Rect, edges:
       out.height += s;
     }
   }
-  let guides = guides_for(&out, &targets, sx.is_some(), sy.is_some());
-  (out, guides)
+  let guides = guides_for(&out, &targets, ex, ey);
+  (out, guides, hx.into_iter().chain(hy).flat_map(|h| h.gaps).collect())
+}
+
+/// Which edges of the moving rect an equal-spacing snap may shift along one axis.
+#[derive(Clone, Copy, PartialEq)]
+enum Edge {
+  /// A move: both edges shift together.
+  Both,
+  /// A resize from the start edge (left or top).
+  Lo,
+  /// A resize from the end edge (right or bottom).
+  Hi,
+}
+
+/// An equal-spacing snap: how far the moving edge shifts and the equal gaps to draw.
+struct SpaceHit {
+  delta: f64,
+  gaps: Vec<Gap>,
+}
+
+/// One gap to draw: the rects on either side (to place the marker) and its extent on the axis.
+type GapSpec = (Rect, Rect, f64, f64);
+
+/// A position for the moving edges that makes two gaps equal.
+struct Candidate {
+  lo: f64,
+  hi: f64,
+  gaps: Vec<GapSpec>,
+}
+
+/// Whether an equal-spacing shift beats the edge snap on the same axis (ties go to edges).
+fn closer(spacing: f64, edge: Option<f64>) -> bool {
+  edge.is_none_or(|e| spacing.abs() < e.abs())
+}
+
+/// Finds the nearest shift (within `thr`) that makes the gap beside the moving rect equal to
+/// another gap between siblings along `axis`: centred between its two neighbours, or repeating
+/// the gap of the two nearest siblings on either side. Siblings sharing its row or column are
+/// preferred, so staircase layouts still snap when nothing is aligned.
+fn spacing_hit(siblings: &[Rect], axis: Axis, moved: &Rect, edge: Edge, thr: f64) -> Option<SpaceHit> {
+  if siblings.len() < 2 {
+    return None;
+  }
+  let (p_lo, p_hi) = perp_span(moved, axis);
+  let aligned: Vec<Rect> = siblings
+    .iter()
+    .filter(|r| {
+      let (a, b) = perp_span(r, axis);
+      a < p_hi && b > p_lo
+    })
+    .cloned()
+    .collect();
+  let search = |rects: &[Rect]| {
+    if rects.len() < 2 {
+      None
+    } else {
+      spacing_in(rects, axis, moved, edge, thr)
+    }
+  };
+  search(&aligned).or_else(|| search(siblings))
+}
+
+fn spacing_in(rects: &[Rect], axis: Axis, moved: &Rect, edge: Edge, thr: f64) -> Option<SpaceHit> {
+  const EPS: f64 = 0.01;
+  let span = |r: &Rect| axis_span(r, axis);
+  let (lo, hi) = span(moved);
+  let w = hi - lo;
+  // The nearest sibling satisfying `pred` by `key`, other than `skip`.
+  let nearest = |pred: &dyn Fn(&Rect) -> bool, key: &dyn Fn(&Rect) -> f64, skip: Option<usize>| -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (i, r) in rects.iter().enumerate() {
+      if Some(i) != skip && pred(r) && best.is_none_or(|b| key(r) < key(&rects[b])) {
+        best = Some(i);
+      }
+    }
+    best
+  };
+  // Nearest sibling before and after the moving rect, and the one beyond each.
+  let l = nearest(&|r| span(r).1 <= lo + EPS, &|r| -span(r).1, None);
+  let r = nearest(&|r| span(r).0 >= hi - EPS, &|r| span(r).0, None);
+  let ll = l.and_then(|l| {
+    let ls = span(&rects[l]).0;
+    nearest(&|r| span(r).1 <= ls + EPS, &|r| -span(r).1, Some(l))
+  });
+  let rr = r.and_then(|r| {
+    let re = span(&rects[r]).1;
+    nearest(&|r| span(r).0 >= re - EPS, &|r| span(r).0, Some(r))
+  });
+  let mut cands: Vec<Candidate> = Vec::new();
+  let mut add = |nl: f64, nh: f64, gaps: Vec<GapSpec>| {
+    if nh - nl > EPS && gaps.iter().all(|g| g.3 - g.2 > EPS) {
+      cands.push(Candidate { lo: nl, hi: nh, gaps });
+    }
+  };
+  let shifted = |nl: f64, nh: f64| axis_rect(moved, axis, nl, nh);
+  if let (Some(l), Some(r)) = (l, r) {
+    let (le, rs) = (span(&rects[l]).1, span(&rects[r]).0);
+    let (nl, nh) = match edge {
+      Edge::Both => ((le + rs - w) / 2.0, (le + rs + w) / 2.0),
+      Edge::Lo => (le + rs - hi, hi),
+      Edge::Hi => (lo, rs - (lo - le)),
+    };
+    let m = shifted(nl, nh);
+    add(nl, nh, vec![(rects[l], m, le, nl), (m, rects[r], nh, rs)]);
+  }
+  if let (Some(l), Some(ll)) = (l, ll) {
+    if edge != Edge::Hi {
+      let (ls, le) = span(&rects[l]);
+      let lle = span(&rects[ll]).1;
+      let nl = le + (ls - lle);
+      let nh = if edge == Edge::Both { nl + w } else { hi };
+      add(nl, nh, vec![(rects[ll], rects[l], lle, ls), (rects[l], shifted(nl, nh), le, nl)]);
+    }
+  }
+  if let (Some(r), Some(rr)) = (r, rr) {
+    if edge != Edge::Lo {
+      let (rs, re) = span(&rects[r]);
+      let rrs = span(&rects[rr]).0;
+      let nh = rs - (rrs - re);
+      let nl = if edge == Edge::Both { nh - w } else { lo };
+      add(nl, nh, vec![(shifted(nl, nh), rects[r], nh, rs), (rects[r], rects[rr], re, rrs)]);
+    }
+  }
+  let delta_of = |c: &Candidate| if edge == Edge::Hi { c.hi - hi } else { c.lo - lo };
+  let best = cands
+    .into_iter()
+    .filter(|c| delta_of(c).abs() <= thr)
+    .min_by(|a, b| delta_of(a).abs().total_cmp(&delta_of(b).abs()))?;
+  let delta = delta_of(&best);
+  let gaps = best
+    .gaps
+    .iter()
+    .map(|(a, b, from, to)| {
+      let pos = perp_mid(a, b, axis);
+      match axis {
+        Axis::X => Gap {
+          x1: *from,
+          y1: pos,
+          x2: *to,
+          y2: pos,
+          value: to - from,
+        },
+        Axis::Y => Gap {
+          x1: pos,
+          y1: *from,
+          x2: pos,
+          y2: *to,
+          value: to - from,
+        },
+      }
+    })
+    .collect();
+  Some(SpaceHit { delta, gaps })
+}
+
+fn axis_span(r: &Rect, axis: Axis) -> (f64, f64) {
+  match axis {
+    Axis::X => (r.x, r.right()),
+    Axis::Y => (r.y, r.bottom()),
+  }
+}
+
+fn perp_span(r: &Rect, axis: Axis) -> (f64, f64) {
+  axis_span(r, if axis == Axis::X { Axis::Y } else { Axis::X })
+}
+
+fn axis_rect(r: &Rect, axis: Axis, lo: f64, hi: f64) -> Rect {
+  match axis {
+    Axis::X => Rect::new(lo, r.y, hi - lo, r.height),
+    Axis::Y => Rect::new(r.x, lo, r.width, hi - lo),
+  }
+}
+
+/// Where a gap marker sits across the axis: the middle of the two rects' overlap, or of the first when they don't overlap.
+fn perp_mid(a: &Rect, b: &Rect, axis: Axis) -> f64 {
+  let (a1, a2) = perp_span(a, axis);
+  let (b1, b2) = perp_span(b, axis);
+  let (o1, o2) = (a1.max(b1), a2.min(b2));
+  if o1 < o2 {
+    (o1 + o2) / 2.0
+  } else {
+    (a1 + a2) / 2.0
+  }
 }
 
 fn best_snap(r: &Rect, targets: &Targets, thr: f64, edges: [bool; 4]) -> (Option<f64>, Option<f64>) {
@@ -373,6 +613,104 @@ fn guides_for(r: &Rect, all: &Targets, gx: bool, gy: bool) -> Vec<Guide> {
     }
   }
   out
+}
+
+/// Alt-hover measurement: the distances from the selection to the layer under the pointer.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct Measurement {
+  /// The layer measured to (the hovered layer or the frame around the pointer).
+  pub target: NodeId,
+  pub lines: Vec<Gap>,
+  /// Dashed projections joining a distance line to the layer it ends at.
+  pub extends: Vec<Guide>,
+}
+
+/// Measures from `ids` to the deepest layer at `p`. None when nothing is hit or the pointer is
+/// over the selection itself.
+pub fn measure_at(doc: &Document, page: &str, ids: &[NodeId], p: Point, zoom: f64) -> Option<Measurement> {
+  let target = hit_test(doc, page, p, zoom)?;
+  if doc.path(&target).iter().any(|a| ids.contains(a)) {
+    return None;
+  }
+  measure_to(doc, ids, &target)
+}
+
+/// Measures from the bounds of `ids` to the layer `target`.
+pub fn measure_to(doc: &Document, ids: &[NodeId], target: &str) -> Option<Measurement> {
+  let from = doc.bounds_of_many(ids)?;
+  doc.get(target)?;
+  let to = doc.abs_bounds(target);
+  let mut m = Measurement {
+    target: target.to_string(),
+    ..Default::default()
+  };
+  measure_axis(&from, &to, Axis::X, &mut m);
+  measure_axis(&from, &to, Axis::Y, &mut m);
+  Some(m)
+}
+
+/// Distances along one axis. Disjoint rects get the single gap between them; overlapping or
+/// nested ones get the distance between their start edges and between their end edges.
+fn measure_axis(a: &Rect, b: &Rect, axis: Axis, m: &mut Measurement) {
+  const MIN: f64 = 0.01;
+  let (a1, a2) = axis_span(a, axis);
+  let (b1, b2) = axis_span(b, axis);
+  let mut spans: Vec<(f64, f64)> = Vec::new();
+  if a2 <= b1 {
+    spans.push((a2, b1));
+  } else if b2 <= a1 {
+    spans.push((b2, a1));
+  } else {
+    spans.push((a1.min(b1), a1.max(b1)));
+    spans.push((a2.min(b2), a2.max(b2)));
+  }
+  // Across the axis the lines sit in the middle of where the rects overlap, else on the selection.
+  let (p1, p2) = perp_span(a, axis);
+  let (q1, q2) = perp_span(b, axis);
+  let (o1, o2) = (p1.max(q1), p2.min(q2));
+  let pos = if o1 < o2 { (o1 + o2) / 2.0 } else { (p1 + p2) / 2.0 };
+  for (from, to) in spans.into_iter().filter(|s| s.1 - s.0 > MIN) {
+    // The line may end beside the layer rather than on it: project it back with a dashed line.
+    for end in [from, to] {
+      let on_b = (end - b1).abs() < MIN || (end - b2).abs() < MIN;
+      let on_a = (end - a1).abs() < MIN || (end - a2).abs() < MIN;
+      for (on, lo, hi) in [(on_b, q1, q2), (on_a, p1, p2)] {
+        if on && (pos < lo || pos > hi) {
+          let near = if (pos - lo).abs() < (pos - hi).abs() { lo } else { hi };
+          m.extends.push(match axis {
+            Axis::X => Guide {
+              x1: end,
+              y1: pos,
+              x2: end,
+              y2: near,
+            },
+            Axis::Y => Guide {
+              x1: pos,
+              y1: end,
+              x2: near,
+              y2: end,
+            },
+          });
+        }
+      }
+    }
+    m.lines.push(match axis {
+      Axis::X => Gap {
+        x1: from,
+        y1: pos,
+        x2: to,
+        y2: pos,
+        value: to - from,
+      },
+      Axis::Y => Gap {
+        x1: pos,
+        y1: from,
+        x2: pos,
+        y2: to,
+        value: to - from,
+      },
+    });
+  }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -789,6 +1127,132 @@ mod tests {
     let (doc, page) = doc_with_frame();
     assert_eq!(marquee(&doc, &page, Rect::new(0.0, 0.0, 50.0, 50.0)), vec!["g".to_string()]);
     assert_eq!(marquee(&doc, &page, Rect::new(-10.0, -10.0, 400.0, 400.0)), vec!["f".to_string()]);
+  }
+
+  type Box4 = (f64, f64, f64, f64);
+
+  fn flat_doc(rects: &[(&str, Box4)]) -> (Document, String) {
+    let mut doc = new_document(&mut IdGen::new(2), "t");
+    let page = doc.pages[0].id.clone();
+    for (id, r) in rects {
+      node(&mut doc, &page, id, NodeType::Rectangle, None, *r);
+    }
+    (doc, page)
+  }
+
+  fn values(m: &Measurement) -> Vec<f64> {
+    m.lines.iter().map(|l| l.value).collect()
+  }
+
+  #[test]
+  fn move_snaps_to_equal_gaps_between_neighbours() {
+    // Gaps A-B 100 and B-C 120 (staircase, nothing aligned): B 3px off the 110/110 split.
+    let (doc, page) = flat_doc(&[
+      ("a", (-300.0, -300.0, 100.0, 100.0)),
+      ("b", (-100.0, -100.0, 80.0, 60.0)),
+      ("c", (100.0, -300.0, 60.0, 60.0)),
+    ]);
+    // Dragged 7px right (x=-93) snaps to x=-90: dx 10.
+    let s = snap_move(&doc, &page, &["b".into()], 7.0, 0.0, 1.0);
+    assert!((s.dx - 10.0).abs() < 1e-9, "snapped to x=-90, got dx {}", s.dx);
+    assert_eq!(s.gaps.len(), 2);
+    assert!(s.gaps.iter().all(|g| (g.value - 110.0).abs() < 1e-9));
+    // Out of range: no spacing snap.
+    let far = snap_move(&doc, &page, &["b".into()], 20.0, 0.0, 1.0);
+    assert!(far.gaps.is_empty());
+  }
+
+  #[test]
+  fn move_repeats_the_gap_between_two_siblings() {
+    // A and B are 40 apart; C dragged to the right of B lands 40 away (x=180).
+    let (doc, page) = flat_doc(&[
+      ("a", (0.0, 0.0, 50.0, 50.0)),
+      ("b", (90.0, 0.0, 50.0, 50.0)),
+      ("c", (200.0, 0.0, 50.0, 50.0)),
+    ]);
+    let s = snap_move(&doc, &page, &["c".into()], -17.0, 0.0, 1.0);
+    assert!((s.dx - -20.0).abs() < 1e-9, "dx {}", s.dx);
+    assert_eq!(s.gaps.len(), 2);
+    assert!(s.gaps.iter().all(|g| (g.value - 40.0).abs() < 1e-9));
+    // Same on the vertical axis.
+    let (doc, page) = flat_doc(&[
+      ("a", (0.0, 0.0, 50.0, 50.0)),
+      ("b", (0.0, 90.0, 50.0, 50.0)),
+      ("c", (0.0, 200.0, 50.0, 50.0)),
+    ]);
+    let s = snap_move(&doc, &page, &["c".into()], 0.0, -17.0, 1.0);
+    assert!((s.dy - -20.0).abs() < 1e-9, "dy {}", s.dy);
+  }
+
+  #[test]
+  fn edge_alignment_wins_over_spacing_on_a_tie() {
+    // B's left edge is already on A's right edge; the equal-gap position is further away.
+    let (doc, page) = flat_doc(&[
+      ("a", (0.0, 0.0, 100.0, 50.0)),
+      ("b", (103.0, 0.0, 40.0, 50.0)),
+      ("c", (204.0, 0.0, 50.0, 50.0)),
+    ]);
+    let s = snap_move(&doc, &page, &["b".into()], -3.0, 0.0, 1.0);
+    assert_eq!(s.dx, -3.0);
+    assert!(s.gaps.is_empty());
+  }
+
+  #[test]
+  fn resize_snaps_the_moving_edge_to_an_equal_gap() {
+    // B's right edge is dragged; the gap B-C should equal the gap A-B (40).
+    let (doc, page) = flat_doc(&[
+      ("a", (0.0, 0.0, 50.0, 50.0)),
+      ("b", (90.0, 0.0, 50.0, 50.0)),
+      ("c", (260.0, 0.0, 50.0, 50.0)),
+    ]);
+    let r = Rect::new(90.0, 0.0, 127.0, 50.0);
+    let (out, _, gaps) = snap_rect(&doc, &page, &["b".into()], r, [false, true, false, false], 1.0);
+    assert!((out.right() - 220.0).abs() < 1e-9, "right edge {}", out.right());
+    assert_eq!(out.x, 90.0);
+    assert_eq!(gaps.len(), 2);
+    // A point (drawing tools) never spaces.
+    let (_, _, none) = snap_rect(&doc, &page, &[], Rect::new(221.0, 0.0, 0.0, 0.0), [true, false, true, false], 1.0);
+    assert!(none.is_empty());
+  }
+
+  #[test]
+  fn measure_nested_layer_reports_inner_edges_of_the_parent() {
+    let (mut doc, page) = flat_doc(&[]);
+    node(&mut doc, &page, "f", NodeType::Frame, None, (0.0, 0.0, 400.0, 300.0));
+    node(&mut doc, &page, "r", NodeType::Rectangle, Some("f"), (50.0, 40.0, 100.0, 60.0));
+    // Hovering the frame's empty area from the rectangle: four distances.
+    let m = measure_at(&doc, &page, &["r".into()], Point::new(300.0, 250.0), 1.0).unwrap();
+    assert_eq!(m.target, "f");
+    assert_eq!(values(&m), vec![50.0, 250.0, 40.0, 200.0]);
+    assert!(m.extends.is_empty());
+    let left = &m.lines[0];
+    assert_eq!((left.x1, left.x2, left.y1), (0.0, 50.0, 70.0));
+    // Over the selection itself, or a layer inside it, there is nothing to measure.
+    assert!(measure_at(&doc, &page, &["r".into()], Point::new(60.0, 50.0), 1.0).is_none());
+    assert!(measure_at(&doc, &page, &["f".into()], Point::new(60.0, 50.0), 1.0).is_none());
+  }
+
+  #[test]
+  fn measure_between_siblings_overlapping_and_diagonal() {
+    let (doc, _) = flat_doc(&[
+      ("a", (0.0, 0.0, 100.0, 100.0)),
+      ("b", (160.0, 20.0, 80.0, 40.0)),
+      ("c", (200.0, 200.0, 50.0, 50.0)),
+      ("d", (50.0, 50.0, 100.0, 100.0)),
+    ]);
+    // Side by side, b within a's rows: the gap across them, then b's insets from a's top and bottom.
+    let m = measure_to(&doc, &["a".into()], "b").unwrap();
+    assert_eq!((values(&m), m.lines[0].y1), (vec![60.0, 20.0, 40.0], 40.0));
+    // Diagonal: a horizontal and a vertical gap, each joined to c by a dashed projection.
+    let m = measure_to(&doc, &["a".into()], "c").unwrap();
+    assert_eq!(values(&m), vec![100.0, 100.0]);
+    assert_eq!(m.extends.len(), 2);
+    // Partial overlap: start-to-start and end-to-end distances on both axes.
+    let m = measure_to(&doc, &["a".into()], "d").unwrap();
+    assert_eq!(values(&m), vec![50.0, 50.0, 50.0, 50.0]);
+    // A multi-selection measures from its bounds (0..240 x 0..100).
+    let m = measure_to(&doc, &["a".into(), "b".into()], "c").unwrap();
+    assert_eq!(values(&m), vec![200.0, 10.0, 100.0]);
   }
 
   fn node(doc: &mut Document, page: &str, id: &str, kind: NodeType, parent: Option<&str>, (x, y, w, h): (f64, f64, f64, f64)) {

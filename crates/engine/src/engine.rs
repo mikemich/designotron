@@ -503,6 +503,20 @@ pub enum Query {
     #[serde(default)]
     exclude: Vec<NodeId>,
   },
+  /// Alt-hover distances from `ids` (default: the selection) to the layer `target`, or the
+  /// deepest layer at the page point (x, y): `{target, lines, extends}` or null.
+  Measure {
+    #[serde(default)]
+    ids: Vec<NodeId>,
+    #[serde(default)]
+    target: Option<NodeId>,
+    #[serde(default)]
+    x: f64,
+    #[serde(default)]
+    y: f64,
+    #[serde(default = "one")]
+    zoom: f64,
+  },
   /// Vector edit mode: the point on vector `id`'s path nearest to a page point, within a
   /// few screen pixels: `{sub, seg, t, x, y}` (page coordinates) or null.
   VectorSegmentAt {
@@ -2278,15 +2292,17 @@ impl Engine {
     }
     self.drag_delta = Some(Point::new(dx, dy));
     let mut guides = Vec::new();
+    let mut gaps = Vec::new();
     let (mut fdx, mut fdy) = (dx, dy);
     if snap && !free.is_empty() {
       let s = interact::snap_move(&self.doc, &self.page, &free, dx, dy, zoom);
       fdx = s.dx;
       fdy = s.dy;
       guides = s.guides;
+      gaps = s.gaps;
     }
     ops::move_by(&mut self.doc, &free, fdx, fdy);
-    Ok(json!({ "dx": fdx, "dy": fdy, "guides": guides }))
+    Ok(json!({ "dx": fdx, "dy": fdy, "guides": guides, "gaps": gaps }))
   }
 
   /// Insertion index in an auto layout frame for a page-space point.
@@ -2363,6 +2379,7 @@ impl Engine {
   ) -> Result<Value, String> {
     let ids = ops::top_most(&self.doc, ids);
     let mut guides = Vec::new();
+    let mut gaps = Vec::new();
     let (mut dx, mut dy) = (dx, dy);
     let (fx, fy) = handle.factors();
     // Snap the moving edges of the axis-aligned selection box.
@@ -2383,8 +2400,9 @@ impl Engine {
         r.height += dy;
       }
       let edges = [fx < 0.0, fx > 0.0, fy < 0.0, fy > 0.0];
-      let (snapped, g) = interact::snap_rect(&self.doc, &self.page, &ids, r, edges, zoom);
+      let (snapped, g, spaced) = interact::snap_rect(&self.doc, &self.page, &ids, r, edges, zoom);
       guides = g;
+      gaps = spaced;
       if fx < 0.0 {
         dx += snapped.x - r.x;
       } else if fx > 0.0 {
@@ -2395,7 +2413,7 @@ impl Engine {
       } else if fy > 0.0 {
         dy += snapped.height - r.height;
       }
-      if guides.is_empty() {
+      if guides.is_empty() && gaps.is_empty() {
         dx = dx.round();
         dy = dy.round();
       }
@@ -2437,7 +2455,7 @@ impl Engine {
       let starts: Vec<Node> = ids.iter().filter_map(|i| self.doc.get(i).cloned()).collect();
       interact::resize_many(&mut self.doc, &starts, from, to);
     }
-    Ok(json!({ "guides": guides }))
+    Ok(json!({ "guides": guides, "gaps": gaps }))
   }
 
   fn paste(&mut self, data: &str, parent: Option<NodeId>, x: Option<f64>, y: Option<f64>) -> Result<Value, String> {
@@ -2592,10 +2610,18 @@ impl Engine {
           .collect();
         json!({ "items": items, "union": self.doc.bounds_of_many(&ids) })
       }
+      Query::Measure { ids, target, x, y, zoom } => {
+        let ids = if ids.is_empty() { self.selection.clone() } else { ids };
+        let m = match target {
+          Some(t) => interact::measure_to(&self.doc, &ids, &t),
+          None => interact::measure_at(&self.doc, &self.page, &ids, Point::new(x, y), zoom),
+        };
+        json!(m)
+      }
       Query::OverrideCount { id } => json!({ "count": components::override_count(&self.doc, &id) }),
       Query::FrameAt { x, y, exclude } => json!(ops::frame_at(&self.doc, &self.page, Point::new(x, y), &exclude, true)),
       Query::SnapPoint { x, y, zoom, exclude } => {
-        let (r, guides) = interact::snap_rect(
+        let (r, guides, _) = interact::snap_rect(
           &self.doc,
           &self.page,
           &exclude,
@@ -3268,6 +3294,63 @@ mod tests {
     e.dispatch(Command::Undo).unwrap();
     e.dispatch(Command::Undo).unwrap();
     assert!(e.doc.page(&e.page).unwrap().guides.is_empty(), "guides are undoable");
+  }
+
+  #[test]
+  fn translate_reports_equal_gaps_and_measure_query_uses_the_selection() {
+    let mut e = engine();
+    let a = rect(&mut e, -300.0, -300.0, 100.0, 100.0, None);
+    let b = rect(&mut e, -100.0, -100.0, 80.0, 60.0, None);
+    let c = rect(&mut e, 100.0, -300.0, 60.0, 60.0, None);
+    e.dispatch(Command::Select {
+      ids: vec![b.clone()],
+      mode: SelectMode::Replace,
+    })
+    .unwrap();
+    let r = e
+      .dispatch(Command::Translate {
+        ids: vec![b.clone()],
+        dx: 7.0,
+        dy: 0.0,
+        snap: true,
+        zoom: 1.0,
+      })
+      .unwrap();
+    assert_eq!(e.doc.get(&b).unwrap().x, -90.0, "{r}");
+    assert_eq!(r["gaps"].as_array().map(|g| g.len()), Some(2), "{r}");
+    // Alt-hover over A from the selected B: horizontal distance to A and the vertical one.
+    let m = e
+      .query(Query::Measure {
+        ids: vec![],
+        target: None,
+        x: -250.0,
+        y: -250.0,
+        zoom: 1.0,
+      })
+      .unwrap();
+    assert_eq!(m["target"], json!(a));
+    assert_eq!(m["lines"].as_array().map(|l| l.len()), Some(2), "{m}");
+    // Hovering the selection itself, or an explicit target, behaves as expected.
+    let own = e
+      .query(Query::Measure {
+        ids: vec![],
+        target: None,
+        x: -50.0,
+        y: -70.0,
+        zoom: 1.0,
+      })
+      .unwrap();
+    assert!(own.is_null(), "{own}");
+    let t = e
+      .query(Query::Measure {
+        ids: vec![],
+        target: Some(c),
+        x: 0.0,
+        y: 0.0,
+        zoom: 1.0,
+      })
+      .unwrap();
+    assert_eq!(t["lines"][0]["value"], json!(110.0), "{t}");
   }
 
   #[test]

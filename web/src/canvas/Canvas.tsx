@@ -17,6 +17,7 @@ import { openTextGesture, TextEditor } from "./TextEditor";
 import { EmptyPrompt } from "./EmptyPrompt";
 import { GridOverlay, PageGuides, Rulers } from "./Rulers";
 import { CommentLayer } from "./Comments";
+import { Measure, SpacingGaps, trackPointer } from "./Measure";
 import { RemoteCursors, RemoteSelections } from "./RemoteCursors";
 import { reportCursor } from "../collab";
 import { insertImageFile, openDtronFile, toggleVectorPointSmooth, vectorPoints } from "../actions";
@@ -106,6 +107,7 @@ export function Canvas() {
   const demoHidden = useDemo((s) => s.hidden);
   const editingVector = useStore((s) => s.editingVector);
   const guides = useStore((s) => s.guides);
+  const gaps = useStore((s) => s.gaps);
   const marquee = useStore((s) => s.marquee);
   const rightTab = useStore((s) => s.rightTab);
   const dropTarget = useStore((s) => s.dropTarget);
@@ -133,6 +135,9 @@ export function Canvas() {
   const [link, setLink] = useState<{ from: string; cur: Pt } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [panning, setPanning] = useState(false);
+  // Alt held with nothing being dragged: show distances from the selection to the hovered layer.
+  const [alt, setAlt] = useState(false);
+  const measuring = alt && tool === "move" && sel.length > 0 && !editingText && !editingVector;
 
   const doc = getDoc();
   const pageObj = doc.pages.find((p) => p.id === page) ?? doc.pages[0];
@@ -283,6 +288,28 @@ export function Canvas() {
   }, [tool, pen, penFrom]);
 
   useEffect(() => {
+    const isAlt = (e: KeyboardEvent) => e.key === "Alt" && !(e.target as HTMLElement | null)?.matches?.("input, textarea, [contenteditable]");
+    const onDown = (e: KeyboardEvent) => {
+      if (isAlt(e) && !drag.current) setAlt(true);
+    };
+    const onUp = (e: KeyboardEvent) => {
+      if (!isAlt(e)) return;
+      setAlt(false);
+      // Releasing Alt on its own would otherwise focus the browser menu bar.
+      if (useStore.getState().es.selection.length) e.preventDefault();
+    };
+    const off = () => setAlt(false);
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    window.addEventListener("blur", off);
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
+      window.removeEventListener("blur", off);
+    };
+  }, []);
+
+  useEffect(() => {
     setVHover(null);
     if (!editingVector) return;
     const onKey = (e: KeyboardEvent) => {
@@ -368,6 +395,7 @@ export function Canvas() {
     const target = e.target as Element;
     const st = useStore.getState();
     if (st.editingText) return;
+    setAlt(false);
 
     if (e.button === 1 || keys.space || tool === "hand") {
       drag.current = { kind: "pan", sx: e.clientX, sy: e.clientY, vx: st.viewport.x, vy: st.viewport.y };
@@ -498,6 +526,8 @@ export function Canvas() {
     const d = drag.current;
     const p = pagePt(e);
     reportCursor(p);
+    trackPointer(e);
+    if (!d && e.altKey !== alt) setAlt(e.altKey);
     if (!d) {
       if (editingVector && tool === "move") {
         const onPoint = (e.target as Element).hasAttribute?.("data-vpt");
@@ -538,17 +568,17 @@ export function Canvas() {
           }
           useStore.setState({ hover: null });
         }
-        const r = dispatch<{ guides: any[] }>({ op: "translate", ids: d.ids, dx, dy, snap: !e.ctrlKey, zoom: zoom() }, { quiet: true });
+        const r = dispatch<{ guides: any[]; gaps: any[] }>({ op: "translate", ids: d.ids, dx, dy, snap: !e.ctrlKey, zoom: zoom() }, { quiet: true });
         const target = query<string | null>({ q: "frameAt", x: p.x, y: p.y, exclude: d.ids });
-        useStore.setState({ guides: r?.guides ?? [], dropTarget: target });
+        useStore.setState({ guides: r?.guides ?? [], gaps: r?.gaps ?? [], dropTarget: target });
         break;
       }
       case "resize": {
-        const r = dispatch<{ guides: any[] }>(
+        const r = dispatch<{ guides: any[]; gaps: any[] }>(
           { op: "resize", ids: d.ids, handle: d.handle, dx: p.x - d.start.x, dy: p.y - d.start.y, keepAspect: e.shiftKey, fromCenter: e.altKey, snap: !e.ctrlKey, zoom: zoom() },
           { quiet: true },
         );
-        useStore.setState({ guides: r?.guides ?? [] });
+        useStore.setState({ guides: r?.guides ?? [], gaps: r?.gaps ?? [] });
         break;
       }
       case "rotate": {
@@ -657,6 +687,7 @@ export function Canvas() {
     const d = drag.current;
     drag.current = null;
     setPanning(false);
+    setAlt(e.altKey);
     if (!d) return;
     const p = pagePt(e);
     switch (d.kind) {
@@ -667,12 +698,12 @@ export function Canvas() {
         } else if (d.clickSelect) {
           dispatch({ op: "select", ids: [d.clickSelect] });
         }
-        useStore.setState({ guides: [], dropTarget: null });
+        useStore.setState({ guides: [], gaps: [], dropTarget: null });
         break;
       case "resize":
       case "rotate":
         dispatch({ op: "endGesture" });
-        useStore.setState({ guides: [] });
+        useStore.setState({ guides: [], gaps: [] });
         break;
       case "vector":
         // Points may have left the layer's box: refit it in the same undo step.
@@ -978,7 +1009,7 @@ export function Canvas() {
           );
         })}
         {dropTarget && <DropOutline id={dropTarget} v={v} />}
-        {hoverItem && <polygon points={polyPoints(corners(v, hoverItem.matrix, hoverItem.width, hoverItem.height))} fill="none" stroke="#0d99ff" strokeWidth={1.5} />}
+        {hoverItem && !measuring && <polygon points={polyPoints(corners(v, hoverItem.matrix, hoverItem.width, hoverItem.height))} fill="none" stroke="#0d99ff" strokeWidth={1.5} />}
         {/* Vector edit mode draws the path itself instead of the layer's box. */}
         {!editingVector && selItems.items.map((it) => (
           <polygon key={it.id} points={polyPoints(corners(v, it.matrix, it.width, it.height))} fill="none" stroke={doc.nodes[it.id]?.type === "component" || doc.nodes[it.id]?.instance ? "#9747ff" : "#0d99ff"} strokeWidth={1} />
@@ -995,7 +1026,7 @@ export function Canvas() {
           handlePts.map(({ h, p }) => (
             <rect key={h} data-handle={h} className="handle" x={p.x - 4} y={p.y - 4} width={8} height={8} fill="white" stroke="#0d99ff" strokeWidth={1} style={{ cursor: HANDLE_CURSORS[h] }} />
           ))}
-        {showHandles && bottomMid && (
+        {showHandles && bottomMid && !measuring && (
           <g transform={`translate(${bottomMid.x} ${bottomMid.y + 16})`}>
             <rect x={-sizeLabel.length * 3.3 - 6} y={-9} width={sizeLabel.length * 6.6 + 12} height={18} rx={3} fill="#0d99ff" />
             <text textAnchor="middle" dominantBaseline="central" fill="white" fontSize={11}>
@@ -1041,6 +1072,8 @@ export function Canvas() {
           const b = toScreen(v, { x: g.x2, y: g.y2 });
           return <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#f24822" strokeWidth={1} />;
         })}
+        <SpacingGaps v={v} gaps={gaps} />
+        {measuring && <Measure v={v} host={ref.current} />}
         {marquee && <polygon points={polyPoints(rectCorners(v, marquee))} fill="rgba(13,153,255,0.08)" stroke="#0d99ff" strokeWidth={1} />}
         {draw && <DrawPreview tool={tool} start={draw.start} cur={draw.cur} v={v} />}
         {pencil && <polyline points={polyPoints(pencil.map((p) => toScreen(v, p)))} fill="none" stroke="#0d99ff" strokeWidth={1.5} />}

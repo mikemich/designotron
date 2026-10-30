@@ -4,7 +4,7 @@
 import { create } from "zustand";
 import init, { WasmEngine } from "./wasm/pkg/designotron_engine_wasm";
 import wasmUrl from "./wasm/pkg/designotron_engine_wasm_bg.wasm?url";
-import type { Doc, EngineState, Guide, Node, Rect, Tool } from "./types";
+import type { Doc, EngineState, Gap, Guide, Node, Rect, Tool } from "./types";
 import { assetUrl } from "./assets";
 
 export const FONTS = [
@@ -119,6 +119,8 @@ interface Store {
   /** Anchors selected in vector edit mode, as [subpath, index]. */
   vectorPoints: [number, number][];
   guides: Guide[];
+  /** Equal gaps the current drag snapped to (pink spacing guides). */
+  gaps: Gap[];
   marquee: Rect | null;
   rightTab: RightTab;
   leftTab: LeftTab;
@@ -176,6 +178,7 @@ export const useStore = create<Store>(() => ({
   editingVector: null,
   vectorPoints: [],
   guides: [],
+  gaps: [],
   marquee: null,
   rightTab: "design",
   leftTab: "layers",
