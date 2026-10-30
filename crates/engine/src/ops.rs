@@ -331,7 +331,7 @@ pub fn default_node(kind: NodeType, id: String, name: String) -> Node {
 
 /// Deepest frame-like node on a page containing a page-space point. Instances are never
 /// containers; main components and sets (with everything inside them) only count when
-/// `include_mains` is set.
+/// `include_mains` is set; a set itself is never returned, only the variants inside it.
 pub fn frame_at(doc: &Document, page: &str, p: Point, exclude: &[NodeId], include_mains: bool) -> Option<NodeId> {
   fn walk(doc: &Document, ids: &[NodeId], p: Point, exclude: &[NodeId], include_mains: bool) -> Option<NodeId> {
     for id in ids.iter().rev() {
@@ -347,7 +347,14 @@ pub fn frame_at(doc: &Document, page: &str, p: Point, exclude: &[NodeId], includ
       }
       let local = doc.abs_matrix(id).invert().apply(p);
       if local.x >= 0.0 && local.y >= 0.0 && local.x <= n.width && local.y <= n.height {
-        return walk(doc, &n.children, p, exclude, include_mains).or_else(|| Some(id.clone()));
+        if let Some(inner) = walk(doc, &n.children, p, exclude, include_mains) {
+          return Some(inner);
+        }
+        // A set only holds variants: its gaps fall through to whatever is behind it.
+        if n.kind == NodeType::ComponentSet {
+          continue;
+        }
+        return Some(id.clone());
       }
     }
     None
@@ -360,6 +367,32 @@ pub fn frame_at(doc: &Document, page: &str, p: Point, exclude: &[NodeId], includ
 mod tests {
   use super::*;
   use crate::doc::new_document;
+
+  #[test]
+  fn frame_at_never_returns_a_component_set() {
+    let mut gen = IdGen::new(9);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mk = |id: &str, kind: NodeType, x: f64, y: f64, w: f64, h: f64| Node {
+      id: id.into(),
+      kind,
+      x,
+      y,
+      width: w,
+      height: h,
+      ..Default::default()
+    };
+    doc.insert(mk("bg", NodeType::Frame, 0.0, 0.0, 500.0, 500.0), None, &page, None);
+    doc.insert(mk("set", NodeType::ComponentSet, 100.0, 100.0, 200.0, 200.0), None, &page, None);
+    doc.insert(mk("v", NodeType::Component, 20.0, 20.0, 100.0, 100.0), Some("set"), &page, None);
+    let at = |x: f64, y: f64, mains: bool| frame_at(&doc, &page, Point::new(x, y), &[], mains);
+    // Inside a variant: the variant. In the set's gap: what is behind the set, never the set.
+    assert_eq!(at(150.0, 150.0, true).as_deref(), Some("v"));
+    assert_eq!(at(280.0, 280.0, true).as_deref(), Some("bg"));
+    assert_eq!(at(280.0, 280.0, false).as_deref(), Some("bg"));
+    // Without mains, variants are skipped too.
+    assert_eq!(at(150.0, 150.0, false).as_deref(), Some("bg"));
+  }
 
   #[test]
   fn group_and_ungroup_roundtrip() {

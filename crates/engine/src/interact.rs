@@ -95,9 +95,10 @@ pub fn pick(doc: &Document, page: &str, p: Point, zoom: f64, selection: &[NodeId
   let mut best: Option<usize> = None;
   for s in selection {
     if let Some(k) = path.iter().position(|x| x == s) {
-      // A selected top-level frame never captures hits on its descendants: its
-      // direct child is picked, as when nothing is selected.
-      let k = if k == 0 && k + 1 < path.len() && is_top_container(doc, &path[0]) {
+      // A lone selected top-level frame never captures hits on its descendants: its
+      // direct child is picked, as when nothing is selected. With several layers selected
+      // the press stays on the selection, so they can be dragged together.
+      let k = if k == 0 && selection.len() == 1 && k + 1 < path.len() && is_top_container(doc, &path[0]) {
         1
       } else {
         k
@@ -678,6 +679,41 @@ mod tests {
   }
 
   #[test]
+  fn pick_keeps_a_multi_selection_of_frames() {
+    let (mut doc, page) = doc_with_frame();
+    node(&mut doc, &page, "f2", NodeType::Frame, None, (400.0, 0.0, 300.0, 300.0));
+    // Pressing inside one selected frame must not narrow the selection to a child.
+    let sel = ["f".to_string(), "f2".to_string()];
+    assert_eq!(pick(&doc, &page, Point::new(20.0, 20.0), 1.0, &sel, false).as_deref(), Some("f"));
+  }
+
+  #[test]
+  fn pick_under_a_selected_top_level_container_stops_at_instances_components_and_sets() {
+    let (mut doc, page) = doc_with_frame();
+    // An instance inside the selected frame is picked whole, not its internals.
+    node(&mut doc, &page, "i", NodeType::Instance, Some("f"), (150.0, 150.0, 100.0, 100.0));
+    node(&mut doc, &page, "ir", NodeType::Rectangle, Some("i"), (0.0, 0.0, 50.0, 50.0));
+    assert_eq!(
+      pick(&doc, &page, Point::new(160.0, 160.0), 1.0, &["f".into()], false).as_deref(),
+      Some("i")
+    );
+    // A selected main component and a component set hand out their child.
+    node(&mut doc, &page, "c", NodeType::Component, None, (0.0, 400.0, 100.0, 100.0));
+    node(&mut doc, &page, "cr", NodeType::Rectangle, Some("c"), (10.0, 10.0, 50.0, 50.0));
+    assert_eq!(
+      pick(&doc, &page, Point::new(20.0, 420.0), 1.0, &["c".into()], false).as_deref(),
+      Some("cr")
+    );
+    node(&mut doc, &page, "cs", NodeType::ComponentSet, None, (400.0, 400.0, 200.0, 200.0));
+    node(&mut doc, &page, "v", NodeType::Component, Some("cs"), (20.0, 20.0, 100.0, 100.0));
+    node(&mut doc, &page, "vr", NodeType::Rectangle, Some("v"), (10.0, 10.0, 50.0, 50.0));
+    assert_eq!(
+      pick(&doc, &page, Point::new(440.0, 440.0), 1.0, &["cs".into()], false).as_deref(),
+      Some("v")
+    );
+  }
+
+  #[test]
   fn resize_from_west_keeps_east_edge() {
     let (mut doc, _) = doc_with_frame();
     let start = doc.get("f").unwrap().clone();
@@ -753,5 +789,18 @@ mod tests {
     let (doc, page) = doc_with_frame();
     assert_eq!(marquee(&doc, &page, Rect::new(0.0, 0.0, 50.0, 50.0)), vec!["g".to_string()]);
     assert_eq!(marquee(&doc, &page, Rect::new(-10.0, -10.0, 400.0, 400.0)), vec!["f".to_string()]);
+  }
+
+  fn node(doc: &mut Document, page: &str, id: &str, kind: NodeType, parent: Option<&str>, (x, y, w, h): (f64, f64, f64, f64)) {
+    let n = Node {
+      id: id.into(),
+      kind,
+      x,
+      y,
+      width: w,
+      height: h,
+      ..Default::default()
+    };
+    doc.insert(n, parent, page, None);
   }
 }

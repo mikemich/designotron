@@ -147,6 +147,39 @@ try {
     check("drop with pointer outside the frame stays on the page", !!b && (await parentName(p, b)) === "page", b ? await parentName(p, b) : "none");
     await p.context().close();
   }
+
+  // 4. Two top-level frames selected: dragging on a child of one still moves both frames.
+  {
+    const p = await fresh();
+    const frame = (name, x) => ({
+      type: "frame",
+      name,
+      x,
+      y: 0,
+      width: 200,
+      height: 200,
+      fill: "#eeeeee",
+      children: [{ type: "rectangle", name: name + " child", x: 40, y: 40, width: 100, height: 60, fill: "#ff0000" }],
+    });
+    await create(p, [frame("FA", 0), frame("FB", 300)]);
+    await p.evaluate(() => window.__dt.zoomToFit());
+    const [fa, fb, child] = [await named(p, "FA"), await named(p, "FB"), await named(p, "FA child")];
+    await select(p, [fa.id, fb.id]);
+    const a = await toClient(p, fa.x + child.x + 50, fa.y + child.y + 30);
+    await p.mouse.move(a.x, a.y);
+    await p.mouse.down();
+    for (let i = 1; i <= 10; i++) {
+      await p.mouse.move(a.x + i * 4, a.y + i * 3);
+      await sleep(15);
+    }
+    await p.mouse.up();
+    await sleep(250);
+    const [fa1, fb1] = [await named(p, "FA"), await named(p, "FB")];
+    const sel = await p.evaluate(() => window.__dt.state().selection);
+    check("dragging a child of one of two selected frames moves both frames", fa1.x !== fa.x && fb1.x !== fb.x && fa1.x - fa.x === fb1.x - fb.x, `FA ${fa.x}->${fa1.x}, FB ${fb.x}->${fb1.x}`);
+    check("both frames stay selected", sel.length === 2, `${sel.length}`);
+    await p.context().close();
+  }
 } catch (e) {
   check("script ran to the end", false, String(e).slice(0, 300));
 }
