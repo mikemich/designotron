@@ -82,7 +82,7 @@ try {
   check("outside stroke is inside the PNG", JSON.stringify(pngSize(r.bytes)) === '{"w":120,"h":80}', JSON.stringify(pngSize(r.bytes)));
   await select("Shadowed");
   r = await exportSelected("PNG", 1);
-  check("shadow is inside the PNG", JSON.stringify(pngSize(r.bytes)) === '{"w":140,"h":100}', JSON.stringify(pngSize(r.bytes)));
+  check("shadow is inside the PNG", JSON.stringify(pngSize(r.bytes)) === '{"w":160,"h":120}', JSON.stringify(pngSize(r.bytes)));
 
   // 2. SVG export: no scale picker, and the SVG has the padded size.
   await select("Outside");

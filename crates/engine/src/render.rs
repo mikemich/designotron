@@ -183,6 +183,10 @@ fn text_box(n: &Node, m: &dyn TextMeasurer) -> Rect {
   let Some(t) = n.text.as_ref() else {
     return Rect::new(0.0, 0.0, n.width, n.height);
   };
+  // Text that resizes itself already fits its layout.
+  if t.auto_resize != crate::model::TextAutoResize::None {
+    return Rect::new(0.0, 0.0, n.width, n.height);
+  }
   let lay = layout_for_node(t, n.width, m);
   let dx = (lay.width - n.width).max(0.0);
   let dy = (lay.height - n.height).max(0.0);
@@ -256,7 +260,8 @@ fn effects_margin(n: &Node) -> [f64; 4] {
   for e in n.effects.iter().filter(|e| e.visible) {
     match e.kind {
       EffectType::DropShadow => {
-        let reach = e.blur.max(0.0) + e.spread.max(0.0);
+        // The blur's tail reaches about 3 sigma = 1.5 x the radius.
+        let reach = 1.5 * e.blur.max(0.0) + e.spread.max(0.0);
         m[0] = m[0].max(reach - e.x);
         m[1] = m[1].max(reach - e.y);
         m[2] = m[2].max(reach + e.x);
@@ -933,13 +938,13 @@ mod tests {
     edit(&mut doc, |n| n.stroke_align = StrokeAlign::Outside);
     let b = render_bounds(&doc, "r", &HeuristicMeasurer);
     assert_eq!((b.x, b.y, b.width, b.height), (90.0, 90.0, 120.0, 80.0));
-    // Drop shadow: offset +/- (blur + spread), per side.
+    // Drop shadow: offset +/- (1.5 x blur + spread), per side.
     edit(&mut doc, |n| {
       n.stroke_weight = 0.0;
       n.effects = vec![shadow(0.0, 12.0, 20.0)];
     });
     let b = render_bounds(&doc, "r", &HeuristicMeasurer);
-    assert_eq!((b.x, b.y, b.width, b.height), (80.0, 92.0, 140.0, 100.0));
+    assert_eq!((b.x, b.y, b.width, b.height), (70.0, 82.0, 160.0, 120.0));
     // Layer blur reaches 1.5x its radius on every side.
     edit(&mut doc, |n| {
       n.effects = vec![Effect {
@@ -984,7 +989,7 @@ mod tests {
     c.effects = vec![shadow(0.0, 0.0, 10.0)];
     doc.insert(c, Some("f"), &page, None);
     let b = render_bounds(&doc, "f", &HeuristicMeasurer);
-    assert_eq!((b.x, b.y, b.right(), b.bottom()), (0.0, 0.0, 140.0, 140.0));
+    assert_eq!((b.x, b.y, b.right(), b.bottom()), (0.0, 0.0, 145.0, 145.0));
     edit_id(&mut doc, "f", |n| n.clip_content = true);
     let b = render_bounds(&doc, "f", &HeuristicMeasurer);
     assert_eq!((b.right(), b.bottom()), (100.0, 100.0));
@@ -997,11 +1002,11 @@ mod tests {
       n.rotation = 90.0;
       n.effects = vec![shadow(0.0, 0.0, 10.0)];
     });
-    // The rotated box is 40x100 around the same centre, plus 10 on every side.
+    // The rotated box is 40x100 around the same centre, plus 15 (1.5 x blur) on every side.
     let b = render_bounds(&doc, "r", &HeuristicMeasurer);
-    assert!((b.width - 60.0).abs() < 1e-6 && (b.height - 120.0).abs() < 1e-6, "{b:?}");
+    assert!((b.width - 70.0).abs() < 1e-6 && (b.height - 130.0).abs() < 1e-6, "{b:?}");
     let svg = export_svg(&doc, "r", &HeuristicMeasurer);
-    assert!(svg.contains("width=\"60\" height=\"120\""), "{svg}");
+    assert!(svg.contains("width=\"70\" height=\"130\""), "{svg}");
     let tight = export_svg_geometry(&doc, "r", &HeuristicMeasurer);
     assert!(tight.contains("width=\"40\" height=\"100\""), "{tight}");
     // The filter region is explicit so it can't clip what the export makes room for.
@@ -1027,6 +1032,16 @@ mod tests {
     assert_eq!((fr.x, fr.y, fr.width, fr.height), (-24.0, -24.0, 148.0, 108.0));
     let svg = export_svg(&doc, "r", &HeuristicMeasurer);
     assert!(svg.contains("x=\"-24\" y=\"-24\" width=\"148\" height=\"108\""), "{svg}");
+  }
+
+  #[test]
+  fn shadow_filter_region_covers_the_blur_tail() {
+    let (mut doc, _) = doc_with_rect(100.0, 100.0, 100.0, 60.0);
+    edit(&mut doc, |n| n.effects = vec![shadow(0.0, 12.0, 20.0)]);
+    let fr = filter_region(&doc, &HeuristicMeasurer, &mut HashMap::new(), doc.get("r").unwrap());
+    // Offset 12 down: the blur (3 sigma = 30) reaches 18 above the shape and 42 below it.
+    assert!(-fr.y >= 18.0 && fr.bottom() - 60.0 >= 42.0, "{fr:?}");
+    assert!(-fr.x >= 30.0 && fr.right() - 100.0 >= 30.0, "{fr:?}");
   }
 
   #[test]
