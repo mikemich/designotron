@@ -727,11 +727,16 @@ try {
     await card.locator(".ibtn.more").click();
     await B.pg.click(".menu >> text=Rename");
     await sleep(800);
-    await A.dispatch({ op: "update", ids: [(await A.byName("A")).id], patch: { x: 7 } });
-    await A.settle();
-    await sleep(500);
-    const stored = JSON.parse(await A.stored(id));
-    check("a rename made elsewhere survives the editor's next save", stored.name === "Renamed elsewhere" && stored.nodes[(await A.byName("A")).id].x === 7, String(stored.name));
+    const names3 = [];
+    for (let i = 0; i < 3; i++) {
+      await A.dispatch({ op: "update", ids: [(await A.byName("A")).id], patch: { x: 7 + i } });
+      await A.settle();
+      await sleep(500);
+      const st = JSON.parse(await A.stored(id));
+      names3.push(st.name);
+    }
+    check("a rename made elsewhere survives three saves of the open editor", names3.every((n) => n === "Renamed elsewhere"), names3.join(" | "));
+    check("and the open editor shows it", (await A.pg.evaluate(() => window.__dt.doc().name)) === "Renamed elsewhere");
     await A.c.close();
   }
   {
@@ -781,6 +786,48 @@ try {
       await R.settle();
       check("and the new editor's edit is stored", (await R.stored(id)) === (await R.canon()));
     }
+    await R.c.close();
+  }
+  {
+    // The closing editor's save is held longer than the new editor waits for it: it must not land
+    // over what the new editor read and wrote.
+    const R = await rig();
+    await R.newFile();
+    await R.tool("create_nodes", { nodes: nodes4(2000) });
+    await R.settle();
+    const id = await R.fileId();
+    await R.pg.evaluate(() => {
+      const orig = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (v, k) {
+        const r = orig.call(this, v, k);
+        if (window.__holdNext && String(k).startsWith("dt:file:") && v && v.v === 2) {
+          window.__holdNext = false;
+          window.__held = true;
+          const os = this;
+          const until = performance.now() + 20000;
+          const spin = () => {
+            if (performance.now() < until) os.get("dt:index").onsuccess = spin;
+          };
+          spin();
+        }
+        return r;
+      };
+      window.__holdNext = true;
+    });
+    await R.dispatch({ op: "update", ids: [(await R.byName("H")).id], patch: { y: 30 } });
+    await R.pg.waitForFunction(() => window.__held, null, { timeout: 10000 });
+    await R.dispatch({ op: "update", ids: [(await R.byName("A")).id], patch: { y: 44 } });
+    await R.pg.evaluate(() => (location.hash = "#/"));
+    await sleep(400);
+    await R.pg.evaluate((id) => (location.hash = "#/file/" + id), id);
+    await sleep(1500);
+    check("while the last save finishes the editor says so", (await R.pg.locator(".empty-hint").innerText().catch(() => "")).includes("Finishing the last save"));
+    await R.pg.waitForSelector("#dt-canvas", { timeout: 40000 });
+    await sleep(8000);
+    await R.dispatch({ op: "update", ids: [(await R.byName("B")).id], patch: { y: 66 } });
+    await R.settle();
+    await sleep(800);
+    check("after the wait ran out, stored equals the new editor's document", (await R.stored(id)) === (await R.canon()));
     await R.c.close();
   }
   if (RELAY) {

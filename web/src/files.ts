@@ -320,6 +320,13 @@ export function planIsOutdated(id: string, plan: { engine: number; token: number
   return !!s && (plan.engine < s.engine || (plan.engine === s.engine && plan.token < s.token));
 }
 
+/** An editor is about to open the file: from now on no older editor's plan is written (a write
+ * of an older editor that has already started may still land; the new one then finds the stored
+ * file isn't the one it read and writes its own document whole). */
+export function claimFile(id: string, engine: number) {
+  startedPlan.set(id, { engine, token: 0 });
+}
+
 /** The document name this tab last read from or wrote to the file's record, to notice a rename
  * made elsewhere. */
 const knownName = new Map<string, string>();
@@ -367,11 +374,12 @@ export async function saveFile(id: string, name: string, docJson: string, thumbn
  *
  * It only builds on the manifest this tab last wrote (a `StaleStorageError` otherwise, after
  * which the caller makes a `full` plan: the last writer's document wins whole, never a mix).
- * Throws when the write didn't land (nothing is changed then). Returns false, writing nothing,
- * for a plan older than one already started (see `planIsOutdated`).
+ * Throws when the write didn't land (nothing is changed then). Returns null, writing nothing,
+ * for a plan older than one already started (see `planIsOutdated`), else the document name that
+ * was stored: not `name` when a rename made elsewhere was kept.
  */
-export async function saveDelta(id: string, name: string, plan: SavePlan): Promise<boolean> {
-  if (planIsOutdated(id, plan)) return false;
+export async function saveDelta(id: string, name: string, plan: SavePlan): Promise<{ name: string } | null> {
+  if (planIsOutdated(id, plan)) return null;
   startedPlan.set(id, { engine: plan.engine, token: plan.token });
   const state = layered.get(id);
   if (!plan.full && !state) throw new StaleStorageError();
@@ -450,13 +458,14 @@ export async function saveDelta(id: string, name: string, plan: SavePlan): Promi
     layered.delete(id);
     throw err;
   }
-  knownName.set(id, writtenName);
+  // (Not from an editor that has been replaced meanwhile: the new one tracks the name.)
+  if (startedPlan.get(id)?.engine === plan.engine) knownName.set(id, writtenName);
   await writeIndex((idx) => {
     const rest = idx.filter((f) => f.id !== id);
     const prev = idx.find((f) => f.id === id);
     return [...rest, { id, name: writtenName, updatedAt: Date.now(), thumbnail: prev?.thumbnail }];
   });
-  return true;
+  return { name: writtenName };
 }
 
 function layeredKeys(id: string, roots: Record<string, string[]>, assets: Iterable<string>): string[] {

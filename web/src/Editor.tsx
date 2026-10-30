@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Canvas } from "./canvas/Canvas";
 import { LeftPanel } from "./panels/LeftPanel";
 import { RightPanel } from "./panels/RightPanel";
@@ -22,6 +22,7 @@ import { installShortcuts } from "./shortcuts";
 import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
 import {
   canSaveDelta,
+  claimFile,
   clearRecovery,
   listVersions,
   loadFile,
@@ -86,6 +87,10 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const [readError, setReadError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [stale, setStale] = useState(false);
+  /** The closing editor's last save is still being written. */
+  const [finishing, setFinishing] = useState(false);
+  /** This editor's number, taken when it starts opening the file (see `claimFile`). */
+  const editorIdRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -99,7 +104,14 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         return;
       }
       const last = closing.get(fileId);
-      if (last) await Promise.race([last, new Promise((r) => setTimeout(r, CLOSING_WAIT_MS))]);
+      if (last) {
+        setFinishing(true);
+        await Promise.race([last, new Promise((r) => setTimeout(r, CLOSING_WAIT_MS))]);
+        setFinishing(false);
+      }
+      // From here no older editor's save may land over what this one reads and then writes.
+      editorIdRef.current = ++editorCount;
+      claimFile(fileId, editorIdRef.current);
       // loadFile also loads the file's images. A copy kept while the page was closing is
       // newer than the last IndexedDB save.
       let stored: string | null = null;
@@ -169,7 +181,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   useEffect(() => {
     if (!ready) return;
     const engine = getEngine();
-    const editorId = ++editorCount;
+    const editorId = editorIdRef.current;
     const docRev = () => useStore.getState().es.docRev;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let idle: number | null = null;
@@ -297,18 +309,22 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     // last wrote (another tab or writer saved it since), the whole document is written over it
     // instead: the last writer wins, whole, never a mix. Returns what was written, or null when
     // a newer plan was already started (that write covers it; nothing is committed or marked saved).
+    const store = async (sn: Snapshot): Promise<boolean> => {
+      const saved = await saveDelta(fileId, sn.name, sn.plan);
+      if (!saved) return false;
+      engine.persistCommit(sn.plan.token);
+      // The save kept a name the file was given elsewhere: the editor shows it too.
+      if (saved.name !== sn.name && !closed && getEngine() === engine) dispatch({ op: "setDocName", name: saved.name });
+      return true;
+    };
     const write = async (snap: Snapshot): Promise<Snapshot | null> => {
       try {
-        if (!(await saveDelta(fileId, snap.name, snap.plan))) return null;
-        engine.persistCommit(snap.plan.token);
-        return snap;
+        return (await store(snap)) ? snap : null;
       } catch (err) {
         if (!(err instanceof StaleStorageError)) throw err;
         lastSnap = null;
         const whole = snapshot();
-        if (!(await saveDelta(fileId, whole.name, whole.plan))) return null;
-        engine.persistCommit(whole.plan.token);
-        return whole;
+        return (await store(whole)) ? whole : null;
       }
     };
 
@@ -544,7 +560,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         </button>
       </div>
     );
-  if (!ready) return <div className="empty-hint">Loading…</div>;
+  if (!ready) return <div className="empty-hint">{finishing ? "Finishing the last save…" : "Loading…"}</div>;
   return (
     <div className="app">
       <Toolbar onHome={onHome} />
