@@ -634,10 +634,24 @@ pub struct Measurement {
 /// or group is measured whole, not its inner text). Without a usable hover (nothing picked, or it
 /// is the selection or inside it) it measures to the layer enclosing the selection at `p`, so
 /// pointing at the selection or at empty frame area gives the distances to the parent's inner edges.
+/// A hover the pointer has left (the canvas moved under a resting pointer: Alt+wheel, nudges) is
+/// stale and replaced by a fresh pick at `p`.
 pub fn measure_at(doc: &Document, page: &str, ids: &[NodeId], hover: Option<&str>, p: Point, zoom: f64) -> Option<Measurement> {
   let inside_selection = |id: &str| doc.path(id).iter().any(|a| ids.contains(a));
-  if let Some(h) = hover.filter(|h| doc.get(h).is_some() && !inside_selection(h)) {
-    return measure_to(doc, ids, h);
+  let tol = 4.0 / zoom.max(0.01);
+  let under_pointer = |id: &str| {
+    let b = doc.abs_bounds(id);
+    p.x >= b.x - tol && p.x <= b.right() + tol && p.y >= b.y - tol && p.y <= b.bottom() + tol
+  };
+  if let Some(h) = hover.filter(|h| doc.get(h).is_some() && under_pointer(h)) {
+    if !inside_selection(h) {
+      return measure_to(doc, ids, h);
+    }
+  } else {
+    let picked = pick(doc, page, p, zoom, ids, false)?;
+    if !inside_selection(&picked) {
+      return measure_to(doc, ids, &picked);
+    }
   }
   let path = doc.path(&hit_test(doc, page, p, zoom)?);
   let target = match path.iter().position(|a| ids.contains(a)) {
@@ -1267,6 +1281,24 @@ mod tests {
     assert_eq!(own.target, "f");
     assert!(measure_at(&doc, &page, &["f".into()], Some("f"), Point::new(60.0, 50.0), 1.0).is_none());
     assert!(measure_at(&doc, &page, &["r".into()], None, Point::new(900.0, 900.0), 1.0).is_none());
+  }
+
+  #[test]
+  fn measure_ignores_a_hover_the_pointer_has_left() {
+    let (doc, page) = flat_doc(&[
+      ("s", (0.0, 0.0, 40.0, 40.0)),
+      ("a", (200.0, 0.0, 40.0, 40.0)),
+      ("b", (400.0, 0.0, 40.0, 40.0)),
+    ]);
+    let sel = ["s".to_string()];
+    // The hover still says A, but the canvas moved and the pointer now rests on B.
+    let m = measure_at(&doc, &page, &sel, Some("a"), Point::new(420.0, 20.0), 1.0).unwrap();
+    assert_eq!(m.target, "b");
+    // Still over A (a couple of pixels past its edge): the hover stands.
+    let m = measure_at(&doc, &page, &sel, Some("a"), Point::new(242.0, 20.0), 1.0).unwrap();
+    assert_eq!(m.target, "a");
+    // Over nothing: no measurement, not the stale one.
+    assert!(measure_at(&doc, &page, &sel, Some("a"), Point::new(700.0, 500.0), 1.0).is_none());
   }
 
   #[test]

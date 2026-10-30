@@ -3347,12 +3347,13 @@ mod tests {
       })
       .unwrap();
     assert!(own.is_null(), "{own}");
+    // The hover the editor picked, with the pointer on it.
     let t = e
       .query(Query::Measure {
         ids: vec![],
         target: Some(c),
-        x: 0.0,
-        y: 0.0,
+        x: 130.0,
+        y: -270.0,
         zoom: 1.0,
       })
       .unwrap();

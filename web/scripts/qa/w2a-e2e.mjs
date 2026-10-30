@@ -285,6 +285,26 @@ try {
     await p.context().close();
   }
 
+  // 4b2. The canvas moves under a resting pointer (Alt+wheel pan): the lines follow what is now under it.
+  {
+    const p = await fresh();
+    await create(p, [rect("S", 0, 0, 40, 40), rect("A", 200, 0, 40, 40), rect("B", 200, 150, 40, 40)]);
+    await select(p, [(await named(p, "S")).id]);
+    const at = await toClient(p, 220, 20);
+    await p.mouse.move(at.x - 3, at.y);
+    await p.mouse.move(at.x, at.y);
+    await p.keyboard.down("Alt");
+    await sleep(150);
+    const before = await labels(p, "g.measure");
+    await p.mouse.wheel(0, 150 * at.zoom);
+    await sleep(250);
+    const after = await labels(p, "g.measure");
+    await shot(p, "7-alt-pan");
+    await p.keyboard.up("Alt");
+    check("Alt+wheel pan: lines move from A (160) to B (160 and 110)", before.join() === "160" && after.slice().sort().join() === ["110", "160"].join(), JSON.stringify({ before, after }));
+    await p.context().close();
+  }
+
   // 4c. Auto layout children and Alt-resize get no spacing snap or markers.
   {
     const p = await fresh();
