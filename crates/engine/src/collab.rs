@@ -851,7 +851,7 @@ mod tests {
       patch: json!({ "exportSettings": rows }),
     })
     .unwrap();
-    let d = delta(&base, &a.doc, true);
+    let d = delta(&base, &a.doc, true, true);
     apply(&mut b.doc, &d).unwrap();
     assert_eq!(b.doc.get(&r).unwrap().export_settings, a.doc.get(&r).unwrap().export_settings);
     assert_eq!(b.doc.get(&r).unwrap().export_settings.len(), 2);
@@ -862,7 +862,7 @@ mod tests {
       patch: json!({ "exportSettings": [] }),
     })
     .unwrap();
-    apply(&mut b.doc, &delta(&with_rows, &a.doc, true)).unwrap();
+    apply(&mut b.doc, &delta(&with_rows, &a.doc, true, true)).unwrap();
     assert!(b.doc.get(&r).unwrap().export_settings.is_empty());
     a.dispatch(Command::Undo).unwrap();
     assert_eq!(a.doc.get(&r).unwrap().export_settings.len(), 2);
