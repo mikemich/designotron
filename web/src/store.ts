@@ -88,6 +88,7 @@ export async function documentLoads(json: string): Promise<boolean> {
 export function newEngine(): WasmEngine {
   engine = new WasmEngine(Math.floor(Math.random() * 2 ** 48));
   docCache = null;
+  lastDocRev = -1;
   // The new engine's revisions restart, so nothing counts as saved until the opener says so.
   useStore.setState({ rev: -1, savedDocRev: -1 });
   sync();
@@ -113,6 +114,8 @@ interface Store {
   es: EngineState;
   tool: Tool;
   viewport: Viewport;
+  /** The view is being zoomed (wheel, pinch, zoom commands) and for a moment after. */
+  zooming: boolean;
   hover: string | null;
   editingText: string | null;
   editingVector: string | null;
@@ -173,6 +176,7 @@ export const useStore = create<Store>(() => ({
   es: { rev: 0, docRev: 0, page: "", selection: [], canUndo: false, canRedo: false, inGesture: false },
   tool: "move",
   viewport: { x: 0, y: 0, zoom: 1 },
+  zooming: false,
   hover: null,
   editingText: null,
   editingVector: null,
@@ -210,13 +214,25 @@ export function styleTextSelection(style: Record<string, unknown>, clear: string
 }
 
 const listeners = new Set<() => void>();
-/** Called after every document change (autosave, bridge sync). */
+/** Engine `docRev` the listeners were last told about. */
+let lastDocRev = -1;
+/** Called after every change to the document itself (autosave, bridge sync, multiplayer), not
+ * after selecting, switching page or ending a drag that changed nothing. */
 export function onDocChange(fn: () => void): () => void {
   listeners.add(fn);
   return () => listeners.delete(fn);
 }
 
 let docCache: { rev: number; doc: Doc } | null = null;
+/** Layers that have layout grids, kept current with the document copy: most files have none,
+ * and then nothing needs to look for grids to draw. */
+const gridFrames = new Set<string>();
+
+/** Whether any layer of the document has layout grids. */
+export function hasLayoutGrids(): boolean {
+  getDoc();
+  return gridFrames.size > 0;
+}
 
 /** Parsed document for the current revision. Kept current from engine deltas, so a
  * change to one layer costs that layer, not the whole file. */
@@ -227,11 +243,20 @@ export function getDoc(): Doc {
   const d = JSON.parse(e.docDelta(!docCache));
   if (d.full || !docCache) {
     docCache = { rev, doc: d.full };
+    gridFrames.clear();
+    for (const id in d.full.nodes) if (d.full.nodes[id].layoutGrids?.length) gridFrames.add(id);
   } else {
     // Patch the node table in place (changed nodes are new objects; the table is shared).
     const nodes = docCache.doc.nodes;
     Object.assign(nodes, d.nodes);
-    for (const id of d.removed) delete nodes[id];
+    for (const id in d.nodes) {
+      if (d.nodes[id].layoutGrids?.length) gridFrames.add(id);
+      else gridFrames.delete(id);
+    }
+    for (const id of d.removed) {
+      delete nodes[id];
+      gridFrames.delete(id);
+    }
     docCache = { rev, doc: { ...d.meta, nodes } };
   }
   return docCache.doc;
@@ -264,6 +289,8 @@ export function sync() {
   // Selecting or switching page moves `rev` but not `docRev`: nothing to save.
   useStore.setState({ rev, es, dirty: es.docRev !== st.savedDocRev });
   dropStalePoints();
+  if (es.docRev === lastDocRev) return;
+  lastDocRev = es.docRev;
   listeners.forEach((l) => l());
 }
 
@@ -335,7 +362,17 @@ export function renderPage(page: string, hidden: string[]): string {
   return resolveAssets(getEngine().render(page, JSON.stringify(hidden)));
 }
 
-export type RenderUpdate = { full: string } | { order: string[]; changed: Record<string, string>; moved: Record<string, string> };
+export type RenderUpdate =
+  | { full: string }
+  | {
+      order: string[];
+      changed: Record<string, string>;
+      moved: Record<string, string>;
+      /** Page-space `[x, y, width, height]` of everything a root paints (roots that changed or moved). */
+      bounds: Record<string, [number, number, number, number]>;
+      /** Text layers in a root that changed. */
+      texts: Record<string, number>;
+    };
 
 /** Incremental canvas render: only top-level layers changed since the last call come back. */
 export function renderPageIncremental(page: string, hidden: string[], reset: boolean): RenderUpdate {
@@ -347,6 +384,18 @@ export function renderPageIncremental(page: string, hidden: string[], reset: boo
 
 export function resolveAssets(svg: string): string {
   return svg.replace(/asset:([a-z0-9_]+)/g, (m, id) => assetUrl(id) ?? m);
+}
+
+/** How long after the last zoom step the view still counts as zooming. */
+const ZOOM_SETTLE_MS = 150;
+let zoomTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Marks the view as zooming until `ZOOM_SETTLE_MS` after the last call, so the canvas can
+ * draw big pages cheaply (text as bars) while the zoom is moving. */
+export function noteZooming() {
+  if (!useStore.getState().zooming) useStore.setState({ zooming: true });
+  clearTimeout(zoomTimer);
+  zoomTimer = setTimeout(() => useStore.setState({ zooming: false }), ZOOM_SETTLE_MS);
 }
 
 export function setTool(tool: Tool) {
@@ -364,6 +413,7 @@ export function zoomToRect(r: Rect | null, canvasW: number, canvasH: number, max
   const pad = 80;
   const zoom = Math.min(maxZoom, (canvasW - pad * 2) / Math.max(r.width, 1), (canvasH - pad * 2) / Math.max(r.height, 1));
   const z = Math.max(0.02, Math.min(256, zoom));
+  noteZooming();
   useStore.setState({ viewport: { zoom: z, x: canvasW / 2 - (r.x + r.width / 2) * z, y: canvasH / 2 - (r.y + r.height / 2) * z } });
 }
 
@@ -394,6 +444,7 @@ export function zoomBy(factor: number, cx?: number, cy?: number) {
   const py = cy ?? h / 2;
   const zoom = Math.max(0.02, Math.min(256, v.zoom * factor));
   const k = zoom / v.zoom;
+  noteZooming();
   useStore.setState({ viewport: { zoom, x: px - (px - v.x) * k, y: py - (py - v.y) * k } });
 }
 
@@ -406,5 +457,7 @@ export function zoomBy(factor: number, cx?: number, cy?: number) {
   zoomToFit: () => zoomToFit(),
   edit: (id: string) => useStore.setState({ editingText: id }),
   viewport: () => useStore.getState().viewport,
+  setViewport: (v: Viewport) => useStore.setState({ viewport: v }),
+  onDocChange: (fn: () => void) => onDocChange(fn),
   vectorEdit: () => ({ id: useStore.getState().editingVector, points: useStore.getState().vectorPoints }),
 };

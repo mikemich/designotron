@@ -577,6 +577,18 @@ textarea.textinput {
   top: 0;
   overflow: visible;
 }
+/* Text level of detail: every text layer comes with a bar (`.gk`) standing in for it. Text
+   too small to read (sizes chosen by `lodCss` in Canvas.tsx) and, while a big page zooms
+   (`.zoom-lod`), all text is hidden and its bars shown. */
+.dt-content .gk {
+  display: none;
+}
+.dt-content .zoom-lod text {
+  display: none;
+}
+.dt-content .zoom-lod .gk {
+  display: inline;
+}
 .canvas .overlay {
   pointer-events: none;
 }

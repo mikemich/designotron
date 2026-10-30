@@ -27,9 +27,9 @@ const KIND_LABEL: Record<string, string> = {
 
 /** Design lint results with one-click fixes, plus a Claude critique. */
 export function ReviewPanel() {
-  const rev = useStore((s) => s.rev);
+  const docRev = useStore((s) => s.es.docRev);
   const page = useStore((s) => s.es.page);
-  const issues = useMemo(() => query<Issue[]>({ q: "lint", page }), [rev, page]);
+  const issues = useMemo(() => query<Issue[]>({ q: "lint", page }), [docRev, page]);
   const fixable = issues.filter((i) => i.fix);
   const fixAll = () => {
     dispatch({ op: "beginGesture" });

@@ -142,6 +142,8 @@ class BridgeClient {
 
   /** Mirrors the document to the bridge so headless tools and project export see it. */
   pushDoc() {
+    // Serialising a big file costs far more than the send; skip it when nobody is listening.
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
     try {
       this.send({ type: "doc", doc: getEngine().save() });
     } catch {

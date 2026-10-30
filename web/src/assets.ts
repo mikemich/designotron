@@ -63,6 +63,8 @@ export function inlineAssets(text: string): string {
 
 /** Asset ids referenced in a string. */
 export function referencedAssets(text: string): string[] {
+  // Nothing loaded, so nothing to find (and no scan of a big document for it).
+  if (dataUrls.size === 0) return [];
   return [...new Set([...text.matchAll(/asset:([a-z0-9_]+)/g)].map((m) => m[1]))];
 }
 

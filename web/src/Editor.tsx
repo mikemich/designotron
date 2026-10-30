@@ -21,15 +21,17 @@ import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
 import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
 import {
+  canSaveDelta,
   clearRecovery,
   listVersions,
   loadFile,
   persistentStorage,
   readRecovery,
-  saveFile,
+  saveDelta,
   saveThumbnail,
   saveVersion,
   writeRecovery,
+  type SavePlan,
 } from "./files";
 import { AUTO_VERSION_MS } from "./panels/HistoryPanel";
 import { nodeSvg, svgToPngBlob } from "./exporter";
@@ -39,6 +41,11 @@ import { failureText, reportFailure } from "./errors";
 /** Largest document (in characters) copied to localStorage when closing: the quota is about
  * 5 MB, and a bigger copy only fails after a slow synchronous write. */
 const MAX_RECOVERY_CHARS = 4_500_000;
+/** Files with more layers than this are never copied: serialising them just to find out the
+ * copy is too big would stall the page for longer than the copy is worth. */
+const MAX_RECOVERY_LAYERS = 4200;
+/** Longest stretch (ms) of one task spent collecting what to save. */
+const SAVE_SLICE_MS = 8;
 
 /** A prompt for Claude to send once the next file has opened (from the start screen). */
 let askOnOpen: string | null = null;
@@ -46,9 +53,10 @@ export function askWhenOpen(prompt: string | null) {
   askOnOpen = prompt;
 }
 
-/** The document as serialised at one moment, with the engine revision it was taken at. */
+/** What to write for the document as of one moment: the layers that changed since the last
+ * stored write, with the engine revision it was taken at. */
 interface Snapshot {
-  json: string;
+  plan: SavePlan;
   name: string;
   rev: number;
 }
@@ -107,6 +115,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       if (json) {
         try {
           getEngine().load(json);
+          // Read from storage as it is (not a recovered copy): later saves write only changes.
+          if (recovered === null && canSaveDelta(fileId)) getEngine().persistAdopt();
         } catch (err) {
           console.error(err);
         }
@@ -139,8 +149,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
 
   // Autosave to IndexedDB, with an occasional thumbnail.
   //
-  // Saves run one at a time, each serialising the document when it starts, so a slow one can
-  // never land after (and over) a newer one. "Saved" means the engine's docRev equals the
+  // Saves run one at a time, each taking the layers that changed when it starts, so a slow one
+  // can never land after (and over) a newer one. "Saved" means the engine's docRev equals the
   // docRev of a save that finished, so selecting or switching page never triggers a save, and
   // edits made while a save is running keep the file dirty.
   useEffect(() => {
@@ -162,8 +172,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     // When the oldest unsaved change was made: steady edits can't postpone saving past a
     // maximum wait.
     let pendingSince: number | null = null;
-    // Highest docRev a write has been started for, and the latest serialised document (so
-    // closing doesn't serialise a big file once per event).
+    // Highest docRev a write has been started for, and the latest plan (so closing doesn't
+    // collect a big file's changes once per event).
     let startedRev = -1;
     let lastSnap: Snapshot | null = null;
     // Layer count for the debounce, refreshed now and then rather than per change.
@@ -190,20 +200,65 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     // A snapshot taken eagerly (the page is closing, or the editor is about to be replaced).
     let final: Snapshot | null = null;
 
+    // A plan can only be written on top of what is stored (`canSaveDelta`): when that was
+    // replaced since the plan was made (another writer saved the whole file), make a new one.
+    const stillUsable = (snap: Snapshot | null, rev: number): snap is Snapshot =>
+      !!snap && snap.rev === rev && (snap.plan.full || canSaveDelta(fileId));
+
+    // The layers to write, gathered in one go (closing the page can't wait).
     const snapshot = (): Snapshot => {
       const rev = docRev();
-      if (lastSnap?.rev !== rev) lastSnap = { json: engine.save(), name: getDoc().name, rev };
-      return lastSnap;
+      if (!stillUsable(lastSnap, rev)) {
+        const p = JSON.parse(engine.persistPlan(!canSaveDelta(fileId)));
+        const dirty: Record<string, string> = {};
+        for (const root of p.dirty as string[]) dirty[root] = engine.persistChunk(p.token, root);
+        lastSnap = { plan: { token: p.token, full: p.full, meta: p.meta, dirty, removed: p.removed }, name: getDoc().name, rev };
+      }
+      return lastSnap!;
     };
 
-    // Keeps a synchronous copy in localStorage. False when it couldn't be kept: over the
-    // quota (a big file's copy is never tried, it would only fail slowly) or storage blocked.
-    const keepRecovery = (snap: Snapshot): boolean => {
-      if (recoveryTried === snap.rev) return recoveryRev === snap.rev;
-      recoveryTried = snap.rev;
-      if (snap.json.length <= MAX_RECOVERY_CHARS && writeRecovery(fileId, snap.json)) {
-        recoveryRev = snap.rev;
-        return true;
+    // The same, letting the page breathe between layers: after changing everything in a big
+    // file this is megabytes of JSON, which as one task would stall typing and the canvas.
+    const snapshotInSlices = async (): Promise<Snapshot> => {
+      for (;;) {
+        const rev = docRev();
+        if (stillUsable(lastSnap, rev)) return lastSnap;
+        const p = JSON.parse(engine.persistPlan(!canSaveDelta(fileId)));
+        const dirty: Record<string, string> = {};
+        let sliceStart = performance.now();
+        let superseded = false;
+        for (const root of p.dirty as string[]) {
+          const body = engine.persistChunk(p.token, root);
+          // A plan made meanwhile (closing the page) replaced this one: start over.
+          if (!body) {
+            superseded = true;
+            break;
+          }
+          dirty[root] = body;
+          if (performance.now() - sliceStart > SAVE_SLICE_MS) {
+            await new Promise((r) => setTimeout(r));
+            sliceStart = performance.now();
+          }
+        }
+        if (superseded) continue;
+        lastSnap = { plan: { token: p.token, full: p.full, meta: p.meta, dirty, removed: p.removed }, name: getDoc().name, rev };
+        return lastSnap;
+      }
+    };
+
+    // Keeps a synchronous copy of the whole document in localStorage too (as of now, which is
+    // the revision it is filed under). False when it couldn't be kept: over the quota (a big
+    // file's copy is never tried, it would only fail slowly) or storage blocked.
+    const keepRecovery = (): boolean => {
+      const rev = docRev();
+      if (recoveryTried === rev) return recoveryRev === rev;
+      recoveryTried = rev;
+      if (Object.keys(getDoc().nodes).length <= MAX_RECOVERY_LAYERS) {
+        const json = engine.save();
+        if (json.length <= MAX_RECOVERY_CHARS && writeRecovery(fileId, json)) {
+          recoveryRev = rev;
+          return true;
+        }
       }
       clearRecovery(fileId);
       recoveryRev = -1;
@@ -212,7 +267,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
 
     const dropRecovery = (snap: Snapshot) => {
       // Without working storage the localStorage copy is the only one there is.
-      if (!persistentStorage()) keepRecovery(snap);
+      if (!persistentStorage()) keepRecovery();
       else if (recoveryRev <= snap.rev) {
         clearRecovery(fileId);
         recoveryRev = -1;
@@ -225,19 +280,21 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       if (running) return;
       running = true;
       try {
-        while (!stale && (final || (!closed && docRev() !== useStore.getState().savedDocRev))) {
+        // A write already started for this revision (closing while one ran) is not repeated.
+        while (!stale && (final || (!closed && docRev() !== useStore.getState().savedDocRev && startedRev < docRev()))) {
           // The engine was replaced under this editor: its revisions mean nothing here.
           if (!final && getEngine() !== engine) break;
-          const snap = final ?? snapshot();
+          const snap = final ?? (await snapshotInSlices());
           final = null;
           pendingSince = null;
           startedRev = Math.max(startedRev, snap.rev);
           try {
-            await saveFile(fileId, snap.name, snap.json);
+            await saveDelta(fileId, snap.name, snap.plan);
+            engine.persistCommit(snap.plan.token);
           } catch (err) {
             // Not stored (quota, disk): stay dirty, keep what the recovery copy can hold, try again.
             console.error(err);
-            keepRecovery(snap);
+            keepRecovery();
             startedRev = -1;
             if (!closed) {
               useStore.setState({ saveFailed: true });
@@ -256,7 +313,9 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           if (getEngine() === engine && snap.rev > useStore.getState().savedDocRev) markSaved(snap.rev);
           if (Date.now() - lastVersion > AUTO_VERSION_MS) {
             lastVersion = Date.now();
-            await saveVersion(fileId, "Autosave", snap.json, true).catch(console.error);
+            // A version is a whole copy of the file (the current one, which may be newer than
+            // the save that just finished).
+            await saveVersion(fileId, "Autosave", engine.save(), true).catch(console.error);
           }
           maybeThumbnail();
         }
@@ -340,7 +399,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     const leave = (): boolean => {
       if (!useStore.getState().dirty || stale) return true;
       const snap = snapshot();
-      const kept = keepRecovery(snap);
+      const kept = keepRecovery();
       cancelTimers();
       if (startedRev >= snap.rev) return kept;
       startedRev = snap.rev;
@@ -350,8 +409,9 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       } else {
         // A save is running: don't queue behind it. IndexedDB runs write transactions on
         // the store in the order they were made, so this one lands after it.
-        saveFile(fileId, snap.name, snap.json).then(
+        saveDelta(fileId, snap.name, snap.plan).then(
           () => {
+            engine.persistCommit(snap.plan.token);
             dropRecovery(snap);
             if (!closed && getEngine() === engine && snap.rev > useStore.getState().savedDocRev) markSaved(snap.rev);
           },

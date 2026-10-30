@@ -4,6 +4,7 @@ import {
   dispatch,
   getDoc,
   pointerDrag,
+  noteZooming,
   query,
   renderPageIncremental,
   screenToPage,
@@ -86,6 +87,20 @@ const HANDLE_CURSORS: Record<Handle, string> = {
   se: "nwse-resize",
 };
 
+/** Text smaller than this on screen (px) is drawn as bars, not glyphs. */
+const MIN_TEXT_PX = 5;
+/** While zooming a page with more than this many text layers in view, text is drawn as bars. */
+const ZOOM_TEXT_BUDGET = 400;
+/** Roots this far (screen px) outside the canvas still stay in the DOM, so panning doesn't pop. */
+const CULL_MARGIN = 300;
+
+/** CSS that hides text of sizes 1..`k` px (see `lod_size` in render.rs) and shows its bars. */
+function lodCss(k: number): string {
+  if (k <= 0) return "";
+  const sizes = Array.from({ length: Math.min(k, 255) }, (_, i) => i + 1);
+  return `${sizes.map((n) => `.dt-content text.s${n}`).join(",")}{display:none}${sizes.map((n) => `.dt-content path.g${n}`).join(",")}{display:inline}`;
+}
+
 const keys = { space: false };
 window.addEventListener("keydown", (e) => {
   if (e.code === "Space" && !(e.target as HTMLElement).matches("input, textarea, [contenteditable]")) keys.space = true;
@@ -113,7 +128,12 @@ export function Canvas() {
   const dropTarget = useStore((s) => s.dropTarget);
   const showRulers = useStore((s) => s.showRulers);
   const showGrids = useStore((s) => s.showGrids);
+  const docRev = useStore((s) => s.es.docRev);
+  const zooming = useStore((s) => s.zooming);
   const [size, setSize] = useState({ w: 0, h: 0 });
+  // The same size without re-rendering (reading clientWidth after DOM writes forces a layout).
+  const sizeRef = useRef(size);
+  sizeRef.current = size;
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -144,6 +164,38 @@ export function Canvas() {
   // Canvas content is patched per top-level layer: only changed roots are re-rendered and replaced.
   const contentRef = useRef<SVGGElement>(null);
   const rootEls = useRef(new Map<string, SVGGElement>());
+  // What each root paints (page space) and how many text layers it has, from the engine, so
+  // roots far outside the view can be left out of the layout and painting.
+  const rootInfo = useRef(new Map<string, { b: Rect; texts: number }>());
+  const culled = useRef(new Set<string>());
+  /** Hides roots outside the view and turns on the cheap zoom look when the view is heavy. */
+  const applyView = () => {
+    const host = contentRef.current;
+    if (!host) return;
+    const { viewport: vp, zooming: z } = useStore.getState();
+    const { w, h } = sizeRef.current;
+    // Before the first measurement everything counts as in view.
+    const x0 = w ? (-CULL_MARGIN - vp.x) / vp.zoom : -Infinity;
+    const y0 = h ? (-CULL_MARGIN - vp.y) / vp.zoom : -Infinity;
+    const x1 = w ? (w + CULL_MARGIN - vp.x) / vp.zoom : Infinity;
+    const y1 = h ? (h + CULL_MARGIN - vp.y) / vp.zoom : Infinity;
+    let texts = 0;
+    for (const [id, g] of rootEls.current) {
+      const info = rootInfo.current.get(id);
+      const show = !info || (info.b.x < x1 && info.b.x + info.b.width > x0 && info.b.y < y1 && info.b.y + info.b.height > y0);
+      if (show) texts += info?.texts ?? 0;
+      if (show === culled.current.has(id)) {
+        if (show) {
+          culled.current.delete(id);
+          g.removeAttribute("display");
+        } else {
+          culled.current.add(id);
+          g.setAttribute("display", "none");
+        }
+      }
+    }
+    host.classList.toggle("zoom-lod", z && texts > ZOOM_TEXT_BUDGET);
+  };
   useLayoutEffect(() => {
     const host = contentRef.current;
     if (!host) return;
@@ -151,16 +203,30 @@ export function Canvas() {
     const r = renderPageIncremental(page, editingText ? [...demoHidden, editingText] : demoHidden, fresh);
     if ("full" in r) {
       rootEls.current.clear();
+      rootInfo.current.clear();
+      culled.current.clear();
       host.innerHTML = r.full;
       return;
     }
-    if (fresh) host.innerHTML = "";
+    if (fresh) {
+      host.innerHTML = "";
+      rootInfo.current.clear();
+      culled.current.clear();
+    }
     const els = rootEls.current;
+    const live = new Set(r.order);
     for (const [id, el] of els) {
-      if (!r.order.includes(id)) {
+      if (!live.has(id)) {
         el.remove();
         els.delete(id);
+        rootInfo.current.delete(id);
+        culled.current.delete(id);
       }
+    }
+    for (const id in r.bounds) {
+      const [x, y, width, height] = r.bounds[id];
+      const prev = rootInfo.current.get(id);
+      rootInfo.current.set(id, { b: { x, y, width, height }, texts: id in r.texts ? r.texts[id] : (prev?.texts ?? 0) });
     }
     const want = r.order.map((id) => {
       let el = els.get(id);
@@ -181,10 +247,17 @@ export function Canvas() {
     for (let i = want.length - 1; i >= 0; i--) {
       if (!keep.has(i)) host.insertBefore(want[i], want[i + 1] ?? null);
     }
-
+    applyView();
   }, [rev, page, editingText, demoHidden]);
 
-  const selItems = useMemo(() => query<{ items: BoundsItem[]; union: Rect | null }>({ q: "bounds", ids: sel }), [rev, sel]);
+  // Panning and zooming change what is in view; zooming also switches the cheap look.
+  useLayoutEffect(applyView, [v.x, v.y, v.zoom, size.w, size.h, zooming]);
+
+  // Text up to this many px in size is under MIN_TEXT_PX on screen.
+  const lodMax = Math.ceil(MIN_TEXT_PX / v.zoom) - 1;
+  const lodStyle = useMemo(() => lodCss(lodMax), [lodMax]);
+  const selKey = sel.join(",");
+  const selItems = useMemo(() => query<{ items: BoundsItem[]; union: Rect | null }>({ q: "bounds", ids: sel }), [rev, selKey]);
   const hoverItem = useMemo(() => (hover && !sel.includes(hover) ? query<{ items: BoundsItem[] }>({ q: "bounds", ids: [hover] }).items[0] : null), [rev, hover, sel]);
   const topFrames = useMemo(() => {
     const ids = (pageObj?.children ?? []).filter((id) => {
@@ -192,7 +265,7 @@ export function Canvas() {
       return n && n.visible && ["frame", "component", "componentSet", "instance"].includes(n.type);
     });
     return query<{ items: BoundsItem[] }>({ q: "bounds", ids }).items;
-  }, [rev, page]);
+  }, [docRev, page]);
 
   // Wheel zoom/pan needs a non-passive listener.
   useEffect(() => {
@@ -249,6 +322,7 @@ export function Canvas() {
       // Keep the page point that was under the fingers' midpoint under the new midpoint.
       const px = (pinch.mx - pinch.v.x) / pinch.v.zoom;
       const py = (pinch.my - pinch.v.y) / pinch.v.zoom;
+      noteZooming();
       useStore.setState({ viewport: { zoom, x: now.mx - px * zoom, y: now.my - py * zoom } });
     };
     const up = (e: PointerEvent) => {
@@ -984,7 +1058,8 @@ export function Canvas() {
       onDragOver={(e) => e.preventDefault()}
       onDrop={onDrop}
     >
-      <svg xmlns="http://www.w3.org/2000/svg" width={size.w || undefined} height={size.h || undefined}>
+      <svg className="dt-content" xmlns="http://www.w3.org/2000/svg" width={size.w || undefined} height={size.h || undefined}>
+        <style>{lodStyle}</style>
         <g ref={contentRef} transform={`translate(${v.x} ${v.y}) scale(${v.zoom})`} />
       </svg>
       <svg className="overlay" width={size.w || undefined} height={size.h || undefined}>

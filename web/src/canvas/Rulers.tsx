@@ -1,7 +1,7 @@
 // Rulers, page guides and layout grid overlay.
 
 import { useMemo, useState } from "react";
-import { dispatch, getDoc, query, useStore } from "../store";
+import { dispatch, getDoc, hasLayoutGrids, query, useStore } from "../store";
 import type { Rect, RulerGuide } from "../types";
 
 type View = { x: number; y: number; zoom: number };
@@ -17,9 +17,10 @@ interface GridItem {
 
 /** Column/row bands and square grids of visible frames (page coordinates → screen). */
 export function GridOverlay({ v }: { v: View }) {
-  const rev = useStore((s) => s.rev);
+  // Layout grids belong to the document: selecting layers must not recompute them.
+  const docRev = useStore((s) => s.es.docRev);
   const page = useStore((s) => s.es.page);
-  const items = useMemo(() => query<GridItem[]>({ q: "gridOverlay" }), [rev, page]);
+  const items = useMemo(() => (hasLayoutGrids() ? query<GridItem[]>({ q: "gridOverlay" }) : []), [docRev, page]);
   if (!items.length) return null;
   return (
     <g className="grid-overlay">
@@ -61,7 +62,7 @@ const toPage = (v: View, axis: "x" | "y", screen: number) => Math.round((screen 
 
 /** Page guides: drag to move, drag back onto a ruler to delete. */
 export function PageGuides({ v, width, height }: { v: View; width: number; height: number }) {
-  useStore((s) => s.rev);
+  useStore((s) => s.es.docRev);
   const [dragging, setDragging] = useState<{ index: number; pos: number } | null>(null);
   const guides = pageGuides();
   return (

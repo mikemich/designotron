@@ -68,7 +68,15 @@ const stored = (page) =>
     const k = keys.find((k) => String(k).startsWith("dt:file:"));
     if (!k) return [];
     const v = await get(k);
-    return Object.values(JSON.parse(v.doc).nodes).map((n) => n.name);
+    // One record (`doc`), or a manifest of one record per top-level layer.
+    if (v.v !== 2) return Object.values(JSON.parse(v.doc).nodes).map((n) => n.name);
+    const id = String(k).slice("dt:file:".length);
+    const names = [];
+    for (const root of Object.keys(v.roots)) {
+      const body = await get(`dt:root:${id}:${root}`);
+      names.push(...Object.values(JSON.parse(`{${body}}`)).map((n) => n.name));
+    }
+    return names;
   });
 
 const layerNames = (page) => page.evaluate(() => Object.values(window.__dt.doc().nodes).map((n) => n.name));

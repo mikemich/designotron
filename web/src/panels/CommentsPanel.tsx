@@ -7,9 +7,9 @@ import { Section } from "../ui/controls";
 
 /** All comment threads in the file; click one to jump to it. */
 export function CommentsPanel() {
-  const rev = useStore((s) => s.rev);
+  const docRev = useStore((s) => s.es.docRev);
   const [showResolved, setShowResolved] = useState(false);
-  const all = useMemo(() => query<CommentPin[]>({ q: "comments", includeResolved: true }), [rev]);
+  const all = useMemo(() => query<CommentPin[]>({ q: "comments", includeResolved: true }), [docRev]);
   const open = all.filter((c) => !c.resolved);
   const list = showResolved ? all : open;
   const jump = (c: CommentPin) => {

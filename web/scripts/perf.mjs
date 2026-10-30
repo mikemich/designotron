@@ -1,6 +1,7 @@
 // Browser performance check on a large file: drag frame time (engine + canvas DOM patch).
 // Usage: node scripts/perf.mjs [frames] [cards]   (needs the dev server on 5173, or E2E_URL)
-// PROFILE=1 prints a CPU profile summary; TRACE=1 lists layout passes.
+// PROFILE=1 prints a CPU profile summary; TRACE=1 lists layout passes; ZOOM=1 first times
+// Ctrl+wheel zoom at the zoom-to-fit view (frame gaps and the longest task).
 // Headless Chromium rasterises in software, so frame times overstate paint cost.
 
 import { chromium } from "playwright-core";
@@ -51,6 +52,37 @@ if (process.env.DUMP) {
   fs.writeFileSync(process.env.DUMP, await page.evaluate(() => document.querySelector("#dt-canvas > svg").outerHTML));
 }
 await page.waitForTimeout(500);
+
+if (process.env.ZOOM) {
+  await page.evaluate(() => {
+    window.__gaps = [];
+    window.__long = [];
+    let last = performance.now();
+    const loop = () => {
+      const t = performance.now();
+      window.__gaps.push(t - last);
+      last = t;
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+    new PerformanceObserver((l) => l.getEntries().forEach((e) => window.__long.push(e.duration))).observe({ entryTypes: ["longtask"] });
+  });
+  await page.mouse.move(800, 500);
+  for (const dir of [-1, 1]) {
+    await page.evaluate(() => ((window.__gaps = []), (window.__long = [])));
+    await page.keyboard.down("Control");
+    for (let i = 0; i < 10; i++) await page.mouse.wheel(0, dir * 60);
+    await page.keyboard.up("Control");
+    await page.waitForTimeout(800);
+    const z = await page.evaluate(() => {
+      const g = [...window.__gaps].sort((a, b) => a - b);
+      return { frames: g.length, p50: g[Math.floor(g.length / 2)], p95: g[Math.floor(g.length * 0.95)], max: g[g.length - 1], longest: Math.max(0, ...window.__long) };
+    });
+    console.log(`zoom ${dir < 0 ? "in " : "out"}: ${z.frames} frames, p50 ${z.p50.toFixed(1)} ms, p95 ${z.p95.toFixed(1)} ms, max ${z.max.toFixed(1)} ms, longest task ${z.longest.toFixed(0)} ms`);
+  }
+  await page.evaluate(() => window.__dt.zoomToFit());
+  await page.waitForTimeout(500);
+}
 
 // Select the first screen, zoom to it, and drag it by its padding.
 await page.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), info.first);

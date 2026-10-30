@@ -231,7 +231,8 @@ function OverlayEditor({ value: o, onChange }: { value: OverlaySettings; onChang
 
 function CodePanel() {
   const nodes = useSelection();
-  const rev = useStore((s) => s.rev);
+  // Generated code depends on the document, not on what is selected beyond the layer's id.
+  const docRev = useStore((s) => s.es.docRev);
   const [lang, setLang] = useState<"react" | "html" | "svg" | "css">("react");
   const n = nodes[0];
   const code = useMemo(() => {
@@ -239,7 +240,7 @@ function CodePanel() {
     if (lang === "svg") return nodeSvg(n.id);
     if (lang === "css") return cssFor(n);
     return inlineAssets(query<string>({ q: lang === "react" ? "exportReact" : "exportHtml", id: n.id }));
-  }, [n?.id, lang, rev]);
+  }, [n?.id, lang, docRev]);
   return (
     <div className="scroll">
       <Section title="Build the real thing">

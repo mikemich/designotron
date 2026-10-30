@@ -61,13 +61,13 @@ export function askClaudeAboutComments(id?: string) {
 
 /** Pins for the current page plus the open thread / composer. */
 export function CommentLayer({ v }: { v: View }) {
-  const rev = useStore((s) => s.rev);
+  const docRev = useStore((s) => s.es.docRev);
   const page = useStore((s) => s.es.page);
   const tool = useStore((s) => s.tool);
   const leftTab = useStore((s) => s.leftTab);
   const open = useStore((s) => s.openComment);
   const draft = useStore((s) => s.draftComment);
-  const pins = useMemo(() => query<CommentPin[]>({ q: "comments", page, includeResolved: true }), [rev, page]);
+  const pins = useMemo(() => query<CommentPin[]>({ q: "comments", page, includeResolved: true }), [docRev, page]);
   const showPins = tool === "comment" || leftTab === "comments" || !!open;
   const toScreen = (x: number, y: number) => ({ left: x * v.zoom + v.x, top: y * v.zoom + v.y });
   // Popovers sit beside their pin but stay inside the canvas (phones, pins near an edge).
