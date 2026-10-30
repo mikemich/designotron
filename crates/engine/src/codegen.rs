@@ -950,11 +950,11 @@ fn text_spans(t: &crate::model::TextProps) -> Vec<Span> {
         styles.push(("color".into(), color::css_with_opacity(c, 1.0)));
       }
       let link = r.link.as_deref().and_then(crate::model::safe_link);
-      // One decoration per span: an explicit one wins, a link underlines only when the range
-      // (or its layer) has none.
-      let deco = match r.decoration.unwrap_or(t.decoration) {
-        TextDecoration::None if link.is_some() => Some(TextDecoration::Underline),
-        _ => r.decoration,
+      // One decoration per span: the range's own (even "none") wins, a link underlines only
+      // when neither the range nor its layer has one.
+      let deco = match r.decoration {
+        None if t.decoration == TextDecoration::None && link.is_some() => Some(TextDecoration::Underline),
+        d => d,
       };
       if let Some(d) = deco {
         let v = match d {
@@ -1903,6 +1903,46 @@ mod tests {
     let html = export_html(&doc, "home", &HeuristicMeasurer);
     let a = html.split("<a href").nth(1).unwrap().split('>').next().unwrap();
     assert!(!a.contains("underline"), "a link on struck text keeps the strike: {a}");
+    // A link whose range sets decoration none stays plain; one that sets nothing on plain text
+    // underlines itself.
+    let mut doc2 = sample();
+    let page2 = doc2.pages[0].id.clone();
+    let mut l = crate::ops::default_node(NodeType::Text, "l".into(), "L".into());
+    {
+      let p = l.text.as_mut().unwrap();
+      p.characters = "plain none link".into();
+      p.runs = vec![
+        crate::model::TextRun {
+          start: 6,
+          end: 10,
+          decoration: Some(TextDecoration::None),
+          link: Some("https://example.com/a".into()),
+          ..Default::default()
+        },
+        crate::model::TextRun {
+          start: 11,
+          end: 15,
+          link: Some("https://example.com/b".into()),
+          ..Default::default()
+        },
+      ];
+    }
+    doc2.insert(l, Some("home"), &page2, None);
+    let html2 = export_html(&doc2, "home", &HeuristicMeasurer);
+    let tag = |h: &str, url: &str| {
+      h.split(&format!("<a href=\"{url}\""))
+        .nth(1)
+        .unwrap()
+        .split('>')
+        .next()
+        .unwrap()
+        .to_string()
+    };
+    assert!(tag(&html2, "https://example.com/a").contains("text-decoration: none"), "{html2}");
+    assert!(
+      tag(&html2, "https://example.com/b").contains("text-decoration: underline"),
+      "{html2}"
+    );
     // One line with a max width keeps its ellipsis rules.
     assert!(
       html.contains("white-space: nowrap") && html.contains("text-overflow: ellipsis"),

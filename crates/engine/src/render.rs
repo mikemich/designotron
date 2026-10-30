@@ -773,9 +773,9 @@ fn span_attrs(s: &SpanStyle, base: &SpanStyle, color: impl Fn(&str) -> String) -
   if s.letter_spacing != base.letter_spacing {
     a.push_str(&format!(" letter-spacing=\"{}\"", fmt(s.letter_spacing)));
   }
-  // One decoration per span, written once (a repeated attribute makes the SVG invalid). An
-  // explicit decoration wins; a link only adds an underline to a span that has none.
-  let deco = if s.decoration == TextDecoration::None && s.link.as_deref().and_then(crate::model::safe_link).is_some() {
+  // One decoration per span, written once (a repeated attribute makes the SVG invalid). A
+  // decoration the range sets (even "none") wins; a link only underlines a span that has none.
+  let deco = if s.decoration == TextDecoration::None && !s.own_decoration && s.link.as_deref().and_then(crate::model::safe_link).is_some() {
     TextDecoration::Underline
   } else {
     s.decoration
@@ -1014,9 +1014,26 @@ mod tests {
         assert!(seen.insert(attr), "{attr} repeated in <{tag}>");
       }
     }
-    // The struck link keeps its strike-through; the link on an underlined text stays underlined.
+    // The struck link keeps its strike-through; an explicit "none" on a link removes the
+    // underline the text has, and it is written once.
     assert!(svg.contains("text-decoration=\"line-through\""), "{svg}");
-    assert!(!svg.contains("text-decoration=\"none\""), "{svg}");
+    assert_eq!(svg.matches("text-decoration=\"none\"").count(), 1, "{svg}");
+    // On plain text a link underlines itself, unless its range says "none".
+    {
+      let p = doc.get_mut("t").unwrap().text.as_mut().unwrap();
+      p.decoration = crate::model::TextDecoration::None;
+    }
+    let svg = export_svg(&doc, "t", &HeuristicMeasurer);
+    assert!(!svg.contains("text-decoration=\"none\""), "already none: nothing to write: {svg}");
+    assert_eq!(svg.matches("text-decoration=\"line-through\"").count(), 1, "{svg}");
+    assert!(!svg.contains("underline"), "the explicit none link isn't underlined: {svg}");
+    doc.get_mut("t").unwrap().text.as_mut().unwrap().runs[0].decoration = None;
+    let svg = export_svg(&doc, "t", &HeuristicMeasurer);
+    assert_eq!(
+      svg.matches("text-decoration=\"underline\"").count(),
+      1,
+      "a plain link underlines: {svg}"
+    );
   }
 
   #[test]

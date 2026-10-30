@@ -53,6 +53,8 @@ pub struct SpanStyle {
   /// Overrides the layer fill when set.
   pub color: Option<String>,
   pub link: Option<String>,
+  /// The range sets its own decoration (even "none"): a link then doesn't add an underline.
+  pub own_decoration: bool,
 }
 
 impl SpanStyle {
@@ -66,6 +68,7 @@ impl SpanStyle {
       decoration: p.decoration,
       color: None,
       link: None,
+      own_decoration: false,
     }
   }
 
@@ -79,6 +82,7 @@ impl SpanStyle {
       decoration: r.decoration.unwrap_or(self.decoration),
       color: r.color.clone().or_else(|| self.color.clone()),
       link: r.link.clone().or_else(|| self.link.clone()),
+      own_decoration: r.decoration.is_some() || self.own_decoration,
     }
   }
 

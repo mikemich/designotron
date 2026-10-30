@@ -759,8 +759,48 @@ pub fn insert_specs(e: &mut Engine, specs: &[Value], parent: Option<&str>) -> Re
     let id = build(e, spec, parent, &page)?;
     roots.push(id);
   }
+  for r in &roots {
+    settle_fill_in_hug(&mut e.doc, r);
+  }
   crate::layout::relayout_all(&mut e.doc, e.measurer.as_ref());
   Ok(roots.iter().map(|r| outline(e, r, 2)).collect())
+}
+
+/// A layer that fills the main axis of an auto layout frame that hugs on that axis has nothing
+/// to fill: it hugs its content (auto layout frames, text) or keeps its size (anything else).
+/// Applied to what a tool just created, top-down so chains of them settle. Parents with a min or
+/// max on that axis (fill under a held-back hug frame is meaningful) and wrap parents are left
+/// alone, as is fill on the cross axis.
+fn settle_fill_in_hug(doc: &mut crate::model::Document, id: &str) {
+  let Some(p) = doc.get(id) else { return };
+  if p.kind == NodeType::Instance {
+    return;
+  }
+  let children = p.children.clone();
+  if let Some(al) = p.layout.as_ref() {
+    let horizontal = al.direction == LayoutDirection::Horizontal;
+    let (sizing, lo, hi) = if horizontal {
+      (p.sizing_h, p.min_width, p.max_width)
+    } else {
+      (p.sizing_v, p.min_height, p.max_height)
+    };
+    if sizing == Sizing::Hug && lo.is_none() && hi.is_none() && !(al.wrap && horizontal) {
+      for c in &children {
+        let Some(cn) = doc.get_mut(c) else { continue };
+        if cn.absolute_position {
+          continue;
+        }
+        let hugs = (cn.kind.is_frame_like() && cn.layout.is_some()) || cn.kind == NodeType::Text;
+        let s = if horizontal { &mut cn.sizing_h } else { &mut cn.sizing_v };
+        if *s == Sizing::Fill {
+          *s = if hugs { Sizing::Hug } else { Sizing::Fixed };
+        }
+      }
+    }
+  }
+  for c in &children {
+    settle_fill_in_hug(doc, c);
+  }
 }
 
 fn build(e: &mut Engine, spec: &Value, parent: Option<&str>, page: &str) -> Result<NodeId, String> {
@@ -1480,6 +1520,83 @@ fn center_of(e: &Engine, id: &str) -> Point {
 
 #[cfg(test)]
 mod tests {
+
+  fn created_geometry(e: &Engine) -> std::collections::BTreeMap<String, (f64, f64, f64, f64)> {
+    e.doc
+      .nodes
+      .values()
+      .map(|n| (n.name.clone(), (n.x, n.y, n.width, n.height)))
+      .collect()
+  }
+
+  #[test]
+  fn fill_children_of_a_hug_axis_settle_when_created() {
+    let mut e = Engine::new(Box::new(crate::text::HeuristicMeasurer), 3);
+    let spec = json!({ "type": "frame", "name": "Col", "width": 320, "height": "hug",
+      "layout": { "direction": "vertical", "gap": 8, "padding": 16 },
+      "children": [{ "type": "frame", "name": "F", "width": "fill", "height": "fill",
+        "layout": { "direction": "vertical", "padding": [12, 24], "gap": 8 },
+        "children": [
+          { "type": "text", "name": "T", "width": "fill", "fontSize": 14, "lineHeight": 30,
+            "text": "a layout dog dog I over a jumps Mm and a few more words to wrap" },
+          { "type": "rectangle", "name": "R", "width": 100, "height": "fill", "fill": "#ccc" } ] }] });
+    e.dispatch(Command::Ai {
+      tool: "create_nodes".into(),
+      input: json!({ "nodes": [spec] }),
+    })
+    .unwrap();
+    let by = |e: &Engine, name: &str| e.doc.nodes.values().find(|n| n.name == name).unwrap().clone();
+    let (col, f, t, r) = (by(&e, "Col"), by(&e, "F"), by(&e, "T"), by(&e, "R"));
+    assert_eq!(
+      (f.sizing_h, f.sizing_v),
+      (Sizing::Fill, Sizing::Hug),
+      "main axis hugs, cross axis keeps fill"
+    );
+    assert_eq!((r.sizing_h, r.sizing_v), (Sizing::Fixed, Sizing::Fixed));
+    assert_eq!(
+      (t.sizing_h, t.sizing_v),
+      (Sizing::Fill, Sizing::Fixed),
+      "text height follows its wrapping"
+    );
+    assert_eq!(r.height, 100.0, "the rectangle keeps its size");
+    assert!(t.height >= 60.0, "the text wraps at the frame's width: {}", t.height);
+    assert_eq!(f.height, 12.0 + t.height + 8.0 + 100.0 + 12.0, "the frame hugs its content");
+    assert_eq!(col.height, 16.0 + f.height + 16.0);
+    // Saved, loaded and laid out again: nothing moves.
+    let before = created_geometry(&e);
+    let json = e.to_json();
+    e.load(&json).unwrap();
+    e.dispatch(Command::Relayout).unwrap();
+    assert_eq!(created_geometry(&e), before);
+  }
+
+  #[test]
+  fn fill_under_a_held_back_hug_frame_stays_fill() {
+    let mut e = Engine::new(Box::new(crate::text::HeuristicMeasurer), 3);
+    let spec = json!({ "type": "frame", "name": "Row", "width": "hug", "height": "hug", "maxWidth": 200,
+      "layout": { "direction": "horizontal", "gap": 0, "padding": 0 },
+      "children": [{ "type": "text", "name": "T", "width": "fill", "text": "a fairly long sentence that needs several lines" }] });
+    e.dispatch(Command::Ai {
+      tool: "create_nodes".into(),
+      input: json!({ "nodes": [spec] }),
+    })
+    .unwrap();
+    let t = e.doc.nodes.values().find(|n| n.name == "T").unwrap().clone();
+    assert_eq!(t.sizing_h, Sizing::Fill);
+    let row = e.doc.nodes.values().find(|n| n.name == "Row").unwrap().clone();
+    assert_eq!(row.width, 200.0);
+    assert_eq!(t.width, 200.0);
+    // A hug row without a max still settles its fill text to hug.
+    let spec = json!({ "type": "frame", "name": "Row2", "width": "hug", "height": "hug",
+      "layout": { "direction": "horizontal", "gap": 0, "padding": 0 },
+      "children": [{ "type": "text", "name": "T2", "width": "fill", "text": "short" }] });
+    e.dispatch(Command::Ai {
+      tool: "create_nodes".into(),
+      input: json!({ "nodes": [spec] }),
+    })
+    .unwrap();
+    assert_eq!(e.doc.nodes.values().find(|n| n.name == "T2").unwrap().sizing_h, Sizing::Hug);
+  }
   use super::*;
   use crate::text::HeuristicMeasurer;
 
