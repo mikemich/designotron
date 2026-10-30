@@ -261,6 +261,86 @@ try {
   const back = await doc();
   check("undo brings the original back in one step", !!back.nodes[victim.id] && !Object.values(back.nodes).some((n) => n.name === "Styled" && n.id !== styled.id) && JSON.stringify(back.nodes[row.id].children) === JSON.stringify(order));
 
+  // 7. A fixed width sizes the layer's own box; shadows add pixels around it.
+  await page.evaluate(() =>
+    window.__dt.tool("create_nodes", {
+      parentId: null,
+      nodes: [
+        { type: "rectangle", name: "Glow", x: 1200, y: 0, width: 100, height: 50, fill: "#FF8800", shadow: { x: 0, y: 0, blur: 20, color: "#000000AA" } },
+        { type: "rectangle", name: "Fold/Dup", x: 1200, y: 200, width: 40, height: 40, fill: "#0088FF" },
+        { type: "frame", name: "Comp", x: 1500, y: 0, width: 120, height: 80, fill: "#EEEEEE", children: [{ type: "rectangle", name: "Inner", x: 10, y: 10, width: 40, height: 40, fill: "#123456" }] },
+      ],
+    }),
+  );
+  await page.waitForTimeout(300);
+  const glow = await byName("Glow");
+  await page.evaluate((id) => window.__dt.dispatch({ op: "update", ids: [id], patch: { exportSettings: [{ format: "png", scale: 1, suffix: "", width: 512 }] } }), glow.id);
+  await select("Glow");
+  const [gdl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), exportSection().locator("button.btn").click()]);
+  const gsz = pngSize(fs.readFileSync(await gdl.path()));
+  const gsvg = await page.evaluate((id) => window.__dt.query({ q: "exportSvg", id }), glow.id);
+  const svgW = Number(gsvg.match(/width="([\d.]+)"/)[1]);
+  check("512w draws the layer 512 px wide, the shadow margin comes on top", svgW > 100 && gsz.w > 600 && Math.abs(gsz.w - svgW * 5.12) <= 2, `${gsz.w}x${gsz.h} for a ${svgW}-wide image`);
+
+  // 8. Zip names: a "/" is a folder, and renamed duplicates never collide with a real "-2".
+  const dup = await byName("Fold/Dup");
+  await page.evaluate(
+    (id) =>
+      window.__dt.dispatch({ op: "update", ids: [id], patch: { exportSettings: [{ format: "png", scale: 1, suffix: "" }, { format: "png", scale: 1, suffix: "" }, { format: "png", scale: 1, suffix: "-2" }] } }),
+    dup.id,
+  );
+  await select("Fold/Dup");
+  const [ddl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), exportSection().locator("button.btn").click()]);
+  const dzip = await JSZip.loadAsync(fs.readFileSync(await ddl.path()));
+  const dnames = Object.keys(dzip.files).filter((n) => !dzip.files[n].dir).sort();
+  check("zip keeps '/' as a folder and numbers duplicates past a real -2", dnames.join(",") === "Fold/Dup-2.png,Fold/Dup-3.png,Fold/Dup.png", dnames.join(","));
+
+  // 9. Mixed export settings: shown as mixed, never one layer's rows copied onto the others; + starts over.
+  await select("Card", "Plain");
+  sec = exportSection();
+  check("differing rows show 'Mixed export settings' and no rows", (await sec.locator(".export-row").count()) === 0 && (await sec.innerText()).includes("Mixed export settings"));
+  const cardRows = JSON.stringify((await byName("Card")).exportSettings);
+  const plainRows = JSON.stringify((await byName("Plain")).exportSettings ?? []);
+  check("looking at a mixed selection changes nothing", cardRows.length > 10 && plainRows === "[]");
+  await sec.locator("button[title='Add export setting']").click();
+  await page.waitForTimeout(200);
+  const both = [(await byName("Card")).exportSettings, (await byName("Plain")).exportSettings];
+  check("+ on a mixed selection replaces all with one default row", both.every((r) => r?.length === 1 && r[0].scale === 1 && r[0].format === "png"), JSON.stringify(both));
+  await select("Card", "Plain");
+  check("the rows are no longer mixed", (await exportSection().locator(".export-row").count()) === 1);
+
+  // 10. Paste to replace refuses layers inside an instance; a non-layer clipboard replaces nothing.
+  const comp = await byName("Comp");
+  await page.evaluate((id) => window.__dt.dispatch({ op: "createComponent", ids: [id] }), comp.id);
+  const main = (await nodes()).find((n) => n.type === "component" && n.name === "Comp");
+  await page.evaluate((id) => window.__dt.dispatch({ op: "createInstance", componentId: id, x: 1500, y: 300, parent: null }), main.id);
+  const inst = (await nodes()).find((n) => n.type === "instance");
+  const child = (await doc()).nodes[inst.children[0]];
+  const childCount = (await doc()).nodes[inst.id].children.length;
+  await select("Styled");
+  await key("Control+c");
+  await page.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), child.id);
+  await key("Control+Shift+r");
+  const stray = (await named("Styled")).length;
+  check("paste to replace skips a layer inside an instance, with a toast", stray === 1 && (await doc()).nodes[inst.id].children.length === childCount && (await page.locator(".toast").allInnerTexts()).some((t) => t.includes("inside an instance")), `Styled copies: ${stray}`);
+
+  // 11. Pasting properties clears a leftover text style; a non-layer clipboard isn't replaced over.
+  await page.evaluate((id) => window.__dt.dispatch({ op: "update", ids: [id], patch: { textStyle: "ghost" } }), (await byName("Small")).id);
+  await select("Big");
+  await key("Control+Alt+c");
+  await select("Small");
+  await key("Control+Alt+v");
+  const small2 = await byName("Small");
+  check("pasting properties from an unstyled text clears the target's text style", small2.textStyle === null && small2.text.fontSize === 40, JSON.stringify({ ts: small2.textStyle, fs: small2.text.fontSize }));
+  await select("Styled");
+  await key("Control+c");
+  await select("Card");
+  await menu("Card", "Copy as CSS");
+  const nBefore = (await named("Styled")).length;
+  await select("Plain");
+  await key("Control+Shift+r");
+  check("paste to replace after Copy as CSS replaces nothing", (await named("Styled")).length === nBefore && !!(await byName("Plain")));
+
   check("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
 } catch (err) {
   check("unexpected exception", false, String(err));

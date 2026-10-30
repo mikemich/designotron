@@ -33,6 +33,8 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Hide / lock", `${SHIFT}${MOD}H / ${SHIFT}${MOD}L`],
       ["Flatten / outline stroke", `${MOD}E / ${SHIFT}${MOD}O`],
       ["Use as mask", `${ALT}${MOD}M`],
+      ["Copy / paste properties", `${ALT}${MOD}C / ${ALT}${MOD}V`],
+      ["Paste to replace", `${SHIFT}${MOD}R`],
       ["Align left / right / top / bottom", `${ALT}A ${ALT}D ${ALT}W ${ALT}S`],
     ],
   },

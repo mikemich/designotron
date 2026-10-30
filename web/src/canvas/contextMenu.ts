@@ -68,6 +68,7 @@ export async function pasteReplace() {
     return;
   }
   const created: string[] = [];
+  let skipped = 0;
   dispatch({ op: "beginGesture" });
   try {
     for (const id of targets) {
@@ -75,6 +76,11 @@ export async function pasteReplace() {
       const n = doc.nodes[id];
       const box = query<{ union: Rect | null }>({ q: "bounds", ids: [id] }).union;
       if (!n || !box) continue;
+      // Layers inside an instance mirror the main component: a pasted layer there would vanish on its next edit.
+      if (insideInstance(n)) {
+        skipped++;
+        continue;
+      }
       const siblings = n.parent ? doc.nodes[n.parent]?.children : doc.pages.find((p) => p.id === n.page)?.children;
       const index = siblings?.indexOf(id) ?? -1;
       const r = dispatch<{ created: string[] }>({ op: "paste", data: text, parent: n.parent, x: box.x, y: box.y });
@@ -86,19 +92,28 @@ export async function pasteReplace() {
   } finally {
     dispatch({ op: "endGesture" });
   }
+  if (skipped) toast("Can't replace layers inside an instance", "error");
   if (created.length) dispatch({ op: "select", ids: created });
+}
+
+function insideInstance(n: Node): boolean {
+  const doc = getDoc();
+  if (n.masterId) return true;
+  for (let p = n.parent ? doc.nodes[n.parent] : null; p; p = p.parent ? doc.nodes[p.parent] : null) {
+    if (p.type === "instance") return true;
+  }
+  return false;
 }
 
 /** The Designotron layers on the clipboard (or the last copy in this tab when it can't be read). */
 async function clipboardLayers(): Promise<string> {
-  let text = internalClipboard;
   try {
+    // What the system clipboard holds now wins, even if it isn't layers (Copy as CSS, say).
     const t = await navigator.clipboard.readText();
-    if (t.includes("designotron/nodes")) text = t;
+    return t.includes("designotron/nodes") ? t : "";
   } catch {
-    /* fall back to the internal clipboard */
+    return internalClipboard;
   }
-  return text;
 }
 
 /** Right-click menu items for the current selection. */

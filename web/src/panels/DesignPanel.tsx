@@ -1123,9 +1123,11 @@ const EXPORT_SIZES = [
 function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const stored = common(nodes, (n) => n.exportSettings ?? []);
   const first = nodes[0];
-  const saved: ExportSetting[] = stored === MIXED ? (first.exportSettings ?? []) : stored;
+  // Layers with different rows show none (never one layer's rows written onto the others); + starts over with one.
+  const mixed = stored === MIXED;
+  const saved: ExportSetting[] = mixed ? [] : stored;
   // A layer without rows still shows one (not saved until it is edited), so it exports in two clicks.
-  const rows = saved.length ? saved : [DEFAULT_EXPORT];
+  const rows = mixed ? [] : saved.length ? saved : [DEFAULT_EXPORT];
   const set = (next: ExportSetting[]) => update(ids, { exportSettings: next });
   const setRow = (i: number, patch: Partial<ExportSetting>) =>
     set(
@@ -1144,6 +1146,7 @@ function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   };
   const sizeOptions = (r: ExportSetting) => (EXPORT_SIZES.some((o) => o.value === sizeOf(r)) ? EXPORT_SIZES : [...EXPORT_SIZES, { value: sizeOf(r), label: `${r.scale}x` }]);
   const add = () => {
+    if (mixed) return set([DEFAULT_EXPORT]);
     const last = rows[rows.length - 1];
     const presets = [0.5, 1, 2, 3, 4];
     const next = presets.find((p) => p > (last.width || last.height ? 1 : last.scale)) ?? 1;
@@ -1158,6 +1161,11 @@ function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         </IconButton>
       }
     >
+      {mixed && (
+        <div className="muted small" style={{ marginBottom: 8 }}>
+          Mixed export settings
+        </div>
+      )}
       {rows.map((r, i) => {
         const svg = r.format === "svg";
         const fixed = !svg && (r.width || r.height);

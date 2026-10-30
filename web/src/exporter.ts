@@ -4,7 +4,7 @@ import JSZip from "jszip";
 import { assetDataUrl, inlineAssets, referencedAssets } from "./assets";
 import { download } from "./files";
 import { getDoc, query, toast } from "./store";
-import type { ExportSetting, Node } from "./types";
+import type { ExportSetting, Node, Rect } from "./types";
 
 /** Largest canvas browsers will allocate: 16384 px per side and about 268 megapixels in all. */
 const MAX_SIDE = 16384;
@@ -111,7 +111,10 @@ export function exportRows(node: Node): ExportSetting[] {
   return node.exportSettings?.length ? node.exportSettings : [DEFAULT_EXPORT];
 }
 
-/** Scale a row asks for on an exported image of `w` x `h` px (fixed widths and heights win over `scale`). */
+/**
+ * Scale a row asks for, where `w` x `h` is the layer's own box (not the image, which also holds
+ * strokes, shadows and blurs). A fixed width or height makes that box N px and wins over `scale`.
+ */
 export function rowScale(row: ExportSetting, w: number, h: number): number {
   if (row.format === "svg") return 1;
   if (row.width && row.width > 0) return row.width / Math.max(w, 1);
@@ -139,13 +142,15 @@ export async function renderExport(id: string, row: ExportSetting): Promise<Expo
   const node = getDoc().nodes[id];
   if (!node) throw new Error("the layer no longer exists");
   const svg = nodeSvg(id);
-  const base = safeName(node.name);
+  // A "/" in the layer name is a folder inside a zip, as in Figma.
+  const base = node.name.split("/").map(safeName).join("/");
   if (row.format === "svg") {
     // Vector: no scale. Fonts embedded so text looks the same wherever the SVG is opened.
     return { name: `${base}${rowSuffix(row)}.svg`, data: await embedFonts(svg), mime: "image/svg+xml" };
   }
   const { w, h } = svgSize(svg);
-  const want = rowScale(row, w, h);
+  const box = query<{ union: Rect | null }>({ q: "bounds", ids: [id] }).union;
+  const want = rowScale(row, box?.width ?? w, box?.height ?? h);
   const used = fitScale(w, h, want);
   if (used < want) {
     const px = `${Math.round(w * used)} × ${Math.round(h * used)} px`;
@@ -177,7 +182,8 @@ export async function exportLayers(ids: string[]) {
   if (!files.length) return;
   const named = uniqueNames(files);
   if (named.length === 1) {
-    download(named[0].name, named[0].data, named[0].mime);
+    // Browsers don't take folders in a download name.
+    download(named[0].name.replace(/\//g, "-"), named[0].data, named[0].mime);
     return;
   }
   const zip = new JSZip();
@@ -187,13 +193,22 @@ export async function exportLayers(ids: string[]) {
   download(`${label}.zip`, await zip.generateAsync({ type: "blob" }), "application/zip");
 }
 
-/** `a.png`, `a.png` -> `a.png`, `a-2.png`. */
+/** `a.png`, `a.png` -> `a.png`, `a-2.png` (numbering on until the name is free, even of a real `a-2.png`). */
 function uniqueNames(files: ExportFile[]): ExportFile[] {
-  const seen = new Map<string, number>();
+  const taken = new Set(files.map((f) => f.name));
+  const used = new Set<string>();
   return files.map((f) => {
-    const n = (seen.get(f.name) ?? 0) + 1;
-    seen.set(f.name, n);
-    return n === 1 ? f : { ...f, name: f.name.replace(/(\.\w+)$/, `-${n}$1`) };
+    if (!used.has(f.name)) {
+      used.add(f.name);
+      return f;
+    }
+    for (let n = 2; ; n++) {
+      const name = f.name.replace(/(\.\w+)$/, `-${n}$1`);
+      if (!used.has(name) && !taken.has(name)) {
+        used.add(name);
+        return { ...f, name };
+      }
+    }
   });
 }
 

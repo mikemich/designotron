@@ -172,12 +172,13 @@ export function pasteProperties() {
   const ids = nodes.map((n) => n.id);
   const texts = nodes.filter((n) => n.type === "text").map((n) => n.id);
   oneStep(() => {
-    // A text style first, so the layer's own type values below win over the style's.
-    if (p.text && p.textStyle && doc.styles.texts.some((s) => s.id === p.textStyle) && texts.length) dispatch({ op: "applyStyle", ids: texts, styleId: p.textStyle });
     dispatch({ op: "update", ids, patch: { ...p.look, ...(p.fillStyle ? {} : { fillStyle: null }) } });
-    if (p.text && texts.length) dispatch({ op: "update", ids: texts, patch: { text: p.text } });
-    // Editing fills detaches a colour style, so link it again afterwards.
-    if (p.fillStyle && doc.styles.colors.some((s) => s.id === p.fillStyle)) dispatch({ op: "applyStyle", ids, styleId: p.fillStyle });
+    // The style link goes in the same patch as the type values, and is cleared when the source has none
+    // (a leftover link would let a later edit of the old style overwrite what was pasted).
+    const textStyle = p.textStyle && doc.styles.texts.some((s) => s.id === p.textStyle) ? p.textStyle : null;
+    if (p.text && texts.length) dispatch({ op: "update", ids: texts, patch: { text: p.text, textStyle } });
+    // Editing fills detaches a colour style, so link it again; a plain update records it as an instance override.
+    if (p.fillStyle && doc.styles.colors.some((s) => s.id === p.fillStyle)) dispatch({ op: "update", ids, patch: { fillStyle: p.fillStyle } });
   });
   toast(`Pasted properties onto ${nodes.length === 1 ? nodes[0].name : `${nodes.length} layers`}`);
 }

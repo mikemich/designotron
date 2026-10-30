@@ -1065,10 +1065,10 @@ pub struct ExportSetting {
   pub scale: f64,
   /// File name suffix; empty means `@2x`-style from the size (nothing at 1x).
   pub suffix: String,
-  /// Fixed export width in px (Figma "512w"); the height follows the aspect ratio.
+  /// Fixed width in px (Figma "512w"): the layer's own box is exported 512 px wide at its aspect ratio, and strokes, shadows and blurs add pixels around it.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub width: Option<f64>,
-  /// Fixed export height in px (Figma "1024h"); the width follows the aspect ratio.
+  /// Fixed height in px (Figma "1024h"): the layer's own box is exported 1024 px tall at its aspect ratio, with effects adding pixels around it.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub height: Option<f64>,
 }
