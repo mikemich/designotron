@@ -358,9 +358,17 @@ pub enum Command {
   },
   CreateInstance {
     component_id: NodeId,
+    /// Top-left of the instance in page coordinates.
     x: f64,
     y: f64,
     parent: Option<NodeId>,
+    /// Page point that picks the parent frame when `parent` is unset (the pointer for a
+    /// drop, the viewport centre for a click). Defaults to the top-left.
+    #[serde(default)]
+    anchor: Option<Point>,
+    /// Let the auto-chosen parent be a main component or set (drops, not clicks).
+    #[serde(default)]
+    into_components: bool,
   },
   DetachInstance {
     ids: Vec<NodeId>,
@@ -1244,7 +1252,7 @@ impl Engine {
   fn auto_parent(&self, explicit: Option<NodeId>, x: f64, y: f64) -> Option<NodeId> {
     explicit
       .filter(|p| self.doc.nodes.contains_key(p))
-      .or_else(|| ops::frame_at(&self.doc, &self.page, Point::new(x, y), &[]))
+      .or_else(|| ops::frame_at(&self.doc, &self.page, Point::new(x, y), &[], true))
   }
 
   /// Inserts a node given in page coordinates under `parent`.
@@ -1700,7 +1708,7 @@ impl Engine {
       Command::DropInto { ids, x, y } => {
         let ids = ops::top_most(&self.doc, &ids);
         let pt = Point::new(x, y);
-        let target = ops::frame_at(&self.doc, &self.page, pt, &ids);
+        let target = ops::frame_at(&self.doc, &self.page, pt, &ids, true);
         for id in &ids {
           let cur = self.doc.get(id).and_then(|n| n.parent.clone());
           if self.doc.instance_ancestor(id).is_some()
@@ -1954,21 +1962,31 @@ impl Engine {
         x,
         y,
         parent,
+        anchor,
+        into_components,
       } => {
-        let parent = self.auto_parent(parent, x, y);
-        let (lx, ly) = match &parent {
-          Some(p) => {
-            let l = self.doc.abs_matrix(p).invert().apply(Point::new(x, y));
-            (l.x, l.y)
-          }
-          None => (x, y),
-        };
-        let page = self.page.clone();
         if self.doc.get(&component_id).map(|c| c.kind == NodeType::Component) != Some(true) {
           return Err("not a component".into());
         }
-        let id = components::create_instance(&mut self.doc, &component_id, parent.as_deref(), &page, lx, ly, &mut self.gen)
-          .ok_or("a component can't contain an instance of itself")?;
+        let explicit = parent.filter(|p| self.doc.nodes.contains_key(p));
+        let anchor = anchor.unwrap_or(Point::new(x, y));
+        let auto = explicit.is_none();
+        let chosen = explicit.or_else(|| ops::frame_at(&self.doc, &self.page, anchor, &[], into_components));
+        let page = self.page.clone();
+        let place = |e: &mut Self, parent: Option<&str>| {
+          let l = match parent {
+            Some(p) => e.doc.abs_matrix(p).invert().apply(Point::new(x, y)),
+            None => Point::new(x, y),
+          };
+          components::create_instance(&mut e.doc, &component_id, parent, &page, l.x, l.y, &mut e.gen)
+        };
+        let mut made = place(self, chosen.as_deref());
+        if made.is_none() && auto && chosen.is_some() {
+          // The frame under the anchor can't hold this instance (it is inside the component's
+          // own main): place it on the page instead of failing.
+          made = place(self, None);
+        }
+        let id = made.ok_or("a component can't contain an instance of itself")?;
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
       }
@@ -2522,7 +2540,7 @@ impl Engine {
         json!({ "items": items, "union": self.doc.bounds_of_many(&ids) })
       }
       Query::OverrideCount { id } => json!({ "count": components::override_count(&self.doc, &id) }),
-      Query::FrameAt { x, y, exclude } => json!(ops::frame_at(&self.doc, &self.page, Point::new(x, y), &exclude)),
+      Query::FrameAt { x, y, exclude } => json!(ops::frame_at(&self.doc, &self.page, Point::new(x, y), &exclude, true)),
       Query::SnapPoint { x, y, zoom, exclude } => {
         let (r, guides) = interact::snap_rect(
           &self.doc,
@@ -2696,6 +2714,84 @@ mod tests {
 
   fn engine() -> Engine {
     Engine::new(Box::new(HeuristicMeasurer), 42)
+  }
+
+  /// Frame "Card" (300,0,200x100), a main "Btn" (0,0,100x40) and a main "Other" (0,200,100x40).
+  fn instance_fixture() -> (Engine, String, String, String) {
+    let mut e = Engine::new(Box::new(HeuristicMeasurer), 3);
+    let frame = |e: &mut Engine, x: f64, y: f64, w: f64, h: f64| {
+      let r = e
+        .dispatch(Command::CreateShape {
+          kind: NodeType::Frame,
+          x,
+          y,
+          width: w,
+          height: h,
+          parent: None,
+        })
+        .unwrap();
+      id_of(&r)
+    };
+    let card = frame(&mut e, 300.0, 0.0, 200.0, 100.0);
+    let btn = frame(&mut e, 0.0, 0.0, 100.0, 40.0);
+    let btn = id_of(&e.dispatch(Command::CreateComponent { ids: vec![btn] }).unwrap());
+    let other = frame(&mut e, 0.0, 200.0, 100.0, 40.0);
+    let other = id_of(&e.dispatch(Command::CreateComponent { ids: vec![other] }).unwrap());
+    (e, card, btn, other)
+  }
+
+  fn place(e: &mut Engine, comp: &str, x: f64, y: f64, anchor: Option<Point>, into_components: bool) -> Result<String, String> {
+    e.dispatch(Command::CreateInstance {
+      component_id: comp.into(),
+      x,
+      y,
+      parent: None,
+      anchor,
+      into_components,
+    })
+    .map(|r| id_of(&r))
+  }
+
+  #[test]
+  fn instance_click_over_a_main_goes_to_the_page() {
+    let (mut e, _, btn, other) = instance_fixture();
+    // Anchor over another main: a click never nests into a main component.
+    let a = place(&mut e, &btn, 0.0, 200.0, Some(Point::new(50.0, 220.0)), false).unwrap();
+    assert_eq!(e.doc.get(&a).unwrap().parent, None);
+    // Over its own main: still the page, no error.
+    let b = place(&mut e, &btn, 0.0, 0.0, Some(Point::new(50.0, 20.0)), false).unwrap();
+    assert_eq!(e.doc.get(&b).unwrap().parent, None);
+    assert!(e.doc.get(&other).unwrap().children.is_empty());
+  }
+
+  #[test]
+  fn instance_drop_onto_a_main_nests_unless_it_is_its_own() {
+    let (mut e, _, btn, other) = instance_fixture();
+    let a = place(&mut e, &btn, 0.0, 200.0, Some(Point::new(50.0, 220.0)), true).unwrap();
+    assert_eq!(e.doc.get(&a).unwrap().parent.as_deref(), Some(other.as_str()));
+    // Onto its own main the recursion check refuses it, so it lands on the page.
+    let b = place(&mut e, &btn, 0.0, 0.0, Some(Point::new(50.0, 20.0)), true).unwrap();
+    assert_eq!(e.doc.get(&b).unwrap().parent, None);
+    assert!(e
+      .doc
+      .get(&btn)
+      .unwrap()
+      .children
+      .iter()
+      .all(|c| e.doc.get(c).unwrap().instance.is_none()));
+  }
+
+  #[test]
+  fn instance_parent_follows_the_anchor_not_the_corner() {
+    let (mut e, card, btn, _) = instance_fixture();
+    // Pointer inside the frame, top-left outside it: nested in the frame.
+    let a = place(&mut e, &btn, 280.0, -10.0, Some(Point::new(340.0, 10.0)), true).unwrap();
+    assert_eq!(e.doc.get(&a).unwrap().parent.as_deref(), Some(card.as_str()));
+    // Without an anchor the top-left decides, as before.
+    let b = place(&mut e, &btn, 280.0, -10.0, None, true).unwrap();
+    assert_eq!(e.doc.get(&b).unwrap().parent, None);
+    let c = place(&mut e, &btn, 320.0, 10.0, None, false).unwrap();
+    assert_eq!(e.doc.get(&c).unwrap().parent.as_deref(), Some(card.as_str()));
   }
 
   fn id_of(v: &Value) -> String {
@@ -3319,6 +3415,8 @@ mod tests {
           x: 300.0,
           y: 0.0,
           parent: None,
+          anchor: None,
+          into_components: false,
         })
         .unwrap(),
     );
@@ -3387,6 +3485,8 @@ mod tests {
         x: 300.0,
         y: 0.0,
         parent: None,
+        anchor: None,
+        into_components: false,
       })
       .unwrap(),
     );
@@ -3947,6 +4047,8 @@ mod tests {
           x: 400.0,
           y: 0.0,
           parent: None,
+          anchor: None,
+          into_components: false,
         })
         .unwrap(),
       );

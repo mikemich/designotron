@@ -1351,6 +1351,8 @@ mod tests {
         x: 10.0,
         y: 10.0,
         parent: Some(home.clone()),
+        anchor: None,
+        into_components: false,
       })
       .unwrap(),
     );
@@ -1889,6 +1891,8 @@ mod tests {
           x: 3010.0,
           y: 10.0,
           parent: Some(f.clone()),
+          anchor: None,
+          into_components: false,
         })
         .unwrap();
       let panel = id(k.e.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap());
@@ -1899,6 +1903,8 @@ mod tests {
             x: 3500.0,
             y: 900.0,
             parent: None,
+            anchor: None,
+            into_components: false,
           })
           .unwrap(),
       );
@@ -2021,6 +2027,8 @@ mod tests {
           x: 3010.0,
           y: 10.0,
           parent: Some(panel_frame.clone()),
+          anchor: None,
+          into_components: false,
         })
         .unwrap();
       let panel = id(k.e.dispatch(Command::CreateComponent { ids: vec![panel_frame] }).unwrap());
@@ -2231,6 +2239,8 @@ mod tests {
           x: 5010.0,
           y: 10.0,
           parent: Some(w.clone()),
+          anchor: None,
+          into_components: false,
         })
         .unwrap();
       let wrap = id(k.e.dispatch(Command::CreateComponent { ids: vec![w] }).unwrap());
@@ -2348,6 +2358,8 @@ mod tests {
         x: 0.0,
         y: 0.0,
         parent: Some(card_comp.clone()),
+        anchor: None,
+        into_components: false,
       });
       assert!(r.is_err());
       // Wrapper holds an instance of the Card; the Card can't take an instance of Wrapper.
@@ -2359,6 +2371,8 @@ mod tests {
           x: 5010.0,
           y: 10.0,
           parent: Some(w.clone()),
+          anchor: None,
+          into_components: false,
         })
         .unwrap();
       let wrapper = id(k.e.dispatch(Command::CreateComponent { ids: vec![w] }).unwrap());
@@ -2367,6 +2381,8 @@ mod tests {
         x: 0.0,
         y: 0.0,
         parent: Some(card_comp.clone()),
+        anchor: None,
+        into_components: false,
       });
       assert!(r.is_err());
       // Moving an instance of Wrapper (made elsewhere) into the Card is refused too.
@@ -2554,6 +2570,8 @@ mod tests {
             x: 600.0,
             y: 300.0,
             parent: None,
+            anchor: None,
+            into_components: false,
           })
           .unwrap(),
       );
@@ -2594,6 +2612,8 @@ mod tests {
           x: 0.0,
           y: 500.0,
           parent: parent.map(String::from),
+          anchor: None,
+          into_components: false,
         })
         .unwrap(),
       )

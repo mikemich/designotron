@@ -401,7 +401,8 @@ function Assets() {
       onDragStart={(e) => e.dataTransfer.setData("application/x-designotron-component", c.id)}
       onClick={() => {
         const p = viewportCenter();
-        dispatch({ op: "createInstance", componentId: c.id, x: p.x - c.width / 2, y: p.y - c.height / 2, parent: null });
+        // The frame under the viewport centre takes it (never a main component or set).
+        dispatch({ op: "createInstance", componentId: c.id, x: p.x - c.width / 2, y: p.y - c.height / 2, parent: null, anchor: p });
       }}
       title="Click or drag to place an instance"
     >

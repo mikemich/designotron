@@ -329,9 +329,11 @@ pub fn default_node(kind: NodeType, id: String, name: String) -> Node {
   n
 }
 
-/// Deepest frame-like node on a page containing a page-space point.
-pub fn frame_at(doc: &Document, page: &str, p: Point, exclude: &[NodeId]) -> Option<NodeId> {
-  fn walk(doc: &Document, ids: &[NodeId], p: Point, exclude: &[NodeId]) -> Option<NodeId> {
+/// Deepest frame-like node on a page containing a page-space point. Instances are never
+/// containers; main components and sets (with everything inside them) only count when
+/// `include_mains` is set.
+pub fn frame_at(doc: &Document, page: &str, p: Point, exclude: &[NodeId], include_mains: bool) -> Option<NodeId> {
+  fn walk(doc: &Document, ids: &[NodeId], p: Point, exclude: &[NodeId], include_mains: bool) -> Option<NodeId> {
     for id in ids.iter().rev() {
       if exclude.contains(id) {
         continue;
@@ -340,15 +342,18 @@ pub fn frame_at(doc: &Document, page: &str, p: Point, exclude: &[NodeId]) -> Opt
       if !n.visible || !n.kind.is_frame_like() || n.kind == NodeType::Instance || doc.instance_ancestor(id).is_some() {
         continue;
       }
+      if !include_mains && matches!(n.kind, NodeType::Component | NodeType::ComponentSet) {
+        continue;
+      }
       let local = doc.abs_matrix(id).invert().apply(p);
       if local.x >= 0.0 && local.y >= 0.0 && local.x <= n.width && local.y <= n.height {
-        return walk(doc, &n.children, p, exclude).or_else(|| Some(id.clone()));
+        return walk(doc, &n.children, p, exclude, include_mains).or_else(|| Some(id.clone()));
       }
     }
     None
   }
   let roots = doc.page(page)?.children.clone();
-  walk(doc, &roots, p, exclude)
+  walk(doc, &roots, p, exclude, include_mains)
 }
 
 #[cfg(test)]

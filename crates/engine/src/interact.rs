@@ -95,6 +95,13 @@ pub fn pick(doc: &Document, page: &str, p: Point, zoom: f64, selection: &[NodeId
   let mut best: Option<usize> = None;
   for s in selection {
     if let Some(k) = path.iter().position(|x| x == s) {
+      // A selected top-level frame never captures hits on its descendants: its
+      // direct child is picked, as when nothing is selected.
+      let k = if k == 0 && k + 1 < path.len() && is_top_container(doc, &path[0]) {
+        1
+      } else {
+        k
+      };
       best = Some(best.map_or(k, |b: usize| b.max(k)));
     } else if let Some(parent) = doc.get(s).and_then(|n| n.parent.clone()) {
       if let Some(k) = path.iter().position(|x| *x == parent) {
@@ -107,11 +114,17 @@ pub fn pick(doc: &Document, page: &str, p: Point, zoom: f64, selection: &[NodeId
   if let Some(k) = best {
     return Some(path[k].clone());
   }
-  let root = doc.get(&path[0])?;
-  if path.len() > 1 && matches!(root.kind, NodeType::Frame | NodeType::Component | NodeType::ComponentSet) {
+  if path.len() > 1 && is_top_container(doc, &path[0]) {
     return Some(path[1].clone());
   }
   Some(path[0].clone())
+}
+
+/// Page-level frames, components and sets: their direct children are pickable without drilling.
+fn is_top_container(doc: &Document, id: &str) -> bool {
+  doc
+    .get(id)
+    .is_some_and(|n| matches!(n.kind, NodeType::Frame | NodeType::Component | NodeType::ComponentSet))
 }
 
 /// Double-click drill-down: the child of `container` on the path to the hit node.
@@ -645,6 +658,23 @@ mod tests {
     assert_eq!(drill(&doc, &page, p, 1.0, "g").as_deref(), Some("r"));
     assert_eq!(pick(&doc, &page, p, 1.0, &["r".into()], false).as_deref(), Some("r"));
     assert_eq!(pick(&doc, &page, Point::new(200.0, 200.0), 1.0, &[], false).as_deref(), Some("f"));
+  }
+
+  #[test]
+  fn pick_with_top_level_frame_selected_returns_its_child() {
+    let (doc, page) = doc_with_frame();
+    let p = Point::new(20.0, 20.0);
+    // The selected frame doesn't capture hits on its content: the direct child is picked.
+    assert_eq!(pick(&doc, &page, p, 1.0, &["f".into()], false).as_deref(), Some("g"));
+    // Empty frame area still picks the frame itself.
+    assert_eq!(
+      pick(&doc, &page, Point::new(200.0, 200.0), 1.0, &["f".into()], false).as_deref(),
+      Some("f")
+    );
+    // A selected nested group stays selected (drill-down state is kept).
+    assert_eq!(pick(&doc, &page, p, 1.0, &["g".into()], false).as_deref(), Some("g"));
+    // Frame plus its child selected: stays at the child's depth.
+    assert_eq!(pick(&doc, &page, p, 1.0, &["f".into(), "g".into()], false).as_deref(), Some("g"));
   }
 
   #[test]

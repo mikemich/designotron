@@ -858,8 +858,11 @@ export function Canvas() {
     }
     const comp = e.dataTransfer.getData("application/x-designotron-component");
     const main = comp ? getDoc().nodes[comp] : null;
-    // Centred on the pointer, like click-to-place in the Assets panel.
-    if (main) dispatch({ op: "createInstance", componentId: comp, x: p.x - main.width / 2, y: p.y - main.height / 2, parent: null });
+    // Centred on the pointer; the frame under the pointer (not the corner) is the parent,
+    // and dropping onto a main component nests the instance there like Figma.
+    if (main) {
+      dispatch({ op: "createInstance", componentId: comp, x: p.x - main.width / 2, y: p.y - main.height / 2, parent: null, anchor: p, intoComponents: true });
+    }
   }
 
   // ---------- Overlay ----------
