@@ -44,6 +44,8 @@ interface Manifest {
 /** What the engine says to write for one save (`persistPlan`) with each layer's records. */
 export interface SavePlan {
   token: number;
+  /** Which editor (engine instance) made the plan; tokens only compare within one. */
+  engine: number;
   /** Replaces every stored layer (nothing stored to build on, or a forced rewrite). */
   full: boolean;
   meta: string;
@@ -300,8 +302,6 @@ interface Known {
   roots: Record<string, string[]>;
   names: Record<string, string>;
   assets: Set<string>;
-  /** The document name in the manifest, to notice a rename made elsewhere. */
-  name: string;
   /** Size of each layer's records, in characters, and of the document-level record. */
   sizes: Record<string, number>;
   metaSize: number;
@@ -309,13 +309,20 @@ interface Known {
 const layered = new Map<string, Known>();
 
 /** The newest plan whose write has started, per file: an older plan (one still being gathered
- * when a newer one was made and written) must never be written after it. */
-const startedPlan = new Map<string, number>();
+ * when a newer one was made and written, or one from an editor that has since been replaced by
+ * a newer one for the same file) must never be written after it. */
+const startedPlan = new Map<string, { engine: number; token: number }>();
 
-/** Whether a plan with this token is older than one already being written for the file. */
-export function planIsOutdated(id: string, token: number): boolean {
-  return token < (startedPlan.get(id) ?? 0);
+/** Whether a plan is older than one already being written for the file: from an older editor,
+ * or from the same one with a lower token. */
+export function planIsOutdated(id: string, plan: { engine: number; token: number }): boolean {
+  const s = startedPlan.get(id);
+  return !!s && (plan.engine < s.engine || (plan.engine === s.engine && plan.token < s.token));
 }
+
+/** The document name this tab last read from or wrote to the file's record, to notice a rename
+ * made elsewhere. */
+const knownName = new Map<string, string>();
 
 /** This page load, for telling manifests apart. */
 const WRITER = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -339,6 +346,7 @@ export async function saveFile(id: string, name: string, docJson: string, thumbn
   const used = new Set(referencedAssets(docJson));
   const assets = Object.fromEntries(Object.entries(allAssets()).filter(([k]) => used.has(k)));
   layered.delete(id);
+  knownName.delete(id);
   // Whatever layered records the file has now go in the same transaction as the new record.
   await transact([fileKey(id)], ([stored]) => ({
     put: [[fileKey(id), { doc: docJson, assets } satisfies StoredFile]],
@@ -359,11 +367,12 @@ export async function saveFile(id: string, name: string, docJson: string, thumbn
  *
  * It only builds on the manifest this tab last wrote (a `StaleStorageError` otherwise, after
  * which the caller makes a `full` plan: the last writer's document wins whole, never a mix).
- * Throws when the write didn't land (nothing is changed then).
+ * Throws when the write didn't land (nothing is changed then). Returns false, writing nothing,
+ * for a plan older than one already started (see `planIsOutdated`).
  */
-export async function saveDelta(id: string, name: string, plan: SavePlan) {
-  if (planIsOutdated(id, plan.token)) return;
-  startedPlan.set(id, plan.token);
+export async function saveDelta(id: string, name: string, plan: SavePlan): Promise<boolean> {
+  if (planIsOutdated(id, plan)) return false;
+  startedPlan.set(id, { engine: plan.engine, token: plan.token });
   const state = layered.get(id);
   if (!plan.full && !state) throw new StaleStorageError();
   // This tab's view of the stored file once the write lands, for a write started before it
@@ -385,7 +394,7 @@ export async function saveDelta(id: string, name: string, plan: SavePlan) {
   }
   const expected = state ? { seq: state.seq, writer: state.writer } : null;
   const seq = (state?.seq ?? 0) + 1;
-  const known: Known = { seq, writer: WRITER, roots, names, assets: new Set(), name, sizes, metaSize: plan.meta.length };
+  const known: Known = { seq, writer: WRITER, roots, names, assets: new Set(), sizes, metaSize: plan.meta.length };
   let writtenName = name;
   // Optimistic: a write begun before this one lands builds on this.
   layered.set(id, known);
@@ -421,14 +430,14 @@ export async function saveDelta(id: string, name: string, plan: SavePlan) {
       // A rename made elsewhere (the files list) since this tab last wrote keeps its name, unless
       // this tab renamed the file too.
       let meta = plan.meta;
-      if (!plan.full && m && state) {
+      const before = knownName.get(id);
+      if (m && before !== undefined) {
         const storedName = JSON.parse(m.meta).name;
-        if (storedName !== state.name && name === state.name) {
+        if (storedName !== before && name === before) {
           meta = JSON.stringify({ ...JSON.parse(meta), name: storedName });
           writtenName = storedName;
         }
       }
-      known.name = writtenName;
       put.push([fileKey(id), { v: 2, seq: (m?.seq ?? 0) + 1, writer: WRITER, meta, roots: nextRoots, names: nextNames, assets: [...nextAssets] } satisfies Manifest]);
       // Records the stored manifest listed and the new one doesn't, deleted with the write.
       const goneRoots = Object.fromEntries(Object.entries(m?.roots ?? {}).filter(([r]) => !(r in nextRoots)));
@@ -441,11 +450,13 @@ export async function saveDelta(id: string, name: string, plan: SavePlan) {
     layered.delete(id);
     throw err;
   }
+  knownName.set(id, writtenName);
   await writeIndex((idx) => {
     const rest = idx.filter((f) => f.id !== id);
     const prev = idx.find((f) => f.id === id);
     return [...rest, { id, name: writtenName, updatedAt: Date.now(), thumbnail: prev?.thumbnail }];
   });
+  return true;
 }
 
 function layeredKeys(id: string, roots: Record<string, string[]>, assets: Iterable<string>): string[] {
@@ -459,12 +470,11 @@ export async function saveThumbnail(id: string, thumbnail: string) {
 }
 
 export async function loadFile(id: string): Promise<string | null> {
-  // A file being opened starts a new engine, whose plans count from 1 again.
-  startedPlan.delete(id);
   const f = (await get(fileKey(id))) as StoredFile | Manifest | undefined;
   if (!f) return null;
   if (isManifest(f)) return loadLayered(id, f);
   layered.delete(id);
+  knownName.delete(id);
   loadAssets(f.assets);
   return f.doc;
 }
@@ -514,12 +524,12 @@ async function loadLayered(id: string, first: Manifest): Promise<string> {
         writer: m.writer,
         roots: m.roots,
         names: m.names ?? {},
-        name: JSON.parse(m.meta).name,
         assets: new Set(m.assets),
         sizes,
         metaSize: m.meta.length,
       });
     }
+    knownName.set(id, JSON.parse(m.meta).name);
     return `${meta.slice(0, -1)},"nodes":{${bodies.join(",")}}}`;
   }
   throw new Error("This file is being saved elsewhere; try again.");

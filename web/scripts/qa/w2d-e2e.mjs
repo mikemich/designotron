@@ -734,6 +734,55 @@ try {
     check("a rename made elsewhere survives the editor's next save", stored.name === "Renamed elsewhere" && stored.nodes[(await A.byName("A")).id].x === 7, String(stored.name));
     await A.c.close();
   }
+  {
+    // Leave a file while its save is held in flight and reopen it at once: the old editor's final
+    // write lands after the new editor has opened. The tab must stay responsive and the new
+    // editor's edit must be stored.
+    const R = await rig();
+    await R.newFile();
+    await R.tool("create_nodes", { nodes: nodes4(2000) });
+    await R.settle();
+    const id = await R.fileId();
+    for (let i = 0; i < 8; i++) {
+      await R.dispatch({ op: "update", ids: [(await R.byName("A")).id], patch: { x: i } });
+      await R.settle();
+    }
+    await R.pg.evaluate(() => {
+      const orig = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (v, k) {
+        const r = orig.call(this, v, k);
+        if (window.__holdNext && String(k).startsWith("dt:file:") && v && v.v === 2) {
+          window.__holdNext = false;
+          window.__held = true;
+          const os = this;
+          const until = performance.now() + 4000;
+          const spin = () => {
+            if (performance.now() < until) os.get("dt:index").onsuccess = spin;
+          };
+          spin();
+        }
+        return r;
+      };
+      window.__holdNext = true;
+    });
+    await R.dispatch({ op: "update", ids: [(await R.byName("H")).id], patch: { y: 30 } });
+    await R.pg.waitForFunction(() => window.__held, null, { timeout: 10000 });
+    await R.dispatch({ op: "update", ids: [(await R.byName("A")).id], patch: { y: 44 } });
+    await R.pg.evaluate(() => (location.hash = "#/"));
+    await sleep(400);
+    await R.pg.evaluate((id) => (location.hash = "#/file/" + id), id);
+    await R.pg.waitForSelector("#dt-canvas");
+    await sleep(6000);
+    await R.dispatch({ op: "update", ids: [(await R.byName("B")).id], patch: { y: 77 } });
+    await sleep(5000);
+    const alive = await Promise.race([R.pg.evaluate(() => 1).then(() => true), sleep(5000).then(() => false)]);
+    check("reopening a file whose save is still running leaves the tab responsive", alive);
+    if (alive) {
+      await R.settle();
+      check("and the new editor's edit is stored", (await R.stored(id)) === (await R.canon()));
+    }
+    await R.c.close();
+  }
   if (RELAY) {
     // A guest makes their own copy of a shared file while an autosave lands during the copy's write.
     for (const racy of [false, true]) {

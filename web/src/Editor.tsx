@@ -49,6 +49,15 @@ const GUESS_CHARS_PER_LAYER = 1100;
 /** Longest stretch (ms) of one task spent collecting what to save. */
 const SAVE_SLICE_MS = 8;
 
+/** Numbers the editors (engine instances) opened in this page, for ordering their saves. */
+let editorCount = 0;
+
+/** Files whose editor was just closed and is still writing: opening the file again waits for
+ * that write, or it would read the file as it was before it. */
+const closing = new Map<string, Promise<void>>();
+/** Longest an editor waits for the closing editor's last write. */
+const CLOSING_WAIT_MS = 15000;
+
 /** A prompt for Claude to send once the next file has opened (from the start screen). */
 let askOnOpen: string | null = null;
 export function askWhenOpen(prompt: string | null) {
@@ -89,6 +98,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         if (!cancelled) setReadError(failureText("load the editor", err));
         return;
       }
+      const last = closing.get(fileId);
+      if (last) await Promise.race([last, new Promise((r) => setTimeout(r, CLOSING_WAIT_MS))]);
       // loadFile also loads the file's images. A copy kept while the page was closing is
       // newer than the last IndexedDB save.
       let stored: string | null = null;
@@ -158,6 +169,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   useEffect(() => {
     if (!ready) return;
     const engine = getEngine();
+    const editorId = ++editorCount;
     const docRev = () => useStore.getState().es.docRev;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let idle: number | null = null;
@@ -214,7 +226,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         const p = JSON.parse(engine.persistPlan(!canSaveDelta(fileId)));
         const dirty: Record<string, string> = {};
         for (const root of p.dirty as string[]) dirty[root] = engine.persistChunk(p.token, root);
-        lastSnap = { plan: { token: p.token, full: p.full, meta: p.meta, dirty, names: p.names, removed: p.removed }, name: getDoc().name, rev };
+        lastSnap = { plan: { token: p.token, full: p.full, meta: p.meta, dirty, names: p.names, removed: p.removed, engine: editorId }, name: getDoc().name, rev };
       }
       return lastSnap!;
     };
@@ -243,7 +255,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           }
         }
         if (superseded) continue;
-        const gathered: Snapshot = { plan: { token: p.token, full: p.full, meta: p.meta, dirty, names: p.names, removed: p.removed }, name: getDoc().name, rev };
+        const gathered: Snapshot = { plan: { token: p.token, engine: editorId, full: p.full, meta: p.meta, dirty, names: p.names, removed: p.removed }, name: getDoc().name, rev };
         // (Not over a newer plan made meanwhile, say by closing the page.)
         const last = lastSnap as Snapshot | null;
         if (!last || last.rev <= rev) lastSnap = gathered;
@@ -283,17 +295,18 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
 
     // Writes a snapshot and tells the engine it landed. If the stored file isn't the one this tab
     // last wrote (another tab or writer saved it since), the whole document is written over it
-    // instead: the last writer wins, whole, never a mix. Returns what was written.
-    const write = async (snap: Snapshot): Promise<Snapshot> => {
+    // instead: the last writer wins, whole, never a mix. Returns what was written, or null when
+    // a newer plan was already started (that write covers it; nothing is committed or marked saved).
+    const write = async (snap: Snapshot): Promise<Snapshot | null> => {
       try {
-        await saveDelta(fileId, snap.name, snap.plan);
+        if (!(await saveDelta(fileId, snap.name, snap.plan))) return null;
         engine.persistCommit(snap.plan.token);
         return snap;
       } catch (err) {
         if (!(err instanceof StaleStorageError)) throw err;
         lastSnap = null;
         const whole = snapshot();
-        await saveDelta(fileId, whole.name, whole.plan);
+        if (!(await saveDelta(fileId, whole.name, whole.plan))) return null;
         engine.persistCommit(whole.plan.token);
         return whole;
       }
@@ -301,9 +314,15 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
 
     // Runs saves until nothing newer than the last one is left. A call while one is running
     // changes nothing: the running loop takes another pass.
-    const flush = async () => {
-      if (running) return;
-      running = true;
+    let flushing: Promise<void> | null = null;
+    const flush = (): Promise<void> => {
+      if (!running) {
+        running = true;
+        flushing = runFlush();
+      }
+      return flushing!;
+    };
+    const runFlush = async () => {
       try {
         // A write already started for this revision (closing while one ran) is not repeated.
         while (!stale && (final || (!closed && docRev() !== useStore.getState().savedDocRev && startedRev < docRev()))) {
@@ -313,11 +332,14 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           final = null;
           // A plan still being gathered when a newer one was made and started (closing the
           // page) must not land after it: it holds older records of the same layers.
-          if (planIsOutdated(fileId, snap.plan.token)) continue;
+          // (Its write is already under way and handles failure itself: leave the loop.)
+          if (planIsOutdated(fileId, snap.plan)) break;
           pendingSince = null;
           startedRev = Math.max(startedRev, snap.rev);
           try {
-            snap = await write(snap);
+            const done = await write(snap);
+            if (!done) break;
+            snap = done;
             startedRev = Math.max(startedRev, snap.rev);
           } catch (err) {
             // Not stored (quota, disk): stay dirty, keep what the recovery copy can hold, try again.
@@ -440,12 +462,20 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         // the store in the order they were made, so this one lands after it.
         write(snap).then(
           (done) => {
+            if (!done) return;
             dropRecovery(done);
             if (persistentStorage() && !closed && getEngine() === engine && done.rev > useStore.getState().savedDocRev) markSaved(done.rev);
           },
           (err) => {
             console.error(err);
             startedRev = -1;
+            if (!closed) {
+              useStore.setState({ saveFailed: true });
+              retry ??= setTimeout(() => {
+                retry = null;
+                schedule();
+              }, 5000);
+            }
           },
         );
       }
@@ -476,6 +506,12 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         final = snapshot();
         startedRev = final.rev;
         flush();
+      }
+      if (running) {
+        const writing: Promise<void> = flushing!.finally(() => {
+          if (closing.get(fileId) === writing) closing.delete(fileId);
+        });
+        closing.set(fileId, writing);
       }
       closed = true;
       tabs?.close();
