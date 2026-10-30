@@ -3,7 +3,7 @@
 // exists. Whoever opens one gets their own copy of the file.
 
 import { allAssets, loadAssets, referencedAssets } from "./assets";
-import { HOSTED_EDITOR, isLocalPage } from "./collab";
+import { editorBase, isLocalPage } from "./collab";
 import { loadFile, newFileId, saveFile } from "./files";
 import { documentLoads, getEngine } from "./store";
 
@@ -27,8 +27,26 @@ function fromBase64Url(text: string): Uint8Array {
   return Uint8Array.from(atob(text.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 }
 
-/** Where links point: this editor, or the hosted one when this runs on localhost. */
-export const linkBase = () => (isLocalPage() ? HOSTED_EDITOR : location.origin + location.pathname);
+/** This editor's own address. */
+const hereBase = () => location.origin + location.pathname;
+
+/** Where links point: this editor, or (when this runs on localhost, where recipients can't
+ *  reach it) the editor `editorBase` names. */
+export const linkBase = () => (isLocalPage() ? editorBase() : hereBase());
+
+/** The editor links open in, as shown to the person sharing ("mikemich.github.io/designotron"),
+ *  and whether that is somewhere other than this editor (so "Preview here" is useful). */
+export function linkDestination(): { host: string; elsewhere: boolean } {
+  const base = linkBase();
+  let host = base;
+  try {
+    const u = new URL(base);
+    host = (u.host + u.pathname).replace(/\/+$/, "");
+  } catch {
+    /* show it as is */
+  }
+  return { host, elsewhere: base !== hereBase() };
+}
 
 /** This file (and its images, unless they'd make links too long), compressed for a link. */
 export async function encodeFile(): Promise<{ data: string; withoutImages: boolean }> {
@@ -58,6 +76,8 @@ export async function copyLink(): Promise<{ url: string; withoutImages: boolean 
 /** Copy (remix) and view-only links for the same encoded file. */
 export const copyUrl = (data: string) => linkBase() + PREFIX + data;
 export const viewUrl = (data: string) => linkBase() + VIEW + data;
+/** The same links on this editor, to try them without leaving it. */
+export const previewUrl = (kind: "copy" | "view", data: string) => hereBase() + (kind === "copy" ? PREFIX : VIEW) + data;
 
 export const isCopyLink = (hash = location.hash) => hash.startsWith(PREFIX);
 export const isViewLink = (hash = location.hash) => hash.startsWith(VIEW);

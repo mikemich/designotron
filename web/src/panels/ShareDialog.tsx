@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, Copy, Globe, Link2, Loader2, Share2, Users, Wifi, X } from "lucide-react";
-import { copyUrl, encodeFile, linkBase, viewUrl } from "../snapshot";
+import { copyUrl, encodeFile, linkBase, linkDestination, previewUrl, viewUrl } from "../snapshot";
 import { myColor, pageIsRelay, relayUrl, remixShared, startOnline, startSharing, stopSharing, useCollab } from "../collab";
 import { useChat } from "../ai/chatState";
 import { userName } from "../canvas/Comments";
@@ -12,7 +12,7 @@ type CopyKind = "copy" | "view" | "embed" | "badge";
 
 /** Share → invite people to edit this file live, online (through a relay) or on the local network. */
 export function ShareDialog() {
-  const { status, role, mode, link, peers } = useCollab();
+  const { status, role, mode, link, peers, previewLink, reconnecting } = useCollab();
   const bridgeStatus = useChat((s) => s.bridgeStatus);
   const [name, setName] = useState(userName());
   const [relay, setRelay] = useState(relayUrl());
@@ -68,6 +68,21 @@ export function ShareDialog() {
       setCopyBusy(null);
     }
   };
+  /** Opens this file's copy link on this editor, to see what the recipient gets. The tab opens
+   *  first so the browser doesn't take it for a pop-up. */
+  const previewHere = async () => {
+    setError(null);
+    const tab = window.open("", "_blank");
+    try {
+      const { data } = await encodeFile();
+      if (tab) tab.location.href = previewUrl("copy", data);
+      else setError("Your browser blocked the new tab. Allow pop-ups for this page and try again.");
+    } catch (e) {
+      tab?.close();
+      setError(String(e instanceof Error ? e.message : e));
+    }
+  };
+  const dest = linkDestination();
   const close = () => useCollab.setState({ dialogOpen: false });
   const dialogRef = useDialog(close);
 
@@ -154,6 +169,18 @@ export function ShareDialog() {
                 <div className="muted small" style={{ lineHeight: 1.5 }}>
                   A link that contains this file. Whoever opens it gets their own copy to remix; your file stays yours.
                 </div>
+                <div className="muted small share-destination" style={{ lineHeight: 1.5 }}>
+                  {dest.elsewhere ? (
+                    <>
+                      Opens in <b>{dest.host}</b>; your file stays in the link.{" "}
+                      <button className="link-btn" title="Open this link on this editor, in a new tab" onClick={previewHere}>
+                        Preview here
+                      </button>
+                    </>
+                  ) : (
+                    <>Opens in this editor; your file stays in the link.</>
+                  )}
+                </div>
                 <button className="btn" disabled={!!busy} onClick={() => sendCopy("copy")}>
                   {copyBusy === "copy" ? <Loader2 size={13} className="spin" /> : copyState === "copy" ? <Check size={13} /> : <Link2 size={13} />}{" "}
                   {copyState === "copy" ? "Link copied" : "Copy link"}
@@ -212,6 +239,14 @@ export function ShareDialog() {
                       <Share2 size={13} /> Invite…
                     </button>
                   )}
+                  {previewLink && mode === "online" && (
+                    <div className="muted small share-destination" style={{ marginTop: 8, lineHeight: 1.5 }}>
+                      Opens in <b>{hostOf(link)}</b>.{" "}
+                      <a href={previewLink} target="_blank" rel="noreferrer" title="Open this link on this editor, in a new tab">
+                        Preview here
+                      </a>
+                    </div>
+                  )}
                   <div className="muted small" style={{ marginTop: 8 }}>
                     Anyone with the link can edit, so send it only to people you trust.
                   </div>
@@ -223,7 +258,7 @@ export function ShareDialog() {
                 </button>
               )}
               <div className="small" style={{ marginTop: 12 }}>
-                {status !== "live" ? "Connecting…" : list.length ? `${list.length + 1} people here` : "Just you so far"}
+                {status !== "live" ? (reconnecting ? "Reconnecting… your changes are kept and sent when you're back." : "Connecting…") : list.length ? `${list.length + 1} people here` : "Just you so far"}
               </div>
               <div className="share-peers">
                 <div className="row">
@@ -255,4 +290,14 @@ export function ShareDialog() {
       </div>
     </div>
   );
+}
+
+/** "host/path" of a link, for showing where it opens. */
+function hostOf(link: string | null): string {
+  try {
+    const u = new URL(link ?? "");
+    return (u.host + u.pathname).replace(/\/+$/, "");
+  } catch {
+    return link ?? "";
+  }
 }

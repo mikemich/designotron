@@ -7,7 +7,7 @@ export const REPO_URL = "https://github.com/mikemich/designotron";
 
 /** Shown to people who opened a shared link: who they're with, and how to keep a copy. */
 export function GuestBar() {
-  const { role, status, peers, ownerGone } = useCollab();
+  const { role, status, peers, ownerGone, reconnecting } = useCollab();
   const [hidden, setHidden] = useState(false);
   // Guests pick a name once (others see it on their cursor and comments).
   const [asking, setAsking] = useState(() => !userName());
@@ -20,7 +20,9 @@ export function GuestBar() {
     : ownerGone
       ? `${ownerGone.name} ${ownerGone.how === "ended" ? "stopped sharing" : "left the file"}. Keep a copy to carry on.`
       : status !== "live"
-        ? "Connecting to the shared file…"
+        ? reconnecting
+          ? "Connection lost: reconnecting. Your changes are kept and will be sent."
+          : "Connecting to the shared file…"
         : names.length
           ? `Editing live with ${who}`
           : "You're the only one here right now";

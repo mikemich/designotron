@@ -31,9 +31,13 @@ const VECTOR_ANCHOR_MARGIN: f64 = 5.0;
 
 /// One undo step: the state before it and the document right after it. Undo applies the
 /// reverse of before→after to the *current* document, so collaborators' later edits stay.
+/// The page and selection right after the step let redo return to them (adding a page
+/// leaves the new one current).
 struct Step {
   before: Snapshot,
   after: Document,
+  after_page: String,
+  after_selection: Vec<NodeId>,
 }
 
 #[derive(Clone)]
@@ -869,6 +873,15 @@ impl Engine {
           // rounding error.
           let exact = self.doc == step.before.doc;
           self.doc = crate::collab::revert(&self.doc, &step.before.doc, &step.after);
+          self.selection = step
+            .after_selection
+            .iter()
+            .filter(|id| self.doc.get(id).is_some())
+            .cloned()
+            .collect();
+          if self.doc.page(&step.after_page).is_some() {
+            self.page = step.after_page.clone();
+          }
           self.refresh_fingerprints();
           if !exact {
             self.after_mutation(&prev);
@@ -1048,6 +1061,8 @@ impl Engine {
     self.past.push(Step {
       before: s,
       after: self.doc.clone(),
+      after_page: self.page.clone(),
+      after_selection: self.selection.clone(),
     });
     if self.past.len() > MAX_HISTORY {
       self.past.remove(0);

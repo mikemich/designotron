@@ -34,14 +34,51 @@ interface CollabState {
   link: string | null;
   peers: Record<number, Peer>;
   dialogOpen: boolean;
+  /** Joined before and now connecting again (offline, or the relay went away): edits are kept
+   *  locally and sent once the connection is back. */
+  reconnecting: boolean;
+  /** Online owners: the same room link on this editor, for trying what a guest sees. */
+  previewLink: string | null;
   /** Guests: the person who shared the file has left ("left") or stopped sharing ("ended"). */
   ownerGone: { name: string; how: "left" | "ended"; /** Before this guest ever got the file. */ early?: boolean } | null;
 }
 
-export const useCollab = create<CollabState>(() => ({ status: "off", role: null, mode: null, link: null, peers: {}, dialogOpen: false, ownerGone: null }));
+export const useCollab = create<CollabState>(() => ({
+  status: "off",
+  role: null,
+  mode: null,
+  link: null,
+  peers: {},
+  dialogOpen: false,
+  reconnecting: false,
+  previewLink: null,
+  ownerGone: null,
+}));
 
 /** Where shared links open when this editor runs on localhost (guests can't reach that). */
-export const HOSTED_EDITOR: string = import.meta.env.VITE_DT_EDITOR_URL || "https://mikemich.github.io/designotron/";
+export const HOSTED_EDITOR = "https://mikemich.github.io/designotron/";
+
+/** The editor that links made on a localhost page open in: `localStorage["dt:editorUrl"]` if
+ *  set (e.g. a relay or Pages site of your own), else the build's `VITE_DT_EDITOR_URL`, else
+ *  the public hosted editor. Always ends with a slash. */
+export function editorBase(): string {
+  let url = "";
+  try {
+    url = localStorage.getItem("dt:editorUrl") ?? "";
+  } catch {
+    /* ignore */
+  }
+  for (const candidate of [url, import.meta.env.VITE_DT_EDITOR_URL ?? ""]) {
+    if (!candidate.trim()) continue;
+    try {
+      const u = new URL(/^https?:\/\//.test(candidate.trim()) ? candidate.trim() : `https://${candidate.trim()}`);
+      return u.origin + u.pathname.replace(/\/*$/, "/");
+    } catch {
+      /* not a URL: try the next */
+    }
+  }
+  return HOSTED_EDITOR;
+}
 
 /** Relay used for online sharing: one the user set, else the build default (VITE_DT_RELAY). */
 export function relayUrl(): string {
@@ -121,6 +158,17 @@ let retry: ReturnType<typeof setTimeout> | null = null;
 /** Pause before reconnecting; doubles while the relay refuses or can't be reached. */
 const RETRY_MS = 2000;
 let retryDelay = RETRY_MS;
+/** Editors ping the room this often; a room that answered pings before and then stays silent
+ *  this long (a dropped network leaves the socket "open" for minutes) is replaced. */
+const PING_MS = 10_000;
+const SILENT_MS = 25_000;
+let heartbeat: ReturnType<typeof setInterval> | null = null;
+let lastHeard = 0;
+let lastPing = 0;
+/** The room has answered a ping on this connection (older relays don't know pings). */
+let heardPong = false;
+/** Drops the current connection as if it had closed (set by `connect`). */
+let dropConnection: (() => void) | null = null;
 const sentAssets = new Set<string>();
 let unsubscribe: (() => void) | null = null;
 
@@ -180,7 +228,11 @@ function loadShared(doc: unknown, assets: Record<string, string>, fit = true) {
 }
 
 function onMessage(m: any) {
+  lastHeard = Date.now();
   switch (m.type) {
+    case "pong":
+      heardPong = true;
+      break;
     case "welcome": {
       // Edits the room never got (made while disconnected, or sent but not acknowledged).
       const unsent: unknown[] = joinedOnce && m.doc ? JSON.parse(getEngine().collabUnsent()) : [];
@@ -198,7 +250,7 @@ function onMessage(m: any) {
       joinedOnce = true;
       const peers: Record<number, Peer> = {};
       for (const p of m.peers ?? []) peers[p.id] = p;
-      useCollab.setState({ status: "live", peers });
+      useCollab.setState({ status: "live", peers, reconnecting: false });
       if (unsent.length) flush();
       retryDelay = RETRY_MS;
       sendPresence(true);
@@ -254,7 +306,7 @@ function onMessage(m: any) {
       // The owner stopped sharing before we (re)joined: keep this copy, don't retry.
       roomEnded = true;
       // `early`: this copy is still the empty placeholder (the guest never got the file).
-      useCollab.setState({ status: "off", peers: {}, ownerGone: { name: m.name || "The owner", how: "ended", early: !joinedOnce && !Object.keys(getDoc().nodes).length } });
+      useCollab.setState({ status: "off", reconnecting: false, peers: {}, ownerGone: { name: m.name || "The owner", how: "ended", early: !joinedOnce && !Object.keys(getDoc().nodes).length } });
       break;
     case "error":
       toast(m.message, "error");
@@ -276,20 +328,23 @@ export function setMyName(name: string) {
 
 function connect(join: Record<string, unknown>) {
   if (retry) clearTimeout(retry);
-  useCollab.setState({ status: "connecting" });
+  useCollab.setState({ status: "connecting", reconnecting: joinedOnce });
   const socket = new WebSocket(wsUrl);
   ws = socket;
   let opened = false;
-  socket.onopen = () => {
-    opened = true;
-    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, ...join }));
-  };
-  socket.onmessage = (e) => onMessage(JSON.parse(e.data));
-  socket.onclose = () => {
+  /** This connection is gone (closed, or silent for too long): try again after a pause. */
+  const lost = () => {
     if (ws !== socket) return;
     ws = null;
+    stopHeartbeat();
+    socket.onclose = socket.onmessage = socket.onerror = null;
+    try {
+      socket.close();
+    } catch {
+      /* ignore */
+    }
     if (!useCollab.getState().role || roomEnded) return;
-    useCollab.setState({ status: "connecting", peers: {} });
+    useCollab.setState({ status: "connecting", reconnecting: joinedOnce, peers: {} });
     // Reconnect with this copy of the file but without `reset`: the relay keeps the room's
     // document if it still has one, and adopts ours if it lost the room (e.g. a free host
     // restarted it after sleeping).
@@ -299,17 +354,62 @@ function connect(join: Record<string, unknown>) {
     retry = setTimeout(() => connect(currentFile()), retryDelay);
     retryDelay = Math.min(retryDelay * 2, 60_000);
   };
+  socket.onopen = () => {
+    opened = true;
+    lastHeard = lastPing = Date.now();
+    heardPong = false;
+    stopHeartbeat();
+    heartbeat = setInterval(() => {
+      const now = Date.now();
+      if (heardPong && now - lastHeard > SILENT_MS) return lost();
+      if (now - lastPing >= PING_MS - 500) {
+        lastPing = now;
+        send({ type: "ping" });
+      }
+    }, PING_MS / 2);
+    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, ...join }));
+  };
+  socket.onmessage = (e) => onMessage(JSON.parse(e.data));
+  socket.onclose = lost;
+  dropConnection = lost;
   unsubscribe ??= subscribeLocal();
+}
+
+function stopHeartbeat() {
+  if (heartbeat) clearInterval(heartbeat);
+  heartbeat = null;
+}
+
+/** The network went away or came back. Edits made meanwhile stay in the engine and go out
+ *  after the next welcome. */
+function onNetwork(online: boolean) {
+  if (!useCollab.getState().role || roomEnded) return;
+  if (!online) {
+    // Don't wait for the socket to notice.
+    dropConnection?.();
+    useCollab.setState({ status: "connecting", reconnecting: joinedOnce });
+    return;
+  }
+  if (useCollab.getState().status === "live") return;
+  if (retry) clearTimeout(retry);
+  retryDelay = RETRY_MS;
+  connect(currentFile());
 }
 
 function subscribeLocal(): () => void {
   const offDoc = onDocChange(scheduleFlush);
+  const goOnline = () => onNetwork(true);
+  const goOffline = () => onNetwork(false);
+  addEventListener("online", goOnline);
+  addEventListener("offline", goOffline);
   const offSel = useStore.subscribe((s, prev) => {
     if (s.es.selection !== prev.es.selection || s.es.page !== prev.es.page) sendPresence(true);
   });
   return () => {
     offDoc();
     offSel();
+    removeEventListener("online", goOnline);
+    removeEventListener("offline", goOffline);
   };
 }
 
@@ -333,14 +433,13 @@ export async function startOnline(relay: string): Promise<void> {
   setRelayUrl(base);
   const room = randomRoomId();
   wsUrl = `${base.replace(/^http/, "ws")}/ws?room=${room}`;
-  // Guests open this editor (or the hosted one when this runs on localhost), pointed at the
-  // relay: never the relay's bundled editor, which can be older than this one.
+  // Guests open this editor (or, when this runs on localhost, the one `editorBase` names),
+  // pointed at the relay: never the relay's bundled editor, which can be older than this one.
   const here = location.origin + location.pathname;
-  const link =
-    base === location.origin
-      ? `${here}?room=${room}` // this page is served by the relay itself
-      : `${isLocalPage() ? HOSTED_EDITOR : here}?room=${room}&relay=${encodeURIComponent(base)}`;
-  useCollab.setState({ role: "owner", mode: "online", link });
+  const own = base === location.origin; // this page is served by the relay itself
+  const query = own ? `?room=${room}` : `?room=${room}&relay=${encodeURIComponent(base)}`;
+  const link = `${own || !isLocalPage() ? here : editorBase()}${query}`;
+  useCollab.setState({ role: "owner", mode: "online", link, previewLink: link === `${here}${query}` ? null : `${here}${query}` });
   shareCurrentFile();
 }
 
@@ -360,7 +459,8 @@ export function stopSharing() {
   roomEnded = false;
   // Tell guests the owner stopped sharing (they keep their copy and can save it).
   if (useCollab.getState().role === "owner") send({ type: "presence", presence: { page: "", cursor: null, selection: [], owner: true, ended: true } satisfies Presence });
-  useCollab.setState({ role: null, mode: null, status: "off", peers: {}, link: null, ownerGone: null });
+  stopHeartbeat();
+  useCollab.setState({ role: null, mode: null, status: "off", reconnecting: false, peers: {}, link: null, previewLink: null, ownerGone: null });
   ws?.close();
   ws = null;
   unsubscribe?.();

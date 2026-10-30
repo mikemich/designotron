@@ -17,6 +17,9 @@
 //! - server → `{type:"peer"|"leave"|"reload"|"error", …}`; errors carry a `message` the
 //!   editor shows as is.
 //! - client → `{type:"name", name}` renames this person; others get `{type:"rename", id, name}`.
+//! - client → `{type:"ping"}` (any time, joined or not); the server answers `{type:"pong"}`. Editors
+//!   send one every few seconds, so a connection that went silent (a dropped network keeps the
+//!   socket "open" for minutes) is noticed and replaced.
 //! - When the person who shared the file stops sharing (presence `{owner:true, ended:true}`),
 //!   the room remembers it: later joins without `reset` get `{type:"ended", name}` and are
 //!   disconnected, instead of rejoining a room nobody shares any more.
@@ -45,6 +48,8 @@ use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 use tokio::sync::{mpsc, Mutex, Notify};
 
+/// The answer to a client's `{type:"ping"}`.
+const PONG: &str = r#"{"type":"pong"}"#;
 /// Shown when the relay has no memory to spare for another file or person.
 pub const BUSY: &str = "This relay is busy right now; try again in a minute.";
 /// A peer with this much queued for it that it hasn't read yet is disconnected (it
@@ -564,6 +569,10 @@ impl Rooms {
           let step = self.join(&room_id, &mut r, id, &out, &m, size).await;
           joined = r.peers.contains_key(&id);
           step
+        }
+        "ping" => {
+          out.send(PONG.to_string());
+          Step::Go
         }
         "delta" if joined => self.delta(&mut r, id, &m, size),
         "name" if joined => {

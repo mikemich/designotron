@@ -459,6 +459,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pings_are_answered_with_pongs() {
+      let (addr, _) = start(None).await;
+      let url = format!("ws://{addr}/ws?room={}", designotron_rooms::random_token());
+      let (mut a, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+      // Before joining, and after.
+      a.send(Message::Text(json!({ "type": "ping" }).to_string())).await.unwrap();
+      assert_eq!(next_json(&mut a).await["type"], "pong");
+      a.send(Message::Text(json!({ "type": "join", "name": "Ana", "doc": doc() }).to_string()))
+        .await
+        .unwrap();
+      assert_eq!(next_json(&mut a).await["type"], "welcome");
+      a.send(Message::Text(json!({ "type": "ping" }).to_string())).await.unwrap();
+      assert_eq!(next_json(&mut a).await["type"], "pong");
+    }
+
+    #[tokio::test]
     async fn rejects_bad_room_ids() {
       let (addr, _) = start(None).await;
       assert!(tokio_tungstenite::connect_async(format!("ws://{addr}/ws?room=abc")).await.is_err());

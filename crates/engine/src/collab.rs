@@ -6,11 +6,14 @@
 //! different properties of one layer both keep their change; a relay that orders every
 //! change (see `designotron-rooms`) makes everyone converge on the same document.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::model::{Comment, Document, Node, NodeId};
+use crate::variables::{Collection, Variable};
 
 /// Changes from `base` to `doc` as JSON: added nodes in full (`nodes`), changed ones as
 /// per-property `patch`es (whole nodes when `patches` is false, for peers that predate
@@ -175,15 +178,17 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
 
 /// Moves `doc` by the change that took `from` to `to`, leaving every other change in place.
 /// With `doc == from` the result is exactly `to`.
+///
+/// Three-way per property: a property the step changed is reset only while `doc` still holds
+/// the value the step gave it (`from`), so a collaborator's later value of the same property
+/// survives an undo or redo, as do their other properties, layers, styles and variables.
 pub fn revert(doc: &Document, from: &Document, to: &Document) -> Document {
   let mut out = doc.clone();
   let mut touched = Vec::new();
   for item in from.nodes.diff(&to.nodes) {
     match item {
-      // Only the properties this step changed, so a collaborator's edits to other
-      // properties of the same layer survive the undo.
       imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, v) } if out.get(k).is_some() => {
-        let n = patch_node(out.get(k).unwrap(), &node_patch(o, v)).unwrap_or_else(|_| v.clone());
+        let n = merge_fields(out.get(k).unwrap(), o, v, false).unwrap_or_else(|| v.clone());
         out.nodes.insert(k.clone(), n);
         touched.push(k.clone());
       }
@@ -197,18 +202,13 @@ pub fn revert(doc: &Document, from: &Document, to: &Document) -> Document {
       }
     }
   }
-  if from.name != to.name {
+  if from.name != to.name && out.name == from.name {
     out.name = to.name.clone();
   }
-  if from.pages != to.pages {
-    out.pages = to.pages.clone();
-  }
-  if from.styles != to.styles {
-    out.styles = to.styles.clone();
-  }
-  if from.variables != to.variables {
-    out.variables = to.variables.clone();
-  }
+  merge_list(&mut out.pages, &from.pages, &to.pages, |p| &p.id);
+  merge_list(&mut out.styles.colors, &from.styles.colors, &to.styles.colors, |s| &s.id);
+  merge_list(&mut out.styles.texts, &from.styles.texts, &to.styles.texts, |s| &s.id);
+  merge_collections(&mut out.variables, &from.variables, &to.variables);
   for id in from.comments.keys().chain(to.comments.keys()).collect::<BTreeSet<_>>() {
     if from.comments.get(id) != to.comments.get(id) {
       match to.comments.get(id) {
@@ -220,6 +220,141 @@ pub fn revert(doc: &Document, from: &Document, to: &Document) -> Document {
   let base = doc.clone();
   repair(&mut out, &base, &touched);
   out
+}
+
+/// Three-way merge of the serialised fields of one item: each field the step changed
+/// (`from` to `to`) takes `to`'s value unless `cur` has since given it another one. `deep`
+/// also merges inside nested objects (a variable's per-mode values), key by key.
+fn merge_fields<T: Serialize + DeserializeOwned>(cur: &T, from: &T, to: &T, deep: bool) -> Option<T> {
+  let (Ok(c), Ok(f), Ok(t)) = (serde_json::to_value(cur), serde_json::to_value(from), serde_json::to_value(to)) else {
+    return None;
+  };
+  serde_json::from_value(merge_json(&c, &f, &t, deep)).ok()
+}
+
+fn merge_json(cur: &Value, from: &Value, to: &Value, deep: bool) -> Value {
+  let (Some(c), Some(f), Some(t)) = (cur.as_object(), from.as_object(), to.as_object()) else {
+    return if same(cur, from) { to.clone() } else { cur.clone() };
+  };
+  let mut out = c.clone();
+  for k in c.keys().chain(f.keys()).chain(t.keys()).collect::<BTreeSet<_>>() {
+    let (cv, fv, tv) = (c.get(k), f.get(k), t.get(k));
+    if same_opt(fv, tv) {
+      continue; // this step left it alone
+    }
+    let merged = if k == "children" {
+      Some(merge_children(cv, fv, tv))
+    } else if let (true, Some(cv), Some(fv), Some(tv)) = (deep, cv, fv, tv) {
+      (cv.is_object() && fv.is_object() && tv.is_object()).then(|| merge_json(cv, fv, tv, true))
+    } else {
+      None
+    };
+    match merged {
+      Some(v) => {
+        out.insert(k.clone(), v);
+      }
+      None if same_opt(cv, fv) => match tv {
+        Some(v) => {
+          out.insert(k.clone(), v.clone());
+        }
+        None => {
+          out.remove(k);
+        }
+      },
+      None => {} // someone else's newer value stays
+    }
+  }
+  Value::Object(out)
+}
+
+/// Child lists: `to`'s order, plus children `cur` has that neither `from` nor `to` knew (added
+/// by others meanwhile). `repair` drops the ones that no longer belong.
+fn merge_children(cur: Option<&Value>, from: Option<&Value>, to: Option<&Value>) -> Value {
+  let list = |v: Option<&Value>| v.and_then(|v| v.as_array()).cloned().unwrap_or_default();
+  let (cur, from, mut out) = (list(cur), list(from), list(to));
+  let theirs: Vec<Value> = cur.iter().filter(|c| !from.contains(c) && !out.contains(c)).cloned().collect();
+  out.extend(theirs);
+  Value::Array(out)
+}
+
+/// Keyed lists (pages, styles): items the step added are removed, items it removed come back
+/// at their old place, and items it edited are merged field by field. Items others added are
+/// left alone.
+fn merge_list<T: Serialize + DeserializeOwned + Clone + PartialEq>(cur: &mut Vec<T>, from: &[T], to: &[T], id: impl Fn(&T) -> &String) {
+  if from == to {
+    return;
+  }
+  let at = |list: &[T], k: &String| list.iter().position(|x| id(x) == k);
+  for f in from {
+    if at(to, id(f)).is_none() {
+      cur.retain(|x| id(x) != id(f));
+    }
+  }
+  for (i, t) in to.iter().enumerate() {
+    match (at(from, id(t)), at(cur, id(t))) {
+      (None, None) => cur.insert(i.min(cur.len()), t.clone()),
+      (Some(fi), Some(ci)) if from[fi] != *t => {
+        if let Some(m) = merge_fields(&cur[ci], &from[fi], t, true) {
+          cur[ci] = m;
+        }
+      }
+      _ => {}
+    }
+  }
+}
+
+/// Variable collections: like `merge_list`, with each collection's variables merged by id too.
+fn merge_collections(cur: &mut Vec<Collection>, from: &[Collection], to: &[Collection]) {
+  if from == to {
+    return;
+  }
+  // Variables of collections that exist on every side are merged on their own; the
+  // collections are then merged without them.
+  let mut merged: BTreeMap<String, Vec<Variable>> = BTreeMap::new();
+  for t in to {
+    if let (Some(f), Some(c)) = (from.iter().find(|f| f.id == t.id), cur.iter().find(|c| c.id == t.id)) {
+      let mut vars = c.variables.clone();
+      merge_list(&mut vars, &f.variables, &t.variables, |v| &v.id);
+      merged.insert(t.id.clone(), vars);
+    }
+  }
+  let bare = |l: &[Collection]| -> Vec<Collection> { l.iter().cloned().map(|c| Collection { variables: vec![], ..c }).collect() };
+  let mut out = bare(cur);
+  merge_list(&mut out, &bare(from), &bare(to), |c| &c.id);
+  for c in out.iter_mut() {
+    c.variables = match merged.remove(&c.id) {
+      Some(v) => v,
+      None => match (cur.iter().find(|x| x.id == c.id), to.iter().find(|x| x.id == c.id)) {
+        (Some(x), _) => x.variables.clone(),
+        (None, Some(t)) => t.variables.clone(),
+        _ => vec![],
+      },
+    };
+  }
+  *cur = out;
+}
+
+/// Equal, with numbers compared within a rounding error (layout re-runs can nudge a value by
+/// a hair).
+fn same(a: &Value, b: &Value) -> bool {
+  match (a, b) {
+    (Value::Number(x), Value::Number(y)) => match (x.as_f64(), y.as_f64()) {
+      (Some(x), Some(y)) => (x - y).abs() <= 1e-6 * x.abs().max(y.abs()).max(1.0),
+      _ => x == y,
+    },
+    (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(a, b)| same(a, b)),
+    (Value::Object(x), Value::Object(y)) => x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w))),
+    _ => a == b,
+  }
+}
+
+/// `same` for properties that may be missing (`null` counts as missing).
+fn same_opt(a: Option<&Value>, b: Option<&Value>) -> bool {
+  match (a, b) {
+    (Some(a), Some(b)) => same(a, b),
+    (None, None) | (Some(Value::Null), None) | (None, Some(Value::Null)) => true,
+    _ => false,
+  }
 }
 
 /// Restores parent/child consistency after merging: every node is listed by its parent
@@ -433,7 +568,8 @@ mod tests {
       let json = first.to_json();
       let editors = (0..n)
         .map(|i| {
-          let mut e = engine(10 + i as u64);
+          // Seeds differ in more than the low bit (the id generator ignores it).
+          let mut e = engine(10 + 2 * i as u64);
           e.load(&json).unwrap();
           e.collab_reset(true);
           e
@@ -543,6 +679,183 @@ mod tests {
     room.assert_converged();
     let n = room.doc.get(&id).unwrap();
     assert_eq!((n.x, n.opacity), (0.0, 0.25));
+  }
+
+  /// Delivers editor `from`'s pending changes to everyone, as the relay would, in order.
+  fn sync(room: &mut Room, from: usize) {
+    for m in room.send(from) {
+      room.receive(m);
+    }
+  }
+
+  fn colour(e: &Engine, id: &str) -> String {
+    match &e.doc.get(id).unwrap().fills[0] {
+      crate::model::Paint::Solid { color, .. } => color.clone(),
+      _ => panic!("not solid"),
+    }
+  }
+
+  fn fill(c: &str) -> Value {
+    json!([{ "type": "solid", "color": c }])
+  }
+
+  #[test]
+  fn undo_skips_property_changed_by_peer_later() {
+    let (mut room, id) = Room::new(2);
+    set(&mut room.editors[0], &id, json!({ "fills": fill("#FF0000"), "x": 10.0 }));
+    sync(&mut room, 0);
+    set(&mut room.editors[1], &id, json!({ "fills": fill("#0000FF") }));
+    sync(&mut room, 1);
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    sync(&mut room, 0);
+    room.assert_converged();
+    assert_eq!(colour(&room.editors[0], &id), "#0000FF", "the peer's newer fill survives my undo");
+    assert_eq!(room.editors[0].doc.get(&id).unwrap().x, 0.0, "what only I changed is undone");
+  }
+
+  #[test]
+  fn redo_skips_property_changed_by_peer_later() {
+    let (mut room, id) = Room::new(2);
+    set(&mut room.editors[0], &id, json!({ "fills": fill("#FF0000") }));
+    sync(&mut room, 0);
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    sync(&mut room, 0);
+    set(&mut room.editors[1], &id, json!({ "fills": fill("#0000FF") }));
+    sync(&mut room, 1);
+    room.editors[0].dispatch(Command::Redo).unwrap();
+    sync(&mut room, 0);
+    room.assert_converged();
+    assert_eq!(colour(&room.editors[0], &id), "#0000FF");
+  }
+
+  #[test]
+  fn undo_is_exact_when_nobody_else_edited() {
+    let mut e = engine(1);
+    let id = rect(&mut e, 0.0, None);
+    let before = e.doc.clone();
+    set(&mut e, &id, json!({ "x": 37.5, "fills": fill("#123456"), "opacity": 0.3 }));
+    let after = e.doc.clone();
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc, before);
+    e.dispatch(Command::Redo).unwrap();
+    assert_eq!(e.doc, after);
+  }
+
+  #[test]
+  fn undo_after_layout_rounding_still_reverts() {
+    let mut e = engine(1);
+    let id = rect(&mut e, 0.0, None);
+    set(&mut e, &id, json!({ "x": 50.0 }));
+    // A relayout or a peer's merge nudged the value by a rounding error.
+    e.doc.get_mut(&id).unwrap().x = 50.0 + 1e-9;
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.get(&id).unwrap().x, 0.0);
+    // A real change by someone else is not mistaken for rounding.
+    set(&mut e, &id, json!({ "x": 60.0 }));
+    e.doc.get_mut(&id).unwrap().x = 61.0;
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.get(&id).unwrap().x, 61.0);
+  }
+
+  #[test]
+  fn undo_style_edit_keeps_peer_added_style() {
+    let (mut room, _) = Room::new(2);
+    let add = |name: &str, color: &str| Command::AddColorStyle {
+      name: name.into(),
+      color: color.into(),
+    };
+    room.editors[0].dispatch(add("Mine", "#111111")).unwrap();
+    sync(&mut room, 0);
+    let mine = room.editors[0].doc.styles.colors[0].id.clone();
+    room.editors[0]
+      .dispatch(Command::UpdateColorStyle {
+        id: mine.clone(),
+        name: None,
+        color: Some("#222222".into()),
+      })
+      .unwrap();
+    sync(&mut room, 0);
+    room.editors[1].dispatch(add("Theirs", "#333333")).unwrap();
+    sync(&mut room, 1);
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    let styles = &room.editors[0].doc.styles.colors;
+    assert_eq!(styles.len(), 2, "the peer's style is still there");
+    assert_eq!(styles.iter().find(|s| s.id == mine).unwrap().color, "#111111");
+    assert!(styles.iter().any(|s| s.name == "Theirs"));
+    // Undoing the creation removes only my style.
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    let names: Vec<&str> = room.editors[0].doc.styles.colors.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Theirs"]);
+  }
+
+  #[test]
+  fn undo_variable_edit_keeps_peer_added_variable() {
+    use crate::variables::{Collection, VarMode, Variable};
+    let var = |id: &str, v: f64| Variable {
+      id: id.into(),
+      name: id.into(),
+      values: [("m".to_string(), json!(v))].into_iter().collect(),
+      ..Default::default()
+    };
+    let coll = |vars: Vec<Variable>| Collection {
+      id: "c".into(),
+      name: "C".into(),
+      modes: vec![VarMode {
+        id: "m".into(),
+        name: "Mode".into(),
+      }],
+      variables: vars,
+    };
+    let set_vars = |room: &mut Room, i: usize, vars: Vec<Variable>| {
+      room.editors[i]
+        .dispatch(Command::SetVariables {
+          collections: vec![coll(vars)],
+        })
+        .unwrap();
+      sync(room, i);
+    };
+    let (mut room, _) = Room::new(2);
+    set_vars(&mut room, 0, vec![var("a", 1.0)]);
+    set_vars(&mut room, 0, vec![var("a", 2.0)]);
+    set_vars(&mut room, 1, vec![var("a", 2.0), var("b", 9.0)]);
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    let vars = &room.editors[0].doc.variables[0].variables;
+    assert_eq!(vars.len(), 2, "the peer's variable survives");
+    assert_eq!(vars[0].values["m"], json!(1.0), "my edit is undone");
+  }
+
+  #[test]
+  fn undo_reorder_keeps_layers_a_peer_added_meanwhile() {
+    let (mut room, first) = Room::new(2);
+    let second = rect(&mut room.editors[0], 20.0, None);
+    sync(&mut room, 0);
+    room.editors[0]
+      .dispatch(Command::Reorder {
+        ids: vec![first.clone()],
+        to: crate::ops::ReorderTo::Front,
+      })
+      .unwrap();
+    sync(&mut room, 0);
+    let theirs = rect(&mut room.editors[1], 40.0, None);
+    sync(&mut room, 1);
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    let page = room.editors[0].doc.page(&room.editors[0].page).unwrap();
+    assert_eq!(page.children, [first.clone(), second, theirs], "old order back, their layer kept");
+  }
+
+  #[test]
+  fn redo_restores_added_page_as_current() {
+    let mut e = engine(1);
+    let first = e.page.clone();
+    e.dispatch(Command::AddPage { name: None }).unwrap();
+    let added = e.page.clone();
+    assert_ne!(first, added);
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.pages.len(), 1);
+    assert_eq!(e.page, first);
+    e.dispatch(Command::Redo).unwrap();
+    assert_eq!(e.doc.pages.len(), 2);
+    assert_eq!(e.page, added, "the page that was added is current again");
   }
 
   #[test]

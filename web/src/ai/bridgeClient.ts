@@ -16,8 +16,11 @@ let checked: Promise<void> | null = null;
  *  Anything else (a relay, a static server) means the bridge is at its default address. */
 export function bridgeChecked(): Promise<void> {
   if (!isLocalPage) return Promise.resolve();
-  checked ??= fetch(`${location.origin}/bridge/status`)
-    .then((r) => (r.ok ? r.json() : null))
+  checked ??= servedByRelay()
+    .then((relay) => {
+      if (relay) return null;
+      return fetch(`${location.origin}/bridge/status`).then((r) => (r.ok ? r.json() : null));
+    })
     .then((j) => {
       notBridgeHere = j?.name !== "designotron-bridge";
     })
@@ -25,6 +28,19 @@ export function bridgeChecked(): Promise<void> {
       notBridgeHere = true;
     });
   return checked;
+}
+
+/** True when this page's server is a relay. Asked first because a relay answers every
+ *  /bridge route with a 404 (an error in the console on every page load), while a bridge or
+ *  dev server answers /health with the editor page. */
+async function servedByRelay(): Promise<boolean> {
+  try {
+    const r = await fetch(`${location.origin}/health`);
+    if (!r.ok || !(r.headers.get("content-type") ?? "").includes("json")) return false;
+    return (await r.json())?.relay === "designotron";
+  } catch {
+    return false;
+  }
 }
 
 function bridgeUrl(): string {
