@@ -254,6 +254,8 @@ export interface Doc {
 
 export interface EngineState {
   rev: number;
+  /** Counts changes to the document itself (not selection or page switches). */
+  docRev: number;
   page: string;
   selection: string[];
   canUndo: boolean;

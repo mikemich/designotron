@@ -74,6 +74,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
   const multi = es.selection.length > 1;
   const zoom = useStore((s) => s.viewport.zoom);
   const dirty = useStore((s) => s.dirty);
+  const saveFailed = useStore((s) => s.saveFailed);
   const chatOpen = useStore((s) => s.chatOpen);
   const claudeOn = useChat((s) => claudeReady(s));
   const doc = useDoc();
@@ -299,7 +300,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
             dispatch({ op: "setDocName", name: e.target.value.trim() })
           }
         />
-        <span className="small save-state">{dirty ? "Saving…" : "Saved locally"}</span>
+        <span className="small save-state">{saveFailed ? "Not saved, retrying" : dirty ? "Saving…" : "Saved locally"}</span>
       </div>
       <div className="group">
         <button

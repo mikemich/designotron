@@ -73,9 +73,18 @@ export async function listFiles(): Promise<FileMeta[]> {
   return idx.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-async function writeIndex(fn: (idx: FileMeta[]) => FileMeta[]) {
-  const idx = ((await get(INDEX)) as FileMeta[] | undefined) ?? [];
-  await set(INDEX, fn(idx));
+// The index is read, changed and written back, so two writers (a save and a thumbnail)
+// must not interleave or the later one drops the earlier one's change.
+let indexQueue: Promise<unknown> = Promise.resolve();
+
+function writeIndex(fn: (idx: FileMeta[]) => FileMeta[]): Promise<void> {
+  const run = async () => {
+    const idx = ((await get(INDEX)) as FileMeta[] | undefined) ?? [];
+    await set(INDEX, fn(idx));
+  };
+  const next = indexQueue.then(run, run);
+  indexQueue = next.catch(() => {});
+  return next;
 }
 
 export function newFileId(): string {
@@ -91,6 +100,12 @@ export async function saveFile(id: string, name: string, docJson: string, thumbn
     const prev = idx.find((f) => f.id === id);
     return [...rest, { id, name, updatedAt: Date.now(), thumbnail: thumbnail ?? prev?.thumbnail }];
   });
+}
+
+/** Updates a file's dashboard thumbnail without touching its document, so a slow thumbnail
+ * can never put an older document over a newer save. */
+export async function saveThumbnail(id: string, thumbnail: string) {
+  await writeIndex((idx) => idx.map((f) => (f.id === id ? { ...f, thumbnail } : f)));
 }
 
 export async function loadFile(id: string): Promise<string | null> {
@@ -235,11 +250,16 @@ export async function importDtron(text: string, fallbackName: string): Promise<s
 // finish. Read on the next open, removed after the next successful save.
 const recoveryKey = (id: string) => `dt:recover:${id}`;
 
-export function writeRecovery(id: string, docJson: string) {
+/** False when the copy couldn't be kept (over the ~5 MB localStorage quota, or storage is
+ * blocked): the IndexedDB save is then all there is, so the caller should warn. */
+export function writeRecovery(id: string, docJson: string): boolean {
   try {
     localStorage.setItem(recoveryKey(id), docJson);
+    return true;
   } catch {
-    /* too large or storage blocked: the IndexedDB save is all we have */
+    // A stale older copy would win over the IndexedDB save on the next open.
+    clearRecovery(id);
+    return false;
   }
 }
 

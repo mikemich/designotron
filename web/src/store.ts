@@ -88,7 +88,8 @@ export async function documentLoads(json: string): Promise<boolean> {
 export function newEngine(): WasmEngine {
   engine = new WasmEngine(Math.floor(Math.random() * 2 ** 48));
   docCache = null;
-  useStore.setState({ rev: -1 });
+  // The new engine's revisions restart, so nothing counts as saved until the opener says so.
+  useStore.setState({ rev: -1, savedDocRev: -1 });
   sync();
   return engine;
 }
@@ -124,7 +125,12 @@ interface Store {
   chatOpen: boolean;
   presenting: string | null;
   fileId: string | null;
+  /** The document has changes that aren't in storage yet (engine docRev !== savedDocRev). */
   dirty: boolean;
+  /** Engine `docRev` that is safely stored; -1 until the opened file says so. */
+  savedDocRev: number;
+  /** The last save attempt failed. */
+  saveFailed: boolean;
   toast: { text: string; kind: "info" | "error" } | null;
   dropTarget: string | null;
   /** Character range selected in the text being edited (code points). */
@@ -162,7 +168,7 @@ export function toggleView(key: "showRulers" | "showGrids") {
 
 export const useStore = create<Store>(() => ({
   rev: 0,
-  es: { rev: 0, page: "", selection: [], canUndo: false, canRedo: false, inGesture: false },
+  es: { rev: 0, docRev: 0, page: "", selection: [], canUndo: false, canRedo: false, inGesture: false },
   tool: "move",
   viewport: { x: 0, y: 0, zoom: 1 },
   hover: null,
@@ -177,6 +183,8 @@ export const useStore = create<Store>(() => ({
   presenting: null,
   fileId: null,
   dirty: false,
+  savedDocRev: -1,
+  saveFailed: false,
   toast: null,
   dropTarget: null,
   textSel: null,
@@ -238,6 +246,11 @@ export function useSelection(): Node[] {
   return sel.map((id) => doc.nodes[id]).filter(Boolean);
 }
 
+/** Records that the document as of engine `docRev` is stored (or that a file just opened). */
+export function markSaved(docRev: number) {
+  useStore.setState((s) => ({ savedDocRev: docRev, dirty: s.es.docRev !== docRev, saveFailed: false }));
+}
+
 /** Pulls revision and state from the engine into the store. */
 export function sync() {
   const e = getEngine();
@@ -245,7 +258,8 @@ export function sync() {
   const st = useStore.getState();
   if (rev === st.rev) return;
   const es: EngineState = JSON.parse(e.state());
-  useStore.setState({ rev, es, dirty: true });
+  // Selecting or switching page moves `rev` but not `docRev`: nothing to save.
+  useStore.setState({ rev, es, dirty: es.docRev !== st.savedDocRev });
   dropStalePoints();
   listeners.forEach((l) => l());
 }

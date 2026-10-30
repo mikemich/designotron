@@ -562,6 +562,9 @@ pub struct Engine {
   pub selection: Vec<NodeId>,
   pub page: String,
   pub rev: u64,
+  /// Bumped whenever the document itself changes (not selection, page or gesture
+  /// bookkeeping), so the editor can tell "needs saving" from "was clicked".
+  pub doc_rev: u64,
   past: Vec<Step>,
   future: Vec<Step>,
   gesture: Option<Snapshot>,
@@ -604,6 +607,7 @@ impl Engine {
       selection: vec![],
       page,
       rev: 1,
+      doc_rev: 1,
       past: vec![],
       future: vec![],
       gesture: None,
@@ -644,6 +648,7 @@ impl Engine {
     layout::relayout_all(&mut self.doc, self.measurer.as_ref());
     self.render_cache = RenderCache::default();
     self.rev += 1;
+    self.doc_rev += 1;
     Ok(())
   }
 
@@ -654,6 +659,7 @@ impl Engine {
   pub fn state(&self) -> Value {
     json!({
       "rev": self.rev,
+      "docRev": self.doc_rev,
       "page": self.page,
       "selection": self.selection,
       "canUndo": !self.past.is_empty(),
@@ -845,6 +851,7 @@ impl Engine {
         // Text measurement may have changed (fonts loaded): repaint everything.
         self.render_cache = RenderCache::default();
         self.rev += 1;
+        self.doc_rev += 1;
         return Ok(json!({}));
       }
       Command::Undo => {
@@ -868,6 +875,7 @@ impl Engine {
             self.after_mutation(&prev);
           }
           self.future.push(step);
+          self.doc_rev += 1;
         }
         self.rev += 1;
         return Ok(json!({}));
@@ -893,6 +901,7 @@ impl Engine {
             self.after_mutation(&prev);
           }
           self.past.push(step);
+          self.doc_rev += 1;
         }
         self.rev += 1;
         return Ok(json!({}));
@@ -905,6 +914,7 @@ impl Engine {
           crate::collab::apply(&mut self.doc, &delta)?;
           self.after_mutation(&prev);
           self.rev += 1;
+          self.doc_rev += 1;
           return Ok(json!({}));
         }
         if let Some(c) = self.collab_confirmed.as_mut() {
@@ -924,6 +934,7 @@ impl Engine {
         self.after_mutation(&prev);
         self.collab_synced = Some(self.doc.clone());
         self.rev += 1;
+        self.doc_rev += 1;
         return Ok(json!({}));
       }
       Command::CollabAck { rejected } => {
@@ -943,6 +954,7 @@ impl Engine {
         self.after_mutation(&prev);
         self.collab_synced = Some(self.doc.clone());
         self.rev += 1;
+        self.doc_rev += 1;
         return Ok(json!({}));
       }
       Command::BeginGesture => {
@@ -973,6 +985,7 @@ impl Engine {
         let gesture = self.gesture.take();
         if let Some(base) = self.gesture_undo.take().or(gesture) {
           self.restore(base);
+          self.doc_rev += 1;
         }
         self.rev += 1;
         return Ok(json!({}));
@@ -1043,7 +1056,7 @@ impl Engine {
     }
     let before = if self.gesture.is_none() { Some(self.snapshot()) } else { None };
     let result = self.apply(cmd);
-    match result {
+    let out = match result {
       Ok(v) => {
         self.after_mutation(&prev);
         if let Some(b) = before {
@@ -1060,7 +1073,13 @@ impl Engine {
         }
         Err(e)
       }
+    };
+    // Selecting through an AI tool or a no-op patch leaves the document as it was (equality
+    // is pointer-fast on shared nodes), and must not look like an edit to autosave.
+    if prev != self.doc {
+      self.doc_rev += 1;
     }
+    out
   }
 
   fn push_past(&mut self, s: Snapshot) {
@@ -2889,6 +2908,76 @@ mod tests {
     e.dispatch(Command::Undo).unwrap();
     set(&mut e, None).unwrap();
     assert_eq!(e.doc.pages[0].flow_start, None);
+  }
+
+  #[test]
+  fn doc_rev_ignores_selection_and_tracks_edits() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    let b = rect(&mut e, 100.0, 0.0, 50.0, 50.0, None);
+    let base = e.doc_rev;
+    for ids in [vec![a.clone()], vec![b.clone()], vec![a.clone(), b.clone()]] {
+      e.dispatch(Command::Select {
+        ids,
+        mode: SelectMode::Replace,
+      })
+      .unwrap();
+    }
+    e.dispatch(Command::SelectAll).unwrap();
+    ai(&mut e, "select", json!({ "ids": [a.clone()] }));
+    assert_eq!(e.doc_rev, base, "selection never counts as an edit");
+    assert_eq!(e.state()["docRev"], json!(base));
+    let rev = e.rev;
+    e.dispatch(Command::Select {
+      ids: vec![b.clone()],
+      mode: SelectMode::Replace,
+    })
+    .unwrap();
+    assert!(e.rev > rev, "the UI revision still moves on selection");
+
+    e.dispatch(Command::Update {
+      ids: vec![a.clone()],
+      patch: json!({ "x": 10.0 }),
+    })
+    .unwrap();
+    let after_edit = e.doc_rev;
+    assert!(after_edit > base);
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.doc_rev > after_edit, "undo changes the document");
+    let after_undo = e.doc_rev;
+    e.dispatch(Command::Redo).unwrap();
+    assert!(e.doc_rev > after_undo, "redo changes the document");
+  }
+
+  #[test]
+  fn doc_rev_counts_remote_changes_and_gestures() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    let before = e.doc_rev;
+    let mut moved = e.doc.clone();
+    moved.get_mut(&a).unwrap().x = 77.0;
+    let theirs = crate::collab::delta(&e.doc, &moved, false);
+    e.dispatch(Command::ApplyRemote {
+      delta: theirs,
+      local: false,
+    })
+    .unwrap();
+    assert!(e.doc_rev > before, "a collaborator's change is unsaved work");
+
+    let mid = e.doc_rev;
+    e.dispatch(Command::BeginGesture).unwrap();
+    e.dispatch(Command::Translate {
+      ids: vec![a.clone()],
+      dx: 5.0,
+      dy: 0.0,
+      snap: false,
+      zoom: 1.0,
+    })
+    .unwrap();
+    assert!(e.doc_rev > mid);
+    let dragged = e.doc_rev;
+    e.dispatch(Command::CancelGesture).unwrap();
+    assert!(e.doc_rev > dragged, "cancelling a drag puts the document back");
   }
 
   #[test]

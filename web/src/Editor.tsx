@@ -19,8 +19,8 @@ import { PhoneNote } from "./panels/PhoneNote";
 import { DemoOverlay, stopDemo } from "./Demo";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
-import { bootEngine, getDoc, getEngine, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
-import { clearRecovery, listVersions, loadFile, readRecovery, saveFile, saveVersion, writeRecovery } from "./files";
+import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
+import { clearRecovery, listVersions, loadFile, readRecovery, saveFile, saveThumbnail, saveVersion, writeRecovery } from "./files";
 import { AUTO_VERSION_MS } from "./panels/HistoryPanel";
 import { nodeSvg, svgToPngBlob } from "./exporter";
 import { readFileAsDataUrl } from "./assets";
@@ -29,6 +29,13 @@ import { readFileAsDataUrl } from "./assets";
 let askOnOpen: string | null = null;
 export function askWhenOpen(prompt: string) {
   askOnOpen = prompt;
+}
+
+/** The document as serialised at one moment, with the engine revision it was taken at. */
+interface Snapshot {
+  json: string;
+  name: string;
+  rev: number;
 }
 
 export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void }) {
@@ -50,7 +57,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       // loadFile also loads the file's images. A copy kept while the page was closing is
       // newer than the last IndexedDB save.
       const stored = await loadFile(fileId);
-      const json = readRecovery(fileId) ?? stored;
+      const recovered = readRecovery(fileId);
+      const json = recovered ?? stored;
       if (cancelled) return;
       // A link to a file that isn't in this browser (deleted, or from another device).
       if (json === null) {
@@ -66,7 +74,9 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         }
       }
       dispatch({ op: "relayout" });
-      useStore.setState({ fileId, dirty: false, editingText: null, editingVector: null, presenting: null });
+      useStore.setState({ fileId, editingText: null, editingVector: null, presenting: null });
+      // A recovered copy isn't in IndexedDB yet: leave it dirty so the first autosave stores it.
+      markSaved(recovered === null ? useStore.getState().es.docRev : -1);
       setReady(true);
       // Two frames: the canvas has its final size by then.
       requestAnimationFrame(() => requestAnimationFrame(zoomToFit));
@@ -90,11 +100,27 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   useEffect(() => installShortcuts(), []);
 
   // Autosave to IndexedDB, with an occasional thumbnail.
+  //
+  // Saves run one at a time, each serialising the document when it starts, so a slow one can
+  // never land after (and over) a newer one. "Saved" means the engine's docRev equals the
+  // docRev of a save that finished, so selecting or switching page never triggers a save, and
+  // edits made while a save is running keep the file dirty.
   useEffect(() => {
     if (!ready) return;
+    const engine = getEngine();
+    const docRev = () => useStore.getState().es.docRev;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let idle: number | null = null;
+    let retry: ReturnType<typeof setTimeout> | null = null;
     let lastThumb = 0;
+    let thumbBusy = false;
     let lastVersion = Date.now();
+    let seenRev = docRev();
+    // docRev of the copy kept in localStorage while closing, so a finished save only
+    // clears a recovery copy it has caught up with.
+    let recoveryRev = -1;
+    // Layer count for the debounce, refreshed now and then rather than per change.
+    let layers = { n: 0, at: 0 };
     // A file without versions gets its first autosave one interval from now, not on the first save.
     listVersions(fileId).then((v) => (lastVersion = v[0]?.createdAt ?? Date.now()));
     // Another tab saving this file makes this tab's copy stale: stop autosaving here so it
@@ -110,54 +136,148 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         }
       };
     let closed = false;
-    const save = async (leaving = false) => {
-      if (stale) return;
-      const json = getEngine().save();
-      const doc = getDoc();
-      let thumb: string | undefined;
-      if (!leaving && Date.now() - lastThumb > 15000) {
-        lastThumb = Date.now();
-        thumb = await thumbnail().catch(() => undefined);
-      }
-      await saveFile(fileId, doc.name, json, thumb);
-      clearRecovery(fileId);
-      if (!closed) tabs?.postMessage({ fileId });
-      useStore.setState({ dirty: false });
-      if (Date.now() - lastVersion > AUTO_VERSION_MS) {
-        lastVersion = Date.now();
-        await saveVersion(fileId, "Autosave", json, true);
+    let running = false;
+    // A snapshot taken eagerly (the page is closing, or the editor is about to be replaced).
+    let final: Snapshot | null = null;
+
+    const snapshot = (): Snapshot => ({ json: engine.save(), name: getDoc().name, rev: docRev() });
+
+    // Runs saves until nothing newer than the last one is left. A call while one is running
+    // changes nothing: the running loop takes another pass.
+    const flush = async () => {
+      if (running) return;
+      running = true;
+      try {
+        while (!stale && (final || (!closed && docRev() !== useStore.getState().savedDocRev))) {
+          const snap = final ?? snapshot();
+          final = null;
+          try {
+            await saveFile(fileId, snap.name, snap.json);
+          } catch (err) {
+            console.error(err);
+            if (!closed) {
+              useStore.setState({ saveFailed: true });
+              retry ??= setTimeout(() => {
+                retry = null;
+                schedule();
+              }, 5000);
+            }
+            break;
+          }
+          if (recoveryRev <= snap.rev) clearRecovery(fileId);
+          // Closed: the editor has moved on, so there is nothing to report and the channel is shut.
+          if (closed) continue;
+          tabs?.postMessage({ fileId });
+          if (getEngine() === engine) markSaved(snap.rev);
+          if (Date.now() - lastVersion > AUTO_VERSION_MS) {
+            lastVersion = Date.now();
+            await saveVersion(fileId, "Autosave", snap.json, true).catch(console.error);
+          }
+          maybeThumbnail();
+        }
+      } finally {
+        running = false;
       }
     };
-    const off = onDocChange(() => {
+
+    // The thumbnail is rendered on its own (it can take seconds: fonts are fetched) and only
+    // touches the file's index entry, never its document.
+    const maybeThumbnail = () => {
+      if (closed || thumbBusy || Date.now() - lastThumb < 15000) return;
+      thumbBusy = true;
+      lastThumb = Date.now();
+      const run = () => {
+        if (closed) {
+          thumbBusy = false;
+          return;
+        }
+        thumbnail()
+          .then(async (t) => {
+            if (t && !closed) await saveThumbnail(fileId, t);
+          })
+          .catch(() => {})
+          .finally(() => (thumbBusy = false));
+      };
+      if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 3000 });
+      else setTimeout(run, 0);
+    };
+
+    // 400 ms for ordinary files, rising to 2 s at 18k layers: serialising a big file costs
+    // more than the typist notices, so wait for a longer pause.
+    const delay = () => {
+      const now = Date.now();
+      if (now - layers.at > 5000) layers = { n: Object.keys(getDoc().nodes).length, at: now };
+      return layers.n < 2000 ? 400 : Math.min(2000, 400 + (layers.n - 2000) / 10);
+    };
+
+    const cancelTimers = () => {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => save(), 400);
-    });
-    // Closing or reloading: IndexedDB writes can be cut off, so keep a synchronous copy in
-    // localStorage too (picked up the next time the file opens).
-    const leave = () => {
-      if (!useStore.getState().dirty || stale) return;
-      writeRecovery(fileId, getEngine().save());
-      save(true);
+      if (idle !== null && typeof cancelIdleCallback === "function") cancelIdleCallback(idle);
+      timer = null;
+      idle = null;
     };
+
+    const schedule = () => {
+      cancelTimers();
+      timer = setTimeout(() => {
+        timer = null;
+        if (typeof requestIdleCallback !== "function") return void flush();
+        idle = requestIdleCallback(
+          () => {
+            idle = null;
+            flush();
+          },
+          { timeout: 1000 },
+        );
+      }, delay());
+    };
+
+    const off = onDocChange(() => {
+      // Selection and page changes move the revision but not the document.
+      const rev = docRev();
+      if (rev === seenRev) return;
+      seenRev = rev;
+      schedule();
+    });
+    // A copy recovered after a crash isn't in IndexedDB yet.
+    if (useStore.getState().dirty) schedule();
+
+    // Closing or reloading: IndexedDB writes can be cut off, so keep a synchronous copy in
+    // localStorage too (picked up the next time the file opens). False when it couldn't be kept.
+    const leave = (): boolean => {
+      if (!useStore.getState().dirty || stale) return true;
+      final = snapshot();
+      const kept = writeRecovery(fileId, final.json);
+      if (kept) recoveryRev = final.rev;
+      cancelTimers();
+      flush();
+      return kept;
+    };
+    // Unsaved work (waiting, or being written right now) or a recovery copy that couldn't be
+    // kept: ask before the page goes.
     const beforeUnload = (e: BeforeUnloadEvent) => {
-      if (useStore.getState().dirty) {
-        leave();
-        e.preventDefault();
-      }
+      if (stale || !useStore.getState().dirty) return;
+      leave();
+      e.preventDefault();
+      e.returnValue = "";
     };
     const hidden = () => document.visibilityState === "hidden" && leave();
+    const pagehide = () => void leave();
     window.addEventListener("beforeunload", beforeUnload);
-    window.addEventListener("pagehide", leave);
+    window.addEventListener("pagehide", pagehide);
     document.addEventListener("visibilitychange", hidden);
     return () => {
       off();
-      if (timer) {
-        clearTimeout(timer);
-        save(true);
-      }
+      cancelTimers();
+      if (retry) clearTimeout(retry);
       window.removeEventListener("beforeunload", beforeUnload);
-      window.removeEventListener("pagehide", leave);
+      window.removeEventListener("pagehide", pagehide);
       document.removeEventListener("visibilitychange", hidden);
+      // Leaving the file: write what's unsaved now, before the engine is replaced.
+      if (!stale && useStore.getState().dirty) {
+        final = snapshot();
+        flush();
+      }
       closed = true;
       tabs?.close();
     };
