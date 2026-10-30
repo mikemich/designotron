@@ -6,7 +6,7 @@ import { ReviewPanel } from "./ReviewPanel";
 import { AppPanel } from "./AppPanel";
 import { IconButton, NumberField, Section, SelectField } from "../ui/controls";
 import type { Interaction, Node, OverlaySettings } from "../types";
-import { DEFAULT_OVERLAY, newInteraction, overlayDim } from "../prototype";
+import { DEFAULT_OVERLAY, isMissingDestination, newInteraction, overlayDim, startFrame } from "../prototype";
 import { exportProjectZip, nodeSvg } from "../exporter";
 import { inlineAssets } from "../assets";
 import { askClaude } from "../ai/chatState";
@@ -48,7 +48,9 @@ function PrototypePanel() {
   const page = doc.pages.find((p) => p.id === useStore.getState().es.page);
   const frames = (page?.children ?? []).map((id) => doc.nodes[id]).filter((n) => n && ["frame", "component"].includes(n.type));
   const n = nodes.length === 1 ? nodes[0] : null;
-  const isTop = n && !n.parent;
+  const isTop = n && !n.parent && ["frame", "component", "componentSet", "instance"].includes(n.type);
+  const start = startFrame(doc, page?.id);
+  const present = () => start && useStore.setState({ presenting: start });
   return (
     <div className="scroll">
       <Section title="Flow">
@@ -56,12 +58,12 @@ function PrototypePanel() {
           <SelectField
             label="▶"
             title="Flow starting point"
-            value={page?.flowStart ?? ""}
+            value={page?.flowStart && frames.some((f) => f.id === page.flowStart) ? page.flowStart : ""}
             options={[{ value: "", label: "First frame" }, ...frames.map((f) => ({ value: f.id, label: f.name }))]}
             onChange={(id) => page && dispatch({ op: "setFlowStart", page: page.id, id: id || null })}
           />
         </div>
-        <button className="btn block primary" onClick={() => useStore.setState({ presenting: page?.flowStart ?? frames.find((f) => f.type === "frame")?.id ?? frames[0]?.id ?? null })} disabled={!frames.length}>
+        <button className="btn block primary" onClick={present} disabled={!start}>
           <Play size={13} /> Present
         </button>
         <div className="muted small" style={{ marginTop: 8 }}>
@@ -93,6 +95,7 @@ function PrototypePanel() {
 }
 
 function InteractionEditor({ node, index, frames }: { node: Node; index: number; frames: Node[] }) {
+  const doc = useDoc();
   const it = node.interactions[index];
   const set = (patch: Partial<Interaction>) => dispatch({ op: "setInteractions", id: node.id, interactions: node.interactions.map((x, i) => (i === index ? { ...x, ...patch } : x)) });
   const overlay = it.action === "openOverlay" || it.action === "swapOverlay";
@@ -127,17 +130,35 @@ function InteractionEditor({ node, index, frames }: { node: Node; index: number;
           onChange={(action) => set({ action })}
         />
       </div>
+      {isMissingDestination(doc, it) && (
+        <div className="row missing-destination" role="alert" style={{ color: "var(--danger)" }}>
+          <span className="small" style={{ flex: 1 }}>Missing destination: that frame was deleted.</span>
+          <button className="btn" title="Remove the broken link" onClick={() => set({ destination: null })}>
+            Remove
+          </button>
+        </div>
+      )}
       {(it.action === "navigate" || overlay) && (
         <div className="row">
           <SelectField
-            value={it.destination ?? ""}
+            value={it.destination && doc.nodes[it.destination] ? it.destination : ""}
             options={[{ value: "", label: overlay ? "Choose overlay frame…" : "Choose frame…" }, ...frames.filter((f) => !overlay || f.id !== node.id).map((f) => ({ value: f.id, label: f.name }))]}
             onChange={(destination) => set({ destination: destination || null })}
           />
         </div>
       )}
       {it.action === "openUrl" && (
-        <input className="textinput" placeholder="https://" defaultValue={it.url ?? ""} onKeyDown={(e) => e.stopPropagation()} onBlur={(e) => set({ url: e.target.value })} />
+        <input
+          key={it.url ?? ""}
+          className="textinput"
+          placeholder="https://"
+          defaultValue={it.url ?? ""}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") e.currentTarget.blur();
+          }}
+          onBlur={(e) => e.target.value !== (it.url ?? "") && set({ url: e.target.value })}
+        />
       )}
       {(it.action === "navigate" || overlay) && (
         <div className="row">

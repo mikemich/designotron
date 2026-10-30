@@ -1394,8 +1394,7 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   let start = doc
     .pages
     .iter()
-    .find_map(|p| p.flow_start.clone())
-    .and_then(|s| ctx.screen_names.get(&s).cloned())
+    .find_map(|p| p.flow_start.as_ref().and_then(|s| ctx.screen_names.get(s)).cloned())
     .or_else(|| screens.first().map(|s| s.1.clone()))
     .unwrap_or_else(|| "Home".into());
   let imports: String = screens

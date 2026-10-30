@@ -41,6 +41,7 @@ import { useCollab } from "../collab";
 import { claudeReady, useChat } from "../ai/chatState";
 import { useShortcuts } from "./ShortcutsDialog";
 import { useImport } from "./ImportDialog";
+import { startFrame } from "../prototype";
 
 const SHAPES: { tool: Tool; label: string; key: string; icon: JSX.Element }[] =
   [
@@ -367,10 +368,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           title="Present"
           onClick={() => {
             const page = doc.pages.find((p) => p.id === es.page);
-            const first =
-              page?.flowStart ??
-              page?.children.find((id) => doc.nodes[id]?.type === "frame") ??
-              page?.children.find((id) => doc.nodes[id]?.type === "component");
+            const first = startFrame(doc, page?.id);
             if (first) useStore.setState({ presenting: first });
             else toast("Nothing to present yet: add a frame (F) first. Presenting plays your frames as a clickable prototype.");
           }}

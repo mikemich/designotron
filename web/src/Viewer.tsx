@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { loadAssets } from "./assets";
 import { Presenter } from "./Presenter";
+import { startFrame } from "./prototype";
 import { copyUrl, decodeFile } from "./snapshot";
 import { bootEngine, dispatch, getDoc, getEngine, newEngine } from "./store";
 
@@ -17,13 +18,18 @@ export function Viewer({ data }: { data: string }) {
         getEngine().load(JSON.stringify(doc));
         dispatch({ op: "relayout" });
         const d = getDoc();
-        // Same rule as Present in the editor: the starting frame, else the first frame, else
-        // the first component.
-        const page = d.pages[0];
-        const ofType = (t: string) => d.pages.flatMap((p) => p.children).find((id) => d.nodes[id]?.type === t);
-        const flow = page?.flowStart && d.nodes[page.flowStart] ? page.flowStart : null;
-        const start = flow ?? ofType("frame") ?? ofType("component");
-        setState(start ? { start } : { error: "This design has no frames to show." });
+        // Same rule as Present in the editor, on the first page that has something to show.
+        // A file with no frames at all is wrapped in one here (this copy is never saved), so
+        // the page's loose layers still show.
+        let start: string | null = null;
+        for (const p of d.pages) start ??= startFrame(d, p.id);
+        if (!start) {
+          const loose = d.pages.find((p) => p.children.length);
+          const made = loose && dispatch<{ id: string }>({ op: "frameSelection", ids: loose.children }, { quiet: true });
+          start = made?.id ?? null;
+          if (start) dispatch({ op: "update", ids: [start], patch: { name: loose.name } }, { quiet: true });
+        }
+        setState(start ? { start } : { error: "This design is empty." });
       } catch (err) {
         setState({ error: String(err instanceof Error ? err.message : err) });
       }

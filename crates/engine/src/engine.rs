@@ -1686,6 +1686,12 @@ impl Engine {
       Command::Delete { ids } => {
         let ids: Vec<NodeId> = ids.into_iter().filter(|i| self.doc.instance_ancestor(i).is_none()).collect();
         ops::delete(&mut self.doc, &ids);
+        // A deleted starting frame leaves the page without one, so Present falls back to its first frame.
+        for p in self.doc.pages.iter_mut() {
+          if p.flow_start.as_ref().is_some_and(|s| !self.doc.nodes.contains_key(s)) {
+            p.flow_start = None;
+          }
+        }
         Ok(json!({}))
       }
       Command::Duplicate { ids } => {
@@ -2042,6 +2048,12 @@ impl Engine {
         Ok(json!({}))
       }
       Command::SetFlowStart { page, id } => {
+        if let Some(start) = &id {
+          let n = self.doc.get(start).ok_or("no such node")?;
+          if n.parent.is_some() || n.page != page || !n.kind.is_frame_like() {
+            return Err("a flow can only start on a top-level frame".into());
+          }
+        }
         self.doc.page_mut(&page).ok_or("no such page")?.flow_start = id;
         Ok(json!({}))
       }
@@ -2814,6 +2826,50 @@ mod tests {
 
   fn ai(e: &mut Engine, tool: &str, input: Value) -> Value {
     e.dispatch(Command::Ai { tool: tool.into(), input }).unwrap()
+  }
+
+  #[test]
+  fn flow_start_is_a_top_level_frame_and_cleared_when_deleted() {
+    let mut e = engine();
+    let page = e.doc.pages[0].id.clone();
+    let shape = |e: &mut Engine, kind, x, parent| {
+      id_of(
+        &e.dispatch(Command::CreateShape {
+          kind,
+          x,
+          y: 0.0,
+          width: 100.0,
+          height: 100.0,
+          parent,
+        })
+        .unwrap(),
+      )
+    };
+    let a = shape(&mut e, NodeType::Frame, 0.0, None);
+    let b = shape(&mut e, NodeType::Frame, 500.0, None);
+    let inner = shape(&mut e, NodeType::Frame, 10.0, Some(a.clone()));
+    let r = rect(&mut e, 900.0, 0.0, 10.0, 10.0, None);
+    let set = |e: &mut Engine, id: Option<&str>| {
+      e.dispatch(Command::SetFlowStart {
+        page: page.clone(),
+        id: id.map(Into::into),
+      })
+    };
+    assert!(set(&mut e, Some(&r)).is_err(), "a rectangle can't start a flow");
+    assert!(set(&mut e, Some(&inner)).is_err(), "a nested frame can't start a flow");
+    assert!(set(&mut e, Some("nope")).is_err());
+    assert_eq!(e.doc.pages[0].flow_start, None);
+    set(&mut e, Some(&b)).unwrap();
+    assert_eq!(e.doc.pages[0].flow_start.as_deref(), Some(b.as_str()));
+    // Deleting another layer keeps the start; deleting the start clears it, and undo restores it.
+    e.dispatch(Command::Delete { ids: vec![a] }).unwrap();
+    assert_eq!(e.doc.pages[0].flow_start.as_deref(), Some(b.as_str()));
+    e.dispatch(Command::Delete { ids: vec![b.clone()] }).unwrap();
+    assert_eq!(e.doc.pages[0].flow_start, None);
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.pages[0].flow_start.as_deref(), Some(b.as_str()));
+    set(&mut e, None).unwrap();
+    assert_eq!(e.doc.pages[0].flow_start, None);
   }
 
   #[test]

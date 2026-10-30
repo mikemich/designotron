@@ -4,7 +4,7 @@ import { getDoc, query, toast, useStore } from "./store";
 import { nodeSvg } from "./exporter";
 import type { Interaction, OverlaySettings, Rect } from "./types";
 import { REPO_URL } from "./panels/GuestBar";
-import { DEFAULT_OVERLAY, overlayDim, overlayOrigin } from "./prototype";
+import { DEFAULT_OVERLAY, isOverlayLink, overlayDim, overlayOrigin } from "./prototype";
 
 interface Hotspot {
   id: string;
@@ -89,6 +89,21 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     }
   };
 
+  /** "While pressing": acts on pointer down and puts the previous screen back on release. */
+  const press = (it: Interaction, from: Rect) => {
+    const prev = { history, overlays };
+    go(it, from);
+    if (it.action !== "navigate" && !isOverlayLink(it)) return;
+    const release = () => {
+      window.removeEventListener("pointerup", release);
+      window.removeEventListener("pointercancel", release);
+      setHistory(prev.history);
+      setOverlays(prev.overlays);
+    };
+    window.addEventListener("pointerup", release);
+    window.addEventListener("pointercancel", release);
+  };
+
   // Timers call `go` through a ref so they never act on a stale render (e.g. "after delay → Back"
   // firing while a modal is open must close the modal).
   const goRef = useRef(go);
@@ -162,7 +177,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
           className="stage"
           style={{ width: frame.width, height: frame.height, transform: `scale(${scale})`, transformOrigin: "0 0", animation: a ? `${a} 300ms ease-out` : undefined }}
         >
-          <FrameLayer id={current.id} hotspots={baseHotspots} flash={flash} onAct={onBaseClick} />
+          <FrameLayer id={current.id} hotspots={baseHotspots} flash={flash} onAct={onBaseClick} onPress={(h, it) => press(it, h.rect)} />
         </div>
         {overlays.length > 0 && (
           <div className="overlays" style={{ width: frame.width, height: frame.height, transform: `scale(${scale})` }}>
@@ -173,6 +188,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
                 isTop={i === overlays.length - 1}
                 onClose={() => setOverlays((l) => l.slice(0, -1))}
                 onAct={(h, it) => go(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y })}
+                onPress={(h, it) => press(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y })}
                 onDelay={(it, from) => goRef.current(it, from)}
               />
             ))}
@@ -190,12 +206,14 @@ function OverlayLayer({
   isTop,
   onClose,
   onAct,
+  onPress,
   onDelay,
 }: {
   overlay: OpenOverlay;
   isTop: boolean;
   onClose: () => void;
   onAct: (h: Hotspot, it: Interaction) => void;
+  onPress: (h: Hotspot, it: Interaction) => void;
   onDelay: (it: Interaction, from: Rect) => void;
 }) {
   const n = getDoc().nodes[o.id];
@@ -225,7 +243,7 @@ function OverlayLayer({
         style={{ left: o.x, top: o.y, width: n.width, height: n.height, animation: a ? `${a} 300ms ease-out` : undefined }}
         onClick={(e) => e.stopPropagation()}
       >
-        <FrameLayer id={o.id} hotspots={hotspots} flash={false} onAct={onAct} />
+        <FrameLayer id={o.id} hotspots={hotspots} flash={false} onAct={onAct} onPress={onPress} />
       </div>
     </div>
   );
@@ -234,10 +252,23 @@ function OverlayLayer({
 /** A frame's picture plus a hotspot per layer with interactions. Hotspots are siblings, so a
  *  layer without its own click runs its nearest ancestor's click, and pointer hover counts for
  *  every layer in the chain (entering a child is still hovering the parent). */
-function FrameLayer({ id, hotspots, flash, onAct }: { id: string; hotspots: Hotspot[]; flash: boolean; onAct: (h: Hotspot, it: Interaction) => void }) {
+function FrameLayer({
+  id,
+  hotspots,
+  flash,
+  onAct,
+  onPress,
+}: {
+  id: string;
+  hotspots: Hotspot[];
+  flash: boolean;
+  onAct: (h: Hotspot, it: Interaction) => void;
+  onPress: (h: Hotspot, it: Interaction) => void;
+}) {
   const svg = useMemo(() => nodeSvg(id), [id]);
   const byId = useMemo(() => new Map(hotspots.map((h) => [h.id, h])), [hotspots]);
-  const isClick = (i: Interaction) => i.trigger === "onClick" || i.trigger === "onPress";
+  const isClick = (i: Interaction) => i.trigger === "onClick";
+  const isPress = (i: Interaction) => i.trigger === "onPress";
   const isHover = (i: Interaction) => i.trigger === "onHover";
   // How many hotspots of each hover owner's chain the pointer is inside; fire on 0 → 1 only.
   const inside = useRef(new Map<string, number>());
@@ -272,6 +303,13 @@ function FrameLayer({ id, hotspots, flash, onAct }: { id: string; hotspots: Hots
               const o = byId.get(owner);
               const click = o?.interactions.find(isClick);
               if (o && click) return onAct(o, click);
+            }
+          }}
+          onPointerDown={() => {
+            for (const owner of h.chain) {
+              const o = byId.get(owner);
+              const down = o?.interactions.find(isPress);
+              if (o && down) return onPress(o, down);
             }
           }}
           onMouseEnter={() => enter(h)}
