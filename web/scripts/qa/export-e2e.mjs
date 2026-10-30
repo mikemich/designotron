@@ -146,6 +146,94 @@ try {
   const css = await page.locator(".code-block").innerText();
   check("notes with */ stay inside the comment", css.startsWith("/* Hover * / check */") && (css.match(/\*\//g) ?? []).length === 1, css.split("\n")[0]);
 
+  await page.click(".tab:has-text('Design')");
+  // 7. Inner shadows survive (the filter region needs margin to cut them from), on canvas and in exports.
+  await page.evaluate(() =>
+    window.__dt.tool("create_nodes", {
+      parentId: null,
+      nodes: [
+        { type: "rectangle", name: "Inner", x: 800, y: 100, width: 100, height: 60, fill: "#F3F4F6" },
+        { type: "rectangle", name: "MaskShape", x: 1000, y: 100, width: 80, height: 80, fill: "#000000" },
+        { type: "rectangle", name: "Masked", x: 970, y: 80, width: 160, height: 140, fill: "#EC4899" },
+        { type: "text", name: "Clipped text", x: 1200, y: 100, text: "one two three four five six seven eight nine ten eleven twelve", fontSize: 16 },
+      ],
+    }),
+  );
+  const inner = await byName("Inner");
+  await page.evaluate(
+    (id) => window.__dt.dispatch({ op: "update", ids: [id], patch: { effects: [{ type: "innerShadow", color: "#000000AA", x: 0, y: 6, blur: 12, spread: 0, visible: true }] } }),
+    inner.id,
+  );
+  await select("Inner");
+  r = await exportSelected("PNG", 1);
+  const px = await page.evaluate(
+    async (b64) => {
+      const img = new Image();
+      img.src = "data:image/png;base64," + b64;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      return { w: c.width, h: c.height, top: Array.from(ctx.getImageData(50, 2, 1, 1).data), mid: Array.from(ctx.getImageData(50, 40, 1, 1).data) };
+    },
+    r.bytes.toString("base64"),
+  );
+  check("inner shadow is painted at the top edge", px.w === 100 && px.h === 60 && px.top[0] < 215 && px.mid[0] > 235, JSON.stringify(px));
+  // Canvas: rasterise the live canvas markup of that layer and look for the same shadow.
+  const canvasPx = await page.evaluate(async (id) => {
+    const g = document.querySelector(`#dt-canvas [data-id='${id}']`);
+    const root = g?.closest("[data-root]") ?? g;
+    if (!root) return null;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="800 100 100 60" width="100" height="60">${root.outerHTML}</svg>`;
+    const img = new Image();
+    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+    await img.decode();
+    const c = document.createElement("canvas");
+    c.width = 100;
+    c.height = 60;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    return { top: Array.from(ctx.getImageData(50, 2, 1, 1).data), mid: Array.from(ctx.getImageData(50, 40, 1, 1).data) };
+  }, inner.id);
+  check("inner shadow is painted on the canvas", !!canvasPx && canvasPx.top[0] < 215 && canvasPx.mid[0] > 235, JSON.stringify(canvasPx));
+
+  // 8. A mask crops the export of its group; overflowing text isn't cut off.
+  await page.evaluate(() => {
+    const ids = ["MaskShape", "Masked"].map((n) => Object.values(window.__dt.doc().nodes).find((x) => x.name === n).id);
+    window.__dt.dispatch({ op: "useAsMask", ids });
+  });
+  await page.waitForTimeout(200);
+  r = await exportSelected("PNG", 1);
+  check("masked group exports at the mask's size", JSON.stringify(pngSize(r.bytes)) === '{"w":80,"h":80}', JSON.stringify(pngSize(r.bytes)));
+  const t = await byName("Clipped text");
+  await page.evaluate(
+    (n) => window.__dt.dispatch({ op: "update", ids: [n.id], patch: { width: 90, height: 24, text: { ...n.text, autoResize: "none" }, effects: [{ type: "dropShadow", color: "#000000AA", x: 2, y: 2, blur: 2, spread: 0, visible: true }] } }),
+    t,
+  );
+  await select("Clipped text");
+  r = await exportSelected("PNG", 1);
+  check("overflowing text with a shadow isn't cut off", pngSize(r.bytes).h > 24 + 30, JSON.stringify(pngSize(r.bytes)));
+
+  // 9. Illustrator-style SVG (DOCTYPE with entities) pasted and dropped keeps its natural size.
+  const AI = `<?xml version="1.0" encoding="utf-8"?>\n<!-- Generator: Adobe Illustrator -->\n<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" [\n\t<!ENTITY ns_svg "http://www.w3.org/2000/svg">\n\t<!ENTITY st0 "fill:#FF0000;">\n]>\n<svg version="1.1" xmlns="&ns_svg;" width="50" height="40" viewBox="0 0 50 40"><rect width="50" height="40" style="&st0;"/></svg>`;
+  const sizes = async () => Object.values((await doc()).nodes).filter((n) => /^(SVG|logo)$/.test(n.name)).map((n) => `${n.name}:${n.width}x${n.height}`);
+  await page.evaluate((text) => {
+    const dt = new DataTransfer();
+    dt.setData("text/plain", text);
+    document.body.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, AI);
+  await page.waitForTimeout(600);
+  await page.evaluate((text) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([text], "logo.svg", { type: "image/svg+xml" }));
+    document.querySelector("#dt-canvas").dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true, clientX: 600, clientY: 400 }));
+  }, AI);
+  await page.waitForTimeout(800);
+  const got = await sizes();
+  check("Illustrator SVG pasted and dropped at natural size", got.includes("SVG:50x40") && got.includes("logo:50x40"), got.join(" "));
+
   check("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
 } catch (err) {
   check("unexpected exception", false, String(err));

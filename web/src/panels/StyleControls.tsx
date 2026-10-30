@@ -99,9 +99,10 @@ export function ColorStylesSection({ filter = "" }: { filter?: string }) {
   const [editing, setEditing] = useState<string | null>(null);
   const add = () => {
     const n = getDoc().nodes[sel[0]];
-    // A colour style holds one solid colour: refuse a gradient or image rather than invent one.
-    const f = n?.fills.find((p) => p.visible);
-    if (f && f.type !== "solid") {
+    // A colour style holds one solid colour: use the first visible solid fill, and refuse
+    // (rather than invent a colour) when the only visible fills are gradients or images.
+    const f = n?.fills.find((p) => p.visible && p.type === "solid");
+    if (n && !f && n.fills.some((p) => p.visible)) {
       toast("Colour styles hold a single solid colour. Select a layer with a solid fill, or change this fill to solid first.", "error");
       return;
     }

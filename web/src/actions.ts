@@ -176,10 +176,11 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
     dispatch({ op: "paste", data: text, parent: pasteTarget(), x: null, y: null });
     return;
   }
-  const svg = cleanSvg(text);
-  if (svg) {
+  if (isSvgText(text)) {
     const c = viewportCenter();
-    const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+    // Only leading whitespace before the prolog stops the browser loading it; the rest is left
+    // as it was (DOCTYPE entities, comments) so the image renders as the author made it.
+    const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text.replace(/^\uFEFF/, "").trim());
     const { width, height } = await imageSize(url);
     dispatch({ op: "createImage", src: "asset:" + addAsset(url), x: c.x - width / 2, y: c.y - height / 2, width, height, name: "SVG", parent: null });
     return;
@@ -189,25 +190,20 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
 }
 
 /**
- * The `<svg>` markup inside pasted or dropped text, without the XML prolog, DOCTYPE and
- * comments that editors and exporters put in front, or null when the text isn't an SVG.
+ * Whether pasted text is an SVG document, allowing the XML prolog, DOCTYPE and comments that
+ * editors and exporters put in front of the `<svg>` tag.
  */
-export function cleanSvg(text: string): string | null {
+export function isSvgText(text: string): boolean {
   const s = text
     .replace(/^\uFEFF/, "")
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/^\s*<\?xml[\s\S]*?\?>/, "")
-    .replace(/^\s*<!DOCTYPE[^[>]*(\[[\s\S]*?\])?\s*>/i, "")
-    .trim();
-  return /^<svg[\s>]/i.test(s) ? s : null;
+    .replace(/^\s*<!DOCTYPE[^[>]*(\[[\s\S]*?\])?\s*>/i, "");
+  return /^\s*<svg[\s>]/i.test(s);
 }
 
 export async function insertImageFile(file: File, x: number, y: number) {
-  let url = await readFileAsDataUrl(file);
-  if (file.type === "image/svg+xml" || /\.svg$/i.test(file.name)) {
-    const svg = cleanSvg(await file.text());
-    if (svg) url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
-  }
+  const url = await readFileAsDataUrl(file);
   const id = addAsset(url);
   let { width, height } = await imageSize(url);
   const max = 1200;
