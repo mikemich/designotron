@@ -182,6 +182,8 @@ try {
   await owner.goto(BASE);
   await newFile(owner);
   await owner.click(".tbtn[title='Share for live editing']");
+  await owner.waitForSelector(".share-dialog");
+  await sleep(500);
   if (!(await owner.locator(".share-dialog input.mono").count())) await owner.click("text=Use a different relay");
   await owner.fill(".share-dialog input.mono", BASE);
   await owner.click("button:has-text('Share online')");

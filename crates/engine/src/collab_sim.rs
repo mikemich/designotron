@@ -31,6 +31,36 @@ fn mixed_old_and_new_editors_converge() {
   }
 }
 
+/// Undoing every change in turn brings back each earlier document exactly (list order
+/// included), and redoing them all brings back each later one.
+#[test]
+fn solo_undo_and_redo_are_exact() {
+  for seed in 1..SEEDS {
+    let mut r = Rng(seed * 7919 + 3);
+    let mut e = engine(seed | 4);
+    e.dispatch(Command::AddPage { name: None }).unwrap();
+    let json = e.to_json();
+    e.load(&json).unwrap();
+    let mut states = vec![e.doc.clone()];
+    for _ in 0..40 {
+      let before = e.doc.clone();
+      local_op(&mut e, &mut r, true);
+      if e.doc != before {
+        states.push(e.doc.clone());
+      }
+    }
+    let same = |a: &Document, b: &Document| a.pages == b.pages && a.styles == b.styles && a.variables == b.variables && a.nodes == b.nodes;
+    for i in (1..states.len()).rev() {
+      e.dispatch(Command::Undo).unwrap();
+      assert!(same(&e.doc, &states[i - 1]), "seed {seed}: undo to state {}", i - 1);
+    }
+    for (i, want) in states.iter().enumerate().skip(1) {
+      e.dispatch(Command::Redo).unwrap();
+      assert!(same(&e.doc, want), "seed {seed}: redo to state {i}");
+    }
+  }
+}
+
 #[test]
 fn concurrent_delete_of_different_pages_leaves_a_page() {
   let mut sim = Sim::new(2, &[], 7);
@@ -287,7 +317,7 @@ fn run(seed: u64, n: usize, old: &[usize], steps: usize) {
     match r.below(10) {
       0..=4 => {
         let i = r.below(n);
-        local_op(&mut sim.eds[i], &mut r);
+        local_op(&mut sim.eds[i], &mut r, false);
       }
       5..=6 => {
         let i = r.below(n);
@@ -305,12 +335,16 @@ fn run(seed: u64, n: usize, old: &[usize], steps: usize) {
 }
 
 /// One random local change, checked to rebuild exactly from its own per-id delta.
-fn local_op(e: &mut Engine, r: &mut Rng) {
+/// With `solo`, no undo, redo or direct page reorder (which has no undo step): only changes
+/// that undo and redo must reverse exactly.
+fn local_op(e: &mut Engine, r: &mut Rng, solo: bool) {
   let before = e.doc.clone();
   let pages: Vec<String> = e.doc.pages.iter().map(|p| p.id.clone()).collect();
   let styles: Vec<String> = e.doc.styles.colors.iter().map(|s| s.id.clone()).collect();
   let page = |r: &mut Rng| pages[r.below(pages.len())].clone();
-  match r.below(16) {
+  let pick = r.below(16);
+  let pick = if solo && matches!(pick, 4 | 11..=13) { 15 } else { pick };
+  match pick {
     0 => {
       let _ = e.dispatch(Command::AddPage { name: None });
     }

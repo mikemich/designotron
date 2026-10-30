@@ -580,6 +580,7 @@ fn merge_list<T: Serialize + DeserializeOwned + Clone + PartialEq>(cur: &mut Vec
       cur.retain(|x| id(x) != id(f));
     }
   }
+  restore_order(cur, from, to, &id);
   for (i, t) in to.iter().enumerate() {
     match (at(from, id(t)), at(cur, id(t))) {
       (None, None) => cur.insert(i.min(cur.len()), t.clone()),
@@ -590,6 +591,26 @@ fn merge_list<T: Serialize + DeserializeOwned + Clone + PartialEq>(cur: &mut Vec
       }
       _ => {}
     }
+  }
+}
+
+/// Puts the items the step neither added nor removed back in `to`'s order, if the step
+/// reordered them and `cur` still has `from`'s order (a collaborator's newer order stays).
+/// Only the slots those items occupy are rearranged, so items others added keep their place.
+fn restore_order<T: Clone>(cur: &mut [T], from: &[T], to: &[T], id: &impl Fn(&T) -> &String) {
+  let in_list = |list: &[T], k: &String| list.iter().any(|x| id(x) == k);
+  let slots: Vec<usize> = (0..cur.len())
+    .filter(|&i| in_list(from, id(&cur[i])) && in_list(to, id(&cur[i])))
+    .collect();
+  let cur_order: Vec<String> = slots.iter().map(|&i| id(&cur[i]).clone()).collect();
+  let order_in = |list: &[T]| -> Vec<String> { list.iter().map(|x| id(x).clone()).filter(|k| cur_order.contains(k)).collect() };
+  let (from_order, to_order) = (order_in(from), order_in(to));
+  if cur_order != from_order || from_order == to_order {
+    return;
+  }
+  let sorted: Vec<T> = to_order.iter().filter_map(|k| cur.iter().find(|x| id(x) == k).cloned()).collect();
+  for (slot, item) in slots.into_iter().zip(sorted) {
+    cur[slot] = item;
   }
 }
 
@@ -1497,6 +1518,55 @@ mod tests {
     assert_eq!(d["colorStyles"]["patch"].as_object().unwrap().keys().collect::<Vec<_>>(), [&id]);
     assert_eq!(d["colorStyles"]["patch"][&id], json!({ "color": "#222222" }));
     assert!(d.get("textStyles").is_none() && d.get("pageChanges").is_none() && d.get("collectionChanges").is_none());
+  }
+
+  #[test]
+  fn undo_of_a_variable_reorder_restores_the_order_and_keeps_a_peers_variable() {
+    let ids = |room: &Room, i: usize| -> Vec<String> { room.editors[i].doc.variables[0].variables.iter().map(|v| v.id.clone()).collect() };
+    let set = |room: &mut Room, i: usize, f: &dyn Fn(&mut Vec<Collection>)| {
+      let mut cs = room.editors[i].doc.variables.clone();
+      f(&mut cs);
+      room.editors[i].dispatch(Command::SetVariables { collections: cs }).unwrap();
+      sync(room, i);
+    };
+    let (mut room, _) = Room::new(2);
+    set(&mut room, 0, &|cs| {
+      *cs = vec![
+        collection("c1", vec![variable("a", &[("m1", 1.0)]), variable("b", &[("m1", 2.0)])]),
+        collection("c2", vec![variable("x", &[("m1", 3.0)])]),
+      ]
+    });
+    // Solo: undo and redo are exact, for variables and for collections.
+    set(&mut room, 0, &|cs| {
+      cs[0].variables.reverse();
+      cs.reverse();
+    });
+    assert_eq!(ids(&room, 0), ["x"]);
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    let c: Vec<&str> = room.editors[0].doc.variables.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(c, ["c1", "c2"], "collections are back in order");
+    assert_eq!(ids(&room, 0), ["a", "b"], "variables are back in order");
+    room.editors[0].dispatch(Command::Redo).unwrap();
+    assert_eq!(
+      room.editors[0].doc.variables[1]
+        .variables
+        .iter()
+        .map(|v| v.id.as_str())
+        .collect::<Vec<_>>(),
+      ["b", "a"]
+    );
+    sync(&mut room, 0);
+    // A peer adds a variable after my reorder: undoing mine keeps theirs.
+    set(&mut room, 1, &|cs| {
+      let n = cs.iter().position(|c| c.id == "c1").unwrap();
+      cs[n].variables.push(variable("c", &[("m1", 4.0)]));
+    });
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    let c1 = room.editors[0].doc.variables.iter().find(|c| c.id == "c1").unwrap();
+    let v: Vec<&str> = c1.variables.iter().map(|v| v.id.as_str()).collect();
+    assert_eq!(v, ["a", "b", "c"], "my order is back, their variable stays");
+    let c: Vec<&str> = room.editors[0].doc.variables.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(c, ["c1", "c2"]);
   }
 
   #[test]
