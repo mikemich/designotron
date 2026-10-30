@@ -1,11 +1,12 @@
 # Status
 
-Last updated: 2026-10-26. Keep this file current: move items between sections in the same
+Last updated: 2026-10-30. Keep this file current: move items between sections in the same
 change that finishes, starts or breaks them.
 
 ## In progress
 
 - Roadmap phases 1–3 and most of 4 are done. Next steps and the launch checklist are in [ROADMAP.md](ROADMAP.md#next).
+- Figma parity programme (from QA round 6): Wave 1 bug fixes are done (below). Wave 2 is next: big-file performance stage 1 (text level of detail, culling, finer render cache, per-root persistence), Alt-hover measurement and equal-spacing snapping, auto layout min/max and text truncation/paragraph spacing/links/baseline, component properties (boolean/text/instance swap), multiple export settings with copy as PNG/SVG/CSS and copy/paste properties.
 
 ## To do
 
@@ -37,6 +38,7 @@ Ordered by impact on "replace Figma for a small team".
 | Engine (Rust)   | Serde document model, pages, undo/redo with gesture coalescing, JSON merge-patch edits               |
 | Layout          | Auto layout (direction, gap, padding, alignment, space-between, wrap), hug/fill/fixed, constraints   |
 | Components      | Main components, instances with stable ids, overrides (also on instances nested in a main component, set through the outer instance, and a nested instance swapped through it; they survive main edits, save/load, undo and multiplayer), reset/detach, variants (component sets); a component can't be made to contain itself (instance placement, moves, paste, swaps; pasting a copy of a main into its own main is fine, it becomes a new component), swap instance (panel and context menu; overrides on layers with the same name path carry over to the new variant or component), add variant, rename variant properties and values; pasting an instance into another file brings its main component |
+| QA round 6, Wave 1 | Autosave: one serialised save at a time, "Saved locally" only after a finished write of the current document revision (`docRev`; selection and no-op relayouts never write), thumbnails saved separately, failed writes show "Not saved, retrying" and keep a recovery copy, saves at least every 4 s (10 s for big files) under continuous editing, closing with unsaved work prompts. Picking: a lone selected top-level frame no longer captures clicks and drags on its children (auto layout children can be dragged to reorder); Assets click places at the viewport centre and drop at the pointer, never inside a main component. Undo/redo are three-way per property (also inside nested objects), per page field and per style or variable id, so a collaborator's newer value is never overwritten; redo restores the page and selection. Multiplayer heartbeat (ping every 10 s) shows "Reconnecting…" on a dead or offline connection without false drops in throttled background tabs. Share links say which editor they open (`localStorage["dt:editorUrl"]` overrides it) with "Preview here". Prototypes: one start-frame rule everywhere (flow start → first frame → first component; deleting the start clears it), flow starts only on top-level frames/components, "Missing destination" for links to deleted frames, While pressing acts on press and reverts on release (mouse, touch, one pointer), Enter commits the link URL, view links of files without frames show the page. Export: crops include strokes, shadows (1.5×blur + spread), blurs, overflowing fixed-size text and stop at masks; inner shadows and canvas filter regions match; oversized exports scale down to 16384 px / 268 Mpx with a toast; SVG export has no scale; SVG paste with a prolog/DOCTYPE/entities works; colour styles only from solid fills; `*/` escaped in CSS notes |
 | Styles          | Colour and text styles: create, rename, edit in place (`UpdateColorStyle`, `UpdateTextStyle`), delete; style chips with detach in Fill and Text |
 | Canvas          | Pan/zoom, Figma-style picking and drill-down, marquee, move/resize/rotate, smart-guide snapping      |
 | Tools           | Frame, rectangle, ellipse, line, arrow, polygon, star, pen, pencil, text, image, hand                |
