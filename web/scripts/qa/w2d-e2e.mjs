@@ -622,7 +622,117 @@ try {
     const ok = (await R.pg.locator(".empty-hint").count()) === 0 && (await R.byName("B"))?.name === "B";
     check("writes that always fail fall back to memory instead of breaking the editor", ok);
     check("and the label says the browser storage is unavailable", (await R.label()).includes("storage unavailable"), await R.label());
+    check("the file stays unsaved, so closing still asks", await R.pg.evaluate(() => window.__dt.dirty()));
     await R.c.close();
+  }
+  {
+    // An edit and a tab hide while the autosave is still gathering a big plan in slices, and the
+    // newer write is slow: the older plan must not land after it.
+    const R = await rig();
+    await R.newFile();
+    for (let k = 0; k < 6; k++) await R.tool("create_nodes", { nodes: Array.from({ length: 10 }, (_, i) => frame(`F${k * 10 + i}`, (k * 10 + i) * 400)) });
+    await R.settle();
+    await sleep(1000);
+    const id = await R.fileId();
+    await R.pg.evaluate(() => {
+      const parse = JSON.parse;
+      JSON.parse = function (src, ...rest) {
+        const v = parse.call(this, src, ...rest);
+        if (window.__armSlice && typeof src === "string" && v && typeof v === "object" && "token" in v && Array.isArray(v.dirty) && !v.full && v.dirty.length > 20) {
+          window.__armSlice = false;
+          setTimeout(() => {
+            const n = Object.values(window.__dt.doc().nodes).find((x) => x.name === "F3");
+            window.__dt.dispatch({ op: "update", ids: [n.id], patch: { name: "F3 edited during slicing" } });
+            window.dispatchEvent(new Event("pagehide"));
+            window.__holdNext = true;
+          }, 1);
+        }
+        return v;
+      };
+      const orig = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (v, k) {
+        const r = orig.call(this, v, k);
+        if (window.__holdNext && String(k).startsWith("dt:file:") && v && v.v === 2) {
+          window.__holdNext = false;
+          // Keep this transaction busy (a slow disk), so it commits after the slicing ends.
+          const os = this;
+          const until = performance.now() + 1500;
+          const spin = () => {
+            if (performance.now() < until) os.get("dt:index").onsuccess = spin;
+          };
+          spin();
+        }
+        return r;
+      };
+    });
+    const ids = await R.pg.evaluate(() => window.__dt.doc().pages[0].children);
+    await R.dispatch({ op: "nudge", ids, dx: 5, dy: 0 });
+    await R.pg.evaluate(() => (window.__armSlice = true));
+    await sleep(7000);
+    await R.dispatch({ op: "update", ids: [(await R.byName("F52")).id], patch: { y: 9 } });
+    await R.settle();
+    await sleep(800);
+    const want = await R.canon();
+    const stored = await R.stored(id);
+    check("a plan gathered slowly never lands over a newer one", stored === want, stored.startsWith("ERR") ? stored : "differs");
+    await R.c.close();
+  }
+  {
+    // The first write of a session fails once (the transaction aborts): it shows as not saved,
+    // is retried, and lands in IndexedDB; nothing is kept only in memory.
+    const R = await rig();
+    await R.newFile();
+    await R.tool("create_nodes", { nodes: nodes4(2) });
+    await R.settle();
+    const id = await R.fileId();
+    await R.pg.reload();
+    await R.pg.waitForSelector("#dt-canvas");
+    await sleep(1000);
+    await R.pg.evaluate(() => {
+      const orig = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (v, k) {
+        const r = orig.call(this, v, k);
+        if (window.__failOnce && String(k).startsWith("dt:file:")) {
+          window.__failOnce = false;
+          this.transaction.abort();
+        }
+        return r;
+      };
+      window.__failOnce = true;
+    });
+    await R.dispatch({ op: "update", ids: [(await R.byName("A")).id], patch: { y: 11 } });
+    await sleep(2500);
+    const failed = await R.label();
+    check("a failed first write shows as not saved, with a retry", failed.includes("Not saved, retrying"), failed);
+    await sleep(6500);
+    await R.settle();
+    check("the retry saves it to IndexedDB", (await R.label()).includes("Saved locally") && (await R.stored(id)) === (await R.canon()), await R.label());
+    await R.c.close();
+  }
+  {
+    // A file renamed in the files list while it is open elsewhere keeps the new name when the editor saves.
+    const A = await rig();
+    await A.newFile();
+    await A.tool("create_nodes", { nodes: nodes4(2) });
+    await A.dispatch({ op: "setDocName", name: "Before" });
+    await A.settle();
+    const id = await A.fileId();
+    const B = await rig(A.c);
+    await B.pg.goto(URL_ + "/#/");
+    await B.pg.waitForSelector(".file-card");
+    B.pg.removeAllListeners("dialog");
+    B.pg.once("dialog", (d) => d.accept("Renamed elsewhere"));
+    const card = B.pg.locator(".file-card", { hasText: "Before" });
+    await card.hover();
+    await card.locator(".ibtn.more").click();
+    await B.pg.click(".menu >> text=Rename");
+    await sleep(800);
+    await A.dispatch({ op: "update", ids: [(await A.byName("A")).id], patch: { x: 7 } });
+    await A.settle();
+    await sleep(500);
+    const stored = JSON.parse(await A.stored(id));
+    check("a rename made elsewhere survives the editor's next save", stored.name === "Renamed elsewhere" && stored.nodes[(await A.byName("A")).id].x === 7, String(stored.name));
+    await A.c.close();
   }
   if (RELAY) {
     // A guest makes their own copy of a shared file while an autosave lands during the copy's write.

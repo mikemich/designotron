@@ -79,9 +79,24 @@ let idbOk = true;
 // is a real failure (a transient error, quota, a full disk) that callers must see, not a sign
 // that IndexedDB is missing.
 let idbWorked = false;
-// Set once a write has landed. Some browsers (older Safari in private mode) open IndexedDB and
-// fail every write; until one has worked a failing write means falling back to memory.
+// Set once a write has landed. A write that fails after the database opened is a real failure
+// (a transaction that aborted, quota) that callers must see and retry, so that nothing is
+// silently kept in memory for the session. The exceptions are the errors of a database that
+// can't be used at all on the very first write: `SecurityError`, and what
+// older Safari does in a private window (opens, then throws a quota error as soon as a write
+// is queued): those fall back to memory until a write has worked.
 let idbWrote = false;
+
+/** An error that says IndexedDB can't be written to at all (not one that may pass). */
+const unusable = (err: unknown): boolean => err instanceof DOMException && err.name === "SecurityError";
+
+/** The first write of a transaction threw a quota error as it was queued (rather than failing
+ * when the transaction ran): what older Safari does in a private window. */
+class QueuedWriteError extends Error {
+  constructor(readonly original: unknown) {
+    super("A write could not be queued");
+  }
+}
 
 /** Opens the database once (as idb-keyval will) so that only a failed *open* means IndexedDB is
  * missing; a read that fails on a cold load then reaches the caller instead of reading as
@@ -135,7 +150,7 @@ async function set(key: string, value: unknown): Promise<void> {
       await idbSet(key, value);
       idbWrote = true;
     } catch (err) {
-      if (idbWrote) throw err;
+      if (idbWrote || !unusable(err)) throw err;
       idbOk = false;
     }
   }
@@ -149,7 +164,7 @@ async function del(key: string): Promise<void> {
       await idbDel(key);
       idbWrote = true;
     } catch (err) {
-      if (idbWrote) throw err;
+      if (idbWrote || !unusable(err)) throw err;
       idbOk = false;
     }
   }
@@ -199,20 +214,33 @@ async function transact(readKeys: string[], decide: (found: unknown[]) => Writes
             tx.oncomplete = () => resolve();
             tx.onabort = () => reject(tx.error ?? new Error("transaction aborted"));
             const found: unknown[] = new Array(readKeys.length);
+            const apply = () => {
+              let w: Writes;
+              try {
+                w = decide(found);
+              } catch (err) {
+                reject(err);
+                tx.abort();
+                return;
+              }
+              let queued = 0;
+              try {
+                for (const [key, value] of w.put) (os.put(value, key), queued++);
+                for (const key of w.del) (os.delete(key), queued++);
+              } catch (err) {
+                // (A later write throwing is just the transaction having been aborted.)
+                const safariPrivate = queued === 0 && err instanceof DOMException && err.name === "QuotaExceededError";
+                reject(safariPrivate ? new QueuedWriteError(err) : err);
+                tx.abort();
+              }
+            };
+            if (!readKeys.length) return apply();
             let left = readKeys.length;
             readKeys.forEach((k, i) => {
               const req = os.get(k);
               req.onsuccess = () => {
                 found[i] = req.result;
-                if (--left > 0) return;
-                try {
-                  const w = decide(found);
-                  for (const [key, value] of w.put) os.put(value, key);
-                  for (const key of w.del) os.delete(key);
-                } catch (err) {
-                  reject(err);
-                  tx.abort();
-                }
+                if (--left === 0) apply();
               };
             });
           }),
@@ -220,8 +248,10 @@ async function transact(readKeys: string[], decide: (found: unknown[]) => Writes
       idbWrote = true;
       return;
     } catch (err) {
-      // A decision to give up (or a broken store that has worked before) is the caller's.
-      if (err instanceof StaleStorageError || idbWrote) throw err;
+      // Only a database that can't be written to at all, on the very first write, is given up
+      // on; anything else is a failed save for the caller to show and retry.
+      const cause = err instanceof QueuedWriteError ? err.original : err;
+      if (idbWrote || !(err instanceof QueuedWriteError || unusable(err))) throw cause;
       idbOk = false;
     }
   }
@@ -270,11 +300,22 @@ interface Known {
   roots: Record<string, string[]>;
   names: Record<string, string>;
   assets: Set<string>;
+  /** The document name in the manifest, to notice a rename made elsewhere. */
+  name: string;
   /** Size of each layer's records, in characters, and of the document-level record. */
   sizes: Record<string, number>;
   metaSize: number;
 }
 const layered = new Map<string, Known>();
+
+/** The newest plan whose write has started, per file: an older plan (one still being gathered
+ * when a newer one was made and written) must never be written after it. */
+const startedPlan = new Map<string, number>();
+
+/** Whether a plan with this token is older than one already being written for the file. */
+export function planIsOutdated(id: string, token: number): boolean {
+  return token < (startedPlan.get(id) ?? 0);
+}
 
 /** This page load, for telling manifests apart. */
 const WRITER = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -321,6 +362,8 @@ export async function saveFile(id: string, name: string, docJson: string, thumbn
  * Throws when the write didn't land (nothing is changed then).
  */
 export async function saveDelta(id: string, name: string, plan: SavePlan) {
+  if (planIsOutdated(id, plan.token)) return;
+  startedPlan.set(id, plan.token);
   const state = layered.get(id);
   if (!plan.full && !state) throw new StaleStorageError();
   // This tab's view of the stored file once the write lands, for a write started before it
@@ -342,7 +385,8 @@ export async function saveDelta(id: string, name: string, plan: SavePlan) {
   }
   const expected = state ? { seq: state.seq, writer: state.writer } : null;
   const seq = (state?.seq ?? 0) + 1;
-  const known: Known = { seq, writer: WRITER, roots, names, assets: new Set(), sizes, metaSize: plan.meta.length };
+  const known: Known = { seq, writer: WRITER, roots, names, assets: new Set(), name, sizes, metaSize: plan.meta.length };
+  let writtenName = name;
   // Optimistic: a write begun before this one lands builds on this.
   layered.set(id, known);
   try {
@@ -374,7 +418,18 @@ export async function saveDelta(id: string, name: string, plan: SavePlan) {
           }
         }
       }
-      put.push([fileKey(id), { v: 2, seq: (m?.seq ?? 0) + 1, writer: WRITER, meta: plan.meta, roots: nextRoots, names: nextNames, assets: [...nextAssets] } satisfies Manifest]);
+      // A rename made elsewhere (the files list) since this tab last wrote keeps its name, unless
+      // this tab renamed the file too.
+      let meta = plan.meta;
+      if (!plan.full && m && state) {
+        const storedName = JSON.parse(m.meta).name;
+        if (storedName !== state.name && name === state.name) {
+          meta = JSON.stringify({ ...JSON.parse(meta), name: storedName });
+          writtenName = storedName;
+        }
+      }
+      known.name = writtenName;
+      put.push([fileKey(id), { v: 2, seq: (m?.seq ?? 0) + 1, writer: WRITER, meta, roots: nextRoots, names: nextNames, assets: [...nextAssets] } satisfies Manifest]);
       // Records the stored manifest listed and the new one doesn't, deleted with the write.
       const goneRoots = Object.fromEntries(Object.entries(m?.roots ?? {}).filter(([r]) => !(r in nextRoots)));
       known.assets = nextAssets;
@@ -389,7 +444,7 @@ export async function saveDelta(id: string, name: string, plan: SavePlan) {
   await writeIndex((idx) => {
     const rest = idx.filter((f) => f.id !== id);
     const prev = idx.find((f) => f.id === id);
-    return [...rest, { id, name, updatedAt: Date.now(), thumbnail: prev?.thumbnail }];
+    return [...rest, { id, name: writtenName, updatedAt: Date.now(), thumbnail: prev?.thumbnail }];
   });
 }
 
@@ -404,6 +459,8 @@ export async function saveThumbnail(id: string, thumbnail: string) {
 }
 
 export async function loadFile(id: string): Promise<string | null> {
+  // A file being opened starts a new engine, whose plans count from 1 again.
+  startedPlan.delete(id);
   const f = (await get(fileKey(id))) as StoredFile | Manifest | undefined;
   if (!f) return null;
   if (isManifest(f)) return loadLayered(id, f);
@@ -457,6 +514,7 @@ async function loadLayered(id: string, first: Manifest): Promise<string> {
         writer: m.writer,
         roots: m.roots,
         names: m.names ?? {},
+        name: JSON.parse(m.meta).name,
         assets: new Set(m.assets),
         sizes,
         metaSize: m.meta.length,

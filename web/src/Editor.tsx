@@ -26,6 +26,7 @@ import {
   listVersions,
   loadFile,
   persistentStorage,
+  planIsOutdated,
   readRecovery,
   saveDelta,
   StaleStorageError,
@@ -242,8 +243,11 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           }
         }
         if (superseded) continue;
-        lastSnap = { plan: { token: p.token, full: p.full, meta: p.meta, dirty, names: p.names, removed: p.removed }, name: getDoc().name, rev };
-        return lastSnap;
+        const gathered: Snapshot = { plan: { token: p.token, full: p.full, meta: p.meta, dirty, names: p.names, removed: p.removed }, name: getDoc().name, rev };
+        // (Not over a newer plan made meanwhile, say by closing the page.)
+        const last = lastSnap as Snapshot | null;
+        if (!last || last.rev <= rev) lastSnap = gathered;
+        return gathered;
       }
     };
 
@@ -307,6 +311,9 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           if (!final && getEngine() !== engine) break;
           let snap = final ?? (await snapshotInSlices());
           final = null;
+          // A plan still being gathered when a newer one was made and started (closing the
+          // page) must not land after it: it holds older records of the same layers.
+          if (planIsOutdated(fileId, snap.plan.token)) continue;
           pendingSince = null;
           startedRev = Math.max(startedRev, snap.rev);
           try {
@@ -331,7 +338,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           // Closed: the editor has moved on, so there is nothing to report and the channel is shut.
           if (closed) continue;
           tabs?.postMessage({ fileId });
-          if (getEngine() === engine && snap.rev > useStore.getState().savedDocRev) markSaved(snap.rev);
+          // Without working storage nothing is saved: stay dirty (and ask before closing).
+          if (persistentStorage() && getEngine() === engine && snap.rev > useStore.getState().savedDocRev) markSaved(snap.rev);
           if (Date.now() - lastVersion > AUTO_VERSION_MS) {
             lastVersion = Date.now();
             // A version is a whole copy of the file (the current one, which may be newer than
@@ -433,7 +441,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         write(snap).then(
           (done) => {
             dropRecovery(done);
-            if (!closed && getEngine() === engine && done.rev > useStore.getState().savedDocRev) markSaved(done.rev);
+            if (persistentStorage() && !closed && getEngine() === engine && done.rev > useStore.getState().savedDocRev) markSaved(done.rev);
           },
           (err) => {
             console.error(err);

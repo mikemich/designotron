@@ -463,6 +463,7 @@ export function zoomBy(factor: number, cx?: number, cy?: number) {
   zoomToFit: () => zoomToFit(),
   edit: (id: string) => useStore.setState({ editingText: id }),
   viewport: () => useStore.getState().viewport,
+  dirty: () => useStore.getState().dirty,
   setViewport: (v: Viewport) => useStore.setState({ viewport: v }),
   onDocChange: (fn: () => void) => onDocChange(fn),
   vectorEdit: () => ({ id: useStore.getState().editingVector, points: useStore.getState().vectorPoints }),
