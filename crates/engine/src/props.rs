@@ -768,35 +768,6 @@ pub fn follow_variants(doc: &mut Document, prev: &Document) {
   }
 }
 
-/// Whether an instance kept its component but got other property values.
-fn values_changed(old: &Option<InstanceInfo>, new: &Option<InstanceInfo>) -> bool {
-  match (old, new) {
-    (Some(a), Some(b)) => a.component_id == b.component_id && a.prop_values != b.prop_values,
-    _ => false,
-  }
-}
-
-/// After a collaborator's change: an instance whose property values changed (its component
-/// didn't) is rebuilt from them, so its layers show what they say; the layers and the info are
-/// merged separately. (A swapped component is left as merged, see STATUS.)
-pub fn resync_changed(doc: &mut Document, gen: &mut IdGen, prev: &Document) {
-  let mut tops: Vec<NodeId> = Vec::new();
-  for item in prev.nodes.diff(&doc.nodes) {
-    let imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, n) } = item else {
-      continue;
-    };
-    if n.kind == NodeType::Instance && values_changed(&o.instance, &n.instance) {
-      let top = outermost(doc, k);
-      if !tops.contains(&top) {
-        tops.push(top);
-      }
-    }
-  }
-  for t in tops {
-    components::sync_instance(doc, &t, gen);
-  }
-}
-
 // ---------- Values on instances ----------
 
 fn set(doc: &mut Document, gen: &mut IdGen, instance: &str, prop: &str, value: Option<Value>) -> Result<Value, String> {

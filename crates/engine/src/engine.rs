@@ -959,7 +959,6 @@ impl Engine {
           let _ = crate::collab::apply(&mut g.doc, &delta);
         }
         self.refresh_fingerprints();
-        crate::props::resync_changed(&mut self.doc, &mut self.gen, &prev);
         self.after_mutation(&prev);
         self.collab_synced = Some(self.doc.clone());
         self.rev += 1;

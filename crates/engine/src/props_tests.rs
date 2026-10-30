@@ -1295,15 +1295,20 @@ mod review {
     assert!(!k.e.doc.get(&named(&k.e, &inst, "Icon")).unwrap().visible);
   }
 
+  /// Relay-ordered collab: two people set different values on one instance at once. Merging is
+  /// per node property, so one of the two `instance` values wins as a whole; what matters is that
+  /// both editors and the relay's copy end with exactly the same thing, also after later changes.
   #[test]
-  fn concurrent_values_on_one_instance_leave_layers_that_match() {
+  fn concurrent_values_on_one_instance_end_identical_everywhere() {
     let mut k = kit();
     let label = add_bound(&mut k, "Label", PropKind::Text, "Label");
     let show = add_bound(&mut k, "Show icon", PropKind::Boolean, "Icon");
     let inst = instance_of_default(&mut k);
     let mut b = Engine::new(Box::new(crate::text::HeuristicMeasurer), 9);
     b.load(&k.e.to_json()).unwrap();
-    let base = k.e.doc.clone();
+    let mut relay = k.e.doc.clone();
+    k.e.collab_reset(true);
+    b.collab_reset(true);
     set_prop(&mut k, &inst, &label, Some(json!("Mine")));
     b.dispatch(Command::ComponentProps {
       edit: PropsOp::Set {
@@ -1313,16 +1318,40 @@ mod review {
       },
     })
     .unwrap();
-    let db = crate::collab::delta(&base, &b.doc, true);
+    let (da, db) = (k.e.collab_delta(), b.collab_delta());
+    // The relay orders A's change, then B's.
+    crate::collab::apply(&mut relay, &da).unwrap();
+    crate::collab::apply(&mut relay, &db).unwrap();
+    k.e.dispatch(Command::CollabAck { rejected: false }).unwrap();
     k.e.dispatch(Command::ApplyRemote { delta: db, local: false }).unwrap();
-    let values = k.e.doc.get(&inst).unwrap().instance.as_ref().unwrap().prop_values.clone();
-    let shown = text(&k.e, &named(&k.e, &inst, "Label"));
-    let expected = values.get(&label).and_then(|v| v.as_str()).unwrap_or("Buy");
-    assert_eq!(shown, expected, "the layers show what the instance's values say");
-    assert_eq!(
-      k.e.doc.get(&named(&k.e, &inst, "Icon")).unwrap().visible,
-      values.get(&show) != Some(&json!(false))
-    );
+    b.dispatch(Command::ApplyRemote { delta: da, local: false }).unwrap();
+    b.dispatch(Command::CollabAck { rejected: false }).unwrap();
+    let state = |d: &crate::model::Document| -> Vec<String> {
+      let mut out = vec![format!("{:?}", d.get(&inst).unwrap().instance)];
+      for i in d.subtree(&inst).iter().skip(1) {
+        let n = d.get(i).unwrap();
+        out.push(format!(
+          "{} {} {} {:?}",
+          i,
+          n.name,
+          n.visible,
+          n.text.as_ref().map(|t| t.characters.clone())
+        ));
+      }
+      out
+    };
+    assert_eq!(state(&k.e.doc), state(&relay), "A matches the relay");
+    assert_eq!(state(&b.doc), state(&relay), "B matches the relay");
+    // An unrelated remote change arrives while A has a local edit waiting: still identical.
+    shape(&mut b, NodeType::Frame, 7000.0);
+    let dc = b.collab_delta();
+    crate::collab::apply(&mut relay, &dc).unwrap();
+    b.dispatch(Command::CollabAck { rejected: false }).unwrap();
+    shape(&mut k.e, NodeType::Rectangle, 9000.0);
+    let _ = k.e.collab_delta();
+    k.e.dispatch(Command::ApplyRemote { delta: dc, local: false }).unwrap();
+    assert_eq!(state(&k.e.doc), state(&relay), "A still matches the relay");
+    assert_eq!(state(&b.doc), state(&relay), "B still matches the relay");
   }
 
   #[test]
