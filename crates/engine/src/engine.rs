@@ -853,7 +853,13 @@ impl Engine {
           // Nobody else changed anything since: the saved state is exact (and laid out).
           let exact = self.doc == step.after;
           self.doc = crate::collab::revert(&self.doc, &step.after, &step.before.doc);
-          self.selection = step.before.selection.clone();
+          self.selection = step
+            .before
+            .selection
+            .iter()
+            .filter(|id| self.doc.get(id).is_some())
+            .cloned()
+            .collect();
           if self.doc.page(&step.before.page).is_some() {
             self.page = step.before.page.clone();
           }

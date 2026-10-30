@@ -140,6 +140,86 @@ try {
   const copied = await mine2.evaluate(() => navigator.clipboard.readText());
   check("dt:editorUrl redirects copy links", copied.startsWith(RELAY + "/#/copy/"), copied.slice(0, 50));
   await mine2.keyboard.press("Escape");
+  // An "online" event while a reconnect is still opening must not leave two sockets joined.
+  const shareRoom = async (p) => {
+    await p.goto(RELAY);
+    await p.click("button:has-text('New design file')");
+    await p.waitForSelector("#dt-canvas");
+    await p.click(".tbtn[title='Share for live editing']");
+    if (!(await p.locator(".share-dialog input.mono").count())) await p.click("text=Use a different relay");
+    await p.fill(".share-dialog input.mono", RELAY);
+    await p.click("button:has-text('Share online')");
+    await p.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 10000 });
+    const link = await p.evaluate(() => window.__dt.collab().link);
+    await p.keyboard.press("Escape");
+    return link;
+  };
+  const race = await newPage("Rae");
+  await race.addInitScript(() => {
+    window.__open = 0;
+    window.__joins = 0;
+    window.__race = false;
+    const Orig = WebSocket;
+    window.WebSocket = class extends Orig {
+      constructor(...a) {
+        super(...a);
+        if (!String(a[0]).includes("/ws?room")) return;
+        this.addEventListener("open", () => window.__open++);
+        this.addEventListener("close", () => window.__open--);
+        const send = this.send.bind(this);
+        this.send = (d) => {
+          if (String(d).includes('"type":"join"')) window.__joins++;
+          send(d);
+        };
+        if (window.__race) {
+          window.__race = false;
+          queueMicrotask(() => dispatchEvent(new Event("online")));
+        }
+      }
+    };
+  });
+  const raceLink = await shareRoom(race);
+  const gus = await newPage("Gus");
+  await gus.goto(raceLink);
+  await gus.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 15000 });
+  await race.evaluate(() => {
+    window.__race = true;
+    dispatchEvent(new Event("offline"));
+  });
+  await sleep(6000);
+  const rs = await race.evaluate(() => ({ open: window.__open, joins: window.__joins, status: window.__dt.collab().status }));
+  const seen = await gus.evaluate(() => Object.values(window.__dt.collab().peers).map((x) => x.name));
+  check("an online event during a reconnect opens no second socket", rs.open === 1 && rs.joins === 2 && rs.status === "live" && seen.length === 1, JSON.stringify({ ...rs, seen }));
+
+  // Timers in hidden tabs can run a minute late. Late ticks alone must not drop the connection
+  // (peers would see the person leave and the whole file would be sent again).
+  const slow = await newPage("Sloane");
+  await slow.addInitScript(() => {
+    window.__sockets = 0;
+    window.__throttle = false;
+    const Orig = WebSocket;
+    window.WebSocket = class extends Orig {
+      constructor(...a) {
+        super(...a);
+        if (String(a[0]).includes("/ws?room")) window.__sockets++;
+      }
+    };
+    const si = window.setInterval;
+    window.setInterval = (f, ms, ...a) => {
+      let last = Date.now();
+      return si(() => {
+        if (window.__throttle && Date.now() - last < 60000) return;
+        last = Date.now();
+        f();
+      }, ms, ...a);
+    };
+  });
+  await shareRoom(slow);
+  await sleep(12000); // the room has answered pings: late ticks are now the only difference
+  await slow.evaluate(() => (window.__throttle = true));
+  await sleep(75000);
+  const ss = await slow.evaluate(() => ({ sockets: window.__sockets, status: window.__dt.collab().status }));
+  check("hidden-tab timer lateness does not reconnect", ss.sockets === 1 && ss.status === "live", JSON.stringify(ss));
 } catch (e) {
   failed++;
   console.log("FAIL  script error:", e.stack ?? e);

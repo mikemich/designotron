@@ -355,24 +355,30 @@ function connect(join: Record<string, unknown>) {
     retryDelay = Math.min(retryDelay * 2, 60_000);
   };
   socket.onopen = () => {
+    // Replaced while connecting (never expected, but two live sockets would double-join).
+    if (ws !== socket) return socket.close();
     opened = true;
     lastHeard = lastPing = Date.now();
     heardPong = false;
     stopHeartbeat();
     heartbeat = setInterval(() => {
       const now = Date.now();
-      if (heardPong && now - lastHeard > SILENT_MS) return lost();
-      if (now - lastPing >= PING_MS - 500) {
-        lastPing = now;
-        send({ type: "ping" });
-      }
+      // Dead only when a ping went out and nothing at all came back since. (Timers in hidden
+      // tabs can run a minute late: lateness alone says nothing about the connection.)
+      if (heardPong && lastPing > lastHeard && now - lastPing > SILENT_MS) return lost();
+      if (now - lastPing >= PING_MS - 500) ping();
     }, PING_MS / 2);
     socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, ...join }));
   };
-  socket.onmessage = (e) => onMessage(JSON.parse(e.data));
+  socket.onmessage = (e) => ws === socket && onMessage(JSON.parse(e.data));
   socket.onclose = lost;
   dropConnection = lost;
   unsubscribe ??= subscribeLocal();
+}
+
+function ping() {
+  lastPing = Date.now();
+  send({ type: "ping" });
 }
 
 function stopHeartbeat() {
@@ -390,7 +396,8 @@ function onNetwork(online: boolean) {
     useCollab.setState({ status: "connecting", reconnecting: joinedOnce });
     return;
   }
-  if (useCollab.getState().status === "live") return;
+  // A connection is already open or opening (a second one would join the room twice).
+  if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
   if (retry) clearTimeout(retry);
   retryDelay = RETRY_MS;
   connect(currentFile());
@@ -402,6 +409,9 @@ function subscribeLocal(): () => void {
   const goOffline = () => onNetwork(false);
   addEventListener("online", goOnline);
   addEventListener("offline", goOffline);
+  // Back in view: check the connection now instead of at the next (possibly throttled) tick.
+  const shown = () => document.visibilityState === "visible" && useCollab.getState().status === "live" && ping();
+  document.addEventListener("visibilitychange", shown);
   const offSel = useStore.subscribe((s, prev) => {
     if (s.es.selection !== prev.es.selection || s.es.page !== prev.es.page) sendPresence(true);
   });
@@ -410,6 +420,7 @@ function subscribeLocal(): () => void {
     offSel();
     removeEventListener("online", goOnline);
     removeEventListener("offline", goOffline);
+    document.removeEventListener("visibilitychange", shown);
   };
 }
 

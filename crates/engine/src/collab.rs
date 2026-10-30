@@ -188,7 +188,7 @@ pub fn revert(doc: &Document, from: &Document, to: &Document) -> Document {
   for item in from.nodes.diff(&to.nodes) {
     match item {
       imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, v) } if out.get(k).is_some() => {
-        let n = merge_fields(out.get(k).unwrap(), o, v, false).unwrap_or_else(|| v.clone());
+        let n = merge_fields(out.get(k).unwrap(), o, v, true).unwrap_or_else(|| v.clone());
         out.nodes.insert(k.clone(), n);
         touched.push(k.clone());
       }
@@ -224,7 +224,8 @@ pub fn revert(doc: &Document, from: &Document, to: &Document) -> Document {
 
 /// Three-way merge of the serialised fields of one item: each field the step changed
 /// (`from` to `to`) takes `to`'s value unless `cur` has since given it another one. `deep`
-/// also merges inside nested objects (a variable's per-mode values), key by key.
+/// also merges inside nested objects (a layer's layout, a variable's per-mode values), key by
+/// key; arrays are taken whole, and a text's characters and runs go together.
 fn merge_fields<T: Serialize + DeserializeOwned>(cur: &T, from: &T, to: &T, deep: bool) -> Option<T> {
   let (Ok(c), Ok(f), Ok(t)) = (serde_json::to_value(cur), serde_json::to_value(from), serde_json::to_value(to)) else {
     return None;
@@ -237,10 +238,12 @@ fn merge_json(cur: &Value, from: &Value, to: &Value, deep: bool) -> Value {
     return if same(cur, from) { to.clone() } else { cur.clone() };
   };
   let mut out = c.clone();
+  // Run ranges index into the characters: keep both of someone else's, or take both of ours.
+  let text_theirs = ["characters", "runs"].iter().any(|k| !same_opt(c.get(*k), f.get(*k)));
   for k in c.keys().chain(f.keys()).chain(t.keys()).collect::<BTreeSet<_>>() {
     let (cv, fv, tv) = (c.get(k), f.get(k), t.get(k));
-    if same_opt(fv, tv) {
-      continue; // this step left it alone
+    if same_opt(fv, tv) || (text_theirs && (k == "characters" || k == "runs") && c.contains_key("characters")) {
+      continue; // this step left it alone, or someone else changed this text
     }
     let merged = if k == "children" {
       Some(merge_children(cv, fv, tv))
@@ -755,6 +758,55 @@ mod tests {
     e.doc.get_mut(&id).unwrap().x = 61.0;
     e.dispatch(Command::Undo).unwrap();
     assert_eq!(e.doc.get(&id).unwrap().x, 61.0);
+  }
+
+  #[test]
+  fn undo_keeps_a_peers_edit_inside_the_same_object() {
+    let (mut room, id) = Room::new(2);
+    set(&mut room.editors[0], &id, json!({ "layout": { "gap": 10.0, "paddingTop": 10.0 } }));
+    sync(&mut room, 0);
+    set(&mut room.editors[0], &id, json!({ "layout": { "gap": 33.0 } }));
+    sync(&mut room, 0);
+    set(&mut room.editors[1], &id, json!({ "layout": { "paddingTop": 41.0 } }));
+    sync(&mut room, 1);
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    sync(&mut room, 0);
+    room.assert_converged();
+    let l = room.doc.get(&id).unwrap().layout.clone().unwrap();
+    assert_eq!((l.gap, l.padding_top), (10.0, 41.0), "my gap is undone, their padding stays");
+  }
+
+  #[test]
+  fn undo_text_edit_with_a_peer_style_change_in_the_same_text() {
+    let mut a = engine(1);
+    let id = a
+      .dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "Hello".into(),
+        parent: None,
+      })
+      .unwrap()["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let json = a.to_json();
+    let mut b = engine(12);
+    b.load(&json).unwrap();
+    let mut room = Room {
+      doc: a.doc.clone(),
+      editors: vec![a, b],
+    };
+    for e in room.editors.iter_mut() {
+      e.collab_reset(true);
+    }
+    set(&mut room.editors[0], &id, json!({ "text": { "characters": "Goodbye" } }));
+    sync(&mut room, 0);
+    set(&mut room.editors[1], &id, json!({ "text": { "fontSize": 40.0 } }));
+    sync(&mut room, 1);
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    let t = room.editors[0].doc.get(&id).unwrap().text.clone().unwrap();
+    assert_eq!((t.characters.as_str(), t.font_size), ("Hello", 40.0));
   }
 
   #[test]
