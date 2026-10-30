@@ -20,6 +20,8 @@ export const trackPointer = (e: { clientX: number; clientY: number }) => {
 export function Measure({ v, host }: { v: Viewport; host: HTMLElement | null }) {
   const rev = useStore((s) => s.rev);
   const sel = useStore((s) => s.es.selection);
+  // The layer the normal hover picked (an instance or group whole, deep with Ctrl/Cmd).
+  const hover = useStore((s) => s.hover);
   const [at, setAt] = useState<Pt | null>(lastPointer);
   useEffect(() => {
     let frame = 0;
@@ -39,8 +41,8 @@ export function Measure({ v, host }: { v: Viewport; host: HTMLElement | null }) 
     const r = host.getBoundingClientRect();
     const x = (at.x - r.left - v.x) / v.zoom;
     const y = (at.y - r.top - v.y) / v.zoom;
-    return query<Measurement | null>({ q: "measure", ids: sel, x, y, zoom: v.zoom });
-  }, [rev, at, sel, v.x, v.y, v.zoom, host]);
+    return query<Measurement | null>({ q: "measure", ids: sel, target: hover, x, y, zoom: v.zoom });
+  }, [rev, at, sel, hover, v.x, v.y, v.zoom, host]);
   const target = useMemo(
     () => (m ? query<{ items: { matrix: Mat; width: number; height: number }[] }>({ q: "bounds", ids: [m.target] }).items[0] : null),
     [m?.target, rev],

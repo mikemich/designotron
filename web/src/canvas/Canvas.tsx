@@ -288,15 +288,15 @@ export function Canvas() {
   }, [tool, pen, penFrom]);
 
   useEffect(() => {
-    const isAlt = (e: KeyboardEvent) => e.key === "Alt" && !(e.target as HTMLElement | null)?.matches?.("input, textarea, [contenteditable]");
+    const typing = (e: KeyboardEvent) => !!(e.target as HTMLElement | null)?.matches?.("input, textarea, select, [contenteditable]");
     const onDown = (e: KeyboardEvent) => {
-      if (isAlt(e) && !drag.current) setAlt(true);
+      if (e.key === "Alt" && !typing(e) && !drag.current) setAlt(true);
     };
     const onUp = (e: KeyboardEvent) => {
-      if (!isAlt(e)) return;
+      if (e.key !== "Alt") return;
       setAlt(false);
       // Releasing Alt on its own would otherwise focus the browser menu bar.
-      if (useStore.getState().es.selection.length) e.preventDefault();
+      if (!typing(e) && useStore.getState().es.selection.length) e.preventDefault();
     };
     const off = () => setAlt(false);
     window.addEventListener("keydown", onDown);

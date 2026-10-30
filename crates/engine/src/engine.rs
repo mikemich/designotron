@@ -503,8 +503,9 @@ pub enum Query {
     #[serde(default)]
     exclude: Vec<NodeId>,
   },
-  /// Alt-hover distances from `ids` (default: the selection) to the layer `target`, or the
-  /// deepest layer at the page point (x, y): `{target, lines, extends}` or null.
+  /// Alt-hover distances from `ids` (default: the selection) to the hovered layer `target`; without
+  /// a usable one (none, or it is the selection) to the layer enclosing the selection at the page
+  /// point (x, y): `{target, lines, extends}` or null.
   Measure {
     #[serde(default)]
     ids: Vec<NodeId>,
@@ -2277,16 +2278,7 @@ impl Engine {
   fn translate(&mut self, ids: &[NodeId], dx: f64, dy: f64, snap: bool, zoom: f64) -> Result<Value, String> {
     let ids = ops::top_most(&self.doc, ids);
     // Children flowing in auto layout reorder instead of moving freely.
-    let (flow, free): (Vec<NodeId>, Vec<NodeId>) = ids.iter().cloned().partition(|id| {
-      let n = self.doc.get(id).unwrap();
-      !n.absolute_position
-        && n
-          .parent
-          .as_ref()
-          .and_then(|p| self.doc.get(p))
-          .map(|p| p.layout.is_some())
-          .unwrap_or(false)
-    });
+    let (flow, free): (Vec<NodeId>, Vec<NodeId>) = ids.iter().cloned().partition(|id| self.in_auto_layout_flow(id));
     for id in &flow {
       self.reorder_in_flow(id, dx, dy);
     }
@@ -2303,6 +2295,12 @@ impl Engine {
     }
     ops::move_by(&mut self.doc, &free, fdx, fdy);
     Ok(json!({ "dx": fdx, "dy": fdy, "guides": guides, "gaps": gaps }))
+  }
+
+  /// Whether `id` is positioned by its parent's auto layout (not absolutely placed).
+  fn in_auto_layout_flow(&self, id: &str) -> bool {
+    let Some(n) = self.doc.get(id) else { return false };
+    !n.absolute_position && n.parent.as_ref().and_then(|p| self.doc.get(p)).is_some_and(|p| p.layout.is_some())
   }
 
   /// Insertion index in an auto layout frame for a page-space point.
@@ -2400,7 +2398,11 @@ impl Engine {
         r.height += dy;
       }
       let edges = [fx < 0.0, fx > 0.0, fy < 0.0, fy > 0.0];
-      let (snapped, g, spaced) = interact::snap_rect(&self.doc, &self.page, &ids, r, edges, zoom);
+      // Equal gaps only for free layers resized from an edge: not auto layout children (the
+      // layout decides their gaps), nor from the centre or with the aspect locked.
+      let in_flow = ids.iter().any(|id| self.in_auto_layout_flow(id));
+      let spacing = !in_flow && !from_center && !keep_aspect;
+      let (snapped, g, spaced) = interact::snap_rect(&self.doc, &self.page, &ids, r, edges, zoom, spacing);
       guides = g;
       gaps = spaced;
       if fx < 0.0 {
@@ -2612,11 +2614,14 @@ impl Engine {
       }
       Query::Measure { ids, target, x, y, zoom } => {
         let ids = if ids.is_empty() { self.selection.clone() } else { ids };
-        let m = match target {
-          Some(t) => interact::measure_to(&self.doc, &ids, &t),
-          None => interact::measure_at(&self.doc, &self.page, &ids, Point::new(x, y), zoom),
-        };
-        json!(m)
+        json!(interact::measure_at(
+          &self.doc,
+          &self.page,
+          &ids,
+          target.as_deref(),
+          Point::new(x, y),
+          zoom
+        ))
       }
       Query::OverrideCount { id } => json!({ "count": components::override_count(&self.doc, &id) }),
       Query::FrameAt { x, y, exclude } => json!(ops::frame_at(&self.doc, &self.page, Point::new(x, y), &exclude, true)),
@@ -2628,6 +2633,7 @@ impl Engine {
           Rect::new(x, y, 0.0, 0.0),
           [true, false, true, false],
           zoom,
+          false,
         );
         json!({ "x": r.x, "y": r.y, "guides": guides })
       }
@@ -3300,7 +3306,7 @@ mod tests {
   fn translate_reports_equal_gaps_and_measure_query_uses_the_selection() {
     let mut e = engine();
     let a = rect(&mut e, -300.0, -300.0, 100.0, 100.0, None);
-    let b = rect(&mut e, -100.0, -100.0, 80.0, 60.0, None);
+    let b = rect(&mut e, -100.0, -260.0, 80.0, 60.0, None);
     let c = rect(&mut e, 100.0, -300.0, 60.0, 60.0, None);
     e.dispatch(Command::Select {
       ids: vec![b.clone()],
@@ -3351,6 +3357,64 @@ mod tests {
       })
       .unwrap();
     assert_eq!(t["lines"][0]["value"], json!(110.0), "{t}");
+  }
+
+  fn resize_east(e: &mut Engine, id: &str, dx: f64, from_center: bool, keep_aspect: bool) -> Value {
+    e.dispatch(Command::BeginGesture).unwrap();
+    let r = e
+      .dispatch(Command::Resize {
+        ids: vec![id.to_string()],
+        handle: Handle::E,
+        dx,
+        dy: 0.0,
+        keep_aspect,
+        from_center,
+        snap: true,
+        zoom: 1.0,
+      })
+      .unwrap();
+    e.dispatch(Command::CancelGesture).unwrap();
+    r
+  }
+
+  #[test]
+  fn resize_spacing_snaps_only_free_edge_resizes() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    let b = rect(&mut e, 90.0, 0.0, 50.0, 50.0, None);
+    let _c = rect(&mut e, 260.0, 0.0, 50.0, 50.0, None);
+    // From an edge the right side lands on the equal 40px gap (width 130).
+    let r = resize_east(&mut e, &b, 77.0, false, false);
+    assert_eq!(r["gaps"].as_array().map(|g| g.len()), Some(2), "{r}");
+    // From the centre or with the aspect locked the moving edges aren't the whole story: no spacing.
+    for (centre, aspect) in [(true, false), (false, true)] {
+      let r = resize_east(&mut e, &b, 77.0, centre, aspect);
+      assert_eq!(
+        r["gaps"].as_array().map(|g| g.len()),
+        Some(0),
+        "centre {centre} aspect {aspect}: {r}"
+      );
+    }
+    let _ = a;
+  }
+
+  #[test]
+  fn resize_of_an_auto_layout_child_has_no_spacing_snap() {
+    let mut e = engine();
+    ai(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "F", "x": 0, "y": 0, "width": 400, "height": 100,
+        "layout": { "direction": "horizontal", "gap": 10, "padding": 10 },
+        "children": [
+          { "type": "rectangle", "name": "a", "width": 50, "height": 50 },
+          { "type": "rectangle", "name": "b", "width": 50, "height": 50 },
+          { "type": "rectangle", "name": "c", "width": 50, "height": 50 } ] }] }),
+    );
+    let b = e.doc.nodes.values().find(|n| n.name == "b").unwrap().id.clone();
+    // +2px would otherwise "snap" back to the 10px gap and show false markers.
+    let r = resize_east(&mut e, &b, 2.0, false, false);
+    assert_eq!(r["gaps"].as_array().map(|g| g.len()), Some(0), "{r}");
   }
 
   #[test]

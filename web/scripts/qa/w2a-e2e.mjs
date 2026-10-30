@@ -78,10 +78,10 @@ async function dragBy(p, from, dx, dy, during) {
 }
 
 try {
-  // 1. Staircase A, B, C: B dragged 7px right snaps to the equal gaps (x = -90) with pink guides.
+  // 1. Row A, B, C (sharing rows): B dragged 7px right snaps to the equal gaps (x = -90) with pink guides.
   {
     const p = await fresh();
-    await create(p, [rect("A", -300, -300, 100, 100), rect("B", -100, -100, 80, 60), rect("C", 100, -300, 60, 60)]);
+    await create(p, [rect("A", -300, -300, 100, 100), rect("B", -100, -260, 80, 60), rect("C", 100, -300, 60, 60), rect("D", -192, 900, 80, 60)]);
     await p.evaluate(() => window.__dt.zoomToFit());
     await sleep(150);
     const b = await named(p, "B");
@@ -100,6 +100,14 @@ try {
     await select(p, [(await named(p, "B")).id]);
     const far = await dragBy(p, await centre(p, await named(p, "B")), 25, 0, async () => overlay(p, "g.spacing-gaps"));
     check("no spacing guides 25px away from the equal position", far === 0);
+    await p.keyboard.press("Control+z");
+    await sleep(100);
+
+    // A far-away layer outside the row never spacing-snaps to its gaps (D would sit exactly between A and B at x = -185).
+    const d = await named(p, "D");
+    await select(p, [d.id]);
+    const dfar = await dragBy(p, await centre(p, d), 7, 0, async () => overlay(p, "g.spacing-gaps"));
+    check("a layer far below the row gets no spacing guides", dfar === 0 && Math.abs((await named(p, "D")).x - (d.x + 7)) < 1e-6);
     await p.keyboard.press("Control+z");
     await sleep(100);
 
@@ -201,7 +209,8 @@ try {
     const dc = await toClient(p, card.x + dot.x + 10, card.y + dot.y + 10);
     await p.mouse.move(dc.x, dc.y);
     await sleep(120);
-    check("Alt over the selection: nothing drawn", (await overlay(p, "g.measure")) === 0);
+    const own = await labels(p, "g.measure");
+    check("Alt over the selection itself: distances to its parent", own.slice().sort().join() === ["200", "250", "40", "50"].join(), JSON.stringify(own));
 
     // Multiple selection: measure from the union of Dot and Bar to Side.
     await select(p, [dot.id, bar.id]);
@@ -240,6 +249,78 @@ try {
     await sleep(100);
     check("Alt-drag still duplicates", Object.keys((await doc(p)).nodes).length === before + 1);
     check("no measurement lingers after an Alt-drag", (await overlay(p, "g.measure")) === 0);
+    await p.context().close();
+  }
+
+  // 4b. The hovered layer is measured whole (a group, not its deepest child); releasing Alt in a
+  // panel input still clears the lines; spacing is off for auto layout children.
+  {
+    const p = await fresh();
+    await create(p, [rect("S", 0, 0, 40, 40), rect("G1", 200, 0, 30, 40), rect("G2", 240, 0, 30, 40)]);
+    const [g1, g2] = [await named(p, "G1"), await named(p, "G2")];
+    await select(p, [g1.id, g2.id]);
+    await p.keyboard.press("Control+g");
+    await sleep(150);
+    await p.evaluate(() => window.__dt.zoomToFit());
+    await sleep(150);
+    await select(p, [(await named(p, "S")).id]);
+    const over = await toClient(p, 255, 20);
+    await p.mouse.move(over.x - 4, over.y);
+    await p.keyboard.down("Alt");
+    await p.mouse.move(over.x, over.y);
+    await sleep(150);
+    const gl = await labels(p, "g.measure");
+    check("Alt over a group's child measures to the group (160), not the child (200)", gl.length === 1 && gl[0] === "160", JSON.stringify(gl));
+    await shot(p, "6-alt-group");
+    // Focus a Design-panel input, hold Alt over the canvas, release Alt: the lines go.
+    await p.keyboard.up("Alt");
+    await p.locator("label.field input").first().focus();
+    await p.keyboard.down("Alt");
+    await p.mouse.move(over.x + 1, over.y);
+    await sleep(150);
+    const during = await overlay(p, "g.measure");
+    await p.keyboard.up("Alt");
+    await sleep(120);
+    check("Alt released while a panel input has focus clears the lines", during > 0 && (await overlay(p, "g.measure")) === 0, `during ${during}`);
+    await p.context().close();
+  }
+
+  // 4c. Auto layout children and Alt-resize get no spacing snap or markers.
+  {
+    const p = await fresh();
+    await create(p, [
+      {
+        type: "frame",
+        name: "Row",
+        x: 0,
+        y: 0,
+        width: 400,
+        height: 100,
+        fill: "#eeeeee",
+        children: [rect("a", 0, 0, 50, 50), rect("b", 60, 0, 50, 50), rect("c", 120, 0, 50, 50)],
+      },
+      rect("A", 0, 300, 50, 50),
+      rect("B", 90, 300, 50, 50),
+      rect("C", 260, 300, 50, 50),
+    ]);
+    await select(p, [(await named(p, "Row")).id]);
+    await p.keyboard.press("Shift+a");
+    await sleep(200);
+    await p.evaluate(() => window.__dt.zoomToFit());
+    await sleep(150);
+    const b = await named(p, "b");
+    const row = await named(p, "Row");
+    await select(p, [b.id]);
+    const h = await toClient(p, row.x + b.x + b.width, row.y + b.y + b.height / 2);
+    const flow = await dragBy(p, h, 2, 0, async () => overlay(p, "g.spacing-gaps"));
+    check("resizing an auto layout child shows no spacing markers", flow === 0);
+    const B = await named(p, "B");
+    await select(p, [B.id]);
+    const hb = await toClient(p, B.x + B.width, B.y + B.height / 2);
+    await p.keyboard.down("Alt");
+    const centred = await dragBy(p, hb, 77, 0, async () => overlay(p, "g.spacing-gaps"));
+    await p.keyboard.up("Alt");
+    check("Alt-resize (from the centre) shows no spacing markers", centred === 0);
     await p.context().close();
   }
 

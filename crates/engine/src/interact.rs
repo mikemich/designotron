@@ -293,13 +293,22 @@ pub fn snap_move(doc: &Document, page: &str, ids: &[NodeId], dx: f64, dy: f64, z
 }
 
 /// Snaps an axis-aligned rect whose `edges` [left, right, top, bottom] are moving.
-/// Also returns the equal gaps it snapped to.
-pub fn snap_rect(doc: &Document, page: &str, exclude: &[NodeId], r: Rect, edges: [bool; 4], zoom: f64) -> (Rect, Vec<Guide>, Vec<Gap>) {
+/// Also returns the equal gaps it snapped to, unless `spacing` is off (auto layout children,
+/// resizing from the centre or keeping the aspect ratio, where the moving edges aren't the whole story).
+pub fn snap_rect(
+  doc: &Document,
+  page: &str,
+  exclude: &[NodeId],
+  r: Rect,
+  edges: [bool; 4],
+  zoom: f64,
+  spacing: bool,
+) -> (Rect, Vec<Guide>, Vec<Gap>) {
   let targets = snap_targets(doc, page, exclude);
   let thr = 6.0 / zoom.max(0.01);
   let (mut sx, mut sy) = best_snap(&r, &targets, thr, edges);
   // A zero-size rect is a point (drawing tools): no spacing there.
-  let spaced = r.width > 0.0 || r.height > 0.0;
+  let spaced = spacing && (r.width > 0.0 || r.height > 0.0);
   let one_edge = |lo: bool, hi: bool| match (lo, hi) {
     (true, false) => Some(Edge::Lo),
     (false, true) => Some(Edge::Hi),
@@ -375,8 +384,8 @@ fn closer(spacing: f64, edge: Option<f64>) -> bool {
 
 /// Finds the nearest shift (within `thr`) that makes the gap beside the moving rect equal to
 /// another gap between siblings along `axis`: centred between its two neighbours, or repeating
-/// the gap of the two nearest siblings on either side. Siblings sharing its row or column are
-/// preferred, so staircase layouts still snap when nothing is aligned.
+/// the gap of the two nearest siblings on either side. Only siblings sharing its row (or column,
+/// on the vertical axis) count, so unrelated layers far away never pull on it.
 fn spacing_hit(siblings: &[Rect], axis: Axis, moved: &Rect, edge: Edge, thr: f64) -> Option<SpaceHit> {
   if siblings.len() < 2 {
     return None;
@@ -390,14 +399,10 @@ fn spacing_hit(siblings: &[Rect], axis: Axis, moved: &Rect, edge: Edge, thr: f64
     })
     .cloned()
     .collect();
-  let search = |rects: &[Rect]| {
-    if rects.len() < 2 {
-      None
-    } else {
-      spacing_in(rects, axis, moved, edge, thr)
-    }
-  };
-  search(&aligned).or_else(|| search(siblings))
+  if aligned.len() < 2 {
+    return None;
+  }
+  spacing_in(&aligned, axis, moved, edge, thr)
 }
 
 fn spacing_in(rects: &[Rect], axis: Axis, moved: &Rect, edge: Edge, thr: f64) -> Option<SpaceHit> {
@@ -625,13 +630,21 @@ pub struct Measurement {
   pub extends: Vec<Guide>,
 }
 
-/// Measures from `ids` to the deepest layer at `p`. None when nothing is hit or the pointer is
-/// over the selection itself.
-pub fn measure_at(doc: &Document, page: &str, ids: &[NodeId], p: Point, zoom: f64) -> Option<Measurement> {
-  let target = hit_test(doc, page, p, zoom)?;
-  if doc.path(&target).iter().any(|a| ids.contains(a)) {
-    return None;
+/// Measures from `ids` to `hover`, the layer the editor's normal hover picked (so an instance
+/// or group is measured whole, not its inner text). Without a usable hover (nothing picked, or it
+/// is the selection or inside it) it measures to the layer enclosing the selection at `p`, so
+/// pointing at the selection or at empty frame area gives the distances to the parent's inner edges.
+pub fn measure_at(doc: &Document, page: &str, ids: &[NodeId], hover: Option<&str>, p: Point, zoom: f64) -> Option<Measurement> {
+  let inside_selection = |id: &str| doc.path(id).iter().any(|a| ids.contains(a));
+  if let Some(h) = hover.filter(|h| doc.get(h).is_some() && !inside_selection(h)) {
+    return measure_to(doc, ids, h);
   }
+  let path = doc.path(&hit_test(doc, page, p, zoom)?);
+  let target = match path.iter().position(|a| ids.contains(a)) {
+    Some(0) => return None,
+    Some(k) => path[k - 1].clone(),
+    None => path.last()?.clone(),
+  };
   measure_to(doc, ids, &target)
 }
 
@@ -1146,11 +1159,12 @@ mod tests {
 
   #[test]
   fn move_snaps_to_equal_gaps_between_neighbours() {
-    // Gaps A-B 100 and B-C 120 (staircase, nothing aligned): B 3px off the 110/110 split.
+    // A row with gaps A-B 100 and B-C 120: B 3px off the 110/110 split. D is far below the row.
     let (doc, page) = flat_doc(&[
       ("a", (-300.0, -300.0, 100.0, 100.0)),
-      ("b", (-100.0, -100.0, 80.0, 60.0)),
+      ("b", (-100.0, -260.0, 80.0, 60.0)),
       ("c", (100.0, -300.0, 60.0, 60.0)),
+      ("d", (-100.0, 2000.0, 80.0, 60.0)),
     ]);
     // Dragged 7px right (x=-93) snaps to x=-90: dx 10.
     let s = snap_move(&doc, &page, &["b".into()], 7.0, 0.0, 1.0);
@@ -1160,6 +1174,19 @@ mod tests {
     // Out of range: no spacing snap.
     let far = snap_move(&doc, &page, &["b".into()], 20.0, 0.0, 1.0);
     assert!(far.gaps.is_empty());
+    // A layer far from the row (no shared rows) has nothing to space against, even at the
+    // x position that would be equal if it were in the row.
+    let d = snap_move(&doc, &page, &["d".into()], 7.0, 0.0, 1.0);
+    assert!(d.gaps.is_empty(), "far layer spacing-snapped: {:?}", d.gaps);
+    assert_eq!(d.dx, 7.0);
+    // Unaligned (staircase) layers don't count either: B moved a row below A and C.
+    let (doc, page) = flat_doc(&[
+      ("a", (-300.0, -300.0, 100.0, 100.0)),
+      ("b", (-100.0, -100.0, 80.0, 60.0)),
+      ("c", (100.0, -300.0, 60.0, 60.0)),
+    ]);
+    let s = snap_move(&doc, &page, &["b".into()], 7.0, 0.0, 1.0);
+    assert!(s.gaps.is_empty() && s.dx == 7.0, "{s:?}");
   }
 
   #[test]
@@ -1206,12 +1233,20 @@ mod tests {
       ("c", (260.0, 0.0, 50.0, 50.0)),
     ]);
     let r = Rect::new(90.0, 0.0, 127.0, 50.0);
-    let (out, _, gaps) = snap_rect(&doc, &page, &["b".into()], r, [false, true, false, false], 1.0);
+    let (out, _, gaps) = snap_rect(&doc, &page, &["b".into()], r, [false, true, false, false], 1.0, true);
     assert!((out.right() - 220.0).abs() < 1e-9, "right edge {}", out.right());
     assert_eq!(out.x, 90.0);
     assert_eq!(gaps.len(), 2);
     // A point (drawing tools) never spaces.
-    let (_, _, none) = snap_rect(&doc, &page, &[], Rect::new(221.0, 0.0, 0.0, 0.0), [true, false, true, false], 1.0);
+    let (_, _, none) = snap_rect(
+      &doc,
+      &page,
+      &[],
+      Rect::new(221.0, 0.0, 0.0, 0.0),
+      [true, false, true, false],
+      1.0,
+      true,
+    );
     assert!(none.is_empty());
   }
 
@@ -1221,15 +1256,31 @@ mod tests {
     node(&mut doc, &page, "f", NodeType::Frame, None, (0.0, 0.0, 400.0, 300.0));
     node(&mut doc, &page, "r", NodeType::Rectangle, Some("f"), (50.0, 40.0, 100.0, 60.0));
     // Hovering the frame's empty area from the rectangle: four distances.
-    let m = measure_at(&doc, &page, &["r".into()], Point::new(300.0, 250.0), 1.0).unwrap();
+    let m = measure_at(&doc, &page, &["r".into()], None, Point::new(300.0, 250.0), 1.0).unwrap();
     assert_eq!(m.target, "f");
     assert_eq!(values(&m), vec![50.0, 250.0, 40.0, 200.0]);
     assert!(m.extends.is_empty());
     let left = &m.lines[0];
     assert_eq!((left.x1, left.x2, left.y1), (0.0, 50.0, 70.0));
-    // Over the selection itself, or a layer inside it, there is nothing to measure.
-    assert!(measure_at(&doc, &page, &["r".into()], Point::new(60.0, 50.0), 1.0).is_none());
-    assert!(measure_at(&doc, &page, &["f".into()], Point::new(60.0, 50.0), 1.0).is_none());
+    // Over the selection itself the distances are to its parent; a top-level selection has none.
+    let own = measure_at(&doc, &page, &["r".into()], Some("r"), Point::new(60.0, 50.0), 1.0).unwrap();
+    assert_eq!(own.target, "f");
+    assert!(measure_at(&doc, &page, &["f".into()], Some("f"), Point::new(60.0, 50.0), 1.0).is_none());
+    assert!(measure_at(&doc, &page, &["r".into()], None, Point::new(900.0, 900.0), 1.0).is_none());
+  }
+
+  #[test]
+  fn measure_uses_the_hovered_layer_not_its_deepest_child() {
+    let (mut doc, page) = flat_doc(&[("s", (0.0, 0.0, 40.0, 40.0))]);
+    node(&mut doc, &page, "btn", NodeType::Frame, None, (200.0, 0.0, 100.0, 40.0));
+    node(&mut doc, &page, "label", NodeType::Rectangle, Some("btn"), (10.0, 10.0, 30.0, 20.0));
+    // The pointer is over the label, but the hover (button) is what gets measured.
+    let p = Point::new(215.0, 15.0);
+    let whole = measure_at(&doc, &page, &["s".into()], Some("btn"), p, 1.0).unwrap();
+    assert_eq!((whole.target.as_str(), values(&whole)[0]), ("btn", 160.0));
+    // Without a hover the deepest layer under the pointer is the fallback.
+    let deep = measure_at(&doc, &page, &["s".into()], None, p, 1.0).unwrap();
+    assert_eq!(deep.target, "label");
   }
 
   #[test]
