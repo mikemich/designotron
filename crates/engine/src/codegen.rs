@@ -1563,6 +1563,27 @@ mod tests {
   }
 
   #[test]
+  fn project_start_skips_a_missing_flow_start() {
+    let mut doc = sample();
+    doc.pages[0].flow_start = Some("gone".into());
+    let start = |doc: &Document| {
+      let files = export_project(doc, &HeuristicMeasurer);
+      files.iter().find(|f| f.path == "src/App.tsx").unwrap().content.clone()
+    };
+    assert!(
+      start(&doc).contains("useState<string[]>([\"Home\"])"),
+      "falls back to the first screen"
+    );
+    // A later page's valid start wins over an earlier page's missing one.
+    let mut other = doc.pages[0].clone();
+    other.id = "p2".into();
+    other.children.clear();
+    other.flow_start = Some("detail".into());
+    doc.pages.push(other);
+    assert!(start(&doc).contains("useState<string[]>([\"ProductDetail\"])"));
+  }
+
+  #[test]
   fn overlays_become_navigate_calls_with_placement() {
     let mut doc = sample();
     let page = doc.pages[0].id.clone();

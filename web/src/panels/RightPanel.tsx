@@ -6,7 +6,7 @@ import { ReviewPanel } from "./ReviewPanel";
 import { AppPanel } from "./AppPanel";
 import { IconButton, NumberField, Section, SelectField } from "../ui/controls";
 import type { Interaction, Node, OverlaySettings } from "../types";
-import { DEFAULT_OVERLAY, isMissingDestination, newInteraction, overlayDim, startFrame } from "../prototype";
+import { DEFAULT_OVERLAY, isMissingDestination, newInteraction, overlayDim, SCREEN_TYPES, startFrame } from "../prototype";
 import { exportProjectZip, nodeSvg } from "../exporter";
 import { inlineAssets } from "../assets";
 import { askClaude } from "../ai/chatState";
@@ -46,9 +46,9 @@ function PrototypePanel() {
   const doc = useDoc();
   const nodes = useSelection();
   const page = doc.pages.find((p) => p.id === useStore.getState().es.page);
-  const frames = (page?.children ?? []).map((id) => doc.nodes[id]).filter((n) => n && ["frame", "component"].includes(n.type));
+  const frames = (page?.children ?? []).map((id) => doc.nodes[id]).filter((n) => n && SCREEN_TYPES.includes(n.type));
   const n = nodes.length === 1 ? nodes[0] : null;
-  const isTop = n && !n.parent && ["frame", "component", "componentSet", "instance"].includes(n.type);
+  const isTop = n && !n.parent && SCREEN_TYPES.includes(n.type);
   const start = startFrame(doc, page?.id);
   const present = () => start && useStore.setState({ presenting: start });
   return (

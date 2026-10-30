@@ -23,11 +23,14 @@ export function Viewer({ data }: { data: string }) {
         // the page's loose layers still show.
         let start: string | null = null;
         for (const p of d.pages) start ??= startFrame(d, p.id);
-        if (!start) {
-          const loose = d.pages.find((p) => p.children.length);
-          const made = loose && dispatch<{ id: string }>({ op: "frameSelection", ids: loose.children }, { quiet: true });
-          start = made?.id ?? null;
-          if (start) dispatch({ op: "update", ids: [start], patch: { name: loose.name } }, { quiet: true });
+        for (const pg of d.pages) {
+          if (start) break;
+          const visible = pg.children.filter((id) => d.nodes[id]?.visible !== false);
+          const made = visible.length ? dispatch<{ id: string }>({ op: "frameSelection", ids: visible }, { quiet: true }) : null;
+          if (!made?.id) continue;
+          start = made.id;
+          const fills = [{ type: "solid", color: pg.background, opacity: 1, visible: true }];
+          dispatch({ op: "update", ids: [start], patch: { name: pg.name, fills } }, { quiet: true });
         }
         setState(start ? { start } : { error: "This design is empty." });
       } catch (err) {

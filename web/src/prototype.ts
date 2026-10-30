@@ -22,17 +22,19 @@ export function newInteraction(destination: string | null): Interaction {
   };
 }
 
-const FRAME_LIKE = ["frame", "component", "componentSet", "instance"];
+/** Layer types that can be a prototype screen or flow start. */
+export const SCREEN_TYPES = ["frame", "component"];
 
 /** Where Present starts on a page: its flow starting point when that still exists, else the
  *  first frame, else the first component. Null when the page has neither. */
 export function startFrame(doc: Doc, pageId: string | undefined): string | null {
   const page = doc.pages.find((p) => p.id === pageId);
   if (!page) return null;
-  const top = (id: string) => (doc.nodes[id] && !doc.nodes[id].parent ? doc.nodes[id] : null);
-  // Older files may point the start at a layer that isn't a frame; ignore those too.
+  const top = (id: string) => (doc.nodes[id] && !doc.nodes[id].parent && doc.nodes[id].page === page.id ? doc.nodes[id] : null);
+  // Older files (or a collaborator's race) may point the start at a layer that isn't a top-level
+  // frame of this page; ignore those too.
   const start = page.flowStart ? top(page.flowStart) : null;
-  if (page.flowStart && start && FRAME_LIKE.includes(start.type)) return page.flowStart;
+  if (page.flowStart && start && SCREEN_TYPES.includes(start.type)) return page.flowStart;
   const ofType = (t: string) => page.children.find((id) => top(id)?.type === t) ?? null;
   return ofType("frame") ?? ofType("component");
 }

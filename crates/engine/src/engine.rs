@@ -1686,12 +1686,6 @@ impl Engine {
       Command::Delete { ids } => {
         let ids: Vec<NodeId> = ids.into_iter().filter(|i| self.doc.instance_ancestor(i).is_none()).collect();
         ops::delete(&mut self.doc, &ids);
-        // A deleted starting frame leaves the page without one, so Present falls back to its first frame.
-        for p in self.doc.pages.iter_mut() {
-          if p.flow_start.as_ref().is_some_and(|s| !self.doc.nodes.contains_key(s)) {
-            p.flow_start = None;
-          }
-        }
         Ok(json!({}))
       }
       Command::Duplicate { ids } => {
@@ -2050,7 +2044,7 @@ impl Engine {
       Command::SetFlowStart { page, id } => {
         if let Some(start) = &id {
           let n = self.doc.get(start).ok_or("no such node")?;
-          if n.parent.is_some() || n.page != page || !n.kind.is_frame_like() {
+          if n.parent.is_some() || n.page != page || !matches!(n.kind, NodeType::Frame | NodeType::Component) {
             return Err("a flow can only start on a top-level frame".into());
           }
         }
@@ -2868,6 +2862,10 @@ mod tests {
     assert_eq!(e.doc.pages[0].flow_start, None);
     e.dispatch(Command::Undo).unwrap();
     assert_eq!(e.doc.pages[0].flow_start.as_deref(), Some(b.as_str()));
+    // The AI delete tool clears it too.
+    ai(&mut e, "delete_nodes", json!({ "ids": [b.clone()] }));
+    assert_eq!(e.doc.pages[0].flow_start, None);
+    e.dispatch(Command::Undo).unwrap();
     set(&mut e, None).unwrap();
     assert_eq!(e.doc.pages[0].flow_start, None);
   }

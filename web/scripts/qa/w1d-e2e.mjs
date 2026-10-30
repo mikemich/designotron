@@ -136,6 +136,66 @@ try {
   check("release returns to the first screen", (await crumb()) === start, await crumb());
   await closePresenter();
 
+  // Two fingers: only the pointer that pressed controls the revert, and a second press is ignored.
+  await page.click("button[title='Present']");
+  await page.waitForSelector(".presenter");
+  const fire = (type, pointerId, sel) =>
+    page.evaluate(([t, pid, s]) => {
+      const el = document.querySelector(s) ?? window;
+      el.dispatchEvent(new PointerEvent(t, { bubbles: true, pointerId: pid, button: 0, isPrimary: pid === 1 }));
+    }, [type, pointerId, sel]);
+  const holdSel = `.presenter [data-hotspot="${id("Hold")}"]`;
+  await fire("pointerdown", 1, holdSel);
+  await page.waitForTimeout(100);
+  check("first finger navigates", (await crumb()) === "Detail", await crumb());
+  await fire("pointerdown", 2, `.presenter [data-hotspot="${id("Hold")}"]`);
+  await fire("pointerup", 2, null);
+  await page.waitForTimeout(100);
+  check("second finger lifting doesn't revert", (await crumb()) === "Detail", await crumb());
+  await fire("pointerup", 1, null);
+  await page.waitForTimeout(100);
+  check("first finger lifting returns to Home", (await crumb()) === "Home", await crumb());
+  await page.waitForTimeout(600);
+  await closePresenter();
+
+  // Touch: a tap on a While-pressing layer inside a frame with On click must not run the frame's click.
+  const touch = await browser.newContext({ viewport: { width: 1600, height: 1000 }, hasTouch: true, ignoreHTTPSErrors: true });
+  const tp = await touch.newPage();
+  watch(tp);
+  await tp.addInitScript(() => localStorage.setItem("dt:tour-done", "1"));
+  await tp.goto(URL);
+  await tp.waitForSelector(".files", { timeout: 20000 });
+  await tp.click("button:has-text('New design file')");
+  await tp.waitForSelector("#dt-canvas", { timeout: 15000 });
+  await tp.evaluate(() =>
+    window.__dt.tool("create_nodes", {
+      nodes: [
+        { type: "frame", name: "Home", x: 0, y: 0, width: 400, height: 300, fill: "#FFFFFF", children: [{ type: "frame", name: "Hold", x: 20, y: 40, width: 120, height: 40, fill: "#2563EB", children: [] }] },
+        { type: "frame", name: "Detail", x: 600, y: 0, width: 400, height: 300, fill: "#F1F5F9" },
+        { type: "frame", name: "Third", x: 1200, y: 0, width: 400, height: 300, fill: "#ECFDF5" },
+      ],
+    }),
+  );
+  const t0 = await tp.evaluate(() => window.__dt.doc());
+  const tid = (n) => byName(t0, n).id;
+  const ix = (trigger, destination) => ({ ...navigate(destination, trigger) });
+  await tp.evaluate(
+    ([home, hold, detail, third, a, b]) => {
+      window.__dt.dispatch({ op: "setInteractions", id: home, interactions: [b] });
+      window.__dt.dispatch({ op: "setInteractions", id: hold, interactions: [a] });
+      window.__dt.dispatch({ op: "setFlowStart", page: window.__dt.doc().pages[0].id, id: home });
+    },
+    [tid("Home"), tid("Hold"), tid("Detail"), tid("Third"), ix("onPress", tid("Detail")), ix("onClick", tid("Third"))],
+  );
+  await tp.click("button[title='Present']");
+  await tp.waitForSelector(".presenter");
+  const tb = await tp.locator(`.presenter [data-hotspot="${tid("Hold")}"]`).boundingBox();
+  await tp.touchscreen.tap(tb.x + 10, tb.y + 10);
+  await tp.waitForTimeout(700);
+  const tcrumb = (await tp.locator(".presenter .bar .muted").innerText()).trim();
+  check("touch tap on a pressing layer doesn't run the parent's click", tcrumb === "Home", tcrumb);
+  await touch.close();
+
   // Open link: Enter commits without leaving the field.
   await dispatch({ op: "setInteractions", id: id("Site"), interactions: [{ ...navigate(null), action: "openUrl" }] });
   await dispatch({ op: "select", ids: [id("Site")] });

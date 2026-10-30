@@ -24,6 +24,9 @@ interface OpenOverlay {
   y: number;
 }
 
+/** How long the click that follows a released "While pressing" is ignored. */
+const SWALLOW_CLICK_MS = 500;
+
 const ANIM: Record<string, string> = {
   dissolve: "dt-dissolve",
   smartAnimate: "dt-dissolve",
@@ -89,20 +92,39 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     }
   };
 
-  /** "While pressing": acts on pointer down and puts the previous screen back on release. */
-  const press = (it: Interaction, from: Rect) => {
+  /** "While pressing": acts on pointer down and puts the previous screen back when that same
+   *  pointer is released. Only one press is tracked at a time (a second finger is ignored), and
+   *  the click the browser sends after the release is swallowed so it can't run another link. */
+  const pressing = useRef<(() => void) | null>(null);
+  const press = (it: Interaction, from: Rect, pointerId: number) => {
+    if (pressing.current) return;
     const prev = { history, overlays };
     go(it, from);
     if (it.action !== "navigate" && !isOverlayLink(it)) return;
-    const release = () => {
+    const stop = () => {
       window.removeEventListener("pointerup", release);
       window.removeEventListener("pointercancel", release);
+      pressing.current = null;
+    };
+    const release = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return;
+      stop();
       setHistory(prev.history);
       setOverlays(prev.overlays);
+      const swallow = (c: Event) => {
+        if (!(c.target as Element | null)?.closest?.(".presenter")) return;
+        c.stopPropagation();
+        c.preventDefault();
+        window.removeEventListener("click", swallow, true);
+      };
+      window.addEventListener("click", swallow, true);
+      setTimeout(() => window.removeEventListener("click", swallow, true), SWALLOW_CLICK_MS);
     };
     window.addEventListener("pointerup", release);
     window.addEventListener("pointercancel", release);
+    pressing.current = stop;
   };
+  useEffect(() => () => pressing.current?.(), []);
 
   // Timers call `go` through a ref so they never act on a stale render (e.g. "after delay → Back"
   // firing while a modal is open must close the modal).
@@ -177,7 +199,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
           className="stage"
           style={{ width: frame.width, height: frame.height, transform: `scale(${scale})`, transformOrigin: "0 0", animation: a ? `${a} 300ms ease-out` : undefined }}
         >
-          <FrameLayer id={current.id} hotspots={baseHotspots} flash={flash} onAct={onBaseClick} onPress={(h, it) => press(it, h.rect)} />
+          <FrameLayer id={current.id} hotspots={baseHotspots} flash={flash} onAct={onBaseClick} onPress={(h, it, pointerId) => press(it, h.rect, pointerId)} />
         </div>
         {overlays.length > 0 && (
           <div className="overlays" style={{ width: frame.width, height: frame.height, transform: `scale(${scale})` }}>
@@ -188,7 +210,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
                 isTop={i === overlays.length - 1}
                 onClose={() => setOverlays((l) => l.slice(0, -1))}
                 onAct={(h, it) => go(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y })}
-                onPress={(h, it) => press(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y })}
+                onPress={(h, it, pointerId) => press(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, pointerId)}
                 onDelay={(it, from) => goRef.current(it, from)}
               />
             ))}
@@ -213,7 +235,7 @@ function OverlayLayer({
   isTop: boolean;
   onClose: () => void;
   onAct: (h: Hotspot, it: Interaction) => void;
-  onPress: (h: Hotspot, it: Interaction) => void;
+  onPress: (h: Hotspot, it: Interaction, pointerId: number) => void;
   onDelay: (it: Interaction, from: Rect) => void;
 }) {
   const n = getDoc().nodes[o.id];
@@ -263,7 +285,7 @@ function FrameLayer({
   hotspots: Hotspot[];
   flash: boolean;
   onAct: (h: Hotspot, it: Interaction) => void;
-  onPress: (h: Hotspot, it: Interaction) => void;
+  onPress: (h: Hotspot, it: Interaction, pointerId: number) => void;
 }) {
   const svg = useMemo(() => nodeSvg(id), [id]);
   const byId = useMemo(() => new Map(hotspots.map((h) => [h.id, h])), [hotspots]);
@@ -299,17 +321,21 @@ function FrameLayer({
           style={{ left: h.rect.x, top: h.rect.y, width: h.rect.width, height: h.rect.height }}
           onClick={(e) => {
             e.stopPropagation();
+            // The nearest layer with a click or a press owns the tap; only a click acts here.
             for (const owner of h.chain) {
               const o = byId.get(owner);
               const click = o?.interactions.find(isClick);
               if (o && click) return onAct(o, click);
+              if (o?.interactions.some(isPress)) return;
             }
           }}
-          onPointerDown={() => {
+          onPointerDown={(e) => {
+            if (e.button !== 0) return;
             for (const owner of h.chain) {
               const o = byId.get(owner);
               const down = o?.interactions.find(isPress);
-              if (o && down) return onPress(o, down);
+              if (o && down) return onPress(o, down, e.pointerId);
+              if (o?.interactions.some(isClick)) return;
             }
           }}
           onMouseEnter={() => enter(h)}

@@ -91,6 +91,13 @@ pub fn delete(doc: &mut Document, ids: &[NodeId]) {
     doc.remove(&id);
     prune_empty_groups(doc, parent);
   }
+  // A deleted starting frame leaves its page without one, so Present falls back to its first frame.
+  let Document { pages, nodes, .. } = doc;
+  for p in pages.iter_mut() {
+    if p.flow_start.as_ref().is_some_and(|s| !nodes.contains_key(s)) {
+      p.flow_start = None;
+    }
+  }
 }
 
 fn prune_empty_groups(doc: &mut Document, mut cur: Option<NodeId>) {
