@@ -959,6 +959,7 @@ impl Engine {
           let _ = crate::collab::apply(&mut g.doc, &delta);
         }
         self.refresh_fingerprints();
+        crate::props::resync_changed(&mut self.doc, &mut self.gen, &prev);
         self.after_mutation(&prev);
         self.collab_synced = Some(self.doc.clone());
         self.rev += 1;
@@ -1158,6 +1159,7 @@ impl Engine {
   }
 
   fn after_mutation(&mut self, prev: &Document) {
+    crate::props::follow_variants(&mut self.doc, prev);
     crate::variables::normalize(&mut self.doc);
     crate::variables::apply(&mut self.doc);
     for _ in 0..4 {
@@ -1215,6 +1217,9 @@ impl Engine {
   fn changed_components(&mut self, prev: &Document) -> Vec<NodeId> {
     let mut comps: Vec<NodeId> = Vec::new();
     for item in prev.nodes.diff(&self.doc.nodes) {
+      // A set's properties belong to every variant: only a change of those reaches them (moving
+      // or renaming the set leaves the variants alone).
+      let props_changed = matches!(&item, imbl::ordmap::DiffItem::Update { old, new } if old.1.component != new.1.component);
       let (doc, k) = match item {
         imbl::ordmap::DiffItem::Add(k, _) | imbl::ordmap::DiffItem::Update { new: (k, _), .. } => (&self.doc, k),
         imbl::ordmap::DiffItem::Remove(k, _) => (prev, k),
@@ -1226,8 +1231,7 @@ impl Engine {
               comps.push(id);
             }
           }
-          // A set's properties belong to every variant.
-          Some(n) if n.kind == NodeType::ComponentSet && id == *k => {
+          Some(n) if n.kind == NodeType::ComponentSet && id == *k && props_changed => {
             for c in n
               .children
               .iter()
@@ -2769,6 +2773,13 @@ impl Engine {
           c.x = b.x + (n.x - local.x);
           c.y = b.y + (n.y - local.y);
           c.parent = None;
+          // A variant copied out of its set stands alone: it brings the set's properties it uses.
+          if n.kind == NodeType::Component {
+            let own = crate::props::standalone_props(&self.doc, root);
+            if !own.is_empty() {
+              c.component.get_or_insert_with(Default::default).props = own;
+            }
+          }
         }
         out.push(c);
       }

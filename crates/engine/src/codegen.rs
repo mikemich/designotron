@@ -226,6 +226,7 @@ struct BoundProps {
 
 /// A component property a generated function takes as a prop.
 struct UsedProp {
+  id: String,
   ident: String,
   kind: PropKind,
   /// What the main component shows (`true`, a text; none for a swap slot).
@@ -473,16 +474,18 @@ impl<'a> Ctx<'a> {
       return out;
     }
     let defs = props::props_of(self.doc, &comp);
+    let idents = prop_idents(self.doc, &comp);
     let mut take = |id: &Option<String>, field: &str| -> Option<String> {
       let def = defs.iter().find(|d| Some(&d.id) == id.as_ref())?;
-      let ident = prop_ident(&def.name);
-      if !self.used_props.iter().any(|u| u.ident == ident) {
+      let ident = idents.get(&def.id)?.clone();
+      if !self.used_props.iter().any(|u| u.id == def.id) {
         let default = match field {
           "visible" => json!(n.visible),
           "characters" => json!(n.text.as_ref().map(|t| t.characters.clone()).unwrap_or_default()),
           _ => serde_json::Value::Null,
         };
         self.used_props.push(UsedProp {
+          id: def.id.clone(),
           ident: ident.clone(),
           kind: def.kind,
           default,
@@ -505,6 +508,8 @@ impl<'a> Ctx<'a> {
     if defs.is_empty() || self.doc.instance_ancestor(&n.id).is_some() {
       return (!has_overrides).then(Default::default);
     }
+    let idents = prop_idents(self.doc, &info.component_id);
+    let ident = |id: &str| idents.get(id).cloned().unwrap_or_default();
     let mut attrs = Vec::new();
     let mut exprs = Vec::new();
     for (key, v) in &info.overrides {
@@ -524,13 +529,13 @@ impl<'a> Ctx<'a> {
         return None;
       }
       let name = self.component_name(&swap.component_id);
-      exprs.push((prop_ident(&def.name), format!("<{name} />")));
+      exprs.push((ident(&def.id), format!("<{name} />")));
     }
     for (pid, v) in &info.prop_values {
       let Some(def) = defs.iter().find(|d| &d.id == pid) else { continue };
       match v {
-        serde_json::Value::Bool(b) => exprs.push((prop_ident(&def.name), b.to_string())),
-        serde_json::Value::String(t) => attrs.push((prop_ident(&def.name), t.clone())),
+        serde_json::Value::Bool(b) => exprs.push((ident(&def.id), b.to_string())),
+        serde_json::Value::String(t) => attrs.push((ident(&def.id), t.clone())),
         _ => {}
       }
     }
@@ -1319,7 +1324,7 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
     "{handler}{}",
     el.attrs
       .iter()
-      .map(|(k, v)| format!(" {k}={}", serde_json::to_string(v).unwrap_or_default()))
+      .map(|(k, v)| format!(" {k}={}", jsx_attr_value(v)))
       .collect::<String>()
   );
   let handler = format!(
@@ -1591,32 +1596,119 @@ fn variants(doc: &Document, set: &Node) -> Vec<Node> {
     .collect()
 }
 
+/// Names a React prop can't have: ours, React's, and JavaScript's reserved words.
+const RESERVED_PROPS: &[&str] = &[
+  "className",
+  "onClick",
+  "onNavigate",
+  "key",
+  "ref",
+  "children",
+  "rest",
+  "style",
+  "arguments",
+  "eval",
+  "undefined",
+  "await",
+  "async",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "debugger",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "enum",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "function",
+  "if",
+  "implements",
+  "import",
+  "in",
+  "instanceof",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "return",
+  "static",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "typeof",
+  "var",
+  "void",
+  "while",
+  "with",
+  "yield",
+];
+
 /// camelCase prop name for a variant property ("Size" → `size`).
-fn prop_ident(key: &str) -> String {
+pub(crate) fn prop_ident(key: &str) -> String {
+  let mut id = camel(key);
+  if RESERVED_PROPS.contains(&id.as_str()) {
+    id.push_str("Variant");
+  }
+  id
+}
+
+fn camel(key: &str) -> String {
   let p = pascal(key, "Prop");
-  let mut id: String = p
-    .chars()
+  p.chars()
     .next()
     .map(|c| c.to_ascii_lowercase())
     .into_iter()
     .chain(p.chars().skip(1))
-    .collect();
-  if [
-    "className",
-    "onClick",
-    "onNavigate",
-    "default",
-    "class",
-    "for",
-    "new",
-    "delete",
-    "in",
-  ]
-  .contains(&id.as_str())
-  {
-    id.push_str("Variant");
+    .collect()
+}
+
+/// The React prop name of each component property (by property id) of component `comp`: never
+/// a reserved word, never the name of a variant property or of another property.
+fn prop_idents(doc: &Document, comp: &str) -> BTreeMap<String, String> {
+  let mut taken: BTreeSet<String> = BTreeSet::new();
+  let variant_keys: Vec<String> = match props::owner(doc, comp).and_then(|o| doc.get(&o)) {
+    Some(o) if o.kind == NodeType::ComponentSet => variants(doc, o).iter().flat_map(|v| v.variant_props().into_keys()).collect(),
+    Some(o) => o.variant_props().into_keys().collect(),
+    None => Vec::new(),
+  };
+  taken.extend(variant_keys.iter().map(|k| prop_ident(k)));
+  let mut out = BTreeMap::new();
+  for d in props::props_of(doc, comp) {
+    let mut id = camel(&d.name);
+    while RESERVED_PROPS.contains(&id.as_str()) || taken.contains(&id) {
+      id.push_str("Prop");
+    }
+    taken.insert(id.clone());
+    out.insert(d.id, id);
   }
-  id
+  out
+}
+
+/// An attribute value as JSX: a plain string literal when it has nothing JSX would read
+/// differently (quotes, backslashes, entities, control characters), else an expression.
+fn jsx_attr_value(v: &str) -> String {
+  let plain = !v.chars().any(|c| matches!(c, '"' | '\\' | '&') || c.is_control());
+  let json = serde_json::to_string(v).unwrap_or_default();
+  if plain {
+    json
+  } else {
+    format!("{{{json}}}")
+  }
 }
 
 /// The exported component for a component set: picks the variant matching its props,
@@ -1660,13 +1752,14 @@ fn set_fn(ctx: &Ctx, set: &Node, name: &str) -> String {
     })
     .collect();
   // Component properties are shared by the variants, which pick them up through `...rest`.
+  let idents = prop_idents(ctx.doc, &set.id);
   for d in props::props_of(ctx.doc, &set.id) {
     let ty = match d.kind {
       PropKind::Boolean => "boolean",
       PropKind::Text => "string",
       PropKind::InstanceSwap => "React.ReactNode",
     };
-    types.push(format!("{}?: {ty}", prop_ident(&d.name)));
+    types.push(format!("{}?: {ty}", idents.get(&d.id).cloned().unwrap_or_default()));
   }
   let mut body = String::new();
   for v in vs.iter().skip(1) {

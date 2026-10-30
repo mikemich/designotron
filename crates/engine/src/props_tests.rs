@@ -976,3 +976,476 @@ fn text(e: &Engine, id: &str) -> String {
 fn comp_of(e: &Engine, id: &str) -> String {
   e.doc.get(id).unwrap().instance.as_ref().unwrap().component_id.clone()
 }
+
+/// Nested instances, layers that outlive their properties, perf and code export.
+mod review {
+  use super::*;
+
+  /// A Card main holding a Button instance whose label the Card's author set to "Pay"; its
+  /// properties are exposed on the Card.
+  fn card(k: &mut Kit, label: &str) -> (String, String) {
+    let frame = shape(&mut k.e, NodeType::Frame, 5000.0);
+    let inner = instance_of_default(k);
+    k.e
+      .dispatch(Command::MoveToParent {
+        ids: vec![inner.clone()],
+        parent: Some(frame.clone()),
+        index: None,
+      })
+      .unwrap();
+    let card = id(k.e.dispatch(Command::CreateComponent { ids: vec![frame] }).unwrap());
+    set_prop(k, &inner, label, Some(json!("Pay")));
+    k.e
+      .dispatch(Command::ComponentProps {
+        edit: PropsOp::Expose {
+          instance: inner.clone(),
+          expose: true,
+        },
+      })
+      .unwrap();
+    (card, inner)
+  }
+
+  fn update(k: &mut Kit, id: &str, patch: Value) {
+    k.e
+      .dispatch(Command::Update {
+        ids: vec![id.to_string()],
+        patch,
+      })
+      .unwrap();
+  }
+
+  #[test]
+  fn a_nested_value_equal_to_the_inner_default_sticks() {
+    let mut k = kit();
+    let label = add_bound(&mut k, "Label", PropKind::Text, "Label");
+    let (card, _) = card(&mut k, &label);
+    let ci = instance(&mut k, &card);
+    let nested = nested_instance(&k.e, &ci);
+    assert_eq!(text(&k.e, &named(&k.e, &nested, "Label")), "Pay");
+    // "Buy" is the Button's own default, but not what this Card shows.
+    set_prop(&mut k, &nested, &label, Some(json!("Buy")));
+    assert_eq!(text(&k.e, &named(&k.e, &nested, "Label")), "Buy");
+    let d = k.e.query(Query::ComponentProps { id: ci.clone() }).unwrap();
+    assert_eq!(d["groups"][0]["props"][0]["custom"], json!(true));
+    // Back to what the Card shows: no value of its own.
+    set_prop(&mut k, &nested, &label, Some(json!("Pay")));
+    assert_eq!(text(&k.e, &named(&k.e, &nested, "Label")), "Pay");
+    assert!(k.e.doc.get(&ci).unwrap().instance.as_ref().unwrap().overrides.is_empty());
+  }
+
+  #[test]
+  fn typing_into_a_nested_label_survives_a_resync() {
+    let mut k = kit();
+    let label = add_bound(&mut k, "Label", PropKind::Text, "Label");
+    let (card, _) = card(&mut k, &label);
+    let ci = instance(&mut k, &card);
+    let nested = nested_instance(&k.e, &ci);
+    let l = named(&k.e, &nested, "Label");
+    k.e
+      .dispatch(Command::SetText {
+        id: l,
+        characters: "Buy".into(),
+      })
+      .unwrap();
+    let t = named(&k.e, &k.default, "Label");
+    update(&mut k, &t, json!({ "text": { "fontSize": 30 } }));
+    assert_eq!(text(&k.e, &named(&k.e, &nested, "Label")), "Buy");
+  }
+
+  #[test]
+  fn three_levels_show_what_the_middle_component_sets() {
+    let mut k = kit();
+    let label = add_bound(&mut k, "Label", PropKind::Text, "Label");
+    let (card, _) = card(&mut k, &label);
+    // A Toolbar main holding a Card instance whose nested Button says "Order".
+    let frame = shape(&mut k.e, NodeType::Frame, 9000.0);
+    let ci = instance(&mut k, &card);
+    k.e
+      .dispatch(Command::MoveToParent {
+        ids: vec![ci.clone()],
+        parent: Some(frame.clone()),
+        index: None,
+      })
+      .unwrap();
+    let toolbar = id(k.e.dispatch(Command::CreateComponent { ids: vec![frame] }).unwrap());
+    let nested = nested_instance(&k.e, &ci);
+    set_prop(&mut k, &nested, &label, Some(json!("Order")));
+    assert_eq!(text(&k.e, &named(&k.e, &nested, "Label")), "Order");
+    let ti = instance(&mut k, &toolbar);
+    let shown = k
+      .e
+      .doc
+      .subtree(&ti)
+      .into_iter()
+      .find(|i| k.e.doc.get(i).unwrap().name == "Label")
+      .unwrap();
+    assert_eq!(text(&k.e, &shown), "Order");
+    // An edit of the Button main keeps both levels' values.
+    let t = named(&k.e, &k.default, "Label");
+    update(&mut k, &t, json!({ "text": { "fontSize": 30 } }));
+    let shown = k
+      .e
+      .doc
+      .subtree(&ti)
+      .into_iter()
+      .find(|i| k.e.doc.get(i).unwrap().name == "Label")
+      .unwrap();
+    assert_eq!(text(&k.e, &shown), "Order");
+    assert_eq!(k.e.doc.get(&shown).unwrap().text.as_ref().unwrap().font_size, 30.0);
+  }
+
+  #[test]
+  fn detaching_a_nested_instance_keeps_the_outer_binding_of_the_detached_layer() {
+    let mut k = kit();
+    let label = add_bound(&mut k, "Label", PropKind::Text, "Label");
+    let (card, inner) = card(&mut k, &label);
+    let show = id(
+      k.e
+        .dispatch(Command::ComponentProps {
+          edit: PropsOp::Add {
+            component: card.clone(),
+            name: "Show button".into(),
+            kind: PropKind::Boolean,
+            default: None,
+            bind: Some(inner.clone()),
+          },
+        })
+        .unwrap(),
+    );
+    let child_label = named(&k.e, &inner, "Label");
+    assert!(k.e.doc.get(&child_label).unwrap().prop_refs.is_some());
+    k.e.dispatch(Command::DetachInstance { ids: vec![inner.clone()] }).unwrap();
+    let r = k.e.doc.get(&inner).unwrap().prop_refs.clone().unwrap();
+    assert_eq!(r.visible, Some(show), "the detached frame still follows the Card's boolean");
+    assert!(r.swap.is_none() && r.characters.is_none());
+    assert!(
+      k.e.doc.get(&child_label).unwrap().prop_refs.is_none(),
+      "its layers follow the Button's properties no more"
+    );
+  }
+
+  #[test]
+  fn redirected_edits_undo_and_work_on_several_instances() {
+    let mut k = kit();
+    let pid = add_bound(&mut k, "Show icon", PropKind::Boolean, "Icon");
+    let a = instance_of_default(&mut k);
+    let b = instance_of_default(&mut k);
+    let (ia, ib) = (named(&k.e, &a, "Icon"), named(&k.e, &b, "Icon"));
+    update(&mut k, &ia, json!({ "visible": false }));
+    k.e
+      .dispatch(Command::Update {
+        ids: vec![ia.clone(), ib.clone()],
+        patch: json!({ "visible": false }),
+      })
+      .unwrap();
+    for i in [&a, &b] {
+      let info = k.e.doc.get(i).unwrap().instance.clone().unwrap();
+      assert_eq!(info.prop_values.get(&pid), Some(&json!(false)));
+      assert!(info.overrides.is_empty());
+    }
+    k.e.dispatch(Command::Undo).unwrap();
+    assert!(k.e.doc.get(&named(&k.e, &b, "Icon")).unwrap().visible);
+    assert!(!k.e.doc.get(&named(&k.e, &a, "Icon")).unwrap().visible);
+  }
+
+  #[test]
+  fn a_pasted_variant_instance_keeps_its_values_and_stays_editable() {
+    let mut k = kit();
+    let label = add_bound(&mut k, "Label", PropKind::Text, "Label");
+    let inst = instance_of_default(&mut k);
+    set_prop(&mut k, &inst, &label, Some(json!("Checkout")));
+    let clip = k.e.copy(std::slice::from_ref(&inst));
+    let mut e2 = Engine::new(Box::new(crate::text::HeuristicMeasurer), 3);
+    let r = e2
+      .dispatch(Command::Paste {
+        data: clip,
+        parent: None,
+        x: None,
+        y: None,
+      })
+      .unwrap();
+    let pasted = r["created"][0].as_str().unwrap().to_string();
+    let comp = comp_of(&e2, &pasted);
+    assert_eq!(props_of(&e2.doc, &comp).len(), 1, "the variant brings the property it uses");
+    assert_eq!(text(&e2, &named(&e2, &pasted, "Label")), "Checkout");
+    let l = named(&e2, &pasted, "Label");
+    e2.dispatch(Command::SetText {
+      id: l,
+      characters: "Hello".into(),
+    })
+    .unwrap();
+    let t = named(&e2, &comp, "Label");
+    e2.dispatch(Command::Update {
+      ids: vec![t],
+      patch: json!({ "text": { "fontSize": 30 } }),
+    })
+    .unwrap();
+    assert_eq!(text(&e2, &named(&e2, &pasted, "Label")), "Hello");
+  }
+
+  #[test]
+  fn a_variant_that_leaves_its_set_keeps_its_properties() {
+    let mut k = kit();
+    let label = add_bound(&mut k, "Label", PropKind::Text, "Label");
+    let hover = k.hover.clone();
+    k.e
+      .dispatch(Command::MoveToParent {
+        ids: vec![hover.clone()],
+        parent: None,
+        index: None,
+      })
+      .unwrap();
+    assert_eq!(props_of(&k.e.doc, &hover).len(), 1);
+    assert_eq!(props_of(&k.e.doc, &hover)[0].id, label);
+    let inst = instance(&mut k, &hover);
+    set_prop(&mut k, &inst, &label, Some(json!("X")));
+    let l = named(&k.e, &inst, "Label");
+    k.e
+      .dispatch(Command::SetText {
+        id: l,
+        characters: "Typed".into(),
+      })
+      .unwrap();
+    let t = named(&k.e, &hover, "Label");
+    update(&mut k, &t, json!({ "text": { "fontSize": 30 } }));
+    assert_eq!(text(&k.e, &named(&k.e, &inst, "Label")), "Typed");
+  }
+
+  #[test]
+  fn ungrouping_a_set_gives_each_variant_the_properties_it_uses() {
+    let mut k = kit();
+    let show = add_bound(&mut k, "Show icon", PropKind::Boolean, "Icon");
+    let (default, hover, set) = (k.default.clone(), k.hover.clone(), k.set.clone());
+    let inst = instance_of_default(&mut k);
+    set_prop(&mut k, &inst, &show, Some(json!(false)));
+    k.e.dispatch(Command::Ungroup { ids: vec![set] }).unwrap();
+    for c in [&default, &hover] {
+      assert_eq!(props_of(&k.e.doc, c).len(), 1, "{c}");
+    }
+    assert!(!k.e.doc.get(&named(&k.e, &inst, "Icon")).unwrap().visible);
+    let t = named(&k.e, &default, "Label");
+    update(&mut k, &t, json!({ "text": { "fontSize": 30 } }));
+    assert!(
+      !k.e.doc.get(&named(&k.e, &inst, "Icon")).unwrap().visible,
+      "the value still applies"
+    );
+  }
+
+  #[test]
+  fn a_dangling_reference_controls_nothing() {
+    let mut k = kit();
+    let label = add_bound(&mut k, "Label", PropKind::Text, "Label");
+    let inst = instance_of_default(&mut k);
+    // The layer points at a property its component doesn't have.
+    let t = named(&k.e, &k.default, "Label");
+    k.e.doc.get_mut(&t).unwrap().prop_refs.as_mut().unwrap().characters = Some("pr_gone".into());
+    crate::components::sync_instance(&mut k.e.doc, &inst, &mut k.e.gen);
+    let l = named(&k.e, &inst, "Label");
+    k.e
+      .dispatch(Command::SetText {
+        id: l,
+        characters: "Typed".into(),
+      })
+      .unwrap();
+    update(&mut k, &t, json!({ "text": { "fontSize": 30 } }));
+    assert_eq!(
+      text(&k.e, &named(&k.e, &inst, "Label")),
+      "Typed",
+      "recorded as an ordinary override"
+    );
+    let _ = label;
+  }
+
+  #[test]
+  fn moving_a_set_does_not_touch_its_variants() {
+    let mut k = kit();
+    add_bound(&mut k, "Show icon", PropKind::Boolean, "Icon");
+    for _ in 0..5 {
+      k.e
+        .dispatch(Command::Duplicate {
+          ids: vec![k.default.clone()],
+        })
+        .unwrap();
+    }
+    let before = crate::components::FINGERPRINTS.with(|c| c.get());
+    for i in 0..10 {
+      let set = k.set.clone();
+      update(&mut k, &set, json!({ "x": 100.0 + i as f64 }));
+    }
+    assert_eq!(
+      crate::components::FINGERPRINTS.with(|c| c.get()),
+      before,
+      "no variant re-fingerprinted"
+    );
+    // A change of the set's properties still does reach them.
+    let pid = props_of(&k.e.doc, &k.set)[0].id.clone();
+    let inst = instance_of_default(&mut k);
+    k.e
+      .dispatch(Command::ComponentProps {
+        edit: PropsOp::Update {
+          component: k.set.clone(),
+          prop: pid.clone(),
+          name: Some("Icon visible".into()),
+          default: Some(json!(false)),
+          options: None,
+        },
+      })
+      .unwrap();
+    assert!(!k.e.doc.get(&named(&k.e, &inst, "Icon")).unwrap().visible);
+  }
+
+  #[test]
+  fn concurrent_values_on_one_instance_leave_layers_that_match() {
+    let mut k = kit();
+    let label = add_bound(&mut k, "Label", PropKind::Text, "Label");
+    let show = add_bound(&mut k, "Show icon", PropKind::Boolean, "Icon");
+    let inst = instance_of_default(&mut k);
+    let mut b = Engine::new(Box::new(crate::text::HeuristicMeasurer), 9);
+    b.load(&k.e.to_json()).unwrap();
+    let base = k.e.doc.clone();
+    set_prop(&mut k, &inst, &label, Some(json!("Mine")));
+    b.dispatch(Command::ComponentProps {
+      edit: PropsOp::Set {
+        instance: inst.clone(),
+        prop: show.clone(),
+        value: Some(json!(false)),
+      },
+    })
+    .unwrap();
+    let db = crate::collab::delta(&base, &b.doc, true);
+    k.e.dispatch(Command::ApplyRemote { delta: db, local: false }).unwrap();
+    let values = k.e.doc.get(&inst).unwrap().instance.as_ref().unwrap().prop_values.clone();
+    let shown = text(&k.e, &named(&k.e, &inst, "Label"));
+    let expected = values.get(&label).and_then(|v| v.as_str()).unwrap_or("Buy");
+    assert_eq!(shown, expected, "the layers show what the instance's values say");
+    assert_eq!(
+      k.e.doc.get(&named(&k.e, &inst, "Icon")).unwrap().visible,
+      values.get(&show) != Some(&json!(false))
+    );
+  }
+
+  #[test]
+  fn deleting_a_property_leaves_no_trace_even_in_swap_records() {
+    let mut k = kit();
+    let label = add_bound(&mut k, "Label", PropKind::Text, "Label");
+    let (card, _) = card(&mut k, &label);
+    let ci = instance(&mut k, &card);
+    let nested = nested_instance(&k.e, &ci);
+    k.e
+      .dispatch(Command::SetVariant {
+        id: nested.clone(),
+        prop: "State".into(),
+        value: "Hover".into(),
+      })
+      .unwrap();
+    set_prop(&mut k, &nested, &label, Some(json!("Deep")));
+    assert!(k.e.to_json().contains("Deep"));
+    let t = named(&k.e, &k.default, "Label");
+    k.e.dispatch(Command::Delete { ids: vec![t] }).unwrap();
+    k.e
+      .dispatch(Command::ComponentProps {
+        edit: PropsOp::Delete {
+          component: k.set.clone(),
+          prop: label.clone(),
+        },
+      })
+      .unwrap();
+    let json = k.e.to_json();
+    assert!(!json.contains(&label), "no trace of the deleted property id");
+    assert!(!json.contains("Deep"));
+  }
+
+  #[test]
+  fn binding_drops_the_overrides_it_replaces() {
+    let mut k = kit();
+    let inst = instance_of_default(&mut k);
+    let icon = named(&k.e, &inst, "Icon");
+    update(&mut k, &icon, json!({ "visible": false, "opacity": 0.5 }));
+    add_bound(&mut k, "Icon", PropKind::Boolean, "Icon");
+    let o = k.e.doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides.clone();
+    let entry = o.values().next().unwrap();
+    assert!(entry.get("visible").is_none() && entry.get("opacity").is_some(), "{entry}");
+  }
+
+  #[test]
+  fn swap_options_leave_out_the_instances_own_component() {
+    let mut k = kit();
+    add_bound(&mut k, "Glyph", PropKind::InstanceSwap, "Icon");
+    let inst = instance_of_default(&mut k);
+    let d = k.e.query(Query::ComponentProps { id: inst }).unwrap();
+    let offered: Vec<Value> = d["groups"][0]["props"][0]["options"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|o| o["id"].clone())
+      .collect();
+    assert!(offered.contains(&json!(k.check)));
+    assert!(
+      !offered.contains(&json!(k.default)) && !offered.contains(&json!(k.hover)),
+      "{offered:?}"
+    );
+  }
+
+  #[test]
+  fn names_that_would_clash_as_props_are_refused() {
+    let mut k = kit();
+    let add = |k: &mut Kit, name: &str| {
+      k.e.dispatch(Command::ComponentProps {
+        edit: PropsOp::Add {
+          component: k.set.clone(),
+          name: name.into(),
+          kind: PropKind::Boolean,
+          default: None,
+          bind: None,
+        },
+      })
+    };
+    assert!(add(&mut k, "State").is_err(), "a variant property's name");
+    assert!(add(&mut k, "state").is_err(), "the same React prop");
+    add(&mut k, "Icon").unwrap();
+    assert!(add(&mut k, "icon").is_err(), "the same React prop as another property");
+  }
+
+  #[test]
+  fn exported_props_are_valid_jsx_with_distinct_names() {
+    let mut k = kit();
+    let names = [
+      ("Class name", PropKind::Text, "Label"),
+      ("Key", PropKind::Boolean, "Icon"),
+      ("Default", PropKind::Boolean, "Bg"),
+    ];
+    let mut ids = Vec::new();
+    for (name, kind, layer) in names {
+      ids.push(add_bound(&mut k, name, kind, layer));
+    }
+    let page = shape(&mut k.e, NodeType::Frame, 8000.0);
+    rename(&mut k.e, &page, "Home");
+    let inst = instance_of_default(&mut k);
+    k.e
+      .dispatch(Command::MoveToParent {
+        ids: vec![inst.clone()],
+        parent: Some(page.clone()),
+        index: None,
+      })
+      .unwrap();
+    set_prop(&mut k, &inst, &ids[0], Some(json!("Say \"hi\" & <bye>\nnow \\o/")));
+    set_prop(&mut k, &inst, &ids[1], Some(json!(false)));
+    let files = crate::codegen::export_project(&k.e.doc, &crate::text::HeuristicMeasurer);
+    let all: String = files.iter().map(|f| f.content.clone()).collect();
+    // Reserved and taken names get a suffix; the text can't be a plain attribute.
+    assert!(
+      all.contains("classNameProp") && all.contains("keyProp") && all.contains("defaultProp"),
+      "{all}"
+    );
+    assert!(all.contains("classNameProp={\"Say \\\"hi\\\" & <bye>\\nnow \\\\o/\"}"), "{all}");
+    assert!(!all.contains("classNameProp=\"Say"), "{all}");
+    if let Ok(dir) = std::env::var("OUT_PROJ") {
+      for f in files {
+        let p = std::path::Path::new(&dir).join(&f.path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, f.content).unwrap();
+      }
+    }
+  }
+}

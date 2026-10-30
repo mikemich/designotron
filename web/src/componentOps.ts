@@ -67,12 +67,23 @@ export function invalidVariantText(s: string): string | null {
   return null;
 }
 
+/** Why a variant property can't be called `name`: a component property of the set has that
+ *  name, or one that becomes the same React prop (the engine refuses the reverse). */
+function clashesWithComponentProp(set: Node, name: string): string | null {
+  const norm = (s: string) => s.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  const hit = (set.component?.props ?? []).find((p) => p.name === name || norm(p.name) === norm(name));
+  return hit ? `“${hit.name}” is already a component property` : null;
+}
+
 /** Renames a variant property on every variant in the set. */
 export function renameVariantProperty(set: Node, from: string, to: string): boolean {
   to = to.trim();
   if (to === from) return true;
   const doc = getDoc();
-  const bad = invalidVariantText(to) ?? (setProperties(doc, set).some((p) => p.name === to) ? `“${to}” already exists` : null);
+  const bad =
+    invalidVariantText(to) ??
+    (setProperties(doc, set).some((p) => p.name === to) ? `“${to}” already exists` : null) ??
+    clashesWithComponentProp(set, to);
   if (bad) return toast(bad, "error"), false;
   return batch(() => {
     for (const v of variantsOf(doc, set)) {
@@ -139,7 +150,7 @@ export function addVariantProperty(set: Node): boolean {
   const doc = getDoc();
   const names = new Set(setProperties(doc, set).map((p) => p.name));
   let i = names.size + 1;
-  while (names.has(`Property ${i}`)) i++;
+  while (names.has(`Property ${i}`) || clashesWithComponentProp(set, `Property ${i}`)) i++;
   const name = `Property ${i}`;
   return batch(() => {
     for (const v of variantsOf(doc, set)) writeVariantProps(v, { ...(v.component?.variantProps ?? {}), [name]: "Default" });

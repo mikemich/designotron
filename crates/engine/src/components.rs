@@ -47,8 +47,16 @@ const ROOT_LOCAL_KEYS: &[&str] = &[
   "sizingV",
 ];
 
+#[cfg(test)]
+thread_local! {
+  /// How many fingerprints this thread computed (tests check that unrelated edits compute none).
+  pub(crate) static FINGERPRINTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Fingerprint of a component subtree; changes whenever the component is edited.
 pub fn fingerprint(doc: &Document, comp_id: &str) -> u64 {
+  #[cfg(test)]
+  FINGERPRINTS.with(|c| c.set(c.get() + 1));
   let mut h = DefaultHasher::new();
   // Variants share the properties of their set.
   if let Some(set) = doc.get(comp_id).and_then(|c| c.parent.as_ref()).and_then(|p| doc.get(p)) {
@@ -236,14 +244,39 @@ pub fn record_override(doc: &mut Document, node_id: &str, p: &Value) {
 }
 
 pub fn detach_instance(doc: &mut Document, inst_id: &str) {
+  // Layers of the instance keep what the properties made of them but no longer follow its
+  // properties; layers inside instances nested in it still follow theirs. The detached layer
+  // itself keeps following the property of the component it sits in that controls its
+  // visibility.
+  let own: HashSet<NodeId> = doc
+    .subtree(inst_id)
+    .into_iter()
+    .filter(|nid| {
+      nid != inst_id
+        && doc
+          .ancestors(nid)
+          .into_iter()
+          .find(|a| doc.get(a).map(|n| n.kind == NodeType::Instance).unwrap_or(false))
+          .as_deref()
+          == Some(inst_id)
+    })
+    .collect();
   for nid in doc.subtree(inst_id) {
     if let Some(n) = doc.get_mut(&nid) {
       n.master_id = None;
-      // Layers keep what the properties made of them, but no longer follow any property.
-      n.prop_refs = None;
+      if own.contains(&nid) {
+        n.prop_refs = None;
+      }
       if nid == inst_id {
         n.kind = NodeType::Frame;
         n.instance = None;
+        n.prop_refs = n.prop_refs.take().and_then(|r| {
+          let kept = crate::model::PropRefs {
+            visible: r.visible,
+            ..Default::default()
+          };
+          (!kept.is_empty()).then_some(kept)
+        });
       }
     }
   }
@@ -425,7 +458,7 @@ pub(crate) fn enclosing_component(doc: &Document, id: &str) -> Option<NodeId> {
 
 /// The components instanced by `n` itself: its main component and any it was swapped to
 /// (recorded in its overrides, to any depth).
-fn referenced_components(n: &Node, out: &mut Vec<NodeId>) {
+pub(crate) fn referenced_components(n: &Node, out: &mut Vec<NodeId>) {
   fn swaps(overrides: &BTreeMap<NodeId, Value>, out: &mut Vec<NodeId>, depth: usize) {
     if depth > MAX_SWAP_DEPTH {
       return;

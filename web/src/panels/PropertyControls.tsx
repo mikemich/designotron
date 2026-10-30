@@ -4,7 +4,7 @@
 
 import { useMemo, useState } from "react";
 import { CornerUpLeft, DiamondPlus, Eye, Replace, ToggleLeft, Trash2, Type, Unlink } from "lucide-react";
-import { useDoc } from "../store";
+import { useDoc, useStore } from "../store";
 import type { Doc, Node, PropKind } from "../types";
 import { IconButton, Popover, Section, SelectField, Seg } from "../ui/controls";
 import {
@@ -31,7 +31,10 @@ const FIELD_ICON: Record<BindField, typeof Type> = { visible: Eye, characters: T
 /** The properties of a selected main component or component set: create, rename, default, delete. */
 export function PropertiesSection({ n }: { n: Node }) {
   const doc = useDoc();
-  const info = useMemo(() => componentProps(n.id), [doc, n.id]);
+  // Queries and the component list are redone when the document changes, not on every render.
+  const docRev = useStore((s) => s.es.docRev);
+  const info = useMemo(() => componentProps(n.id), [docRev, n.id]);
+  const options = useMemo(() => componentOptions(doc), [docRev]);
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
   if (info.mode !== "main") return null;
   return (
@@ -47,7 +50,7 @@ export function PropertiesSection({ n }: { n: Node }) {
         <div className="muted small">No properties yet. Create one here, or from a layer's “Apply component property”.</div>
       )}
       {info.props.map((p) => (
-        <MainPropRow key={p.id} owner={n.id} p={p} doc={doc} />
+        <MainPropRow key={p.id} owner={n.id} p={p} options={options} />
       ))}
       {anchor && (
         <Popover anchor={anchor} onClose={() => setAnchor(null)} width={250}>
@@ -57,7 +60,7 @@ export function PropertiesSection({ n }: { n: Node }) {
             onCreate={(name, kind, def) => {
               if (addProp(n.id, name, kind, { default: def })) setAnchor(null);
             }}
-            doc={doc}
+            options={options}
           />
         </Popover>
       )}
@@ -65,7 +68,9 @@ export function PropertiesSection({ n }: { n: Node }) {
   );
 }
 
-function MainPropRow({ owner, p, doc }: { owner: string; p: MainProp; doc: Doc }) {
+type ComponentChoice = { value: string; label: string };
+
+function MainPropRow({ owner, p, options }: { owner: string; p: MainProp; options: ComponentChoice[] }) {
   const Icon = KIND_ICON[p.kind];
   const used = p.bound.map((b) => b.name || "Layer");
   return (
@@ -94,9 +99,10 @@ function MainPropRow({ owner, p, doc }: { owner: string; p: MainProp; doc: Doc }
         )}
         {p.kind === "instanceSwap" && (
           <SelectField
+            label="Default"
             title={`${p.name} default component`}
             value={String(p.default)}
-            options={componentOptions(doc, String(p.default))}
+            options={withCurrent(options, String(p.default))}
             onChange={(id) => updateProp(owner, p.id, { default: id })}
           />
         )}
@@ -107,29 +113,30 @@ function MainPropRow({ owner, p, doc }: { owner: string; p: MainProp; doc: Doc }
 }
 
 /** Every main component as dropdown options (variants labelled with their set). */
-function componentOptions(doc: Doc, current?: string): { value: string; label: string }[] {
-  const out = Object.values(doc.nodes)
+function componentOptions(doc: Doc): ComponentChoice[] {
+  return Object.values(doc.nodes)
     .filter((c) => c.type === "component")
     .map((c) => {
       const set = c.parent ? doc.nodes[c.parent] : null;
       return { value: c.id, label: set?.type === "componentSet" ? `${set.name} / ${c.name}` : c.name };
     })
     .sort((a, b) => a.label.localeCompare(b.label));
-  if (current && !out.some((o) => o.value === current)) out.unshift({ value: current, label: "Missing component" });
-  return out;
 }
+
+const withCurrent = (options: ComponentChoice[], current: string): ComponentChoice[] =>
+  options.some((o) => o.value === current) ? options : [{ value: current, label: "Missing component" }, ...options];
 
 /** Name, type and default for a new property. With `kind` fixed (made from a layer) only the name. */
 function CreateForm(props: {
   title: string;
   taken: string[];
-  doc: Doc;
+  options: ComponentChoice[];
   kind?: PropKind;
   onCreate: (name: string, kind: PropKind, def: PropValue | undefined) => void;
 }) {
   const [kind, setKind] = useState<PropKind>(props.kind ?? "boolean");
   const [name, setName] = useState(freeName(props.taken));
-  const options = useMemo(() => componentOptions(props.doc), [props.doc]);
+  const options = props.options;
   const [swap, setSwap] = useState(options[0]?.value ?? "");
   const [text, setText] = useState("Text");
   const [on, setOn] = useState(true);
@@ -191,15 +198,15 @@ function CreateForm(props: {
 
 /** A layer of a main component: apply component properties to its visibility, text or swap. */
 export function LayerPropsSection({ n }: { n: Node }) {
-  const doc = useDoc();
-  const found = useMemo(() => componentProps(n.id), [doc, n.id]);
+  const docRev = useStore((s) => s.es.docRev);
+  const found = useMemo(() => componentProps(n.id), [docRev, n.id]);
   const info = found.mode === "instance" ? found.layer : found;
   if (info?.mode !== "layer") return null;
   const fields = (["visible", "characters", "swap"] as BindField[]).filter((f) => info.canBind[f]);
   return (
     <Section title={<span className="wf-purple-text">Component properties</span>}>
       {fields.map((f) => (
-        <LayerPropRow key={f} n={n} field={f} owner={info.owner} props={info.props} bound={info.refs?.[f] ?? null} doc={doc} />
+        <LayerPropRow key={f} n={n} field={f} owner={info.owner} props={info.props} bound={info.refs?.[f] ?? null} />
       ))}
     </Section>
   );
@@ -211,7 +218,6 @@ function LayerPropRow(props: {
   owner: string;
   props: { id: string; name: string; kind: PropKind }[];
   bound: string | null;
-  doc: Doc;
 }) {
   const { n, field, owner, bound } = props;
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
@@ -260,7 +266,7 @@ function LayerPropRow(props: {
             <CreateForm
               title={`Create ${KIND_LABEL[kind].toLowerCase()} property from this layer`}
               taken={props.props.map((p) => p.name)}
-              doc={props.doc}
+              options={[]}
               kind={kind}
               onCreate={(name) => {
                 if (addProp(owner, name, kind, { bind: n.id })) setAnchor(null);
@@ -276,8 +282,8 @@ function LayerPropRow(props: {
 /** The controls an instance shows for its component's properties, and for those of nested
  *  instances that expose theirs. Empty when there is nothing to control. */
 export function InstanceProps({ n }: { n: Node }) {
-  const doc = useDoc();
-  const info = useMemo(() => componentProps(n.id), [doc, n.id]);
+  const docRev = useStore((s) => s.es.docRev);
+  const info = useMemo(() => componentProps(n.id), [docRev, n.id]);
   if (info.mode !== "instance") return null;
   const own = info.groups.find((g) => g.instance === n.id);
   const nested = info.groups.filter((g) => g.instance !== n.id);
@@ -317,7 +323,7 @@ function GroupControls({ g }: { g: InstanceGroup }) {
           )}
           {p.kind === "instanceSwap" && (
             <SelectField
-              label={<DiamondPlus size={12} className="wf-purple" />}
+              label={p.name}
               title={p.name}
               value={String(p.value)}
               options={(p.options ?? []).map((o) => ({ value: o.id, label: o.name }))}

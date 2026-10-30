@@ -15,7 +15,7 @@
 //! `components::swap_component` keeps is the value, which also gives it the recursion guard.
 //! Nested instances can show their properties on the outer instance (`expose_props`).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
@@ -222,6 +222,18 @@ fn bound_in_comp(doc: &Document, comp: &str, field: Option<PropField>, prop: &st
     }
   }
   out
+}
+
+/// What instance `a`'s layers show for a property when it sets no value: what the layers they
+/// copy show (inside a nested instance that is the outer component's copy, not the inner one's
+/// own main component).
+fn baseline(doc: &Document, a: &str, def: &PropDef) -> Value {
+  let field = PropField::of(def.kind);
+  let from_masters = bound_in_instance(doc, a, field, &def.id).iter().find_map(|l| {
+    let master = doc.get(l)?.master_id.as_ref()?;
+    layer_value(doc.get(master)?, field)
+  });
+  from_masters.unwrap_or_else(|| own_main_value(doc, a, def))
 }
 
 /// What the instance's own component shows for a property.
@@ -431,34 +443,87 @@ fn delete(doc: &mut Document, component: &str, prop: &str) -> Result<Value, Stri
   if let Some(c) = doc.get_mut(&owner).and_then(|n| n.component.as_mut()) {
     c.props.retain(|p| p.id != prop);
   }
-  // Instances forget their values for it (their layers fall back to the main components').
-  let holders: Vec<NodeId> = doc
-    .nodes
-    .values()
-    .filter(|n| {
-      n.instance
-        .as_ref()
-        .map(|i| i.prop_values.contains_key(prop) || has_entry(i, prop))
-        .unwrap_or(false)
-    })
-    .map(|n| n.id.clone())
-    .collect();
-  for id in holders {
-    if let Some(i) = doc.get_mut(&id).and_then(|n| n.instance.as_mut()) {
-      i.prop_values.remove(prop);
-      for v in i.overrides.values_mut() {
-        if let Some(Value::Object(m)) = v.get_mut(PROPS_KEY) {
-          m.remove(prop);
-        }
-      }
+  // Instances forget their values for it (their layers fall back to the main components'),
+  // also those kept in the swap records of instances swapped inside them.
+  update_instances(doc, |i| {
+    let mut changed = i.prop_values.remove(prop).is_some();
+    for v in i.overrides.values_mut() {
+      changed |= strip_values(v, prop);
+    }
+    if changed {
       i.overrides.retain(|_, v| !is_blank(v));
     }
-  }
+    changed
+  });
   Ok(json!({}))
 }
 
-fn has_entry(i: &InstanceInfo, prop: &str) -> bool {
-  i.overrides.values().any(|v| v.get(PROPS_KEY).and_then(|p| p.get(prop)).is_some())
+/// Runs `edit` on a copy of every instance's info and stores it back when it reports a change.
+fn update_instances(doc: &mut Document, mut edit: impl FnMut(&mut InstanceInfo) -> bool) {
+  let all: Vec<(NodeId, InstanceInfo)> = doc
+    .nodes
+    .values()
+    .filter_map(|n| n.instance.clone().map(|i| (n.id.clone(), i)))
+    .collect();
+  for (id, mut info) in all {
+    if edit(&mut info) {
+      if let Some(n) = doc.get_mut(&id) {
+        n.instance = Some(info);
+      }
+    }
+  }
+}
+
+/// Removes property `prop`'s value from every `propValues` map inside an override entry.
+fn strip_values(v: &mut Value, prop: &str) -> bool {
+  let Value::Object(m) = v else { return false };
+  let mut changed = false;
+  if let Some(Value::Object(pv)) = m.get_mut(PROPS_KEY) {
+    changed |= pv.remove(prop).is_some();
+  }
+  for (k, x) in m.iter_mut() {
+    if k != PROPS_KEY {
+      changed |= strip_values(x, prop);
+    }
+  }
+  changed
+}
+
+/// Drops the overrides on `node`'s `field` (made before a property took the field over) from every
+/// instance, including the swap records inside them.
+fn prune_overrides(doc: &mut Document, node: &str, field: PropField) {
+  fn prune(map: &mut serde_json::Map<String, Value>, node: &str, field: PropField) -> bool {
+    let mut changed = false;
+    if let Some(Value::Object(e)) = map.get_mut(node) {
+      match field {
+        PropField::Visible => changed |= e.remove("visible").is_some(),
+        PropField::Characters => {
+          if let Some(Value::Object(t)) = e.get_mut("text") {
+            changed |= t.remove("characters").is_some();
+            changed |= t.remove("runs").is_some();
+            if t.is_empty() {
+              e.remove("text");
+            }
+          }
+        }
+        PropField::Swap => {}
+      }
+    }
+    for e in map.values_mut() {
+      if let Some(Value::Object(inner)) = e.get_mut(components::SWAP_KEY).and_then(|s| s.get_mut("overrides")) {
+        changed |= prune(inner, node, field);
+      }
+    }
+    changed
+  }
+  update_instances(doc, |i| {
+    let mut map: serde_json::Map<String, Value> = i.overrides.clone().into_iter().collect();
+    if !prune(&mut map, node, field) {
+      return false;
+    }
+    i.overrides = map.into_iter().filter(|(_, v)| !is_blank(v)).collect();
+    true
+  });
 }
 
 /// An override entry left with no content (an empty object, or an empty `propValues`).
@@ -476,8 +541,23 @@ fn check_name(doc: &Document, owner: &str, except: &str, name: &str) -> Result<(
   if name.is_empty() {
     return Err("a property needs a name".into());
   }
-  if props_of(doc, owner).iter().any(|p| p.name == name && p.id != except) {
+  // Names that become the same React prop count as the same name.
+  let ident = crate::codegen::prop_ident(name);
+  if props_of(doc, owner)
+    .iter()
+    .any(|p| p.id != except && (p.name == name || crate::codegen::prop_ident(&p.name) == ident))
+  {
     return Err(format!("a property named “{name}” already exists"));
+  }
+  let variant_names = comps_of(doc, owner)
+    .into_iter()
+    .filter_map(|c| doc.get(&c).map(|n| n.variant_props()))
+    .flat_map(|v| v.into_keys());
+  if variant_names
+    .into_iter()
+    .any(|k| k == name || crate::codegen::prop_ident(&k) == ident)
+  {
+    return Err(format!("“{name}” is already a variant property of this component"));
   }
   Ok(())
 }
@@ -553,6 +633,9 @@ fn bind(doc: &mut Document, node: &str, field: PropField, prop: Option<&str>) ->
   if refs.is_empty() {
     n.prop_refs = None;
   }
+  if prop.is_some() {
+    prune_overrides(doc, node, field);
+  }
   Ok(())
 }
 
@@ -622,6 +705,98 @@ pub fn merge_into_set(doc: &mut Document, comps: &[NodeId], set: &str) {
   }
 }
 
+/// The properties of `comp`'s set that its layers use, for a copy of the variant that stands
+/// alone (copied out of its set, or moved out of it).
+pub fn standalone_props(doc: &Document, comp: &str) -> Vec<PropDef> {
+  let used = used_ids(doc, comp);
+  props_of(doc, comp).into_iter().filter(|p| used.contains(&p.id)).collect()
+}
+
+/// Ids of the properties the layers under `comp` are bound to.
+fn used_ids(doc: &Document, comp: &str) -> HashSet<String> {
+  doc
+    .subtree(comp)
+    .iter()
+    .filter_map(|i| doc.get(i).and_then(|n| n.prop_refs.clone()))
+    .flat_map(|r| [r.visible, r.characters, r.swap])
+    .flatten()
+    .collect()
+}
+
+/// After a mutation: a variant that left its component set (moved out, set ungrouped) takes the
+/// set's properties its layers use, so they keep working; moved to another set, they go there.
+pub fn follow_variants(doc: &mut Document, prev: &Document) {
+  let mut moved: Vec<(NodeId, Vec<PropDef>)> = Vec::new();
+  for item in prev.nodes.diff(&doc.nodes) {
+    let imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, n) } = item else {
+      continue;
+    };
+    if n.kind != NodeType::Component || o.parent == n.parent {
+      continue;
+    }
+    let old_set = o
+      .parent
+      .as_ref()
+      .and_then(|p| prev.get(p))
+      .filter(|s| s.kind == NodeType::ComponentSet);
+    let used = used_ids(doc, k);
+    let defs: Vec<PropDef> = old_set
+      .and_then(|s| s.component.as_ref())
+      .map(|c| c.props.iter().filter(|p| used.contains(&p.id)).cloned().collect())
+      .unwrap_or_default();
+    if !defs.is_empty() {
+      moved.push((k.clone(), defs));
+    }
+  }
+  for (comp, defs) in moved {
+    let Some(target) = owner(doc, &comp) else { continue };
+    for mut d in defs {
+      let have = props_of(doc, &target);
+      if have.iter().any(|p| p.id == d.id) {
+        continue;
+      }
+      let base = d.name.clone();
+      let mut i = 2;
+      while check_name(doc, &target, "", &d.name).is_err() {
+        d.name = format!("{base} {i}");
+        i += 1;
+      }
+      if let Some(n) = doc.get_mut(&target) {
+        n.component.get_or_insert_with(ComponentInfo::default).props.push(d);
+      }
+    }
+  }
+}
+
+/// Whether an instance kept its component but got other property values.
+fn values_changed(old: &Option<InstanceInfo>, new: &Option<InstanceInfo>) -> bool {
+  match (old, new) {
+    (Some(a), Some(b)) => a.component_id == b.component_id && a.prop_values != b.prop_values,
+    _ => false,
+  }
+}
+
+/// After a collaborator's change: an instance whose property values changed (its component
+/// didn't) is rebuilt from them, so its layers show what they say; the layers and the info are
+/// merged separately. (A swapped component is left as merged, see STATUS.)
+pub fn resync_changed(doc: &mut Document, gen: &mut IdGen, prev: &Document) {
+  let mut tops: Vec<NodeId> = Vec::new();
+  for item in prev.nodes.diff(&doc.nodes) {
+    let imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, n) } = item else {
+      continue;
+    };
+    if n.kind == NodeType::Instance && values_changed(&o.instance, &n.instance) {
+      let top = outermost(doc, k);
+      if !tops.contains(&top) {
+        tops.push(top);
+      }
+    }
+  }
+  for t in tops {
+    components::sync_instance(doc, &t, gen);
+  }
+}
+
 // ---------- Values on instances ----------
 
 fn set(doc: &mut Document, gen: &mut IdGen, instance: &str, prop: &str, value: Option<Value>) -> Result<Value, String> {
@@ -632,7 +807,7 @@ fn set(doc: &mut Document, gen: &mut IdGen, instance: &str, prop: &str, value: O
   }
   // A value the component already shows is no value at all.
   let value = match value {
-    Some(v) => Some(coerce(doc, def.kind, &v)?).filter(|v| *v != own_main_value(doc, instance, &def)),
+    Some(v) => Some(coerce(doc, def.kind, &v)?).filter(|v| *v != baseline(doc, instance, &def)),
     None => None,
   };
   write_value(doc, instance, prop, value)?;
@@ -655,7 +830,7 @@ fn set_swap(doc: &mut Document, gen: &mut IdGen, a: &str, def: &PropDef, value: 
         return Err("that component isn't one of the property's options".into());
       }
       for l in &layers {
-        if would_nest(doc, &target, &components::enclosing_component(doc, l)) {
+        if would_nest(doc, &target, &components::enclosing_component(doc, l)) || instance_components(doc, l).contains(&target) {
           return Err("a component can't contain an instance of itself".into());
         }
       }
@@ -818,7 +993,7 @@ pub fn redirect_edit(doc: &mut Document, node_id: &str, p: &Value) -> Value {
   let known = |pid: &String| def_of(doc, &comp, pid).is_some();
   // The value to record: none when the component already shows it.
   let value = |pid: &String, v: Value| {
-    let same = def_of(doc, &comp, pid).map(|d| own_main_value(doc, &a, &d) == v).unwrap_or(false);
+    let same = def_of(doc, &comp, pid).map(|d| baseline(doc, &a, &d) == v).unwrap_or(false);
     (!same).then_some(v)
   };
   let mut out = p.clone();
@@ -904,12 +1079,22 @@ pub(crate) fn apply_values(
     Characters(String),
   }
   let mut edits: Vec<(NodeId, Edit)> = Vec::new();
-  let mut stack: Vec<(NodeId, Rc<BTreeMap<String, Value>>)> = vec![(inst_id.to_string(), Rc::new(info.prop_values.clone()))];
-  while let Some((cur, values)) = stack.pop() {
+  // Per instance level: the values set on it and the ids of the properties its component has
+  // (a reference to any other property, left by a variant that left its set, controls nothing).
+  type Level = (Rc<BTreeMap<String, Value>>, Rc<HashSet<String>>);
+  let ids_of = |comp: &str| Rc::new(props_of(doc, comp).into_iter().map(|p| p.id).collect::<HashSet<String>>());
+  let root: Level = (Rc::new(info.prop_values.clone()), ids_of(&info.component_id));
+  let mut stack: Vec<(NodeId, Level)> = vec![(inst_id.to_string(), root)];
+  while let Some((cur, (values, valid))) = stack.pop() {
     let Some(n) = doc.get(&cur) else { continue };
     for c in &n.children {
       let Some(cn) = doc.get(c) else { continue };
-      if let Some(r) = &cn.prop_refs {
+      let on = |p: &Option<String>| p.clone().filter(|p| valid.contains(p));
+      if let Some(r) = cn.prop_refs.as_ref().map(|r| PropRefs {
+        visible: on(&r.visible),
+        characters: on(&r.characters),
+        swap: None,
+      }) {
         // The property alone decides what it controls: its value, else what the main component
         // shows (an override made before the layer was bound to it no longer counts).
         let master = cn.master_id.as_ref().and_then(|m| doc.get(m));
@@ -938,21 +1123,20 @@ pub(crate) fn apply_values(
           if skip.contains(c) {
             continue;
           }
-          // A nested instance: its properties come from its own info and what was set on it
-          // through the outer one.
-          let mut v = i.prop_values.clone();
+          // A nested instance: only what was set on it through the outer one is a value here;
+          // what its own main component's copy sets is already what its layers' masters show.
           let set = cn
             .master_id
             .as_ref()
             .and_then(|m| overrides.get(m))
             .and_then(|o| o.get(PROPS_KEY))
             .and_then(|v| v.as_object());
-          if let Some(set) = set {
-            v.extend(set.iter().map(|(k, x)| (k.clone(), x.clone())));
-          }
-          stack.push((c.clone(), Rc::new(v)));
+          let v: BTreeMap<String, Value> = set
+            .map(|s| s.iter().map(|(k, x)| (k.clone(), x.clone())).collect())
+            .unwrap_or_default();
+          stack.push((c.clone(), (Rc::new(v), ids_of(&i.component_id))));
         }
-        _ => stack.push((c.clone(), values.clone())),
+        _ => stack.push((c.clone(), (values.clone(), valid.clone()))),
       }
     }
   }
@@ -1133,6 +1317,10 @@ pub fn values_summary(doc: &Document, n: &Node) -> Option<Value> {
 /// main component) except those that would put a component inside itself.
 fn swap_options(doc: &Document, def: &PropDef, x: Option<&str>, current: &Value) -> Vec<Value> {
   let host = x.and_then(|x| components::enclosing_component(doc, x));
+  // One pass over the components for all candidates (not a walk per candidate), and never the
+  // component of an instance the layer sits in (an instance can't hold its own component).
+  let blocked = host.as_deref().map(|h| reaching(doc, h)).unwrap_or_default();
+  let outer = x.map(|x| instance_components(doc, x)).unwrap_or_default();
   let ids: Vec<&NodeId> = if def.options.is_empty() {
     doc
       .nodes
@@ -1147,7 +1335,7 @@ fn swap_options(doc: &Document, def: &PropDef, x: Option<&str>, current: &Value)
     .into_iter()
     .filter_map(|c| doc.get(c))
     .filter(|c| c.kind == NodeType::Component)
-    .filter(|c| current.as_str() == Some(c.id.as_str()) || !would_nest(doc, &c.id, &host))
+    .filter(|c| current.as_str() == Some(c.id.as_str()) || !(blocked.contains(&c.id) || outer.contains(&c.id)))
     .map(|c| {
       let label = component_label(doc, c);
       (label.clone(), json!({ "id": c.id, "name": label }))
@@ -1155,6 +1343,51 @@ fn swap_options(doc: &Document, def: &PropDef, x: Option<&str>, current: &Value)
     .collect();
   out.sort_by(|a, b| a.0.cmp(&b.0));
   out.into_iter().map(|(_, v)| v).collect()
+}
+
+/// The main components of the instances around layer `x` (the ones whose content it is part of).
+fn instance_components(doc: &Document, x: &str) -> HashSet<NodeId> {
+  doc
+    .ancestors(x)
+    .iter()
+    .filter_map(|a| doc.get(a))
+    .filter(|a| a.kind == NodeType::Instance)
+    .filter_map(|a| a.instance.as_ref().map(|i| i.component_id.clone()))
+    // (a variant counts as its whole set)
+    .flat_map(|c| {
+      let all = owner(doc, &c).map(|o| comps_of(doc, &o)).unwrap_or_default();
+      std::iter::once(c).chain(all)
+    })
+    .collect()
+}
+
+/// The components that are `host` or hold it (through instances, any depth): placing one of
+/// them inside `host` would make it contain itself. One walk over every component's layers.
+fn reaching(doc: &Document, host: &str) -> HashSet<NodeId> {
+  let mut holders: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+  for c in doc.nodes.values().filter(|n| n.kind == NodeType::Component) {
+    let mut refs = Vec::new();
+    let mut stack = vec![c.id.clone()];
+    while let Some(id) = stack.pop() {
+      if let Some(n) = doc.get(&id) {
+        components::referenced_components(n, &mut refs);
+        stack.extend(n.children.iter().cloned());
+      }
+    }
+    for r in refs {
+      holders.entry(r).or_default().push(c.id.clone());
+    }
+  }
+  let mut out: HashSet<NodeId> = HashSet::from([host.to_string()]);
+  let mut queue: VecDeque<NodeId> = VecDeque::from([host.to_string()]);
+  while let Some(c) = queue.pop_front() {
+    for h in holders.get(&c).into_iter().flatten() {
+      if out.insert(h.clone()) {
+        queue.push_back(h.clone());
+      }
+    }
+  }
+  out
 }
 
 /// "Button / Size=Large" for a variant, the component's name otherwise.

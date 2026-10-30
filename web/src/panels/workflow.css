@@ -285,3 +285,17 @@
 .wf-create .textinput {
   width: 100%;
 }
+.wf-ctl .field .lbl,
+.wf-indent .field .lbl {
+  width: auto;
+  min-width: 52px;
+  max-width: 84px;
+  padding: 0 6px;
+  text-align: left;
+  display: block;
+  line-height: 28px;
+  cursor: default;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
