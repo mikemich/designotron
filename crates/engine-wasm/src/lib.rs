@@ -82,6 +82,13 @@ impl WasmEngine {
     self.inner.collab_reset(ordered, granular);
   }
 
+  /// Whether this engine reads and writes pages, styles and variables per id in deltas (what
+  /// an editor tells the room it can do when joining).
+  #[wasm_bindgen(js_name = collabGranular)]
+  pub fn collab_granular(&self) -> bool {
+    designotron_engine::collab::GRANULAR
+  }
+
   /// JSON array of this editor's unacknowledged and unsent changes, oldest first.
   #[wasm_bindgen(js_name = collabUnsent)]
   pub fn collab_unsent(&mut self) -> String {

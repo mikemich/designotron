@@ -827,8 +827,9 @@ impl Rooms {
       assets: if keep { m.assets } else { None },
     };
     let older = r.peers.iter().any(|(pid, p)| *pid != id && !p.granular);
-    let whole = designotron_engine::collab::legacy(&delta, r.doc.as_ref().unwrap())
-      .filter(|_| older)
+    let whole = older
+      .then(|| designotron_engine::collab::legacy(&delta, r.doc.as_ref().unwrap()))
+      .flatten()
       .and_then(|w| serde_json::value::to_raw_value(&w).ok());
     match &whole {
       // Peers that predate per-id changes get the room's whole lists instead.

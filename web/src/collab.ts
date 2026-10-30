@@ -377,7 +377,7 @@ function connect(join: Record<string, unknown>) {
       if (heardPong && lastPing > lastHeard && now - lastHeard > SILENT_MS && now - lastPing >= PING_MS / 2 - 500) return lost();
       if (now - lastPing >= PING_MS - 500) ping();
     }, PING_MS / 2);
-    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, granular: true, ...join }));
+    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, granular: getEngine().collabGranular(), ...join }));
   };
   socket.onmessage = (e) => ws === socket && onMessage(JSON.parse(e.data));
   socket.onclose = lost;

@@ -1212,7 +1212,9 @@ impl Engine {
     }
     self.selection.retain(|i| self.doc.nodes.contains_key(i));
     if self.doc.page(&self.page).is_none() {
-      self.page = self.doc.pages[0].id.clone();
+      if let Some(p) = self.doc.pages.first() {
+        self.page = p.id.clone();
+      }
     }
   }
 

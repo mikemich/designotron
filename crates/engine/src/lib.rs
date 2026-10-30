@@ -6,6 +6,8 @@
 pub mod ai;
 pub mod codegen;
 pub mod collab;
+#[cfg(test)]
+mod collab_sim;
 pub mod color;
 pub mod comments;
 pub mod components;

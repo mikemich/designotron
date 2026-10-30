@@ -72,6 +72,9 @@ pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> 
   out
 }
 
+/// This engine can read and write the per-id form of pages, styles and variables.
+pub const GRANULAR: bool = true;
+
 /// The wire keys of the per-id form of pages, styles and variables.
 const GRANULAR_KEYS: [&str; 5] = ["pageChanges", "colorStyles", "textStyles", "collectionChanges", "variableChanges"];
 
@@ -109,19 +112,41 @@ pub fn legacy(d: &Value, doc: &Document) -> Option<Value> {
 
 /// Adds the per-id changes of pages, styles and variables from `base` to `doc` to `o`.
 fn granular_parts(base: &Document, doc: &Document, o: &mut Map<String, Value>) {
+  // Sent on every flush (every frame of a drag): comparing is cheap, serialising is not.
+  if base.pages == doc.pages && base.styles == doc.styles && base.variables == doc.variables {
+    return;
+  }
   let mut put = |k: &str, d: Option<Value>| {
     if let Some(d) = d {
       o.insert(k.into(), d);
     }
   };
-  put("pageChanges", ListDelta::of(&base.pages, &doc.pages, |p| &p.id, &[]));
-  put(
-    "colorStyles",
-    ListDelta::of(&base.styles.colors, &doc.styles.colors, |s| &s.id, &[]),
-  );
-  put("textStyles", ListDelta::of(&base.styles.texts, &doc.styles.texts, |s| &s.id, &[]));
+  if base.pages != doc.pages {
+    put("pageChanges", ListDelta::of(&base.pages, &doc.pages, |p| &p.id, &[]));
+  }
+  if base.styles.colors != doc.styles.colors {
+    put(
+      "colorStyles",
+      ListDelta::of(&base.styles.colors, &doc.styles.colors, |s| &s.id, &[]),
+    );
+  }
+  if base.styles.texts != doc.styles.texts {
+    put("textStyles", ListDelta::of(&base.styles.texts, &doc.styles.texts, |s| &s.id, &[]));
+  }
+  if base.variables == doc.variables {
+    return;
+  }
   // Collections without their variables; a new collection travels whole, with them.
-  let bare = |l: &[Collection]| -> Vec<Collection> { l.iter().cloned().map(|c| Collection { variables: vec![], ..c }).collect() };
+  let bare = |l: &[Collection]| -> Vec<Collection> {
+    l.iter()
+      .map(|c| Collection {
+        id: c.id.clone(),
+        name: c.name.clone(),
+        modes: c.modes.clone(),
+        variables: vec![],
+      })
+      .collect()
+  };
   if let Some(mut d) = ListDelta::of(&bare(&base.variables), &bare(&doc.variables), |c| &c.id, &[]) {
     if let Some(add) = d.get_mut("add").and_then(|a| a.as_object_mut()) {
       for c in &doc.variables {
@@ -156,13 +181,14 @@ fn granular_parts(base: &Document, doc: &Document, o: &mut Map<String, Value>) {
 struct ListDelta;
 
 impl ListDelta {
-  fn of<T: Serialize>(base: &[T], new: &[T], id: impl Fn(&T) -> &String, nested: &[&str]) -> Option<Value> {
+  fn of<T: Serialize + PartialEq>(base: &[T], new: &[T], id: impl Fn(&T) -> &String, nested: &[&str]) -> Option<Value> {
     let (mut add, mut patch) = (Map::new(), Map::new());
     for n in new {
       match base.iter().find(|b| id(b) == id(n)) {
         None => {
           add.insert(id(n).clone(), serde_json::to_value(n).unwrap_or(Value::Null));
         }
+        Some(b) if b == n => {}
         Some(b) => {
           let p = fields_patch(b, n, nested);
           if !p.is_empty() {
@@ -380,6 +406,9 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
     doc.variables = serde_json::from_value(v.clone()).map_err(|e| format!("bad variables: {e}"))?;
   }
   apply_granular(doc, d)?;
+  // Two people deleting different pages at the same moment must not leave none (the first
+  // page is the editor's fallback): the room's order decides, so every copy keeps the same one.
+  keep_a_page(doc, &before);
   repair(doc, &before, &touched);
   Ok(())
 }
@@ -426,6 +455,21 @@ fn apply_granular(doc: &mut Document, d: &Value) -> Result<(), String> {
 /// the value the step gave it (`from`), so a collaborator's later value of the same property
 /// survives an undo or redo, as do their other properties, layers, styles and variables.
 pub fn revert(doc: &Document, from: &Document, to: &Document) -> Document {
+  let mut out = revert_inner(doc, from, to);
+  keep_a_page(&mut out, doc);
+  out
+}
+
+/// A document always has a page: if `doc` has none, the last page `before` had comes back.
+fn keep_a_page(doc: &mut Document, before: &Document) {
+  if doc.pages.is_empty() {
+    if let Some(p) = before.pages.last() {
+      doc.pages.push(p.clone());
+    }
+  }
+}
+
+fn revert_inner(doc: &Document, from: &Document, to: &Document) -> Document {
   let mut out = doc.clone();
   let mut touched = Vec::new();
   for item in from.nodes.diff(&to.nodes) {
