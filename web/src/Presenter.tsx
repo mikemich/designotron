@@ -96,6 +96,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
    *  pointer is released. Only one press is tracked at a time (a second finger is ignored), and
    *  the click the browser sends after the release is swallowed so it can't run another link. */
   const pressing = useRef<(() => void) | null>(null);
+  const disarmSwallow = useRef<(() => void) | null>(null);
   const press = (it: Interaction, from: Rect, pointerId: number) => {
     if (pressing.current) return;
     const prev = { history, overlays };
@@ -111,20 +112,37 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       stop();
       setHistory(prev.history);
       setOverlays(prev.overlays);
+      // A mouse release sends no click into the player (the layer under the pointer was replaced),
+      // so the next pointerdown, which starts a real click, disarms the swallow too.
+      disarmSwallow.current?.();
       const swallow = (c: Event) => {
         if (!(c.target as Element | null)?.closest?.(".presenter")) return;
         c.stopPropagation();
         c.preventDefault();
+        disarm();
+      };
+      const timer = setTimeout(() => disarm(), SWALLOW_CLICK_MS);
+      const disarm = () => {
         window.removeEventListener("click", swallow, true);
+        window.removeEventListener("pointerdown", disarm, true);
+        clearTimeout(timer);
+        disarmSwallow.current = null;
       };
       window.addEventListener("click", swallow, true);
-      setTimeout(() => window.removeEventListener("click", swallow, true), SWALLOW_CLICK_MS);
+      window.addEventListener("pointerdown", disarm, true);
+      disarmSwallow.current = disarm;
     };
     window.addEventListener("pointerup", release);
     window.addEventListener("pointercancel", release);
     pressing.current = stop;
   };
-  useEffect(() => () => pressing.current?.(), []);
+  useEffect(
+    () => () => {
+      pressing.current?.();
+      disarmSwallow.current?.();
+    },
+    [],
+  );
 
   // Timers call `go` through a ref so they never act on a stale render (e.g. "after delay → Back"
   // firing while a modal is open must close the modal).

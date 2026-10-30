@@ -122,6 +122,7 @@ try {
   // While pressing: acts on press, goes back on release.
   await dispatch({ op: "setFlowStart", page: pageId, id: id("Home") });
   await dispatch({ op: "setInteractions", id: id("Hold"), interactions: [navigate(id("Detail"), "onPress")] });
+  await dispatch({ op: "setInteractions", id: id("Go"), interactions: [navigate(id("Detail"))] });
   await dispatch({ op: "select", ids: [] });
   await page.click("button[title='Present']");
   await page.waitForSelector(".presenter");
@@ -134,6 +135,18 @@ try {
   await page.mouse.up();
   await page.waitForTimeout(200);
   check("release returns to the first screen", (await crumb()) === start, await crumb());
+  // A real click right after releasing a press still works (the swallow must not eat it).
+  await page.mouse.move(hold.x + 5, hold.y + 5);
+  await page.mouse.down();
+  await page.waitForTimeout(300);
+  await page.mouse.up();
+  const goBox = await hotspotBox(id("Go"));
+  await page.mouse.move(goBox.x + 5, goBox.y + 5);
+  await page.waitForTimeout(30);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  check("hold, release, click within 500 ms navigates", (await crumb()) === "Detail", await crumb());
   await closePresenter();
 
   // Two fingers: only the pointer that pressed controls the revert, and a second press is ignored.
