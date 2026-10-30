@@ -1,12 +1,14 @@
 import * as A from "../actions";
-import { dispatch, getDoc, query, selection, useStore, zoomToSelection } from "../store";
+import { dispatch, getDoc, query, selection, toast, useStore, zoomToSelection } from "../store";
 import { ALT, MOD, SHIFT, type MenuItem } from "../ui/controls";
 import { assetDataUrl } from "../assets";
 import { askClaude } from "../ai/chatState";
 import { rasterize } from "../ai/images";
-import type { Node } from "../types";
+import type { Node, Rect } from "../types";
 import { addVariant } from "../componentOps";
 import { openSwapPicker } from "../panels/ComponentControls";
+import { cssFor } from "../panels/RightPanel";
+import { copyAsPng, copyAsSvg, copyText } from "../exporter";
 
 /** Where the last right-click happened, so pickers opened from the menu appear there. */
 let menuAt = { x: 240, y: 160 };
@@ -46,6 +48,49 @@ export async function copySelection() {
 }
 
 export async function pasteHere(x?: number, y?: number) {
+  const text = await clipboardLayers();
+  if (text) dispatch({ op: "paste", data: text, parent: null, x: x ?? null, y: y ?? null });
+}
+
+/**
+ * Paste to replace (Figma ⇧⌘R): each selected layer is swapped for a copy of the clipboard
+ * layers, which take its top-left corner, parent and place in the stack. One undo step.
+ */
+export async function pasteReplace() {
+  const targets = selection();
+  if (!targets.length) {
+    toast("Select the layers to replace, then paste to replace");
+    return;
+  }
+  const text = await clipboardLayers();
+  if (!text) {
+    toast("Copy some layers first, then paste to replace", "error");
+    return;
+  }
+  const created: string[] = [];
+  dispatch({ op: "beginGesture" });
+  try {
+    for (const id of targets) {
+      const doc = getDoc();
+      const n = doc.nodes[id];
+      const box = query<{ union: Rect | null }>({ q: "bounds", ids: [id] }).union;
+      if (!n || !box) continue;
+      const siblings = n.parent ? doc.nodes[n.parent]?.children : doc.pages.find((p) => p.id === n.page)?.children;
+      const index = siblings?.indexOf(id) ?? -1;
+      const r = dispatch<{ created: string[] }>({ op: "paste", data: text, parent: n.parent, x: box.x, y: box.y });
+      if (!r?.created?.length) continue;
+      dispatch({ op: "moveToParent", ids: r.created, parent: n.parent, index: index >= 0 ? index : null });
+      dispatch({ op: "delete", ids: [id] });
+      created.push(...r.created);
+    }
+  } finally {
+    dispatch({ op: "endGesture" });
+  }
+  if (created.length) dispatch({ op: "select", ids: created });
+}
+
+/** The Designotron layers on the clipboard (or the last copy in this tab when it can't be read). */
+async function clipboardLayers(): Promise<string> {
   let text = internalClipboard;
   try {
     const t = await navigator.clipboard.readText();
@@ -53,7 +98,7 @@ export async function pasteHere(x?: number, y?: number) {
   } catch {
     /* fall back to the internal clipboard */
   }
-  if (text) dispatch({ op: "paste", data: text, parent: null, x: x ?? null, y: y ?? null });
+  return text;
 }
 
 /** Right-click menu items for the current selection. */
@@ -73,6 +118,14 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   const items: MenuItem[] = [
     { label: "Copy", kbd: `${MOD}C`, onClick: copySelection },
     { label: "Paste here", kbd: `${MOD}V`, onClick: () => pasteHere(at.x, at.y) },
+    { label: "Paste to replace", kbd: `${SHIFT}${MOD}R`, onClick: pasteReplace },
+    { label: "Copy properties", kbd: `${ALT}${MOD}C`, onClick: A.copyProperties },
+    { label: "Paste properties", kbd: `${ALT}${MOD}V`, onClick: A.pasteProperties },
+    { heading: "Copy as" },
+    { label: "Copy as PNG", disabled: !one, onClick: () => one && copyAsPng(one.id) },
+    { label: "Copy as SVG", disabled: !one, onClick: () => one && copyAsSvg(one.id) },
+    { label: "Copy as CSS", disabled: !one, onClick: () => one && copyText(cssFor(one), `Copied CSS for ${one.name}`, "CSS") },
+    { sep: true },
     { label: "Duplicate", kbd: `${MOD}D`, onClick: A.duplicate },
     { label: "Delete", kbd: "⌫", onClick: A.deleteSelection },
     { sep: true },

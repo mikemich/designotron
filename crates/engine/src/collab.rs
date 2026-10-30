@@ -531,6 +531,36 @@ mod tests {
   }
 
   #[test]
+  fn export_rows_travel_to_peers_and_undo_removes_them() {
+    let mut a = engine(1);
+    let r = rect(&mut a, 0.0, None);
+    let mut b = engine(2);
+    b.load(&a.to_json()).unwrap();
+    let base = a.doc.clone();
+    let rows = json!([{ "format": "png", "scale": 2, "suffix": "" }, { "format": "jpg", "scale": 1, "suffix": "-w", "width": 512 }]);
+    a.dispatch(Command::Update {
+      ids: vec![r.clone()],
+      patch: json!({ "exportSettings": rows }),
+    })
+    .unwrap();
+    let d = delta(&base, &a.doc, true);
+    apply(&mut b.doc, &d).unwrap();
+    assert_eq!(b.doc.get(&r).unwrap().export_settings, a.doc.get(&r).unwrap().export_settings);
+    assert_eq!(b.doc.get(&r).unwrap().export_settings.len(), 2);
+    // Removing the rows leaves the key out of the node; the peer must clear them too.
+    let with_rows = a.doc.clone();
+    a.dispatch(Command::Update {
+      ids: vec![r.clone()],
+      patch: json!({ "exportSettings": [] }),
+    })
+    .unwrap();
+    apply(&mut b.doc, &delta(&with_rows, &a.doc, true)).unwrap();
+    assert!(b.doc.get(&r).unwrap().export_settings.is_empty());
+    a.dispatch(Command::Undo).unwrap();
+    assert_eq!(a.doc.get(&r).unwrap().export_settings.len(), 2);
+  }
+
+  #[test]
   fn undo_keeps_a_collaborators_later_edit() {
     let mut a = engine(1);
     let mine = rect(&mut a, 0.0, None);

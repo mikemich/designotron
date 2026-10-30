@@ -194,7 +194,8 @@ export interface Node {
   fillStyle: string | null;
   textStyle: string | null;
   interactions: Interaction[];
-  exportSettings: { format: "png" | "jpg" | "svg"; scale: number; suffix: string }[];
+  /** Export rows; the engine leaves the key out when there are none. */
+  exportSettings?: ExportSetting[];
   notes: string;
   layoutGrids: LayoutGrid[];
   isMask: boolean;
@@ -202,6 +203,15 @@ export interface Node {
   bindings: Record<string, string>;
   /** Collection id → mode id. */
   variableModes: Record<string, string>;
+}
+
+/** One row of the Export section; at most one of `width` / `height` is set (else `scale` applies). */
+export interface ExportSetting {
+  format: "png" | "jpg" | "svg";
+  scale: number;
+  suffix: string;
+  width?: number;
+  height?: number;
 }
 
 export interface CommentMessage {

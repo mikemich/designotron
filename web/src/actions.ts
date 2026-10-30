@@ -129,6 +129,59 @@ export function selectChildren() {
   }
 }
 
+// ---------- Copy / paste properties (Figma ⌥⌘C / ⌥⌘V) ----------
+
+/** Look properties pasted onto any layer. */
+const LOOK_KEYS = ["opacity", "blendMode", "fills", "strokes", "strokeWeight", "strokeAlign", "strokeDash", "cornerRadius", "cornerRadii", "effects"] as const;
+/** Type properties pasted onto text layers (never the characters, sizing mode or ranges). */
+const TEXT_KEYS = ["fontFamily", "fontSize", "fontWeight", "italic", "lineHeight", "letterSpacing", "paragraphSpacing", "alignH", "alignV", "decoration", "case"] as const;
+
+interface CopiedProps {
+  look: Record<string, unknown>;
+  text: Record<string, unknown> | null;
+  fillStyle: string | null;
+  textStyle: string | null;
+}
+
+let copiedProps: CopiedProps | null = null;
+
+/** Remembers the look of the first selected layer (fills, strokes, effects, radius, opacity, blend, text style). */
+export function copyProperties() {
+  const n = getDoc().nodes[selection()[0]];
+  if (!n) {
+    toast("Select a layer to copy its properties");
+    return;
+  }
+  const look: Record<string, unknown> = {};
+  for (const k of LOOK_KEYS) look[k] = structuredClone(n[k]);
+  const text = n.text ? Object.fromEntries(TEXT_KEYS.map((k) => [k, n.text![k]])) : null;
+  copiedProps = { look, text, fillStyle: n.fillStyle, textStyle: n.textStyle };
+  toast(`Copied properties of ${n.name}`);
+}
+
+/** Pastes the copied properties onto the selection as one undo step. */
+export function pasteProperties() {
+  const p = copiedProps;
+  if (!p) {
+    toast("Copy properties first (select a layer, then ⌥⌘C)");
+    return;
+  }
+  const doc = getDoc();
+  const nodes = selection().map((id) => doc.nodes[id]).filter(Boolean);
+  if (!nodes.length) return;
+  const ids = nodes.map((n) => n.id);
+  const texts = nodes.filter((n) => n.type === "text").map((n) => n.id);
+  oneStep(() => {
+    // A text style first, so the layer's own type values below win over the style's.
+    if (p.text && p.textStyle && doc.styles.texts.some((s) => s.id === p.textStyle) && texts.length) dispatch({ op: "applyStyle", ids: texts, styleId: p.textStyle });
+    dispatch({ op: "update", ids, patch: { ...p.look, ...(p.fillStyle ? {} : { fillStyle: null }) } });
+    if (p.text && texts.length) dispatch({ op: "update", ids: texts, patch: { text: p.text } });
+    // Editing fills detaches a colour style, so link it again afterwards.
+    if (p.fillStyle && doc.styles.colors.some((s) => s.id === p.fillStyle)) dispatch({ op: "applyStyle", ids, styleId: p.fillStyle });
+  });
+  toast(`Pasted properties onto ${nodes.length === 1 ? nodes[0].name : `${nodes.length} layers`}`);
+}
+
 /** Page point at the centre of the visible canvas. */
 export function viewportCenter(): { x: number; y: number } {
   const { w, h } = canvasSize();

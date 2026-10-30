@@ -1,5 +1,5 @@
 import * as A from "./actions";
-import { copySelection, pasteHere } from "./canvas/contextMenu";
+import { copySelection, pasteHere, pasteReplace } from "./canvas/contextMenu";
 import { pointerDrag, selection, setTool, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
 import { useShortcuts } from "./panels/ShortcutsDialog";
 
@@ -27,6 +27,10 @@ export function installShortcuts(): () => void {
       if (k === "e" && !e.shiftKey) return run(A.flatten);
       if (k === "o" && e.shiftKey) return run(A.outlineStroke);
       if (e.altKey && e.code === "KeyM") return run(A.useAsMask);
+      // Alt changes the typed letter on some layouts, so these go by the physical key.
+      if (e.altKey && e.code === "KeyC") return run(A.copyProperties);
+      if (e.altKey && e.code === "KeyV") return run(A.pasteProperties);
+      if (e.shiftKey && k === "r") return run(() => void pasteReplace());
       if (k === "y") return run(A.redo);
       if (k === "d") return run(A.duplicate);
       if (k === "a") return run(st.editingVector ? () => !pointerDrag.active && A.selectAllVectorPoints() : A.selectAll);

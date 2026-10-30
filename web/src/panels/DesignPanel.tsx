@@ -29,11 +29,11 @@ import {
   Radius,
   Blend,
 } from "lucide-react";
-import type { Effect, LayoutGrid, Node, Paint, VarKind } from "../types";
+import type { Effect, ExportSetting, LayoutGrid, Node, Paint, VarKind } from "../types";
 import { dispatch, FONTS, getDoc, styleTextSelection, useDoc, useSelection, useStore } from "../store";
 import { ALT, common, IconButton, MIXED, MOD, NumberField, Section, Seg, SelectField, SHIFT, type Maybe } from "../ui/controls";
 import { paintLabel, PaintSwatch, cssColor, ColorPicker } from "../ui/color";
-import { exportNode } from "../exporter";
+import { DEFAULT_EXPORT, exportLayers, rowSuffix } from "../exporter";
 import * as A from "../actions";
 import { Popover } from "../ui/controls";
 import { ComponentSetSection, InstanceSection, MainComponentSection } from "./ComponentControls";
@@ -76,7 +76,7 @@ export function DesignPanel() {
       <EffectsSection nodes={nodes} ids={ids} />
       {nodes.length === 1 && ["frame", "component"].includes(nodes[0].type) && <GridSection node={nodes[0]} />}
       <VariablesSection nodes={nodes} ids={ids} />
-      <ExportSection nodes={nodes} />
+      <ExportSection nodes={nodes} ids={ids} />
       {nodes.length === 1 && <NotesSection node={nodes[0]} />}
     </div>
   );
@@ -1107,30 +1107,105 @@ function VariablesSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   );
 }
 
-function ExportSection({ nodes }: { nodes: Node[] }) {
-  const [format, setFormat] = useState<"png" | "jpg" | "svg">("png");
-  const [scale, setScale] = useState(2);
+const EXPORT_SIZES = [
+  { value: "0.5", label: "0.5x" },
+  { value: "0.75", label: "0.75x" },
+  { value: "1", label: "1x" },
+  { value: "1.5", label: "1.5x" },
+  { value: "2", label: "2x" },
+  { value: "3", label: "3x" },
+  { value: "4", label: "4x" },
+  { value: "w", label: "Width" },
+  { value: "h", label: "Height" },
+];
+
+/** Figma's Export section: any number of rows per layer, saved on the layer. */
+function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
+  const stored = common(nodes, (n) => n.exportSettings ?? []);
+  const first = nodes[0];
+  const saved: ExportSetting[] = stored === MIXED ? (first.exportSettings ?? []) : stored;
+  // A layer without rows still shows one (not saved until it is edited), so it exports in two clicks.
+  const rows = saved.length ? saved : [DEFAULT_EXPORT];
+  const set = (next: ExportSetting[]) => update(ids, { exportSettings: next });
+  const setRow = (i: number, patch: Partial<ExportSetting>) =>
+    set(
+      rows.map((r, j) => {
+        if (j !== i) return r;
+        // A fixed width or height replaces the other; undefined drops the key.
+        const { width, height, ...rest } = { ...r, ...patch };
+        return { ...rest, ...(width ? { width } : {}), ...(height ? { height } : {}) };
+      }),
+    );
+  const sizeOf = (r: ExportSetting) => (r.width ? "w" : r.height ? "h" : String(r.scale));
+  const setSize = (i: number, v: string) => {
+    if (v === "w") setRow(i, { width: Math.max(1, Math.round(first.width)), height: undefined });
+    else if (v === "h") setRow(i, { height: Math.max(1, Math.round(first.height)), width: undefined });
+    else setRow(i, { scale: Number(v), width: undefined, height: undefined });
+  };
+  const sizeOptions = (r: ExportSetting) => (EXPORT_SIZES.some((o) => o.value === sizeOf(r)) ? EXPORT_SIZES : [...EXPORT_SIZES, { value: sizeOf(r), label: `${r.scale}x` }]);
+  const add = () => {
+    const last = rows[rows.length - 1];
+    const presets = [0.5, 1, 2, 3, 4];
+    const next = presets.find((p) => p > (last.width || last.height ? 1 : last.scale)) ?? 1;
+    set([...rows, { format: last.format, scale: next, suffix: "" }]);
+  };
   return (
-    <Section title="Export">
-      <div className="grid2" style={format === "svg" ? { gridTemplateColumns: "minmax(0, 1fr)" } : undefined}>
-        {format !== "svg" && (
-          <SelectField
-            value={scale}
-            options={[0.5, 1, 2, 3, 4].map((s) => ({ value: s, label: `${s}x` }))}
-            onChange={setScale}
-          />
-        )}
-        <SelectField
-          value={format}
-          options={[
-            { value: "png", label: "PNG" },
-            { value: "jpg", label: "JPG" },
-            { value: "svg", label: "SVG" },
-          ]}
-          onChange={setFormat}
-        />
-      </div>
-      <button className="btn block" onClick={() => nodes.forEach((n) => exportNode(n.id, format, scale))}>
+    <Section
+      title="Export"
+      actions={
+        <IconButton title="Add export setting" onClick={add}>
+          <Plus size={14} />
+        </IconButton>
+      }
+    >
+      {rows.map((r, i) => {
+        const svg = r.format === "svg";
+        const fixed = !svg && (r.width || r.height);
+        return (
+          <div key={i} className="export-row" style={{ marginBottom: 8 }}>
+            <div className="grid2" style={svg ? { gridTemplateColumns: "minmax(0, 1fr)" } : undefined}>
+              {!svg && <SelectField value={sizeOf(r)} options={sizeOptions(r)} onChange={(v) => setSize(i, v)} />}
+              <SelectField
+                value={r.format}
+                options={[
+                  { value: "png", label: "PNG" },
+                  { value: "jpg", label: "JPG" },
+                  { value: "svg", label: "SVG" },
+                ]}
+                onChange={(format) => setRow(i, { format })}
+              />
+            </div>
+            {fixed && (
+              <div className="grid2">
+                <NumberField
+                  label={r.width ? "W" : "H"}
+                  min={1}
+                  suffix="px"
+                  value={r.width || r.height || 1}
+                  onChange={(v) => setRow(i, r.width ? { width: Math.max(1, Math.round(v)) } : { height: Math.max(1, Math.round(v)) })}
+                />
+              </div>
+            )}
+            <div className="row">
+              <input
+                key={`${first.id}:${i}:${r.suffix}`}
+                className="textinput"
+                placeholder={`Suffix ${rowSuffix(r) || "(none)"}`}
+                title="File name suffix"
+                defaultValue={r.suffix}
+                onKeyDown={(e) => (e.key === "Enter" && e.currentTarget.blur(), e.stopPropagation())}
+                onBlur={(e) => e.target.value !== r.suffix && setRow(i, { suffix: e.target.value })}
+              />
+              {saved.length > 0 && (
+                <IconButton title="Remove export setting" onClick={() => set(saved.filter((_, j) => j !== i))}>
+                  <Minus size={13} />
+                </IconButton>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      <button className="btn block" onClick={() => exportLayers(ids)}>
         Export {nodes.length === 1 ? nodes[0].name : `${nodes.length} layers`}
       </button>
     </Section>

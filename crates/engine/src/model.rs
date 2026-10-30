@@ -249,6 +249,8 @@ pub struct Node {
   pub text_style: Option<String>,
 
   pub interactions: Vec<Interaction>,
+  /// Export rows (Figma's Export section); empty rows are left out of saved files.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
   pub export_settings: Vec<ExportSetting>,
   /// Free-form notes for developers / AI ("dev mode" annotations).
   pub notes: String,
@@ -1059,8 +1061,16 @@ pub enum ExportFormat {
 #[serde(rename_all = "camelCase", default)]
 pub struct ExportSetting {
   pub format: ExportFormat,
+  /// Multiplier on the layer's exported size (ignored for SVG and when `width`/`height` is set).
   pub scale: f64,
+  /// File name suffix; empty means `@2x`-style from the size (nothing at 1x).
   pub suffix: String,
+  /// Fixed export width in px (Figma "512w"); the height follows the aspect ratio.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub width: Option<f64>,
+  /// Fixed export height in px (Figma "1024h"); the width follows the aspect ratio.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub height: Option<f64>,
 }
 
 impl Default for ExportSetting {
@@ -1069,6 +1079,8 @@ impl Default for ExportSetting {
       format: ExportFormat::Png,
       scale: 1.0,
       suffix: String::new(),
+      width: None,
+      height: None,
     }
   }
 }
@@ -1226,5 +1238,42 @@ mod w2c_tests {
     let back: Node = serde_json::from_value(serde_json::to_value(&n).unwrap()).unwrap();
     assert_eq!(back, n);
     assert_eq!(serde_json::to_value(&n).unwrap()["layout"]["counterAlign"], "baseline");
+  }
+}
+
+#[cfg(test)]
+mod export_settings_tests {
+  use super::*;
+  use serde_json::json;
+
+  #[test]
+  fn old_files_without_export_rows_load_empty_and_save_without_the_key() {
+    let n: Node = serde_json::from_value(json!({ "id": "a", "type": "rectangle", "name": "R" })).unwrap();
+    assert!(n.export_settings.is_empty());
+    let v = serde_json::to_value(&n).unwrap();
+    assert!(v.get("exportSettings").is_none(), "empty rows are skipped");
+  }
+
+  #[test]
+  fn rows_with_fixed_sizes_round_trip_and_old_rows_still_load() {
+    let n: Node = serde_json::from_value(json!({
+      "id": "a", "type": "rectangle", "name": "R",
+      "exportSettings": [
+        { "format": "png", "scale": 2, "suffix": "@2x" },
+        { "format": "jpg", "scale": 1, "suffix": "-wide", "width": 512 },
+        { "format": "svg", "scale": 1, "suffix": "", "height": 1024 }
+      ]
+    }))
+    .unwrap();
+    assert_eq!(n.export_settings.len(), 3);
+    assert_eq!(n.export_settings[0].width, None);
+    assert_eq!(n.export_settings[1].width, Some(512.0));
+    assert_eq!(n.export_settings[1].format, ExportFormat::Jpg);
+    assert_eq!(n.export_settings[2].height, Some(1024.0));
+    let v = serde_json::to_value(&n).unwrap();
+    assert!(v["exportSettings"][0].get("width").is_none());
+    assert_eq!(v["exportSettings"][1]["width"], 512.0);
+    let back: Node = serde_json::from_value(v).unwrap();
+    assert_eq!(back.export_settings, n.export_settings);
   }
 }

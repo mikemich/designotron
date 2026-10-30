@@ -4,6 +4,7 @@ import JSZip from "jszip";
 import { assetDataUrl, inlineAssets, referencedAssets } from "./assets";
 import { download } from "./files";
 import { getDoc, query, toast } from "./store";
+import type { ExportSetting, Node } from "./types";
 
 /** Largest canvas browsers will allocate: 16384 px per side and about 268 megapixels in all. */
 const MAX_SIDE = 16384;
@@ -102,27 +103,133 @@ function safeName(s: string): string {
   return s.replace(/[^\w\- ]+/g, "").trim() || "export";
 }
 
-export async function exportNode(id: string, format: "png" | "jpg" | "svg", scale: number, suffix = "") {
+/** What a layer exports when it has no rows of its own. */
+export const DEFAULT_EXPORT: ExportSetting = { format: "png", scale: 1, suffix: "" };
+
+/** Rows to export for a layer: its own, or the default one. */
+export function exportRows(node: Node): ExportSetting[] {
+  return node.exportSettings?.length ? node.exportSettings : [DEFAULT_EXPORT];
+}
+
+/** Scale a row asks for on an exported image of `w` x `h` px (fixed widths and heights win over `scale`). */
+export function rowScale(row: ExportSetting, w: number, h: number): number {
+  if (row.format === "svg") return 1;
+  if (row.width && row.width > 0) return row.width / Math.max(w, 1);
+  if (row.height && row.height > 0) return row.height / Math.max(h, 1);
+  return row.scale > 0 ? row.scale : 1;
+}
+
+/** File name suffix of a row: what the user typed, else `@2x`, `@512w` or `@1024h` (nothing at 1x). */
+export function rowSuffix(row: ExportSetting, scale = row.scale): string {
+  if (row.suffix) return row.suffix;
+  if (row.format === "svg") return "";
+  if (row.width && row.width > 0) return `@${Math.round(row.width)}w`;
+  if (row.height && row.height > 0) return `@${Math.round(row.height)}h`;
+  return scale !== 1 ? `@${scale}x` : "";
+}
+
+export interface ExportFile {
+  name: string;
+  data: Blob | string;
+  mime: string;
+}
+
+/** One exported file for a layer and a row. A raster that is too large is scaled down with a toast. */
+export async function renderExport(id: string, row: ExportSetting): Promise<ExportFile> {
+  const node = getDoc().nodes[id];
+  if (!node) throw new Error("the layer no longer exists");
+  const svg = nodeSvg(id);
+  const base = safeName(node.name);
+  if (row.format === "svg") {
+    // Vector: no scale. Fonts embedded so text looks the same wherever the SVG is opened.
+    return { name: `${base}${rowSuffix(row)}.svg`, data: await embedFonts(svg), mime: "image/svg+xml" };
+  }
+  const { w, h } = svgSize(svg);
+  const want = rowScale(row, w, h);
+  const used = fitScale(w, h, want);
+  if (used < want) {
+    const px = `${Math.round(w * used)} × ${Math.round(h * used)} px`;
+    toast(`${node.name} is too large to export at ${Math.round(want * 100) / 100}x; exporting at ${used}x (${px}), the most browsers can make`, "error");
+  }
+  const blob = await svgToPngBlob(svg, used, row.format === "jpg" ? "image/jpeg" : "image/png");
+  const suffix = used < want && !row.suffix ? `@${used}x` : rowSuffix(row, used);
+  return { name: `${base}${suffix}.${row.format}`, data: blob, mime: blob.type };
+}
+
+/**
+ * Exports every row of every layer. One file downloads as it is; several come as a zip
+ * (browsers ask before allowing many downloads). Names that collide get a number.
+ */
+export async function exportLayers(ids: string[]) {
+  const doc = getDoc();
+  const files: ExportFile[] = [];
+  for (const id of ids) {
+    const node = doc.nodes[id];
+    if (!node) continue;
+    for (const row of exportRows(node)) {
+      try {
+        files.push(await renderExport(id, row));
+      } catch (err) {
+        toast(`Could not export ${node.name}: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    }
+  }
+  if (!files.length) return;
+  const named = uniqueNames(files);
+  if (named.length === 1) {
+    download(named[0].name, named[0].data, named[0].mime);
+    return;
+  }
+  const zip = new JSZip();
+  for (const f of named) zip.file(f.name, f.data);
+  const first = doc.nodes[ids[0]];
+  const label = ids.length === 1 && first ? safeName(first.name) : safeName(doc.name);
+  download(`${label}.zip`, await zip.generateAsync({ type: "blob" }), "application/zip");
+}
+
+/** `a.png`, `a.png` -> `a.png`, `a-2.png`. */
+function uniqueNames(files: ExportFile[]): ExportFile[] {
+  const seen = new Map<string, number>();
+  return files.map((f) => {
+    const n = (seen.get(f.name) ?? 0) + 1;
+    seen.set(f.name, n);
+    return n === 1 ? f : { ...f, name: f.name.replace(/(\.\w+)$/, `-${n}$1`) };
+  });
+}
+
+// ---------- Copy as ----------
+
+/** Copies a layer to the clipboard as a 2x PNG image. */
+export async function copyAsPng(id: string) {
   const node = getDoc().nodes[id];
   if (!node) return;
   try {
+    if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) throw new Error("this browser can't copy images");
     const svg = nodeSvg(id);
-    if (format === "svg") {
-      // Vector: no scale. Fonts embedded so text looks the same wherever the SVG is opened.
-      download(`${safeName(node.name)}${suffix}.svg`, await embedFonts(svg), "image/svg+xml");
-      return;
-    }
     const { w, h } = svgSize(svg);
-    const used = fitScale(w, h, scale);
-    if (used < scale) {
-      const px = `${Math.round(w * used)} × ${Math.round(h * used)} px`;
-      toast(`${node.name} is too large to export at ${scale}x; exporting at ${used}x (${px}), the most browsers can make`, "error");
-    }
-    const base = safeName(node.name) + (suffix || (used !== 1 ? `@${used}x` : ""));
-    const blob = await svgToPngBlob(svg, used, format === "jpg" ? "image/jpeg" : "image/png");
-    download(`${base}.${format}`, blob, blob.type);
+    // The promise goes in unresolved so the copy still counts as the user's click while it renders.
+    const png = svgToPngBlob(svg, fitScale(w, h, 2));
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+    toast(`Copied ${node.name} as PNG`);
   } catch (err) {
-    toast(`Could not export ${node.name}: ${err instanceof Error ? err.message : String(err)}`, "error");
+    toast(`Could not copy as PNG: ${err instanceof Error ? err.message : String(err)}`, "error");
+  }
+}
+
+/** Copies a layer's SVG markup to the clipboard as text. */
+export async function copyAsSvg(id: string) {
+  const node = getDoc().nodes[id];
+  if (!node) return;
+  await copyText(nodeSvg(id), `Copied ${node.name} as SVG`, "SVG");
+}
+
+/** Copies a text (code) to the clipboard with a toast. */
+export async function copyText(text: string, done: string, what: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(done);
+  } catch (err) {
+    toast(`Could not copy as ${what}: ${err instanceof Error ? err.message : String(err)}`, "error");
   }
 }
 

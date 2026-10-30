@@ -292,7 +292,7 @@ function CodePanel() {
   );
 }
 
-function cssFor(n: Node): string {
+export function cssFor(n: Node): string {
   const html = query<string>({ q: "exportHtml", id: n.id });
   const m = html.match(/<body>\s*<\w+ style="([^"]*)"/);
   const decl = (m?.[1] ?? "").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
