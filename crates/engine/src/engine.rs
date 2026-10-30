@@ -703,10 +703,12 @@ impl Engine {
   }
 
   /// Changes since the previous call, for keeping a JS copy of the document current:
-  /// `{full: doc}` the first time (or when `full`), else `{nodes: {id: node}, removed: [ids], meta}`
-  /// where `meta` carries the small document-level fields (pages, styles, variables, name).
+  /// `{full: doc}` the first time (or when `full`), `{same: true}` when nothing changed (selecting,
+  /// say: the copy stays the same object), else `{nodes: {id: node}, removed: [ids], meta}` where
+  /// `meta` carries the small document-level fields (pages, styles, variables, name).
   pub fn doc_delta(&mut self, full: bool) -> Value {
     let out = match (&self.synced, full) {
+      (Some(prev), false) if *prev == self.doc => return json!({ "same": true }),
       (Some(prev), false) => {
         let mut nodes = serde_json::Map::new();
         let mut removed = Vec::new();
@@ -3139,6 +3141,28 @@ mod tests {
       (moved[0] - shadowed[0], moved[1] - shadowed[1], moved[2], moved[3]),
       (30.0, 30.0, shadowed[2], shadowed[3])
     );
+  }
+
+  #[test]
+  fn doc_delta_says_when_nothing_changed() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 10.0, 10.0, None);
+    assert!(e.doc_delta(true).get("full").is_some());
+    assert_eq!(e.doc_delta(false), json!({ "same": true }), "nothing happened since the last call");
+    e.dispatch(Command::Select {
+      ids: vec![a.clone()],
+      mode: SelectMode::Replace,
+    })
+    .unwrap();
+    assert_eq!(e.doc_delta(false), json!({ "same": true }), "selecting doesn't change the document");
+    e.dispatch(Command::Update {
+      ids: vec![a.clone()],
+      patch: json!({ "x": 5.0 }),
+    })
+    .unwrap();
+    let d = e.doc_delta(false);
+    assert!(d.get("same").is_none() && d["nodes"].get(&a).is_some());
+    assert_eq!(e.doc_delta(false), json!({ "same": true }));
   }
 
   #[test]

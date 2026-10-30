@@ -242,6 +242,11 @@ export function getDoc(): Doc {
   const rev = e.rev();
   if (docCache && docCache.rev === rev) return docCache.doc;
   const d = JSON.parse(e.docDelta(!docCache));
+  // Selecting and the like: keep the same object, so what is derived from it isn't redone.
+  if (d.same && docCache) {
+    docCache = { rev, doc: docCache.doc };
+    return docCache.doc;
+  }
   if (d.full || !docCache) {
     docCache = { rev, doc: d.full };
     gridFrames.clear();
