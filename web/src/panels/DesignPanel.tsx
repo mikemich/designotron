@@ -899,12 +899,14 @@ function ExportSection({ nodes }: { nodes: Node[] }) {
   const [scale, setScale] = useState(2);
   return (
     <Section title="Export">
-      <div className="grid2">
-        <SelectField
-          value={scale}
-          options={[0.5, 1, 2, 3, 4].map((s) => ({ value: s, label: `${s}x` }))}
-          onChange={setScale}
-        />
+      <div className="grid2" style={format === "svg" ? { gridTemplateColumns: "minmax(0, 1fr)" } : undefined}>
+        {format !== "svg" && (
+          <SelectField
+            value={scale}
+            options={[0.5, 1, 2, 3, 4].map((s) => ({ value: s, label: `${s}x` }))}
+            onChange={setScale}
+          />
+        )}
         <SelectField
           value={format}
           options={[

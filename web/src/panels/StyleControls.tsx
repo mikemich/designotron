@@ -3,7 +3,7 @@
 
 import { useState } from "react";
 import { LayoutGrid, Pencil, Plus, Trash2, Unlink } from "lucide-react";
-import { dispatch, dispatchOrThrow, FONTS, getDoc, useDoc, useStore } from "../store";
+import { dispatch, dispatchOrThrow, FONTS, getDoc, toast, useDoc, useStore } from "../store";
 import type { Doc, Node } from "../types";
 import { common, IconButton, Menu, MIXED, NumberField, Popover, SelectField, type MenuItem } from "../ui/controls";
 import { ColorPicker, cssColor } from "../ui/color";
@@ -99,7 +99,12 @@ export function ColorStylesSection({ filter = "" }: { filter?: string }) {
   const [editing, setEditing] = useState<string | null>(null);
   const add = () => {
     const n = getDoc().nodes[sel[0]];
-    const f = n?.fills.find((p) => p.type === "solid" && p.visible);
+    // A colour style holds one solid colour: refuse a gradient or image rather than invent one.
+    const f = n?.fills.find((p) => p.visible);
+    if (f && f.type !== "solid") {
+      toast("Colour styles hold a single solid colour. Select a layer with a solid fill, or change this fill to solid first.", "error");
+      return;
+    }
     const color = f && f.type === "solid" ? f.color : "#7C5CFF";
     let id = "";
     const ok = batch(() => {

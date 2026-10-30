@@ -176,9 +176,10 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
     dispatch({ op: "paste", data: text, parent: pasteTarget(), x: null, y: null });
     return;
   }
-  if (text.trim().startsWith("<svg")) {
+  const svg = cleanSvg(text);
+  if (svg) {
     const c = viewportCenter();
-    const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text.trim());
+    const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
     const { width, height } = await imageSize(url);
     dispatch({ op: "createImage", src: "asset:" + addAsset(url), x: c.x - width / 2, y: c.y - height / 2, width, height, name: "SVG", parent: null });
     return;
@@ -187,8 +188,26 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
   dispatch({ op: "createText", x: c.x, y: c.y, characters: text.slice(0, 5000), parent: pasteTarget() });
 }
 
+/**
+ * The `<svg>` markup inside pasted or dropped text, without the XML prolog, DOCTYPE and
+ * comments that editors and exporters put in front, or null when the text isn't an SVG.
+ */
+export function cleanSvg(text: string): string | null {
+  const s = text
+    .replace(/^\uFEFF/, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/^\s*<\?xml[\s\S]*?\?>/, "")
+    .replace(/^\s*<!DOCTYPE[^[>]*(\[[\s\S]*?\])?\s*>/i, "")
+    .trim();
+  return /^<svg[\s>]/i.test(s) ? s : null;
+}
+
 export async function insertImageFile(file: File, x: number, y: number) {
-  const url = await readFileAsDataUrl(file);
+  let url = await readFileAsDataUrl(file);
+  if (file.type === "image/svg+xml" || /\.svg$/i.test(file.name)) {
+    const svg = cleanSvg(await file.text());
+    if (svg) url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+  }
   const id = addAsset(url);
   let { width, height } = await imageSize(url);
   const max = 1200;

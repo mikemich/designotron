@@ -3,7 +3,11 @@
 import JSZip from "jszip";
 import { assetDataUrl, inlineAssets, referencedAssets } from "./assets";
 import { download } from "./files";
-import { getDoc, query } from "./store";
+import { getDoc, query, toast } from "./store";
+
+/** Largest canvas browsers will allocate: 16384 px per side and about 268 megapixels in all. */
+const MAX_SIDE = 16384;
+const MAX_AREA = 268_435_456;
 
 const fontCss = new Map<string, Promise<string>>();
 
@@ -53,10 +57,22 @@ export function nodeSvg(id: string): string {
   return inlineAssets(query<string>({ q: "exportSvg", id }));
 }
 
+/** Pixel size of an exported SVG (its width/height attributes). */
+function svgSize(svg: string): { w: number; h: number } {
+  return { w: Number(svg.match(/width="([\d.]+)"/)?.[1] ?? 100), h: Number(svg.match(/height="([\d.]+)"/)?.[1] ?? 100) };
+}
+
+/** The largest scale at or below `scale` that keeps the raster within what a canvas can hold. */
+export function fitScale(w: number, h: number, scale: number): number {
+  const k = Math.min(scale, MAX_SIDE / Math.max(w, 1), MAX_SIDE / Math.max(h, 1), Math.sqrt(MAX_AREA / Math.max(w * h, 1)));
+  // Rounding each side can push the area a hair over; leave room for it.
+  return k < scale ? Math.floor(k * 1000) / 1000 : scale;
+}
+
 export async function svgToPngBlob(svg: string, scale: number, type = "image/png", background?: string): Promise<Blob> {
   const withFonts = await embedFonts(svg);
-  const w = Number(withFonts.match(/width="([\d.]+)"/)?.[1] ?? 100);
-  const h = Number(withFonts.match(/height="([\d.]+)"/)?.[1] ?? 100);
+  const { w, h } = svgSize(withFonts);
+  scale = fitScale(w, h, scale);
   const url = URL.createObjectURL(new Blob([withFonts], { type: "image/svg+xml" }));
   try {
     const img = new Image();
@@ -67,9 +83,10 @@ export async function svgToPngBlob(svg: string, scale: number, type = "image/png
       img.src = url;
     });
     const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(w * scale));
-    canvas.height = Math.max(1, Math.round(h * scale));
-    const ctx = canvas.getContext("2d")!;
+    canvas.width = Math.max(1, Math.min(MAX_SIDE, Math.round(w * scale)));
+    canvas.height = Math.max(1, Math.min(MAX_SIDE, Math.round(h * scale)));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("the browser could not allocate an image this large");
     if (background || type === "image/jpeg") {
       ctx.fillStyle = background ?? "#FFFFFF";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -88,15 +105,25 @@ function safeName(s: string): string {
 export async function exportNode(id: string, format: "png" | "jpg" | "svg", scale: number, suffix = "") {
   const node = getDoc().nodes[id];
   if (!node) return;
-  const svg = nodeSvg(id);
-  const base = safeName(node.name) + (suffix || (scale !== 1 && format !== "svg" ? `@${scale}x` : ""));
-  if (format === "svg") {
-    // Fonts embedded so text looks the same wherever the SVG is opened.
-    download(`${base}.svg`, await embedFonts(svg), "image/svg+xml");
-    return;
+  try {
+    const svg = nodeSvg(id);
+    if (format === "svg") {
+      // Vector: no scale. Fonts embedded so text looks the same wherever the SVG is opened.
+      download(`${safeName(node.name)}${suffix}.svg`, await embedFonts(svg), "image/svg+xml");
+      return;
+    }
+    const { w, h } = svgSize(svg);
+    const used = fitScale(w, h, scale);
+    if (used < scale) {
+      const px = `${Math.round(w * used)} × ${Math.round(h * used)} px`;
+      toast(`${node.name} is too large to export at ${scale}x; exporting at ${used}x (${px}), the most browsers can make`, "error");
+    }
+    const base = safeName(node.name) + (suffix || (used !== 1 ? `@${used}x` : ""));
+    const blob = await svgToPngBlob(svg, used, format === "jpg" ? "image/jpeg" : "image/png");
+    download(`${base}.${format}`, blob, blob.type);
+  } catch (err) {
+    toast(`Could not export ${node.name}: ${err instanceof Error ? err.message : String(err)}`, "error");
   }
-  const blob = await svgToPngBlob(svg, scale, format === "jpg" ? "image/jpeg" : "image/png");
-  download(`${base}.${format}`, blob, blob.type);
 }
 
 /** Base64 PNG of a node (or the union of a page) for Claude to look at. */

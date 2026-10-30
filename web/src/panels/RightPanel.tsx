@@ -302,6 +302,7 @@ function cssFor(n: Node): string {
     .filter(Boolean)
     .map((s) => `  ${s};`);
   const doc = getDoc();
-  const hint = n.notes ? `/* ${n.notes} */\n` : "";
+  // A "*/" in the note would end the comment early and leak the rest into the stylesheet.
+  const hint = n.notes ? `/* ${n.notes.replace(/\*\//g, "* /")} */\n` : "";
   return `${hint}.${(doc.nodes[n.id]?.name ?? "layer").replace(/[^\w]+/g, "-").toLowerCase()} {\n${lines.join("\n")}\n}`;
 }

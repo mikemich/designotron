@@ -1,7 +1,7 @@
 //! SVG renderer. The same code paints the editor canvas (with `data-id`
 //! hooks) and produces exported SVG, so what you see is what you export.
 
-use crate::geom::{fmt, Mat};
+use crate::geom::{fmt, Mat, Point, Rect};
 use crate::model::{
   Document, Effect, EffectType, Node, NodeId, NodeType, Paint, ScaleMode, StrokeAlign, StrokeCap, TextAlignH, TextAlignV, TextDecoration,
 };
@@ -65,10 +65,30 @@ pub fn render_root(doc: &Document, root: &str, m: &dyn TextMeasurer, opts: Rende
   }
 }
 
-/// Renders a single node as a standalone SVG document cropped to its bounds.
+/// Renders a single node as a standalone SVG document cropped to everything it paints
+/// (outside strokes, shadows, blurs), like Figma's export bounds.
 pub fn export_svg(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
+  export_svg_in(doc, id, m, render_bounds(doc, id))
+}
+
+/// Like `export_svg` but cropped to the node's geometry only, so the size matches the layer
+/// (code export embeds it in a box of that size).
+pub fn export_svg_geometry(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
+  export_svg_in(doc, id, m, doc.abs_bounds(id))
+}
+
+/// Page-space bounds of everything a node paints: its geometry plus outside/centre strokes
+/// and line caps, drop shadows and layer blurs, and its descendants (unless it clips them).
+pub fn render_bounds(doc: &Document, id: &str) -> Rect {
+  if doc.get(id).is_none() {
+    return Rect::default();
+  }
+  let local = local_render_bounds(doc, id);
+  mat_bounds(&doc.abs_matrix(id), &local)
+}
+
+fn export_svg_in(doc: &Document, id: &str, m: &dyn TextMeasurer, b: Rect) -> String {
   let Some(n) = doc.get(id) else { return String::new() };
-  let b = doc.abs_bounds(id);
   let mut r = Renderer {
     doc,
     m,
@@ -88,6 +108,103 @@ pub fn export_svg(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
     h = fmt(b.height.max(1.0)),
     defs = r.defs,
   )
+}
+
+/// Everything a node paints, in its own coordinate space (before its transform).
+fn local_render_bounds(doc: &Document, id: &str) -> Rect {
+  let Some(n) = doc.get(id) else { return Rect::default() };
+  let sm = stroke_margin(n);
+  let mut b = Rect::new(-sm, -sm, n.width + 2.0 * sm, n.height + 2.0 * sm);
+  let clips = n.kind.is_frame_like() && n.clip_content;
+  if !clips {
+    for c in &n.children {
+      let Some(cn) = doc.get(c) else { continue };
+      if !cn.visible {
+        continue;
+      }
+      let cb = mat_bounds(&doc.local_matrix(cn), &local_render_bounds(doc, c));
+      b = b.union(&cb);
+    }
+  }
+  let [l, t, r, bt] = effects_margin(n);
+  Rect::new(b.x - l, b.y - t, b.width + l + r, b.height + t + bt)
+}
+
+/// How far the visible strokes reach beyond the node's box.
+fn stroke_margin(n: &Node) -> f64 {
+  let sw = n.stroke_weight;
+  if sw <= 0.0 || n.kind == NodeType::Text || !n.strokes.iter().any(|p| p.visible()) {
+    return 0.0;
+  }
+  let mut m = match n.kind {
+    NodeType::Line => sw / 2.0,
+    NodeType::Polygon | NodeType::Star => {
+      if n.stroke_align == StrokeAlign::Inside {
+        0.0
+      } else {
+        sw / 2.0
+      }
+    }
+    NodeType::Vector => {
+      if n.stroke_align == StrokeAlign::Inside && is_closed(n) {
+        0.0
+      } else {
+        sw / 2.0
+      }
+    }
+    _ => match n.stroke_align {
+      StrokeAlign::Inside => 0.0,
+      StrokeAlign::Center => sw / 2.0,
+      StrokeAlign::Outside => sw,
+    },
+  };
+  if matches!(n.kind, NodeType::Line | NodeType::Vector) {
+    if let Some(s) = n.shape.as_ref() {
+      for cap in [s.start_cap, s.end_cap] {
+        m = m.max(match cap {
+          StrokeCap::Arrow => 3.0 * sw,
+          StrokeCap::Circle => 1.8 * sw,
+          _ => 0.0,
+        });
+      }
+    }
+  }
+  m.ceil()
+}
+
+/// Left, top, right and bottom reach of the node's drop shadows and layer blur.
+fn effects_margin(n: &Node) -> [f64; 4] {
+  let mut m = [0.0_f64; 4];
+  let mut blur = 0.0_f64;
+  for e in n.effects.iter().filter(|e| e.visible) {
+    match e.kind {
+      EffectType::DropShadow => {
+        let reach = e.blur.max(0.0) + e.spread.max(0.0);
+        m[0] = m[0].max(reach - e.x);
+        m[1] = m[1].max(reach - e.y);
+        m[2] = m[2].max(reach + e.x);
+        m[3] = m[3].max(reach + e.y);
+      }
+      EffectType::LayerBlur => blur = blur.max(e.blur.max(0.0)),
+      _ => {}
+    }
+  }
+  m.map(|v| (v.max(0.0) + 1.5 * blur).ceil())
+}
+
+/// Axis-aligned bounds of `r` after transforming it by `m`.
+fn mat_bounds(m: &Mat, r: &Rect) -> Rect {
+  let pts = [
+    m.apply(Point::new(r.x, r.y)),
+    m.apply(Point::new(r.right(), r.y)),
+    m.apply(Point::new(r.right(), r.bottom())),
+    m.apply(Point::new(r.x, r.bottom())),
+  ];
+  let min_x = pts.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+  let min_y = pts.iter().map(|p| p.y).fold(f64::INFINITY, f64::min);
+  let max_x = pts.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+  let max_y = pts.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+  Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
 }
 
 /// Geometry of a node in its local coordinate space.
@@ -420,7 +537,15 @@ impl<'a> Renderer<'a> {
       return None;
     }
     let fid = self.id("fx");
-    let mut f = format!("<filter id=\"{fid}\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\" color-interpolation-filters=\"sRGB\">");
+    // Region in the node's own space, so big shadows/blurs and zero-height lines aren't cut off.
+    let fr = local_render_bounds(self.doc, &n.id);
+    let mut f = format!(
+      "<filter id=\"{fid}\" filterUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" color-interpolation-filters=\"sRGB\">",
+      fmt(fr.x),
+      fmt(fr.y),
+      fmt(fr.width.max(1.0)),
+      fmt(fr.height.max(1.0))
+    );
     let mut under = Vec::new();
     let mut over = Vec::new();
     for (i, e) in effects.iter().enumerate() {
@@ -706,5 +831,136 @@ mod tests {
     let out = export_svg(&doc, "f", &HeuristicMeasurer);
     assert!(out.starts_with("<svg"));
     assert!(!out.contains("data-id"));
+  }
+
+  #[test]
+  fn render_bounds_cover_strokes_shadows_and_blur() {
+    let (mut doc, _) = doc_with_rect(100.0, 100.0, 100.0, 60.0);
+    // No decoration: exactly the geometry.
+    let b = render_bounds(&doc, "r");
+    assert_eq!((b.x, b.y, b.width, b.height), (100.0, 100.0, 100.0, 60.0));
+    // Inside stroke adds nothing, centre adds w/2, outside adds w.
+    edit(&mut doc, |n| {
+      n.strokes = vec![Paint::Solid {
+        color: "#000".into(),
+        opacity: 1.0,
+        visible: true,
+      }];
+      n.stroke_weight = 10.0;
+    });
+    assert_eq!(render_bounds(&doc, "r").width, 100.0);
+    edit(&mut doc, |n| n.stroke_align = StrokeAlign::Center);
+    let b = render_bounds(&doc, "r");
+    assert_eq!((b.x, b.width, b.height), (95.0, 110.0, 70.0));
+    edit(&mut doc, |n| n.stroke_align = StrokeAlign::Outside);
+    let b = render_bounds(&doc, "r");
+    assert_eq!((b.x, b.y, b.width, b.height), (90.0, 90.0, 120.0, 80.0));
+    // Drop shadow: offset +/- (blur + spread), per side.
+    edit(&mut doc, |n| {
+      n.stroke_weight = 0.0;
+      n.effects = vec![shadow(0.0, 12.0, 20.0)];
+    });
+    let b = render_bounds(&doc, "r");
+    assert_eq!((b.x, b.y, b.width, b.height), (80.0, 92.0, 140.0, 100.0));
+    // Layer blur reaches 1.5x its radius on every side.
+    edit(&mut doc, |n| {
+      n.effects = vec![Effect {
+        kind: EffectType::LayerBlur,
+        blur: 10.0,
+        ..Effect::default()
+      }];
+    });
+    let b = render_bounds(&doc, "r");
+    assert_eq!((b.x, b.y, b.width, b.height), (85.0, 85.0, 130.0, 90.0));
+    // Hidden effects and inner shadows add nothing.
+    edit(&mut doc, |n| {
+      n.effects = vec![
+        Effect {
+          visible: false,
+          blur: 40.0,
+          ..Effect::default()
+        },
+        Effect {
+          kind: EffectType::InnerShadow,
+          blur: 40.0,
+          ..Effect::default()
+        },
+      ];
+    });
+    assert_eq!(render_bounds(&doc, "r").width, 100.0);
+  }
+
+  #[test]
+  fn render_bounds_union_children_unless_clipped() {
+    let (mut doc, page) = doc_with_rect(500.0, 500.0, 10.0, 10.0);
+    let mut f = crate::ops::default_node(NodeType::Frame, "f".into(), "F".into());
+    f.width = 100.0;
+    f.height = 100.0;
+    f.clip_content = false;
+    doc.insert(f, None, &page, None);
+    let mut c = crate::ops::default_node(NodeType::Rectangle, "c".into(), "C".into());
+    c.x = 80.0;
+    c.y = 80.0;
+    c.width = 50.0;
+    c.height = 50.0;
+    c.effects = vec![shadow(0.0, 0.0, 10.0)];
+    doc.insert(c, Some("f"), &page, None);
+    let b = render_bounds(&doc, "f");
+    assert_eq!((b.x, b.y, b.right(), b.bottom()), (0.0, 0.0, 140.0, 140.0));
+    edit_id(&mut doc, "f", |n| n.clip_content = true);
+    let b = render_bounds(&doc, "f");
+    assert_eq!((b.right(), b.bottom()), (100.0, 100.0));
+  }
+
+  #[test]
+  fn render_bounds_follow_rotation_and_size_the_export() {
+    let (mut doc, _) = doc_with_rect(50.0, 50.0, 100.0, 40.0);
+    edit(&mut doc, |n| {
+      n.rotation = 90.0;
+      n.effects = vec![shadow(0.0, 0.0, 10.0)];
+    });
+    // The rotated box is 40x100 around the same centre, plus 10 on every side.
+    let b = render_bounds(&doc, "r");
+    assert!((b.width - 60.0).abs() < 1e-6 && (b.height - 120.0).abs() < 1e-6, "{b:?}");
+    let svg = export_svg(&doc, "r", &HeuristicMeasurer);
+    assert!(svg.contains("width=\"60\" height=\"120\""), "{svg}");
+    let tight = export_svg_geometry(&doc, "r", &HeuristicMeasurer);
+    assert!(tight.contains("width=\"40\" height=\"100\""), "{tight}");
+    // The filter region is explicit so it can't clip what the export makes room for.
+    assert!(svg.contains("filterUnits=\"userSpaceOnUse\""));
+  }
+
+  fn doc_with_rect(x: f64, y: f64, w: f64, h: f64) -> (Document, String) {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut r = crate::ops::default_node(NodeType::Rectangle, "r".into(), "R".into());
+    r.x = x;
+    r.y = y;
+    r.width = w;
+    r.height = h;
+    r.fills.clear();
+    r.strokes.clear();
+    r.stroke_weight = 0.0;
+    doc.insert(r, None, &page, None);
+    (doc, page)
+  }
+
+  fn edit(doc: &mut Document, f: impl FnOnce(&mut Node)) {
+    edit_id(doc, "r", f);
+  }
+
+  fn edit_id(doc: &mut Document, id: &str, f: impl FnOnce(&mut Node)) {
+    f(doc.get_mut(id).unwrap());
+  }
+
+  fn shadow(x: f64, y: f64, blur: f64) -> Effect {
+    Effect {
+      x,
+      y,
+      blur,
+      spread: 0.0,
+      ..Effect::default()
+    }
   }
 }

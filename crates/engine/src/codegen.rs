@@ -10,7 +10,7 @@ use crate::model::{
   Action, Align, Document, EffectType, LayoutDirection, Node, NodeType, OverlayPosition, OverlaySettings, Paint, ScaleMode, Sizing,
   StrokeAlign, TextAlignH, TextAutoResize, TextCase, TextDecoration,
 };
-use crate::render::{esc, export_svg, font_stack};
+use crate::render::{esc, export_svg_geometry, font_stack};
 use crate::text::TextMeasurer;
 
 const PX: &str = "px";
@@ -298,7 +298,7 @@ impl<'a> Ctx<'a> {
     let mut el = match n.kind {
       _ if has_mask => {
         let mut e = El::new("div");
-        e.raw = Some(export_svg(self.doc, &n.id, self.m));
+        e.raw = Some(export_svg_geometry(self.doc, &n.id, self.m));
         e
       }
       NodeType::Text => {
@@ -308,7 +308,7 @@ impl<'a> Ctx<'a> {
       }
       NodeType::Vector | NodeType::Polygon | NodeType::Star => {
         let mut e = El::new("div");
-        e.raw = Some(export_svg(self.doc, &n.id, self.m));
+        e.raw = Some(export_svg_geometry(self.doc, &n.id, self.m));
         e
       }
       _ if image_src.is_some() => {
