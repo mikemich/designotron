@@ -2,7 +2,7 @@
 // and holds UI-only state in a zustand store.
 
 import { create } from "zustand";
-import init, { WasmEngine } from "./wasm/pkg/designotron_engine_wasm";
+import init, { clearMeasureCache, WasmEngine } from "./wasm/pkg/designotron_engine_wasm";
 import wasmUrl from "./wasm/pkg/designotron_engine_wasm_bg.wasm?url";
 import type { Doc, EngineState, Gap, Guide, Node, Rect, Tool } from "./types";
 import { assetUrl } from "./assets";
@@ -66,6 +66,7 @@ async function loadEngine(): Promise<void> {
   engine = new WasmEngine(Math.floor(Math.random() * 2 ** 48));
   document.fonts.addEventListener("loadingdone", () => {
     measureCache.clear();
+    clearMeasureCache();
     dispatch({ op: "relayout" });
   });
 }

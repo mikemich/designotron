@@ -1,10 +1,16 @@
 //! WebAssembly bindings for the Designotron engine. All structured data
 //! crosses the boundary as JSON strings to keep the surface small.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use designotron_engine::persist::Persist;
 use designotron_engine::text::{FontSpec, TextMeasurer};
 use designotron_engine::{Command, Engine, Query};
 use wasm_bindgen::prelude::*;
+
+/// Measured strings kept before the cache is dropped (about 100 bytes each).
+const MAX_MEASURED: usize = 200_000;
 
 #[wasm_bindgen]
 extern "C" {
@@ -18,8 +24,54 @@ struct CanvasMeasurer;
 impl TextMeasurer for CanvasMeasurer {
   fn measure(&self, text: &str, font: &FontSpec) -> f64 {
     let n = text.chars().count() as f64;
-    js_measure(font.family, font.size, font.weight, font.italic, text) + n * font.letter_spacing
+    let key = FontKey {
+      family: font.family.to_string(),
+      size: font.size.to_bits(),
+      weight: font.weight,
+      italic: font.italic,
+    };
+    let cached = MEASURED.with(|m| m.borrow().fonts.get(&key).and_then(|t| t.get(text)).copied());
+    let width = cached.unwrap_or_else(|| {
+      let w = js_measure(font.family, font.size, font.weight, font.italic, text);
+      MEASURED.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.entries >= MAX_MEASURED {
+          *m = Measured::default();
+        }
+        m.entries += 1;
+        m.fonts.entry(key).or_default().insert(text.to_string(), w);
+      });
+      w
+    });
+    width + n * font.letter_spacing
   }
+}
+
+// Text widths already asked of the browser. Laying out a big file measures the same strings
+// again and again, and every call across the boundary copies its strings into JS, so a
+// relayout of 20k layers made hundreds of MB of garbage there. Dropped when fonts load.
+thread_local! {
+  static MEASURED: RefCell<Measured> = RefCell::new(Measured::default());
+}
+
+#[derive(Default)]
+struct Measured {
+  fonts: HashMap<FontKey, HashMap<String, f64>>,
+  entries: usize,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct FontKey {
+  family: String,
+  size: u64,
+  weight: u32,
+  italic: bool,
+}
+
+/// Forgets measured text widths (a web font finished loading, so widths changed).
+#[wasm_bindgen(js_name = clearMeasureCache)]
+pub fn clear_measure_cache() {
+  MEASURED.with(|m| *m.borrow_mut() = Measured::default());
 }
 
 #[wasm_bindgen]
