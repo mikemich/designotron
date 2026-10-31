@@ -1,5 +1,9 @@
 /* tslint:disable */
 /* eslint-disable */
+/**
+ * Forgets measured text widths (a web font finished loading, so widths changed).
+ */
+export function clearMeasureCache(): void;
 export class WasmEngine {
   free(): void;
   /**
@@ -13,9 +17,28 @@ export class WasmEngine {
    */
   collabReset(ordered: boolean, granular: boolean): void;
   /**
+   * What to write to storage so it matches the document: JSON
+   * `{token, full, meta, dirty: [layer ids], names: {layer id: name}, removed: [layer ids]}` (see `persist::Plan`).
+   * Fetch each dirty layer's records with `persistChunk` (they stay available until a write that is at least as new has landed).
+   */
+  persistPlan(force_full: boolean): string;
+  /**
    * JSON array of this editor's unacknowledged and unsent changes, oldest first.
    */
   collabUnsent(): string;
+  /**
+   * The document just loaded is exactly what storage holds: later plans cover only changes.
+   */
+  persistAdopt(): void;
+  /**
+   * The nodes of one top-level layer's tree from plan `token` of `persistPlan`, as the body
+   * of a JSON object (`"id":{...},...`); empty if the plan is no longer kept.
+   */
+  persistChunk(token: number, root: string): string;
+  /**
+   * Storage now holds the document of plan `token`.
+   */
+  persistCommit(token: number): void;
   /**
    * Whether this engine reads and writes pages, styles and variables per id in deltas (what
    * an editor tells the room it can do when joining).
@@ -50,6 +73,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly __wbg_wasmengine_free: (a: number, b: number) => void;
+  readonly clearMeasureCache: () => void;
   readonly wasmengine_collabDelta: (a: number) => [number, number];
   readonly wasmengine_collabGranular: (a: number) => number;
   readonly wasmengine_collabReset: (a: number, b: number, c: number) => void;
@@ -58,6 +82,10 @@ export interface InitOutput {
   readonly wasmengine_docDelta: (a: number, b: number) => [number, number];
   readonly wasmengine_load: (a: number, b: number, c: number) => [number, number];
   readonly wasmengine_new: (a: number) => number;
+  readonly wasmengine_persistAdopt: (a: number) => void;
+  readonly wasmengine_persistChunk: (a: number, b: number, c: number, d: number) => [number, number];
+  readonly wasmengine_persistCommit: (a: number, b: number) => void;
+  readonly wasmengine_persistPlan: (a: number, b: number) => [number, number];
   readonly wasmengine_query: (a: number, b: number, c: number) => [number, number, number, number];
   readonly wasmengine_render: (a: number, b: number, c: number, d: number, e: number) => [number, number];
   readonly wasmengine_renderIncremental: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];

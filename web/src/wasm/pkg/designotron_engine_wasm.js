@@ -17,6 +17,12 @@ function getStringFromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
 }
+/**
+ * Forgets measured text widths (a web font finished loading, so widths changed).
+ */
+export function clearMeasureCache() {
+    wasm.clearMeasureCache();
+}
 
 let WASM_VECTOR_LEN = 0;
 
@@ -124,6 +130,25 @@ export class WasmEngine {
         wasm.wasmengine_collabReset(this.__wbg_ptr, ordered, granular);
     }
     /**
+     * What to write to storage so it matches the document: JSON
+     * `{token, full, meta, dirty: [layer ids], names: {layer id: name}, removed: [layer ids]}` (see `persist::Plan`).
+     * Fetch each dirty layer's records with `persistChunk` (they stay available until a write that is at least as new has landed).
+     * @param {boolean} force_full
+     * @returns {string}
+     */
+    persistPlan(force_full) {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmengine_persistPlan(this.__wbg_ptr, force_full);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * JSON array of this editor's unacknowledged and unsent changes, oldest first.
      * @returns {string}
      */
@@ -138,6 +163,40 @@ export class WasmEngine {
         } finally {
             wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
         }
+    }
+    /**
+     * The document just loaded is exactly what storage holds: later plans cover only changes.
+     */
+    persistAdopt() {
+        wasm.wasmengine_persistAdopt(this.__wbg_ptr);
+    }
+    /**
+     * The nodes of one top-level layer's tree from plan `token` of `persistPlan`, as the body
+     * of a JSON object (`"id":{...},...`); empty if the plan is no longer kept.
+     * @param {number} token
+     * @param {string} root
+     * @returns {string}
+     */
+    persistChunk(token, root) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(root, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.wasmengine_persistChunk(this.__wbg_ptr, token, ptr0, len0);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * Storage now holds the document of plan `token`.
+     * @param {number} token
+     */
+    persistCommit(token) {
+        wasm.wasmengine_persistCommit(this.__wbg_ptr, token);
     }
     /**
      * Whether this engine reads and writes pages, styles and variables per id in deltas (what
