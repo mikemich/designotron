@@ -2294,6 +2294,7 @@ body:has(.phone-note) .toast {
 }
 .paint-type .seg button {
   flex: 1 0 28%;
+}
 /* W3-A prototyping: scrolling frames, fixed layers, move/push transitions, smart animate */
 .presenter .scroller {
   position: absolute;
@@ -2353,6 +2354,7 @@ body:has(.phone-note) .toast {
 /* Overlays stay above the screens, including the one that is leaving. */
 .presenter .overlays {
   z-index: 5;
+}
 /* W3-E pages and tools */
 .page-item {
   position: relative;
@@ -2378,6 +2380,7 @@ body:has(.phone-note) .toast {
 }
 .scale-row .field {
   flex: 1;
+}
 /* W3-F inspect */
 .insp-live {
   font-weight: 500;
@@ -2502,6 +2505,13 @@ body:has(.phone-note) .toast {
   flex: none;
 }
 .insp-asset-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
 /* W3-C styles and assets */
 .asset-folder {
   display: flex;
@@ -2531,7 +2541,6 @@ body:has(.phone-note) .toast {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
 }
 .var-folder td {
   padding: 0;
@@ -2612,6 +2621,7 @@ body:has(.phone-note) .toast {
   align-items: center;
   gap: 8px;
   cursor: pointer;
+}
 /* W3-B presence */
 .avatar.me,
 .peer-avatars button.avatar {
