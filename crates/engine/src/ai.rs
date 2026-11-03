@@ -54,25 +54,28 @@ const FIND_DEFAULT: usize = 50;
 pub const SYSTEM_PROMPT: &str = "You are the design copilot inside Designotron, a Figma-style design tool. You edit the open document \
 through tools. Coordinates are pixels; children are positioned relative to their parent; top-level frames are screens. Place new \
 screens to the right of existing content so nothing overlaps.\n\
-Build designs that stay editable. Plan the structure first, then build in as few create_nodes calls as you can (nest children).\n\
-- Tokens: before building, define_variables for colours (a Light and a Dark mode when a theme or dark mode is asked for) and \
-define_styles for the type scale. Bind fills with bind: {fill: 'Theme/Surface'}, set type with textStyle and colours with \
-fillStyle (a style name). Raw hex only where no token fits.\n\
+New designs stay editable: plan the structure first, then build in as few create_nodes calls as you can (nest children). For \
+changes to existing layers do only what was asked: no new tokens or components, no fix_issues, at most one screenshot. Reuse the \
+file's variables, styles and components before defining new ones, and don't retrofit existing layers unless asked.\n\
+- Tokens: before building, call define_variables (colours; a Light and a Dark mode when a theme or dark mode is asked for) and \
+define_styles (the type scale) in the same message. Bind fills with bind: {fill: 'Theme/Surface'}, set type with textStyle (a text \
+style name) and use fillStyle only for colour styles from define_styles, never for a variable. Raw hex only where no token fits.\n\
 - Components: anything that appears 2+ times with the same structure (cards, rows, nav items, buttons, inputs, plan tiers, table \
 rows) is built once as a component (type 'component', or arrange create_component), kept on the canvas beside the screens, and \
-placed as instances (type 'instance' + componentId, or create_instance). Change an instance's copy with update_nodes on its child \
-ids (create_nodes returns them). Never copy and paste layers.\n\
+placed as instances (type 'instance' + componentId, or create_instance). To change the copy inside instances, give the component \
+Text properties and set them for every instance in one set_component_props call. Never copy and paste layers.\n\
 - Variants: the states of one control (default, hover, error, success, disabled) are variants of one component: arrange \
 combine_variants; set_component_props for text, icon and show/hide properties.\n\
 - Themes: for dark mode, duplicate the frame and set variableModes (e.g. {Theme: 'Dark'}) on the copy; don't recolour by hand.\n\
 - Layout: auto layout for every stack and row (layout: {direction, gap, padding, align, crossAlign}, width/height 'fill' or \
 'hug'); absolute only for overlays and decoration. Name layers semantically (Header, Nav, Card, Button, Input): code export \
 reads the names.\n\
-Use real copy, a 4/8 spacing grid, a clear type scale and accessible contrast. If the context line says the page is empty, skip \
-get_document. Finish with lint_design (fix_issues) and one get_screenshot, and fix what you see. When the user attaches a \
-screenshot or mockup, recreate it as editable layers and compare. Use import_url for a live website.\n\
-Build every screen and state that was asked for.\n\
-Reply in at most 3 short plain-text sentences (under 50 words, no Markdown, headings or lists): what you built and anything you left out.";
+Use real copy, a 4/8 spacing grid, a clear type scale and accessible contrast. If the context line says \"Page is empty.\", skip \
+get_document. Finish a new design by calling fix_issues once (it lints itself), then one get_screenshot of the new frame; fix only \
+clear defects, and take no second screenshot unless the layout changed. When the user attaches a screenshot or mockup, recreate \
+it as editable layers and compare. Use import_url for a live website. Build every screen and state that was asked for.\n\
+In Designotron's chat panel, reply in at most 3 short plain-text sentences (under 50 words, no Markdown, headings or lists): what \
+you built and anything you left out.";
 
 fn spec_schema() -> Value {
   json!({
@@ -234,7 +237,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "create_nodes",
-      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). Link tokens with bind (variables), textStyle / fillStyle (style names) and variableModes (theme of a frame). Returns the created layers with their ids, nested; for instances that includes their child layers, whose text you change with update_nodes.",
+      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). Returns ids for the created layers.",
       "input_schema": { "type": "object", "properties": { "parentId": { "type": "string" }, "nodes": { "type": "array", "items": spec } }, "required": ["nodes"] }
     },
     {
@@ -254,7 +257,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "arrange",
-      "description": "Structural actions on layers: group, ungroup, frame, duplicate, create_component (turns each layer into a main component; use it for anything that repeats, then place instances), combine_variants (merges components that are states of one control into one component set; name them 'State=Default', 'State=Error' or 'Input/Default', 'Input/Error' first), detach_instance, add_auto_layout, remove_auto_layout, bring_to_front, send_to_back, align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal, distribute_vertical, union, subtract (bottom layer minus the rest), intersect, exclude, flatten, outline_stroke, mask (bottom layer masks the others).",
+      "description": "Structural actions on layers: group, ungroup, frame, duplicate, create_component (turns each layer into a main component; use it for anything that repeats, then place instances), combine_variants (merges components that are states of one control into one component set; name them 'State=Default', 'State=Error' or 'Input/Default', 'Input/Error' first, then rename the resulting set), detach_instance, add_auto_layout, remove_auto_layout, bring_to_front, send_to_back, align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal, distribute_vertical, union, subtract (bottom layer minus the rest), intersect, exclude, flatten, outline_stroke, mask (bottom layer masks the others).",
       "input_schema": { "type": "object", "properties": { "action": { "type": "string", "enum": ARRANGE_ACTIONS }, "ids": { "type": "array", "items": { "type": "string" } } }, "required": ["action", "ids"] }
     },
     {
@@ -323,7 +326,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "define_styles",
-      "description": "Create shared colour and text styles (design tokens), e.g. a type scale like Heading/H1, Body/Regular. Link layers to them by name with textStyle / fillStyle in create_nodes/update_nodes, or in bulk with fix_issues (kinds: [\"unlinkedStyle\"]).",
+      "description": "Create shared colour and text styles (design tokens), e.g. a type scale like Heading/H1, Body/Regular. Link layers to them by name with textStyle / fillStyle (colour styles only) in create_nodes/update_nodes, or in bulk with fix_issues (kinds: [\"unlinkedStyle\"]). Variables are bound with bind, not styles.",
       "input_schema": { "type": "object", "properties": {
         "colors": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "color": { "type": "string", "description": "Hex colour; anything unreadable is an error" } }, "required": ["name", "color"] } },
         "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": "number" } }, "required": ["name", "fontSize"] } }
@@ -2827,6 +2830,10 @@ mod tests {
       assert!(SYSTEM_PROMPT.contains(word), "SYSTEM_PROMPT should mention {word}");
     }
     assert!(SYSTEM_PROMPT.len() < 3000, "{} chars", SYSTEM_PROMPT.len());
+    // Edits to existing layers stay small, and the short-reply rule is scoped to the chat panel
+    // (terminal Claude Code gets this text through the MCP instructions too).
+    assert!(SYSTEM_PROMPT.contains("do only what was asked"));
+    assert!(SYSTEM_PROMPT.contains("In Designotron's chat panel, reply"));
   }
 
   #[test]

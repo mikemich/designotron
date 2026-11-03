@@ -21,10 +21,20 @@ EVAL_CLAUDE=1 node scripts/eval/claude-eval.mjs
 It starts the bridge on `EVAL_PORT` (default 5332) with `--static web/dist`, opens the
 editor in headless Chromium (every non-local request is aborted), creates a blank file per
 prompt, types the prompt into the chat box and waits for the turn to end (6 minute cap).
-The bridge runs `claude-wrapper.mjs` instead of `claude`: it adds `--model`,
-`--max-budget-usd`, `--strict-mcp-config` (only the designotron MCP server, so your own MCP
-servers don't change the numbers) and `--disable-slash-commands`, and keeps each turn's
-stream-json as `<prompt>.jsonl`.
+The bridge runs `claude-wrapper.sh` instead of `claude`. The wrapper `exec`s the real
+`claude` (so a kill reaches it) and tees its stream-json to `<prompt>.jsonl`. It adds
+`--model`, `--max-budget-usd`, and isolation so the numbers don't depend on the machine:
+`--strict-mcp-config` (only the designotron MCP server), `--disable-slash-commands`,
+`--setting-sources project,local` (no user settings, plugins, hooks or memory) and
+`--disallowedTools Bash,Write,Edit,WebFetch,WebSearch,Task,Agent`. The bridge itself is
+started without the `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_REMOTE_SESSION_ID`,
+`CLAUDE_CODE_CHILD_SESSION` and `CLAUDE_CODE_MESSAGING_*` variables, so the spawned `claude`
+doesn't believe it is a child of the Claude Code session you run this from.
+
+Each turn's `init` event (model, MCP servers, plugins, agents, tool count) is saved in
+`results.json`, and the run warns about any MCP server besides designotron and any plugin.
+It also warns about a turn that ends without a result event (killed or crashed; it is
+counted as spending `EVAL_MAX_USD`), a turn over `EVAL_MAX_USD`, and a timeout.
 
 | Variable            | Default                          | Meaning                                         |
 |---------------------|----------------------------------|-------------------------------------------------|
@@ -43,13 +53,13 @@ Keep a binary and `dist/` copy of the version you want to use as the baseline an
 
 ## Output
 
-`results.json` (per-prompt metrics and run numbers, plus a summary), `<n>.doc.json` (the
-final document and lint issues), `<n>.png` (screenshot of the editor), `<n>.jsonl` and a
-markdown table on stdout.
+`results.json` (per-prompt metrics, run numbers and warnings, plus a summary), `<n>.doc.json`
+(the final document and lint issues), `<n>.png` (screenshot of the editor), `<n>.jsonl` and a
+markdown table on stdout. The temporary bridge workspace is removed at the end.
 
 ```bash
 node scripts/eval/claude-eval.mjs --compare before/results.json after/results.json
-node scripts/eval/claude-eval.mjs --rescore <out dir>   # recompute the metrics from the saved documents, no Claude
+node scripts/eval/claude-eval.mjs --rescore <out dir>   # recompute the metrics from the saved documents into rescore.json, no Claude
 ```
 
 ## Score (0-100)
@@ -59,18 +69,30 @@ node scripts/eval/claude-eval.mjs --rescore <out dir>   # recompute the metrics 
 - autoLayout: frames with 2+ children that use auto layout.
 - absoluteRatio: children of non-auto-layout frames with 2+ children, plus `absolute`
   children, over all non-root layers.
-- repeatsAsInstances: layers that repeat 3+ times with the same structure (3+ layers each,
+- repeatsAsInstances: layers that repeat 3+ times with the same structure (2+ layers each,
   text and position ignored) are either copies or instances of one component; this is the
-  instance share. 0 when nothing repeats or nothing is shared.
-- tokenUse: solid fills and text colours bound to a variable or linked to a style.
+  instance share. An instance group only counts when its main component has 2+ layers too
+  (a one-layer "Dot" component placed three times earns nothing). 0 when nothing repeats or
+  nothing is shared.
+- tokenUse: the mean of two shares: solid fills and text colours bound to a variable or
+  linked to a colour style, and text layers linked to a text style (colour only, when
+  there is no text).
 - lintPer100: `lint_design` issues per 100 layers after the turn.
 - Layers inside instances are ignored (they come from the component).
 
-Also reported: components, component sets, colour/text styles, variables and modes, text
-layers with a text style, time to the first canvas change, total time, tool calls and
-errors, ToolSearch calls, reply word count and cost. Haiku is noisy: compare the mean over
-all four prompts and look at the screenshots before trusting a few points.
+Guards: the score is 0 when the document is empty, the turn ended in an error or no result
+event, or it timed out. It is capped at 60 when there are 6+ text layers in fewer than 3
+distinct font sizes (no type hierarchy). `results.json` says why in `metrics.scoreNote`.
 
-`fake-claude.mjs` is a stand-in for `claude` that builds three cards and costs nothing:
-`EVAL_REAL_CLAUDE=$PWD/scripts/eval/fake-claude.mjs EVAL_CLAUDE=1 EVAL_PROMPTS=1 node scripts/eval/claude-eval.mjs`
-checks the plumbing.
+The score can't see everything (a pricing card that lost its highlight, a design that is
+ugly but tidy): read the screenshots before trusting a few points. Haiku is noisy, so compare
+the mean over all four prompts. Also reported: components, component sets, colour/text styles,
+variables and modes, time to the first canvas change, total time, tool calls and errors,
+ToolSearch calls, reply word count and cost.
+
+## Smoke test without Claude
+
+`fake-claude.mjs` is a stand-in for `claude` that builds one screen and costs nothing:
+`EVAL_REAL_CLAUDE=$PWD/scripts/eval/fake-claude.mjs EVAL_CLAUDE=1 EVAL_PROMPTS=1 node scripts/eval/claude-eval.mjs`.
+`FAKE_MODE=empty|error|noresult|expensive|extras|flat` exercises the scoring guards and
+the warnings (see the top of the file).

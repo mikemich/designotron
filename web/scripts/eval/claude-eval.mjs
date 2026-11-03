@@ -23,9 +23,17 @@ const repo = path.resolve(here, "../../..");
 
 const INSTANCE_ROOTS = new Set(["instance"]);
 const CONTAINERS = new Set(["frame", "component", "componentSet"]);
+/** A repeated structure, or the main component behind a group of instances, has at least this many layers. */
+const MIN_REPEAT_LAYERS = 2;
+/** The score is capped here when the type has no hierarchy (many texts, fewer than 3 font sizes). */
+const FLAT_TYPE_CAP = 60;
+const FLAT_TYPE_TEXTS = 6;
 
-/** Scores one finished document. `doc` is `__dt.doc()`, `issues` the lint_design issue list. */
-export function computeMetrics(doc, issues = []) {
+/**
+ * Scores one finished document. `doc` is `__dt.doc()`, `issues` the lint_design issue list, `run`
+ * (optional) the turn's outcome: an empty document, an errored turn or a timeout score 0.
+ */
+export function computeMetrics(doc, issues = [], run = {}) {
   const nodes = doc.nodes ?? {};
   const roots = new Set(doc.pages.flatMap((p) => p.children));
   // Everything under an instance is derived from its component: ignore it.
@@ -61,8 +69,8 @@ export function computeMetrics(doc, issues = []) {
   }
   const absoluteRatio = ratio(absolute, nonRoot);
 
-  // Repeats: maximal subtrees (3+ layers) whose signature repeats 3+ times, against
-  // instances of one component that appear 3+ times.
+  // Repeats: maximal subtrees (MIN_REPEAT_LAYERS+ layers) whose signature repeats 3+ times, against
+  // instances of one component that appear 3+ times and whose main is as big as such a subtree.
   const sizeOf = new Map();
   const sizeFn = (id) => {
     if (sizeOf.has(id)) return sizeOf.get(id);
@@ -90,7 +98,7 @@ export function computeMetrics(doc, issues = []) {
   };
   const groups = new Map();
   for (const n of own) {
-    if (n.type === "instance" || n.type === "text" || sizeFn(n.id) < 3 || roots.has(n.id)) continue;
+    if (n.type === "instance" || n.type === "text" || sizeFn(n.id) < MIN_REPEAT_LAYERS || roots.has(n.id)) continue;
     // A main component is the definition, not a copy.
     if (n.type === "component" || n.type === "componentSet") continue;
     const k = sigFn(n.id);
@@ -109,7 +117,9 @@ export function computeMetrics(doc, issues = []) {
   [...roots].filter((id) => nodes[id]).forEach(walk);
   const byComponent = new Map();
   for (const n of own) if (n.type === "instance") byComponent.set(n.instance.componentId, (byComponent.get(n.instance.componentId) ?? 0) + 1);
-  const instanceRepeats = [...byComponent.values()].filter((c) => c >= 3).reduce((a, c) => a + c, 0);
+  const instanceRepeats = [...byComponent.entries()]
+    .filter(([comp, c]) => c >= 3 && nodes[comp] && sizeFn(comp) >= MIN_REPEAT_LAYERS)
+    .reduce((a, [, c]) => a + c, 0);
   const repeatsAsInstances = ratio(instanceRepeats, instanceRepeats + rawRepeats);
 
   // Tokens: solid fills and text colours bound to a variable or linked to a style.
@@ -122,23 +132,38 @@ export function computeMetrics(doc, issues = []) {
     solids++;
     if (n.fillStyle || Object.keys(n.bindings ?? {}).some((k) => k.startsWith("fill"))) tokens++;
   }
-  const tokenUse = ratio(tokens, solids);
+  const fillTokens = ratio(tokens, solids);
   const texts = own.filter((n) => n.type === "text");
   const textStyled = ratio(texts.filter((n) => n.textStyle).length, texts.length);
+  // Colour tokens and type tokens count equally (colour only when there is no text).
+  const tokenUse = texts.length ? (fillTokens + textStyled) / 2 : fillTokens;
+  const fontSizes = new Set(texts.map((n) => n.text?.fontSize));
+  const flatType = texts.length >= FLAT_TYPE_TEXTS && fontSizes.size < 3;
 
   const lintPer100 = (issues.length / Math.max(1, own.length)) * 100;
   const modeFrames = own.filter((n) => Object.keys(n.variableModes ?? {}).length > 0).length;
   const collectionsWithModes = (doc.variables ?? []).filter((c) => (c.modes ?? []).length >= 2).length;
 
-  const score =
+  let score =
     25 * autoLayout +
     25 * repeatsAsInstances +
     20 * tokenUse +
     15 * (1 - absoluteRatio) +
     15 * Math.max(0, 1 - lintPer100 / 10);
+  let scoreNote;
+  if (flatType && score > FLAT_TYPE_CAP) {
+    score = FLAT_TYPE_CAP;
+    scoreNote = `capped at ${FLAT_TYPE_CAP}: ${texts.length} texts in ${fontSizes.size} font size(s)`;
+  }
+  if (!own.length || run.isError || run.timedOut) {
+    score = 0;
+    scoreNote = !own.length ? "0: the document is empty" : run.timedOut ? "0: the turn timed out" : "0: the turn ended in an error";
+  }
 
   return {
     score: round(score, 1),
+    scoreNote,
+    fontSizes: fontSizes.size,
     nodes: own.length,
     autoLayout: round(autoLayout, 2),
     absoluteRatio: round(absoluteRatio, 2),
@@ -153,6 +178,7 @@ export function computeMetrics(doc, issues = []) {
     collectionsWithModes,
     modeFrames,
     tokenUse: round(tokenUse, 2),
+    fillTokens: round(fillTokens, 2),
     textStyled: round(textStyled, 2),
     lintIssues: issues.length,
     lintPer100: round(lintPer100, 1),
@@ -161,7 +187,7 @@ export function computeMetrics(doc, issues = []) {
 
 /** Numbers from one turn's stream-json: cost, tool calls, errors, ToolSearch round trips, reply length. */
 export function parseStream(text) {
-  const out = { costUsd: 0, toolCalls: 0, toolErrors: 0, toolSearch: 0, replyWords: 0, turns: 0, durationMs: 0, isError: false, tools: {} };
+  const out = { hasResult: false, costUsd: 0, toolCalls: 0, toolErrors: 0, toolSearch: 0, replyWords: 0, turns: 0, durationMs: 0, isError: false, tools: {}, init: null };
   const ids = new Map();
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -171,7 +197,10 @@ export function parseStream(text) {
     } catch {
       continue;
     }
-    if (e.type === "assistant") {
+    if (e.type === "system" && e.subtype === "init") {
+      const names = (xs) => (xs ?? []).map((x) => (typeof x === "string" ? x : (x.name ?? x.path ?? "?")));
+      out.init = { model: e.model, mcpServers: names(e.mcp_servers), plugins: names(e.plugins), agents: names(e.agents), tools: (e.tools ?? []).length };
+    } else if (e.type === "assistant") {
       for (const b of e.message?.content ?? []) {
         if (b.type !== "tool_use") continue;
         if (b.name === "ToolSearch") out.toolSearch++;
@@ -184,6 +213,7 @@ export function parseStream(text) {
         if (b.type === "tool_result" && b.is_error && ids.has(b.tool_use_id)) out.toolErrors++;
       }
     } else if (e.type === "result") {
+      out.hasResult = true;
       out.costUsd = e.total_cost_usd ?? out.costUsd;
       out.turns = e.num_turns ?? out.turns;
       out.durationMs = e.duration_ms ?? out.durationMs;
@@ -276,7 +306,7 @@ function compare(aPath, bPath) {
 // ---------------------------------------------------------------- running
 
 const args = process.argv.slice(2);
-if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) await main();
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) await main();
 
 async function main() {
   const ci = args.indexOf("--compare");
@@ -313,18 +343,21 @@ async function main() {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "designotron-eval-ws-"));
   console.log(`eval: model=${model} prompts=${todo.map((p) => p.id).join(",")} out=${out}`);
 
+  // The spawned claude must not think it is a child of the Claude Code session that runs this script.
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([k]) => !(k === "CLAUDECODE" || k === "CLAUDE_CODE_SESSION_ID" || k === "CLAUDE_CODE_REMOTE_SESSION_ID" || k === "CLAUDE_CODE_CHILD_SESSION" || k.startsWith("CLAUDE_CODE_MESSAGING_")),
+    ),
+  );
   const bridge = spawn(bin, ["--port", String(port), "--workspace", workspace, "--static", staticDir, "--no-open"], {
-    env: {
-      ...process.env,
-      CLAUDE_BIN: path.join(here, "claude-wrapper.mjs"),
-      EVAL_OUT: out,
-      EVAL_MODEL: model,
-      EVAL_MAX_USD: maxUsd,
-    },
+    env: { ...env, CLAUDE_BIN: path.join(here, "claude-wrapper.sh"), EVAL_OUT: out, EVAL_MODEL: model, EVAL_MAX_USD: maxUsd },
     stdio: ["ignore", "ignore", "ignore"],
   });
-  const stopBridge = () => bridge.kill("SIGTERM");
-  process.on("exit", stopBridge);
+  const cleanup = () => {
+    bridge.kill("SIGTERM");
+    fs.rmSync(workspace, { recursive: true, force: true });
+  };
+  process.on("exit", cleanup);
   process.on("SIGINT", () => process.exit(130));
 
   const { chromium } = await import("playwright-core");
@@ -344,20 +377,21 @@ async function main() {
       }
       fs.writeFileSync(path.join(out, ".current"), String(p.id));
       console.log(`\n[${p.id}] ${p.name}: ${p.prompt}`);
-      const r = await runPrompt(browser, port, p, out);
+      const r = await runPrompt(browser, port, p, out, Number(maxUsd));
       spent += r.run.costUsd;
-      console.log(`  score ${r.metrics.score}, ${r.metrics.nodes} nodes, ${r.run.totalMs / 1000}s, $${r.run.costUsd.toFixed(2)} (spent $${spent.toFixed(2)})`);
+      console.log(`  score ${r.metrics.score}${r.metrics.scoreNote ? ` (${r.metrics.scoreNote})` : ""}, ${r.metrics.nodes} nodes, ${r.run.totalMs / 1000}s, $${r.run.costUsd.toFixed(2)} (spent $${spent.toFixed(2)})`);
+      for (const w of r.warnings) console.log(`  WARNING: ${w}`);
       results.push(r);
       fs.writeFileSync(path.join(out, "results.json"), JSON.stringify({ model, results, summary: summarise(results) }, null, 2));
     }
   } finally {
     await browser.close();
-    stopBridge();
+    cleanup();
   }
   report(out, model, results);
 }
 
-async function runPrompt(browser, port, p, out) {
+async function runPrompt(browser, port, p, out, maxUsd) {
   const ctx = await browser.newContext({ viewport: { width: 1500, height: 950 } });
   // Nothing leaves this machine except what the bridge's claude process does.
   await ctx.route(/^(?!http:\/\/(127\.0\.0\.1|localhost)[:/])/, (route) => route.abort());
@@ -406,25 +440,44 @@ async function runPrompt(browser, port, p, out) {
 
   const jsonl = path.join(out, `${p.id}.jsonl`);
   const stream = parseStream(fs.existsSync(jsonl) ? fs.readFileSync(jsonl, "utf8") : "");
-  return { id: p.id, name: p.name, prompt: p.prompt, metrics: computeMetrics(doc, issues), run: { firstChangeMs, totalMs, timedOut, ...stream } };
+  const warnings = [];
+  // A turn killed before its result event (SIGKILL, crash) is counted at the most it could have cost.
+  if (!stream.hasResult) {
+    stream.costUsd = maxUsd;
+    warnings.push(`no result event: counted as $${maxUsd} spent`);
+  } else if (stream.costUsd > maxUsd) warnings.push(`cost $${stream.costUsd.toFixed(2)} is over the per-turn cap of $${maxUsd}`);
+  if (timedOut) warnings.push("the turn timed out and was stopped");
+  const init = stream.init;
+  if (init) {
+    const extra = init.mcpServers.filter((s) => s !== "designotron");
+    if (extra.length) warnings.push(`other MCP servers were loaded: ${extra.join(", ")}`);
+    if (init.plugins.length) warnings.push(`plugins were loaded: ${init.plugins.join(", ")}`);
+  } else warnings.push("no init event in the stream: can't tell what was loaded");
+  const run = { firstChangeMs, totalMs, timedOut, ...stream, overBudget: stream.costUsd > maxUsd, isError: stream.isError || !stream.hasResult };
+  return { id: p.id, name: p.name, prompt: p.prompt, metrics: computeMetrics(doc, issues, run), run, warnings };
 }
 
+/** Recomputes the metrics from the saved documents of a finished run; writes rescore.json next to results.json. */
 function rescore(dir) {
   const prompts = JSON.parse(fs.readFileSync(path.join(here, "prompts.json"), "utf8"));
   const old = JSON.parse(fs.readFileSync(path.join(dir, "results.json"), "utf8"));
   const results = old.results.map((r) => {
     const { doc, issues } = JSON.parse(fs.readFileSync(path.join(dir, `${r.id}.doc.json`), "utf8"));
-    return { ...r, name: prompts.find((p) => p.id === r.id)?.name ?? r.name, metrics: computeMetrics(doc, issues) };
+    return { ...r, name: prompts.find((p) => p.id === r.id)?.name ?? r.name, metrics: computeMetrics(doc, issues, r.run) };
   });
-  report(dir, old.model, results);
+  report(dir, old.model, results, "rescore.json");
 }
 
-function report(out, model, results) {
+function report(out, model, results, file = "results.json") {
   const summary = summarise(results);
-  fs.writeFileSync(path.join(out, "results.json"), JSON.stringify({ model, results, summary }, null, 2));
+  fs.writeFileSync(path.join(out, file), JSON.stringify({ model, results, summary }, null, 2));
   console.log("\n" + table(results));
   console.log("\nmean: " + Object.entries(summary).map(([k, v]) => `${k}=${v}`).join(", "));
-  console.log(`\nresults: ${path.join(out, "results.json")}`);
+  for (const r of results) {
+    if (r.metrics.scoreNote) console.log(`prompt ${r.id}: score ${r.metrics.scoreNote}`);
+    for (const w of r.warnings ?? []) console.log(`prompt ${r.id}: WARNING ${w}`);
+  }
+  console.log(`\nresults: ${path.join(out, file)}`);
 }
 
 function portInUse(port) {

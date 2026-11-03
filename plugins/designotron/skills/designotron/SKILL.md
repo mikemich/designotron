@@ -23,12 +23,15 @@ then open the editor at http://127.0.0.1:5174 (or https://mikemich.github.io/des
 
 ## How to work
 
-1. Call `get_document` first to see pages, frames and existing components, so you build
-   on what is there instead of duplicating it. Skip it on a page you know is empty.
-2. Define tokens before you build, every time: colours with `define_variables` (a Light
-   and a Dark mode when a theme or dark mode is asked for) and the type scale with
-   `define_styles`. Apply them while building: `bind` for variables, `textStyle` and
-   `fillStyle` (a style name) for styles. Raw hex only where no token fits.
+1. Call `get_document` first to see pages, frames and existing components, variables and
+   styles, so you build on what is there instead of duplicating it. Skip it on a page you
+   know is empty.
+2. For a new design, define tokens before you build: colours with `define_variables` (a
+   Light and a Dark mode when a theme or dark mode is asked for) and the type scale with
+   `define_styles`, in the same message. Apply them while building: `bind` for variables,
+   `textStyle` for text styles and `fillStyle` for colour styles (never a variable name).
+   Raw hex only where no token fits. Reuse the file's existing variables, styles and
+   components before defining new ones.
 3. Create screens as top-level frames (for example 1440 wide for desktop, 390 for
    mobile) placed to the right of existing content. Use auto layout (`add_auto_layout`, or
    `layout` in `create_nodes`) for every stack and row; absolute positions only for
@@ -40,16 +43,18 @@ then open the editor at http://127.0.0.1:5174 (or https://mikemich.github.io/des
    and place instances (`type: "instance"` or `create_instance`). The states of one
    control (default, hover, error, disabled) are variants: `combine_variants`. Give
    components Boolean (show/hide a layer), Text and Instance swap properties with
-   `set_component_props`; instances set them, and code export turns them into React props.
+   `set_component_props`; set the copy of every instance with one `set_component_props`
+   call, and code export turns the properties into React props.
 5. Dark mode or another theme: duplicate the frame and set `variableModes` (for example
    `{Theme: "Dark"}`) on the copy. Don't recolour by hand.
 6. Use real copy and consistent spacing (multiples of 4 or 8).
 7. Link screens with `set_prototype` when the person asks for a flow or prototype (`open_overlay` / `swap_overlay` / `close_overlay` for modals, menus and sheets).
-8. Finish with `lint_design` and `fix_issues`, then one `get_screenshot` (when available):
-   compare it with what was asked and fix spacing, alignment and contrast.
+8. Finish a new design with `fix_issues` once (it lints itself), then one `get_screenshot`
+   of the new frame (when available): fix only clear defects, and take no second
+   screenshot unless the layout changed.
 9. To build the design as an app, use `export_code` (React + Tailwind) and refine the
    generated project.
 
-Keep edits focused: change only what was asked, and build every screen and state that was
-asked for. Reply in at most three short plain-text sentences (under 50 words, no Markdown
-headings or lists) saying what you built and anything you left out.
+For changes to existing layers do only what was asked: no new tokens or components, no
+`fix_issues`, at most one screenshot, and don't retrofit existing layers unless asked.
+Build every screen and state that was asked for, and say briefly what you changed.
