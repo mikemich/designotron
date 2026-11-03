@@ -38,6 +38,8 @@ import * as A from "../actions";
 import { Popover } from "../ui/controls";
 import { ComponentSetSection, InstanceSection, MainComponentSection } from "./ComponentControls";
 import { LayerPropsSection } from "./PropertyControls";
+import { DeviceSection, isDeviceTarget, resizeToPreset } from "./DeviceSection";
+import { PresetPicker } from "./PresetPicker";
 import { ApplyStyleButton, BoundChip, CreateStyleButton, StyleChip } from "./StyleControls";
 import { inScope } from "./variableScopes";
 
@@ -47,17 +49,6 @@ const end = () => dispatch({ op: "endGesture" });
 function update(ids: string[], patch: Record<string, unknown>) {
   if (ids.length) dispatch({ op: "update", ids, patch });
 }
-
-const FRAME_PRESETS = [
-  { label: "iPhone 16", w: 393, h: 852 },
-  { label: "iPhone 16 Pro Max", w: 440, h: 956 },
-  { label: "Android", w: 412, h: 917 },
-  { label: "iPad", w: 820, h: 1180 },
-  { label: "Desktop", w: 1440, h: 1024 },
-  { label: "MacBook", w: 1512, h: 982 },
-  { label: "Slide 16:9", w: 1920, h: 1080 },
-  { label: "Instagram post", w: 1080, h: 1080 },
-];
 
 export function DesignPanel() {
   const nodes = useSelection();
@@ -78,6 +69,7 @@ export function DesignPanel() {
       <ComponentSection nodes={nodes} />
       <AlignSection />
       <FrameSection nodes={nodes} ids={ids} />
+      {isDeviceTarget(nodes) && <DeviceSection node={nodes[0]} />}
       <PositionSection nodes={nodes} ids={ids} />
       <AutoLayoutSection nodes={nodes} ids={ids} />
       <LayerSection nodes={nodes} ids={ids} />
@@ -209,20 +201,33 @@ function AlignSection() {
   );
 }
 
-/** While the Frame tool is active: the preset sizes, one click makes that frame at the viewport centre. */
+/** While the Frame tool is active: the grouped presets, one click makes that frame at the viewport centre. */
 function FramePresets() {
+  const [withUi, setWithUi] = useState(() => {
+    try {
+      return localStorage.getItem("dt:frameSystemUi") !== "0";
+    } catch {
+      return true;
+    }
+  });
   return (
     <Section title="Frame">
-      <div className="frame-presets" role="group" aria-label="Frame presets">
-        {FRAME_PRESETS.map((p) => (
-          <button key={p.label} className="btn block preset" onClick={() => A.createFramePreset(p.w, p.h, p.label)}>
-            <span>{p.label}</span>
-            <span className="muted small">
-              {p.w}×{p.h}
-            </span>
-          </button>
-        ))}
-      </div>
+      <label className="row" style={{ cursor: "pointer" }} title="Phones, tablets, windows and browsers get a status bar, home indicator or window chrome">
+        <input
+          type="checkbox"
+          checked={withUi}
+          onChange={(e) => {
+            setWithUi(e.target.checked);
+            try {
+              localStorage.setItem("dt:frameSystemUi", e.target.checked ? "1" : "0");
+            } catch {
+              /* not remembered */
+            }
+          }}
+        />
+        Add system UI
+      </label>
+      <PresetPicker label="Search frame presets" onPick={(p) => A.createFramePreset(p, withUi)} />
     </Section>
   );
 }
@@ -252,20 +257,27 @@ function ScaleField({ ids }: { ids: string[] }) {
 }
 
 function FrameSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
   if (!nodes.every((n) => ["frame", "component", "instance"].includes(n.type))) return null;
   return (
     <Section title="Frame">
       <div className="row">
-        <SelectField
-          ariaLabel="Frame size preset"
-          value={"" as string}
-          options={[{ value: "", label: "Resize to preset…" }, ...FRAME_PRESETS.map((p) => ({ value: p.label, label: `${p.label}  ${p.w}×${p.h}` }))]}
-          onChange={(label) => {
-            const p = FRAME_PRESETS.find((x) => x.label === label);
-            if (p) update(ids, { width: p.w, height: p.h, sizingH: "fixed", sizingV: "fixed" });
-          }}
-        />
+        <button className="btn block preset-btn" aria-haspopup="listbox" onClick={(e) => setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect())}>
+          Resize to preset…
+        </button>
       </div>
+      {anchor && (
+        <Popover anchor={anchor} width={280} onClose={() => setAnchor(null)}>
+          <PresetPicker
+            autoFocus
+            label="Search size presets"
+            onPick={(p) => {
+              setAnchor(null);
+              resizeToPreset(nodes, p);
+            }}
+          />
+        </Popover>
+      )}
       <label className="row" style={{ cursor: "pointer" }}>
         <input type="checkbox" checked={common(nodes, (n) => n.clipContent) === true} onChange={(e) => update(ids, { clipContent: e.target.checked })} />
         Clip content

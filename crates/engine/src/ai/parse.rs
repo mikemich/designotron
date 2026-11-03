@@ -34,6 +34,7 @@ pub const KNOWN_KEYS: &[&str] = &[
   "maxHeight",
   "bind",
   "variableModes",
+  "device",
   "layoutGrids",
   "notes",
   "color",

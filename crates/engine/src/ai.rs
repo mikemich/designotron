@@ -68,7 +68,7 @@ and set them for every instance in one set_component_props call. Never copy and 
 - Variants: the states of one control (default, hover, error, disabled) are variants of one component (arrange combine_variants).\n\
 - Themes: for dark mode, duplicate the frame and set variableModes (e.g. {Theme: 'Dark'}) on the copy; don't recolour by hand.\n\
 - Layout: auto layout for every stack and row (width/height 'fill' or 'hug'); absolute only for overlays and decoration. Name \
-layers semantically (Header, Nav, Card, Button, Input): code export reads the names.\n\
+layers semantically (Header, Nav, Card, Button, Input): code export reads the names. App and site screens: set device on the frame.\n\
 Use real copy, a 4/8 grid, a clear type scale and accessible contrast. Recreate attached mockups as editable layers. If the \
 context line says \"Page is empty.\", skip get_document. Build every screen and state that was asked for. Finish a new design: if \
 the page had nothing else on it before this turn, call fix_issues once (it lints itself); otherwise call lint_design and fix only \
@@ -144,6 +144,7 @@ fn spec_schema() -> Value {
       "notes": { "type": "string", "description": "Developer annotation" },
       "bind": { "type": "object", "description": "Property → variable name, e.g. {fill: 'Theme/Surface'}; null unbinds" },
       "variableModes": { "type": "object", "description": "Collection → mode for this frame and its children, e.g. {Theme: 'Dark'}" },
+      "device": { "type": ["string", "object", "null"], "description": "Top-level screens: a device preset id (iphone-17-pro, iphone-16, iphone-se, pixel-9, android-compact, ipad-air-11, macbook-pro-14, mac-window, browser-1440…) or {preset, theme:'light'|'dark', statusBar, homeIndicator, chrome, nav:'gesture'|'buttons', url}. Sizes the frame unless width/height are given and adds the system UI as locked, fixed layers that code export leaves out. Safe-area insets are added to layout padding, so give padding from the safe area. null removes it." },
       "layoutGrids": { "type": "array", "description": "Frame layout grids, e.g. [{pattern:'columns', count:12, gutter:24, margin:80}] or [{pattern:'grid', size:8}]", "items": { "type": "object" } },
       "children": { "type": "array", "items": { "type": "object" } }
     },
@@ -894,6 +895,22 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
         }
       }
     }
+    if let Some(d) = u.get("device") {
+      let device = crate::devices::parse_spec(d, before.device.as_ref()).map_err(|m| cx.err("device", m))?;
+      let sized = u.get("width").is_some() || u.get("height").is_some();
+      // A new preset sizes the frame (unless the update gives a size); the same one only restyles.
+      let new_preset = device
+        .as_ref()
+        .is_some_and(|n| before.device.as_ref().map(|b| &b.preset) != Some(&n.preset));
+      e.dispatch_inner(Command::SetDevice {
+        id: id.to_string(),
+        device,
+        resize: !sized && new_preset,
+      })
+      .map_err(|m| cx.err("device", m))?;
+    } else if u.get("layout").is_some_and(|l| l.get("padding").is_some()) {
+      keep_safe_area(e, id);
+    }
     done.push(id.to_string());
     cx.leave(mark);
   }
@@ -903,6 +920,19 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
     r["warnings"] = json!(warnings);
   }
   Ok(r)
+}
+
+/// New padding given to a device frame is the content's: its safe area goes on top again.
+fn keep_safe_area(e: &mut Engine, id: &str) {
+  let Some(applied) = e.doc.get(id).and_then(|n| n.device.as_ref()).map(|d| d.applied) else {
+    return;
+  };
+  if let Some(l) = e.doc.get_mut(id).and_then(|n| n.layout.as_mut()) {
+    l.padding_top += applied[0];
+    l.padding_right += applied[1];
+    l.padding_bottom += applied[2];
+    l.padding_left += applied[3];
+  }
 }
 
 fn move_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
@@ -1726,6 +1756,9 @@ fn outline_in(e: &Engine, id: &str, depth: usize, only: Option<&HashSet<String>>
       )),
     );
   }
+  if let Some(d) = &n.device {
+    m.insert("device".into(), json!(d.preset));
+  }
   if let Some(i) = &n.instance {
     m.insert("componentId".into(), json!(i.component_id));
     if let Some(values) = crate::props::values_summary(&e.doc, n) {
@@ -1737,7 +1770,11 @@ fn outline_in(e: &Engine, id: &str, depth: usize, only: Option<&HashSet<String>>
       n.children
         .iter()
         .filter(|c| only.is_none_or(|o| o.contains(c.as_str())))
-        .map(|c| outline_in(e, c, depth - 1, only))
+        .map(|c| match e.doc.get(c).and_then(|c| c.device_part.as_ref().map(|part| (c, part))) {
+          // The system UI of a device frame: one line per part, not its layers.
+          Some((part_node, part)) => json!({ "id": part_node.id, "name": part_node.name, "devicePart": part }),
+          None => outline_in(e, c, depth - 1, only),
+        })
         .collect()
     } else {
       Vec::new()
@@ -1989,7 +2026,8 @@ fn build(e: &mut Engine, cx: &mut Ctx, spec: &Value, parent: Option<&str>, page:
       n.fills = vec![Paint::solid("#E5E7EB")];
     }
     let id = n.id.clone();
-    e.doc.insert(n, parent, page, None);
+    let index = parent.and_then(|p| before_device_ui(&e.doc, p));
+    e.doc.insert(n, parent, page, index);
     match spec.get("children") {
       None | Some(Value::Null) => {}
       // An empty list is fine on any layer (models often send `children: []` everywhere).
@@ -2011,6 +2049,11 @@ fn build(e: &mut Engine, cx: &mut Ctx, spec: &Value, parent: Option<&str>, page:
         ))
       }
     }
+    if let Some(d) = spec.get("device").filter(|d| !d.is_null()) {
+      let device = crate::devices::parse_spec(d, None).map_err(|m| cx.err("device", m))?;
+      let sized = spec.get("width").is_some() || spec.get("height").is_some();
+      crate::devices::apply(&mut e.doc, &mut e.gen, &id, device, !sized).map_err(|m| cx.err("device", m))?;
+    }
     id
   };
   if depth > 0 {
@@ -2019,6 +2062,12 @@ fn build(e: &mut Engine, cx: &mut Ctx, spec: &Value, parent: Option<&str>, page:
     }
   }
   Ok(id)
+}
+
+/// Where a new child of `parent` goes so a device frame's system UI stays on top of it.
+fn before_device_ui(doc: &crate::model::Document, parent: &str) -> Option<usize> {
+  let p = doc.get(parent)?;
+  p.children.iter().position(|c| doc.get(c).is_some_and(|c| c.device_part.is_some()))
 }
 
 fn parse_kind(cx: &Ctx, s: &str) -> Result<NodeType, String> {

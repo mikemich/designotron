@@ -14,6 +14,7 @@ mod collab_sim;
 pub mod color;
 pub mod comments;
 pub mod components;
+pub mod devices;
 pub mod doc;
 pub mod engine;
 pub mod figma;

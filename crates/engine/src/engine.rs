@@ -8,13 +8,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::components;
+use crate::devices;
 use crate::doc::{new_document, IdGen};
 use crate::geom::{Mat, Point, Rect};
 use crate::interact::{self, Handle};
 use crate::layout;
 use crate::model::{
-  AutoLayout, ColorStyle, Document, Effect, EffectStyle, GridStyle, Interaction, LayoutDirection, LayoutGrid, Node, NodeId, NodeType, Page,
-  Paint, RulerGuide, Sizing, SubPath, TextStyle, VectorData, VectorPoint,
+  AutoLayout, ColorStyle, DeviceFrame, Document, Effect, EffectStyle, GridStyle, Interaction, LayoutDirection, LayoutGrid, Node, NodeId,
+  NodeType, Page, Paint, RulerGuide, Sizing, SubPath, TextStyle, VectorData, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render::{self, Mode, RenderOptions};
@@ -395,6 +396,14 @@ pub enum Command {
   FrameSelection {
     ids: Vec<NodeId>,
   },
+  /// Puts a device (preset, theme, system UI toggles) on a screen frame or takes it off with
+  /// `None`; `resize` also gives the frame the preset's size. One undo step.
+  SetDevice {
+    id: NodeId,
+    device: Option<DeviceFrame>,
+    #[serde(default)]
+    resize: bool,
+  },
   AddAutoLayout {
     ids: Vec<NodeId>,
   },
@@ -651,6 +660,17 @@ pub enum Query {
   GridOverlay {
     #[serde(default)]
     page: Option<String>,
+  },
+  /// Safe-area bands of the selected device frames on a page, for the canvas overlay.
+  SafeAreas {
+    #[serde(default)]
+    page: Option<String>,
+  },
+  /// The device preset table: id, group, label, size, kind and insets.
+  DevicePresets,
+  /// A device frame's safe area as its toggles stand: `[top, right, bottom, left]` or null.
+  DeviceInsets {
+    id: NodeId,
   },
   Copy {
     ids: Vec<NodeId>,
@@ -2346,8 +2366,14 @@ impl Engine {
         });
         n.sizing_h = Sizing::Hug;
         n.sizing_v = Sizing::Hug;
+        // A screen keeps its device size, takes the safe area as padding and its chrome leaves the flow.
+        devices::refresh(&mut self.doc, &mut self.gen, &target);
         self.selection = vec![target.clone()];
         Ok(json!({ "id": target }))
+      }
+      Command::SetDevice { id, device, resize } => {
+        devices::apply(&mut self.doc, &mut self.gen, &id, device, resize)?;
+        Ok(json!({}))
       }
       Command::RemoveAutoLayout { ids } => {
         for id in ids {
@@ -2380,6 +2406,8 @@ impl Engine {
               n.sizing_v = Sizing::Fixed;
             }
           }
+          // The safe area leaves the padding, and the chrome stops being absolute.
+          devices::refresh(&mut self.doc, &mut self.gen, &id);
         }
         Ok(json!({}))
       }
@@ -3233,6 +3261,9 @@ impl Engine {
       }
       Query::Comments { page, include_resolved } => crate::comments::list(&self.doc, page.as_deref(), include_resolved),
       Query::GridOverlay { page } => crate::grids::overlay(&self.doc, page.as_deref().unwrap_or(&self.page)),
+      Query::SafeAreas { page } => crate::grids::safe_areas(&self.doc, page.as_deref().unwrap_or(&self.page), &self.selection),
+      Query::DevicePresets => crate::devices::presets_json(),
+      Query::DeviceInsets { id } => json!(self.doc.get(&id).and_then(crate::devices::safe_insets)),
       Query::Copy { ids } => json!(self.copy(&ids)),
       Query::MatchingLayers { ids } => json!(arrange::matching_layers(&self.doc, &ids)),
       Query::SameProperty { id, prop } => {

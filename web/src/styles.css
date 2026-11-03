@@ -2398,6 +2398,59 @@ body:has(.phone-note) .toast {
   justify-content: space-between;
   align-items: center;
 }
+/* Device frames: the grouped preset picker and the Device section */
+.preset-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.preset-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 8px;
+}
+.preset-search input {
+  flex: 1;
+  min-width: 0;
+}
+.preset-list {
+  max-height: 340px;
+  overflow-y: auto;
+  gap: 2px;
+}
+.preset-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 4px;
+}
+.preset-group-label {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 4px 2px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  background: var(--preset-bg, var(--panel));
+}
+.frame-presets .preset.active {
+  outline: 2px solid var(--select);
+  outline-offset: -2px;
+}
+.preset-empty {
+  padding: 8px 2px;
+}
+.preset-btn {
+  text-align: left;
+}
+.device-safe {
+  margin-top: 2px;
+}
 .scale-row {
   align-items: center;
   gap: 8px;
@@ -2585,7 +2638,7 @@ body:has(.phone-note) .toast {
   overflow: hidden;
   border-radius: 4px;
   background: var(--panel-2);
-  color: var(--muted, #8a8a8a);
+  color: var(--text-3);
 }
 .asset-thumb img {
   max-width: 100%;

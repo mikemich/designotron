@@ -36,7 +36,10 @@ then open the editor at http://127.0.0.1:5174 (or https://mikemich.github.io/des
    mobile) placed to the right of existing content. Use auto layout (`add_auto_layout`, or
    `layout` in `create_nodes`) for every stack and row; absolute positions only for
    overlays and decoration. Name layers semantically (Header, Nav, Card, Button, Input)
-   because code export reads the names.
+   because code export reads the names. App and site screens get `device` (for example
+   `"iphone-17-pro"`, or `{preset: "pixel-9", theme: "dark"}`): it sizes the frame, adds a
+   locked status bar and home indicator (or window chrome) that code export leaves out, and
+   adds the safe area to the frame's padding.
 4. Anything that appears twice or more with the same structure (cards, list rows, nav
    items, buttons, inputs, table rows) is a component, not a copy: build it once as
    `type: "component"` (or `create_component`), keep it on the canvas beside the screens,

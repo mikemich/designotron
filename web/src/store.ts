@@ -231,11 +231,19 @@ let docCache: { rev: number; doc: Doc } | null = null;
 /** Layers that have layout grids, kept current with the document copy: most files have none,
  * and then nothing needs to look for grids to draw. */
 const gridFrames = new Set<string>();
+/** Device frames, kept the same way: the safe-area overlay only runs when there are any. */
+const deviceFrames = new Set<string>();
 
 /** Whether any layer of the document has layout grids. */
 export function hasLayoutGrids(): boolean {
   getDoc();
   return gridFrames.size > 0;
+}
+
+/** Whether any layer of the document is a device frame. */
+export function hasDeviceFrames(): boolean {
+  getDoc();
+  return deviceFrames.size > 0;
 }
 
 /** Parsed document for the current revision. Kept current from engine deltas, so a
@@ -253,7 +261,11 @@ export function getDoc(): Doc {
   if (d.full || !docCache) {
     docCache = { rev, doc: d.full };
     gridFrames.clear();
-    for (const id in d.full.nodes) if (d.full.nodes[id].layoutGrids?.length) gridFrames.add(id);
+    deviceFrames.clear();
+    for (const id in d.full.nodes) {
+      if (d.full.nodes[id].layoutGrids?.length) gridFrames.add(id);
+      if (d.full.nodes[id].device) deviceFrames.add(id);
+    }
   } else {
     // Patch the node table in place (changed nodes are new objects; the table is shared).
     const nodes = docCache.doc.nodes;
@@ -261,10 +273,13 @@ export function getDoc(): Doc {
     for (const id in d.nodes) {
       if (d.nodes[id].layoutGrids?.length) gridFrames.add(id);
       else gridFrames.delete(id);
+      if (d.nodes[id].device) deviceFrames.add(id);
+      else deviceFrames.delete(id);
     }
     for (const id of d.removed) {
       delete nodes[id];
       gridFrames.delete(id);
+      deviceFrames.delete(id);
     }
     docCache = { rev, doc: { ...d.meta, nodes } };
   }

@@ -359,6 +359,32 @@ impl<'a> Ctx<'a> {
     }
   }
 
+  /// CSS padding of an auto layout frame. A device frame's safe area is not content padding: on a
+  /// phone or tablet it becomes `env(safe-area-inset-*)` (the real device supplies it), and in a
+  /// window or browser frame it is left out (the real chrome takes that space).
+  fn padding_value(&self, n: &Node, pad: [f64; 4]) -> String {
+    let applied = n.device.as_ref().map(|d| d.applied).filter(|a| a.iter().any(|v| *v > 0.0));
+    let (Some(applied), Some(d)) = (applied, n.device.as_ref()) else {
+      return pad.iter().map(|p| px(*p)).collect::<Vec<_>>().join(" ");
+    };
+    let mobile = crate::devices::is_mobile(d);
+    ["top", "right", "bottom", "left"]
+      .iter()
+      .enumerate()
+      .map(|(i, side)| {
+        let rest = (pad[i] - applied[i]).max(0.0);
+        if !mobile || applied[i] <= 0.0 {
+          px(rest)
+        } else if rest == 0.0 {
+          format!("env(safe-area-inset-{side}, 0px)")
+        } else {
+          format!("calc({} + env(safe-area-inset-{side}, 0px))", px(rest))
+        }
+      })
+      .collect::<Vec<_>>()
+      .join(" ")
+  }
+
   /// The component set `comp_id` is a variant of.
   fn variant_set(&self, comp_id: &str) -> Option<Node> {
     let p = self.doc.get(comp_id)?.parent.as_ref()?;
@@ -381,6 +407,10 @@ impl<'a> Ctx<'a> {
 
   fn build(&mut self, id: &str, place: Place) -> Option<El> {
     let n = self.doc.get(id)?.clone();
+    // A device frame's system UI is not app content.
+    if n.device_part.is_some() {
+      return None;
+    }
     // Layers a component property controls are written as expressions in the component's function.
     let bound = self.bound_props(&n);
     if !n.visible && bound.visible.is_none() {
@@ -507,7 +537,7 @@ impl<'a> Ctx<'a> {
       }
       let pad = [al.padding_top, al.padding_right, al.padding_bottom, al.padding_left];
       if pad.iter().any(|p| *p != 0.0) {
-        el.s("padding", pad.iter().map(|p| px(*p)).collect::<Vec<_>>().join(" "));
+        el.s("padding", self.padding_value(&n, pad));
       }
       let justify = match al.primary_align {
         Align::Start | Align::Baseline => None,
@@ -1724,13 +1754,37 @@ fn tw_border_side(side: &str, v: &str) -> String {
   }
 }
 
+/// Splits a padding value at the spaces outside parentheses (`calc(1px + 2px)` stays whole).
+fn split_top(v: &str) -> Vec<&str> {
+  let (mut depth, mut start, mut out) = (0usize, 0usize, Vec::new());
+  for (i, c) in v.char_indices() {
+    match c {
+      '(' => depth += 1,
+      ')' => depth = depth.saturating_sub(1),
+      ' ' if depth == 0 => {
+        out.push(&v[start..i]);
+        start = i + 1;
+      }
+      _ => {}
+    }
+  }
+  out.push(&v[start..]);
+  out
+}
+
 fn tw_padding(v: &str) -> String {
-  let p: Vec<&str> = v.split(' ').collect();
+  let p: Vec<&str> = split_top(v);
   if p.len() != 4 {
     return format!("p-[{}]", tw_value(v));
   }
   let (t, r, b, l) = (p[0], p[1], p[2], p[3]);
-  let cls = |pre: &str, val: &str| if val == "0" { String::new() } else { format!("{pre}-[{val}]") };
+  let cls = |pre: &str, val: &str| {
+    if val == "0" {
+      String::new()
+    } else {
+      format!("{pre}-[{}]", tw_value(val))
+    }
+  };
   if t == r && r == b && b == l {
     return cls("p", t);
   }
@@ -1953,6 +2007,15 @@ fn google_fonts_link(doc: &Document) -> String {
   format!("https://fonts.googleapis.com/css2?{}&display=swap", q.join("&"))
 }
 
+/// `viewport-fit=cover` lets a page reach under the notch, which `env(safe-area-inset-*)` needs.
+fn viewport_fit(mobile: bool) -> &'static str {
+  if mobile {
+    ", viewport-fit=cover"
+  } else {
+    ""
+  }
+}
+
 /// Standalone HTML document for a node.
 pub fn export_html(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
   let mut ctx = Ctx::new(doc, m, false);
@@ -1964,7 +2027,8 @@ pub fn export_html(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
   let fonts = google_fonts_link(doc);
   let name = doc.get(id).map(|n| n.name.clone()).unwrap_or_default();
   format!(
-    "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\" />\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n  <title>{}</title>\n{}  <style>*, *::before, *::after {{ box-sizing: border-box; }} body {{ margin: 0; }}{}</style>\n</head>\n<body>\n{}</body>\n</html>\n",
+    "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\" />\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0{}\" />\n  <title>{}</title>\n{}  <style>*, *::before, *::after {{ box-sizing: border-box; }} body {{ margin: 0; }}{}</style>\n</head>\n<body>\n{}</body>\n</html>\n",
+    viewport_fit(doc.get(id).is_some_and(|n| n.device.as_ref().is_some_and(crate::devices::is_mobile))),
     esc(&name),
     if fonts.is_empty() { String::new() } else { format!("  <link rel=\"stylesheet\" href=\"{}\" />\n", esc(&fonts)) },
     if doc.variables.is_empty() { String::new() } else { format!("\n{}", crate::variables::tokens_css(doc)) },
@@ -2449,9 +2513,15 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
     content: "import React from \"react\";\nimport ReactDOM from \"react-dom/client\";\nimport App from \"./App\";\nimport \"./index.css\";\n\nReactDOM.createRoot(document.getElementById(\"root\")!).render(\n  <React.StrictMode>\n    <App />\n  </React.StrictMode>,\n);\n".into(),
   });
   let title = esc(&doc.name);
+  let fit = viewport_fit(
+    doc
+      .nodes
+      .values()
+      .any(|n| n.parent.is_none() && n.device.as_ref().is_some_and(crate::devices::is_mobile)),
+  );
   files.push(ProjectFile {
     path: "index.html".into(),
-    content: format!("<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n    <title>{title}</title>\n  </head>\n  <body>\n    <div id=\"root\"></div>\n    <script type=\"module\" src=\"/src/main.tsx\"></script>\n  </body>\n</html>\n"),
+    content: format!("<!doctype html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"UTF-8\" />\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0{fit}\" />\n    <title>{title}</title>\n  </head>\n  <body>\n    <div id=\"root\"></div>\n    <script type=\"module\" src=\"/src/main.tsx\"></script>\n  </body>\n</html>\n"),
   });
   let pkg = pascal(&doc.name, "app").to_lowercase();
   files.push(ProjectFile {

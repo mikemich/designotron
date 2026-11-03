@@ -98,6 +98,54 @@ pub fn overlay(doc: &Document, page: &str) -> Value {
   Value::Array(out)
 }
 
+/// Tint of the safe-area bands.
+const SAFE_AREA_COLOR: &str = "rgba(255,59,48,0.14)";
+
+/// The unsafe margins of a frame (page coordinates): bands for each non-zero inset.
+pub fn safe_bands(frame: &Rect, insets: [f64; 4]) -> Vec<Rect> {
+  let [t, r, b, l] = insets;
+  let mut out = Vec::new();
+  if t > 0.0 {
+    out.push(Rect::new(frame.x, frame.y, frame.width, t));
+  }
+  if b > 0.0 {
+    out.push(Rect::new(frame.x, frame.bottom() - b, frame.width, b));
+  }
+  if l > 0.0 {
+    out.push(Rect::new(frame.x, frame.y + t, l, (frame.height - t - b).max(0.0)));
+  }
+  if r > 0.0 {
+    out.push(Rect::new(frame.right() - r, frame.y + t, r, (frame.height - t - b).max(0.0)));
+  }
+  out
+}
+
+/// Safe-area bands for the device frames that are selected, or contain a selected layer.
+pub fn safe_areas(doc: &Document, page: &str, selection: &[NodeId]) -> Value {
+  let mut frames: Vec<NodeId> = Vec::new();
+  for id in selection {
+    let Some(n) = doc.get(id) else { continue };
+    if n.page != page {
+      continue;
+    }
+    let top = std::iter::once(id.clone())
+      .chain(doc.ancestors(id))
+      .find(|i| doc.get(i).is_some_and(|n| n.device.is_some()));
+    if let Some(t) = top.filter(|t| !frames.contains(t)) {
+      frames.push(t);
+    }
+  }
+  let out: Vec<Value> = frames
+    .iter()
+    .filter_map(|id| {
+      let n = doc.get(id)?;
+      let bands = safe_bands(&doc.abs_bounds(id), crate::devices::safe_insets(n)?);
+      (!bands.is_empty()).then(|| json!({ "frameId": id, "color": SAFE_AREA_COLOR, "bands": bands, "frame": doc.abs_bounds(id) }))
+    })
+    .collect();
+  Value::Array(out)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -115,6 +163,15 @@ mod tests {
     assert_eq!(b[0].x, 40.0);
     assert!((b[3].right() - 960.0).abs() < 1e-9);
     assert!((b[0].width - 215.0).abs() < 1e-9);
+  }
+
+  #[test]
+  fn safe_bands_cover_only_the_insets() {
+    let b = safe_bands(&Rect::new(10.0, 20.0, 100.0, 200.0), [30.0, 0.0, 10.0, 0.0]);
+    assert_eq!(b.len(), 2);
+    assert_eq!((b[0].y, b[0].height), (20.0, 30.0));
+    assert_eq!((b[1].y, b[1].height), (210.0, 10.0));
+    assert!(safe_bands(&Rect::new(0.0, 0.0, 10.0, 10.0), [0.0; 4]).is_empty());
   }
 
   #[test]
