@@ -8,13 +8,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::components;
+use crate::devices;
 use crate::doc::{new_document, IdGen};
 use crate::geom::{Mat, Point, Rect};
 use crate::interact::{self, Handle};
 use crate::layout;
 use crate::model::{
-  AutoLayout, ColorStyle, Document, Effect, EffectStyle, GridStyle, Interaction, LayoutDirection, LayoutGrid, Node, NodeId, NodeType, Page,
-  Paint, RulerGuide, Sizing, SubPath, TextStyle, VectorData, VectorPoint,
+  AutoLayout, ColorStyle, DeviceFrame, Document, Effect, EffectStyle, GridStyle, Interaction, LayoutDirection, LayoutGrid, Node, NodeId,
+  NodeType, Page, Paint, RulerGuide, Sizing, SubPath, TextStyle, VectorData, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render::{self, Mode, RenderOptions};
@@ -395,6 +396,14 @@ pub enum Command {
   FrameSelection {
     ids: Vec<NodeId>,
   },
+  /// Puts a device (preset, theme, system UI toggles) on a screen frame or takes it off with
+  /// `None`; `resize` also gives the frame the preset's size. One undo step.
+  SetDevice {
+    id: NodeId,
+    device: Option<DeviceFrame>,
+    #[serde(default)]
+    resize: bool,
+  },
   AddAutoLayout {
     ids: Vec<NodeId>,
   },
@@ -651,6 +660,17 @@ pub enum Query {
   GridOverlay {
     #[serde(default)]
     page: Option<String>,
+  },
+  /// Safe-area bands of the selected device frames on a page, for the canvas overlay.
+  SafeAreas {
+    #[serde(default)]
+    page: Option<String>,
+  },
+  /// The device preset table: id, group, label, size, kind and insets.
+  DevicePresets,
+  /// A device frame's safe area as its toggles stand: `[top, right, bottom, left]` or null.
+  DeviceInsets {
+    id: NodeId,
   },
   Copy {
     ids: Vec<NodeId>,
@@ -1396,6 +1416,18 @@ impl Engine {
   }
 
   fn after_mutation(&mut self, prev: &Document) {
+    // Layers added to or reordered in a device frame stay below its system UI (before instances
+    // of a main device frame sync from it).
+    let device_frames: Vec<NodeId> = self
+      .changed_by_root(prev)
+      .values()
+      .flatten()
+      .filter(|id| self.doc.get(id).is_some_and(|n| n.device.is_some()))
+      .cloned()
+      .collect();
+    for id in &device_frames {
+      devices::raise_chrome(&mut self.doc, id);
+    }
     crate::props::follow_variants(&mut self.doc, prev);
     crate::variables::normalize(&mut self.doc);
     crate::variables::apply(&mut self.doc);
@@ -1438,7 +1470,8 @@ impl Engine {
     crate::variables::apply(&mut self.doc);
     // Only trees that changed need layout (layout never reaches across top-level layers),
     // and moving a whole top-level layer changes nothing inside it.
-    for (root, changed) in self.changed_by_root(prev) {
+    let by_root = self.changed_by_root(prev);
+    for (root, changed) in by_root {
       if !self.only_moved(prev, &root, &changed) {
         layout::layout_node(&mut self.doc, &root, self.measurer.as_ref());
       }
@@ -1583,6 +1616,7 @@ impl Engine {
   fn auto_parent(&self, explicit: Option<NodeId>, x: f64, y: f64) -> Option<NodeId> {
     explicit
       .filter(|p| self.doc.nodes.contains_key(p))
+      .map(|p| devices::host_of(&self.doc, &p))
       .or_else(|| ops::frame_at(&self.doc, &self.page, Point::new(x, y), &[], true))
   }
 
@@ -1596,8 +1630,37 @@ impl Engine {
     }
     let id = n.id.clone();
     let page = self.page.clone();
-    self.doc.insert(n, parent, &page, None);
+    let index = parent.and_then(|p| devices::before_chrome(&self.doc, p));
+    self.doc.insert(n, parent, &page, index);
     id
+  }
+
+  /// Structural commands never take a device frame's system UI: those layers are dropped from the
+  /// command, and it fails when nothing is left (the Device section turns system UI on and off).
+  fn without_chrome(&self, mut cmd: Command) -> Result<Command, String> {
+    let wrap = match &cmd {
+      Command::AddAutoLayout { ids } => !(ids.len() == 1 && self.doc.get(&ids[0]).is_some_and(|n| n.kind.is_frame_like())),
+      _ => true,
+    };
+    let ids = match &mut cmd {
+      Command::Group { ids }
+      | Command::Ungroup { ids }
+      | Command::FrameSelection { ids }
+      | Command::CreateComponent { ids }
+      | Command::BooleanOp { ids, .. }
+      | Command::Flatten { ids }
+      | Command::OutlineStroke { ids }
+      | Command::UseAsMask { ids }
+      | Command::MoveToPage { ids, .. } => ids,
+      Command::AddAutoLayout { ids } if wrap => ids,
+      _ => return Ok(cmd),
+    };
+    let before = ids.len();
+    ids.retain(|i| !devices::in_part(&self.doc, i));
+    if before > 0 && ids.is_empty() {
+      return Err("system UI of a device frame can't be changed this way; turn it on or off in the Device section".into());
+    }
+    Ok(cmd)
   }
 
   /// Applies a command without touching history (used by AI tools inside one step).
@@ -1606,6 +1669,7 @@ impl Engine {
   }
 
   fn apply(&mut self, cmd: Command) -> Result<Value, String> {
+    let cmd = self.without_chrome(cmd)?;
     match cmd {
       Command::AddPage { name } => {
         let id = self.gen.next("p_");
@@ -2078,10 +2142,19 @@ impl Engine {
       }
       Command::Delete { ids } => {
         let ids: Vec<NodeId> = ids.into_iter().filter(|i| self.doc.instance_ancestor(i).is_none()).collect();
+        let parts = devices::parts_among(&self.doc, &ids);
         ops::delete(&mut self.doc, &ids);
+        // Deleting a system UI part is turning it off in the Device section.
+        for (frame, part) in parts {
+          devices::turn_off(&mut self.doc, &mut self.gen, &frame, &part);
+        }
         Ok(json!({}))
       }
       Command::Duplicate { ids } => {
+        let ids: Vec<NodeId> = ids.into_iter().filter(|i| !devices::in_part(&self.doc, i)).collect();
+        if ids.is_empty() {
+          return Err("system UI can't be duplicated; turn it on or off in the Device section".into());
+        }
         let created = ops::duplicate(&mut self.doc, &ids, &mut self.gen, Point::new(0.0, 0.0));
         // Offset only when it would land exactly on top of a page-level original.
         for (orig, new) in ids.iter().zip(created.iter()) {
@@ -2105,6 +2178,7 @@ impl Engine {
         for id in &ids {
           let cur = self.doc.get(id).and_then(|n| n.parent.clone());
           if self.doc.instance_ancestor(id).is_some()
+            || devices::in_part(&self.doc, id)
             || components::would_nest_under(&self.doc, std::slice::from_ref(id), target.as_deref())
           {
             continue;
@@ -2153,6 +2227,12 @@ impl Engine {
         }
         if let Some(missing) = ids.iter().find(|id| self.doc.get(id).is_none()) {
           return Err(format!("no layer {missing}"));
+        }
+        if parent.as_deref().is_some_and(|p| devices::in_part(&self.doc, p)) {
+          return Err("system UI of a device frame can't hold layers; use the device frame".into());
+        }
+        if ids.iter().any(|id| devices::in_part(&self.doc, id)) {
+          return Err("system UI of a device frame can't be moved; turn it on or off in the Device section".into());
         }
         let ids = ops::paint_order(&self.doc, &ops::top_most(&self.doc, &ids));
         if components::would_nest_under(&self.doc, &ids, parent.as_deref()) {
@@ -2346,8 +2426,14 @@ impl Engine {
         });
         n.sizing_h = Sizing::Hug;
         n.sizing_v = Sizing::Hug;
+        // A screen keeps its device size, takes the safe area as padding and its chrome leaves the flow.
+        devices::refresh(&mut self.doc, &mut self.gen, &target);
         self.selection = vec![target.clone()];
         Ok(json!({ "id": target }))
+      }
+      Command::SetDevice { id, device, resize } => {
+        devices::apply(&mut self.doc, &mut self.gen, &id, device, resize)?;
+        Ok(json!({}))
       }
       Command::RemoveAutoLayout { ids } => {
         for id in ids {
@@ -2380,6 +2466,8 @@ impl Engine {
               n.sizing_v = Sizing::Fixed;
             }
           }
+          // The safe area leaves the padding, and the chrome stops being absolute.
+          devices::refresh(&mut self.doc, &mut self.gen, &id);
         }
         Ok(json!({}))
       }
@@ -3042,7 +3130,7 @@ impl Engine {
     for n in &nodes {
       map.insert(n.id.clone(), self.gen.next("n_"));
     }
-    let parent = parent.filter(|p| {
+    let parent = parent.map(|p| devices::host_of(&self.doc, &p)).filter(|p| {
       self
         .doc
         .get(p)
@@ -3076,6 +3164,10 @@ impl Engine {
         c.y += oy;
         c.parent = None;
         c.master_id = None;
+        // A copied piece of system UI is an ordinary layer from here on (code export includes it).
+        if c.device_part.take().is_some() {
+          c.locked = false;
+        }
         let id = c.id.clone();
         self.doc.insert(c, None, &page, None);
         if let Some(p) = &parent {
@@ -3233,6 +3325,9 @@ impl Engine {
       }
       Query::Comments { page, include_resolved } => crate::comments::list(&self.doc, page.as_deref(), include_resolved),
       Query::GridOverlay { page } => crate::grids::overlay(&self.doc, page.as_deref().unwrap_or(&self.page)),
+      Query::SafeAreas { page } => crate::grids::safe_areas(&self.doc, page.as_deref().unwrap_or(&self.page), &self.selection),
+      Query::DevicePresets => crate::devices::presets_json(),
+      Query::DeviceInsets { id } => json!(self.doc.get(&id).and_then(crate::devices::safe_insets)),
       Query::Copy { ids } => json!(self.copy(&ids)),
       Query::MatchingLayers { ids } => json!(arrange::matching_layers(&self.doc, &ids)),
       Query::SameProperty { id, prop } => {

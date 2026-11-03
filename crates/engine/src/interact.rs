@@ -246,6 +246,20 @@ fn snap_targets(doc: &Document, page: &str, moving: &[NodeId]) -> Targets {
   let mut anc = moving.first().and_then(|m| doc.get(m)).and_then(|n| n.parent.clone());
   while let Some(a) = anc {
     let Some(n) = doc.get(&a) else { break };
+    // The safe area of a device frame: its inset edges snap like layout grid lines.
+    if let Some([top, right, bottom, left]) = crate::devices::safe_insets(n).filter(|_| n.visible) {
+      let r = doc.abs_bounds(&a);
+      for (v, edge) in [(top, r.y + top), (bottom, r.bottom() - bottom)] {
+        if v > 0.0 {
+          t.ys.push((edge, r.x, r.right()));
+        }
+      }
+      for (v, edge) in [(left, r.x + left), (right, r.right() - right)] {
+        if v > 0.0 {
+          t.xs.push((edge, r.y, r.bottom()));
+        }
+      }
+    }
     if n.visible && !n.layout_grids.is_empty() {
       let r = doc.abs_bounds(&a);
       for g in n.layout_grids.iter().filter(|g| g.visible) {

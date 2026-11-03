@@ -1,7 +1,7 @@
 // Rulers, page guides and layout grid overlay.
 
 import { useMemo, useState } from "react";
-import { dispatch, getDoc, hasLayoutGrids, query, useStore } from "../store";
+import { dispatch, getDoc, hasDeviceFrames, hasLayoutGrids, query, useStore } from "../store";
 import type { Rect, RulerGuide } from "../types";
 
 type View = { x: number; y: number; zoom: number };
@@ -12,6 +12,8 @@ interface GridItem {
   color: string;
   frame: Rect;
   bands?: Rect[];
+  /** Dashed edge lines `[x1, y1, x2, y2]` (safe areas). */
+  lines?: [number, number, number, number][];
   cell?: number;
 }
 
@@ -20,12 +22,29 @@ export function GridOverlay({ v }: { v: View }) {
   // Layout grids belong to the document: selecting layers must not recompute them.
   const docRev = useStore((s) => s.es.docRev);
   const page = useStore((s) => s.es.page);
-  const items = useMemo(() => (hasLayoutGrids() ? query<GridItem[]>({ q: "gridOverlay" }) : []), [docRev, page]);
+  const selection = useStore((s) => s.es.selection);
+  const grids = useMemo(() => (hasLayoutGrids() ? query<GridItem[]>({ q: "gridOverlay" }) : []), [docRev, page]);
+  // The safe area of the selected device frame: dashed lines along its edges.
+  const safe = useMemo(() => (hasDeviceFrames() ? query<GridItem[]>({ q: "safeAreas" }) : []), [docRev, page, selection]);
+  const items = useMemo(() => [...grids, ...safe], [grids, safe]);
   if (!items.length) return null;
   return (
     <g className="grid-overlay">
       {items.map((g, i) => {
         const f = g.frame;
+        if (g.lines)
+          return g.lines.map((l, j) => (
+            <line
+              key={`${i}-${j}`}
+              x1={l[0] * v.zoom + v.x}
+              y1={l[1] * v.zoom + v.y}
+              x2={l[2] * v.zoom + v.x}
+              y2={l[3] * v.zoom + v.y}
+              stroke={g.color}
+              strokeWidth={1}
+              strokeDasharray="5 4"
+            />
+          ));
         if (g.bands)
           return g.bands.map((b, j) => (
             <rect key={`${i}-${j}`} x={b.x * v.zoom + v.x} y={b.y * v.zoom + v.y} width={b.width * v.zoom} height={b.height * v.zoom} fill={g.color} />

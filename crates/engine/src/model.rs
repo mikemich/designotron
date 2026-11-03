@@ -289,6 +289,52 @@ pub struct Node {
   /// Component properties this layer of a main component is bound to.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub prop_refs: Option<PropRefs>,
+  // Device frames
+  /// Screen frames: the device preset and the system UI built on it (see `devices.rs`).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub device: Option<DeviceFrame>,
+  /// The root of a system UI part of a device frame (`statusBar`, `homeIndicator`, `navBar`,
+  /// `titleBar`, `browserBar`). A string, so a later build's new value never refuses a file.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub device_part: Option<String>,
+}
+
+/// A screen frame's device: the preset it was sized from and which system UI it shows.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DeviceFrame {
+  pub preset: String,
+  /// `light` or `dark`; anything else reads as light.
+  pub theme: String,
+  pub status_bar: bool,
+  /// The iOS home indicator, or the Android navigation bar.
+  pub home_indicator: bool,
+  /// The macOS title bar or the browser toolbar.
+  pub chrome: bool,
+  /// Android navigation: `gesture` or `buttons`.
+  pub nav: String,
+  /// The address shown in a browser frame.
+  pub url: String,
+  /// Add the safe area to the frame's auto layout padding.
+  pub pad: bool,
+  /// Insets currently added to the padding (top, right, bottom, left).
+  pub applied: [f64; 4],
+}
+
+impl Default for DeviceFrame {
+  fn default() -> Self {
+    DeviceFrame {
+      preset: String::new(),
+      theme: "light".into(),
+      status_bar: true,
+      home_indicator: true,
+      chrome: true,
+      nav: "gesture".into(),
+      url: "example.com".into(),
+      pad: true,
+      applied: [0.0; 4],
+    }
+  }
 }
 
 impl Default for Node {
@@ -352,6 +398,8 @@ impl Default for Node {
       bindings: BTreeMap::new(),
       variable_modes: BTreeMap::new(),
       prop_refs: None,
+      device: None,
+      device_part: None,
     }
   }
 }

@@ -17,7 +17,8 @@ import {
   useStore,
 } from "./store";
 import { openTextGesture } from "./canvas/TextEditor";
-import type { Rect, Tool } from "./types";
+import type { DeviceFrame, Rect, Tool } from "./types";
+import { hasDeviceUi, type DevicePreset } from "./panels/presetList";
 
 const CLIPBOARD_TAG = "designotron/nodes";
 
@@ -85,7 +86,7 @@ export function toggleVectorPointSmooth(sub: number, index: number) {
 }
 
 /** Runs several edits as one undo step. */
-function oneStep(fn: () => void) {
+export function oneStep(fn: () => void) {
   dispatch({ op: "beginGesture" });
   try {
     fn();
@@ -484,7 +485,8 @@ export function movePage(id: string, index: number) {
 }
 
 /** A frame of a preset size at the viewport centre (to the right of what is there when that is taken). */
-export function createFramePreset(w: number, h: number, name: string) {
+export function createFramePreset(preset: DevicePreset, withUi: boolean) {
+  const { w, h, label: name } = preset;
   const c = viewportCenter();
   let x = Math.round(c.x - w / 2);
   let y = Math.round(c.y - h / 2);
@@ -497,7 +499,27 @@ export function createFramePreset(w: number, h: number, name: string) {
   }
   oneStep(() => {
     const r = dispatch<{ id: string }>({ op: "createShape", kind: "frame", x, y, width: w, height: h, parent: null });
-    if (r) dispatch({ op: "update", ids: [r.id], patch: { name } });
+    if (!r) return;
+    dispatch({ op: "update", ids: [r.id], patch: { name } });
+    if (withUi && hasDeviceUi(preset)) setDevice(r.id, { ...DEVICE_DEFAULTS, preset: preset.id }, false);
   });
   setTool("move");
+}
+
+/** What a device frame starts with: light, every bar on, the safe area added to auto layout padding. */
+export const DEVICE_DEFAULTS: DeviceFrame = {
+  preset: "",
+  theme: "light",
+  statusBar: true,
+  homeIndicator: true,
+  chrome: true,
+  nav: "gesture",
+  url: "example.com",
+  pad: true,
+  applied: [0, 0, 0, 0],
+};
+
+/** Puts a device (or none) on a screen frame; `resize` also gives it the preset's size. One undo step. */
+export function setDevice(id: string, device: DeviceFrame | null, resize: boolean) {
+  return dispatch({ op: "setDevice", id, device, resize });
 }

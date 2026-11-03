@@ -42,7 +42,12 @@ pub struct Issue {
 pub fn lint_page(doc: &Document, page: &str, m: &dyn TextMeasurer) -> Vec<Issue> {
   let mut out = Vec::new();
   let page_bg = doc.page(page).map(|p| p.background.clone()).unwrap_or_else(|| "#FFFFFF".into());
-  let nodes = doc.page_nodes(page);
+  // A device frame's system UI is not part of the design.
+  let nodes: Vec<NodeId> = doc
+    .page_nodes(page)
+    .into_iter()
+    .filter(|id| !crate::devices::in_part(doc, id))
+    .collect();
   for id in &nodes {
     let Some(n) = doc.get(id) else { continue };
     if !n.visible || doc.instance_ancestor(id).is_some() {

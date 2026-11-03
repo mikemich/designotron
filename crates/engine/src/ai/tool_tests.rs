@@ -1277,6 +1277,197 @@ mod strictness {
   }
 }
 
+mod device {
+  use super::*;
+
+  fn screen(e: &mut Engine, device: Value) -> String {
+    one(
+      e,
+      json!({ "type": "frame", "name": "Home", "device": device,
+        "layout": { "direction": "vertical", "gap": 8, "padding": 16 },
+        "children": [{ "type": "text", "text": "Welcome" }] }),
+    )
+  }
+
+  #[test]
+  fn create_nodes_sizes_the_frame_and_adds_the_safe_area_to_the_padding() {
+    let mut e = engine();
+    let id = screen(&mut e, json!("iphone-17-pro"));
+    let n = e.doc.get(&id).unwrap();
+    assert_eq!((n.width, n.height), (402.0, 874.0));
+    let l = n.layout.clone().unwrap();
+    assert_eq!((l.padding_top, l.padding_bottom, l.padding_left), (78.0, 50.0, 16.0));
+    assert_eq!(n.device.as_ref().unwrap().preset, "iphone-17-pro");
+    assert_eq!(n.sizing_v, Sizing::Fixed);
+    // Content comes first, the system UI is the last layers.
+    let names: Vec<String> = n.children.iter().map(|c| e.doc.get(c).unwrap().name.clone()).collect();
+    assert_eq!(names, ["Welcome", "Status bar", "Home indicator"]);
+    // A given size wins over the preset's.
+    let sized = one(
+      &mut e,
+      json!({ "type": "frame", "width": 500, "height": 900, "device": { "preset": "pixel-9", "theme": "dark" } }),
+    );
+    let n = e.doc.get(&sized).unwrap();
+    assert_eq!((n.width, n.height), (500.0, 900.0));
+    assert_eq!(n.device.as_ref().unwrap().theme, "dark");
+  }
+
+  #[test]
+  fn a_bad_preset_is_an_error_that_names_the_field_and_suggests_ids() {
+    let mut e = engine();
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "frame", "device": "iphone-17-prp" }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("nodes[0].device") && err.contains("iphone-17-pro"), "{err}");
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "frame", "device": { "preset": "pixel-9", "theme": "pink" } }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("nodes[0].device") && err.contains("theme"), "{err}");
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "rectangle", "device": "pixel-9" }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("frame"), "{err}");
+    assert!(e.doc.nodes.is_empty() || e.doc.nodes.values().all(|n| n.kind != crate::model::NodeType::Rectangle));
+  }
+
+  #[test]
+  fn update_nodes_changes_the_theme_and_removes_the_device() {
+    let mut e = engine();
+    let id = screen(&mut e, json!("iphone-16"));
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "device": { "theme": "dark", "statusBar": false } }] }),
+    );
+    let n = e.doc.get(&id).unwrap();
+    assert_eq!((n.width, n.height), (393.0, 852.0), "same preset: no resize");
+    assert_eq!(n.layout.as_ref().unwrap().padding_top, 16.0);
+    assert!(n.device.as_ref().unwrap().theme == "dark" && !n.device.as_ref().unwrap().status_bar);
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "device": "ipad-air-11" }] }),
+    );
+    assert_eq!(e.doc.get(&id).unwrap().width, 820.0);
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "layout": { "padding": 8 } }] }),
+    );
+    assert_eq!(
+      e.doc.get(&id).unwrap().layout.as_ref().unwrap().padding_bottom,
+      28.0,
+      "8 plus the iPad's 20"
+    );
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": id, "device": null }] }));
+    let n = e.doc.get(&id).unwrap();
+    assert!(n.device.is_none());
+    assert_eq!(n.children.len(), 1);
+    assert_eq!(n.layout.as_ref().unwrap().padding_bottom, 8.0);
+  }
+
+  #[test]
+  fn adding_and_removing_auto_layout_by_update_keeps_the_chrome_and_padding_right() {
+    let mut e = engine();
+    let id = one(&mut e, json!({ "type": "frame", "name": "Home", "device": "iphone-17-pro" }));
+    assert!(e.doc.get(&id).unwrap().layout.is_none());
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "layout": { "direction": "vertical", "padding": 8 } }] }),
+    );
+    let n = e.doc.get(&id).unwrap();
+    assert_eq!((n.sizing_h, n.sizing_v, n.height), (Sizing::Fixed, Sizing::Fixed, 874.0));
+    let l = n.layout.clone().unwrap();
+    assert_eq!((l.padding_top, l.padding_bottom), (70.0, 42.0));
+    assert!(n
+      .children
+      .iter()
+      .filter_map(|c| e.doc.get(c))
+      .filter(|c| c.device_part.is_some())
+      .all(|c| c.absolute_position));
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "patch": { "layout": null } }] }),
+    );
+    let n = e.doc.get(&id).unwrap();
+    assert!(n.layout.is_none());
+    assert_eq!(n.device.as_ref().unwrap().applied, [0.0; 4], "no stale insets");
+    assert!(n
+      .children
+      .iter()
+      .filter_map(|c| e.doc.get(c))
+      .filter(|c| c.device_part.is_some())
+      .all(|c| !c.absolute_position));
+  }
+
+  #[test]
+  fn a_device_and_padding_in_one_update_use_the_new_padding_once() {
+    let mut e = engine();
+    let id = screen(&mut e, json!("iphone-16"));
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "device": "iphone-17", "layout": { "padding": 16 } }] }),
+    );
+    let l = e.doc.get(&id).unwrap().layout.clone().unwrap();
+    assert_eq!((l.padding_top, l.padding_bottom), (78.0, 50.0));
+  }
+
+  #[test]
+  fn system_ui_is_not_a_parent() {
+    let mut e = engine();
+    let id = screen(&mut e, json!("iphone-17"));
+    let bar = e
+      .doc
+      .get(&id)
+      .unwrap()
+      .children
+      .iter()
+      .find(|c| e.doc.get(c).unwrap().device_part.as_deref() == Some("statusBar"))
+      .unwrap()
+      .clone();
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "parentId": bar, "nodes": [{ "type": "text", "text": "x" }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("system UI") && err.contains(&id), "{err}");
+  }
+
+  #[test]
+  fn new_children_go_below_the_system_ui_and_the_outline_stays_compact() {
+    let mut e = engine();
+    let id = screen(&mut e, json!("iphone-17"));
+    let added = created(&run(
+      &mut e,
+      "create_nodes",
+      json!({ "parentId": id, "nodes": [{ "type": "text", "text": "More" }] }),
+    ))[0]
+      .clone();
+    let n = e.doc.get(&id).unwrap();
+    assert_eq!(n.children.iter().position(|c| *c == added), Some(1), "before the status bar");
+    let r = run(&mut e, "get_nodes", json!({ "ids": [id], "depth": 3 }));
+    let outline = &r[0]["outline"];
+    assert_eq!(outline["device"], "iphone-17");
+    let kids = outline["children"].as_array().unwrap();
+    let bar = kids.iter().find(|k| k["devicePart"] == "statusBar").unwrap();
+    assert_eq!(bar["name"], "Status bar");
+    assert!(bar.get("children").is_none() && bar.get("type").is_none(), "{bar}");
+  }
+}
+
 fn engine() -> Engine {
   Engine::new(Box::new(HeuristicMeasurer), 7)
 }

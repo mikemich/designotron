@@ -98,6 +98,55 @@ pub fn overlay(doc: &Document, page: &str) -> Value {
   Value::Array(out)
 }
 
+/// Colour of the safe-area edge lines (drawn dashed, so the system UI keeps its own colours).
+const SAFE_AREA_COLOR: &str = "#FF3B30";
+
+/// The edges of a frame's safe area (page coordinates) as `[x1, y1, x2, y2]` lines, one for each
+/// non-zero inset.
+pub fn safe_lines(frame: &Rect, insets: [f64; 4]) -> Vec<[f64; 4]> {
+  let [t, r, b, l] = insets;
+  let mut out = Vec::new();
+  if t > 0.0 {
+    out.push([frame.x, frame.y + t, frame.right(), frame.y + t]);
+  }
+  if b > 0.0 {
+    out.push([frame.x, frame.bottom() - b, frame.right(), frame.bottom() - b]);
+  }
+  if l > 0.0 {
+    out.push([frame.x + l, frame.y, frame.x + l, frame.bottom()]);
+  }
+  if r > 0.0 {
+    out.push([frame.right() - r, frame.y, frame.right() - r, frame.bottom()]);
+  }
+  out
+}
+
+/// Safe-area edge lines for the device frames that are selected, or contain a selected layer.
+pub fn safe_areas(doc: &Document, page: &str, selection: &[NodeId]) -> Value {
+  let mut frames: Vec<NodeId> = Vec::new();
+  for id in selection {
+    let Some(n) = doc.get(id) else { continue };
+    if n.page != page {
+      continue;
+    }
+    let top = std::iter::once(id.clone())
+      .chain(doc.ancestors(id))
+      .find(|i| doc.get(i).is_some_and(|n| n.device.is_some()));
+    if let Some(t) = top.filter(|t| !frames.contains(t)) {
+      frames.push(t);
+    }
+  }
+  let out: Vec<Value> = frames
+    .iter()
+    .filter_map(|id| {
+      let n = doc.get(id)?;
+      let lines = safe_lines(&doc.abs_bounds(id), crate::devices::safe_insets(n)?);
+      (!lines.is_empty()).then(|| json!({ "frameId": id, "color": SAFE_AREA_COLOR, "lines": lines, "frame": doc.abs_bounds(id) }))
+    })
+    .collect();
+  Value::Array(out)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -115,6 +164,13 @@ mod tests {
     assert_eq!(b[0].x, 40.0);
     assert!((b[3].right() - 960.0).abs() < 1e-9);
     assert!((b[0].width - 215.0).abs() < 1e-9);
+  }
+
+  #[test]
+  fn safe_lines_mark_only_the_insets() {
+    let l = safe_lines(&Rect::new(10.0, 20.0, 100.0, 200.0), [30.0, 0.0, 10.0, 0.0]);
+    assert_eq!(l, vec![[10.0, 50.0, 110.0, 50.0], [10.0, 210.0, 110.0, 210.0]]);
+    assert!(safe_lines(&Rect::new(0.0, 0.0, 10.0, 10.0), [0.0; 4]).is_empty());
   }
 
   #[test]

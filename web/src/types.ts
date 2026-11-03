@@ -171,6 +171,20 @@ export interface PropRefs {
   swap?: string;
 }
 
+/** A screen frame's device (mirrors `DeviceFrame` in model.rs). */
+export interface DeviceFrame {
+  preset: string;
+  theme: "light" | "dark";
+  statusBar: boolean;
+  homeIndicator: boolean;
+  chrome: boolean;
+  nav: "gesture" | "buttons";
+  url: string;
+  pad: boolean;
+  /** Insets currently added to the padding: top, right, bottom, left. */
+  applied: [number, number, number, number];
+}
+
 export interface Node {
   id: string;
   type: NodeType;
@@ -227,6 +241,10 @@ export interface Node {
   } | null;
   /** Component properties this layer of a main component is bound to (property ids). */
   propRefs?: PropRefs | null;
+  /** Screen frames: the device preset and its system UI (the engine leaves the key out when there is none). */
+  device?: DeviceFrame;
+  /** The root of a system UI part (statusBar, homeIndicator, navBar, titleBar, browserBar). */
+  devicePart?: string;
   masterId: string | null;
   fillStyle: string | null;
   textStyle: string | null;

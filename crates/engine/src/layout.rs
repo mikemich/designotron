@@ -537,12 +537,15 @@ fn set_size(doc: &mut Document, id: &str, horizontal: bool, main: Option<f64>, c
   }
 }
 
-/// Applies child constraints after a (non auto layout) frame changes size.
+/// Applies child constraints after a frame changes size. In an auto layout frame only the
+/// children that opted out of the flow (absolute position) have constraints; the others are
+/// placed by the layout.
 pub fn apply_constraints(doc: &mut Document, frame_id: &str, old_w: f64, old_h: f64) {
   let Some(f) = doc.get(frame_id) else { return };
-  if f.layout.is_some() || !f.kind.is_frame_like() {
+  if !f.kind.is_frame_like() {
     return;
   }
+  let flowing = f.layout.is_some();
   let (nw, nh) = (f.width, f.height);
   let (dw, dh) = (nw - old_w, nh - old_h);
   if dw == 0.0 && dh == 0.0 {
@@ -552,6 +555,9 @@ pub fn apply_constraints(doc: &mut Document, frame_id: &str, old_w: f64, old_h: 
   let sy = if old_h > 0.0 { nh / old_h } else { 1.0 };
   for cid in f.children.clone() {
     let Some(c) = doc.get_mut(&cid) else { continue };
+    if flowing && !c.absolute_position {
+      continue;
+    }
     let (cw, ch) = (c.width, c.height);
     match c.constraints.horizontal {
       ConstraintH::Left => {}
@@ -1020,5 +1026,59 @@ mod tests {
     doc.get_mut("f").unwrap().width = 300.0;
     apply_constraints(&mut doc, "f", 200.0, 200.0);
     assert_eq!(doc.get("c").unwrap().x, 250.0);
+  }
+
+  #[test]
+  fn auto_layout_frames_apply_constraints_to_absolute_children_only() {
+    let (mut doc, page) = setup();
+    doc.insert(
+      Node {
+        id: "f".into(),
+        kind: NodeType::Frame,
+        width: 200.0,
+        height: 200.0,
+        layout: Some(AutoLayout::default()),
+        ..Default::default()
+      },
+      None,
+      &page,
+      None,
+    );
+    let child = |id: &str, absolute: bool, h: ConstraintH, v: ConstraintV| {
+      let mut c = Node {
+        id: id.into(),
+        x: 150.0,
+        y: 150.0,
+        width: 40.0,
+        height: 40.0,
+        absolute_position: absolute,
+        ..Default::default()
+      };
+      c.constraints.horizontal = h;
+      c.constraints.vertical = v;
+      c
+    };
+    doc.insert(child("abs", true, ConstraintH::Right, ConstraintV::Bottom), Some("f"), &page, None);
+    doc.insert(child("scale", true, ConstraintH::Scale, ConstraintV::Scale), Some("f"), &page, None);
+    doc.insert(
+      child("flow", false, ConstraintH::Right, ConstraintV::Bottom),
+      Some("f"),
+      &page,
+      None,
+    );
+    let f = doc.get_mut("f").unwrap();
+    f.width = 400.0;
+    f.height = 300.0;
+    apply_constraints(&mut doc, "f", 200.0, 200.0);
+    let abs = doc.get("abs").unwrap();
+    assert_eq!(
+      (abs.x, abs.y),
+      (350.0, 250.0),
+      "absolute child follows its Right/Bottom constraints"
+    );
+    let scale = doc.get("scale").unwrap();
+    assert_eq!((scale.x, scale.y, scale.width, scale.height), (300.0, 225.0, 80.0, 60.0));
+    let flow = doc.get("flow").unwrap();
+    assert_eq!((flow.x, flow.y), (150.0, 150.0), "a child in the flow is left to the layout");
   }
 }

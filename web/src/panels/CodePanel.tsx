@@ -16,11 +16,12 @@ export function CodePanel() {
   const docRev = useStore((s) => s.es.docRev);
   const [lang, setLang] = useState<Lang>("react");
   const n = nodes[0];
+  const systemUi = !!n && inDeviceUi(n);
   // The engine writes images as `asset:<id>`. The snippet shows the paths an exported project
   // serves them from. Copy copies those paths; Copy with images inline embeds the bytes, which
   // work pasted into any project.
   const raw = useMemo(() => {
-    if (!n) return "";
+    if (!n || systemUi) return "";
     if (lang === "svg") return query<string>({ q: "exportSvg", id: n.id });
     if (lang === "css") return cssFor(n);
     return query<string>({ q: lang === "react" ? "exportReact" : "exportHtml", id: n.id });
@@ -64,9 +65,13 @@ export function CodePanel() {
               onChange={setLang}
             />
           </div>
-          <div className="code-block" tabIndex={0} role="region" aria-label={`Code for ${n.name}`}>
-            {code.length > 60000 ? code.slice(0, 60000) + "\n… (truncated, use Copy)" : code}
-          </div>
+          {systemUi ? (
+            <div className="muted small">Device UI, not exported. The real device or browser draws it, so code export leaves it out.</div>
+          ) : (
+            <div className="code-block" tabIndex={0} role="region" aria-label={`Code for ${n.name}`}>
+              {code.length > 60000 ? code.slice(0, 60000) + "\n… (truncated, use Copy)" : code}
+            </div>
+          )}
         </Section>
       ) : (
         <Section title="Inspect">
@@ -93,6 +98,13 @@ export function CodePanel() {
       </Section>
     </div>
   );
+}
+
+/** Whether a layer is part of a device frame's system UI (status bar, home indicator, window chrome). */
+function inDeviceUi(n: Node): boolean {
+  const doc = getDoc();
+  for (let cur: Node | undefined = n; cur; cur = cur.parent ? doc.nodes[cur.parent] : undefined) if (cur.devicePart) return true;
+  return false;
 }
 
 /** Copies the code with every image as a data URL, so it works pasted anywhere; big ones say so. */
