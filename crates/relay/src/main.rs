@@ -836,6 +836,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_viewer_cant_fill_the_room() {
+      let (addr, _) = start(None).await;
+      let (_room, _a, mut v) = watching(addr).await;
+      // Too big a message (14 messages of 5 KB), too many new messages (21), and exactly 20.
+      let big = "x".repeat(5000);
+      let texts: Vec<&str> = (0..14).map(|_| big.as_str()).collect();
+      assert!(rejected(&mut v, json!({ "comments": { "a": thread("a", &texts) } })).await);
+      let many: Vec<&str> = (0..21).map(|_| "hi").collect();
+      assert!(rejected(&mut v, json!({ "comments": { "b": thread("b", &many) } })).await);
+      assert!(!rejected(&mut v, json!({ "comments": { "b": thread("b", &many[..20]) } })).await);
+      // Replies count per delta: 20 more are fine, 21 are not.
+      let more: Vec<&str> = (0..41).map(|_| "hi").collect();
+      assert!(rejected(&mut v, json!({ "comments": { "b": thread("b", &more) } })).await);
+      assert!(!rejected(&mut v, json!({ "comments": { "b": thread("b", &more[..40]) } })).await);
+    }
+
+    #[tokio::test]
+    async fn viewers_are_refused_once_the_room_is_half_full() {
+      let limits = Limits {
+        max_room_bytes: 1000,
+        ..Limits::default()
+      };
+      let (addr, _) = start_with(limits, ClientLimits::default(), None).await;
+      let room = designotron_rooms::random_token();
+      let mut a = connect(addr, &room, None).await.unwrap();
+      let mut d = doc();
+      d["name"] = json!("y".repeat(600));
+      a.send(Message::Text(
+        json!({ "type": "join", "name": "Ana", "doc": d, "reset": true }).to_string(),
+      ))
+      .await
+      .unwrap();
+      let first = next_json(&mut a).await;
+      assert_eq!(first["type"], "welcome");
+      let mut v = viewer(addr, first["view"].as_str().unwrap()).await;
+      v.send(Message::Text(json!({ "type": "join", "name": "Vi" }).to_string()))
+        .await
+        .unwrap();
+      next_json(&mut v).await;
+      assert!(rejected(&mut v, json!({ "comments": { "a": thread("a", &["hi"]) } })).await);
+    }
+
+    #[tokio::test]
     async fn a_viewer_cant_end_the_room_and_its_presence_loses_owner_and_ended() {
       let (addr, _) = start(None).await;
       let (room, mut a, first) = owner(addr).await;

@@ -73,14 +73,29 @@ setPresenceSource(() => {
   };
 });
 
+/** True if following `peer` would come back to this person: `peer` follows someone who follows
+ *  someone ... who follows me. The walk is bounded by the number of people. */
+function loopsBackToMe(peer: number): boolean {
+  const { me, peers } = useCollab.getState();
+  if (me == null) return false;
+  let cur = peer;
+  for (let i = 0; i <= Object.keys(peers).length; i++) {
+    const next = peers[cur]?.presence?.following;
+    if (next == null) return false;
+    if (next === me) return true;
+    cur = next;
+  }
+  return false;
+}
+
 /** Starts following `peer` (their page and view, at once), or stops with null. `via` is the
  *  spotlight that started it. */
 export function follow(peer: number | null, via: number | null = null) {
   const c = useCollab.getState();
   if (peer != null && peer === c.me) return;
-  // Following each other would chase one view round and round.
-  if (peer != null && c.me != null && c.peers[peer]?.presence?.following === c.me) {
-    toast(`${c.peers[peer].name} is following you`);
+  // Following each other (or in a ring) would chase one view round and round.
+  if (peer != null && loopsBackToMe(peer)) {
+    toast(`Following ${c.peers[peer]?.name ?? "them"} would loop back to you: they follow you, directly or through others`);
     return;
   }
   clearPending();
@@ -135,8 +150,8 @@ function applyLeader() {
   const c = useCollab.getState();
   const p = c.peers[leader];
   if (!p) return endFollow();
-  if (c.me != null && p.presence?.following === c.me) {
-    toast(`${p.name} is following you`);
+  if (loopsBackToMe(leader)) {
+    toast(`Stopped following ${p.name}: they follow you, directly or through others`);
     return endFollow();
   }
   const view = p.presence?.view;
@@ -170,7 +185,9 @@ function endFollow() {
   sendPresence(true);
 }
 
-/** The one spotlight in force: the newest; on a tie the lower id. `mine` is this person's own. */
+/** The one spotlight in force: the newest; on a tie the lower id. The timestamps come from each
+ *  person's own clock, so with clocks that disagree "newest" is approximate (everyone still
+ *  picks the same winner, since they compare the same numbers). `mine` is this person's own. */
 export function winningSpotlight(peers: Record<number, Peer>, me: number | null, mine: number): { id: number; spot: number } | null {
   let best: { id: number; spot: number } | null = null;
   const consider = (id: number, spot: number) => {

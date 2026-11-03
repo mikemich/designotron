@@ -215,7 +215,7 @@ if (ONLY.includes("A")) try {
   const olgaId = await owner.evaluate(() => window.__dt.collab().me);
   await owner.click(".peer-avatars button.avatar:has-text('G')");
   await sleep(400);
-  check("A3b following someone who follows you is refused with a note", (await count(owner, ".follow-bar:has-text('Following')")) === 0 && /Gina is following you/.test(await text(owner, ".toast")), olgaId + " " + (await text(owner, ".toast")));
+  check("A3b following someone who follows you is refused with a note", (await count(owner, ".follow-bar:has-text('Following')")) === 0 && /Following Gina would loop back to you/.test(await text(owner, ".toast")), olgaId + " " + (await text(owner, ".toast")));
   await guest.click(".follow-bar button:has-text('Stop following')");
   await sleep(300);
   // Two spotlights at once: the newer wins, the other one ends.
@@ -231,6 +231,26 @@ if (ONLY.includes("A")) try {
   await guest.click(".follow-bar.mine button:has-text('Stop')");
   await sleep(600);
   check("A3b ending the winning spotlight ends those follows", (await count(owner, ".follow-bar")) === 0 && (await count(viewer, ".follow-bar")) === 0);
+
+  // A ring of three follows: the last click is refused (or the ring is undone), nobody's view collapses.
+  const third = await newPage("Tess");
+  await third.goto(editLink);
+  await live(third);
+  await sleep(800);
+  const trio = [owner, guest, third];
+  const ids = await Promise.all(trio.map((p) => p.evaluate(() => window.__dt.collab().me)));
+  for (let i = 0; i < 3; i++) {
+    await trio[i].click(`.peer-avatars [data-peer="${ids[(i + 1) % 3]}"]`).catch(() => {});
+    await sleep(500);
+  }
+  await sleep(2500);
+  const zooms = await Promise.all(trio.map((p) => p.evaluate(() => window.__dt.viewport().zoom)));
+  check("A3c a ring of three follows doesn't collapse anyone's view", zooms.every((z) => z > 0.05), zooms.join(" "));
+  const stillFollowing = (await Promise.all(trio.map((p) => count(p, ".follow-frame")))).reduce((a, b) => a + b, 0);
+  check("A3c ...and not everyone ends up following in a ring", stillFollowing < 3, `${stillFollowing} following`);
+  for (const p of trio) await p.click(".follow-bar button:has-text('Stop following')").catch(() => {});
+  await third.close();
+  await sleep(400);
 
   // 4. Names on selections.
   await guest.evaluate(() => window.__dt.zoomToFit());

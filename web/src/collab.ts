@@ -421,7 +421,14 @@ function onMessage(m: any) {
         dispatch({ op: "collabAck", rejected: true }, { quiet: true });
         // Viewers' harmless re-syncs are turned down on purpose; for anyone else the relay
         // couldn't take the change (most often: it's older than this editor).
-        if (!useCollab.getState().viewer) toast(`The relay couldn't take your last change because it's older than this editor, so it was undone. ${OLD_RELAY_HINT}`, "error");
+        if (!useCollab.getState().viewer) {
+          toast(
+            relayModel < MODEL_REVISION
+              ? `The relay couldn't take your last change because it's older than this editor, so it was undone. ${OLD_RELAY_HINT}`
+              : "The relay couldn't take your last change, so it was undone.",
+            "error",
+          );
+        }
       }
       else getEngine().dispatch(JSON.stringify({ op: "collabAck", rejected: false }));
       break;

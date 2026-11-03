@@ -353,6 +353,10 @@ pub fn valid_view_id(id: &str) -> bool {
 const VIEWER_MAX_TEXT: usize = 5 * 1024;
 /// Most comments one viewer delta may touch.
 const VIEWER_MAX_COMMENTS: usize = 20;
+/// Most messages one viewer delta may add to a comment.
+const VIEWER_MAX_NEW_MESSAGES: usize = 20;
+/// Largest delta (the whole message, in bytes) a viewer may send.
+const VIEWER_MAX_DELTA: usize = 64 * 1024;
 /// Editor slots kept free of viewers (viewers are capped at `max_peers` minus this).
 const EDITOR_RESERVE: usize = 10;
 
@@ -395,6 +399,10 @@ fn viewer_delta(delta: &Value, doc: &Document) -> Option<Value> {
       if !kept || c.page != old.page || c.x != old.x || c.y != old.y || c.node != old.node {
         return None;
       }
+    }
+    let before = doc.comments.get(id).map_or(0, |old| old.messages.len());
+    if c.messages.len().saturating_sub(before) > VIEWER_MAX_NEW_MESSAGES {
+      return None;
     }
     out.insert(id.clone(), serde_json::to_value(&c).ok()?);
   }
@@ -599,7 +607,11 @@ impl Rooms {
         };
         let keep = if r.doc.is_none() {
           // Nothing to keep (a connection that never joined, or a room that was refused).
-          emptied.push(id.clone());
+          // Only a room that was loaded and found empty is gone; an unloaded saved one still
+          // has its file (and its view link).
+          if r.loaded {
+            emptied.push(id.clone());
+          }
           false
         } else if idle > ttl {
           deleted.push(id.clone());
@@ -1001,6 +1013,11 @@ impl Rooms {
     let clean_raw;
     let mut raw = raw;
     if role == Role::Viewer {
+      // Viewers can't fill the room: small messages, and nothing once it is half full.
+      if size > VIEWER_MAX_DELTA || r.bytes() > self.limits.max_room_bytes / 2 {
+        self.ack(r, id, true);
+        return Step::Go;
+      }
       let Some(clean) = viewer_delta(&delta, r.doc.as_ref().unwrap()) else {
         self.ack(r, id, true);
         return Step::Go;
