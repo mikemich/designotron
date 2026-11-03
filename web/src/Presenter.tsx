@@ -1,17 +1,45 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
-import { getDoc, query, toast, useStore } from "./store";
-import { nodeSvg } from "./exporter";
+import { toast, useStore } from "./store";
 import type { Interaction, OverlaySettings, Rect } from "./types";
 import { REPO_URL } from "./panels/GuestBar";
-import { DEFAULT_OVERLAY, isOverlayLink, overlayDim, overlayOrigin } from "./prototype";
+import { DEFAULT_OVERLAY, overlayDim, overlayOrigin } from "./prototype";
+import { inlineAssets } from "./assets";
+import {
+  buildScene,
+  changeTarget,
+  closePlayer,
+  INSTANT,
+  keepsOldScreen,
+  keyName,
+  matchPieces,
+  morph,
+  motionAnimation,
+  motionOf,
+  pdoc,
+  piecesOf,
+  playerRevision,
+  pq,
+  reverseMotion,
+  scrollersOf,
+  slide,
+  smartable,
+  swapVariant,
+  type FixedScene,
+  type Hotspot,
+  type Motion,
+  type Piece,
+  type Scene,
+  type ScrollerScene,
+} from "./player";
 
-interface Hotspot {
+/** Undoes what an interaction did (While hovering / While pressing). */
+type Revert = () => void;
+
+/** A screen the player has been on, and how it was entered (Back plays that in reverse). */
+interface Entry {
   id: string;
-  rect: Rect;
-  interactions: Interaction[];
-  /** This hotspot's layer, then its ancestors that have hotspots, innermost first. */
-  chain: string[];
+  via: Motion;
 }
 
 /** An open overlay; `x`/`y` place it on the base frame. */
@@ -19,9 +47,25 @@ interface OpenOverlay {
   key: number;
   id: string;
   settings: OverlaySettings;
-  transition: Interaction["transition"];
+  motion: Motion;
   x: number;
   y: number;
+}
+
+/** A change of screen in progress: the screen that is leaving and how it plays. */
+interface Leaving {
+  key: number;
+  id: string;
+  motion: Motion;
+}
+
+/** A smart animate in progress: the new state's background, and the pieces of both states. */
+interface Smart {
+  key: number;
+  motion: Motion;
+  bg: string;
+  from: Piece[];
+  to: Piece[];
 }
 
 /** People who asked for less motion get instant transitions. */
@@ -30,33 +74,45 @@ const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(pre
 /** How long the click that follows a released "While pressing" is ignored. */
 const SWALLOW_CLICK_MS = 500;
 
-const ANIM: Record<string, string> = {
-  dissolve: "dt-dissolve",
-  smartAnimate: "dt-dissolve",
-  slideLeft: "dt-slide-left",
-  slideRight: "dt-slide-right",
-  slideUp: "dt-slide-up",
-  slideDown: "dt-slide-down",
-};
-
 /** Prototype player: renders a frame and turns interactions into hotspots, with overlays
  *  (modals, menus) stacked on top. With `remixUrl` it is the view-only player for view links
  *  and embeds: no close, a Remix button instead. */
 export function Presenter({ start, remixUrl }: { start: string; remixUrl?: string }) {
-  const [history, setHistory] = useState<{ id: string; transition: Interaction["transition"] }[]>([{ id: start, transition: "instant" }]);
+  const [history, setHistory] = useState<Entry[]>([{ id: start, via: INSTANT }]);
   // Open overlays, topmost last. Navigating to another frame closes them all.
   const [overlays, setOverlays] = useState<OpenOverlay[]>([]);
   const overlayKey = useRef(0);
   const [flash, setFlash] = useState(false);
+  const [leaving, setLeaving] = useState<Leaving | null>(null);
+  const [smart, setSmart] = useState<Smart | null>(null);
+  const motionKey = useRef(0);
+  // Moves when the player's own engine changes (a Change to), so scenes are rebuilt.
+  const [, setRevision] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const current = history[history.length - 1];
-  const doc = getDoc();
+  const doc = pdoc();
   const frame = doc.nodes[current.id];
   const frames = useMemo(() => {
     const page = doc.pages.find((p) => p.id === frame?.page);
     return (page?.children ?? []).filter((id) => ["frame", "component"].includes(doc.nodes[id]?.type));
   }, [current.id]);
-  const baseHotspots = useHotspots(current.id);
+
+  // Scenes are built once per screen and player revision (never per frame or scroll event).
+  const scenes = useRef({ rev: -1, map: new Map<string, Scene>() });
+  const sceneFor = (id: string): Scene => {
+    const rev = playerRevision();
+    if (scenes.current.rev !== rev) scenes.current = { rev, map: new Map() };
+    let s = scenes.current.map.get(id);
+    if (!s) scenes.current.map.set(id, (s = buildScene(id)));
+    return s;
+  };
+  const scene = frame ? sceneFor(current.id) : null;
+
+  // Scroll positions survive a rebuilt scene (Change to) and are dropped with the screen.
+  const scrolls = useRef({ key: "", pos: new Map<string, { left: number; top: number }>() });
+  const scrollEls = useRef(new Map<string, HTMLElement>());
+  const scrollKey = `${history.length}`;
+  if (scrolls.current.key !== scrollKey) scrolls.current = { key: scrollKey, pos: new Map() };
 
   const [scale, setScale] = useState(1);
   useEffect(() => {
@@ -66,34 +122,160 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     window.addEventListener("resize", fit);
     return () => window.removeEventListener("resize", fit);
   }, [current.id]);
+  useEffect(() => closePlayer, []);
 
-  const navigate = (id: string, transition: Interaction["transition"]) => {
+  /** The motion that really plays: none with reduced motion, a dissolve for a smart animate
+   *  between containers with too many children. */
+  const playable = (m: Motion, ...containers: string[]): Motion =>
+    reducedMotion() ? INSTANT : m.kind === "smart" && !containers.every(smartable) ? { ...m, kind: "dissolve" } : m;
+
+  /** Starts a change of screen from `from` (the screen that goes away) to `to`. */
+  const startMotion = (from: string, to: string, m: Motion) => {
+    const motion = playable(m, from, to);
+    setSmart(null);
+    if (motion.kind === "instant") return setLeaving(null);
+    const key = ++motionKey.current;
+    if (motion.kind === "smart") {
+      const kids = pdoc().nodes[to]?.children ?? [];
+      const bg = inlineAssets(pq<string>({ q: "exportSvg", id: to, hide: kids }));
+      setSmart({ key, motion, bg, from: piecesOf(from, from), to: piecesOf(to, to) });
+    }
+    setLeaving({ key, id: from, motion });
+  };
+
+  const navigate = (id: string, m: Motion) => {
     setOverlays([]);
-    setHistory((h) => [...h, { id, transition }]);
+    startMotion(current.id, id, m);
+    setHistory((h) => [...h, { id, via: m }]);
   };
-  // Back closes the topmost overlay before leaving the frame.
+  // Back closes the topmost overlay before leaving the frame, and plays the way in reversed.
   const back = () => {
-    if (overlays.length) setOverlays((o) => o.slice(0, -1));
-    else setHistory((h) => (h.length > 1 ? h.slice(0, -1) : h));
+    if (overlays.length) return setOverlays((o) => o.slice(0, -1));
+    if (history.length < 2) return;
+    startMotion(current.id, history[history.length - 2].id, reverseMotion(current.via));
+    setHistory((h) => h.slice(0, -1));
+  };
+  // The change of screen is over: take the old screen away.
+  useEffect(() => {
+    if (!leaving) return;
+    const t = setTimeout(() => {
+      setLeaving(null);
+      setSmart(null);
+    }, leaving.motion.ms + 60);
+    return () => clearTimeout(t);
+  }, [leaving?.key]);
+
+  /** Puts screens and overlays back as they were (While hovering / While pressing). */
+  const snapshot = (): Revert => {
+    const prev = { history, overlays };
+    return () => {
+      setLeaving(null);
+      setSmart(null);
+      setHistory(prev.history);
+      setOverlays(prev.overlays);
+    };
   };
 
-  /** Runs an interaction; `from` is the triggering layer's rect on the base frame. */
-  const go = (it: Interaction, from: Rect) => {
+  /** Scrolls every scroller holding `target` so the layer's top-left reaches the scroller's. */
+  const scrollTo = (it: Interaction, sceneOf: Scene) => {
+    if (!it.destination) return;
+    const frameAt = pq<{ union: Rect }>({ q: "bounds", ids: [sceneOf.id] }).union;
+    const target = pq<{ items: { bounds: Rect }[] }>({ q: "bounds", ids: [it.destination] }).items[0]?.bounds;
+    if (!target) return;
+    const smooth = it.transition !== "instant" && !reducedMotion();
+    for (const s of scrollersOf(sceneOf, it.destination)) {
+      const el = scrollEls.current.get(s.id);
+      if (!el) continue;
+      const h = s.overflow === "horizontal" || s.overflow === "both";
+      const v = s.overflow === "vertical" || s.overflow === "both";
+      el.scrollTo({
+        left: h ? target.x - frameAt.x - s.rect.x : el.scrollLeft,
+        top: v ? target.y - frameAt.y - s.rect.y : el.scrollTop,
+        behavior: smooth ? "smooth" : "instant",
+      });
+    }
+  };
+
+  /** Runs an interaction; `from` is the triggering layer's rect on the base frame, `source` its
+   *  layer and `inFrame` the screen it lives on. Returns how to undo it, if it can be undone. */
+  const go = (it: Interaction, from: Rect, source: string, inFrame: string): Revert | null => {
     if (it.action === "back") back();
     else if (it.action === "openUrl" && it.url) {
       const url = safeLink(it.url);
       if (url) window.open(url, "_blank", "noopener,noreferrer");
       else toast("This prototype link isn't a web, email or phone link, so it wasn't opened", "error");
-    } else if (it.action === "navigate" && it.destination && doc.nodes[it.destination]) navigate(it.destination, it.transition);
-    else if (it.action === "closeOverlay") setOverlays((o) => o.slice(0, -1));
+    } else if (it.action === "scrollTo") {
+      const s = sceneFor(inFrame);
+      scrollTo(it, s);
+    } else if (it.action === "changeTo" && it.destination) {
+      return changeVariant(it, source, inFrame);
+    } else if (it.action === "navigate" && it.destination && doc.nodes[it.destination]) {
+      const undo = snapshot();
+      navigate(it.destination, motionOf(it));
+      return undo;
+    } else if (it.action === "closeOverlay") setOverlays((o) => o.slice(0, -1));
     else if ((it.action === "openOverlay" || it.action === "swapOverlay") && it.destination && frame) {
       const dest = doc.nodes[it.destination];
-      if (!dest) return;
+      if (!dest) return null;
       const settings = it.overlay ?? DEFAULT_OVERLAY;
       const at = overlayOrigin(settings, frame, dest, from);
-      const next: OpenOverlay = { key: ++overlayKey.current, id: dest.id, settings, transition: it.transition, x: at.x, y: at.y };
+      const next: OpenOverlay = { key: ++overlayKey.current, id: dest.id, settings, motion: playable(motionOf(it)), x: at.x, y: at.y };
+      const undo = snapshot();
       setOverlays((o) => (it.action === "swapOverlay" ? [...o.slice(0, -1), next] : [...o, next]));
+      return undo;
     }
+    return null;
+  };
+
+  /** Change to: the instance holding `source` switches to another variant of its set, in place. */
+  const changeVariant = (it: Interaction, source: string, inFrame: string): Revert | null => {
+    const instance = changeTarget(source, it.destination!);
+    const before = instance ? pdoc().nodes[instance]?.instance?.componentId : null;
+    if (!instance || !before || before === it.destination) return null;
+    const m = playable(motionOf(it), instance);
+    // Smart animate: the instance's direct children, before and after. Only on the visible screen
+    // and outside scrolling layers (their pictures are placed by the scroller).
+    const sc = sceneFor(inFrame);
+    let pieces: Piece[] | null = null;
+    if (m.kind === "smart" && inFrame === current.id && !overlays.length && !scrollersOf(sc, instance).length && !sc.fixed.some((f) => f.id === instance)) {
+      pieces = piecesOf(instance, inFrame);
+    }
+    if (!swapVariant(instance, it.destination!)) return null;
+    if (pieces) {
+      const kids = pdoc().nodes[instance].children;
+      const bg = inlineAssets(pq<string>({ q: "exportSvg", id: inFrame, hide: kids }));
+      const key = ++motionKey.current;
+      setSmart({ key, motion: m, bg, from: pieces, to: piecesOf(instance, inFrame) });
+      setLeaving({ key, id: inFrame, motion: { ...m, kind: "dissolve" } });
+    }
+    setRevision((r) => r + 1);
+    return () => {
+      if (swapVariant(instance, before)) setRevision((r) => r + 1);
+    };
+  };
+
+  // "While hovering": acts when the pointer enters the layer and undoes it when the pointer is
+  // no longer over the layer's box. The layer itself may be gone by then (a Navigate replaced the
+  // screen), so the box is checked on the window, in the page's coordinates.
+  const hovering = useRef<(() => void) | null>(null);
+  const hover = (owner: string, run: () => Revert | null) => {
+    hovering.current?.();
+    const box = rootRef.current?.querySelector<HTMLElement>(`[data-hotspot="${CSS.escape(owner)}"]`)?.getBoundingClientRect();
+    const undo = run();
+    if (!undo || !box) return;
+    const move = (e: PointerEvent | MouseEvent) => {
+      if (e.clientX >= box.left && e.clientX <= box.right && e.clientY >= box.top && e.clientY <= box.bottom) return;
+      stop();
+      undo();
+    };
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("mousemove", move);
+      hovering.current = null;
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("mousemove", move);
+    hovering.current = stop;
   };
 
   /** "While pressing": acts on pointer down and puts the previous screen back when that same
@@ -101,11 +283,10 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
    *  the click the browser sends after the release is swallowed so it can't run another link. */
   const pressing = useRef<(() => void) | null>(null);
   const disarmSwallow = useRef<(() => void) | null>(null);
-  const press = (it: Interaction, from: Rect, pointerId: number) => {
+  const press = (it: Interaction, from: Rect, source: string, inFrame: string, pointerId: number) => {
     if (pressing.current) return;
-    const prev = { history, overlays };
-    go(it, from);
-    if (it.action !== "navigate" && !isOverlayLink(it)) return;
+    const undo = go(it, from, source, inFrame);
+    if (!undo) return;
     const stop = () => {
       window.removeEventListener("pointerup", release);
       window.removeEventListener("pointercancel", release);
@@ -114,8 +295,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     const release = (e: PointerEvent) => {
       if (e.pointerId !== pointerId) return;
       stop();
-      setHistory(prev.history);
-      setOverlays(prev.overlays);
+      undo();
       // A mouse release sends no click into the player (the layer under the pointer was replaced),
       // so the next pointerdown, which starts a real click, disarms the swallow too.
       disarmSwallow.current?.();
@@ -144,22 +324,23 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     () => () => {
       pressing.current?.();
       disarmSwallow.current?.();
+      hovering.current?.();
     },
     [],
   );
 
-  // Timers call `go` through a ref so they never act on a stale render (e.g. "after delay → Back"
-  // firing while a modal is open must close the modal).
+  // Timers and keys call `go` through a ref so they never act on a stale render (e.g. "after
+  // delay → Back" firing while a modal is open must close the modal).
   const goRef = useRef(go);
   goRef.current = go;
   const top = overlays.length ? overlays[overlays.length - 1] : null;
   // The base frame's delayed interaction runs once per visit to the frame; each overlay starts
   // its own once, when it opens (see OverlayLayer), so closing an overlay never restarts either.
   useEffect(() => {
-    const n = getDoc().nodes[current.id];
+    const n = pdoc().nodes[current.id];
     const delayed = n?.interactions.find((i) => i.trigger === "afterDelay");
     if (!n || !delayed) return;
-    const t = setTimeout(() => goRef.current(delayed, { x: 0, y: 0, width: n.width, height: n.height }), delayed.delayMs || 800);
+    const t = setTimeout(() => goRef.current(delayed, { x: 0, y: 0, width: n.width, height: n.height }, n.id, n.id), delayed.delayMs || 800);
     return () => clearTimeout(t);
   }, [history.length, current.id]);
 
@@ -172,23 +353,42 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     };
   }, []);
 
+  // Keys: a Key interaction of the top overlay, else of the base frame, wins; otherwise Escape
+  // closes and the arrows step through the page's frames.
+  const keys = useRef({ scene, top, frames, current, overlays });
+  keys.current = { scene, top, frames, current, overlays };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable)) return;
+      const k = keys.current;
+      const name = keyName(e);
+      const live = k.top ? sceneFor(k.top.id) : k.scene;
+      const hit = name ? live?.keyed.find((x) => x.it.key === name) : null;
+      if (hit && live) {
+        e.preventDefault();
+        e.stopPropagation();
+        const r = live.all.get(hit.id)?.rect ?? { x: 0, y: 0, width: live.width, height: live.height };
+        const at = k.top ? { ...r, x: r.x + k.top.x, y: r.y + k.top.y } : r;
+        goRef.current(hit.it, at, hit.id, live.id);
+        return;
+      }
       if (e.key === "Escape") {
-        if (overlays.length) setOverlays((o) => o.slice(0, -1));
+        if (k.overlays.length) setOverlays((o) => o.slice(0, -1));
         else if (!remixUrl) useStore.setState({ presenting: null });
       }
-      const i = frames.indexOf(current.id);
-      if (e.key === "ArrowRight" && i < frames.length - 1) navigate(frames[i + 1], "slideLeft");
-      if (e.key === "ArrowLeft" && i > 0) navigate(frames[i - 1], "slideRight");
+      const i = k.frames.indexOf(k.current.id);
+      if (e.key === "ArrowRight" && i < k.frames.length - 1) navigateRef.current(k.frames[i + 1], slide("left"));
+      if (e.key === "ArrowLeft" && i > 0) navigateRef.current(k.frames[i - 1], slide("right"));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [current.id, frames, overlays.length]);
+  }, []);
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
 
-  if (!frame) return null;
-  const a = reducedMotion() ? undefined : ANIM[current.transition];
-  const onBaseClick = (h: Hotspot, it: Interaction) => go(it, h.rect);
+  if (!frame || !scene) return null;
+  const hasHotspots = scene.all.size > 0;
   const trapTab = (e: React.KeyboardEvent) => {
     const root = rootRef.current;
     if (e.key !== "Tab" || !root) return;
@@ -198,6 +398,56 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     else if (e.shiftKey && (at === els[0] || at === root)) (e.preventDefault(), els[els.length - 1].focus());
     else if (!e.shiftKey && at === els[els.length - 1]) (e.preventDefault(), els[0].focus());
   };
+
+  const m = leaving?.motion;
+  const old = leaving && m && keepsOldScreen(m) && pdoc().nodes[leaving.id] ? leaving : null;
+  const curStage = (
+    <div
+      key={"s" + history.length}
+      className="stage"
+      style={{
+        width: frame.width,
+        height: frame.height,
+        transform: `scale(${scale})`,
+        transformOrigin: "0 0",
+        animation: m ? motionAnimation(m, true) : undefined,
+        visibility: smart ? "hidden" : undefined,
+        zIndex: m?.kind === "moveOut" ? 0 : 1,
+      }}
+    >
+      <SceneView
+        scene={scene}
+        flash={flash}
+        interactive={!smart}
+        scrolls={scrolls}
+        scrollEls={scrollEls}
+        onAct={(h, it) => go(it, h.rect, h.id, current.id)}
+        onHover={hover}
+        onPress={(h, it, pointerId) => press(it, h.rect, h.id, current.id, pointerId)}
+      />
+    </div>
+  );
+  const oldStage = old && (
+    <div
+      key={"l" + old.key}
+      className="stage stage-leaving"
+      aria-hidden="true"
+      style={{
+        position: "absolute",
+        left: 0,
+        top: 0,
+        width: pdoc().nodes[old.id].width,
+        height: pdoc().nodes[old.id].height,
+        transform: `scale(${scale})`,
+        transformOrigin: "0 0",
+        animation: motionAnimation(old.motion, false),
+        pointerEvents: "none",
+        zIndex: old.motion.kind === "moveOut" ? 2 : 0,
+      }}
+    >
+      <SceneView scene={sceneFor(old.id)} flash={false} interactive={false} scrolls={scrolls} scrollEls={scrollEls} />
+    </div>
+  );
   return (
     <div
       ref={rootRef}
@@ -207,7 +457,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       aria-label={`Prototype: ${frame.name}`}
       tabIndex={-1}
       onKeyDown={trapTab}
-      onClick={() => !baseHotspots.length || (setFlash(true), setTimeout(() => setFlash(false), 400))}
+      onClick={() => hasHotspots || (setFlash(true), setTimeout(() => setFlash(false), 400))}
     >
       <div className="bar" onClick={(e) => e.stopPropagation()}>
         <button className="tbtn" title="Back" onClick={back}>
@@ -222,7 +472,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
           title="Next frame"
           onClick={() => {
             const i = frames.indexOf(current.id);
-            if (i < frames.length - 1) navigate(frames[i + 1], "slideLeft");
+            if (i < frames.length - 1) navigate(frames[i + 1], slide("left"));
           }}
         >
           <ChevronRight size={16} />
@@ -243,24 +493,25 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         )}
       </div>
       <div style={{ position: "relative", overflow: "hidden", width: frame.width * scale, height: frame.height * scale }}>
-        <div
-          key={history.length}
-          className="stage"
-          style={{ width: frame.width, height: frame.height, transform: `scale(${scale})`, transformOrigin: "0 0", animation: a ? `${a} 300ms ease-out` : undefined }}
-        >
-          <FrameLayer id={current.id} hotspots={baseHotspots} flash={flash} onAct={onBaseClick} onPress={(h, it, pointerId) => press(it, h.rect, pointerId)} />
-        </div>
+        {old && m?.kind !== "moveOut" && oldStage}
+        {curStage}
+        {old && m?.kind === "moveOut" && oldStage}
+        {smart && <SmartLayer key={smart.key} smart={smart} width={frame.width} height={frame.height} scale={scale} />}
         {overlays.length > 0 && (
           <div className="overlays" style={{ width: frame.width, height: frame.height, transform: `scale(${scale})` }}>
             {overlays.map((o, i) => (
               <OverlayLayer
                 key={o.key}
                 overlay={o}
+                scene={sceneFor(o.id)}
                 isTop={i === overlays.length - 1}
+                scrolls={scrolls}
+                scrollEls={scrollEls}
                 onClose={() => setOverlays((l) => l.slice(0, -1))}
-                onAct={(h, it) => go(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y })}
-                onPress={(h, it, pointerId) => press(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, pointerId)}
-                onDelay={(it, from) => goRef.current(it, from)}
+                onAct={(h, it) => go(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, h.id, o.id)}
+                onHover={hover}
+                onPress={(h, it, pointerId) => press(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, h.id, o.id, pointerId)}
+                onDelay={(it, from) => goRef.current(it, from, o.id, o.id)}
               />
             ))}
           </div>
@@ -270,177 +521,299 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   );
 }
 
+/** Smart animate, stage 1: the direct children of the old and new state matched by layer name
+ *  move, resize, rotate and fade from one to the other over the new state's background; what
+ *  only one state has fades out or in. The real screen replaces this when it is done. */
+function SmartLayer({ smart, width, height, scale }: { smart: Smart; width: number; height: number; scale: number }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const { pairs, gone, added } = useMemo(() => matchPieces(smart.from, smart.to), [smart]);
+  // What each picture does: [element key, piece, keyframes, side].
+  const items = useMemo(() => {
+    const out: { key: string; piece: Piece; frames: Keyframe[]; side: "old" | "new" | "both" }[] = [];
+    pairs.forEach(([a, b], i) => {
+      if (a.svg === b.svg) {
+        // Same picture: it only moves (a cross-fade would dim it halfway).
+        out.push({ key: `p${i}`, piece: a, frames: [{ transform: "none" }, { transform: morph(a, b) }], side: "both" });
+      } else {
+        out.push({ key: `o${i}`, piece: a, frames: [{ transform: "none", opacity: 1 }, { transform: morph(a, b), opacity: 0 }], side: "old" });
+        out.push({ key: `n${i}`, piece: b, frames: [{ transform: morph(b, a), opacity: 0 }, { transform: "none", opacity: 1 }], side: "new" });
+      }
+    });
+    gone.forEach((p, i) => out.push({ key: `g${i}`, piece: p, frames: [{ opacity: 1 }, { opacity: 0 }], side: "old" }));
+    added.forEach((p, i) => out.push({ key: `a${i}`, piece: p, frames: [{ opacity: 0 }, { opacity: 1 }], side: "new" }));
+    return out;
+  }, [pairs, gone, added]);
+  useEffect(() => {
+    const els = ref.current?.querySelectorAll<HTMLElement>("[data-piece]");
+    if (!els) return;
+    const anims = [...els].map((el) => el.animate(items[Number(el.dataset.piece)].frames, { duration: smart.motion.ms, easing: smart.motion.easing, fill: "both" }));
+    return () => anims.forEach((a) => a.cancel());
+  }, [items]);
+  return (
+    <div ref={ref} className="smart-layer" style={{ position: "absolute", left: 0, top: 0, width, height, transform: `scale(${scale})`, transformOrigin: "0 0", pointerEvents: "none", zIndex: 3 }}>
+      <div dangerouslySetInnerHTML={{ __html: smart.bg }} />
+      {items.map((it, i) => (
+        <div
+          key={it.key}
+          data-piece={i}
+          data-smart={it.piece.name}
+          data-smart-side={it.side}
+          style={{
+            position: "absolute",
+            left: it.piece.crop.x,
+            top: it.piece.crop.y,
+            width: it.piece.crop.width,
+            height: it.piece.crop.height,
+            transformOrigin: `${it.piece.cx - it.piece.crop.x}px ${it.piece.cy - it.piece.crop.y}px`,
+          }}
+          dangerouslySetInnerHTML={{ __html: it.piece.svg }}
+        />
+      ))}
+    </div>
+  );
+}
+
 /** One overlay: a click-catching (optionally dimmed) backdrop over the frame and the overlay
  *  frame at its position. Only the topmost overlay's backdrop closes on click. */
 function OverlayLayer({
   overlay: o,
+  scene,
   isTop,
+  scrolls,
+  scrollEls,
   onClose,
   onAct,
+  onHover,
   onPress,
   onDelay,
 }: {
   overlay: OpenOverlay;
+  scene: Scene;
   isTop: boolean;
+  scrolls: Scrolls;
+  scrollEls: ScrollEls;
   onClose: () => void;
-  onAct: (h: Hotspot, it: Interaction) => void;
+  onAct: (h: Hotspot, it: Interaction) => Revert | null;
+  onHover: (owner: string, run: () => Revert | null) => void;
   onPress: (h: Hotspot, it: Interaction, pointerId: number) => void;
   onDelay: (it: Interaction, from: Rect) => void;
 }) {
-  const n = getDoc().nodes[o.id];
-  const hotspots = useHotspots(o.id);
+  const n = pdoc().nodes[o.id];
   // Layers are keyed by the overlay's key, so this runs once per opening, not whenever it is on top.
   useEffect(() => {
-    const node = getDoc().nodes[o.id];
+    const node = pdoc().nodes[o.id];
     const delayed = node?.interactions.find((i) => i.trigger === "afterDelay");
     if (!node || !delayed) return;
     const t = setTimeout(() => onDelay(delayed, { x: o.x, y: o.y, width: node.width, height: node.height }), delayed.delayMs || 800);
     return () => clearTimeout(t);
   }, []);
   if (!n) return null;
-  const a = reducedMotion() ? undefined : ANIM[o.transition];
+  const m = o.motion;
+  const a = m.kind === "instant" ? undefined : m.kind === "dissolve" || m.kind === "smart" ? motionAnimation(m, true) : `dt-in-${m.dir} ${m.ms}ms ${m.easing} both`;
   return (
     <div
       className="overlay-backdrop"
       data-overlay={o.id}
-      style={{ background: overlayDim(o.settings), animation: reducedMotion() ? undefined : "dt-dissolve 200ms ease-out" }}
+      style={{ background: overlayDim(o.settings), animation: m.kind === "instant" ? undefined : `dt-dissolve ${Math.min(m.ms, 300)}ms ${m.easing}` }}
       onClick={(e) => {
         e.stopPropagation();
         if (isTop && o.settings.closeOnClickOutside) onClose();
       }}
     >
-      <div
-        className="overlay-frame"
-        style={{ left: o.x, top: o.y, width: n.width, height: n.height, animation: a ? `${a} 300ms ease-out` : undefined }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <FrameLayer id={o.id} hotspots={hotspots} flash={false} onAct={onAct} onPress={onPress} />
+      <div className="overlay-frame" style={{ left: o.x, top: o.y, width: n.width, height: n.height, animation: a }} onClick={(e) => e.stopPropagation()}>
+        <SceneView scene={scene} flash={false} interactive scrolls={scrolls} scrollEls={scrollEls} onAct={onAct} onHover={onHover} onPress={onPress} />
       </div>
     </div>
   );
 }
 
-/** A frame's picture plus a hotspot per layer with interactions. Hotspots are siblings, so a
- *  layer without its own click runs its nearest ancestor's click, and pointer hover counts for
- *  every layer in the chain (entering a child is still hovering the parent). */
-function FrameLayer({
-  id,
-  hotspots,
-  flash,
-  onAct,
-  onPress,
-}: {
-  id: string;
-  hotspots: Hotspot[];
+type Scrolls = React.MutableRefObject<{ key: string; pos: Map<string, { left: number; top: number }> }>;
+type ScrollEls = React.MutableRefObject<Map<string, HTMLElement>>;
+
+interface SceneProps {
+  scene: Scene;
   flash: boolean;
-  onAct: (h: Hotspot, it: Interaction) => void;
-  onPress: (h: Hotspot, it: Interaction, pointerId: number) => void;
-}) {
-  const svg = useMemo(() => nodeSvg(id), [id]);
-  const byId = useMemo(() => new Map(hotspots.map((h) => [h.id, h])), [hotspots]);
-  const isClick = (i: Interaction) => i.trigger === "onClick";
-  const isPress = (i: Interaction) => i.trigger === "onPress";
-  const isHover = (i: Interaction) => i.trigger === "onHover";
-  // How many hotspots of each hover owner's chain the pointer is inside; fire on 0 → 1 only.
+  interactive: boolean;
+  scrolls: Scrolls;
+  scrollEls: ScrollEls;
+  onAct?: (h: Hotspot, it: Interaction) => Revert | null;
+  onHover?: (owner: string, run: () => Revert | null) => void;
+  onPress?: (h: Hotspot, it: Interaction, pointerId: number) => void;
+}
+
+/** A screen's picture, its scrolling boxes and fixed layers, and a hotspot per layer with
+ *  interactions. Hotspots are siblings, so a layer without its own click runs its nearest
+ *  ancestor's click, and pointer hover counts for every layer in the chain (entering a child is
+ *  still hovering the parent). */
+function SceneView({ scene, flash, interactive, scrolls, scrollEls, onAct, onHover, onPress }: SceneProps) {
+  const byId = scene.all;
+  const is = (t: Interaction["trigger"]) => (i: Interaction) => i.trigger === t;
+  // How many hotspots of each owner's chain the pointer is inside; fire on 0 → 1 and 1 → 0 only.
   const inside = useRef(new Map<string, number>());
   const enter = (h: Hotspot) => {
     for (const owner of h.chain) {
       const o = byId.get(owner);
-      const hover = o?.interactions.find(isHover);
-      if (!o || !hover) continue;
+      if (!o) continue;
       const n = inside.current.get(owner) ?? 0;
       inside.current.set(owner, n + 1);
-      if (n === 0) onAct(o, hover);
+      if (n !== 0) continue;
+      for (const it of o.interactions) {
+        if (it.trigger === "mouseEnter") onAct?.(o, it);
+        else if (it.trigger === "onHover") onHover?.(owner, () => onAct?.(o, it) ?? null);
+      }
     }
   };
   const leave = (h: Hotspot) => {
     // Deferred so moving between a parent and its child (leave, then enter) doesn't re-fire.
     setTimeout(() => {
-      for (const owner of h.chain) if (inside.current.has(owner)) inside.current.set(owner, Math.max(0, (inside.current.get(owner) ?? 1) - 1));
+      for (const owner of h.chain) {
+        const n = inside.current.get(owner);
+        if (n === undefined) continue;
+        inside.current.set(owner, Math.max(0, n - 1));
+        if (n !== 1) continue;
+        const o = byId.get(owner);
+        for (const it of o?.interactions.filter(is("mouseLeave")) ?? []) onAct?.(o!, it);
+      }
     }, 0);
   };
+  /** The nearest layer of `chain` with a click acts; a press on the way owns the tap. */
+  const click = (chain: string[]): boolean => {
+    for (const owner of chain) {
+      const o = byId.get(owner);
+      const c = o?.interactions.find(is("onClick"));
+      if (o && c) {
+        onAct?.(o, c);
+        return true;
+      }
+      if (o?.interactions.some(is("onPress"))) return true;
+    }
+    return false;
+  };
+  const nearest = (chain: string[], t: Interaction["trigger"]) => {
+    for (const owner of chain) {
+      const o = byId.get(owner);
+      const it = o?.interactions.find(is(t));
+      if (o && it) return { o, it };
+    }
+    return null;
+  };
+  const spot = (h: Hotspot, origin: Rect) => (
+    <div
+      key={h.id}
+      className={"hotspot" + (flash ? " hint-flash" : "")}
+      data-hotspot={h.id}
+      style={{ left: h.rect.x - origin.x, top: h.rect.y - origin.y, width: h.rect.width, height: h.rect.height }}
+      onClick={(e) => {
+        e.stopPropagation();
+        click(h.chain);
+      }}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        const down = nearest(h.chain, "mouseDown");
+        if (down) onAct?.(down.o, down.it);
+        for (const owner of h.chain) {
+          const o = byId.get(owner);
+          const p = o?.interactions.find(is("onPress"));
+          if (o && p) return onPress?.(o, p, e.pointerId);
+          if (o?.interactions.some(is("onClick"))) return;
+        }
+      }}
+      onPointerUp={(e) => {
+        if (e.button !== 0) return;
+        const up = nearest(h.chain, "mouseUp");
+        if (up) onAct?.(up.o, up.it);
+      }}
+      onMouseEnter={() => enter(h)}
+      onMouseLeave={() => leave(h)}
+    />
+  );
+  const none: Rect = { x: 0, y: 0, width: 0, height: 0 };
   return (
     <>
-      <div dangerouslySetInnerHTML={{ __html: svg }} />
-      {hotspots.map((h) => (
-        <div
-          key={h.id}
-          className={"hotspot" + (flash ? " hint-flash" : "")}
-          data-hotspot={h.id}
-          style={{ left: h.rect.x, top: h.rect.y, width: h.rect.width, height: h.rect.height }}
-          onClick={(e) => {
-            e.stopPropagation();
-            // The nearest layer with a click or a press owns the tap; only a click acts here.
-            for (const owner of h.chain) {
-              const o = byId.get(owner);
-              const click = o?.interactions.find(isClick);
-              if (o && click) return onAct(o, click);
-              if (o?.interactions.some(isPress)) return;
-            }
-          }}
-          onPointerDown={(e) => {
-            if (e.button !== 0) return;
-            for (const owner of h.chain) {
-              const o = byId.get(owner);
-              const down = o?.interactions.find(isPress);
-              if (o && down) return onPress(o, down, e.pointerId);
-              if (o?.interactions.some(isClick)) return;
-            }
-          }}
-          onMouseEnter={() => enter(h)}
-          onMouseLeave={() => leave(h)}
-        />
+      <div dangerouslySetInnerHTML={{ __html: scene.base }} />
+      {interactive && scene.hotspots.map((h) => spot(h, none))}
+      {scene.scrollers.map((s) => (
+        <ScrollerView key={s.id} s={s} origin={none} interactive={interactive} scrolls={scrolls} scrollEls={scrollEls} spot={spot} click={click} />
       ))}
+      {scene.fixed.length > 0 && (
+        <div className="fixed-layers">
+          {scene.fixed.map((f) => (
+            <FixedView key={f.id} f={f} interactive={interactive} spot={spot} />
+          ))}
+        </div>
+      )}
     </>
   );
 }
 
-/** Hotspots of a frame's layers, in frame coordinates. */
-function useHotspots(frameId: string): Hotspot[] {
-  return useMemo<Hotspot[]>(() => {
-    const doc = getDoc();
-    if (!doc.nodes[frameId]) return [];
-    const ids = Object.values(doc.nodes)
-      // Only layers with something to click or hover get a hotspot: an after-delay interaction on
-      // the frame itself must not put a click-swallowing layer over its children.
-      .filter((n) => n.interactions.some((i) => i.trigger !== "afterDelay") && (n.id === frameId || isDescendant(n.id, frameId)))
-      .map((n) => n.id);
-    const fb = query<{ union: Rect }>({ q: "bounds", ids: [frameId] }).union;
-    const items = query<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids }).items;
-    const withHotspot = new Set(items.map((it) => it.id));
-    // Layer ids from `id` up to (and including) the frame.
-    const lineage = (id: string) => {
-      const out = [id];
-      for (let p = doc.nodes[id]?.parent; p && out[out.length - 1] !== frameId; p = doc.nodes[p]?.parent ?? null) out.push(p);
-      return out;
-    };
-    return (
-      items
-        .map((it) => ({
-          id: it.id,
-          rect: { x: it.bounds.x - fb.x, y: it.bounds.y - fb.y, width: it.bounds.width, height: it.bounds.height },
-          interactions: doc.nodes[it.id].interactions,
-          chain: lineage(it.id).filter((l) => withHotspot.has(l)),
-          depth: lineage(it.id).length,
-        }))
-        // Node order in the document is arbitrary: deeper layers go on top of their ancestors
-        // (so a child that overflows or matches its parent's size still gets the click), and
-        // among layers of the same depth bigger ones go first.
-        .sort((a, b) => a.depth - b.depth || b.rect.width * b.rect.height - a.rect.width * a.rect.height || (a.id < b.id ? -1 : 1))
-        .map(({ depth: _depth, ...h }) => h)
-    );
-  }, [frameId]);
+/** A fixed layer: drawn above the scrolling box, never moves. */
+function FixedView({ f, interactive, spot }: { f: FixedScene; interactive: boolean; spot: (h: Hotspot, origin: Rect) => React.ReactNode }) {
+  const none: Rect = { x: 0, y: 0, width: 0, height: 0 };
+  return (
+    <>
+      <div data-fixed={f.id} style={{ position: "absolute", left: f.rect.x, top: f.rect.y, width: f.rect.width, height: f.rect.height }} dangerouslySetInnerHTML={{ __html: f.svg }} />
+      {interactive && f.hotspots.map((h) => spot(h, none))}
+    </>
+  );
 }
 
-function isDescendant(id: string, ancestor: string): boolean {
-  const doc = getDoc();
-  for (let p = doc.nodes[id]?.parent; p; p = doc.nodes[p]?.parent ?? null) if (p === ancestor) return true;
-  return false;
+/** A scrolling box: a div that scrolls the children's picture, with the hotspots and the
+ *  scrolling boxes inside it so they move with the content. */
+function ScrollerView({
+  s,
+  origin,
+  interactive,
+  scrolls,
+  scrollEls,
+  spot,
+  click,
+}: {
+  s: ScrollerScene;
+  origin: Rect;
+  interactive: boolean;
+  scrolls: Scrolls;
+  scrollEls: ScrollEls;
+  spot: (h: Hotspot, origin: Rect) => React.ReactNode;
+  click: (chain: string[]) => boolean;
+}) {
+  const h = s.overflow === "horizontal" || s.overflow === "both";
+  const v = s.overflow === "vertical" || s.overflow === "both";
+  const ox = s.content.x - s.rect.x;
+  const oy = s.content.y - s.rect.y;
+  return (
+    <div
+      className="scroller"
+      data-scroller={s.id}
+      ref={(el) => {
+        if (!el) return scrollEls.current.delete(s.id);
+        scrollEls.current.set(s.id, el);
+        const at = scrolls.current.pos.get(s.id);
+        if (at) {
+          el.scrollLeft = at.left;
+          el.scrollTop = at.top;
+        }
+      }}
+      style={{ left: s.rect.x - origin.x, top: s.rect.y - origin.y, width: s.rect.width, height: s.rect.height, overflowX: h ? "auto" : "hidden", overflowY: v ? "auto" : "hidden" }}
+      onScroll={(e) => scrolls.current.pos.set(s.id, { left: e.currentTarget.scrollLeft, top: e.currentTarget.scrollTop })}
+      onClick={(e) => {
+        // The empty area of the box acts as the box's own layer (or the nearest one above it).
+        if (interactive && click(s.chain)) e.stopPropagation();
+      }}
+    >
+      <div style={{ position: "relative", width: Math.max(s.rect.width, ox + s.content.width), height: Math.max(s.rect.height, oy + s.content.height) }}>
+        <div style={{ position: "absolute", left: ox, top: oy, width: s.content.width, height: s.content.height, pointerEvents: "none" }} dangerouslySetInnerHTML={{ __html: s.content.svg }} />
+        {interactive && s.hotspots.map((hs) => spot(hs, s.rect))}
+        {s.scrollers.map((n) => (
+          <ScrollerView key={n.id} s={n} origin={s.rect} interactive={interactive} scrolls={scrolls} scrollEls={scrollEls} spot={spot} click={click} />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 /** Prototype links come from shared files: only web, email and phone links may open (never
  *  `javascript:` or `data:`). Mirrors the engine's `safe_link`. */
 export function safeLink(url: string): string | null {
-  const u = url.replace(/[\u0000-\u0020\u007f]/g, "");
+  const u = url.replace(/[\u0000- \u007f]/g, "");
   return /^(https?:\/\/|mailto:|tel:)/i.test(u) ? u : null;
 }

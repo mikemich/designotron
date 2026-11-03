@@ -89,7 +89,7 @@ pub struct SvgCrop {
   pub bounds: Rect,
 }
 
-/// The prototype player's pieces of a screen. `hidden` layers are laid out but not painted.
+/// The prototype player's pieces of a screen. `hidden` layers are left out, with what is inside them.
 /// With `children_only` only the node's children are drawn (not its own fills, strokes or
 /// effects, and not clipped), cropped to what they paint, so a scrolling frame's content can
 /// be placed inside a scroller of its own. Otherwise this is `export_svg` with `hidden`.
@@ -404,6 +404,11 @@ impl<'a> Renderer<'a> {
       attrs.push_str(&format!(" style=\"mix-blend-mode:{}\"", n.blend_mode.css()));
     }
     if self.opts.hidden.contains(&n.id) {
+      // Exports leave hidden layers (and everything inside them) out; the canvas keeps them so
+      // text being edited still measures.
+      if self.opts.mode == Mode::Export {
+        return String::new();
+      }
       attrs.push_str(" visibility=\"hidden\"");
     }
     if let Some(f) = self.effects_filter(n) {
@@ -1548,10 +1553,13 @@ mod w3a_tests {
   }
 
   #[test]
-  fn hidden_layers_are_not_painted_but_stay_in_the_svg() {
+  fn hidden_layers_are_left_out_of_the_svg() {
     let doc = scroller();
     let c = export_svg_parts(&doc, "f", &HeuristicMeasurer, &["nav".to_string()], false);
-    assert!(c.svg.contains("visibility=\"hidden\""), "{}", c.svg);
-    assert!(!export_svg(&doc, "f", &HeuristicMeasurer).contains("visibility"));
+    assert!(!c.svg.to_lowercase().contains("00ff00"), "the hidden strip isn't painted: {}", c.svg);
+    assert!(c.svg.to_lowercase().contains("0000ff"), "its sibling is: {}", c.svg);
+    assert!(export_svg(&doc, "f", &HeuristicMeasurer).to_lowercase().contains("00ff00"));
+    // The crop is still what the whole layer paints.
+    assert_eq!(c.bounds, render_bounds(&doc, "f", &HeuristicMeasurer));
   }
 }

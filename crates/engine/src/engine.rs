@@ -561,12 +561,15 @@ pub enum Query {
   },
   ExportSvg {
     id: NodeId,
-    /// Layers laid out but not painted (the prototype player draws them elsewhere).
+    /// Layers (with what is inside them) left out of the picture; the prototype player draws them elsewhere.
     #[serde(default)]
     hide: Vec<NodeId>,
     /// Only the children, cropped to what they paint; answers `{svg, x, y, width, height}`.
     #[serde(default)]
     children_only: bool,
+    /// Answer `{svg, x, y, width, height}` (the crop in page space) for the whole layer too.
+    #[serde(default)]
+    with_bounds: bool,
   },
   ExportHtml {
     id: NodeId,
@@ -2814,12 +2817,18 @@ impl Engine {
       Query::Comments { page, include_resolved } => crate::comments::list(&self.doc, page.as_deref(), include_resolved),
       Query::GridOverlay { page } => crate::grids::overlay(&self.doc, page.as_deref().unwrap_or(&self.page)),
       Query::Copy { ids } => json!(self.copy(&ids)),
-      Query::ExportSvg { id, hide, children_only } => {
-        if hide.is_empty() && !children_only {
+      Query::ExportSvg {
+        id,
+        hide,
+        children_only,
+        with_bounds,
+      } => {
+        let with_bounds = with_bounds || children_only;
+        if hide.is_empty() && !with_bounds {
           json!(render::export_svg(&self.doc, &id, m))
         } else {
           let c = render::export_svg_parts(&self.doc, &id, m, &hide, children_only);
-          if children_only {
+          if with_bounds {
             json!({ "svg": c.svg, "x": c.bounds.x, "y": c.bounds.y, "width": c.bounds.width, "height": c.bounds.height })
           } else {
             json!(c.svg)

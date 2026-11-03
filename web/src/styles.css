@@ -2294,4 +2294,59 @@ body:has(.phone-note) .toast {
 }
 .paint-type .seg button {
   flex: 1 0 28%;
+/* W3-A prototyping: scrolling frames, fixed layers, move/push transitions, smart animate */
+.presenter .scroller {
+  position: absolute;
+  scrollbar-width: none;
+}
+.presenter .scroller::-webkit-scrollbar {
+  display: none;
+}
+.presenter .fixed-layers {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.presenter .fixed-layers .hotspot {
+  pointer-events: auto;
+}
+@keyframes dt-in-left {
+  from {
+    transform: translateX(100%);
+  }
+}
+@keyframes dt-in-right {
+  from {
+    transform: translateX(-100%);
+  }
+}
+@keyframes dt-in-up {
+  from {
+    transform: translateY(100%);
+  }
+}
+@keyframes dt-in-down {
+  from {
+    transform: translateY(-100%);
+  }
+}
+@keyframes dt-out-left {
+  to {
+    transform: translateX(-100%);
+  }
+}
+@keyframes dt-out-right {
+  to {
+    transform: translateX(100%);
+  }
+}
+@keyframes dt-out-up {
+  to {
+    transform: translateY(-100%);
+  }
+}
+@keyframes dt-out-down {
+  to {
+    transform: translateY(100%);
+  }
 }

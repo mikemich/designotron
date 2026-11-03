@@ -118,16 +118,27 @@ export interface VectorPoint {
 }
 
 export interface Interaction {
-  trigger: "onClick" | "onHover" | "onPress" | "afterDelay";
+  trigger: "onClick" | "onHover" | "onPress" | "afterDelay" | "mouseEnter" | "mouseLeave" | "mouseDown" | "mouseUp" | "key";
   delayMs: number;
-  action: "navigate" | "back" | "openUrl" | "scrollTo" | "openOverlay" | "closeOverlay" | "swapOverlay";
+  action: "navigate" | "back" | "openUrl" | "scrollTo" | "openOverlay" | "closeOverlay" | "swapOverlay" | "changeTo";
   destination: string | null;
   url: string | null;
-  transition: "instant" | "dissolve" | "smartAnimate" | "slideLeft" | "slideRight" | "slideUp" | "slideDown";
+  transition: "instant" | "dissolve" | "smartAnimate" | "slideLeft" | "slideRight" | "slideUp" | "slideDown" | "moveIn" | "moveOut" | "push";
+  /** 0 in files from before durations were honoured: the player uses 300. */
   durationMs: number;
+  /** Key trigger: a key or combination such as "Shift+K" (see `keyName` in player.ts). */
+  key?: string;
+  /** Move in, Move out and Push; the engine leaves the key out for "left". */
+  direction?: Direction;
+  /** The engine leaves the key out for "easeOut". */
+  easing?: Easing;
   /** Placement and behaviour for openOverlay / swapOverlay. */
   overlay: OverlaySettings;
 }
+
+export type Direction = "left" | "right" | "up" | "down";
+export type Easing = "linear" | "easeIn" | "easeOut" | "easeInOut" | "easeInBack" | "easeOutBack" | "easeInOutBack";
+export type Overflow = "none" | "horizontal" | "vertical" | "both";
 
 export type OverlayPosition = "center" | "topLeft" | "topCenter" | "topRight" | "bottomLeft" | "bottomCenter" | "bottomRight" | "manual";
 
@@ -220,6 +231,11 @@ export interface Node {
   fillStyle: string | null;
   textStyle: string | null;
   interactions: Interaction[];
+  // Prototype (W3-A)
+  /** Frames: scrolling directions in the prototype player; the engine leaves the key out for "none". */
+  overflow?: Overflow;
+  /** Children of a scrolling frame; the engine leaves the key out for "scroll". */
+  scrollBehavior?: "scroll" | "fixed";
   /** Export rows; the engine leaves the key out when there are none. */
   exportSettings?: ExportSetting[];
   notes: string;

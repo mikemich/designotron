@@ -1,4 +1,4 @@
-import type { Doc, Interaction, OverlaySettings, Rect } from "./types";
+import type { Doc, Interaction, Node, OverlaySettings, Rect } from "./types";
 
 /** Figma's overlay defaults (mirrors `OverlaySettings::default` in model.rs). */
 export const DEFAULT_OVERLAY: OverlaySettings = {
@@ -83,3 +83,44 @@ export function overlayDim(o: OverlaySettings): string {
   if (Number.isNaN(n)) return "transparent";
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${Math.max(0, Math.min(1, b.opacity))})`;
 }
+
+/** Component sets a layer can Change to variants of, nearest first: the set of the variant it is
+ *  in, or of the instance it is in (or is). */
+export function enclosingSets(doc: Doc, id: string): Node[] {
+  const out: Node[] = [];
+  for (let n: Node | undefined = doc.nodes[id]; n; n = n.parent ? doc.nodes[n.parent] : undefined) {
+    const comp = n.type === "component" ? n : n.instance ? doc.nodes[n.instance.componentId] : undefined;
+    const set = comp?.parent ? doc.nodes[comp.parent] : undefined;
+    if (set?.type === "componentSet" && !out.includes(set)) out.push(set);
+  }
+  return out;
+}
+
+/** Layers inside the same top-level frame as `id`, with their name paths, for Scroll to. */
+export function scrollTargets(doc: Doc, id: string, max = 400): { id: string; label: string }[] {
+  let top = doc.nodes[id];
+  while (top?.parent && doc.nodes[top.parent]) top = doc.nodes[top.parent];
+  const out: { id: string; label: string }[] = [];
+  const walk = (n: Node, path: string[]) => {
+    for (const cid of n.children) {
+      const c = doc.nodes[cid];
+      if (!c || out.length >= max) continue;
+      if (c.id !== id) out.push({ id: c.id, label: [...path, c.name].join(" / ") });
+      walk(c, [...path, c.name]);
+    }
+  };
+  if (top) walk(top, []);
+  return out;
+}
+
+export const TRIGGER_LABELS: Record<Interaction["trigger"], string> = {
+  onClick: "On click",
+  onHover: "While hovering",
+  onPress: "While pressing",
+  afterDelay: "After delay",
+  mouseEnter: "Mouse enter",
+  mouseLeave: "Mouse leave",
+  mouseDown: "Mouse down",
+  mouseUp: "Mouse up",
+  key: "Key",
+};
