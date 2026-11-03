@@ -3307,6 +3307,7 @@ mod tests {
         kind: VarKind::Color,
         values: BTreeMap::from([("m".into(), json!("#FF0000"))]),
         description: String::new(),
+        scopes: Vec::new(),
       }],
     });
     let color = |id: &str, name: &str, c: &str| crate::model::ColorStyle {
@@ -3460,6 +3461,7 @@ mod tests {
         kind: VarKind::Color,
         values: BTreeMap::from([("m1".into(), json!("#FFFFFF")), ("m2".into(), json!("#111111"))]),
         description: String::new(),
+        scopes: Vec::new(),
       }],
     });
     let files = export_project(&doc, &HeuristicMeasurer);

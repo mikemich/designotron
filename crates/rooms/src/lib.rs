@@ -1452,6 +1452,7 @@ mod tests {
         color: "#000".into(),
         presence: Value::Null,
         granular,
+        role: Role::Editor,
       },
       rx,
     )
@@ -1484,7 +1485,7 @@ mod tests {
     let msg =
       r##"{"type":"delta","delta":{"nodes":{},"removed":[],"styles":{"colors":[{"id":"c1","name":"C","color":"#111111"}],"texts":[]}}}"##;
     let m: Incoming = serde_json::from_str(msg).unwrap();
-    rooms.delta(&mut r, 1, &m, msg.len());
+    rooms.delta(&mut r, 1, Role::Editor, &m, msg.len());
     let doc = r.doc.as_ref().unwrap();
     assert_eq!(
       (doc.styles.colors.len(), doc.styles.effects.len(), doc.styles.grids.len()),
