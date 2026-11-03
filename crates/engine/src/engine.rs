@@ -64,6 +64,12 @@ pub enum SelectMode {
 pub enum Command {
   /// Re-measures text and re-runs layout without an undo step (e.g. after web fonts load).
   Relayout,
+  /// Turns the read-only mode on or off: while on, every command that would change the file is
+  /// refused (selecting, switching page, comments and receiving collaborators' changes still
+  /// work). Used for view-only links. Not an edit: no revision bump.
+  SetReadOnly {
+    on: bool,
+  },
   Undo,
   Redo,
   /// Tags the steps that `Command::Ai` pushes from now on with `group` (`None` stops), so a
@@ -696,6 +702,34 @@ fn three() -> usize {
   3
 }
 
+/// The error for an edit in read-only mode.
+pub const READ_ONLY: &str = "You can view this file but not edit it";
+
+/// Commands a read-only engine still runs: moving around, comments (people with a view link
+/// may comment), changes from collaborators and the bookkeeping around them.
+fn allowed_read_only(cmd: &Command) -> bool {
+  matches!(
+    cmd,
+    Command::Relayout
+      | Command::Select { .. }
+      | Command::SelectAll
+      | Command::SetPage { .. }
+      | Command::ApplyRemote { .. }
+      | Command::CollabAck { .. }
+      | Command::ReplaceDocument { .. }
+      | Command::SetReadOnly { .. }
+      | Command::SetHistoryGroup { .. }
+      | Command::BeginGesture
+      | Command::EndGesture
+      | Command::CancelGesture
+      | Command::Undo
+      | Command::Redo
+      | Command::AddComment { .. }
+      | Command::ReplyComment { .. }
+      | Command::ResolveComment { .. }
+  )
+}
+
 pub struct Engine {
   pub doc: Document,
   pub selection: Vec<NodeId>,
@@ -704,6 +738,8 @@ pub struct Engine {
   /// Bumped whenever the document itself changes (not selection, page or gesture
   /// bookkeeping), so the editor can tell "needs saving" from "was clicked".
   pub doc_rev: u64,
+  /// View-only: `dispatch` refuses commands that change the file (see `Command::SetReadOnly`).
+  read_only: bool,
   past: Vec<Step>,
   future: Vec<Step>,
   /// Group for the steps of `Command::Ai` (see `Command::SetHistoryGroup`).
@@ -753,6 +789,7 @@ impl Engine {
       page,
       rev: 1,
       doc_rev: 1,
+      read_only: false,
       past: vec![],
       future: vec![],
       history_group: None,
@@ -827,6 +864,7 @@ impl Engine {
       "canUndo": !self.past.is_empty(),
       "canRedo": !self.future.is_empty(),
       "inGesture": self.gesture.is_some(),
+      "readOnly": self.read_only,
     })
   }
 
@@ -1028,6 +1066,13 @@ impl Engine {
 
   /// Executes a command. Mutations become one undo step (or join the open gesture).
   pub fn dispatch(&mut self, cmd: Command) -> Result<Value, String> {
+    if let Command::SetReadOnly { on } = cmd {
+      self.read_only = on;
+      return Ok(json!({}));
+    }
+    if self.read_only && !allowed_read_only(&cmd) {
+      return Err(READ_ONLY.into());
+    }
     match cmd {
       Command::Relayout => {
         let prev = self.doc.clone();
@@ -2724,7 +2769,8 @@ impl Engine {
       | Command::SelectAll
       | Command::ApplyRemote { .. }
       | Command::CollabAck { .. }
-      | Command::SetPage { .. } => Ok(json!({})),
+      | Command::SetPage { .. }
+      | Command::SetReadOnly { .. } => Ok(json!({})),
     }
   }
 
@@ -3526,6 +3572,47 @@ mod tests {
 
   fn ai(e: &mut Engine, tool: &str, input: Value) -> Value {
     e.dispatch(Command::Ai { tool: tool.into(), input }).unwrap()
+  }
+
+  #[test]
+  fn read_only_refuses_edits_but_allows_looking_and_comments() {
+    let mut e = engine();
+    let id = rect(&mut e, 0.0, 0.0, 5.0, 5.0, None);
+    let rev = e.doc_rev;
+    e.dispatch(Command::SetReadOnly { on: true }).unwrap();
+    assert_eq!(e.doc_rev, rev, "switching the mode isn't an edit");
+    assert_eq!(e.state()["readOnly"], true);
+    let update = Command::Update {
+      ids: vec![id.clone()],
+      patch: json!({ "name": "x" }),
+    };
+    assert_eq!(e.dispatch(update.clone()).unwrap_err(), READ_ONLY);
+    let ai = Command::Ai {
+      tool: "get_selection".into(),
+      input: json!({}),
+    };
+    assert_eq!(e.dispatch(ai).unwrap_err(), READ_ONLY);
+    let nodes = e.doc.nodes.clone();
+    e.dispatch(Command::Select {
+      ids: vec![id.clone()],
+      mode: SelectMode::Replace,
+    })
+    .unwrap();
+    assert_eq!(e.selection, vec![id]);
+    let comment = Command::AddComment {
+      page: None,
+      x: 1.0,
+      y: 2.0,
+      node: None,
+      text: "hi".into(),
+      author: "Viewer".into(),
+      time: 1.0,
+    };
+    e.dispatch(comment).unwrap();
+    assert_eq!(e.doc.comments.len(), 1);
+    assert_eq!(e.doc.nodes, nodes);
+    e.dispatch(Command::SetReadOnly { on: false }).unwrap();
+    e.dispatch(update).unwrap();
   }
 
   #[test]

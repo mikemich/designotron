@@ -24,7 +24,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
-use designotron_rooms::{valid_room_id, Limits, Rooms, TokenBucket};
+use designotron_rooms::{valid_room_id, valid_view_id, Limits, Rooms, TokenBucket};
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::cors::CorsLayer;
@@ -44,6 +44,9 @@ struct App {
 struct WsParams {
   #[serde(default)]
   room: String,
+  /// A view-only link's id (instead of `room`).
+  #[serde(default)]
+  view: String,
 }
 
 struct Config {
@@ -240,6 +243,9 @@ async fn ws(
   headers: HeaderMap,
   State(app): State<App>,
 ) -> Response {
+  if !p.view.is_empty() {
+    return view_ws(ws, p.view, peer, headers, app).await;
+  }
   // The room id is the secret: anyone with the link can edit, nobody can guess one.
   if !valid_room_id(&p.room) {
     return (StatusCode::BAD_REQUEST, "invalid room").into_response();
@@ -264,6 +270,24 @@ async fn ws(
   })
 }
 
+/// A connection through a view-only link: never creates a room, and an unknown link is told
+/// so over the socket (the editor shows the message).
+async fn view_ws(ws: WebSocketUpgrade, view: String, peer: SocketAddr, headers: HeaderMap, app: App) -> Response {
+  if !valid_view_id(&view) {
+    return (StatusCode::BAD_REQUEST, "invalid view link").into_response();
+  }
+  let ip = app.clients.ip(&headers, peer.ip());
+  let Some(slot) = app.clients.connect(ip) else {
+    return (StatusCode::TOO_MANY_REQUESTS, "too many connections from your address").into_response();
+  };
+  let rooms = app.rooms.clone();
+  let max = rooms.limits().max_room_bytes + MESSAGE_OVERHEAD;
+  ws.max_message_size(max).max_frame_size(max).on_upgrade(move |socket| async move {
+    rooms.serve_viewer(socket, view).await;
+    drop(slot);
+  })
+}
+
 async fn health(State(app): State<App>) -> Json<serde_json::Value> {
   let s = app.rooms.stats().await;
   Json(json!({
@@ -272,6 +296,10 @@ async fn health(State(app): State<App>) -> Json<serde_json::Value> {
     // The git commit the image was built from (set by relay-image.yml), to tell deploys apart.
     "commit": option_env!("DESIGNOTRON_COMMIT").unwrap_or("dev"),
     "editor": app.serves_editor,
+    // What editors check before offering features: the document model this build
+    // understands and the optional things it can do. Older relays report neither.
+    "model": designotron_rooms::MODEL_REVISION,
+    "features": ["viewLinks"],
     "rooms": s.rooms,
     "people": s.people,
     "memory": {
@@ -319,7 +347,7 @@ fn parse_bytes(s: &str) -> Option<usize> {
 async fn main() {
   env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
   let cfg = parse_args();
-  let rooms = Rooms::new(cfg.limits.clone(), cfg.data_dir.clone());
+  let rooms = Rooms::with_view_links(cfg.limits.clone(), cfg.data_dir.clone());
   let clients = Clients::new(cfg.clients.clone());
   let (maintain, sweep) = (rooms.clone(), clients.clone());
   tokio::spawn(async move {
@@ -624,6 +652,216 @@ mod tests {
     }
   }
 
+  mod views {
+    use super::*;
+
+    /// An owner who shared `doc()` in a fresh room; returns the room id, the socket and the welcome.
+    async fn owner(addr: SocketAddr) -> (String, Ws, serde_json::Value) {
+      let room = designotron_rooms::random_token();
+      let mut a = connect(addr, &room, None).await.unwrap();
+      let share = json!({ "type": "join", "name": "Ana", "doc": doc(), "reset": true });
+      a.send(Message::Text(share.to_string())).await.unwrap();
+      let welcome = next_json(&mut a).await;
+      (room, a, welcome)
+    }
+
+    async fn viewer(addr: SocketAddr, view: &str) -> Ws {
+      let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?view={view}"))
+        .await
+        .unwrap();
+      ws
+    }
+
+    fn comment_delta() -> String {
+      let c = json!({ "id": "c1", "page": "p", "x": 1, "y": 2, "resolved": false,
+        "messages": [{ "author": "Vi", "text": "hello", "time": 1 }] });
+      json!({ "type": "delta", "delta": { "nodes": {}, "removed": [], "comments": { "c1": c }, "commentsRemoved": [] } }).to_string()
+    }
+
+    /// A late editor's view of the room's document.
+    async fn room_doc(addr: SocketAddr, room: &str) -> serde_json::Value {
+      let mut c = connect(addr, room, None).await.unwrap();
+      join(&mut c, None).await["doc"].clone()
+    }
+
+    #[tokio::test]
+    async fn editors_get_the_derived_view_id_and_the_model_revision() {
+      let (addr, _) = start(None).await;
+      let (room, mut a, first) = owner(addr).await;
+      assert_eq!(first["model"], 3);
+      assert_eq!(first["view"], designotron_rooms::view_id(&room));
+      assert_eq!(first["view"].as_str().unwrap().len(), 32);
+      assert!(first.get("role").is_none());
+      let mut b = connect(addr, &room, None).await.unwrap();
+      assert_eq!(join(&mut b, None).await["view"], first["view"]);
+      next_json(&mut a).await;
+    }
+
+    #[tokio::test]
+    async fn a_viewer_gets_the_file_but_never_the_edit_room_id() {
+      let (addr, _) = start(None).await;
+      let (room, mut a, first) = owner(addr).await;
+      let mut v = viewer(addr, first["view"].as_str().unwrap()).await;
+      v.send(Message::Text(json!({ "type": "join", "name": "Vi" }).to_string()))
+        .await
+        .unwrap();
+      let welcome = next_json(&mut v).await;
+      assert_eq!(welcome["role"], "viewer");
+      assert_eq!(welcome["model"], 3);
+      assert_eq!(welcome["doc"]["name"], "Shared");
+      assert!(welcome.get("view").is_none(), "viewers get no link of their own");
+      assert_eq!(welcome["peers"][0]["name"], "Ana");
+      assert!(!welcome.to_string().contains(&room));
+      let peer = next_json(&mut a).await;
+      assert_eq!((peer["type"].as_str(), peer["role"].as_str()), (Some("peer"), Some("viewer")));
+      // Editors who join later see the viewer marked as one.
+      let mut c = connect(addr, &room, None).await.unwrap();
+      let w = join(&mut c, None).await;
+      assert!(w["peers"].as_array().unwrap().iter().any(|p| p["role"] == "viewer"));
+    }
+
+    #[tokio::test]
+    async fn a_viewers_changes_are_rejected_but_comments_go_through() {
+      let (addr, _) = start(None).await;
+      let (room, mut a, first) = owner(addr).await;
+      let mut v = viewer(addr, first["view"].as_str().unwrap()).await;
+      v.send(Message::Text(json!({ "type": "join", "name": "Vi" }).to_string()))
+        .await
+        .unwrap();
+      next_json(&mut v).await;
+      next_json(&mut a).await; // peer
+                               // Anything but comments.
+      v.send(Message::Text(rename("Hijacked"))).await.unwrap();
+      assert_eq!(next_json(&mut v).await, json!({ "type": "ack", "rejected": true }));
+      let sneaky = json!({ "type": "delta", "delta": { "comments": { "c": {} }, "name": "Hijacked" } });
+      v.send(Message::Text(sneaky.to_string())).await.unwrap();
+      assert_eq!(next_json(&mut v).await["rejected"], true);
+      let removal = json!({ "type": "delta", "delta": { "comments": {}, "commentsRemoved": ["c1"] } });
+      v.send(Message::Text(removal.to_string())).await.unwrap();
+      assert_eq!(next_json(&mut v).await["rejected"], true);
+      assert_eq!(room_doc(addr, &room).await["name"], "Shared");
+      // A comment is applied and relayed; the owner's first delta is that one (nothing of the
+      // rejected changes reached it).
+      v.send(Message::Text(comment_delta())).await.unwrap();
+      loop {
+        let m = next_json(&mut v).await;
+        if m["type"] == "ack" {
+          assert!(m.get("rejected").is_none());
+          break;
+        }
+      }
+      let d = next_delta(&mut a).await;
+      assert_eq!(d["comments"]["c1"]["messages"][0]["text"], "hello");
+      assert_eq!(room_doc(addr, &room).await["comments"]["c1"]["x"], 1.0);
+    }
+
+    #[tokio::test]
+    async fn a_viewer_cant_end_the_room_and_its_presence_loses_owner_and_ended() {
+      let (addr, _) = start(None).await;
+      let (room, mut a, first) = owner(addr).await;
+      let mut v = viewer(addr, first["view"].as_str().unwrap()).await;
+      v.send(Message::Text(json!({ "type": "join", "name": "Vi" }).to_string()))
+        .await
+        .unwrap();
+      next_json(&mut v).await;
+      next_json(&mut a).await;
+      let p = json!({ "type": "presence", "presence": { "owner": true, "ended": true, "cursor": { "x": 1, "y": 2 } } });
+      v.send(Message::Text(p.to_string())).await.unwrap();
+      let got = next_json(&mut a).await;
+      assert_eq!(got["presence"], json!({ "cursor": { "x": 1, "y": 2 } }));
+      let mut late = connect(addr, &room, None).await.unwrap();
+      assert_eq!(join(&mut late, None).await["type"], "welcome", "the room is still open");
+    }
+
+    #[tokio::test]
+    async fn a_viewer_cant_set_the_document() {
+      let (addr, _) = start(None).await;
+      let (room, _a, first) = owner(addr).await;
+      // Into an empty room, and over a live one with reset.
+      let mut v = viewer(addr, first["view"].as_str().unwrap()).await;
+      let take = json!({ "type": "join", "name": "Vi", "doc": big_doc("Mine"), "reset": true });
+      v.send(Message::Text(take.to_string())).await.unwrap();
+      assert_eq!(next_json(&mut v).await["doc"]["name"], "Shared");
+      assert_eq!(room_doc(addr, &room).await["name"], "Shared");
+
+      // A room that nobody has opened yet: the viewer waits.
+      let (addr2, _) = start(None).await;
+      let room2 = designotron_rooms::random_token();
+      let _hold = connect(addr2, &room2, None).await.unwrap();
+      let mut w = viewer(addr2, &designotron_rooms::view_id(&room2)).await;
+      w.send(Message::Text(
+        json!({ "type": "join", "name": "Vi", "doc": doc(), "reset": true }).to_string(),
+      ))
+      .await
+      .unwrap();
+      let welcome = next_json(&mut w).await;
+      assert!(welcome["doc"].is_null() && welcome["role"] == "viewer");
+      let mut late = connect(addr2, &room2, None).await.unwrap();
+      assert!(join(&mut late, None).await["doc"].is_null(), "still no document");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_view_link_gets_an_error_then_a_close() {
+      let (addr, _) = start(None).await;
+      let mut v = viewer(addr, &designotron_rooms::view_id("nobody-has-this-room-id")).await;
+      let e = next_json(&mut v).await;
+      assert_eq!(e["type"], "error");
+      assert!(e["message"].as_str().unwrap().contains("view link isn't active"));
+      assert!(closes(&mut v).await);
+      // A view link never creates a room.
+      assert_eq!(start_stats(addr).await["rooms"], 0);
+      // Not a view id at all: refused before the upgrade.
+      assert!(tokio_tungstenite::connect_async(format!("ws://{addr}/ws?view=abc")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn view_ids_of_saved_rooms_resolve_after_a_restart() {
+      let dir = temp_dir("views");
+      let room = designotron_rooms::random_token();
+      {
+        let (addr, rooms) = start(Some(dir.clone())).await;
+        let mut a = connect(addr, &room, None).await.unwrap();
+        join(&mut a, Some(doc())).await;
+        rooms.maintain().await;
+      }
+      let (addr, _) = start(Some(dir.clone())).await;
+      let mut v = viewer(addr, &designotron_rooms::view_id(&room)).await;
+      v.send(Message::Text(json!({ "type": "join", "name": "Vi" }).to_string()))
+        .await
+        .unwrap();
+      let welcome = next_json(&mut v).await;
+      assert_eq!(
+        (welcome["type"].as_str(), welcome["doc"]["name"].as_str()),
+        (Some("welcome"), Some("Shared"))
+      );
+      let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn health_says_which_model_and_features() {
+      let (addr, _) = start(None).await;
+      let h = start_stats(addr).await;
+      assert_eq!(h["model"], 3);
+      assert_eq!(h["features"], json!(["viewLinks"]));
+    }
+
+    #[test]
+    fn the_bridges_lan_room_has_no_view_links() {
+      // `Rooms::new` (what the bridge uses) never hands out a view id.
+      let rooms = Rooms::new(Limits::default(), None);
+      let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+      assert!(rt.block_on(rooms.view_room(&designotron_rooms::view_id("x"))).is_none());
+    }
+
+    async fn start_stats(addr: SocketAddr) -> serde_json::Value {
+      let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+      tcp.write_all(b"GET /health HTTP/1.0\r\n\r\n").await.unwrap();
+      let mut body = String::new();
+      tcp.read_to_string(&mut body).await.unwrap();
+      serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    }
+  }
+
   mod memory {
     use super::*;
 
@@ -827,7 +1065,7 @@ mod tests {
   }
 
   async fn start_with(limits: Limits, clients: ClientLimits, data: Option<PathBuf>) -> (SocketAddr, Arc<Rooms>) {
-    let rooms = Rooms::new(limits, data);
+    let rooms = Rooms::with_view_links(limits, data);
     let app = App {
       rooms: rooms.clone(),
       clients: Clients::new(clients),

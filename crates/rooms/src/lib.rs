@@ -24,6 +24,14 @@
 //! - client → `{type:"ping"}` (any time, joined or not); the server answers `{type:"pong"}`. Editors
 //!   send one every few seconds, so a connection that went silent (a dropped network keeps the
 //!   socket "open" for minutes) is noticed and replaced.
+//! - server → `welcome` also carries `model` (the document model revision the server understands;
+//!   older servers send none), `view` (editors, when the server has view links: the id of this
+//!   room's view-only link, derived from the room id) and `role:"viewer"` (viewers). `peer` and
+//!   `peers` entries carry `role:"viewer"` for viewers.
+//! - A viewer joins with `?view=<id>` instead of `?room=<id>` (`serve_viewer`). It sees the file,
+//!   cursors and presence, but its join never sets the document, only comment-only deltas are
+//!   applied (anything else is acknowledged as rejected) and the `owner` and `ended` keys of its
+//!   presence are dropped. The edit room id is never sent to it.
 //! - When the person who shared the file stops sharing (presence `{owner:true, ended:true}`),
 //!   the room remembers it: later joins without `reset` get `{type:"ended", name}` and are
 //!   disconnected, instead of rejoining a room nobody shares any more.
@@ -45,11 +53,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
+pub use designotron_engine::collab::MODEL_REVISION;
 use designotron_engine::model::Document;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Mutex, Notify};
 
 /// The answer to a client's `{type:"ping"}`.
@@ -143,6 +153,10 @@ pub struct Rooms {
   /// Sum of every connection's `Meter`.
   conn_bytes: Arc<AtomicUsize>,
   people: AtomicUsize,
+  /// Whether rooms hand out view-only links (the bridge's LAN room doesn't).
+  view_links: bool,
+  /// View id → room id for the rooms this server knows (see `view_id`).
+  views: std::sync::Mutex<HashMap<String, String>>,
   /// Rooms whose owner stopped sharing (id → owner's name), oldest first, bounded.
   ended: std::sync::Mutex<(HashMap<String, String>, std::collections::VecDeque<String>)>,
 }
@@ -170,7 +184,16 @@ struct Room {
   measured: (usize, Option<Instant>),
 }
 
+/// What a connection may do in a room.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+  Editor,
+  /// Joined through a view-only link: watches, and may only add to the comments.
+  Viewer,
+}
+
 struct Peer {
+  role: Role,
   out: Outbox,
   name: String,
   color: String,
@@ -232,6 +255,13 @@ struct Welcome<'a> {
   ordered: bool,
   /// Pages, styles and variables may travel as per-id changes (see the protocol above).
   granular: bool,
+  /// The document model revision this server understands.
+  model: u32,
+  /// The id of this room's view-only link (editors, when the server has them).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  view: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  role: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -240,6 +270,8 @@ struct PeerInfo<'a> {
   name: &'a str,
   color: &'a str,
   presence: &'a Value,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  role: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -305,6 +337,35 @@ pub fn valid_room_id(id: &str) -> bool {
   (16..=64).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// The id of the view-only link of room `room_id`: derived, so a server needs no register of
+/// them and the link survives a restart. It can't be turned back into the room id.
+pub fn view_id(room_id: &str) -> String {
+  let digest = Sha256::digest(format!("designotron-view\0{room_id}").as_bytes());
+  digest.iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
+/// True for ids `view_id` makes: 32 lowercase hex characters.
+pub fn valid_view_id(id: &str) -> bool {
+  id.len() == 32 && id.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+
+/// True if `delta` only adds or changes comments (all a viewer may send): a non-empty
+/// `comments` object and nothing else but empty values.
+fn comments_only(delta: &Value) -> bool {
+  let Some(o) = delta.as_object() else { return false };
+  let has_comments = o.get("comments").and_then(Value::as_object).is_some_and(|c| !c.is_empty());
+  has_comments
+    && o.iter().all(|(k, v)| {
+      k == "comments"
+        || match v {
+          Value::Null => true,
+          Value::Array(a) => a.is_empty(),
+          Value::Object(m) => m.is_empty(),
+          _ => false,
+        }
+    })
+}
+
 /// 128 random bits from the OS-seeded hasher keys, as hex.
 pub fn random_token() -> String {
   let mut out = String::new();
@@ -365,6 +426,28 @@ impl TokenBucket {
 
 impl Rooms {
   pub fn new(limits: Limits, data_dir: Option<PathBuf>) -> Arc<Self> {
+    Self::build(limits, data_dir, false)
+  }
+
+  /// Like `new`, and rooms hand out view-only links (`serve_viewer`). Saved rooms in the
+  /// data dir are indexed by their file names.
+  pub fn with_view_links(limits: Limits, data_dir: Option<PathBuf>) -> Arc<Self> {
+    Self::build(limits, data_dir, true)
+  }
+
+  fn build(limits: Limits, data_dir: Option<PathBuf>, view_links: bool) -> Arc<Self> {
+    let mut views = HashMap::new();
+    if let (true, Some(d)) = (view_links, &data_dir) {
+      for entry in std::fs::read_dir(d).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let stem = path.file_stem().and_then(|s| s.to_str());
+        if let (Some("json"), Some(stem)) = (path.extension().and_then(|e| e.to_str()), stem) {
+          if valid_room_id(stem) {
+            views.insert(view_id(stem), stem.to_string());
+          }
+        }
+      }
+    }
     if let Some(d) = &data_dir {
       if let Err(e) = std::fs::create_dir_all(d) {
         log::error!("cannot create data dir {}: {e}", d.display());
@@ -378,6 +461,8 @@ impl Rooms {
       room_bytes: AtomicUsize::new(0),
       conn_bytes: Arc::new(AtomicUsize::new(0)),
       people: AtomicUsize::new(0),
+      view_links,
+      views: std::sync::Mutex::new(views),
       ended: Default::default(),
     })
   }
@@ -493,15 +578,46 @@ impl Rooms {
       });
       self.evict_idle(&mut rooms, 0);
     }
-    for id in deleted {
-      if let Some(path) = self.file(&id) {
+    for id in &deleted {
+      if let Some(path) = self.file(id) {
         let _ = tokio::fs::remove_file(path).await;
+      }
+    }
+    if self.view_links {
+      // Forget links of rooms that exist nowhere any more.
+      let rooms = self.rooms.lock().await;
+      if let Ok(mut v) = self.views.lock() {
+        v.retain(|_, room| rooms.contains_key(room) || (self.data_dir.is_some() && !deleted.contains(room)));
+      }
+    }
+  }
+
+  /// The room a view-only link opens, if this server knows it (in memory or saved).
+  pub async fn view_room(&self, view: &str) -> Option<String> {
+    let room = self.views.lock().ok()?.get(view).cloned()?;
+    self.known(&room).await.then_some(room)
+  }
+
+  /// Serves one connection through a view-only link until it disconnects. Never creates a
+  /// room; an unknown link gets an error to show and is closed.
+  pub async fn serve_viewer(self: Arc<Self>, socket: WebSocket, view: String) {
+    match self.view_room(&view).await {
+      Some(room_id) => self.serve_as(socket, room_id, Role::Viewer).await,
+      None => {
+        let (mut sink, _) = socket.split();
+        let msg = "This view link isn't active: the file isn't being shared right now.";
+        let _ = sink.send(Message::Text(error_json(msg))).await;
+        let _ = sink.close().await;
       }
     }
   }
 
   /// Serves one editor connection in room `room_id` until it disconnects.
   pub async fn serve(self: Arc<Self>, socket: WebSocket, room_id: String) {
+    self.serve_as(socket, room_id, Role::Editor).await
+  }
+
+  async fn serve_as(self: Arc<Self>, socket: WebSocket, room_id: String, role: Role) {
     let (mut sink, mut stream) = socket.split();
     let room = match self.room(&room_id).await {
       Ok(r) => r,
@@ -576,7 +692,7 @@ impl Rooms {
       r.last_active = Some(Instant::now());
       let step = match m.kind.as_ref() {
         "join" if !joined => {
-          let step = self.join(&room_id, &mut r, id, &out, &m, size).await;
+          let step = self.join(&room_id, &mut r, id, role, &out, &m, size).await;
           joined = r.peers.contains_key(&id);
           step
         }
@@ -584,7 +700,7 @@ impl Rooms {
           out.send(PONG.to_string());
           Step::Go
         }
-        "delta" if joined => self.delta(&mut r, id, &m, size),
+        "delta" if joined => self.delta(&mut r, id, role, &m, size),
         "name" if joined => {
           let name = m.name.as_deref().unwrap_or("").trim().chars().take(40).collect::<String>();
           if let (false, Some(peer)) = (name.is_empty(), r.peers.get_mut(&id)) {
@@ -595,10 +711,21 @@ impl Rooms {
         }
         "presence" if joined => {
           if let Some(p) = m.presence.filter(|p| p.get().len() <= MAX_PRESENCE_BYTES) {
-            let presence: Value = serde_json::from_str(p.get()).unwrap_or(Value::Null);
+            let mut presence: Value = serde_json::from_str(p.get()).unwrap_or(Value::Null);
+            // A viewer can't own the file or end the room.
+            let stripped = role == Role::Viewer
+              && presence
+                .as_object_mut()
+                .is_some_and(|o| o.remove("owner").is_some() | o.remove("ended").is_some());
+            let stripped = if stripped {
+              serde_json::value::to_raw_value(&presence).ok()
+            } else {
+              None
+            };
+            let p = stripped.as_deref().unwrap_or(p);
             // The person who shared the file stopped sharing: later joins are told so.
             // Without a known owner (e.g. after a restart), whoever says they own it.
-            let owner_ok = r.owner.map_or(presence["owner"] == true, |o| o == id);
+            let owner_ok = role == Role::Editor && r.owner.map_or(presence["owner"] == true, |o| o == id);
             if presence["ended"] == true && owner_ok {
               let name = r.peers.get(&id).map(|p| p.name.clone()).unwrap_or_default();
               self.set_ended(&room_id, Some(name));
@@ -670,10 +797,16 @@ impl Rooms {
     }
     let r = Arc::new(Mutex::new(Room::default()));
     rooms.insert(id.to_string(), r.clone());
+    if self.view_links {
+      if let Ok(mut v) = self.views.lock() {
+        v.insert(view_id(id), id.to_string());
+      }
+    }
     Ok(r)
   }
 
-  async fn join(&self, room_id: &str, r: &mut Room, id: u64, out: &Outbox, m: &Incoming<'_>, size: usize) -> Step {
+  #[allow(clippy::too_many_arguments)]
+  async fn join(&self, room_id: &str, r: &mut Room, id: u64, role: Role, out: &Outbox, m: &Incoming<'_>, size: usize) -> Step {
     if r.peers.len() >= self.limits.max_peers {
       return Step::Close(format!(
         "This file already has the maximum number of people ({}).",
@@ -693,7 +826,9 @@ impl Rooms {
     }
     let name = m.name.as_deref().unwrap_or("Guest").chars().take(40).collect::<String>();
     let color = m.color.as_deref().unwrap_or("#7C5CFF").chars().take(16).collect::<String>();
-    if m.reset && m.doc.is_some() {
+    // Viewers never bring a document.
+    let doc_given = m.doc.is_some() && role == Role::Editor;
+    if m.reset && doc_given {
       // Shared (again) on purpose: this connection owns the room.
       self.set_ended(room_id, None);
       r.owner = Some(id);
@@ -701,7 +836,7 @@ impl Rooms {
       out.send(json!({ "type": "ended", "name": owner }).to_string());
       return Step::Leave;
     }
-    let adopt = m.doc.is_some() && (r.doc.is_none() || m.reset);
+    let adopt = doc_given && (r.doc.is_none() || m.reset);
     if adopt {
       if size > self.limits.max_room_bytes {
         return Step::Close(self.too_large());
@@ -744,10 +879,14 @@ impl Rooms {
           name: &p.name,
           color: &p.color,
           presence: &p.presence,
+          role: p.role.name(),
         })
         .collect(),
       ordered: true,
       granular: true,
+      model: designotron_engine::collab::MODEL_REVISION,
+      view: (self.view_links && role == Role::Editor).then(|| view_id(room_id)),
+      role: role.name(),
     };
     out.send(serde_json::to_string(&welcome).unwrap_or_default());
     if adopt && !r.peers.is_empty() {
@@ -762,6 +901,7 @@ impl Rooms {
     r.peers.insert(
       id,
       Peer {
+        role,
         out: out.clone(),
         name: name.clone(),
         color: color.clone(),
@@ -770,11 +910,15 @@ impl Rooms {
       },
     );
     self.people.fetch_add(1, Ordering::Relaxed);
-    self.broadcast(r, id, &json!({ "type": "peer", "id": id, "name": name, "color": color }), false);
+    let mut peer = json!({ "type": "peer", "id": id, "name": name, "color": color });
+    if let Some(role) = role.name() {
+      peer["role"] = json!(role);
+    }
+    self.broadcast(r, id, &peer, false);
     Step::Go
   }
 
-  fn delta(&self, r: &mut Room, id: u64, m: &Incoming<'_>, size: usize) -> Step {
+  fn delta(&self, r: &mut Room, id: u64, role: Role, m: &Incoming<'_>, size: usize) -> Step {
     let Some(raw) = m.delta else {
       return Step::Go;
     };
@@ -784,6 +928,7 @@ impl Rooms {
     }
     let assets = m
       .assets
+      .filter(|_| role == Role::Editor)
       .and_then(|a| serde_json::from_str::<Map<String, Value>>(a.get()).ok())
       .filter(|a| !a.is_empty());
     let new_asset_bytes = assets.as_ref().map(assets_size).unwrap_or(0);
@@ -806,6 +951,10 @@ impl Rooms {
       self.ack(r, id, true);
       return Step::Go;
     };
+    if role == Role::Viewer && !comments_only(&delta) {
+      self.ack(r, id, true);
+      return Step::Go;
+    }
     // An editor that predates effect and grid styles sends whole `styles` without them: keep the room's.
     let sender_granular = r.peers.get(&id).is_some_and(|p| p.granular);
     let fixed = if !sender_granular && designotron_engine::collab::keep_style_lists(&mut delta, r.doc.as_ref().unwrap()) {
@@ -1024,6 +1173,13 @@ impl Rooms {
     }
     let doc_bytes = r.doc_bytes;
     self.set_bytes(r, doc_bytes, asset_bytes);
+  }
+}
+
+impl Role {
+  /// The name sent to editors for viewers (editors need none).
+  fn name(self) -> Option<&'static str> {
+    (self == Role::Viewer).then_some("viewer")
   }
 }
 

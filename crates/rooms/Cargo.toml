@@ -13,3 +13,4 @@ axum = { version = "0.7.9", features = ["ws"] }
 tokio = { version = "1.41", features = ["sync", "time", "fs", "macros", "rt"] }
 futures-util = "0.3"
 log = "0.4"
+sha2 = "0.11"

@@ -72,6 +72,10 @@ pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> 
   out
 }
 
+/// Which generation of the document model this build understands. Rooms say it in their welcome, so
+/// an editor can tell a relay that predates the model it uses (older relays say nothing).
+pub const MODEL_REVISION: u32 = 3;
+
 /// This engine can read and write the per-id form of pages, styles and variables.
 pub const GRANULAR: bool = true;
 
