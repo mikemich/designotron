@@ -68,17 +68,19 @@ try {
   const undoable = await page.evaluate(() => window.__dt.state().canUndo);
   check("MCP edits are undoable in the editor", undoable);
 
-  // import_url: the bridge fetches a page, the editor converts it to layers.
+  // import_url over MCP reaches only the public internet: the bridge refuses local and private
+  // addresses on purpose (File > Import, typed by the person, is the way to a page on their machine).
   const site = http.createServer((_, res) => {
     res.setHeader("content-type", "text/html");
-    res.end(`<html><head><title>Test site</title><style>body{margin:0;background:#101828}h1{color:#fff;font:700 40px Inter;padding:32px}.card{margin:32px;padding:24px;background:#fff;border-radius:16px}</style></head><body><h1>Hello from a website</h1><div class="card">Card body text</div></body></html>`);
+    res.end(`<html><head><title>Test site</title></head><body><h1>Hello from a website</h1></body></html>`);
   });
   await new Promise((r) => site.listen(5199, "127.0.0.1", r));
+  const layersBefore = await page.evaluate(() => Object.keys(window.__dt.doc().nodes).length);
   const imported = await mcp("tools/call", { name: "import_url", arguments: { url: "http://127.0.0.1:5199/", width: 800, x: 2000, y: 0 } });
   site.close();
   const impText = imported.result?.content?.at(-1)?.text ?? JSON.stringify(imported);
-  const texts = await page.evaluate(() => Object.values(window.__dt.doc().nodes).filter((n) => n.type === "text").map((n) => n.text.characters));
-  check("import_url turns a live page into layers", !imported.result?.isError && texts.includes("Hello from a website") && texts.includes("Card body text"), impText.slice(0, 160));
+  const layersAfter = await page.evaluate(() => Object.keys(window.__dt.doc().nodes).length);
+  check("import_url refuses a local address and creates no layers", imported.result?.isError === true && /local or private network address/.test(impText) && layersAfter === layersBefore, impText.slice(0, 160));
 
   // Live app preview: write the generated project, run it, see it in the App tab.
   if (!process.env.E2E_SKIP_PREVIEW) {

@@ -49,9 +49,6 @@ export interface BoxNode {
   children: BoxNode[];
   /** Text sized by its content (single line); otherwise its width is fixed and it wraps. */
   hugText?: boolean;
-  /** Text whose browser height isn't lines × line height (a mono run grew a line box): emitted with
-   *  that height so siblings keep their positions. */
-  fixedH?: boolean;
   plan?: Plan;
 }
 
@@ -156,6 +153,27 @@ function sameStyle(a: RunStyle, b: RunStyle): boolean {
   );
 }
 
+/** Lines of a text block from the vertical centres of its client rects, in document order. Only
+ *  the vertical position counts, so right-to-left and bidirectional runs (whose rects come in any
+ *  horizontal order) count the same as left-to-right text, and blank lines (`<br><br>`) show up as
+ *  a jump of several line heights. A rect belongs to the current line while its centre is less than
+ *  half a line height below that line's first centre. `starts` holds those first centres. */
+export function countLines(centres: number[], lh: number): { lines: number; starts: number[] } {
+  const pitch = Number.isFinite(lh) && lh > 0 ? lh : 1;
+  const starts: number[] = [];
+  let lines = 0;
+  for (const c of centres) {
+    if (!starts.length) {
+      starts.push(c);
+      lines = 1;
+    } else if (c - starts[starts.length - 1] > pitch / 2) {
+      lines += Math.max(1, Math.round((c - starts[starts.length - 1]) / pitch));
+      starts.push(c);
+    }
+  }
+  return { lines, starts };
+}
+
 /** Plans auto layout bottom-up for a whole tree (children first, so their hug sizes are known). */
 export function planTree(node: BoxNode) {
   for (const c of node.children) planTree(c);
@@ -170,10 +188,6 @@ export function emitSpec(node: BoxNode, parent: Rect, sizing?: { w: Size; h: Siz
   if (node.kind === "text") {
     if (own.w === "fill") spec.width = "fill";
     else if (!node.hugText) spec.width = round(node.rect.w);
-    if (node.fixedH) {
-      spec.height = round(node.rect.h);
-      spec.autoResize = "none";
-    }
     return spec;
   }
   spec.width = own.w === "fixed" ? round(node.rect.w) : own.w;
@@ -459,14 +473,21 @@ function tryWrap(node: BoxNode, flowDom: BoxNode[]): Plan | null {
 }
 
 /** Accepts a layout when every child lands within TOL. Padding and gaps are rounded to whole
- *  pixels (no `pb-[0.41px]` in exported code) when the rounded layout is still accepted and hugs no worse. */
+ *  pixels (no `pb-[0.41px]` in exported code) when the rounded layout is still accepted and hugs
+ *  to the same size. */
 function validate(node: BoxNode, flow: BoxNode[], layout: Layout, sizing: Map<BoxNode, { w: Size; h: Size }>): Plan | null {
   const exact = validateExact(node, flow, layout, sizing);
   const whole: Layout = { ...layout, gap: Math.round(layout.gap), counterGap: Math.round(layout.counterGap), padding: layout.padding.map(Math.round) as Layout["padding"] };
   if (whole.gap === layout.gap && whole.counterGap === layout.counterGap && whole.padding.every((v, i) => v === layout.padding[i])) return exact;
   const plan = validateExact(node, flow, whole, sizing);
   if (!plan) return exact;
-  if (exact && ((exact.canHug.w && !plan.canHug.w) || (exact.canHug.h && !plan.canHug.h))) return exact;
+  // A hugging frame must come out as tall (wide) as it does with the exact padding: a parent adds
+  // its children's sizes up, so even a fraction of a pixel each drifts over a long list.
+  if (exact) {
+    for (const axis of ["w", "h"] as const) {
+      if (exact.canHug[axis] && (!plan.canHug[axis] || Math.abs(plan.hug[axis] - exact.hug[axis]) > 0.05)) return exact;
+    }
+  }
   return plan;
 }
 
@@ -509,7 +530,7 @@ function rectsMatch(a: Rect[], b: Rect[]) {
 /** The size the engine will give a child: auto-width text rounds up, and a hugging frame gets its
  *  simulated hug size (not the browser's), so errors show up in the parent's check instead of piling up. */
 function predictedSize(c: BoxNode, s: { w: Size; h: Size }): [number, number] {
-  if (c.kind === "text") return [c.hugText ? Math.ceil(c.rect.w) : c.rect.w, c.fixedH ? c.rect.h : Math.ceil(c.rect.h - 0.01)];
+  if (c.kind === "text") return [c.hugText ? Math.ceil(c.rect.w) : c.rect.w, Math.ceil(c.rect.h - 0.01)];
   const hug = c.plan?.hug;
   return [s.w === "hug" && hug ? hug.w : c.rect.w, s.h === "hug" && hug ? hug.h : c.rect.h];
 }

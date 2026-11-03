@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CSS, emitSpec, mergeInlineRuns, planContainer, planTree, simulate, type BoxNode, type Css, type InlinePiece, type RunStyle } from "./htmlLayout";
+import { DEFAULT_CSS, countLines, emitSpec, mergeInlineRuns, planContainer, planTree, simulate, type BoxNode, type Css, type InlinePiece, type RunStyle } from "./htmlLayout";
 
 const text = (x: number, y: number, w: number, h: number, css: Partial<Css> = {}): BoxNode => ({
   kind: "text",
@@ -230,5 +230,46 @@ describe("whole-pixel padding", () => {
     const kids = Array.from({ length: 12 }, (_, i) => box(0, i * 40.45, 100, 40));
     const col = frame(0, 0, 100, 11 * 40.45 + 40, {}, kids);
     expect(planContainer(col)!.layout.gap).toBeCloseTo(0.45, 2);
+  });
+});
+
+describe("whole-pixel padding keeps hugging", () => {
+  it("does not turn hugging items into fixed fractional heights", () => {
+    const items = Array.from({ length: 14 }, (_, i) => {
+      const y = i * (40.8 + 6.4);
+      return frame(0, y, 300, 40.8, { inset: [10.4, 12, 10.4, 12] }, [text(12, y + 10.4, 100, 20)]);
+    });
+    const col = frame(0, 0, 300, 14 * 40.8 + 13 * 6.4, { display: "flex", flexDirection: "column", rowGap: 6.4 }, items);
+    planTree(col);
+    const spec = emitSpec(col, col.rect);
+    expect(spec.children.every((c: any) => c.height === "hug")).toBe(true);
+    expect(spec.children[0].layout.padding[0]).toBeCloseTo(10.4, 2);
+  });
+});
+
+describe("countLines", () => {
+  it("counts a wrapped paragraph by vertical position", () => {
+    expect(countLines([10, 10, 36, 36, 36, 62], 26)).toEqual({ lines: 3, starts: [10, 36, 62] });
+  });
+
+  it("is not confused by right-to-left or bidirectional rect order", () => {
+    // Rects of one line arrive in any horizontal order, and the centres stay the same: still one line each.
+    expect(countLines([10.2, 10, 9.8, 10.1], 20).lines).toBe(1);
+    expect(countLines([10, 10, 30, 30.2, 30], 20).lines).toBe(2);
+  });
+
+  it("keeps runs in another font on the line they sit on", () => {
+    // A 28px run in a 20px line has a centre a few pixels off the others.
+    expect(countLines([10, 6, 12, 31, 29], 20).lines).toBe(2);
+  });
+
+  it("counts empty lines between two rects", () => {
+    expect(countLines([10, 70], 20).lines).toBe(4);
+  });
+
+  it("copes with a bad line height and no rects", () => {
+    expect(countLines([], 20)).toEqual({ lines: 0, starts: [] });
+    expect(countLines([5, 5], 0).lines).toBe(1);
+    expect(Number.isFinite(countLines([5, 9], NaN).lines)).toBe(true);
   });
 });

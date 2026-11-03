@@ -4,7 +4,7 @@ import { addAsset, readFileAsDataUrl } from "../assets";
 import { screenshotBase64 } from "../exporter";
 import { aiDispatch, getDoc, selection, useStore, FONTS } from "../store";
 import { bridgeChecked, bridgeHttpBase } from "./bridgeClient";
-import { DEFAULT_CSS, emitSpec, mergeInlineRuns, planTree, type BoxNode, type Css, type InlinePiece, type Rect, type RunStyle } from "./htmlLayout";
+import { DEFAULT_CSS, countLines, emitSpec, mergeInlineRuns, planTree, type BoxNode, type Css, type InlinePiece, type Rect, type RunStyle } from "./htmlLayout";
 
 /** Picks what to screenshot when no id is given: selection, else the newest top-level frame. */
 export async function getScreenshot(id?: string, scale = 1) {
@@ -102,7 +102,7 @@ export async function importHtml(input: ImportInput) {
     const rootBox: BoxNode = {
       kind: "frame",
       rect: { x: 0, y: 0, w: width, h: total },
-      spec: { type: "frame", name: input.name || doc.title.trim() || input.fallbackName || "Imported HTML", fill: bodyBg ?? "#FFFFFF", clip: true },
+      spec: { type: "frame", name: input.name || doc.title.replace(/\s+/g, " ").trim().slice(0, 60) || input.fallbackName || "Imported HTML", fill: bodyBg ?? "#FFFFFF", clip: true },
       css: { ...readCss(win.getComputedStyle(body)), inset: [0, 0, 0, 0] },
       children,
     };
@@ -220,40 +220,43 @@ async function walk(node: globalThis.Node, win: Window, auto: boolean): Promise<
   return [{ kind: "frame", rect, css, children: kids, spec }];
 }
 
-const LAYER_NAMES: Record<string, [string, string]> = {
-  header: ["Header", "header"],
-  nav: ["Nav", "nav"],
-  footer: ["Footer", "footer"],
-  main: ["Main", "main"],
-  section: ["Section", "section"],
-  aside: ["Sidebar", "sidebar"],
-  button: ["Button", "button"],
-  form: ["Form", "form"],
-  input: ["Input", "input"],
-  a: ["Link", "link"],
-  li: ["List item", "item"],
-  ul: ["List", "list"],
-  ol: ["List", "list"],
-  article: ["Article", "article"],
-  h1: ["Heading 1", "heading"],
-  h2: ["Heading 2", "heading"],
-  h3: ["Heading 3", "heading"],
-  h4: ["Heading 4", "heading"],
-  h5: ["Heading 5", "heading"],
-  h6: ["Heading 6", "heading"],
+/** Tag → layer name, and the whole words in a class or id that say the same thing. Code export picks
+ *  button, nav, header, footer and so on from the words in a layer name (`container_tag` in codegen.rs),
+ *  so a class is kept only when it matches the element's own tag: `<button class="menu-toggle">` is a
+ *  "Button", not the nav that "menu" would make it. */
+const LAYER_NAMES: Record<string, [string, string[]]> = {
+  header: ["Header", ["header", "topbar"]],
+  nav: ["Nav", ["nav", "navbar", "navigation", "menu"]],
+  footer: ["Footer", ["footer"]],
+  main: ["Main", ["main"]],
+  section: ["Section", ["section", "hero", "features", "pricing", "testimonials", "faq"]],
+  aside: ["Sidebar", ["sidebar"]],
+  button: ["Button", ["button", "btn", "cta"]],
+  form: ["Form", ["form"]],
+  input: ["Input", ["input"]],
+  a: ["Link", ["link"]],
+  li: ["List item", ["item"]],
+  ul: ["List", ["list", "nav", "navbar", "navigation", "menu"]],
+  ol: ["List", ["list"]],
+  article: ["Article", ["article"]],
+  h1: ["Heading 1", []],
+  h2: ["Heading 2", []],
+  h3: ["Heading 3", []],
+  h4: ["Heading 4", []],
+  h5: ["Heading 5", []],
+  h6: ["Heading 6", []],
 };
 
-/** Layer names carry the semantics code export reads ("Nav", "Header", "Button", "Footer"...). A
- *  class or id that already says what the element is wins; otherwise the tag names it. */
 function layerName(el: HTMLElement, tag: string): string {
   const own = el.id || el.className?.toString().trim().split(/\s+/)[0] || "";
   const known = LAYER_NAMES[tag];
   if (!known) return own || tag;
   const words = own.toLowerCase().split(/[^a-z0-9]+/);
-  return own && (words.includes(known[1]) || words.some((w) => CODE_WORDS.includes(w))) ? own : known[0];
+  // Also no word that would make it another tag: `nav-link` on an <a> would export as a <nav>.
+  const other = words.some((w) => CODE_WORDS.includes(w) && !known[1].includes(w));
+  return own && !other && words.some((w) => known[1].includes(w)) ? own : known[0];
 }
 
-/** Whole words in a layer name that make code export pick a tag (see `container_tag` in codegen.rs). */
 const CODE_WORDS = ["button", "btn", "cta", "nav", "navbar", "navigation", "menu", "header", "topbar", "footer", "sidebar", "main", "hero", "section", "features", "pricing", "testimonials", "faq"];
 
 /** A wrapper that only holds one box hands its place in the layout to that box. Text that is
@@ -328,7 +331,7 @@ function textBox(node: Text, win: Window, auto: boolean): BoxNode | null {
 
 const NOT_INLINE_TEXT = ["img", "svg", "video", "canvas", "iframe", "input", "select", "textarea", "object", "embed", "picture", "audio"];
 const TEXT_CONTAINERS = ["block", "list-item", "flow-root", "inline", "table-cell", "inline-block"];
-const SAFE_LINK = /^(https?:|mailto:|tel:)/i;
+const SAFE_LINK = /^(https?:\/\/|mailto:|tel:)/i;
 
 interface InlineCtx {
   link?: string;
@@ -361,21 +364,28 @@ function inlineText(el: HTMLElement, cs: CSSStyleDeclaration, win: Window, auto:
   const right = Math.max(...frags.map((q) => q.right));
   const topAll = Math.min(...frags.map((q) => q.top));
   const bottomAll = Math.max(...frags.map((q) => q.bottom));
-  // A new line starts where the text stops moving right (or drops below the line so far).
-  const lineTops: number[] = [];
-  let prev: DOMRect | null = null;
-  let lineBottom = -Infinity;
-  for (const q of frags) {
-    if (!prev || q.left < prev.right - 1 || q.top >= lineBottom - 1) {
-      lineTops.push(q.top);
-      lineBottom = q.bottom;
-    } else lineBottom = Math.max(lineBottom, q.bottom);
-    prev = q;
-  }
-  const lines = lineTops.length;
+  // Lines come from vertical positions only, so right-to-left and bidirectional text and blank
+  // `<br>` lines count right.
   const fontSize = parseFloat(cs.fontSize) || 16;
-  const contentH = frags[0].height;
-  const lh = cs.lineHeight === "normal" ? (lines > 1 ? (lineTops[lines - 1] - lineTops[0]) / (lines - 1) : contentH) : parseFloat(cs.lineHeight) || fontSize * 1.2;
+  const glyphH = frags[0].height;
+  let lh = cs.lineHeight === "normal" ? glyphH : parseFloat(cs.lineHeight);
+  if (!Number.isFinite(lh) || lh <= 0) lh = glyphH;
+  const { lines, starts } = countLines(frags.map((q) => (q.top + q.bottom) / 2), lh);
+  if (cs.lineHeight === "normal" && lines > 1) lh = (starts[starts.length - 1] - starts[0]) / (lines - 1);
+  // The block's content box is exact. Runs in another font can make a line box taller than the line
+  // height, so the paragraph is then a little taller than lines × line height: keep the layer that
+  // tall through its line height (it stays auto height and grows when edited). A box much taller
+  // than its text (a button, a centred flex item) only says where the box is, not where the text is.
+  let box: { top: number; h: number } | null = null;
+  if (auto && cs.display !== "inline") {
+    const b = el.getBoundingClientRect();
+    const px = (v: string) => parseFloat(v) || 0;
+    const h = b.height - px(cs.paddingTop) - px(cs.paddingBottom) - px(cs.borderTopWidth) - px(cs.borderBottomWidth);
+    const top = b.top + px(cs.paddingTop) + px(cs.borderTopWidth);
+    if (h > 0 && Math.abs(h - lines * lh) <= 0.1 * lines * lh + 1 && Math.abs(top - frags[0].top) <= Math.max(3, lh)) box = { top, h };
+  }
+  if (!Number.isFinite(lh) || lh < 0.8 * fontSize) lh = (box ? box.h : (bottomAll - topAll)) / lines;
+  const lineHeight = box && Math.abs(box.h - lines * lh) > 0.5 ? Math.floor((box.h / lines) * 1000) / 1000 : lh;
   const style = (r: RunStyle): Spec => {
     const out: Spec = { fontWeight: r.fontWeight, italic: r.italic, color: r.color, fontSize: r.fontSize, fontFamily: r.fontFamily };
     // A link the page doesn't underline says so (code export underlines links that don't).
@@ -385,35 +395,29 @@ function inlineText(el: HTMLElement, cs: CSSStyleDeclaration, win: Window, auto:
   };
   const one = merged.spans.length === 1 && !merged.spans[0].link ? merged.spans[0] : null;
   const spec: Spec = one
-    ? { type: "text", text: merged.text, ...style(one), lineHeight: lh }
+    ? { type: "text", text: merged.text, ...style(one), lineHeight }
     : {
         type: "text",
         spans: merged.spans.map((r) => ({ text: r.text, ...style(r) })),
         fontSize,
         fontWeight: parseInt(cs.fontWeight) || 400,
         fontFamily: firstFamily(cs),
-        lineHeight: lh,
+        lineHeight,
         color: cs.color,
         italic: cs.fontStyle === "italic",
       };
-  spec.textAlign = ["center", "right", "justify"].includes(cs.textAlign) ? cs.textAlign : "left";
+  // `start` and `end` follow the writing direction.
+  const rtl = cs.direction === "rtl";
+  const align = cs.textAlign === "start" ? (rtl ? "right" : "left") : cs.textAlign === "end" ? (rtl ? "left" : "right") : cs.textAlign;
+  spec.textAlign = ["center", "right", "justify"].includes(align) ? align : "left";
   if (cs.letterSpacing !== "normal") spec.letterSpacing = parseFloat(cs.letterSpacing) || 0;
   const w = lines > 1 ? Math.ceil(right - left) + 1 : right - left;
-  let rect = auto ? { x: left, y: frags[0].top - (lh - contentH) / 2, w, h: lines * lh } : { x: left, y: topAll, w, h: bottomAll - topAll };
-  let fixedH = false;
-  if (auto && cs.display !== "inline") {
-    // The block's own content box is exact: runs in another font can make a line box taller than the
-    // line height, so the paragraph is then a little taller than lines × line height.
-    const box = el.getBoundingClientRect();
-    const px = (v: string) => parseFloat(v) || 0;
-    const top = box.top + px(cs.paddingTop) + px(cs.borderTopWidth);
-    const h = box.height - px(cs.paddingTop) - px(cs.paddingBottom) - px(cs.borderTopWidth) - px(cs.borderBottomWidth);
-    if (h > 0 && Math.abs(top - rect.y) <= 2) {
-      fixedH = Math.abs(h - lines * lh) > 0.5;
-      rect = { ...rect, y: top, h: fixedH ? h : lines * lh };
-    }
-  }
-  return { kind: "text", rect, spec, css: { ...DEFAULT_CSS, display: "inline" }, children: [], hugText: lines <= 1, fixedH };
+  const rect = !auto
+    ? { x: left, y: topAll, w, h: bottomAll - topAll }
+    : box
+      ? { x: left, y: box.top, w, h: box.h }
+      : { x: left, y: frags[0].top - (lh - glyphH) / 2, w, h: lines * lh };
+  return { kind: "text", rect, spec, css: { ...DEFAULT_CSS, display: "inline" }, children: [], hugText: lines <= 1 };
 }
 
 /** Collects the styled pieces of an inline formatting context. False when a child has its own box. */
@@ -443,13 +447,12 @@ function gatherInline(parent: HTMLElement, pcs: CSSStyleDeclaration, ctx: Inline
   return true;
 }
 
-/** Backgrounds, borders, shadows, padding or margins make an inline element a box of its own. */
+/** An inline element with only a background, border, padding or radius (a code chip) joins the
+ *  text as a run and loses that styling. Shadows and side margins can't be carried by a run, so
+ *  those elements stay boxes of their own. */
 function hasBoxVisuals(cs: CSSStyleDeclaration): boolean {
-  const sides = ["Top", "Right", "Bottom", "Left"] as const;
-  if (sides.some((s) => parseFloat(cs[`padding${s}`]) > 0 || (parseFloat(cs[`border${s}Width`]) > 0 && cs[`border${s}Style`] !== "none"))) return true;
-  if (parseFloat(cs.marginLeft) || parseFloat(cs.marginRight)) return true;
-  const bg = cs.backgroundColor;
-  return (bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") || cs.backgroundImage !== "none" || cs.boxShadow !== "none";
+  if (parseFloat(cs.marginLeft) || parseFloat(cs.marginRight) || parseFloat(cs.marginTop) || parseFloat(cs.marginBottom)) return true;
+  return cs.boxShadow !== "none";
 }
 
 function runStyle(cs: CSSStyleDeclaration, ctx: InlineCtx): RunStyle {
@@ -472,10 +475,25 @@ function decorationOf(cs: CSSStyleDeclaration, inherited: RunStyle["decoration"]
   return inherited;
 }
 
+/** The link of an `<a href>`, or undefined when the engine wouldn't keep it. Only absolute web, mail
+ *  and phone addresses count. A relative one resolves against the page only when the page brings its
+ *  own `<base>` (a URL import); in pasted HTML it would resolve against the editor. */
 function linkOf(el: HTMLElement): string | undefined {
-  if (el.tagName.toLowerCase() !== "a" || !el.hasAttribute("href")) return undefined;
-  const href = (el as HTMLAnchorElement).href;
-  return SAFE_LINK.test(href) ? href : undefined;
+  if (el.tagName.toLowerCase() !== "a") return undefined;
+  const raw = (el.getAttribute("href") ?? "").trim();
+  if (!raw) return undefined;
+  let href = raw;
+  if (!SAFE_LINK.test(raw)) {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || !el.ownerDocument.querySelector("base[href]")) return undefined;
+    href = (el as HTMLAnchorElement).href;
+    if (!SAFE_LINK.test(href)) return undefined;
+  }
+  try {
+    new URL(href);
+  } catch {
+    return undefined;
+  }
+  return href;
 }
 
 function firstFamily(cs: CSSStyleDeclaration): string {
