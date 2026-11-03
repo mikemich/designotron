@@ -10,8 +10,8 @@ describe("parseBlocks", () => {
     const blocks = parseBlocks("# Title\n\nHello\nworld\n\n- a\n- b\n\n1. x\n2. y\n\n```js\nlet a = 1;\n```\nend");
     expect(blocks.map((b) => b.kind)).toEqual(["heading", "p", "list", "list", "code", "p"]);
     expect(blocks[1]).toEqual({ kind: "p", text: "Hello\nworld" });
-    expect(blocks[2]).toEqual({ kind: "list", ordered: false, items: ["a", "b"] });
-    expect(blocks[3]).toEqual({ kind: "list", ordered: true, items: ["x", "y"] });
+    expect(blocks[2]).toEqual({ kind: "list", ordered: false, start: 1, items: ["a", "b"] });
+    expect(blocks[3]).toEqual({ kind: "list", ordered: true, start: 1, items: ["x", "y"] });
     expect(blocks[4]).toEqual({ kind: "code", text: "let a = 1;", lang: "js" });
   });
 
@@ -47,5 +47,27 @@ describe("Markdown", () => {
 
   it("shows headings as bold lines, never as raw hashes", () => {
     expect(html("## Plan")).toBe('<p class="md-heading"><strong>Plan</strong></p>');
+    expect(html("## Plan ##")).toBe('<p class="md-heading"><strong>Plan</strong></p>');
+  });
+
+  it("starts a numbered list at its first number", () => {
+    expect(html("3. c\n4. d")).toBe('<ol start="3"><li>c</li><li>d</li></ol>');
+    expect(html("1) a\n2) b")).toBe("<ol><li>a</li><li>b</li></ol>");
+  });
+
+  it("nests emphasis and handles ***", () => {
+    expect(html("**a *b* c**")).toBe("<p><strong>a <em>b</em> c</strong></p>");
+    expect(html("*a **b** c*")).toBe("<p><em>a <strong>b</strong> c</em></p>");
+    expect(html("***both***")).toBe("<p><strong><em>both</em></strong></p>");
+    expect(html("***")).toBe("<p>***</p>");
+  });
+
+  it("is fast on hostile input", () => {
+    const inputs = ["**a ".repeat(5000), "*a" + " b".repeat(20000), "*".repeat(50000), "[".repeat(50000), "[a](" + "(".repeat(50000), "[x](y".repeat(10000), "#" + " ".repeat(50000) + "x", " ".repeat(50000) + "x", "```" + " ".repeat(50000) + "a b", "`a".repeat(2500), "**x" + "y".repeat(5000)];
+    for (const input of inputs) {
+      const start = performance.now();
+      html(input);
+      expect(performance.now() - start).toBeLessThan(50);
+    }
   });
 });

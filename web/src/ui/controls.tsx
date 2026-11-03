@@ -5,11 +5,11 @@ import { dispatch } from "../store";
 export const MIXED = Symbol("mixed");
 export type Maybe<T> = T | typeof MIXED;
 
-/** Number input with a scrubbable label, arrow-key stepping and simple math. `null` shows
- *  `autoText` (e.g. an automatic line height); scrubbing and arrows then start at `autoValue`. */
 /** Largest magnitude a number field accepts unless it sets its own range. */
 const MAX_NUMBER = 1e6;
 
+/** Number input with a scrubbable label, arrow-key stepping and simple math. `null` shows
+ *  `autoText` (e.g. an automatic line height); scrubbing and arrows then start at `autoValue`. */
 export function NumberField(props: {
   label?: ReactNode;
   value: Maybe<number> | null;
@@ -34,9 +34,14 @@ export function NumberField(props: {
   const [focused, setFocused] = useState(false);
   /** The text was edited since the last commit: only then does leaving the field commit it. */
   const edited = useRef(false);
+  /** What the field last showed for the document's value. */
+  const shown = useRef(text);
+  /** Something typed that differs from what the document said: it is kept, not overwritten. */
+  const pending = () => edited.current && text !== shown.current;
   useEffect(() => {
     // A focused field keeps what is being typed, but follows the document after a commit or an undo.
-    if (!focused || !edited.current) setText(fmt(value));
+    if (!focused || !pending()) setText(fmt(value));
+    shown.current = fmt(value);
   }, [value, focused]);
   const clamp = (v: number) => Math.min(max, Math.max(min, v));
   /** Applies the typed text; returns the value it was clamped to, or null when there was none. */
@@ -105,9 +110,12 @@ export function NumberField(props: {
             e.preventDefault();
             const input = e.target as HTMLInputElement;
             const out = commit();
-            if (out !== null) setText(fmt(out));
+            if (out !== null) {
+              setText(fmt(out));
+              shown.current = fmt(out);
+            }
             requestAnimationFrame(() => document.activeElement === input && input.select());
-          } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y") && !edited.current) {
+          } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y") && !pending()) {
             // Nothing typed since the last commit: undo and redo belong to the design, not the text box.
             e.preventDefault();
             dispatch({ op: e.key.toLowerCase() === "y" || e.shiftKey ? "redo" : "undo" });
@@ -240,9 +248,18 @@ export interface MenuItem {
 /** Whether the last thing the person did was press a key (not click or touch): a menu they
  *  opened by keyboard focuses its first item, one opened by pointer waits for an arrow key. */
 let keyboardModality = false;
+/** The element that last took focus from a pointer (a click on a button, say), if it still has it. */
+let pointerFocused: EventTarget | null = null;
 if (typeof window !== "undefined") {
   window.addEventListener("keydown", (e) => (keyboardModality = !["Shift", "Control", "Alt", "Meta"].includes(e.key) || keyboardModality), true);
   window.addEventListener("pointerdown", () => (keyboardModality = false), true);
+  window.addEventListener("focusin", (e) => (pointerFocused = keyboardModality ? null : e.target), true);
+}
+
+/** Whether `el` has focus because it was clicked or tapped (not reached with Tab). Keys then
+ *  belong to the design, not to that button: Enter on a clicked button selects children. */
+export function focusedByPointer(el: EventTarget | null): boolean {
+  return !!el && el === pointerFocused;
 }
 
 /** Menu following the ARIA menu pattern: focus moves to the first item on open, arrows, Home/End
@@ -336,6 +353,11 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
       style={pos}
       onContextMenu={(e) => e.preventDefault()}
       onPointerDown={(e) => e.stopPropagation()}
+      // The item under the pointer is the focused one, so hover and keyboard never show two.
+      onPointerMove={(e) => {
+        const item = (e.target as HTMLElement).closest<HTMLElement>("[role=menuitem]:not(:disabled)");
+        if (item && item !== document.activeElement) item.focus({ preventScroll: true });
+      }}
       onKeyDown={onKeyDown}
     >
       {props.items.map((it, i) =>

@@ -63,6 +63,13 @@ const focused = (page) =>
     };
   });
 
+/** Focuses an element the way a keyboard user gets there: after a key press (focus that follows a
+ *  mouse click is treated as pointer focus, where Enter acts on the design). */
+async function kbFocus(page, selector) {
+  await page.keyboard.press("F7");
+  await page.locator(selector).first().focus();
+}
+
 /** Presses Tab until `test(focused element)` holds; the number of presses, or -1. */
 async function tabTo(page, test, max = 60, key = "Tab") {
   for (let i = 1; i <= max; i++) {
@@ -97,15 +104,14 @@ try {
     await page.waitForTimeout(600);
     const f = await focused(page);
     check("a newly opened file focuses the canvas", f.id === "dt-canvas", JSON.stringify(f));
-    const ring = await page.evaluate(() => getComputedStyle(document.getElementById("dt-canvas")).outlineStyle);
-    check("the focused canvas shows a focus ring", ring === "solid", ring);
+
 
     // The "more" button: named, and its menu opens at the button and is operable.
     await page.evaluate(() => (location.hash = "#/"));
     await page.waitForSelector(".file-card .more");
     const label = await page.locator(".file-card .more").first().getAttribute("aria-label");
     check("the more button names its file", /^More actions for .+/.test(label ?? ""), label ?? "");
-    await page.locator(".file-card .more").first().focus();
+    await kbFocus(page, ".file-card .more");
     await page.keyboard.press("Enter");
     await page.waitForSelector(".menu");
     const box = await page.locator(".menu").boundingBox();
@@ -143,7 +149,7 @@ try {
     check("editor has a <main>, a <header> and an <h1>", (await page.locator("main").count()) === 1 && (await page.locator("header.topbar").count()) === 1 && (await page.locator("h1").count()) === 1);
 
     // Main menu
-    await page.locator(".tbtn[title='Main menu']").focus();
+    await kbFocus(page, ".tbtn[title='Main menu']");
     check("main menu trigger announces a menu", (await page.getAttribute(".tbtn[title='Main menu']", "aria-haspopup")) === "menu" && (await page.getAttribute(".tbtn[title='Main menu']", "aria-expanded")) === "false");
     await page.keyboard.press("Enter");
     await page.waitForSelector(".menu[role=menu]");
@@ -200,7 +206,7 @@ try {
     await page.keyboard.press("Escape");
 
     // Context menu from the keyboard
-    await page.locator("#dt-canvas").focus();
+    await kbFocus(page, "#dt-canvas");
     await page.keyboard.press("Shift+F10");
     const opened = await page.waitForSelector(".menu", { timeout: 3000 }).then(() => true, () => false);
     f = await focused(page);
@@ -212,10 +218,54 @@ try {
     f = await focused(page);
     check("Escape closes it and focus returns to the canvas", (await page.locator(".menu").count()) === 0 && f.id === "dt-canvas", JSON.stringify(f));
 
+    // The canvas focus ring belongs to keyboard users: no ring through mouse work after a key press
+    const outline = () => page.evaluate(() => getComputedStyle(document.getElementById("dt-canvas")).outlineStyle);
+    await page.locator("#dt-canvas").click({ position: { x: 60, y: 500 } });
+    await page.keyboard.press("v");
+    await page.locator("#dt-canvas").click({ position: { x: 80, y: 520 } });
+    check("no focus ring on the canvas during mouse work after a key press", (await outline()) === "none", await outline());
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("Tab");
+    check("Tab to the canvas shows the focus ring", (await focused(page)).id === "dt-canvas" && (await outline()) === "solid", await outline());
+    await page.locator("#dt-canvas").click({ position: { x: 80, y: 520 } });
+    check("clicking the canvas removes the ring", (await outline()) === "none");
+
+    // A button that was clicked doesn't keep Enter; arrows on a clicked tab nudge
+    await page.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), card.id);
+    await page.waitForSelector("button[aria-label='Add fill']");
+    const fills = async () => (await nodeNamed(page, "Card")).fills.length;
+    const f0 = await fills();
+    await page.click("button[aria-label='Add fill']");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(200);
+    const sel = await page.evaluate(() => window.__dt.state().selection);
+    check("Enter after clicking a button acts on the design (no second fill, children selected)", (await fills()) === f0 + 1 && sel.length === 1 && sel[0] === box.id, `${f0} -> ${await fills()}, selection ${sel.length}`);
+    await page.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), card.id);
+    await page.click("#right-tab-design");
+    const x0 = (await nodeNamed(page, "Card")).x;
+    await page.keyboard.press("ArrowRight");
+    await page.waitForTimeout(200);
+    check("arrows after clicking a tab nudge the selection instead of switching tabs", (await page.getAttribute("#right-tab-design", "aria-selected")) === "true" && (await nodeNamed(page, "Card")).x === x0 + 1);
+    await page.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), card.id);
+    await kbFocus(page, "#right-tab-design");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.press("ArrowRight");
+    check("arrows on a keyboard-focused tab still switch tabs", (await page.getAttribute("#right-tab-prototype", "aria-selected")) === "true");
+    await page.click("#right-tab-design");
+
+    // Hovering a menu item focuses it, so hover and keyboard show one item
+    await kbFocus(page, ".tbtn[title='Main menu']");
+    await page.keyboard.press("Enter");
+    await page.waitForSelector(".menu");
+    await page.hover(".menu [role=menuitem]:has-text('Undo')");
+    check("the hovered menu item is the focused one", (await focused(page)).label.startsWith("Undo"));
+    await page.keyboard.press("Escape");
+
     // Number fields keep focus on Enter
     await page.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), box.id);
     await page.waitForSelector("input[aria-label='Width']");
-    await page.locator("input[aria-label='Width']").focus();
+    await kbFocus(page, "input[aria-label='Width']");
     await page.keyboard.type("150");
     await page.keyboard.press("Enter");
     await page.waitForTimeout(300);
@@ -240,18 +290,18 @@ try {
     check("Escape reverts the field and focus goes to the canvas, not the body", (await nodeNamed(page, "Box")).width === 1e6 && f.id === "dt-canvas", JSON.stringify(f));
 
     // The Claude panel's close button
-    await page.locator("#claude-toggle").focus();
+    await kbFocus(page, "#claude-toggle");
     await page.keyboard.press("Enter");
     await page.waitForSelector(".chat");
     check("the Claude toggle reports pressed", (await page.getAttribute("#claude-toggle", "aria-pressed")) === "true");
-    await page.locator("button[aria-label='Close Claude panel']").focus();
+    await kbFocus(page, "button[aria-label='Close Claude panel']");
     await page.keyboard.press("Enter");
     await page.waitForSelector(".chat", { state: "detached" });
     f = await focused(page);
     check("closing the Claude panel with its X leaves focus on its toolbar button", f.tag !== "BODY" && f.id === "claude-toggle", JSON.stringify(f));
 
     // Presenter
-    await page.locator(".tbtn[title='Present']").focus();
+    await kbFocus(page, ".tbtn[title='Present']");
     await page.keyboard.press("Enter");
     await page.waitForSelector(".presenter");
     await page.waitForTimeout(200);
@@ -282,7 +332,7 @@ try {
     check("the 9 alignment buttons are named", names.length === 9 && names.every(Boolean) && names[0] === "Align top left" && names[8] === "Align bottom right", names.join("|"));
 
     // Share dialog in a short window: the body scrolls and the focused control is visible
-    await page.locator(".tbtn[title='Share for live editing']").focus();
+    await kbFocus(page, ".tbtn[title='Share for live editing']");
     await page.keyboard.press("Enter");
     await page.waitForSelector(".share-dialog");
     await page.setViewportSize({ width: 640, height: 360 });
@@ -453,34 +503,48 @@ try {
     await page.waitForTimeout(3500);
     await page.context().close();
 
-    // Offline queue: a message that waited more than 10 s for a key is confirmed first
-    const p2 = await newPage();
-    await p2.route("**/v1/messages*", async (route) => {
-      if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
-      requests++;
-      await route.fulfill({ status: 200, headers: { ...cors, "content-type": "text/event-stream" }, body: sse(message([{ type: "text", text: "sent after confirmation" }], "end_turn")) });
-    });
-    await p2.addInitScript(() => localStorage.setItem("dt:chatMode", "api"));
-    await p2.goto(URL);
-    await p2.waitForSelector(".files", { timeout: 20000 });
-    await p2.click("button:has-text('New design file')");
-    await p2.waitForSelector("#dt-canvas", { timeout: 20000 });
-    await p2.keyboard.press("Control+/");
-    await p2.waitForSelector(".chat");
-    requests = 0;
-    await p2.locator(".chat-input textarea").fill("make a poster");
-    await p2.keyboard.press("Enter");
-    await p2.waitForFunction(() => window.__dt.chat().queued);
+    // Offline queue: a message that waited more than 10 s for a key is confirmed first.
+    // Two pages wait together: one answers the question, the other sends something newer.
+    const queued = async (name) => {
+      const pg = await newPage();
+      pg.bodies = [];
+      await pg.route("**/v1/messages*", async (route) => {
+        if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
+        pg.bodies.push(route.request().postData() ?? "");
+        await route.fulfill({ status: 200, headers: { ...cors, "content-type": "text/event-stream" }, body: sse(message([{ type: "text", text: "sent after confirmation" }], "end_turn")) });
+      });
+      await pg.addInitScript(() => localStorage.setItem("dt:chatMode", "api"));
+      await pg.goto(URL);
+      await pg.waitForSelector(".files", { timeout: 20000 });
+      await pg.click("button:has-text('New design file')");
+      await pg.waitForSelector("#dt-canvas", { timeout: 20000 });
+      await pg.keyboard.press("Control+/");
+      await pg.waitForSelector(".chat");
+      await pg.locator(".chat-input textarea").fill(name);
+      await pg.keyboard.press("Enter");
+      await pg.waitForFunction(() => window.__dt.chat().queued);
+      return pg;
+    };
+    const p2 = await queued("make a poster");
+    const p3 = await queued("old request");
     await p2.waitForTimeout(10500);
-    await p2.locator(".bridge-setup input[type=password]").fill("sk-ant-test");
-    await p2.locator(".bridge-setup button:has-text('Connect')").first().click();
-    await p2.waitForSelector("text=Send queued message?");
+    for (const pg of [p2, p3]) {
+      await pg.locator(".bridge-setup input[type=password]").fill("sk-ant-test");
+      await pg.locator(".bridge-setup button:has-text('Connect')").first().click();
+      await pg.waitForSelector("text=Send queued message?");
+    }
     await p2.waitForTimeout(500);
-    check("a prompt that waited over 10 s asks before sending", requests === 0 && (await p2.locator("text=Send queued message?").count()) >= 1, `${requests} requests`);
+    check("a prompt that waited over 10 s asks before sending", p2.bodies.length === 0 && (await p2.locator("text=Send queued message?").count()) >= 1, `${p2.bodies.length} requests`);
     await p2.locator(".chat-input button:has-text('Send')").first().click();
     await p2.waitForFunction(() => window.__dt.chat().items.some((i) => i.kind === "assistant"), null, { timeout: 10000 });
-    check("Send sends it", requests >= 1);
+    check("Send sends it", p2.bodies.length === 1 && p2.bodies[0].includes("make a poster"));
+    await p3.locator(".chat-input textarea").fill("a newer message");
+    await p3.keyboard.press("Enter");
+    await p3.waitForFunction(() => window.__dt.chat().items.some((i) => i.kind === "assistant"), null, { timeout: 10000 });
+    await p3.waitForTimeout(500);
+    check("a new message replaces the queued one waiting for confirmation", p3.bodies.length === 1 && p3.bodies[0].includes("a newer message") && !p3.bodies[0].includes("old request") && (await p3.locator("text=Send queued message?").count()) === 0, `${p3.bodies.length} requests`);
     await p2.context().close();
+    await p3.context().close();
   }
 
   const page = await newPage();

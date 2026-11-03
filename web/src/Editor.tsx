@@ -183,6 +183,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   }, [ready, fileId]);
 
   useFrameLabelColors(ready);
+  useCanvasFocusRing();
 
   // Autosave to IndexedDB, with an occasional thumbnail.
   //
@@ -609,6 +610,35 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       )}
     </div>
   );
+}
+
+/** The canvas shows its focus ring (`data-kbd-focus`) only when Tab or F6 brought focus to it:
+ *  after any other key the browser would keep drawing it through every click and drag. */
+function useCanvasFocusRing() {
+  useEffect(() => {
+    let viaTab = false;
+    const canvas = () => document.getElementById("dt-canvas");
+    const key = (e: KeyboardEvent) => {
+      viaTab = e.key === "Tab" || e.key === "F6";
+    };
+    const focusin = (e: FocusEvent) => {
+      const el = canvas();
+      if (!el) return;
+      if (e.target === el && viaTab) el.setAttribute("data-kbd-focus", "");
+      else el.removeAttribute("data-kbd-focus");
+    };
+    const clear = () => canvas()?.removeAttribute("data-kbd-focus");
+    document.addEventListener("keydown", key, true);
+    document.addEventListener("focusin", focusin, true);
+    document.addEventListener("pointerdown", clear, true);
+    document.addEventListener("focusout", clear, true);
+    return () => {
+      document.removeEventListener("keydown", key, true);
+      document.removeEventListener("focusin", focusin, true);
+      document.removeEventListener("pointerdown", clear, true);
+      document.removeEventListener("focusout", clear, true);
+    };
+  }, []);
 }
 
 /** Frame names on the canvas must read on any page colour: pick the pair of label colours with

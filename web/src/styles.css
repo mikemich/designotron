@@ -604,7 +604,7 @@ textarea.textinput {
   contain: strict;
 }
 /* Pixel-sized from the canvas size (not percentages), so they never depend on container layout. */
-.canvas:focus-visible {
+.canvas[data-kbd-focus]:focus {
   outline: 2px solid var(--select);
   outline-offset: -2px;
 }

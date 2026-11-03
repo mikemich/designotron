@@ -4,7 +4,7 @@ import { dispatch, getDoc, query, useDoc, useSelection, useStore, type RightTab 
 import { DesignPanel } from "./DesignPanel";
 import { ReviewPanel } from "./ReviewPanel";
 import { AppPanel } from "./AppPanel";
-import { IconButton, NumberField, Section, SelectField } from "../ui/controls";
+import { focusedByPointer, IconButton, NumberField, Section, SelectField } from "../ui/controls";
 import type { Interaction, Node, OverlaySettings } from "../types";
 import { DEFAULT_OVERLAY, isMissingDestination, newInteraction, overlayDim, SCREEN_TYPES, startFrame } from "../prototype";
 import { exportProjectZip, nodeSvg } from "../exporter";
@@ -24,6 +24,8 @@ export function RightPanel() {
   const set = (rightTab: RightTab) => useStore.setState({ rightTab });
   // Arrow keys move between tabs (only the selected one is a Tab stop).
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // A tab that was clicked leaves the arrows to the design (they nudge the selection).
+    if (focusedByPointer(e.target as Element)) return;
     const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
     const home = e.key === "Home" ? 0 : e.key === "End" ? TABS.length - 1 : -1;
     if (!step && home < 0) return;

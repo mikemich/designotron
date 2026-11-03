@@ -2,6 +2,7 @@ import * as A from "./actions";
 import { copySelection, pasteHere, pasteReplace } from "./canvas/contextMenu";
 import { dispatch, getDoc, pointerDrag, selectSibling, selection, setTool, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
 import { useShortcuts } from "./panels/ShortcutsDialog";
+import { focusedByPointer } from "./ui/controls";
 
 function isTyping(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement;
@@ -62,9 +63,12 @@ function stepPage(dir: 1 | -1) {
 export function installShortcuts(): () => void {
   const onKey = (e: KeyboardEvent) => {
     if (isTyping(e) || useStore.getState().presenting) return;
-    // Enter and Space on a focused button, link, tab or menu item activate that control
-    // (without this a selection made Enter select its children instead of opening the menu).
-    if ((e.key === "Enter" || e.key === " ") && (e.target as HTMLElement)?.closest?.("button, a[href], [role=menuitem], [role=tab]")) return;
+    // Enter and Space on a button, link, tab or menu item reached by keyboard activate that
+    // control (without this a selection made Enter select its children instead of opening the
+    // menu). A button that was clicked doesn't keep Enter: it acts on the design, as on the canvas.
+    const target = e.target as HTMLElement | null;
+    const designEnter = e.key === "Enter" && focusedByPointer(target);
+    if ((e.key === "Enter" || e.key === " ") && !designEnter && target?.closest?.("button, a[href], [role=menuitem], [role=tab]")) return;
     const mod = e.metaKey || e.ctrlKey;
     if (!mod && inOverlay(e)) return;
     const k = e.key.toLowerCase();

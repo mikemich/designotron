@@ -151,6 +151,8 @@ export function ChatPanel() {
   const staleQueue = useQueueConfirm((s) => s.stale);
   const submit = () => {
     if (!text.trim()) return;
+    // A new message replaces a queued one that was waiting for confirmation.
+    if (useQueueConfirm.getState().stale) discardQueued();
     send(text);
     setText("");
   };
