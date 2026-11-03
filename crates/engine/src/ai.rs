@@ -273,10 +273,10 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "set_prototype",
-      "description": "Add a prototype interaction: clicking nodeId navigates to destinationId (a top-level frame), goes back, opens a URL, or works with overlays. open_overlay shows destinationId (a top-level frame, e.g. a modal, menu or sheet) on top of the current screen; close_overlay closes the topmost overlay (put it on a close button inside the overlay); swap_overlay replaces the topmost overlay with destinationId. Overlays default to centred, a 30% black dimmed background and closing when clicking outside; change that with `overlay`.",
+      "description": "Add a prototype interaction: by default clicking nodeId navigates to destinationId (a top-level frame), goes back, opens a URL, or works with overlays. open_overlay shows destinationId (a top-level frame, e.g. a modal, menu or sheet) on top of the current screen; close_overlay closes the topmost overlay (put it on a close button inside the overlay); swap_overlay replaces the topmost overlay with destinationId. Overlays default to centred, a 30% black dimmed background and closing when clicking outside; change that with `overlay`.",
       "input_schema": { "type": "object", "properties": {
         "nodeId": { "type": "string" }, "destinationId": { "type": "string" },
-        "action": { "type": "string", "enum": ["navigate", "back", "open_url", "open_overlay", "close_overlay", "swap_overlay"] }, "url": { "type": "string" },
+        "action": { "type": "string", "enum": ["navigate", "back", "open_url", "open_overlay", "close_overlay", "swap_overlay", "scroll_to", "change_to"], "description": "scroll_to scrolls the player to destinationId (a layer in the same top-level frame); change_to switches the instance holding nodeId to destinationId, a variant of the same component set (put it on a variant of the set, or a layer inside one)" }, "url": { "type": "string" },
         "overlay": { "type": "object", "description": "For open_overlay / swap_overlay", "properties": {
           "position": { "type": "string", "enum": ["center", "top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right", "manual"] },
           "offsetX": { "type": "number", "description": "manual: x from the top-left of nodeId" },
@@ -285,8 +285,12 @@ pub fn tool_defs() -> Value {
           "background": { "type": ["string", "null"], "description": "Dim colour behind the overlay (hex, default #000000); null or \"none\" for no dimming" },
           "backgroundOpacity": { "type": "number", "description": "0-1, default 0.3" }
         } },
-        "trigger": { "type": "string", "enum": ["click", "hover", "press", "delay"] },
-        "transition": { "type": "string", "enum": ["instant", "dissolve", "smart_animate", "slide_left", "slide_right", "slide_up", "slide_down"] },
+        "trigger": { "type": "string", "enum": ["click", "hover", "press", "delay", "mouse_enter", "mouse_leave", "mouse_down", "mouse_up", "key"], "description": "hover and press revert when the pointer leaves or lets go; key needs `key`" },
+        "key": { "type": "string", "description": "For trigger key: a key or combination such as 'Enter', 'ArrowRight' or 'Shift+K'" },
+        "transition": { "type": "string", "enum": ["instant", "dissolve", "smart_animate", "slide_left", "slide_right", "slide_up", "slide_down", "move_in", "move_out", "push"], "description": "smart_animate matches the direct children of both screens by name" },
+        "direction": { "type": "string", "enum": ["left", "right", "up", "down"], "description": "For move_in, move_out and push (default left)" },
+        "easing": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out", "ease_in_back", "ease_out_back", "ease_in_out_back"], "description": "Default ease_out" },
+        "duration": { "type": "number", "description": "Transition milliseconds (default 300)" },
         "clear": { "type": "boolean", "description": "Remove existing interactions first" },
         "delay": { "type": "number", "description": "Milliseconds before a delay trigger fires (default 800)" }
       }, "required": ["nodeId"] }
@@ -895,6 +899,8 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
       ("open_overlay", Action::OpenOverlay),
       ("close_overlay", Action::CloseOverlay),
       ("swap_overlay", Action::SwapOverlay),
+      ("scroll_to", Action::ScrollTo),
+      ("change_to", Action::ChangeTo),
     ],
   )?;
   let trigger = parse::exact(
@@ -907,8 +913,58 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
       ("hover", Trigger::OnHover),
       ("press", Trigger::OnPress),
       ("delay", Trigger::AfterDelay),
+      ("mouse_enter", Trigger::MouseEnter),
+      ("mouse_leave", Trigger::MouseLeave),
+      ("mouse_down", Trigger::MouseDown),
+      ("mouse_up", Trigger::MouseUp),
+      ("key", Trigger::Key),
     ],
   )?;
+  let key = match input.get("key").filter(|v| !v.is_null()) {
+    Some(k) => Some(normalize_key(k.as_str().ok_or("key must be text like 'Shift+K'")?)?),
+    None => None,
+  };
+  if trigger == Trigger::Key && key.is_none() {
+    return Err("trigger key needs `key`, a key or combination such as 'Enter' or 'Shift+K'".into());
+  }
+  let key = if trigger == Trigger::Key { key } else { None };
+  let direction = parse::exact(
+    &cx,
+    "direction",
+    input.get("direction"),
+    crate::model::Direction::Left,
+    &[
+      ("left", crate::model::Direction::Left),
+      ("right", crate::model::Direction::Right),
+      ("up", crate::model::Direction::Up),
+      ("down", crate::model::Direction::Down),
+    ],
+  )?;
+  let easing = parse::exact(
+    &cx,
+    "easing",
+    input.get("easing"),
+    crate::model::Easing::EaseOut,
+    &[
+      ("linear", crate::model::Easing::Linear),
+      ("ease_in", crate::model::Easing::EaseIn),
+      ("ease_out", crate::model::Easing::EaseOut),
+      ("ease_in_out", crate::model::Easing::EaseInOut),
+      ("ease_in_back", crate::model::Easing::EaseInBack),
+      ("ease_out_back", crate::model::Easing::EaseOutBack),
+      ("ease_in_out_back", crate::model::Easing::EaseInOutBack),
+    ],
+  )?;
+  let duration_ms = match input.get("duration").filter(|v| !v.is_null()) {
+    Some(v) => parse::number(&cx, "duration", v).and_then(|d| {
+      if (0.0..=60000.0).contains(&d) {
+        Ok(d)
+      } else {
+        Err(cx.err("duration", "must be between 0 and 60000 milliseconds"))
+      }
+    })?,
+    None => 300.0,
+  };
   let transition = parse::exact(
     &cx,
     "transition",
@@ -922,6 +978,9 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
       ("slide_right", Transition::SlideRight),
       ("slide_up", Transition::SlideUp),
       ("slide_down", Transition::SlideDown),
+      ("move_in", Transition::MoveIn),
+      ("move_out", Transition::MoveOut),
+      ("push", Transition::Push),
     ],
   )?;
   let url = input.get("url").and_then(|v| v.as_str());
@@ -955,6 +1014,46 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
       Some(_) => {}
     }
   }
+  match action {
+    Action::ScrollTo => {
+      let d = destination
+        .as_deref()
+        .ok_or("destinationId (the layer to scroll to) is required for scroll_to")?;
+      if e.doc.get(d).is_none() {
+        return Err(format!("destinationId {d} doesn't exist"));
+      }
+      if e.doc.top_level_of(d) != e.doc.top_level_of(id) {
+        return Err(format!("destinationId {d} must be inside the same top-level frame as {id}"));
+      }
+    }
+    Action::ChangeTo => {
+      let d = destination
+        .as_deref()
+        .ok_or("destinationId (the variant to change to) is required for change_to")?;
+      let dest_set = e
+        .doc
+        .get(d)
+        .filter(|v| v.kind == NodeType::Component)
+        .and_then(|v| v.parent.as_deref())
+        .filter(|p| e.doc.get(p).is_some_and(|p| p.kind == NodeType::ComponentSet))
+        .ok_or_else(|| format!("destinationId {d} must be a variant (a component inside a component set)"))?;
+      let sets = enclosing_sets(&e.doc, id);
+      if sets.is_empty() {
+        return Err(format!(
+          "{id} isn't a variant or inside one (or inside an instance of one), so there is nothing to change"
+        ));
+      }
+      if !sets.iter().any(|s| s == dest_set) {
+        let name = |s: &str| e.doc.get(s).map(|n| n.name.clone()).unwrap_or_default();
+        return Err(format!(
+          "destinationId {d} belongs to the set '{}'; {id} can only change to a variant of '{}'",
+          name(dest_set),
+          name(&sets[0])
+        ));
+      }
+    }
+    _ => {}
+  }
   let overlay = overlay_settings(input.get("overlay"))?;
   let delay_ms = match input.get("delay").filter(|v| !v.is_null()) {
     Some(v) => parse::number(&cx, "delay", v).and_then(|d| {
@@ -970,9 +1069,11 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
   if input.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
     n.interactions.clear();
   }
-  // A second interaction with the same trigger would never play, so it replaces the first.
-  let (replaced, kept): (Vec<Interaction>, Vec<Interaction>) =
-    std::mem::take(&mut n.interactions).into_iter().partition(|i| i.trigger == trigger);
+  // A second interaction with the same trigger would never play, so it replaces the first
+  // (key triggers are told apart by their key).
+  let (replaced, kept): (Vec<Interaction>, Vec<Interaction>) = std::mem::take(&mut n.interactions)
+    .into_iter()
+    .partition(|i| i.trigger == trigger && (trigger != Trigger::Key || i.key == key));
   n.interactions = kept;
   n.interactions.push(Interaction {
     trigger,
@@ -981,7 +1082,10 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
     destination,
     url: url.map(String::from),
     transition,
-    duration_ms: 300.0,
+    duration_ms,
+    key,
+    direction,
+    easing,
     overlay,
   });
   let mut r = json!({ "ok": true });
@@ -2782,6 +2886,101 @@ pub fn diff_patch(before: &Node, after: &Node) -> Value {
     }
   }
   Value::Object(out)
+}
+
+/// Component sets a layer can change variants in, nearest first: the set of the variant it is
+/// in, or of the instance it is in (or is).
+fn enclosing_sets(doc: &Document, id: &str) -> Vec<String> {
+  let mut out = Vec::new();
+  let mut at = doc.get(id);
+  while let Some(n) = at {
+    let comp = match n.kind {
+      NodeType::Component => Some(n.id.as_str()),
+      NodeType::Instance => n.instance.as_ref().map(|i| i.component_id.as_str()),
+      _ => None,
+    };
+    if let Some(set) = comp.and_then(|c| doc.get(c)).and_then(|c| c.parent.as_deref()) {
+      if doc.get(set).is_some_and(|s| s.kind == NodeType::ComponentSet) && !out.iter().any(|o| o == set) {
+        out.push(set.to_string());
+      }
+    }
+    at = n.parent.as_deref().and_then(|p| doc.get(p));
+  }
+  out
+}
+
+/// "shift+k" → "Shift+K": modifiers ordered Ctrl, Alt, Shift, Meta, then one key (a letter,
+/// digit, or a name such as Enter or ArrowRight). Mirrors `keyName` in web/src/prototype.ts.
+fn normalize_key(s: &str) -> Result<String, String> {
+  const NAMED: &[&str] = &[
+    "Enter",
+    "Escape",
+    "Space",
+    "Tab",
+    "Backspace",
+    "Delete",
+    "ArrowLeft",
+    "ArrowRight",
+    "ArrowUp",
+    "ArrowDown",
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
+  ];
+  let (mut ctrl, mut alt, mut shift, mut meta) = (false, false, false, false);
+  let mut key: Option<String> = None;
+  let parts: Vec<&str> = if s.trim() == "+" {
+    vec!["+"]
+  } else {
+    s.split('+').map(str::trim).collect()
+  };
+  for p in parts {
+    match p.to_lowercase().as_str() {
+      "ctrl" | "control" => ctrl = true,
+      "alt" | "option" => alt = true,
+      "shift" => shift = true,
+      "meta" | "cmd" | "command" => meta = true,
+      "" => return Err(format!("key '{s}' isn't a key or combination like 'Shift+K'")),
+      l => {
+        let name = match l {
+          "esc" => Some("Escape"),
+          "return" => Some("Enter"),
+          "del" => Some("Delete"),
+          "left" => Some("ArrowLeft"),
+          "right" => Some("ArrowRight"),
+          "up" => Some("ArrowUp"),
+          "down" => Some("ArrowDown"),
+          _ => NAMED.iter().find(|n| n.to_lowercase() == l).copied(),
+        };
+        let k = match name {
+          Some(n) => n.to_string(),
+          None if p.chars().count() == 1 => p.to_uppercase(),
+          None => {
+            return Err(format!(
+              "key '{p}' isn't supported; use a single character or one of {}",
+              NAMED.join(", ")
+            ))
+          }
+        };
+        if key.replace(k).is_some() {
+          return Err(format!(
+            "key '{s}' has more than one key; use modifiers plus one key, like 'Shift+K'"
+          ));
+        }
+      }
+    }
+  }
+  let key = key.ok_or_else(|| format!("key '{s}' has no key, only modifiers"))?;
+  let mut out = String::new();
+  for (on, m) in [(ctrl, "Ctrl"), (alt, "Alt"), (shift, "Shift"), (meta, "Meta")] {
+    if on {
+      out.push_str(m);
+      out.push('+');
+    }
+  }
+  out.push_str(&key);
+  Ok(out)
 }
 
 /// `set_prototype`'s `overlay` options; anything left out keeps Figma's defaults.

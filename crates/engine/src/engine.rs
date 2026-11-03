@@ -561,6 +561,12 @@ pub enum Query {
   },
   ExportSvg {
     id: NodeId,
+    /// Layers laid out but not painted (the prototype player draws them elsewhere).
+    #[serde(default)]
+    hide: Vec<NodeId>,
+    /// Only the children, cropped to what they paint; answers `{svg, x, y, width, height}`.
+    #[serde(default)]
+    children_only: bool,
   },
   ExportHtml {
     id: NodeId,
@@ -2808,7 +2814,18 @@ impl Engine {
       Query::Comments { page, include_resolved } => crate::comments::list(&self.doc, page.as_deref(), include_resolved),
       Query::GridOverlay { page } => crate::grids::overlay(&self.doc, page.as_deref().unwrap_or(&self.page)),
       Query::Copy { ids } => json!(self.copy(&ids)),
-      Query::ExportSvg { id } => json!(render::export_svg(&self.doc, &id, m)),
+      Query::ExportSvg { id, hide, children_only } => {
+        if hide.is_empty() && !children_only {
+          json!(render::export_svg(&self.doc, &id, m))
+        } else {
+          let c = render::export_svg_parts(&self.doc, &id, m, &hide, children_only);
+          if children_only {
+            json!({ "svg": c.svg, "x": c.bounds.x, "y": c.bounds.y, "width": c.bounds.width, "height": c.bounds.height })
+          } else {
+            json!(c.svg)
+          }
+        }
+      }
       Query::ExportHtml { id } => json!(codegen::export_html(&self.doc, &id, m)),
       Query::ExportReact { id } => json!(codegen::export_react(&self.doc, &id, m)),
       Query::ExportProject => {

@@ -1260,4 +1260,157 @@ fn paint_specs_accept_conic_diamond_handles_and_stroke_keys() {
       json!({ "nodes": [{ "type": "rectangle", "strokeJoin": "sharp" }] })
     ))
     .is_err());
+
+mod w3a_prototype {
+  use super::*;
+  use crate::model::{Direction, Easing, Trigger};
+
+  /// Variants Off, On, A, B (not yet in sets) and a plain frame.
+  fn sets() -> (Engine, [String; 4], String) {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "frame", "name": "Off", "width": 40, "height": 20, "children": [{ "type": "rectangle", "name": "Knob", "width": 10, "height": 10 }] },
+        { "type": "frame", "name": "On", "x": 100, "width": 40, "height": 20 },
+        { "type": "frame", "name": "A", "x": 200, "width": 40, "height": 20 },
+        { "type": "frame", "name": "B", "x": 300, "width": 40, "height": 20 },
+        { "type": "frame", "name": "Page", "x": 400, "width": 300, "height": 300 }] }),
+    );
+    let ids = created(&r);
+    (e, [ids[0].clone(), ids[1].clone(), ids[2].clone(), ids[3].clone()], ids[4].clone())
+  }
+
+  #[test]
+  fn new_triggers_transitions_and_easing_are_validated_loudly() {
+    let (mut e, ids) = super::prototype_screens();
+    let (home, other, btn) = (&ids[0], &ids[1], &ids[2]);
+    run(
+      &mut e,
+      "set_prototype",
+      json!({ "nodeId": btn, "destinationId": other, "trigger": "key", "key": "shift+k",
+        "transition": "push", "direction": "up", "easing": "ease_in_out_back", "duration": 450 }),
+    );
+    let i = &e.doc.get(btn).unwrap().interactions[0];
+    assert_eq!(
+      (i.trigger, i.key.as_deref(), i.direction, i.easing, i.duration_ms),
+      (Trigger::Key, Some("Shift+K"), Direction::Up, Easing::EaseInOutBack, 450.0)
+    );
+    // A different key is its own interaction; the same key replaces.
+    run(
+      &mut e,
+      "set_prototype",
+      json!({ "nodeId": btn, "destinationId": home, "trigger": "key", "key": "Enter" }),
+    );
+    assert_eq!(e.doc.get(btn).unwrap().interactions.len(), 2);
+    run(
+      &mut e,
+      "set_prototype",
+      json!({ "nodeId": btn, "destinationId": home, "trigger": "key", "key": "Shift+K" }),
+    );
+    assert_eq!(e.doc.get(btn).unwrap().interactions.len(), 2);
+    let err = |e: &mut Engine, v: Value| e.dispatch(ai("set_prototype", v)).unwrap_err();
+    assert!(err(&mut e, json!({ "nodeId": btn, "destinationId": home, "trigger": "key" })).contains("needs `key`"));
+    assert!(err(
+      &mut e,
+      json!({ "nodeId": btn, "destinationId": home, "trigger": "key", "key": "Shift+K+L" })
+    )
+    .contains("more than one key"));
+    let bad = err(&mut e, json!({ "nodeId": btn, "destinationId": home, "easing": "bouncy" }));
+    assert!(
+      bad.contains("bouncy") && bad.contains("ease_in_out_back") && bad.contains("linear"),
+      "{bad}"
+    );
+    assert!(err(&mut e, json!({ "nodeId": btn, "destinationId": home, "direction": "sideways" })).contains("left, right, up, down"));
+    for t in ["mouse_enter", "mouse_leave", "mouse_down", "mouse_up"] {
+      run(
+        &mut e,
+        "set_prototype",
+        json!({ "nodeId": btn, "destinationId": home, "trigger": t, "transition": "move_out" }),
+      );
+    }
+  }
+
+  #[test]
+  fn scroll_to_needs_a_layer_in_the_same_screen() {
+    let (mut e, ids) = super::prototype_screens();
+    let (home, other, btn) = (&ids[0], &ids[1], &ids[2]);
+    run(
+      &mut e,
+      "set_prototype",
+      json!({ "nodeId": btn, "action": "scroll_to", "destinationId": home }),
+    );
+    assert_eq!(e.doc.get(btn).unwrap().interactions[0].action, Action::ScrollTo);
+    let msg = e
+      .dispatch(ai(
+        "set_prototype",
+        json!({ "nodeId": btn, "action": "scroll_to", "destinationId": other }),
+      ))
+      .unwrap_err();
+    assert!(msg.contains("same top-level frame"), "{msg}");
+    assert!(e
+      .dispatch(ai("set_prototype", json!({ "nodeId": btn, "action": "scroll_to" })))
+      .is_err());
+  }
+
+  #[test]
+  fn change_to_must_name_a_variant_of_the_same_set() {
+    let (mut e, [off, on, a, b], page) = sets();
+    let comp = |e: &mut Engine, id: String| {
+      e.dispatch(Command::CreateComponent { ids: vec![id] }).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+    };
+    let (off, on, a, b) = (comp(&mut e, off), comp(&mut e, on), comp(&mut e, a), comp(&mut e, b));
+    let toggle = e
+      .dispatch(Command::CombineVariants {
+        ids: vec![off.clone(), on.clone()],
+      })
+      .unwrap();
+    let toggle = toggle["id"].as_str().unwrap().to_string();
+    let other = e.dispatch(Command::CombineVariants { ids: vec![a, b] }).unwrap();
+    let other = other["id"].as_str().unwrap().to_string();
+    for (set, name) in [(&toggle, "Toggle"), (&other, "Other")] {
+      e.dispatch(Command::Update {
+        ids: vec![set.clone()],
+        patch: json!({ "name": name }),
+      })
+      .unwrap();
+    }
+    let kids = |e: &Engine, s: &str| e.doc.get(s).unwrap().children.clone();
+    let (t, o) = (kids(&e, &toggle), kids(&e, &other));
+    let knob = e.doc.get(&t[0]).unwrap().children[0].clone();
+    let set = |e: &mut Engine, v: Value| e.dispatch(ai("set_prototype", v));
+    // Without a destination.
+    assert!(set(&mut e, json!({ "nodeId": t[0], "action": "change_to" })).is_err());
+    // On a variant, and on a layer inside one.
+    set(&mut e, json!({ "nodeId": t[0], "action": "change_to", "destinationId": t[1] })).unwrap();
+    set(&mut e, json!({ "nodeId": knob, "action": "change_to", "destinationId": t[1] })).unwrap();
+    assert_eq!(e.doc.get(&t[0]).unwrap().interactions[0].action, Action::ChangeTo);
+    // A variant of a different set names the set the layer belongs to.
+    let msg = set(&mut e, json!({ "nodeId": t[0], "action": "change_to", "destinationId": o[0] })).unwrap_err();
+    assert!(msg.contains("Other") && msg.contains("Toggle"), "{msg}");
+    // Not a variant at all, and a layer outside any set.
+    let msg = set(&mut e, json!({ "nodeId": t[0], "action": "change_to", "destinationId": page })).unwrap_err();
+    assert!(msg.contains("must be a variant"), "{msg}");
+    let msg = set(&mut e, json!({ "nodeId": page, "action": "change_to", "destinationId": t[1] })).unwrap_err();
+    assert!(msg.contains("nothing to change"), "{msg}");
+  }
+}
+
+/// Home, Settings and a button inside Home: [home, settings, button].
+fn prototype_screens() -> (Engine, Vec<String>) {
+  let mut e = engine();
+  let r = run(
+    &mut e,
+    "create_nodes",
+    json!({ "nodes": [
+      { "type": "frame", "name": "Home", "width": 300, "height": 300,
+        "children": [{ "type": "rectangle", "name": "Go", "width": 50, "height": 20 }] },
+      { "type": "frame", "name": "Settings", "x": 400, "width": 300, "height": 300 }] }),
+  );
+  let btn = r["names"]["Go"].as_str().unwrap().to_string();
+  (e, vec![created(&r)[0].clone(), created(&r)[1].clone(), btn])
 }

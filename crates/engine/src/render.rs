@@ -80,13 +80,63 @@ pub fn render_root(doc: &Document, root: &str, m: &dyn TextMeasurer, opts: Rende
 /// Renders a single node as a standalone SVG document cropped to everything it paints
 /// (outside strokes, shadows, blurs), like Figma's export bounds.
 pub fn export_svg(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
-  export_svg_in(doc, id, m, render_bounds(doc, id, m))
+  export_svg_in(doc, id, m, render_bounds(doc, id, m), &[])
+}
+
+/// An SVG with its page-space crop.
+pub struct SvgCrop {
+  pub svg: String,
+  pub bounds: Rect,
+}
+
+/// The prototype player's pieces of a screen. `hidden` layers are laid out but not painted.
+/// With `children_only` only the node's children are drawn (not its own fills, strokes or
+/// effects, and not clipped), cropped to what they paint, so a scrolling frame's content can
+/// be placed inside a scroller of its own. Otherwise this is `export_svg` with `hidden`.
+pub fn export_svg_parts(doc: &Document, id: &str, m: &dyn TextMeasurer, hidden: &[NodeId], children_only: bool) -> SvgCrop {
+  if !children_only {
+    let bounds = render_bounds(doc, id, m);
+    return SvgCrop {
+      svg: export_svg_in(doc, id, m, bounds, hidden),
+      bounds,
+    };
+  }
+  let Some(n) = doc.get(id) else {
+    return SvgCrop {
+      svg: String::new(),
+      bounds: Rect::default(),
+    };
+  };
+  let kids = n.children.iter().filter(|c| doc.get(c).is_some_and(|k| k.visible));
+  let b = Rect::union_all(kids.map(|c| render_bounds(doc, c, m))).unwrap_or_else(|| doc.abs_bounds(id));
+  let mut r = Renderer {
+    doc,
+    m,
+    opts: RenderOptions {
+      mode: Mode::Export,
+      hidden,
+    },
+    defs: String::new(),
+    uid: 0,
+    scope: String::new(),
+    bounds: HashMap::new(),
+  };
+  let place = Mat::translate(-b.x, -b.y).mul(&doc.abs_matrix(id));
+  let body = r.children(n);
+  let svg = format!(
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\" fill=\"none\"><defs>{defs}</defs><g transform=\"{t}\">{body}</g></svg>",
+    w = fmt(b.width.max(1.0)),
+    h = fmt(b.height.max(1.0)),
+    defs = r.defs,
+    t = place.svg(),
+  );
+  SvgCrop { svg, bounds: b }
 }
 
 /// Like `export_svg` but cropped to the node's geometry only, so the size matches the layer
 /// (code export embeds it in a box of that size).
 pub fn export_svg_geometry(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
-  export_svg_in(doc, id, m, doc.abs_bounds(id))
+  export_svg_in(doc, id, m, doc.abs_bounds(id), &[])
 }
 
 /// Page-space bounds of everything a node paints: its geometry plus outside/centre strokes
@@ -97,14 +147,14 @@ pub fn render_bounds(doc: &Document, id: &str, m: &dyn TextMeasurer) -> Rect {
   mat_bounds(&doc.abs_matrix(id), &local)
 }
 
-fn export_svg_in(doc: &Document, id: &str, m: &dyn TextMeasurer, b: Rect) -> String {
+fn export_svg_in(doc: &Document, id: &str, m: &dyn TextMeasurer, b: Rect, hidden: &[NodeId]) -> String {
   let Some(n) = doc.get(id) else { return String::new() };
   let mut r = Renderer {
     doc,
     m,
     opts: RenderOptions {
       mode: Mode::Export,
-      hidden: &[],
+      hidden,
     },
     defs: String::new(),
     uid: 0,
@@ -1436,5 +1486,72 @@ mod tests {
       spread: 0.0,
       ..Effect::default()
     }
+  }
+}
+
+#[cfg(test)]
+mod w3a_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::text::HeuristicMeasurer;
+
+  /// A 100x100 red clipping frame at (50, 20) with a blue child that overflows it (y 50..250)
+  /// and a green strip at the top.
+  fn scroller() -> Document {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut f = crate::ops::default_node(NodeType::Frame, "f".into(), "Frame".into());
+    f.x = 50.0;
+    f.y = 20.0;
+    f.width = 100.0;
+    f.height = 100.0;
+    f.clip_content = true;
+    f.fills = vec![crate::model::Paint::solid("#FF0000")];
+    doc.insert(f, None, &page, None);
+    for (id, y, color) in [("tall", 50.0, "#0000FF"), ("nav", 0.0, "#00FF00")] {
+      let mut c = crate::ops::default_node(NodeType::Rectangle, id.into(), id.into());
+      c.y = y;
+      c.width = 100.0;
+      c.height = if id == "tall" { 200.0 } else { 10.0 };
+      c.fills = vec![crate::model::Paint::solid(color)];
+      doc.insert(c, Some("f"), &page, None);
+    }
+    crate::layout::relayout_all(&mut doc, &HeuristicMeasurer);
+    doc
+  }
+
+  #[test]
+  fn children_only_crops_to_overflowing_children_and_skips_the_frame_paint() {
+    let doc = scroller();
+    let c = export_svg_parts(&doc, "f", &HeuristicMeasurer, &[], true);
+    assert_eq!(
+      (c.bounds.x, c.bounds.y, c.bounds.width, c.bounds.height),
+      (50.0, 20.0, 100.0, 250.0),
+      "{}",
+      c.svg
+    );
+    assert!(
+      c.svg.to_lowercase().contains("0000ff") && c.svg.contains("height=\"250\""),
+      "{}",
+      c.svg
+    );
+    assert!(
+      !c.svg.to_lowercase().contains("ff0000"),
+      "the frame's own fill is left out: {}",
+      c.svg
+    );
+    assert!(!c.svg.contains("clip-path"), "not clipped: {}", c.svg);
+    // The whole frame still clips and paints itself.
+    let full = export_svg_parts(&doc, "f", &HeuristicMeasurer, &[], false);
+    assert!(full.svg.to_lowercase().contains("ff0000") && full.svg.contains("clip-path"));
+  }
+
+  #[test]
+  fn hidden_layers_are_not_painted_but_stay_in_the_svg() {
+    let doc = scroller();
+    let c = export_svg_parts(&doc, "f", &HeuristicMeasurer, &["nav".to_string()], false);
+    assert!(c.svg.contains("visibility=\"hidden\""), "{}", c.svg);
+    assert!(!export_svg(&doc, "f", &HeuristicMeasurer).contains("visibility"));
   }
 }

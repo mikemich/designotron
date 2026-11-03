@@ -41,6 +41,7 @@ const ROOT_LOCAL_KEYS: &[&str] = &[
   "flipX",
   "flipY",
   "interactions",
+  "scrollBehavior",
   "constraints",
   "absolutePosition",
   "sizingH",

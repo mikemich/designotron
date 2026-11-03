@@ -456,11 +456,39 @@ impl<'a> Ctx<'a> {
         },
         _ => Place::Absolute,
       };
+      // Fixed layers of a scrolling frame stay put: the scrolling content moves into a box of its
+      // own and the fixed layers sit next to it.
+      let fixed = |c: &Node| c.scroll_behavior == crate::model::ScrollBehavior::Fixed && (n.layout.is_none() || c.absolute_position);
+      let split = n.overflow != crate::model::Overflow::None && n.layout.is_none();
+      let mut stuck = Vec::new();
       for cid in &n.children {
         let Some(c) = self.doc.get(cid).cloned() else { continue };
         if let Some(ce) = self.build(cid, child_place(&c)) {
-          el.children.push(ce);
+          if split && fixed(&c) {
+            stuck.push(ce);
+          } else {
+            el.children.push(ce);
+          }
         }
+      }
+      if !stuck.is_empty() {
+        let mut inner = El::new("div");
+        for (k, v) in [
+          ("position", "absolute"),
+          ("left", "0"),
+          ("top", "0"),
+          ("width", "100%"),
+          ("height", "100%"),
+        ] {
+          inner.s(k, v);
+        }
+        inner
+          .styles
+          .extend(el.styles.iter().filter(|(k, _)| k.starts_with("overflow")).cloned());
+        el.styles.retain(|(k, _)| !k.starts_with("overflow"));
+        inner.children = std::mem::take(&mut el.children);
+        el.children.push(inner);
+        el.children.extend(stuck);
       }
     }
     self.interactions(&mut el, &n);
@@ -620,7 +648,7 @@ impl<'a> Ctx<'a> {
         }
         Action::CloseOverlay => el.navigate = Some("close-overlay".into()),
         Action::OpenUrl => el.url = i.url.as_deref().and_then(crate::model::safe_link),
-        Action::ScrollTo => {}
+        Action::ScrollTo | Action::ChangeTo => {}
       }
     }
     if el.navigate.is_some() || el.url.is_some() {
@@ -904,8 +932,14 @@ impl<'a> Ctx<'a> {
           }
         }
       }
-      if n.clip_content && n.kind.is_frame_like() {
-        el.s("overflow", "hidden");
+      if n.kind.is_frame_like() {
+        match n.overflow {
+          crate::model::Overflow::Horizontal => el.s("overflow-x", "auto"),
+          crate::model::Overflow::Vertical => el.s("overflow-y", "auto"),
+          crate::model::Overflow::Both => el.s("overflow", "auto"),
+          crate::model::Overflow::None if n.clip_content => el.s("overflow", "hidden"),
+          crate::model::Overflow::None => {}
+        }
       }
     }
     let mut shadows: Vec<String> = n
@@ -1342,6 +1376,9 @@ fn tw_class(k: &str, v: &str) -> String {
     ("align-items", "flex-end") => "items-end".into(),
     ("align-items", "flex-start") => "items-start".into(),
     ("overflow", "hidden") => "overflow-hidden".into(),
+    ("overflow", "auto") => "overflow-auto".into(),
+    ("overflow-x", "auto") => "overflow-x-auto".into(),
+    ("overflow-y", "auto") => "overflow-y-auto".into(),
     ("margin", "0") => "m-0".into(),
     ("cursor", "pointer") => "cursor-pointer".into(),
     ("white-space", "pre") => "whitespace-pre".into(),
@@ -2585,5 +2622,53 @@ mod tests {
     let css = css_paint(&p, 200.0, 100.0);
     assert!(css.starts_with("linear-gradient(90deg"), "{css}");
     assert!(css.contains("25%") && css.contains("75%"), "{css}");
+  }
+}
+
+#[cfg(test)]
+mod w3a_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::text::HeuristicMeasurer;
+
+  fn page_with(overflow: crate::model::Overflow, fixed_nav: bool) -> Document {
+    let mut gen = IdGen::new(3);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut f = crate::ops::default_node(NodeType::Frame, "f".into(), "Screen".into());
+    f.width = 390.0;
+    f.height = 800.0;
+    f.overflow = overflow;
+    doc.insert(f, None, &page, None);
+    for (id, fixed) in [("nav", fixed_nav), ("body", false)] {
+      let mut c = crate::ops::default_node(NodeType::Frame, id.into(), id.into());
+      c.width = 390.0;
+      c.height = if id == "nav" { 80.0 } else { 2000.0 };
+      if fixed {
+        c.scroll_behavior = crate::model::ScrollBehavior::Fixed;
+      }
+      doc.insert(c, Some("f"), &page, None);
+    }
+    doc
+  }
+
+  #[test]
+  fn scrolling_frames_get_overflow_classes_and_fixed_layers_leave_the_scroller() {
+    use crate::model::Overflow;
+    let m = HeuristicMeasurer;
+    let src = export_react(&page_with(Overflow::Vertical, false), "f", &m);
+    assert!(src.contains("overflow-y-auto"), "{src}");
+    let src = export_react(&page_with(Overflow::Horizontal, false), "f", &m);
+    assert!(src.contains("overflow-x-auto"), "{src}");
+    let src = export_react(&page_with(Overflow::Both, false), "f", &m);
+    assert!(src.contains("overflow-auto"), "{src}");
+    // A fixed nav sits next to the scrolling box instead of inside it: the screen itself no
+    // longer scrolls, a new box inside it does.
+    let src = export_react(&page_with(Overflow::Vertical, true), "f", &m);
+    assert_eq!(src.matches("overflow-y-auto").count(), 1, "{src}");
+    assert!(
+      src.contains("h-full") || src.contains("height: 100%") || src.contains("100%"),
+      "{src}"
+    );
   }
 }

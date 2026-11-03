@@ -256,6 +256,13 @@ pub struct Node {
   pub text_style: Option<String>,
 
   pub interactions: Vec<Interaction>,
+  // Prototype (W3-A)
+  /// Frames: which directions the prototype player scrolls the content in.
+  #[serde(skip_serializing_if = "Overflow::is_none")]
+  pub overflow: Overflow,
+  /// Children of a scrolling frame: scroll with it, or stay put.
+  #[serde(skip_serializing_if = "ScrollBehavior::is_scroll")]
+  pub scroll_behavior: ScrollBehavior,
   /// Export rows (Figma's Export section); empty rows are left out of saved files.
   #[serde(skip_serializing_if = "Vec::is_empty")]
   pub export_settings: Vec<ExportSetting>,
@@ -323,6 +330,8 @@ impl Default for Node {
       fill_style: None,
       text_style: None,
       interactions: Vec::new(),
+      overflow: Overflow::None,
+      scroll_behavior: ScrollBehavior::Scroll,
       export_settings: Vec::new(),
       notes: String::new(),
       layout_grids: Vec::new(),
@@ -1019,6 +1028,12 @@ pub enum Trigger {
   OnHover,
   OnPress,
   AfterDelay,
+  MouseEnter,
+  MouseLeave,
+  MouseDown,
+  MouseUp,
+  /// A key or key combination, see `Interaction::key`.
+  Key,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1035,6 +1050,9 @@ pub enum Action {
   CloseOverlay,
   /// Replace the topmost overlay with `destination` (opens it when none is open).
   SwapOverlay,
+  /// Switch the instance holding this layer to another variant of its component set;
+  /// `destination` is the variant.
+  ChangeTo,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1048,6 +1066,79 @@ pub enum Transition {
   SlideRight,
   SlideUp,
   SlideDown,
+  /// The new screen slides over the old one (direction in `Interaction::direction`).
+  MoveIn,
+  /// The old screen slides away, revealing the new one.
+  MoveOut,
+  /// Both screens move together.
+  Push,
+}
+
+/// Direction of Move in, Move out and Push.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum Direction {
+  #[default]
+  Left,
+  Right,
+  Up,
+  Down,
+}
+
+impl Direction {
+  fn is_default(&self) -> bool {
+    *self == Direction::Left
+  }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum Easing {
+  Linear,
+  EaseIn,
+  #[default]
+  EaseOut,
+  EaseInOut,
+  EaseInBack,
+  EaseOutBack,
+  EaseInOutBack,
+}
+
+impl Easing {
+  fn is_default(&self) -> bool {
+    *self == Easing::EaseOut
+  }
+}
+
+/// Which directions a frame scrolls in the prototype player.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum Overflow {
+  #[default]
+  None,
+  Horizontal,
+  Vertical,
+  Both,
+}
+
+impl Overflow {
+  pub fn is_none(&self) -> bool {
+    *self == Overflow::None
+  }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ScrollBehavior {
+  #[default]
+  Scroll,
+  Fixed,
+}
+
+impl ScrollBehavior {
+  pub fn is_scroll(&self) -> bool {
+    *self == ScrollBehavior::Scroll
+  }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -1060,6 +1151,13 @@ pub struct Interaction {
   pub url: Option<String>,
   pub transition: Transition,
   pub duration_ms: f64,
+  /// Normalised key for the `Key` trigger, e.g. "Shift+K", "Enter", "ArrowRight".
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub key: Option<String>,
+  #[serde(skip_serializing_if = "Direction::is_default")]
+  pub direction: Direction,
+  #[serde(skip_serializing_if = "Easing::is_default")]
+  pub easing: Easing,
   /// Placement and behaviour of the overlay for `OpenOverlay` / `SwapOverlay`.
   pub overlay: OverlaySettings,
 }
@@ -1251,6 +1349,45 @@ mod link_tests {
 #[cfg(test)]
 mod interaction_tests {
   use super::*;
+
+  #[test]
+  fn w3a_defaults_load_and_stay_out_of_saved_files() {
+    let old = r#"{"trigger":"onClick","action":"navigate","destination":"a","transition":"dissolve","durationMs":0}"#;
+    let i: Interaction = serde_json::from_str(old).unwrap();
+    assert_eq!((i.easing, i.direction, i.key.clone()), (Easing::EaseOut, Direction::Left, None));
+    let v = serde_json::to_value(&i).unwrap();
+    for k in ["key", "direction", "easing"] {
+      assert!(v.get(k).is_none(), "{k}");
+    }
+    let v = serde_json::to_value(Node::default()).unwrap();
+    assert!(v.get("overflow").is_none() && v.get("scrollBehavior").is_none());
+  }
+
+  #[test]
+  fn w3a_values_round_trip_in_camel_case() {
+    let i: Interaction = serde_json::from_value(serde_json::json!({
+      "trigger": "key", "key": "Shift+K", "action": "changeTo", "destination": "v",
+      "transition": "moveIn", "direction": "up", "easing": "easeInOutBack"
+    }))
+    .unwrap();
+    assert_eq!(
+      (i.trigger, i.action, i.transition),
+      (Trigger::Key, Action::ChangeTo, Transition::MoveIn)
+    );
+    assert_eq!((i.direction, i.easing), (Direction::Up, Easing::EaseInOutBack));
+    let v = serde_json::to_value(&i).unwrap();
+    assert_eq!(
+      (v["direction"].as_str(), v["easing"].as_str(), v["key"].as_str()),
+      (Some("up"), Some("easeInOutBack"), Some("Shift+K"))
+    );
+    let n: Node = serde_json::from_value(serde_json::json!({ "overflow": "both", "scrollBehavior": "fixed" })).unwrap();
+    assert_eq!((n.overflow, n.scroll_behavior), (Overflow::Both, ScrollBehavior::Fixed));
+    let v = serde_json::to_value(&n).unwrap();
+    assert_eq!(
+      (v["overflow"].as_str(), v["scrollBehavior"].as_str()),
+      (Some("both"), Some("fixed"))
+    );
+  }
 
   #[test]
   fn old_interactions_load_with_overlay_defaults() {
