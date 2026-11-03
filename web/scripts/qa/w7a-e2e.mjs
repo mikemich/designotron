@@ -230,6 +230,24 @@ try {
   const movedX = await B.evaluate(() => Object.values(window.__dt.doc().nodes).find((n) => n.name === "Dragged").x);
   check("and the drag itself still landed", movedX > 200, `x=${movedX}`);
 
+  // Editing text in place keeps a gesture open but is no drag: calls don't wait for it.
+  await B.evaluate(() => {
+    window.__dt.tool("create_nodes", { nodes: [{ type: "text", name: "Copy", text: "Hello", x: 400, y: 600, fontSize: 40 }] });
+    window.__dt.zoomToFit();
+  });
+  await sleep(300);
+  await B.evaluate(() => {
+    const id = Object.values(window.__dt.doc().nodes).find((n) => n.name === "Copy").id;
+    window.__dt.dispatch({ op: "select", ids: [id], mode: "replace" });
+    document.activeElement?.blur();
+  });
+  await B.keyboard.press("Enter");
+  await sleep(300);
+  check("the text is being edited in place", await B.evaluate(() => !!document.querySelector("textarea, [contenteditable]")));
+  const whileEditing = await mcp("create_nodes", { nodes: [{ type: "frame", name: "WhileEditing", x: 0, y: 1000, width: 20, height: 20 }] });
+  check("a call during text editing runs promptly", !whileEditing.isError && whileEditing.ms < 500, `${whileEditing.ms} ms`);
+  await B.keyboard.press("Escape");
+
   // 7. With every tab gone, MCP falls back to the headless document.
   await A.close();
   await B.close();

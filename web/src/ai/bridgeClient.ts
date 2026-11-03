@@ -3,7 +3,7 @@
 // streams Claude Code chat events back.
 
 import { getEngine, onDocChange } from "../store";
-import { executeTool, whenCanvasIdle } from "./tools";
+import { DRAG_BUSY, executeTool, whenCanvasIdle, type ToolOutcome } from "./tools";
 import { appendText, patchItem, push, showScreenshot, useChat } from "./chatState";
 import { onPreviewMessage } from "./preview";
 
@@ -183,9 +183,10 @@ class BridgeClient {
         break;
       case "tool_call": {
         // Not in the middle of the person's drag: the drag's next step would undo this call.
-        await whenCanvasIdle();
         // `group`: calls of one chat turn share it, so the turn is one undo step.
-        const out = await executeTool(m.name, m.input, { group: typeof m.group === "string" ? m.group : undefined });
+        const out: ToolOutcome = (await whenCanvasIdle())
+          ? await executeTool(m.name, m.input, { group: typeof m.group === "string" ? m.group : undefined })
+          : { ok: false, result: DRAG_BUSY };
         this.send({ type: "tool_result", id: m.id, ok: out.ok, result: out.result, image: out.image ?? null });
         showScreenshot(out);
         break;

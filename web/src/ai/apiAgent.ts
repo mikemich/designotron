@@ -3,12 +3,14 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { useChat, push, appendText, patchItem, showScreenshot } from "./chatState";
-import { executeTool, systemPrompt, toolDefs, whenCanvasIdle } from "./tools";
+import { DRAG_BUSY, executeTool, systemPrompt, toolDefs, whenCanvasIdle, type ToolOutcome } from "./tools";
 import type { Attachment } from "./bridgeClient";
 
 let messages: Anthropic.Beta.BetaMessageParam[] = [];
 let controller: AbortController | null = null;
 let runCount = 0;
+/** The tool calls of the reply being answered: what finished, and the call running now. */
+let round: { done: Map<string, Anthropic.Beta.BetaToolResultBlockParam>; running: string | null } | null = null;
 
 export function resetApiConversation() {
   messages = [];
@@ -21,16 +23,24 @@ export function abortApiAgent() {
   controller.abort();
   controller = null;
   // Stopped between a reply with tool calls and their results: answer each call, so the next
-  // message (it joins this user turn) is accepted. The run itself runs no further tools.
+  // message (it joins this user turn) is accepted. Calls that finished keep their results (so
+  // Claude doesn't redo them), the one running may or may not have landed, the rest never ran.
+  // The run itself runs no further tools.
   const last = messages[messages.length - 1];
+  const finished = round;
+  round = null;
   if (last?.role !== "assistant" || typeof last.content === "string") return;
   const calls = last.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
-  if (calls.length) {
-    messages.push({
-      role: "user",
-      content: calls.map((c) => ({ type: "tool_result" as const, tool_use_id: c.id, is_error: true, content: "Stopped by the user" })),
-    });
-  }
+  if (!calls.length) return;
+  const stopped = (id: string, text: string): Anthropic.Beta.BetaToolResultBlockParam => ({ type: "tool_result", tool_use_id: id, is_error: true, content: text });
+  messages.push({
+    role: "user",
+    content: calls.map(
+      (c) =>
+        finished?.done.get(c.id) ??
+        stopped(c.id, finished?.running === c.id ? "Stopped by the user; it may have been applied" : "Stopped by the user"),
+    ),
+  });
 }
 
 function aborted(): Error {
@@ -125,17 +135,23 @@ async function runTurns(client: Anthropic, tools: Anthropic.Beta.BetaTool[], sys
     if (msg.stop_reason === "max_tokens") throw new Error("Claude's tool call was cut off (max_tokens). Try a smaller request.");
 
     const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
+    const mine = { done: new Map<string, Anthropic.Beta.BetaToolResultBlockParam>(), running: null as string | null };
+    round = mine;
     for (const use of uses) {
       // Stop pressed: no further tool runs (`abortApiAgent` already answered the calls).
       if (signal.aborted) throw aborted();
       const chip = push({ kind: "tool", name: use.name, ok: null });
-      await whenCanvasIdle();
-      const out = await executeTool(use.name, use.input, { group });
-      if (signal.aborted) throw aborted();
+      mine.running = use.id;
+      const idle = await whenCanvasIdle();
+      if (signal.aborted) {
+        patchItem(chip, { ok: false, detail: "Stopped" });
+        throw aborted();
+      }
+      const out: ToolOutcome = idle ? await executeTool(use.name, use.input, { group }) : { ok: false, result: DRAG_BUSY };
       patchItem(chip, { ok: out.ok, detail: out.ok ? undefined : String(out.result) });
       showScreenshot(out);
       const text = typeof out.result === "string" ? out.result : JSON.stringify(out.result);
-      results.push({
+      const block: Anthropic.Beta.BetaToolResultBlockParam = {
         type: "tool_result",
         tool_use_id: use.id,
         is_error: !out.ok,
@@ -145,8 +161,13 @@ async function runTurns(client: Anthropic, tools: Anthropic.Beta.BetaTool[], sys
               { type: "text", text },
             ]
           : text,
-      });
+      };
+      mine.done.set(use.id, block);
+      mine.running = null;
+      results.push(block);
+      if (signal.aborted) throw aborted();
     }
+    round = null;
     messages.push({ role: "user", content: results });
   }
   push({ kind: "system", text: "Stopped after the maximum number of steps." });

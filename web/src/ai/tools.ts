@@ -36,13 +36,22 @@ export function contextLine(): string {
   return `[Editor context] Document "${doc.name}", page "${page?.name}" (${page?.id}). ${sel.length ? `Selected: ${sel.join(", ")}.` : "Nothing selected."}`;
 }
 
-/** Resolves once the person isn't dragging on the canvas (or has no gesture open), or after
- *  `timeoutMs`. A tool call that landed mid-drag would be undone by the drag's next step, which
- *  starts again from the gesture's base document. Chat calls wait here before `executeTool`. */
-export async function whenCanvasIdle(timeoutMs = 5000): Promise<void> {
-  const busy = () => pointerDrag.active || useStore.getState().es.inGesture;
+/** What a chat call gets when the person keeps dragging for too long. */
+export const DRAG_BUSY = "The person is dragging on the canvas; try again in a moment";
+
+/** Resolves true once the person isn't dragging on the canvas, false if they still are after
+ *  `timeoutMs` (the caller must then not run the tool). A tool call that landed mid-drag would be
+ *  undone by the drag's next step, which starts again from the gesture's base document. Only a
+ *  pointer drag does that: other open gestures (editing text in place, a running plugin) don't
+ *  rebase, so they don't wait. Chat calls wait here before `executeTool`; the cap stays under
+ *  the bridge's 180 s call timeout. */
+export async function whenCanvasIdle(timeoutMs = 45000): Promise<boolean> {
   const until = Date.now() + timeoutMs;
-  while (busy() && Date.now() < until) await new Promise((r) => setTimeout(r, 40));
+  while (pointerDrag.active) {
+    if (Date.now() >= until) return false;
+    await new Promise((r) => setTimeout(r, 40));
+  }
+  return true;
 }
 
 /** `opts.group`: undo group of the chat turn the call belongs to (see `aiDispatch`). */
