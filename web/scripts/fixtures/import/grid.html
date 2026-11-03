@@ -1,0 +1,17 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+*{box-sizing:border-box} body{margin:0;font-family:Inter,sans-serif;background:#F1F5F9;padding:32px}
+h2{margin:0 0 16px;font-size:24px;color:#0F172A}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.tile{background:#fff;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:6px;border:1px solid #E2E8F0}
+.tile .ic{width:36px;height:36px;border-radius:10px;background:#DBEAFE;margin-bottom:8px}
+.tile b{font-size:15px;color:#0F172A}
+.tile p{margin:0;font-size:13px;color:#64748B;line-height:18px}
+.wide{grid-column:span 2}
+</style></head><body>
+<h2>Integrations</h2>
+<div class="grid">
+<div class="tile"><div class="ic"></div><b>Slack</b><p>Send alerts to channels when a comment is posted.</p></div>
+<div class="tile"><div class="ic" style="background:#DCFCE7"></div><b>GitHub</b><p>Link pull requests and branches to design files.</p></div>
+<div class="tile wide"><div class="ic" style="background:#FEF3C7"></div><b>Figma import</b><p>Bring frames from other tools into a new project with a single click, keeping layer names intact.</p></div>
+<div class="tile"><div class="ic" style="background:#FCE7F3"></div><b>Jira</b><p>Create tickets from selected layers.</p></div>
+</div></body></html>

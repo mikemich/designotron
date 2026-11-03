@@ -4,12 +4,13 @@ import { addAsset, readFileAsDataUrl } from "../assets";
 import { screenshotBase64 } from "../exporter";
 import { aiDispatch, getDoc, selection, useStore, FONTS } from "../store";
 import { bridgeChecked, bridgeHttpBase } from "./bridgeClient";
-import { DEFAULT_CSS, emitSpec, planTree, type BoxNode, type Css, type Rect } from "./htmlLayout";
+import { DEFAULT_CSS, emitSpec, mergeInlineRuns, planTree, type BoxNode, type Css, type InlinePiece, type Rect, type RunStyle } from "./htmlLayout";
 
 /** Picks what to screenshot when no id is given: selection, else the newest top-level frame. */
 export async function getScreenshot(id?: string, scale = 1) {
   const doc = getDoc();
-  let target = id && doc.nodes[id] ? id : selection()[0];
+  if (id && !doc.nodes[id]) throw new Error(`no layer ${id}`);
+  let target = id || selection()[0];
   if (!target) {
     const page = doc.pages.find((p) => p.id === useStore.getState().es.page);
     target = [...(page?.children ?? [])].reverse().find((c) => doc.nodes[c]?.visible) ?? "";
@@ -26,6 +27,8 @@ interface ImportInput {
   y?: number;
   parentId?: string;
   name?: string;
+  /** Names the frame when there is no `name` and the page has no <title>. */
+  fallbackName?: string;
   /** Map flex/grid/block flow to auto layout (default). `false` keeps every layer absolutely positioned. */
   autoLayout?: boolean;
   /** Undo group of the chat turn this import belongs to. */
@@ -38,12 +41,16 @@ type Spec = Record<string, any>;
  *  the person entered the address themselves, so pages on their own machine or network are
  *  allowed (Claude's imports reach only the public internet). */
 export async function importUrl(input: { url: string; width?: number; x?: number; y?: number; autoLayout?: boolean; group?: string }, typed = false) {
+  if (typeof input?.url !== "string" || !input.url.trim()) throw new Error("url must be a string like https://example.com");
+  const raw = input.url.trim();
+  if (/\s/.test(raw)) throw new Error(`not a valid URL: ${raw}`);
   let url: URL;
   try {
-    url = new URL(input.url.includes("://") ? input.url : `https://${input.url}`);
+    url = new URL(raw.includes("://") ? raw : `https://${raw}`);
   } catch {
-    throw new Error(`not a valid URL: ${input.url}`);
+    throw new Error(`not a valid URL: ${raw}`);
   }
+  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`only http and https addresses can be imported: ${raw}`);
   let res: Response;
   try {
     await bridgeChecked();
@@ -59,12 +66,14 @@ export async function importUrl(input: { url: string; width?: number; x?: number
   // Resolve relative stylesheets and images against the page. Scripts never run (sandboxed iframe).
   const base = `<base href="${url.href.replace(/"/g, "&quot;")}">`;
   html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => m + base) : `<!doctype html><html><head>${base}</head><body>${html}</body></html>`;
-  return importHtml({ html, width: input.width ?? 1440, x: input.x, y: input.y, name: url.hostname, autoLayout: input.autoLayout, group: input.group });
+  // The frame takes the page's <title>; the host name only names pages that have none.
+  return importHtml({ html, width: input.width ?? 1440, x: input.x, y: input.y, fallbackName: url.hostname, autoLayout: input.autoLayout, group: input.group });
 }
 
 /** Renders HTML in a hidden iframe and converts the box tree into layer specs. */
 export async function importHtml(input: ImportInput) {
-  if (!input.html) throw new Error("html is required");
+  if (typeof input?.html !== "string") throw new Error("html must be a string of HTML");
+  if (!input.html.trim()) throw new Error("html is required");
   const width = input.width ?? 1280;
   const iframe = document.createElement("iframe");
   iframe.setAttribute("sandbox", "allow-same-origin");
@@ -93,7 +102,7 @@ export async function importHtml(input: ImportInput) {
     const rootBox: BoxNode = {
       kind: "frame",
       rect: { x: 0, y: 0, w: width, h: total },
-      spec: { type: "frame", name: input.name || doc.title || "Imported HTML", fill: bodyBg ?? "#FFFFFF", clip: true },
+      spec: { type: "frame", name: input.name || doc.title.trim() || input.fallbackName || "Imported HTML", fill: bodyBg ?? "#FFFFFF", clip: true },
       css: { ...readCss(win.getComputedStyle(body)), inset: [0, 0, 0, 0] },
       children,
     };
@@ -176,14 +185,16 @@ async function walk(node: globalThis.Node, win: Window, auto: boolean): Promise<
     return [{ kind: "leaf", rect, css, children: [], spec: { type: "rectangle", name: "Icon", fills: [{ type: "image", src: "asset:" + addAsset(url), scaleMode: "fit" }] } }];
   }
 
-  const kids: BoxNode[] = [];
-  for (const c of Array.from(el.childNodes)) kids.push(...(await walk(c, win, auto)));
+  // A block of text with inline formatting is one text layer with mixed styles, not one per run.
+  const runs = inlineText(el, cs, win, auto);
+  const kids: BoxNode[] = runs ? [runs] : [];
+  if (!runs) for (const c of Array.from(el.childNodes)) kids.push(...(await walk(c, win, auto)));
   const bg = parseBg(cs);
   const bgImage = cs.backgroundImage.match(/url\("?([^")]+)"?\)/)?.[1];
   const bw = parseFloat(cs.borderTopWidth) || 0;
   const hasBorder = bw > 0 && cs.borderTopStyle !== "none";
   const shadow = parseShadow(cs.boxShadow);
-  const name = el.id || el.className?.toString().split(" ")[0] || tag;
+  const name = layerName(el, tag);
   if (!(bg || bgImage || hasBorder || shadow)) {
     if (!kids.length) return [];
     // Without auto layout every visual-less element dissolves into its parent (the original import).
@@ -208,6 +219,42 @@ async function walk(node: globalThis.Node, win: Window, auto: boolean): Promise<
   if (op < 1) spec.opacity = op;
   return [{ kind: "frame", rect, css, children: kids, spec }];
 }
+
+const LAYER_NAMES: Record<string, [string, string]> = {
+  header: ["Header", "header"],
+  nav: ["Nav", "nav"],
+  footer: ["Footer", "footer"],
+  main: ["Main", "main"],
+  section: ["Section", "section"],
+  aside: ["Sidebar", "sidebar"],
+  button: ["Button", "button"],
+  form: ["Form", "form"],
+  input: ["Input", "input"],
+  a: ["Link", "link"],
+  li: ["List item", "item"],
+  ul: ["List", "list"],
+  ol: ["List", "list"],
+  article: ["Article", "article"],
+  h1: ["Heading 1", "heading"],
+  h2: ["Heading 2", "heading"],
+  h3: ["Heading 3", "heading"],
+  h4: ["Heading 4", "heading"],
+  h5: ["Heading 5", "heading"],
+  h6: ["Heading 6", "heading"],
+};
+
+/** Layer names carry the semantics code export reads ("Nav", "Header", "Button", "Footer"...). A
+ *  class or id that already says what the element is wins; otherwise the tag names it. */
+function layerName(el: HTMLElement, tag: string): string {
+  const own = el.id || el.className?.toString().trim().split(/\s+/)[0] || "";
+  const known = LAYER_NAMES[tag];
+  if (!known) return own || tag;
+  const words = own.toLowerCase().split(/[^a-z0-9]+/);
+  return own && (words.includes(known[1]) || words.some((w) => CODE_WORDS.includes(w))) ? own : known[0];
+}
+
+/** Whole words in a layer name that make code export pick a tag (see `container_tag` in codegen.rs). */
+const CODE_WORDS = ["button", "btn", "cta", "nav", "navbar", "navigation", "menu", "header", "topbar", "footer", "sidebar", "main", "hero", "section", "features", "pricing", "testimonials", "faq"];
 
 /** A wrapper that only holds one box hands its place in the layout to that box. Text that is
  *  the whole content of a block takes the block's content width, so it wraps and aligns the same. */
@@ -277,6 +324,169 @@ function textBox(node: Text, win: Window, auto: boolean): BoxNode | null {
   // The engine centres glyphs in each line box (like CSS half-leading), so auto layout places line boxes.
   const rect = auto ? { x: r.left, y: top - (lh - contentH) / 2, w, h: lines * lh } : { x: r.left, y: r.top, w, h: r.height };
   return { kind: "text", rect, spec, css: { ...DEFAULT_CSS, display: "inline" }, children: [], hugText: lines <= 1 };
+}
+
+const NOT_INLINE_TEXT = ["img", "svg", "video", "canvas", "iframe", "input", "select", "textarea", "object", "embed", "picture", "audio"];
+const TEXT_CONTAINERS = ["block", "list-item", "flow-root", "inline", "table-cell", "inline-block"];
+const SAFE_LINK = /^(https?:|mailto:|tel:)/i;
+
+interface InlineCtx {
+  link?: string;
+  decoration: RunStyle["decoration"];
+}
+
+/** One text box for a block whose content is only text, `<br>` and inline elements without their
+ *  own box (strong, em, a, span, code without a background...). Null when the element has anything
+ *  else (badges, images, nested blocks, flex/grid children) or nothing to merge, so the caller walks
+ *  its children as before. */
+function inlineText(el: HTMLElement, cs: CSSStyleDeclaration, win: Window, auto: boolean): BoxNode | null {
+  if (!TEXT_CONTAINERS.includes(cs.display) || cs.whiteSpace.startsWith("pre") || cs.whiteSpace === "break-spaces") return null;
+  if (NOT_INLINE_TEXT.includes(el.tagName.toLowerCase())) return null;
+  const scan = { pieces: [] as InlinePiece[], structure: false };
+  if (!gatherInline(el, cs, { link: linkOf(el), decoration: decorationOf(cs, undefined) }, win, scan)) return null;
+  const merged = mergeInlineRuns(scan.pieces);
+  if (!merged) return null;
+  // A lone text node keeps the plain path unless it carries a link or a decoration.
+  if (!scan.structure && !merged.spans.some((s) => s.link || s.decoration)) return null;
+
+  const frags: DOMRect[] = [];
+  for (const n of textNodesOf(el)) {
+    if (!/\S/.test(n.textContent ?? "")) continue;
+    const range = el.ownerDocument.createRange();
+    range.selectNodeContents(n);
+    frags.push(...Array.from(range.getClientRects()).filter((q) => q.width > 0 && q.height > 0));
+  }
+  if (!frags.length) return null;
+  const left = Math.min(...frags.map((q) => q.left));
+  const right = Math.max(...frags.map((q) => q.right));
+  const topAll = Math.min(...frags.map((q) => q.top));
+  const bottomAll = Math.max(...frags.map((q) => q.bottom));
+  // A new line starts where the text stops moving right (or drops below the line so far).
+  const lineTops: number[] = [];
+  let prev: DOMRect | null = null;
+  let lineBottom = -Infinity;
+  for (const q of frags) {
+    if (!prev || q.left < prev.right - 1 || q.top >= lineBottom - 1) {
+      lineTops.push(q.top);
+      lineBottom = q.bottom;
+    } else lineBottom = Math.max(lineBottom, q.bottom);
+    prev = q;
+  }
+  const lines = lineTops.length;
+  const fontSize = parseFloat(cs.fontSize) || 16;
+  const contentH = frags[0].height;
+  const lh = cs.lineHeight === "normal" ? (lines > 1 ? (lineTops[lines - 1] - lineTops[0]) / (lines - 1) : contentH) : parseFloat(cs.lineHeight) || fontSize * 1.2;
+  const style = (r: RunStyle): Spec => {
+    const out: Spec = { fontWeight: r.fontWeight, italic: r.italic, color: r.color, fontSize: r.fontSize, fontFamily: r.fontFamily };
+    // A link the page doesn't underline says so (code export underlines links that don't).
+    if (r.decoration || r.link) out.decoration = r.decoration ?? "none";
+    if (r.link) out.link = r.link;
+    return out;
+  };
+  const one = merged.spans.length === 1 && !merged.spans[0].link ? merged.spans[0] : null;
+  const spec: Spec = one
+    ? { type: "text", text: merged.text, ...style(one), lineHeight: lh }
+    : {
+        type: "text",
+        spans: merged.spans.map((r) => ({ text: r.text, ...style(r) })),
+        fontSize,
+        fontWeight: parseInt(cs.fontWeight) || 400,
+        fontFamily: firstFamily(cs),
+        lineHeight: lh,
+        color: cs.color,
+        italic: cs.fontStyle === "italic",
+      };
+  spec.textAlign = ["center", "right", "justify"].includes(cs.textAlign) ? cs.textAlign : "left";
+  if (cs.letterSpacing !== "normal") spec.letterSpacing = parseFloat(cs.letterSpacing) || 0;
+  const w = lines > 1 ? Math.ceil(right - left) + 1 : right - left;
+  let rect = auto ? { x: left, y: frags[0].top - (lh - contentH) / 2, w, h: lines * lh } : { x: left, y: topAll, w, h: bottomAll - topAll };
+  let fixedH = false;
+  if (auto && cs.display !== "inline") {
+    // The block's own content box is exact: runs in another font can make a line box taller than the
+    // line height, so the paragraph is then a little taller than lines × line height.
+    const box = el.getBoundingClientRect();
+    const px = (v: string) => parseFloat(v) || 0;
+    const top = box.top + px(cs.paddingTop) + px(cs.borderTopWidth);
+    const h = box.height - px(cs.paddingTop) - px(cs.paddingBottom) - px(cs.borderTopWidth) - px(cs.borderBottomWidth);
+    if (h > 0 && Math.abs(top - rect.y) <= 2) {
+      fixedH = Math.abs(h - lines * lh) > 0.5;
+      rect = { ...rect, y: top, h: fixedH ? h : lines * lh };
+    }
+  }
+  return { kind: "text", rect, spec, css: { ...DEFAULT_CSS, display: "inline" }, children: [], hugText: lines <= 1, fixedH };
+}
+
+/** Collects the styled pieces of an inline formatting context. False when a child has its own box. */
+function gatherInline(parent: HTMLElement, pcs: CSSStyleDeclaration, ctx: InlineCtx, win: Window, scan: { pieces: InlinePiece[]; structure: boolean }): boolean {
+  for (const c of Array.from(parent.childNodes)) {
+    if (c.nodeType === Node.TEXT_NODE) {
+      const raw = c.textContent ?? "";
+      scan.pieces.push({ text: pcs.textTransform === "uppercase" ? raw.toUpperCase() : raw, style: runStyle(pcs, ctx) });
+      continue;
+    }
+    if (c.nodeType !== Node.ELEMENT_NODE) continue;
+    const e = c as HTMLElement;
+    const tag = e.tagName.toLowerCase();
+    if (tag === "br") {
+      scan.pieces.push({ br: true });
+      scan.structure = true;
+      continue;
+    }
+    const cs = win.getComputedStyle(e);
+    if (cs.display === "none") continue;
+    if (NOT_INLINE_TEXT.includes(tag) || cs.display !== "inline" || cs.position !== "static" || cs.float !== "none") return false;
+    if (cs.visibility === "hidden" || parseFloat(cs.opacity) < 1 || cs.verticalAlign !== "baseline" || cs.whiteSpace.startsWith("pre")) return false;
+    if (hasBoxVisuals(cs)) return false;
+    scan.structure = true;
+    if (!gatherInline(e, cs, { link: linkOf(e) ?? ctx.link, decoration: decorationOf(cs, ctx.decoration) }, win, scan)) return false;
+  }
+  return true;
+}
+
+/** Backgrounds, borders, shadows, padding or margins make an inline element a box of its own. */
+function hasBoxVisuals(cs: CSSStyleDeclaration): boolean {
+  const sides = ["Top", "Right", "Bottom", "Left"] as const;
+  if (sides.some((s) => parseFloat(cs[`padding${s}`]) > 0 || (parseFloat(cs[`border${s}Width`]) > 0 && cs[`border${s}Style`] !== "none"))) return true;
+  if (parseFloat(cs.marginLeft) || parseFloat(cs.marginRight)) return true;
+  const bg = cs.backgroundColor;
+  return (bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") || cs.backgroundImage !== "none" || cs.boxShadow !== "none";
+}
+
+function runStyle(cs: CSSStyleDeclaration, ctx: InlineCtx): RunStyle {
+  return {
+    fontWeight: parseInt(cs.fontWeight) || 400,
+    italic: cs.fontStyle === "italic" || cs.fontStyle === "oblique",
+    color: cs.color,
+    fontSize: parseFloat(cs.fontSize) || 16,
+    fontFamily: firstFamily(cs),
+    decoration: ctx.decoration,
+    link: ctx.link,
+  };
+}
+
+/** Text decorations paint over inline descendants, but the computed value isn't inherited. */
+function decorationOf(cs: CSSStyleDeclaration, inherited: RunStyle["decoration"]): RunStyle["decoration"] {
+  const line = cs.textDecorationLine;
+  if (line.includes("underline")) return "underline";
+  if (line.includes("line-through")) return "line-through";
+  return inherited;
+}
+
+function linkOf(el: HTMLElement): string | undefined {
+  if (el.tagName.toLowerCase() !== "a" || !el.hasAttribute("href")) return undefined;
+  const href = (el as HTMLAnchorElement).href;
+  return SAFE_LINK.test(href) ? href : undefined;
+}
+
+function firstFamily(cs: CSSStyleDeclaration): string {
+  return cs.fontFamily.split(",")[0].replace(/["']/g, "").trim();
+}
+
+function textNodesOf(el: HTMLElement): Text[] {
+  const out: Text[] = [];
+  const walker = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) out.push(n as Text);
+  return out;
 }
 
 function readCss(cs: CSSStyleDeclaration): Css {

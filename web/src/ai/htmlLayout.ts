@@ -49,6 +49,9 @@ export interface BoxNode {
   children: BoxNode[];
   /** Text sized by its content (single line); otherwise its width is fixed and it wraps. */
   hugText?: boolean;
+  /** Text whose browser height isn't lines × line height (a mono run grew a line box): emitted with
+   *  that height so siblings keep their positions. */
+  fixedH?: boolean;
   plan?: Plan;
 }
 
@@ -92,6 +95,67 @@ export const DEFAULT_CSS: Css = {
   inset: [0, 0, 0, 0],
 };
 
+/** The text style of one inline run. `decoration` and `link` are absent when there is none. */
+export interface RunStyle {
+  fontWeight: number;
+  italic: boolean;
+  color: string;
+  fontSize: number;
+  fontFamily: string;
+  decoration?: "underline" | "line-through";
+  link?: string;
+}
+
+/** A piece of an inline formatting context in DOM order: raw text with its style, or a `<br>`. */
+export type InlinePiece = { text: string; style: RunStyle } | { br: true };
+
+export interface MergedText {
+  /** The collapsed characters of the whole block (`\n` for `<br>`). */
+  text: string;
+  /** Consecutive runs, merged where the style is the same. */
+  spans: (RunStyle & { text: string })[];
+}
+
+/** Joins the pieces of an inline formatting context the way the browser lays them out: white space
+ *  collapses across element boundaries, is dropped at the start and end of a line, and `<br>` is a
+ *  line break. Null when nothing visible is left. */
+export function mergeInlineRuns(pieces: InlinePiece[]): MergedText | null {
+  const chars: { ch: string; style: RunStyle }[] = [];
+  for (const p of pieces) {
+    if ("br" in p) {
+      while (chars.length && chars[chars.length - 1].ch === " ") chars.pop();
+      if (chars.length) chars.push({ ch: "\n", style: chars[chars.length - 1].style });
+      continue;
+    }
+    for (const ch of p.text.replace(/[ \t\r\n\f]+/g, " ")) {
+      const prev = chars.length ? chars[chars.length - 1].ch : "\n";
+      if (ch === " " && (prev === " " || prev === "\n")) continue;
+      chars.push({ ch, style: p.style });
+    }
+  }
+  while (chars.length && (chars[chars.length - 1].ch === " " || chars[chars.length - 1].ch === "\n")) chars.pop();
+  if (!chars.length) return null;
+  const spans: MergedText["spans"] = [];
+  for (const { ch, style } of chars) {
+    const tail = spans[spans.length - 1];
+    if (tail && sameStyle(tail, style)) tail.text += ch;
+    else spans.push({ ...style, text: ch });
+  }
+  return { text: chars.map((c) => c.ch).join(""), spans };
+}
+
+function sameStyle(a: RunStyle, b: RunStyle): boolean {
+  return (
+    a.fontWeight === b.fontWeight &&
+    a.italic === b.italic &&
+    a.color === b.color &&
+    a.fontSize === b.fontSize &&
+    a.fontFamily === b.fontFamily &&
+    a.decoration === b.decoration &&
+    a.link === b.link
+  );
+}
+
 /** Plans auto layout bottom-up for a whole tree (children first, so their hug sizes are known). */
 export function planTree(node: BoxNode) {
   for (const c of node.children) planTree(c);
@@ -106,6 +170,10 @@ export function emitSpec(node: BoxNode, parent: Rect, sizing?: { w: Size; h: Siz
   if (node.kind === "text") {
     if (own.w === "fill") spec.width = "fill";
     else if (!node.hugText) spec.width = round(node.rect.w);
+    if (node.fixedH) {
+      spec.height = round(node.rect.h);
+      spec.autoResize = "none";
+    }
     return spec;
   }
   spec.width = own.w === "fixed" ? round(node.rect.w) : own.w;
@@ -390,8 +458,20 @@ function tryWrap(node: BoxNode, flowDom: BoxNode[]): Plan | null {
   return null;
 }
 
-/** Runs the engine simulation and accepts the layout when every child lands within TOL. */
+/** Accepts a layout when every child lands within TOL. Padding and gaps are rounded to whole
+ *  pixels (no `pb-[0.41px]` in exported code) when the rounded layout is still accepted and hugs no worse. */
 function validate(node: BoxNode, flow: BoxNode[], layout: Layout, sizing: Map<BoxNode, { w: Size; h: Size }>): Plan | null {
+  const exact = validateExact(node, flow, layout, sizing);
+  const whole: Layout = { ...layout, gap: Math.round(layout.gap), counterGap: Math.round(layout.counterGap), padding: layout.padding.map(Math.round) as Layout["padding"] };
+  if (whole.gap === layout.gap && whole.counterGap === layout.counterGap && whole.padding.every((v, i) => v === layout.padding[i])) return exact;
+  const plan = validateExact(node, flow, whole, sizing);
+  if (!plan) return exact;
+  if (exact && ((exact.canHug.w && !plan.canHug.w) || (exact.canHug.h && !plan.canHug.h))) return exact;
+  return plan;
+}
+
+/** Runs the engine simulation and accepts the layout when every child lands within TOL. */
+function validateExact(node: BoxNode, flow: BoxNode[], layout: Layout, sizing: Map<BoxNode, { w: Size; h: Size }>): Plan | null {
   const horizontal = layout.direction === "horizontal";
   const items: SimItem[] = flow.map((c) => {
     const s = sizing.get(c)!;
@@ -429,7 +509,7 @@ function rectsMatch(a: Rect[], b: Rect[]) {
 /** The size the engine will give a child: auto-width text rounds up, and a hugging frame gets its
  *  simulated hug size (not the browser's), so errors show up in the parent's check instead of piling up. */
 function predictedSize(c: BoxNode, s: { w: Size; h: Size }): [number, number] {
-  if (c.kind === "text") return [c.hugText ? Math.ceil(c.rect.w) : c.rect.w, Math.ceil(c.rect.h - 0.01)];
+  if (c.kind === "text") return [c.hugText ? Math.ceil(c.rect.w) : c.rect.w, c.fixedH ? c.rect.h : Math.ceil(c.rect.h - 0.01)];
   const hug = c.plan?.hug;
   return [s.w === "hug" && hug ? hug.w : c.rect.w, s.h === "hug" && hug ? hug.h : c.rect.h];
 }

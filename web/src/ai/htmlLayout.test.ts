@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CSS, emitSpec, planContainer, planTree, simulate, type BoxNode, type Css } from "./htmlLayout";
+import { DEFAULT_CSS, emitSpec, mergeInlineRuns, planContainer, planTree, simulate, type BoxNode, type Css, type InlinePiece, type RunStyle } from "./htmlLayout";
 
 const text = (x: number, y: number, w: number, h: number, css: Partial<Css> = {}): BoxNode => ({
   kind: "text",
@@ -174,5 +174,61 @@ describe("emitSpec", () => {
     const spec = emitSpec(root, root.rect);
     expect(spec.layout).toBeUndefined();
     expect(spec.children.map((c: any) => [c.x, c.y])).toEqual([[0, 0], [108, 0]]);
+  });
+});
+
+describe("mergeInlineRuns", () => {
+  const base: RunStyle = { fontWeight: 400, italic: false, color: "rgb(51, 65, 85)", fontSize: 16, fontFamily: "Inter" };
+  const bold: RunStyle = { ...base, fontWeight: 700 };
+  const link: RunStyle = { ...base, color: "rgb(79, 70, 229)", decoration: "underline", link: "https://x.dev/" };
+  const t = (text: string, style = base): InlinePiece => ({ text, style });
+
+  it("joins runs and collapses white space across element boundaries", () => {
+    const m = mergeInlineRuns([t("Use "), t(" one ", bold), t(" accent, "), t("see\n  the guide", link), t(".")])!;
+    expect(m.text).toBe("Use one accent, see the guide.");
+    expect(m.spans.map((s) => s.text)).toEqual(["Use ", "one ", "accent, ", "see the guide", "."]);
+    expect(m.spans[1].fontWeight).toBe(700);
+    expect(m.spans[3]).toMatchObject({ link: "https://x.dev/", decoration: "underline" });
+  });
+
+  it("drops white space at the start, end and around line breaks", () => {
+    const m = mergeInlineRuns([t("  Line one  "), { br: true }, t("  Line two "), { br: true }])!;
+    expect(m.text).toBe("Line one\nLine two");
+  });
+
+  it("merges neighbouring runs with the same style into one", () => {
+    const m = mergeInlineRuns([t("a"), t("b"), t("c", bold), t("d", bold)])!;
+    expect(m.spans.map((s) => s.text)).toEqual(["ab", "cd"]);
+    expect(mergeInlineRuns([t("a"), t(" b", { ...base })])!.spans).toHaveLength(1);
+  });
+
+  it("keeps a link run apart from its neighbours", () => {
+    const m = mergeInlineRuns([t("Go "), t("here", link)])!;
+    expect(m.spans.map((s) => !!s.link)).toEqual([false, true]);
+  });
+
+  it("returns null when only white space is left", () => {
+    expect(mergeInlineRuns([t("  \n "), { br: true }])).toBeNull();
+    expect(mergeInlineRuns([])).toBeNull();
+  });
+
+  it("keeps non-breaking spaces", () => {
+    expect(mergeInlineRuns([t("a b")])!.text).toBe("a b");
+  });
+});
+
+describe("whole-pixel padding", () => {
+  it("rounds padding and gaps the browser left fractional when the layout still fits", () => {
+    const col = frame(0, 0, 300, 120.82, { inset: [16.41, 16.41, 16.41, 16.41] }, [box(16.41, 16.41, 267.18, 40), box(16.41, 66.41, 267.18, 40)]);
+    const plan = planContainer(col)!;
+    expect(plan.layout.padding.every((v) => Number.isInteger(v))).toBe(true);
+    expect(Number.isInteger(plan.layout.gap)).toBe(true);
+  });
+
+  it("keeps fractions when rounding would push a child out of tolerance", () => {
+    // Twelve children on a 40.45 px pitch: rounding the gap drifts more than 2px by the last one.
+    const kids = Array.from({ length: 12 }, (_, i) => box(0, i * 40.45, 100, 40));
+    const col = frame(0, 0, 100, 11 * 40.45 + 40, {}, kids);
+    expect(planContainer(col)!.layout.gap).toBeCloseTo(0.45, 2);
   });
 });
