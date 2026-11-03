@@ -556,12 +556,19 @@ function Layers() {
             setFocusId(id);
           }}
           onBlur={(e) => {
-            if (e.currentTarget.contains(e.relatedTarget as globalThis.Node | null)) return;
-            setFocusId(null);
-            // A row removed under focus keeps its claim; focus that really moved on drops it.
+            const to = e.relatedTarget as globalThis.Node | null;
+            if (e.currentTarget.contains(to)) return;
+            if (to) {
+              hadFocus.current = false;
+              return setFocusId(null);
+            }
+            // Focus went nowhere: a row removed under it keeps its claim (the tree hands focus on),
+            // while focus that really left (a click on empty space) drops it.
             const row = e.target as HTMLElement;
             setTimeout(() => {
-              if (row.isConnected) hadFocus.current = false;
+              if (!row.isConnected) return;
+              hadFocus.current = false;
+              setFocusId(null);
             }, 0);
           }}
         >

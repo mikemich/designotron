@@ -407,6 +407,13 @@ try {
   const afterDel = await active();
   check("layers: Delete on an expanded frame leaves focus on a surviving row", !!afterDel.layer && afterDel.layer !== frameA.id, JSON.stringify(afterDel));
   await press("Control+z", 300);
+  // Tab leaves the tree (it is one stop) and Shift+Tab comes back to the same row.
+  await p.evaluate((id) => document.querySelector(`[data-layer="${id}"]`).focus(), frameA.id);
+  await press("Tab", 150);
+  const tabbedOut = (await active()).id === "dt-canvas";
+  await dispatch({ op: "select", ids: [] }); // with a selection Shift+Tab on the canvas picks siblings
+  await press("Shift+Tab", 150);
+  check("layers: Tab leaves the tree for the canvas, Shift+Tab returns to the row", tabbedOut && (await active()).layer === frameA.id, JSON.stringify(await active()));
   // A row deleted from outside (a collaborator) hands focus on, too.
   const bId = (await named("Screen B")).id;
   await p.evaluate((id) => document.querySelector(`[data-layer="${id}"]`).focus(), bId);
