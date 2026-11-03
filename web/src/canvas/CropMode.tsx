@@ -39,18 +39,6 @@ function Crop({ v, t, paint }: { v: Viewport; t: PaintTarget; paint: ImagePaint 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paint.crop, src]);
 
-  // Enter leaves crop mode like Escape does: the popover owns closing.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Enter") return;
-      e.preventDefault();
-      e.stopPropagation();
-      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, []);
-
   const crop: ImageCrop | undefined = paint.crop;
   if (!crop || !src) return null;
   const rect = { x: crop.x * w, y: crop.y * h, w: crop.w * w, h: crop.h * h };

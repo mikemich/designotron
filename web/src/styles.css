@@ -2289,3 +2289,9 @@ body:has(.phone-note) .toast {
 .paint-overlay .paint-handle.crop-corner {
   cursor: nwse-resize;
 }
+.paint-type .seg {
+  flex-wrap: wrap;
+}
+.paint-type .seg button {
+  flex: 1 0 28%;
+}

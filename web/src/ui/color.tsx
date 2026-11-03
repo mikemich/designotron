@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Image as ImageIcon, Pipette, Plus, Trash2 } from "lucide-react";
 import type { GradientHandles, GradientPaintType, ImageCrop, Paint } from "../types";
 import { NumberField, Popover, Seg, SelectField } from "./controls";
@@ -266,7 +266,7 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
   };
   return (
     <div>
-      <div style={{ marginBottom: 10 }}>
+      <div className="paint-type" style={{ marginBottom: 10 }}>
         <Seg
           value={p.type}
           onChange={toType}
@@ -346,15 +346,17 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
               ariaLabel="Image scale mode"
               value={p.scaleMode}
               onChange={(scaleMode) => {
-                props.onChange({ ...p, scaleMode });
-                if (scaleMode !== "crop" || p.crop) return;
-                // The first time: the whole image starts where the mode it came from shows it.
+                if (scaleMode !== "crop" || p.crop) return props.onChange({ ...p, scaleMode });
+                // The first time: the whole image starts where the mode it came from shows it, set in
+                // the same change as the mode (one undo step, no jump).
                 const id = useStore.getState().paintEdit?.id;
                 const box = id ? getDoc().nodes[id] : undefined;
                 const url = p.src.startsWith("asset:") ? assetUrl(p.src.slice(6)) : p.src;
-                if (!box || !url) return;
+                const whole = { x: 0, y: 0, w: 1, h: 1 };
+                if (!box || !url) return props.onChange({ ...p, scaleMode, crop: whole });
                 const img = new Image();
                 img.onload = () => props.onChange({ ...p, scaleMode, crop: cropRectFor(p.scaleMode, img.naturalWidth, img.naturalHeight, box.width, box.height) });
+                img.onerror = () => props.onChange({ ...p, scaleMode, crop: whole });
                 img.src = url;
               }}
               options={[
@@ -375,6 +377,19 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
 /** Swatch that opens a paint editor popover. */
 export function PaintSwatch(props: { paint: Paint; onChange: (p: Paint) => void; onOpen?: () => void; onClose?: () => void }) {
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  // Enter or Escape on the canvas (see PaintHandles) clears `paintEdit`: that closes the popover too.
+  const editing = useStore((s) => s.paintEdit !== null);
+  const sawEdit = useRef(false);
+  useEffect(() => {
+    if (!anchor) sawEdit.current = false;
+    else if (editing) sawEdit.current = true;
+    else if (sawEdit.current) {
+      sawEdit.current = false;
+      setAnchor(null);
+      props.onClose?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing, anchor]);
   return (
     <>
       <div

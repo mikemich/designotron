@@ -9,10 +9,17 @@ use crate::geom::fmt;
 use crate::model::{GradientHandles, GradientStop, ImageCrop, StrokeAlign};
 use crate::render::stops_svg;
 
-/// Wedges in an angular gradient; bigger boxes get the finer ring.
-const WEDGES: usize = 180;
-const WEDGES_LARGE: usize = 360;
-const LARGE_BOX: f64 = 1000.0;
+/// Wedges in an angular gradient, by the larger side of the layer: a wedge is one solid colour,
+/// so bigger layers need finer steps to stay smooth. (A linear gradient across each wedge was
+/// tried to save nodes: it bands near the centre, because the stripes are parallel, not rays.)
+fn wedge_count(side: f64) -> usize {
+  match side {
+    s if s <= 160.0 => 72,
+    s if s <= 600.0 => 120,
+    s if s <= 1000.0 => 144,
+    _ => 180,
+  }
+}
 /// Each wedge reaches this many pixels (a third of the way out) into the next, hiding anti-aliasing seams.
 const WEDGE_OVERLAP_PX: f64 = 2.0;
 
@@ -31,6 +38,19 @@ pub fn handle_angle(hd: &GradientHandles, w: f64, h: f64) -> f64 {
   let dy = (hd.end[1] - hd.start[1]) * h;
   let deg = dx.atan2(-dy).to_degrees();
   (deg.rem_euclid(360.0) * 100.0).round() / 100.0
+}
+
+/// Where the start and end handles sit on the CSS gradient line of a `w` x `h` layer (0 and 1
+/// are its two ends, which CSS puts at the box corners along the angle).
+pub fn linear_extent(hd: &GradientHandles, w: f64, h: f64) -> (f64, f64) {
+  let a = handle_angle(hd, w, h).to_radians();
+  let (dx, dy) = (a.sin(), -a.cos());
+  let len = (w * a.sin()).abs() + (h * a.cos()).abs();
+  if len < 1e-9 {
+    return (0.0, 1.0);
+  }
+  let at = |p: [f64; 2]| ((p[0] * w - w / 2.0) * dx + (p[1] * h - h / 2.0) * dy) / len + 0.5;
+  (at(hd.start), at(hd.end))
 }
 
 /// Radii of the two axes as a percentage of the layer's width and height.
@@ -114,11 +134,12 @@ pub fn diamond_pattern(id: &str, stops: &[GradientStop], opacity: f64, hd: &Grad
   ))
 }
 
-/// Pattern of solid wedges around the start handle; the sweep begins towards the end handle
-/// and runs clockwise. `None` when the stops are empty.
+/// Pattern of wedges around the start handle; the sweep begins towards the end handle and runs
+/// clockwise. Wedges are opaque solids, the paint's opacity sits on a group and stop alpha on a luminance mask, so overlaps
+/// never composite twice. `None` when the stops are empty.
 pub fn angular_pattern(id: &str, stops: &[GradientStop], opacity: f64, hd: &GradientHandles, w: f64, h: f64, pad: f64) -> Option<String> {
   let samples = Sampler::new(stops, opacity)?;
-  let n = if w.max(h) > LARGE_BOX { WEDGES_LARGE } else { WEDGES };
+  let n = wedge_count(w.max(h));
   let (cx, cy) = (hd.start[0] * w, hd.start[1] * h);
   let (dx, dy) = ((hd.end[0] - hd.start[0]) * w, (hd.end[1] - hd.start[1]) * h);
   let start = if dx == 0.0 && dy == 0.0 {
@@ -131,33 +152,35 @@ pub fn angular_pattern(id: &str, stops: &[GradientStop], opacity: f64, hd: &Grad
     .map(|(x, y)| (x - cx).hypot(y - cy))
     .fold(0.0_f64, f64::max)
     + 2.0;
-  let step = TAU / n as f64;
-  // The chord between two rim points sits inside the circle, so push the rim out.
-  let overlap = (WEDGE_OVERLAP_PX / (far * 0.3)).min(step * 0.5);
-  let rim = far / ((step + overlap) / 2.0).cos();
-  let mut out = String::new();
-  for i in 0..n {
-    let a0 = start + step * i as f64;
-    let a1 = start + step * (i as f64 + 1.0) + overlap;
-    let (c, alpha) = samples.at((i as f64 + 0.5) / n as f64);
-    out.push_str(&format!(
-      "<path d=\"M{} {}L{} {}L{} {}Z\" fill=\"{}\"{}/>",
-      fmt(cx),
-      fmt(cy),
-      fmt(cx + rim * a0.cos()),
-      fmt(cy + rim * a0.sin()),
-      fmt(cx + rim * a1.cos()),
-      fmt(cy + rim * a1.sin()),
-      c.hex6(),
-      if alpha < 0.999 {
-        format!(" fill-opacity=\"{}\"", fmt(alpha))
-      } else {
-        String::new()
-      }
-    ));
-  }
+  let ring = Ring { n, cx, cy, start, far };
+  let translucent = samples.stops.iter().any(|s| s.1.a < 0.999);
+  let colour = |t: f64| samples.at(t).0;
+  let body = ring.wedges(&colour);
+  let (mask_def, group_open) = if translucent {
+    // Stop alpha as grey levels: white is opaque.
+    let grey = |t: f64| {
+      let a = (samples.at(t).1 / samples.opacity.max(1e-9)).clamp(0.0, 1.0);
+      let v = (a * 255.0).round() as u8;
+      Rgba { r: v, g: v, b: v, a: 1.0 }
+    };
+    let mid = format!("{id}m");
+    (
+      format!(
+        "<mask id=\"{mid}\" maskUnits=\"userSpaceOnUse\" x=\"-100000\" y=\"-100000\" width=\"200000\" height=\"200000\">{}</mask>",
+        ring.wedges(&grey)
+      ),
+      format!("<g mask=\"url(#{mid})\">"),
+    )
+  } else {
+    (String::new(), "<g>".to_string())
+  };
+  let op = if samples.opacity < 0.999 {
+    format!(" opacity=\"{}\"", fmt(samples.opacity))
+  } else {
+    String::new()
+  };
   Some(format!(
-    "<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"><g transform=\"translate({} {})\">{out}</g></pattern>",
+    "<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\">{mask_def}<g transform=\"translate({} {})\"{op}>{group_open}{body}</g></g></pattern>",
     fmt(-pad),
     fmt(-pad),
     fmt(w + 2.0 * pad),
@@ -165,6 +188,64 @@ pub fn angular_pattern(id: &str, stops: &[GradientStop], opacity: f64, hd: &Grad
     fmt(pad),
     fmt(pad)
   ))
+}
+
+/// One decimal is plenty for wedge corners and keeps the markup small.
+fn f1(v: f64) -> String {
+  fmt((v * 10.0).round() / 10.0)
+}
+
+/// Geometry shared by the colour wedges and the alpha-mask wedges of one angular gradient.
+struct Ring {
+  n: usize,
+  cx: f64,
+  cy: f64,
+  start: f64,
+  far: f64,
+}
+
+impl Ring {
+  /// A disc of the closing colour (so no seam can show the background), then the wedges.
+  /// Each wedge reaches a little into the next; the last one does not reach into the first.
+  fn wedges(&self, colour: &dyn Fn(f64) -> Rgba) -> String {
+    let step = TAU / self.n as f64;
+    let overlap = (WEDGE_OVERLAP_PX / (self.far * 0.3)).min(step * 0.5);
+    let rim = self.far / ((step + overlap) / 2.0).cos();
+    let at = |a: f64| (self.cx + rim * a.cos(), self.cy + rim * a.sin());
+    let mut out = String::new();
+    let last = colour(1.0);
+    let disc = |r: f64| {
+      format!(
+        "<path d=\"M{} {}A{r} {r} 0 1 1 {} {}A{r} {r} 0 1 1 {} {}Z\" fill=\"{}\"/>",
+        fmt(self.cx - r),
+        fmt(self.cy),
+        fmt(self.cx + r),
+        fmt(self.cy),
+        fmt(self.cx - r),
+        fmt(self.cy),
+        last.hex6(),
+        r = fmt(r)
+      )
+    };
+    out.push_str(&disc(self.far));
+    for i in 0..self.n {
+      let (t0, t1) = (i as f64 / self.n as f64, (i + 1) as f64 / self.n as f64);
+      let a0 = self.start + step * i as f64;
+      let a1 = a0 + step + if i + 1 < self.n { overlap } else { 0.0 };
+      let (p0, p1) = (at(a0), at(a1));
+      let fill = colour((t0 + t1) / 2.0).hex6();
+      out.push_str(&format!(
+        "<path d=\"M{} {}L{} {}L{} {}Z\" fill=\"{fill}\"/>",
+        f1(self.cx),
+        f1(self.cy),
+        f1(p0.0),
+        f1(p0.1),
+        f1(p1.0),
+        f1(p1.1)
+      ));
+    }
+    out
+  }
 }
 
 /// Image pattern for `ScaleMode::Crop`: the whole image stretched over `crop`, which is given
@@ -467,11 +548,53 @@ mod tests {
     let doc = doc_with(NodeType::Rectangle, 100.0, 100.0, |n| n.fills = vec![angular(None)]);
     let s = svg(&doc);
     let pat = s.split("<pattern").nth(1).expect("pattern");
-    assert!(pat.matches("<path").count() >= 180, "wedges: {}", pat.matches("<path").count());
+    // The base disc plus 72 solid wedges on a small layer.
+    assert_eq!(pat.matches("<path").count(), 1 + 72);
+    assert!(!s.contains("<linearGradient"));
     assert!(s.contains("fill=\"url(#ag1)\""));
-    // Big boxes get the finer ring.
-    let big = doc_with(NodeType::Rectangle, 1200.0, 100.0, |n| n.fills = vec![angular(None)]);
-    assert!(svg(&big).matches("<path").count() >= 360);
+    // Bigger layers get finer steps.
+    let count = |side: f64| {
+      svg(&doc_with(NodeType::Rectangle, side, 100.0, |n| n.fills = vec![angular(None)]))
+        .matches("<path")
+        .count()
+    };
+    assert_eq!((count(400.0), count(800.0), count(1200.0)), (1 + 120, 1 + 144, 1 + 180));
+  }
+
+  #[test]
+  fn angular_opacity_goes_on_a_group_and_stop_alpha_on_a_mask() {
+    let opaque_stops = |opacity: f64| Paint::AngularGradient {
+      stops: stops(),
+      opacity,
+      visible: true,
+      handles: None,
+    };
+    for size in [100.0, 400.0] {
+      let half = doc_with(NodeType::Rectangle, size, size, |n| n.fills = vec![opaque_stops(0.5)]);
+      let s = svg(&half);
+      assert!(!s.contains("fill-opacity") && !s.contains("<mask"), "{s}");
+      assert!(s.contains("<g transform=\"translate(0 0)\" opacity=\"0.5\">"), "{s}");
+      let faded = Paint::AngularGradient {
+        stops: vec![
+          GradientStop {
+            color: "#FF000000".into(),
+            position: 0.0,
+          },
+          GradientStop {
+            color: "#0000FF".into(),
+            position: 1.0,
+          },
+        ],
+        opacity: 1.0,
+        visible: true,
+        handles: None,
+      };
+      let t = svg(&doc_with(NodeType::Rectangle, size, size, |n| n.fills = vec![faded]));
+      assert!(
+        t.contains("<mask") && t.contains("mask=\"url(#ag1m)\"") && !t.contains("fill-opacity"),
+        "{t}"
+      );
+    }
   }
 
   #[test]

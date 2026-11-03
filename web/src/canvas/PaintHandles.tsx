@@ -102,7 +102,28 @@ export function handlesOf(p: GradientPaint, w: number, h: number): GradientHandl
   return { start: [0.5, 0.5], end: [1, 0.5], width: [0.5, 1] };
 }
 
+/** Enter and Escape finish paint editing (handles, crop) without reaching the shortcuts: clearing
+ *  `paintEdit` closes the popover. Keys typed in a field, and Enter on a popover button, are left alone. */
+function usePaintKeys() {
+  const editing = useStore((s) => s.paintEdit !== null);
+  useEffect(() => {
+    if (!editing) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Enter" && e.key !== "Escape") return;
+      const t = e.target as Element | null;
+      if (t?.closest?.("input, textarea, select, [contenteditable]")) return;
+      if (e.key === "Enter" && t?.closest?.(".popover")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      useStore.setState({ paintEdit: null });
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [editing]);
+}
+
 export function PaintHandles({ v }: { v: Viewport }) {
+  usePaintKeys();
   const t = usePaintTarget();
   if (!t || !isGradient(t.paint)) return null;
   return <Handles v={v} t={t} paint={t.paint} />;

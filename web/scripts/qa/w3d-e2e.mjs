@@ -5,6 +5,9 @@
 
 import { chromium } from "playwright-core";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
 
 const URL = process.env.E2E_URL ?? "http://localhost:5173";
 const launch = { headless: true, args: ["--no-sandbox"] };
@@ -121,6 +124,7 @@ try {
         { type: "rectangle", name: "Ang", x: 100, y: 100, width: 200, height: 200, fill: "#FF0000" },
         { type: "rectangle", name: "Lin", x: 100, y: 400, width: 200, height: 200, fill: "linear-gradient(90deg, #000000, #FFFFFF)" },
         { type: "rectangle", name: "Pic", x: 100, y: 700, width: 200, height: 100, fill: "#CCCCCC" },
+        { type: "rectangle", name: "Pic2", x: 400, y: 700, width: 200, height: 100, fill: "#CCCCCC" },
         { type: "rectangle", name: "Sides", x: 100, y: 900, width: 200, height: 100, fill: "#FFFFFF", stroke: "#000000", strokeWidth: 1 },
         { type: "star", name: "Star", x: 500, y: 900, width: 120, height: 120, fill: "#FFFFFF", stroke: "#000000", strokeWidth: 6 },
       ],
@@ -129,6 +133,9 @@ try {
   await page.evaluate((src) => {
     const pic = Object.values(window.__dt.doc().nodes).find((n) => n.name === "Pic");
     window.__dt.dispatch({ op: "update", ids: [pic.id], patch: { fills: [{ type: "image", src, scaleMode: "fill", opacity: 1, visible: true }] } });
+    // A source with both quote kinds in it, in Fit mode (it becomes the Crop test below).
+    const two = Object.values(window.__dt.doc().nodes).find((n) => n.name === "Pic2");
+    window.__dt.dispatch({ op: "update", ids: [two.id], patch: { fills: [{ type: "image", src: src + "#it's\"q\"", scaleMode: "fit", opacity: 1, visible: true }] } });
   }, picture);
   await page.waitForTimeout(300);
 
@@ -196,11 +203,12 @@ try {
     near(moved[1], 0.6, 0.04) && moved[0] === stopsBefore[0] && moved[2] === stopsBefore[2],
     `${stopsBefore} -> ${moved}`,
   );
-  // (A key pressed inside the popover never reaches its Escape handler: leave its button first.)
-  await page.evaluate(() => document.activeElement?.blur());
+  // Escape works even with focus on a popover button, and leaves the selection alone.
+  const selHandles = await page.evaluate(() => window.__dt.state().selection.join(","));
   await page.keyboard.press("Escape");
   await page.waitForTimeout(200);
-  check("3b. closing the popover hides the handles", (await page.locator("[data-paint-handle]").count()) === 0);
+  check("3b. closing the popover hides the handles", (await page.locator("[data-paint-handle]").count()) === 0 && (await page.locator(".popover").count()) === 0);
+  check("3c. Escape leaves the selection alone", (await page.evaluate(() => window.__dt.state().selection.join(","))) === selHandles && !!selHandles);
   // Undo steps: the stop drag, adding the stop, then the handle drag (both fields together).
   await page.locator("#dt-canvas").focus();
   for (let i = 0; i < 3; i++) {
@@ -233,14 +241,33 @@ try {
     near(pic1.fills[0].crop.x - c0.x, 0.2, 0.01) && pic1.width === 200 && pic1.height === 100,
     `${pic1.fills[0].crop.x} ${pic1.width}x${pic1.height}`,
   );
+  const selOf = () => page.evaluate(() => window.__dt.state().selection.join(","));
+  const selBefore = await selOf();
   await page.keyboard.press("Enter");
   await page.waitForTimeout(250);
   check("4c. Enter leaves crop mode", (await page.locator("[data-crop-body]").count()) === 0 && (await page.locator(".popover").count()) === 0);
+  check("4c2. Enter leaves the selection alone", (await selOf()) === selBefore && !!selBefore, `${selBefore} -> ${await selOf()}`);
   const r4 = await raster("Pic");
   const empty = await px(10, 100);
   const red = await px(2 * 60, 100);
   const blue = await px(2 * 170, 100);
   check("4d. the export shows the shifted image", empty[3] < 40 && red[0] > 200 && red[2] < 60 && blue[2] > 200 && blue[0] < 60, `${empty} ${red} ${blue} (${r4.w}x${r4.h})`);
+
+  // 4e. Fit to Crop is one change: no jump to the Fill rectangle, one undo step.
+  const two = await show("Pic2");
+  await openPaint("Fill");
+  await page.locator('.popover select[aria-label="Image scale mode"]').selectOption("crop");
+  await page.waitForFunction(() => Object.values(window.__dt.doc().nodes).find((n) => n.name === "Pic2")?.fills[0]?.crop);
+  const c2 = (await byName("Pic2")).fills[0].crop;
+  // The 40x20 picture fits a 200x100 box exactly, in Fit or Fill: use that to see the rect is right.
+  check("4e. Fit to Crop starts from the Fit rectangle", near(c2.w, 1, 0.01) && near(c2.h, 1, 0.01), JSON.stringify(c2));
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
+  await page.locator("#dt-canvas").focus();
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  const back = (await byName("Pic2")).fills[0];
+  check("4f. one undo takes the mode and the rectangle back together", back.scaleMode === "fit" && !back.crop, JSON.stringify(back).slice(0, 80));
 
   // 5. Individual strokes.
   await show("Sides");
@@ -297,6 +324,34 @@ try {
   await page.waitForTimeout(200);
   const diamond = await rootHtml(ang.id);
   check("7. a diamond gradient renders four quadrant gradients", (diamond.match(/<linearGradient/g) ?? []).length === 4, `${(diamond.match(/<linearGradient/g) ?? []).length}`);
+
+  // 8. A project with a cropped image (quotes in its address) type-checks.
+  await page.evaluate((src) => {
+    window.__dt.tool("create_nodes", {
+      parentId: null,
+      nodes: [{ type: "frame", name: "Screen", x: 2000, y: 0, width: 300, height: 200, fill: "#FFFFFF", children: [{ type: "rectangle", name: "Cropped", x: 0, y: 0, width: 200, height: 100, fill: "#CCCCCC" }] }],
+    });
+    const child = Object.values(window.__dt.doc().nodes).find((n) => n.name === "Cropped");
+    const fill = { type: "image", src: src + "#it's\"q\"", scaleMode: "crop", opacity: 1, visible: true, crop: { x: -0.1, y: 0, w: 1.2, h: 1 } };
+    window.__dt.dispatch({ op: "update", ids: [child.id], patch: { fills: [fill] } });
+  }, picture);
+  const files = await page.evaluate(() => window.__dt.query({ q: "exportProject" }));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "w3d-proj-"));
+  for (const f of files) {
+    fs.mkdirSync(path.dirname(path.join(dir, f.path)), { recursive: true });
+    fs.writeFileSync(path.join(dir, f.path), f.content);
+  }
+  const app = files.map((f) => f.content).join("\n");
+  fs.symlinkSync(path.resolve("node_modules"), path.join(dir, "node_modules"));
+  let tscOut = "";
+  try {
+    execFileSync(path.resolve("node_modules/.bin/tsc"), ["--noEmit", "--skipLibCheck", "--jsx", "react-jsx", "--strict", "--target", "es2020", "--moduleResolution", "bundler", "--module", "esnext", ...files.filter((f) => /\.tsx?$/.test(f.path)).map((f) => f.path)], { cwd: dir, stdio: "pipe" });
+  } catch (e) {
+    tscOut = String(e.stdout ?? e);
+  }
+  check("8a. the exported project has the cropped image", /url\('/.test(app) && /%27/.test(app));
+  check("8b. the exported project type-checks", tscOut === "", tscOut.split("\n").slice(0, 3).join(" | "));
+  fs.rmSync(dir, { recursive: true, force: true });
 
   check("no page errors", errors.length === 0, errors.join(" | "));
 } catch (e) {

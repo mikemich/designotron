@@ -1173,11 +1173,22 @@ fn css_paint(p: &Paint, w: f64, h: f64) -> String {
       opacity,
       handles: Some(hd),
       ..
-    } => format!(
-      "linear-gradient({}deg, {})",
-      fmt(paint::handle_angle(hd, w, h)),
-      css_stops(stops, *opacity)
-    ),
+    } => {
+      // CSS spans the whole box along the angle; the handles may cover only part of that line.
+      let (t0, t1) = paint::linear_extent(hd, w, h);
+      let mapped: Vec<crate::model::GradientStop> = stops
+        .iter()
+        .map(|s| crate::model::GradientStop {
+          color: s.color.clone(),
+          position: t0 + (t1 - t0) * s.position,
+        })
+        .collect();
+      format!(
+        "linear-gradient({}deg, {})",
+        fmt(paint::handle_angle(hd, w, h)),
+        css_stops(&mapped, *opacity)
+      )
+    }
     Paint::LinearGradient { stops, angle, opacity, .. } => format!("linear-gradient({}deg, {})", fmt(*angle), css_stops(stops, *opacity)),
     Paint::RadialGradient {
       stops,
@@ -1202,7 +1213,7 @@ fn css_paint(p: &Paint, w: f64, h: f64) -> String {
     Paint::DiamondGradient {
       stops, opacity, handles, ..
     } => radial_css(stops, *opacity, &handles.unwrap_or_else(|| paint::default_handles(false)), w, h),
-    Paint::Image { src, .. } => format!("url(\"{}\")", src.replace('"', "%22")),
+    Paint::Image { src, .. } => format!("url('{}')", src.replace('\'', "%27").replace('"', "%22")),
   }
 }
 
@@ -1306,7 +1317,8 @@ pub fn pascal(name: &str, fallback: &str) -> String {
 // ---------- Tailwind ----------
 
 fn tw_value(v: &str) -> String {
-  v.replace(' ', "_")
+  // A `"` would end the className string in the generated TSX.
+  v.replace(' ', "_").replace('"', "'")
 }
 
 /// Converts a CSS declaration into Tailwind utility classes.
@@ -2516,5 +2528,62 @@ mod tests {
       html.contains("background-size: 400px 100px") && html.contains("background-position: -100px 0"),
       "{html}"
     );
+  }
+
+  #[test]
+  fn class_names_never_contain_double_quotes() {
+    use crate::model::ImageCrop;
+    let mut doc = sample();
+    let page = doc.get("home").unwrap().page.clone();
+    let mut r = crate::ops::default_node(NodeType::Rectangle, "pic2".into(), "Pic2".into());
+    r.fills = vec![Paint::Image {
+      src: "https://example.com/it's \"q\".png".into(),
+      scale_mode: ScaleMode::Crop,
+      opacity: 1.0,
+      visible: true,
+      crop: Some(ImageCrop {
+        x: 0.0,
+        y: 0.0,
+        w: 1.5,
+        h: 1.5,
+      }),
+    }];
+    // A second fill so the background shorthand with url() lands in the class list too.
+    r.fills.push(Paint::solid("#112233"));
+    doc.insert(r, Some("home"), &page, None);
+    let react = export_react(&doc, "home", &HeuristicMeasurer);
+    let line = react.lines().find(|l| l.contains("url(")).expect("a url() class");
+    let class = line.split("className=\"").nth(1).expect("className");
+    let class = class.split('"').next().unwrap();
+    assert!(class.contains("url('") && class.contains("%27") && class.contains("%22"), "{line}");
+    assert!(line.matches('"').count() == 2, "className must hold no double quote: {line}");
+  }
+
+  #[test]
+  fn handle_extent_rescales_css_linear_stops() {
+    use crate::model::{GradientHandles, GradientStop};
+    let p = Paint::LinearGradient {
+      stops: vec![
+        GradientStop {
+          color: "#000000".into(),
+          position: 0.0,
+        },
+        GradientStop {
+          color: "#FFFFFF".into(),
+          position: 1.0,
+        },
+      ],
+      angle: 90.0,
+      opacity: 1.0,
+      visible: true,
+      handles: Some(GradientHandles {
+        start: [0.25, 0.5],
+        end: [0.75, 0.5],
+        width: [0.25, 1.0],
+      }),
+    };
+    let css = css_paint(&p, 200.0, 100.0);
+    assert!(css.starts_with("linear-gradient(90deg"), "{css}");
+    assert!(css.contains("25%") && css.contains("75%"), "{css}");
   }
 }
