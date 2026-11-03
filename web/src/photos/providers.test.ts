@@ -91,6 +91,34 @@ describe("Openverse search", () => {
     expect(plain.results).toHaveLength(6);
   });
 
+  it("only cc0, pdm, by and by-sa pass by default; unknown codes never do", async () => {
+    const body = JSON.parse(text("openverse-search.json"));
+    body.results = ["sampling+", "by-nc", "by-nd", "by-nc-sa", "mystery", "by", "BY-SA", "cc0", "pdm"].map((license, i) => ({ ...body.results[0], id: `0000001${i}-aaaa-4bbb-8ccc-dddddddddddd`, license }));
+    const { fn } = fakeFetch({ "https://api.openverse.org/": json(JSON.stringify(body)) });
+    const plain = await searchPhotos(env(fn), { provider: "openverse", query: "codes" });
+    expect(plain.results.map((r) => r.license)).toEqual(["CC BY 2.0", "CC BY-SA 2.0", "CC0 2.0", "Public Domain Mark 2.0"]);
+    clearPhotoCache();
+    const nc = await searchPhotos(env(fn, { nonCommercial: true }), { provider: "openverse", query: "codes" });
+    expect(nc.results.map((r) => r.license.split(" ").slice(0, 2).join(" "))).toEqual(["CC BY-NC", "CC BY-NC-SA", "CC BY", "CC BY-SA", "CC0 2.0", "Public Domain"]);
+  });
+
+  it("a detail lookup of an unknown or non-commercial licence is refused", async () => {
+    for (const [license, ncOk] of [["sampling+", false], ["sampling+", true], ["by-nd", true], ["by-nc", false]] as const) {
+      clearPhotoCache();
+      const detail = { ...JSON.parse(text("openverse-detail.json")), license };
+      const { fn } = fakeFetch({ [`https://api.openverse.org/v1/images/${U1}/`]: json(JSON.stringify(detail)) });
+      await expect(photoDetails(env(fn, { nonCommercial: ncOk }), `openverse:${U1}`), `${license} ${ncOk}`).rejects.toMatchObject({ kind: "bad" });
+    }
+  });
+
+  it("a cached non-commercial photo isn't handed out once the toggle is off", async () => {
+    const { fn } = fakeFetch({ "https://api.openverse.org/": json(text("openverse-search-nc.json")) });
+    const page = await searchPhotos(env(fn, { nonCommercial: true }), { provider: "openverse", query: "shoes" });
+    const nc = page.results.find((r) => r.nonCommercial)!;
+    expect((await photoDetails(env(fn, { nonCommercial: true }), nc.id)).id).toBe(nc.id);
+    await expect(photoDetails(env(fn), nc.id)).rejects.toMatchObject({ kind: "bad" });
+  });
+
   it("caches searches and results for placing", async () => {
     const { fn, calls } = fakeFetch({ "https://api.openverse.org/v1/images/?": json(text("openverse-search.json")) });
     await searchPhotos(env(fn), { provider: "openverse", query: "shoes" });

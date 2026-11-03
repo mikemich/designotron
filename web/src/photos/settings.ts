@@ -26,7 +26,7 @@ export function setNonCommercial(on: boolean) {
 /** The provider the panel searches: the saved choice, Openverse when that one needs a key that isn't there. */
 export function getProvider(): ProviderId {
   const saved = read(KEY_PROVIDER) as ProviderId;
-  return saved in PROVIDERS && (!PROVIDERS[saved].needsKey || getKey(saved)) ? saved : "openverse";
+  return Object.prototype.hasOwnProperty.call(PROVIDERS, saved) && (!PROVIDERS[saved].needsKey || getKey(saved)) ? saved : "openverse";
 }
 
 export function setProvider(p: ProviderId) {

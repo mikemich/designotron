@@ -381,7 +381,7 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
                 mode={{
                   kind: "pick",
                   onPick: async (r) => {
-                    const { paint } = await photoPaint(r, p.scaleMode === "fit" ? "fit" : "fill");
+                    const { paint } = await photoPaint(r, p.scaleMode === "crop" ? "fill" : p.scaleMode);
                     // A new photo starts uncropped; the opacity of this paint stays.
                     props.onChange({ ...p, src: paint.src, credit: paint.credit, scaleMode: paint.scaleMode, crop: undefined });
                     setFinding(false);

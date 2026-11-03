@@ -71,6 +71,8 @@ const MAX_COUNT = 20;
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const OPENVERSE_ID = new RegExp(`^openverse:(${UUID})$`);
 const PEXELS_ID = /^pexels:(\d{1,12})$/;
+const ALLOWED = ["cc0", "pdm", "by", "by-sa"];
+const ALLOWED_NC = [...ALLOWED, "by-nc", "by-nc-sa"];
 const SEARCH_CACHE = 30;
 const RESULT_CACHE = 200;
 
@@ -96,7 +98,9 @@ export async function searchPhotos(env: PhotoEnv, o: SearchOptions): Promise<Sea
 /** Looks a photo up by its id (never by a URL Claude made up). */
 export async function photoDetails(env: PhotoEnv, id: string): Promise<PhotoResult> {
   const cached = results.get(id);
-  if (cached) return cached;
+  // A non-commercial photo found with the toggle on isn't handed out once it is off.
+  if (cached && (!cached.nonCommercial || env.nonCommercial)) return cached;
+  if (cached) throw new PhotoError("bad", "That photo can't be used (its licence isn't allowed)");
   const parsed = parsePhotoId(id);
   if (!parsed) throw new PhotoError("bad", `'${String(id).slice(0, 60)}' is not a photo id from search_photos`);
   let r: PhotoResult | null;
@@ -190,10 +194,10 @@ async function searchOpenverse(env: PhotoEnv, query: string, orientation: Orient
 function openverseResult(x: any, nonCommercialOk: boolean): PhotoResult | null {
   const uuid = typeof x?.id === "string" && new RegExp(`^${UUID}$`).test(x.id) ? x.id : "";
   const code = typeof x?.license === "string" ? x.license.toLowerCase() : "";
-  if (!uuid || !/^[a-z0-9+-]{2,20}$/.test(code)) return null;
-  const nd = /(^|-)nd$/.test(code) || code.includes("-nd");
+  if (!uuid) return null;
+  // Only these licences allow commercial use and changes (the toggle adds the NC ones).
+  if (!(nonCommercialOk ? ALLOWED_NC : ALLOWED).includes(code)) return null;
   const nonCommercial = code.includes("nc");
-  if (nd || (nonCommercial && !nonCommercialOk)) return null;
   const version = cleanText(x.license_version, 8);
   const license = code === "cc0" ? `CC0 ${version || "1.0"}` : code === "pdm" ? `Public Domain Mark ${version || "1.0"}` : `CC ${code.toUpperCase()}${version ? " " + version : ""}`;
   const fallbackLicenseUrl = code === "cc0" ? "https://creativecommons.org/publicdomain/zero/1.0/" : code === "pdm" ? "https://creativecommons.org/publicdomain/mark/1.0/" : version ? `https://creativecommons.org/licenses/${code}/${version}/` : "";
@@ -318,7 +322,7 @@ async function apiJson(env: PhotoEnv, provider: ProviderId, url: string): Promis
       throw new PhotoError("rateLimited", `${spec.label} refused the request (rate limit)`, { retryAfter: retryAfter(res), status: res.status });
     }
     if (res.status === 404) throw new PhotoError("bad", "Photo not found", { status: 404 });
-    if (!res.ok) throw new PhotoError("http", `${spec.label} answered ${res.status}`, { status: res.status });
+    if (!res.ok) throw new PhotoError("http", `${spec.label} isn't answering right now. Try again in a moment.`, { status: res.status });
     const text = await readCapped(res, MAX_JSON_BYTES);
     try {
       return JSON.parse(text);

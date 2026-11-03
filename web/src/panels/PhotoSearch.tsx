@@ -38,7 +38,11 @@ export function PhotoSearch(props: { mode: Mode }) {
   const [orientation, setOrientation] = useState<Orientation | "any">("any");
   const [provider, setProviderState] = useState<ProviderId>(getProvider);
   const [nc, setNc] = useState(getNonCommercial);
-  const [pexelsKey, setPexelsKey] = useState(() => getKey("pexels"));
+  // The saved key is never shown again: only "saved" with Replace and Remove.
+  const [hasKey, setHasKey] = useState(() => !!getKey("pexels"));
+  const [replacing, setReplacing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [typeHint, setTypeHint] = useState(false);
   const [sources, setSources] = useState(false);
   const [results, setResults] = useState<PhotoResult[]>([]);
   const [state, setState] = useState<State>({ s: "idle" });
@@ -58,7 +62,10 @@ export function PhotoSearch(props: { mode: Mode }) {
     const text = q.trim();
     if (!text) return;
     const mine = ++run.current;
+    setTypeHint(false);
     if (page === 1) {
+      // The old tiles go at once: they must not stay clickable under an error.
+      setResults([]);
       setSearched(text);
       lastKey.current = searchKey(text);
     }
@@ -79,6 +86,14 @@ export function PhotoSearch(props: { mode: Mode }) {
       });
   };
   const pages = useRef(1);
+
+  // Back online: the search that failed (or never ran) is run again.
+  const wasOnline = useRef(online);
+  useEffect(() => {
+    if (online && !wasOnline.current && searched) search(searched, 1);
+    wasOnline.current = online;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [online]);
 
   // Searching again as the person types (3+ characters), and when a filter changes.
   useEffect(() => {
@@ -108,9 +123,14 @@ export function PhotoSearch(props: { mode: Mode }) {
           setLive(msg);
         } else {
           const c = viewportCenter();
+          const odd = newLayer ? undefined : selection().map((id) => getDoc().nodes[id]).find((n) => n && !fillable(n));
           await placeNewLayer(r, { x: c.x, y: c.y });
-          toast(`Placed "${short(r.title)}"`);
-          setLive(`Placed ${short(r.title)}`);
+          // Say why a selected layer didn't take the photo.
+          const msg = odd
+            ? `${odd.type === "text" ? "Text layers" : odd.type === "group" ? "Groups" : "That layer"} can't take an image fill, so the photo was placed as a new layer`
+            : `Placed "${short(r.title)}"`;
+          toast(msg);
+          setLive(msg);
         }
       }
     } catch (err) {
@@ -124,6 +144,8 @@ export function PhotoSearch(props: { mode: Mode }) {
 
   const onKey = (e: React.KeyboardEvent, i: number, r: PhotoResult) => {
     const cols = Math.max(1, getComputedStyle(grid.current!).gridTemplateColumns.split(" ").length);
+    // The canvas shortcuts (arrows nudge the selection) must not see keys the grid uses.
+    if (["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp", "Home", "End", "Enter", " "].includes(e.key)) e.stopPropagation();
     let next = i;
     if (e.key === "ArrowRight") next = i + 1;
     else if (e.key === "ArrowLeft") next = i - 1;
@@ -164,12 +186,16 @@ export function PhotoSearch(props: { mode: Mode }) {
           placeholder="Search photos"
           aria-label="Search photos"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setTypeHint(false);
+          }}
           onKeyDown={(e) => {
             e.stopPropagation();
             if (e.key === "Enter") {
               pages.current = 1;
-              search(query, 1);
+              if (query.trim()) search(query, 1);
+              else setTypeHint(true);
             }
           }}
         />
@@ -214,34 +240,70 @@ export function PhotoSearch(props: { mode: Mode }) {
             />
             <span>Include non-commercial licences</span>
           </label>
-          <label className="photo-key">
-            <span className="muted small">Pexels key (optional)</span>
-            <input
-              className="textinput"
-              type="password"
-              autoComplete="off"
-              spellCheck={false}
-              placeholder="Paste a key from pexels.com/api"
-              aria-label="Pexels API key"
-              value={pexelsKey}
-              onChange={(e) => {
-                setPexelsKey(e.target.value);
-                setKey("pexels", e.target.value);
-                if (!e.target.value.trim() && provider === "pexels") {
-                  setProvider("openverse");
-                  setProviderState("openverse");
-                }
-              }}
-              onKeyDown={(e) => e.stopPropagation()}
-            />
-          </label>
+          {hasKey && !replacing ? (
+            <div className="photo-key" data-testid="pexels-key-saved">
+              <span className="muted small">Pexels key saved</span>
+              <div className="row">
+                <button className="btn small" onClick={() => setReplacing(true)}>
+                  Replace
+                </button>
+                <button
+                  className="btn small"
+                  onClick={() => {
+                    setKey("pexels", "");
+                    setHasKey(false);
+                    setDraft("");
+                    if (provider === "pexels") {
+                      setProvider("openverse");
+                      setProviderState("openverse");
+                    }
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
+          ) : (
+            <label className="photo-key">
+              <span className="muted small">Pexels key (optional)</span>
+              <input
+                className="textinput"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="Paste a key from pexels.com/api, then Enter"
+                aria-label="Pexels API key"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Enter" && draft.trim()) {
+                    setKey("pexels", draft);
+                    setDraft("");
+                    setHasKey(true);
+                    setReplacing(false);
+                  }
+                }}
+              />
+            </label>
+          )}
           <p className="muted small">Openverse needs no key. Pexels has no safe-search switch (its library is curated). Keys stay in this browser and go only to api.pexels.com.</p>
         </div>
       )}
       <div className="sr-only" role="status" aria-live="polite">
         {live}
       </div>
-      {!online && <div className="photo-note">Photo search needs the internet.</div>}
+      {!online && (
+        <div className="photo-note">
+          Photo search needs the internet.
+          {searched && !err && (
+            <button className="btn small" onClick={() => search(searched, 1)}>
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+      {typeHint && <div className="photo-note">Type what you're looking for.</div>}
       {state.s === "loading" && results.length === 0 && (
         <div className="photo-grid skeleton" aria-hidden>
           {Array.from({ length: 6 }, (_, i) => (
@@ -273,6 +335,7 @@ export function PhotoSearch(props: { mode: Mode }) {
                 onFocus={() => setFocus(i)}
                 onClick={() => void choose(r, false)}
                 onKeyDown={(e) => onKey(e, i, r)}
+                onKeyUp={(e) => e.key === " " && e.stopPropagation()}
               >
                 <img src={r.thumb} alt="" referrerPolicy="no-referrer" loading="lazy" draggable={false} />
                 {r.nonCommercial && <span className="photo-badge">NC</span>}
@@ -305,7 +368,7 @@ export function PhotoSearch(props: { mode: Mode }) {
 /** What went wrong, in words for the person. */
 function describe(err: unknown): string {
   if (err instanceof PhotoError) {
-    if (err.kind === "rateLimited") return err.extra.retryAfter ? `Too many searches. Try again in ${err.extra.retryAfter} s.` : "Too many searches right now. Wait a minute and try again.";
+    if (err.kind === "rateLimited") return err.extra.retryAfter ? `Too many searches. Try again in ${err.extra.retryAfter}\u00a0s.` : "Too many searches right now. Wait a minute and try again.";
     if (err.kind === "offline") return "Photo search needs the internet.";
     return err.message;
   }
