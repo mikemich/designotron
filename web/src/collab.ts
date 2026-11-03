@@ -137,7 +137,7 @@ function normalizeRelay(url: string): string {
 }
 
 /** Checks that `url` is a Designotron relay; returns its health info. */
-export async function probeRelay(url: string): Promise<{ editor: boolean }> {
+export async function probeRelay(url: string): Promise<{ editor: boolean; model: number }> {
   const base = normalizeRelay(url);
   if (location.protocol === "https:" && base.startsWith("http:")) throw new Error("This editor is on https, so the relay must be too (https://…).");
   let info: any;
@@ -151,7 +151,8 @@ export async function probeRelay(url: string): Promise<{ editor: boolean }> {
     clearTimeout(slow);
   }
   if (info?.relay !== "designotron") throw new Error(`${base} isn't a Designotron relay.`);
-  return { editor: !!info.editor };
+  // Relays that predate the model revision say nothing: model 0.
+  return { editor: !!info.editor, model: Number(info.model) || 0 };
 }
 
 /** True when this page is itself served by a relay (it can share without any setup). */
@@ -174,7 +175,7 @@ export const isLocalPage = () => ["localhost", "127.0.0.1", "[::1]"].includes(lo
 const COLORS = ["#F24822", "#0FA958", "#9747FF", "#FF7A00", "#1BC4FF", "#FF24BD", "#14AE5C", "#E8A400"];
 /** This person's cursor colour, as collaborators see it. Starts random; changes to the first
  *  free one when somebody else in the room already has it (see `settleColor`). */
-export let myColor = COLORS[Math.floor(Math.random() * COLORS.length)];
+export let myColor: string = COLORS[Math.floor(Math.random() * COLORS.length)];
 /** True once the colour was changed from the one joined with: presence then carries it. */
 let colorChanged = false;
 
@@ -196,6 +197,61 @@ function settleColor() {
   sendPresence(true);
 }
 const myName = () => userName() || "Anonymous";
+
+/** The document model revision this editor writes (keep in step with `collab::MODEL_REVISION`). */
+const MODEL_REVISION = 3;
+/** Nothing to downgrade: a relay built with this editor (the bridge) or not known yet. */
+const CURRENT = 1_000_000;
+/** The model the room's relay understands (0: an older relay, which says nothing). Changes
+ *  sent to a relay older than this editor are rewritten for it (`collab::downgrade`) so it
+ *  doesn't reject them; the editor's own copy keeps the real values. */
+let relayModel = CURRENT;
+
+/** `value` (a delta or document about to be sent) as the room's relay can store it. */
+function onWire<T>(value: T): T {
+  if (relayModel >= MODEL_REVISION) return value;
+  return JSON.parse(getEngine().collabDowngrade(JSON.stringify(value), relayModel));
+}
+
+const OLD_RELAY_HINT = "Ask the relay's owner to update it.";
+
+const HEX = /^#[0-9a-f]{6}$/i;
+const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && Math.abs(n) < 1e7;
+
+/** A colour that is safe to put in a style: `#rrggbb`, else `fallback`. */
+export const safeColor = (c: unknown, fallback = "#7C5CFF") => (typeof c === "string" && HEX.test(c) ? c : fallback);
+
+/** Presence from the room is whatever a peer sent: keep only well-formed, bounded values, so a
+ *  hostile or buggy peer can't crash this editor, fetch URLs through a colour, or send the view
+ *  to NaN. */
+export function cleanPresence(p: any): Presence | null {
+  if (!p || typeof p !== "object") return null;
+  const out: Presence = { page: typeof p.page === "string" ? p.page.slice(0, 100) : "", cursor: null, selection: [] };
+  if (p.cursor && finite(p.cursor.x) && finite(p.cursor.y)) out.cursor = { x: p.cursor.x, y: p.cursor.y };
+  if (Array.isArray(p.selection)) out.selection = p.selection.filter((id: unknown) => typeof id === "string").slice(0, 500).map((id: string) => id.slice(0, 100));
+  if (p.owner === true) out.owner = true;
+  if (p.ended === true) out.ended = true;
+  const v = p.view;
+  if (v && finite(v.x) && finite(v.y) && finite(v.w) && finite(v.h) && v.w >= 1 && v.h >= 1 && v.w <= 1e6 && v.h <= 1e6) out.view = { x: v.x, y: v.y, w: v.w, h: v.h };
+  if (finite(p.following)) out.following = p.following;
+  // A timestamp: any finite number (the other fields are bounded to sane coordinates).
+  if (typeof p.spotlight === "number" && Number.isFinite(p.spotlight)) out.spotlight = p.spotlight;
+  if (p.chat && typeof p.chat === "object") out.chat = { text: typeof p.chat.text === "string" ? p.chat.text.slice(0, 52) : "", t: finite(p.chat.t) ? p.chat.t : 0 };
+  if (typeof p.color === "string" && HEX.test(p.color)) out.color = p.color;
+  return out;
+}
+
+/** A peer from the room as this editor keeps it (names and colours bounded and safe). */
+function cleanPeer(p: any): Peer {
+  const presence = cleanPresence(p.presence);
+  return {
+    id: Number(p.id),
+    name: typeof p.name === "string" ? p.name.slice(0, 40) : "Guest",
+    color: presence?.color ?? safeColor(p.color),
+    presence,
+    role: p.role === "viewer" ? "viewer" : undefined,
+  };
+}
 
 let ws: WebSocket | null = null;
 let wsUrl = "";
@@ -264,7 +320,7 @@ function flush() {
   if (useCollab.getState().status !== "live") return;
   const d = JSON.parse(getEngine().collabDelta());
   if (d.full || isEmptyDelta(d)) return;
-  send({ type: "delta", delta: d, assets: newAssets(JSON.stringify([d.nodes ?? {}, d.patch ?? {}])) });
+  send({ type: "delta", delta: onWire(d), assets: newAssets(JSON.stringify([d.nodes ?? {}, d.patch ?? {}])) });
 }
 
 function scheduleFlush() {
@@ -310,6 +366,7 @@ function onMessage(m: any) {
       const unsent: unknown[] = joinedOnce && m.doc ? JSON.parse(getEngine().collabUnsent()) : [];
       ordered = !!m.ordered;
       granular = !!m.granular;
+      relayModel = typeof m.model === "number" ? m.model : useCollab.getState().mode === "online" ? 0 : CURRENT;
       // A viewer's engine refuses every edit (comments still work).
       if (m.role === "viewer") dispatch({ op: "setReadOnly", on: true }, { quiet: true });
       if (m.doc) loadShared(m.doc, m.assets, !joinedOnce);
@@ -324,7 +381,7 @@ function onMessage(m: any) {
       }
       joinedOnce = true;
       const peers: Record<number, Peer> = {};
-      for (const p of m.peers ?? []) peers[p.id] = { ...p, color: p.presence?.color ?? p.color };
+      for (const p of m.peers ?? []) peers[p.id] = cleanPeer(p);
       const online = useCollab.getState().mode === "online";
       useCollab.setState({
         status: "live",
@@ -360,7 +417,12 @@ function onMessage(m: any) {
     case "ack":
       // The relay applied our oldest unacknowledged change (or turned it down).
       flush();
-      if (m.rejected) dispatch({ op: "collabAck", rejected: true }, { quiet: true });
+      if (m.rejected) {
+        dispatch({ op: "collabAck", rejected: true }, { quiet: true });
+        // Viewers' harmless re-syncs are turned down on purpose; for anyone else the relay
+        // couldn't take the change (most often: it's older than this editor).
+        if (!useCollab.getState().viewer) toast(`The relay couldn't take your last change because it's older than this editor, so it was undone. ${OLD_RELAY_HINT}`, "error");
+      }
       else getEngine().dispatch(JSON.stringify({ op: "collabAck", rejected: false }));
       break;
     case "reload":
@@ -370,7 +432,7 @@ function onMessage(m: any) {
       toast("The shared file was replaced by its owner");
       break;
     case "peer":
-      useCollab.setState((s) => ({ peers: { ...s.peers, [m.id]: { id: m.id, name: m.name, color: m.color, presence: null, role: m.role } } }));
+      useCollab.setState((s) => ({ peers: { ...s.peers, [m.id]: cleanPeer({ id: m.id, name: m.name, color: m.color, presence: null, role: m.role }) } }));
       settleColor();
       break;
     case "leave":
@@ -386,16 +448,17 @@ function onMessage(m: any) {
       useCollab.setState((s) => {
         const p = s.peers[m.id];
         if (!p) return s;
+        const presence = cleanPresence(m.presence);
         // A colour in presence wins over the one joined with (the person had to change it).
-        const peers = { ...s.peers, [m.id]: { ...p, color: m.presence?.color ?? p.color, presence: m.presence } };
+        const peers = { ...s.peers, [m.id]: { ...p, color: presence?.color ?? p.color, presence } };
         // The owner stopped sharing, or came back.
-        const ownerGone = m.presence?.ended ? { name: p.name, how: "ended" as const } : m.presence?.owner ? null : s.ownerGone;
+        const ownerGone = presence?.ended ? { name: p.name, how: "ended" as const } : presence?.owner ? null : s.ownerGone;
         return { peers, ownerGone };
       });
       settleColor();
       break;
     case "rename":
-      useCollab.setState((s) => (s.peers[m.id] ? { peers: { ...s.peers, [m.id]: { ...s.peers[m.id], name: m.name } } } : s));
+      useCollab.setState((s) => (s.peers[m.id] ? { peers: { ...s.peers, [m.id]: { ...s.peers[m.id], name: typeof m.name === "string" ? m.name.slice(0, 40) : s.peers[m.id].name } } } : s));
       break;
     case "ended":
       // The owner stopped sharing before we (re)joined: keep this copy, don't retry.
@@ -406,7 +469,12 @@ function onMessage(m: any) {
     case "error":
       // A view link the relay doesn't serve right now: say so in the bar, keep trying quietly.
       if (viewing && /view link/i.test(m.message ?? "")) useCollab.setState({ viewError: m.message });
-      else toast(m.message, "error");
+      else if (typeof m.message === "string" && m.message.startsWith("This file couldn't be shared:")) {
+        // The relay's own parser said no (raw serde text): say what it means, and don't leave a
+        // link that leads nowhere.
+        toast(`The relay couldn't take this file because it's older than this editor and doesn't know some of its newer properties. ${OLD_RELAY_HINT}`, "error");
+        if (!joinedDoc && useCollab.getState().role === "owner") stopSharing();
+      } else toast(m.message, "error");
       break;
   }
 }
@@ -553,7 +621,7 @@ function currentFile(): { doc: unknown; assets: Record<string, unknown> } {
   const used = new Set(referencedAssets(json));
   const assets = Object.fromEntries(Object.entries(allAssets()).filter(([k]) => used.has(k)));
   used.forEach((id) => sentAssets.add(id));
-  return { doc: JSON.parse(json), assets };
+  return { doc: onWire(JSON.parse(json)), assets };
 }
 
 function shareCurrentFile() {
@@ -563,7 +631,8 @@ function shareCurrentFile() {
 /** Owner: shares this file through an internet relay; anyone with the link can join. */
 export async function startOnline(relay: string): Promise<void> {
   const base = normalizeRelay(relay);
-  await probeRelay(base);
+  const info = await probeRelay(base);
+  relayModel = info.model;
   setRelayUrl(base);
   const room = randomRoomId();
   wsUrl = `${base.replace(/^http/, "ws")}/ws?room=${room}`;
@@ -583,6 +652,7 @@ export async function startSharing(): Promise<void> {
   const res = await fetch(`${bridgeHttpBase()}/bridge/share`, { method: "POST" });
   if (!res.ok) throw new Error(await res.text());
   const { url } = await res.json();
+  relayModel = CURRENT;
   wsUrl = `${bridgeHttpBase().replace(/^http/, "ws")}/collab/ws`;
   useCollab.setState({ role: "owner", mode: "lan", link: url });
   shareCurrentFile();
@@ -595,6 +665,7 @@ export function stopSharing() {
   viewing = false;
   viewFailures = 0;
   colorChanged = false;
+  relayModel = CURRENT;
   if (useCollab.getState().viewer) dispatch({ op: "setReadOnly", on: false }, { quiet: true });
   // Tell guests the owner stopped sharing (they keep their copy and can save it).
   if (useCollab.getState().role === "owner") send({ type: "presence", presence: { page: "", cursor: null, selection: [], owner: true, ended: true } satisfies Presence });
@@ -725,6 +796,8 @@ export function joinShared() {
     const relay = normalizeRelay(q.get("relay") || location.origin);
     viewing = true;
     viewRelay = relay;
+    // Read-only from the start, before the welcome says so.
+    dispatch({ op: "setReadOnly", on: true }, { quiet: true });
     wsUrl = `${wsBase(relay)}/ws?view=${encodeURIComponent(view)}`;
     useCollab.setState({ role: "guest", mode: "online", link: location.href, viewer: true });
   } else if (room) {

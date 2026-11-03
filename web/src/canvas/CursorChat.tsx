@@ -5,15 +5,16 @@ import { useEffect, useRef, useState } from "react";
 import { myColor, useCollab } from "../collab";
 import { CHAT_MAX, CHAT_MS, closeCursorChat, setChatText, useFollow } from "../follow";
 import { useStore } from "../store";
+import { PresenceBoundary } from "./PresenceBoundary";
 
 type View = { x: number; y: number; zoom: number };
 
 export function CursorChat({ v }: { v: View }) {
   return (
-    <>
+    <PresenceBoundary>
       <LocalBubble />
       <RemoteBubbles v={v} />
-    </>
+    </PresenceBoundary>
   );
 }
 
@@ -21,18 +22,24 @@ export function CursorChat({ v }: { v: View }) {
 function LocalBubble() {
   const chat = useFollow((s) => s.chat);
   const live = useCollab((s) => s.status === "live" && Object.keys(s.peers).length > 0);
+  // The pointer is tracked in a ref (no re-render per move); the bubble reads it when it opens
+  // and follows it only while it is open.
+  const pointer = useRef({ x: 80, y: 80 });
   const [at, setAt] = useState<{ x: number; y: number }>({ x: 80, y: 80 });
   const input = useRef<HTMLInputElement>(null);
+  const open = chat.open;
   useEffect(() => {
     const move = (e: PointerEvent) => {
       const el = document.getElementById("dt-canvas");
       if (!el) return;
       const r = el.getBoundingClientRect();
-      setAt({ x: e.clientX - r.left, y: e.clientY - r.top });
+      pointer.current = { x: e.clientX - r.left, y: e.clientY - r.top };
+      if (open) setAt(pointer.current);
     };
+    if (open) setAt(pointer.current);
     window.addEventListener("pointermove", move);
     return () => window.removeEventListener("pointermove", move);
-  }, []);
+  }, [open]);
   useEffect(() => {
     if (chat.open) input.current?.focus({ preventScroll: true });
   }, [chat.open]);

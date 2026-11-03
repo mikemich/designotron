@@ -755,6 +755,86 @@ mod tests {
       assert_eq!(room_doc(addr, &room).await["comments"]["c1"]["x"], 1.0);
     }
 
+    /// A viewer in a fresh room: (room id, owner socket, viewer socket).
+    async fn watching(addr: SocketAddr) -> (String, Ws, Ws) {
+      let (room, mut a, first) = owner(addr).await;
+      let mut v = viewer(addr, first["view"].as_str().unwrap()).await;
+      v.send(Message::Text(json!({ "type": "join", "name": "Vi" }).to_string()))
+        .await
+        .unwrap();
+      next_json(&mut v).await;
+      next_json(&mut a).await;
+      (room, a, v)
+    }
+
+    async fn rejected(v: &mut Ws, delta: serde_json::Value) -> bool {
+      v.send(Message::Text(json!({ "type": "delta", "delta": delta }).to_string()))
+        .await
+        .unwrap();
+      loop {
+        let m = next_json(v).await;
+        if m["type"] == "ack" {
+          return m["rejected"] == true;
+        }
+      }
+    }
+
+    fn thread(id: &str, texts: &[&str]) -> serde_json::Value {
+      let messages: Vec<_> = texts.iter().map(|t| json!({ "author": "Vi", "text": t, "time": 1 })).collect();
+      json!({ "id": id, "page": "p", "x": 1, "y": 2, "resolved": false, "messages": messages })
+    }
+
+    #[tokio::test]
+    async fn a_viewer_cant_smuggle_pages_styles_or_variables_in_with_a_comment() {
+      let (addr, _) = start(None).await;
+      let (room, _a, mut v) = watching(addr).await;
+      let c = json!({ "c1": thread("c1", &["hi"]) });
+      for extra in [
+        json!({ "pages": [] }),
+        json!({ "styles": {} }),
+        json!({ "variables": [] }),
+        json!({ "pages": null }),
+        json!({ "patch": { "x": {} } }),
+        json!({ "whatever": 1 }),
+      ] {
+        let mut d = json!({ "comments": c });
+        d.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        assert!(rejected(&mut v, d.clone()).await, "{d}");
+      }
+      let d = room_doc(addr, &room).await;
+      assert_eq!(d["pages"].as_array().unwrap().len(), 1);
+      assert!(d["comments"].as_object().is_none_or(|c| c.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn a_viewer_can_only_append_to_comments() {
+      let (addr, _) = start(None).await;
+      let (room, mut a, mut v) = watching(addr).await;
+      assert!(!rejected(&mut v, json!({ "comments": { "c1": thread("c1", &["first"]) } })).await);
+      // Erasing, rewriting, moving and forging earlier messages are refused.
+      assert!(rejected(&mut v, json!({ "comments": { "c1": thread("c1", &[]) } })).await);
+      assert!(rejected(&mut v, json!({ "comments": { "c1": thread("c1", &["edited"]) } })).await);
+      let mut moved = thread("c1", &["first"]);
+      moved["x"] = json!(99);
+      assert!(rejected(&mut v, json!({ "comments": { "c1": moved } })).await);
+      assert!(rejected(&mut v, json!({ "comments": { "other": thread("c1", &["x"]) } })).await);
+      assert!(rejected(&mut v, json!({ "comments": { "c2": thread("c2", &["x".repeat(6000).as_str()]) } })).await);
+      // A reply and resolving are fine; so is a thread of its own.
+      let mut reply = thread("c1", &["first", "second"]);
+      reply["resolved"] = json!(true);
+      assert!(!rejected(&mut v, json!({ "comments": { "c1": reply } })).await);
+      let got = room_doc(addr, &room).await;
+      assert_eq!(got["comments"]["c1"]["messages"].as_array().unwrap().len(), 2);
+      assert_eq!(got["comments"]["c1"]["resolved"], true);
+      // The owner only heard the changes that were applied.
+      let mut seen = 0;
+      while seen < 2 {
+        let d = next_delta(&mut a).await;
+        assert!(d["comments"]["c1"].is_object());
+        seen += 1;
+      }
+    }
+
     #[tokio::test]
     async fn a_viewer_cant_end_the_room_and_its_presence_loses_owner_and_ended() {
       let (addr, _) = start(None).await;

@@ -1,15 +1,34 @@
 // The border and bars that go with following someone and with spotlights.
 
 import { useCollab } from "../collab";
-import { breakFollow, dismissSpotlight, follow, stopSpotlight, useFollow } from "../follow";
+import { useEffect } from "react";
+import { breakFollow, dismissSpotlight, follow, onCanvasResize, stopSpotlight, useFollow, winningSpotlight } from "../follow";
+import { PresenceBoundary } from "./PresenceBoundary";
 
 export function FollowFrame() {
+  return (
+    <PresenceBoundary>
+      <Frame />
+    </PresenceBoundary>
+  );
+}
+
+function Frame() {
+  // Followers refit to this canvas's size, so a panel opening or a window resize counts.
+  useEffect(() => {
+    const el = document.getElementById("dt-canvas");
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => onCanvasResize());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const { leader, pending, dismissed, spotlight } = useFollow();
   const peers = useCollab((s) => s.peers);
   const me = useCollab((s) => s.me);
   const lead = leader != null ? peers[leader] : undefined;
   // Someone spotlighting whom this person isn't following (and hasn't turned down).
-  const offered = Object.values(peers).find((p) => (p.presence?.spotlight ?? 0) > 0 && p.id !== leader && !dismissed.includes(`${p.id}:${p.presence?.spotlight}`));
+  const win = winningSpotlight(peers, me, spotlight);
+  const offered = win && win.id !== me && win.id !== leader && !dismissed.includes(`${win.id}:${win.spot}`) ? peers[win.id] : undefined;
   const waiting = pending ? peers[pending.peer] : undefined;
   const followers = Object.values(peers).filter((p) => me != null && p.presence?.following === me).length;
   return (

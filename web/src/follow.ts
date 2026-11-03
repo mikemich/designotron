@@ -9,7 +9,7 @@
 
 import { create } from "zustand";
 import { sendPresence, setPresenceSource, useCollab, type Peer, type Presence } from "./collab";
-import { canvasSize, dispatch, getDoc, useStore } from "./store";
+import { canvasSize, dispatch, getDoc, toast, useStore } from "./store";
 import type { Tool } from "./types";
 
 /** How long "<Name> is spotlighting" waits (with "Not now") before following. */
@@ -47,8 +47,8 @@ export const useFollow = create<FollowState>(() => ({
 let applying = false;
 let lastApplied = "";
 let pendingTimer: ReturnType<typeof setTimeout> | null = null;
-/** The last spotlight value seen per peer, to notice changes. */
-const seenSpot = new Map<number, number>();
+/** The spotlight (`peer:timestamp`) the bar was last shown for, to notice a new one. */
+let seenKey = "";
 
 const MIN_ZOOM = 0.02;
 const MAX_ZOOM = 256;
@@ -76,7 +76,13 @@ setPresenceSource(() => {
 /** Starts following `peer` (their page and view, at once), or stops with null. `via` is the
  *  spotlight that started it. */
 export function follow(peer: number | null, via: number | null = null) {
-  if (peer != null && peer === useCollab.getState().me) return;
+  const c = useCollab.getState();
+  if (peer != null && peer === c.me) return;
+  // Following each other would chase one view round and round.
+  if (peer != null && c.me != null && c.peers[peer]?.presence?.following === c.me) {
+    toast(`${c.peers[peer].name} is following you`);
+    return;
+  }
   clearPending();
   lastApplied = "";
   useFollow.setState({ leader: peer, via: peer == null ? null : via });
@@ -126,8 +132,13 @@ function clearPending() {
 function applyLeader() {
   const { leader } = useFollow.getState();
   if (leader == null) return;
-  const p = useCollab.getState().peers[leader];
+  const c = useCollab.getState();
+  const p = c.peers[leader];
   if (!p) return endFollow();
+  if (c.me != null && p.presence?.following === c.me) {
+    toast(`${p.name} is following you`);
+    return endFollow();
+  }
   const view = p.presence?.view;
   const page = p.presence?.page;
   if (!view || !page || !(view.w > 0) || !(view.h > 0)) return;
@@ -159,30 +170,50 @@ function endFollow() {
   sendPresence(true);
 }
 
-/** Notices spotlights starting and ending. */
+/** The one spotlight in force: the newest; on a tie the lower id. `mine` is this person's own. */
+export function winningSpotlight(peers: Record<number, Peer>, me: number | null, mine: number): { id: number; spot: number } | null {
+  let best: { id: number; spot: number } | null = null;
+  const consider = (id: number, spot: number) => {
+    if (!(spot > 0)) return;
+    if (!best || spot > best.spot || (spot === best.spot && id < best.id)) best = { id, spot };
+  };
+  for (const p of Object.values(peers)) consider(p.id, p.presence?.spotlight ?? 0);
+  if (me != null) consider(me, mine);
+  return best;
+}
+
+/** Notices spotlights starting and ending. Only one counts at a time (see `winningSpotlight`);
+ *  a spotlight that was overtaken ends. */
 function checkSpotlights(peers: Record<number, Peer>) {
+  const { me } = useCollab.getState();
   const f = useFollow.getState();
-  for (const id of [...seenSpot.keys()]) if (!peers[id]) seenSpot.delete(id);
-  if (f.pending && !peers[f.pending.peer]) clearPending();
-  for (const p of Object.values(peers)) {
-    const spot = p.presence?.spotlight ?? 0;
-    if (seenSpot.get(p.id) === spot || (spot === 0 && !seenSpot.has(p.id))) continue;
-    seenSpot.set(p.id, spot);
-    if (spot) {
-      const now = useFollow.getState();
-      if (now.leader === p.id || now.dismissed.includes(`${p.id}:${spot}`)) continue;
-      clearPending();
-      useFollow.setState({ pending: { peer: p.id, spot } });
-      pendingTimer = setTimeout(() => {
-        const cur = useFollow.getState().pending;
-        if (cur && cur.peer === p.id && cur.spot === spot) follow(p.id, spot);
-      }, SPOTLIGHT_WAIT_MS);
-    } else {
-      const now = useFollow.getState();
-      if (now.pending?.peer === p.id) clearPending();
-      if (now.leader === p.id && now.via != null) follow(null);
-    }
+  const w = winningSpotlight(peers, me, f.spotlight);
+  if (f.spotlight > 0 && w && w.id !== me) stopSpotlight();
+  if (f.pending && (!w || w.id !== f.pending.peer || w.spot !== f.pending.spot)) clearPending();
+  // A follow that came from a spotlight ends with it.
+  if (f.leader != null && f.via != null && !((peers[f.leader]?.presence?.spotlight ?? 0) > 0)) follow(null);
+  if (!w || w.id === me) {
+    seenKey = "";
+    return;
   }
+  const key = `${w.id}:${w.spot}`;
+  if (key === seenKey) return;
+  seenKey = key;
+  const now = useFollow.getState();
+  if (now.leader === w.id || now.dismissed.includes(key)) return;
+  clearPending();
+  useFollow.setState({ pending: { peer: w.id, spot: w.spot } });
+  pendingTimer = setTimeout(() => {
+    const cur = useFollow.getState().pending;
+    if (cur && cur.peer === w.id && cur.spot === w.spot) follow(w.id, w.spot);
+  }, SPOTLIGHT_WAIT_MS);
+}
+
+/** This canvas changed size (window, panels): refit the leader's view, and tell followers. */
+export function onCanvasResize() {
+  lastApplied = "";
+  applyLeader();
+  sendPresence(false);
 }
 
 useCollab.subscribe((s, prev) => {
@@ -193,7 +224,7 @@ useCollab.subscribe((s, prev) => {
   if (s.status === "off" && prev.status !== "off") {
     // Sharing ended: nothing to follow or announce any more.
     clearPending();
-    seenSpot.clear();
+    seenKey = "";
     useFollow.setState({ leader: null, via: null, spotlight: 0, chat: { open: false, text: "", t: 0 } });
   }
 });

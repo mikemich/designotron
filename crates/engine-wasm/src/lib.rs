@@ -152,6 +152,14 @@ impl WasmEngine {
     designotron_engine::collab::GRANULAR
   }
 
+  /// `json` (a delta or document) as a relay that knows only model `relay_model` can store it
+  /// (see `collab::downgrade`). Applied to what is sent, never to the editor's own copy.
+  #[wasm_bindgen(js_name = collabDowngrade)]
+  pub fn collab_downgrade(&self, json: &str, relay_model: f64) -> String {
+    let value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
+    designotron_engine::collab::downgrade(&value, relay_model as u32).to_string()
+  }
+
   /// JSON array of this editor's unacknowledged and unsent changes, oldest first.
   #[wasm_bindgen(js_name = collabUnsent)]
   pub fn collab_unsent(&mut self) -> String {

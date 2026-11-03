@@ -349,21 +349,56 @@ pub fn valid_view_id(id: &str) -> bool {
   id.len() == 32 && id.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
-/// True if `delta` only adds or changes comments (all a viewer may send): a non-empty
-/// `comments` object and nothing else but empty values.
-fn comments_only(delta: &Value) -> bool {
-  let Some(o) = delta.as_object() else { return false };
-  let has_comments = o.get("comments").and_then(Value::as_object).is_some_and(|c| !c.is_empty());
-  has_comments
-    && o.iter().all(|(k, v)| {
-      k == "comments"
-        || match v {
-          Value::Null => true,
-          Value::Array(a) => a.is_empty(),
-          Value::Object(m) => m.is_empty(),
-          _ => false,
-        }
-    })
+/// Longest comment message a viewer may write, in bytes.
+const VIEWER_MAX_TEXT: usize = 5 * 1024;
+/// Most comments one viewer delta may touch.
+const VIEWER_MAX_COMMENTS: usize = 20;
+/// Editor slots kept free of viewers (viewers are capped at `max_peers` minus this).
+const EDITOR_RESERVE: usize = 10;
+
+/// What a viewer's delta is allowed to do, as a clean delta to apply and relay; None if it
+/// does anything else. Only comments: new threads, replies appended to existing ones and
+/// resolving. Everything is rebuilt from typed values, so nothing else the viewer put in the
+/// message (pages, styles, variables, unknown keys) can reach the room.
+fn viewer_delta(delta: &Value, doc: &Document) -> Option<Value> {
+  use designotron_engine::model::Comment;
+  let o = delta.as_object()?;
+  // The editor always sends these three, empty; anything else but comments is refused.
+  let empty = |k: &str| match o.get(k) {
+    None => true,
+    Some(Value::Array(a)) => a.is_empty(),
+    Some(Value::Object(m)) => m.is_empty(),
+    Some(_) => false,
+  };
+  if o
+    .keys()
+    .any(|k| !matches!(k.as_str(), "comments" | "nodes" | "removed" | "commentsRemoved"))
+    || !empty("nodes")
+    || !empty("removed")
+    || !empty("commentsRemoved")
+  {
+    return None;
+  }
+  let given = o.get("comments")?.as_object()?;
+  if given.is_empty() || given.len() > VIEWER_MAX_COMMENTS {
+    return None;
+  }
+  let mut out = Map::new();
+  for (id, v) in given {
+    let c: Comment = serde_json::from_value(v.clone()).ok()?;
+    if &c.id != id || c.messages.iter().any(|m| m.text.len() > VIEWER_MAX_TEXT || m.author.len() > 200) {
+      return None;
+    }
+    if let Some(old) = doc.comments.get(id) {
+      // Append-only: the old messages stay as they were; only `resolved` may change.
+      let kept = c.messages.len() >= old.messages.len() && c.messages[..old.messages.len()] == old.messages[..];
+      if !kept || c.page != old.page || c.x != old.x || c.y != old.y || c.node != old.node {
+        return None;
+      }
+    }
+    out.insert(id.clone(), serde_json::to_value(&c).ok()?);
+  }
+  Some(json!({ "nodes": {}, "removed": [], "comments": out, "commentsRemoved": [] }))
 }
 
 /// 128 random bits from the OS-seeded hasher keys, as hex.
@@ -545,6 +580,7 @@ impl Rooms {
       }
     }
     let mut deleted = Vec::new();
+    let mut emptied = Vec::new();
     {
       let mut rooms = self.rooms.lock().await;
       let now = Instant::now();
@@ -563,6 +599,7 @@ impl Rooms {
         };
         let keep = if r.doc.is_none() {
           // Nothing to keep (a connection that never joined, or a room that was refused).
+          emptied.push(id.clone());
           false
         } else if idle > ttl {
           deleted.push(id.clone());
@@ -587,7 +624,7 @@ impl Rooms {
       // Forget links of rooms that exist nowhere any more.
       let rooms = self.rooms.lock().await;
       if let Ok(mut v) = self.views.lock() {
-        v.retain(|_, room| rooms.contains_key(room) || (self.data_dir.is_some() && !deleted.contains(room)));
+        v.retain(|_, room| rooms.contains_key(room) || (self.data_dir.is_some() && !deleted.contains(room) && !emptied.contains(room)));
       }
     }
   }
@@ -807,6 +844,15 @@ impl Rooms {
 
   #[allow(clippy::too_many_arguments)]
   async fn join(&self, room_id: &str, r: &mut Room, id: u64, role: Role, out: &Outbox, m: &Incoming<'_>, size: usize) -> Step {
+    let viewers = r.peers.values().filter(|p| p.role == Role::Viewer).count();
+    let viewer_cap = if self.limits.max_peers > EDITOR_RESERVE {
+      self.limits.max_peers - EDITOR_RESERVE
+    } else {
+      self.limits.max_peers / 2
+    };
+    if role == Role::Viewer && viewers >= viewer_cap.max(1) {
+      return Step::Close("This file already has the maximum number of people watching.".into());
+    }
     if r.peers.len() >= self.limits.max_peers {
       return Step::Close(format!(
         "This file already has the maximum number of people ({}).",
@@ -951,9 +997,19 @@ impl Rooms {
       self.ack(r, id, true);
       return Step::Go;
     };
-    if role == Role::Viewer && !comments_only(&delta) {
-      self.ack(r, id, true);
-      return Step::Go;
+    // A viewer's change is rebuilt from what it may do; the rebuilt one is applied and relayed.
+    let clean_raw;
+    let mut raw = raw;
+    if role == Role::Viewer {
+      let Some(clean) = viewer_delta(&delta, r.doc.as_ref().unwrap()) else {
+        self.ack(r, id, true);
+        return Step::Go;
+      };
+      clean_raw = serde_json::value::to_raw_value(&clean).ok();
+      delta = clean;
+      if let Some(c) = clean_raw.as_deref() {
+        raw = c;
+      }
     }
     // An editor that predates effect and grid styles sends whole `styles` without them: keep the room's.
     let sender_granular = r.peers.get(&id).is_some_and(|p| p.granular);

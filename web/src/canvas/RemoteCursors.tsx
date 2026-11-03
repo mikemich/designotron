@@ -4,6 +4,7 @@ import { useCollab } from "../collab";
 import { getDoc, query, useStore } from "../store";
 import type { Mat } from "../types";
 import { corners, polyPoints } from "./geometry";
+import { PresenceBoundary } from "./PresenceBoundary";
 
 type View = { x: number; y: number; zoom: number };
 
@@ -11,6 +12,14 @@ type View = { x: number; y: number; zoom: number };
 const tagWidth = (name: string) => Math.min(140, name.length * 6.4 + 12);
 
 export function RemoteSelections({ v }: { v: View }) {
+  return (
+    <PresenceBoundary>
+      <Selections v={v} />
+    </PresenceBoundary>
+  );
+}
+
+function Selections({ v }: { v: View }) {
   const peers = useCollab((s) => s.peers);
   const page = useStore((s) => s.es.page);
   useStore((s) => s.rev);
@@ -53,6 +62,14 @@ export function RemoteSelections({ v }: { v: View }) {
 }
 
 export function RemoteCursors({ v }: { v: View }) {
+  return (
+    <PresenceBoundary>
+      <Cursors v={v} />
+    </PresenceBoundary>
+  );
+}
+
+function Cursors({ v }: { v: View }) {
   const peers = useCollab((s) => s.peers);
   const page = useStore((s) => s.es.page);
   return (

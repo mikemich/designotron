@@ -209,6 +209,29 @@ if (ONLY.includes("A")) try {
   await owner.click(".follow-bar.mine button:has-text('Stop')");
   await viewer.click(".follow-bar button:has-text('Stop following')").catch(() => {});
 
+  // Following each other is refused (it would chase one view round and round).
+  await guest.click(".peer-avatars button.avatar >> nth=0");
+  await sleep(500);
+  const olgaId = await owner.evaluate(() => window.__dt.collab().me);
+  await owner.click(".peer-avatars button.avatar:has-text('G')");
+  await sleep(400);
+  check("A3b following someone who follows you is refused with a note", (await count(owner, ".follow-bar:has-text('Following')")) === 0 && /Gina is following you/.test(await text(owner, ".toast")), olgaId + " " + (await text(owner, ".toast")));
+  await guest.click(".follow-bar button:has-text('Stop following')");
+  await sleep(300);
+  // Two spotlights at once: the newer wins, the other one ends.
+  await owner.click("button[data-me]");
+  await owner.click(".menu [role=menuitem]:has-text('Spotlight me')");
+  await sleep(700);
+  await guest.click("button[data-me]");
+  await guest.click(".menu [role=menuitem]:has-text('Spotlight me')");
+  await sleep(1500);
+  check("A3b with two spotlights the newer one wins and the older one ends", (await count(guest, ".follow-bar.mine")) === 1 && (await count(owner, ".follow-bar.mine")) === 0);
+  await sleep(3800);
+  check("A3b ...the others follow the winner and nobody's view collapses", /Following Gina/.test(await text(owner, ".follow-bar")) && (await owner.evaluate(() => window.__dt.viewport().zoom)) > 0.05 && (await guest.evaluate(() => window.__dt.viewport().zoom)) > 0.05 && (await viewer.evaluate(() => window.__dt.viewport().zoom)) > 0.05);
+  await guest.click(".follow-bar.mine button:has-text('Stop')");
+  await sleep(600);
+  check("A3b ending the winning spotlight ends those follows", (await count(owner, ".follow-bar")) === 0 && (await count(viewer, ".follow-bar")) === 0);
+
   // 4. Names on selections.
   await guest.evaluate(() => window.__dt.zoomToFit());
   await owner.evaluate(() => window.__dt.zoomToFit());
@@ -300,7 +323,42 @@ if (ONLY.includes("A")) try {
   await sleep(800);
   check("A6 Make my own copy leaves the room and lifts the restriction", (await viewer.evaluate(() => window.__dt.state().readOnly === false)) && !viewer.url().includes("view="));
 
-  check("A no page errors", [owner, guest, viewer].every((p) => p.errors.length === 0), [owner, guest, viewer].flatMap((p) => p.errors).join(" | "));
+  // 8. Hostile presence and comments from a raw view-link socket; the editors stay alive.
+  const wsBase = RELAY.replace(/^http/, "ws");
+  const raw = new WebSocket(`${wsBase}/ws?view=${new URL(viewLink).searchParams.get("view")}`);
+  const rawMsgs = [];
+  raw.onmessage = (e) => rawMsgs.push(JSON.parse(e.data));
+  await new Promise((r) => (raw.onopen = r));
+  raw.send(JSON.stringify({ type: "join", name: "Raw", color: "url(http://127.0.0.1:1/leak)" }));
+  await sleep(500);
+  const pageNow = await owner.evaluate(() => window.__dt.state().page);
+  const bad = [
+    { page: pageNow, cursor: { x: 10, y: 10 }, selection: [], chat: { text: { evil: 1 }, t: 1 } },
+    { page: pageNow, cursor: { x: 10, y: 10 }, selection: 5 },
+    { page: pageNow, cursor: { x: 10, y: 10 }, selection: [], chat: { text: "x".repeat(15000), t: 2 }, color: "url(http://127.0.0.1:1/leak)" },
+    { page: pageNow, cursor: { x: 10, y: 10 }, selection: [], view: { x: -1e308, y: 0, w: 1e308, h: 1e-300 }, spotlight: Date.now() },
+    { page: pageNow, cursor: { x: "a", y: null }, selection: [1, 2, null], following: "x", color: 7 },
+  ];
+  for (const presence of bad) {
+    raw.send(JSON.stringify({ type: "presence", presence }));
+    await sleep(80);
+  }
+  await sleep(500);
+  const seenRaw = await owner.evaluate(() => Object.values(window.__dt.collab().peers).find((p) => p.name === "Raw") ?? null);
+  const vp = await owner.evaluate(() => window.__dt.viewport());
+  check("A8 hostile presence doesn't crash the editors or fetch URLs", owner.errors.length === 0 && guest.errors.length === 0 && (await owner.locator("#dt-canvas").count()) === 1 && !!seenRaw && /^#[0-9a-f]{6}$/i.test(seenRaw.color) && Number.isFinite(vp.zoom) && vp.zoom > 0.01, `${JSON.stringify(seenRaw?.presence)?.slice(0, 160)} ${owner.errors.join("|")}`);
+  check("A8 chat text is bounded", !seenRaw?.presence?.chat || (typeof seenRaw.presence.chat.text === "string" && seenRaw.presence.chat.text.length <= 52));
+  await sleep(4000);
+  check("A8 a stray spotlight from a peer with a nonsense view doesn't zoom the owner out", (await owner.evaluate(() => window.__dt.viewport().zoom)) > 0.01 && (await guest.evaluate(() => window.__dt.viewport().zoom)) > 0.01);
+  const pagesBefore = await owner.evaluate(() => window.__dt.doc().pages.length);
+  const attack = { id: "cx", page: pageNow, x: 1, y: 2, node: null, resolved: false, messages: [{ author: "R", text: "hi", time: 1 }] };
+  const sent = [{ comments: { cx: attack }, pages: [] }, { comments: { cx: attack }, pages: null }, { comments: { cx: attack }, styles: {} }, { comments: { cx: attack }, variables: [] }];
+  for (const delta of sent) raw.send(JSON.stringify({ type: "delta", delta }));
+  await sleep(600);
+  check("A8 a viewer can't wipe pages, styles or variables with a comment", rawMsgs.filter((m) => m.type === "ack" && m.rejected).length === 4 && (await owner.evaluate(() => window.__dt.doc().pages.length)) === pagesBefore && (await owner.evaluate(() => window.__dt.doc().comments.cx)) === undefined);
+  raw.close();
+
+  check("A no page errors",[owner, guest, viewer].every((p) => p.errors.length === 0), [owner, guest, viewer].flatMap((p) => p.errors).join(" | "));
 
   // ---- B. Distinct colours -----------------------------------------------------------------
   const o2 = await newPage("Oscar", { random: 0.0001 });
@@ -364,6 +422,27 @@ if (!ONLY.includes("C")) {
     await o.keyboard.press("/");
     await o.keyboard.type("hello");
     check("C cursor chat works on the old relay", await waitFor(g, () => [...document.querySelectorAll(".chat-bubble")].some((b) => b.textContent === "hello"), null, 4000));
+    // Changes are rewritten for an old relay on the way out (model 0): ordinary edits still flow.
+    await dispatch(o, { op: "update", ids: [a], patch: { x: 321 } });
+    check("C edits flow through the downgrade path to the guest", await waitFor(g, (id) => window.__dt.doc().nodes[id]?.x === 321, a));
+    // A change the relay can't take (a value it has no name for, which the downgrade tables
+    // missed) is turned down: the author is told, and it is undone.
+    await o.evaluate((id) => {
+      const orig = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (d) {
+        if (window.__bad && typeof d === "string" && d.includes('"type":"delta"')) {
+          const m = JSON.parse(d);
+          m.delta.patch = { [id]: { fills: [{ type: "angularGradient", stops: [] }] } };
+          d = JSON.stringify(m);
+        }
+        return orig.call(this, d);
+      };
+      window.__bad = true;
+    }, a);
+    await dispatch(o, { op: "update", ids: [a], patch: { x: 555 } });
+    await waitFor(o, () => /older than this editor/.test(document.querySelector(".toast.error")?.textContent ?? ""), null, 5000);
+    await o.evaluate(() => (window.__bad = false));
+    check("C a change the old relay rejects shows 'older than this editor' and is undone", /older than this editor/.test(await text(o, ".toast.error")) && (await nodes(o))[a].x === 321, await text(o, ".toast.error"));
     // A hand-made view link.
     const v = await newPage("Vera", { relay: OLD_RELAY });
     const fake = "0123456789abcdef0123456789abcdef";

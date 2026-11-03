@@ -76,6 +76,71 @@ pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> 
 /// an editor can tell a relay that predates the model it uses (older relays say nothing).
 pub const MODEL_REVISION: u32 = 3;
 
+/// `value` (a delta or a document, as JSON) rewritten so a relay that understands only model
+/// `relay_model` can store it: values it has no names for are replaced by the closest old one
+/// (angular and diamond gradients become radial, cropped images fill, Move in, Move out and Push
+/// become the slide in their direction, hover/press/up triggers become the old ones) and what has
+/// no old equivalent (mouse leave and key triggers, Change to) is dropped. Old relays reject a
+/// whole change that holds an unknown name, so this is applied to what is *sent* only, never to
+/// the editor's own copy. Works on names alone, anywhere in the JSON (fills, strokes, styles,
+/// instance overrides, patches). A relay at this build's model gets `value` back unchanged.
+pub fn downgrade(value: &Value, relay_model: u32) -> Value {
+  let mut v = value.clone();
+  if relay_model < MODEL_REVISION {
+    downgrade_in_place(&mut v);
+  }
+  v
+}
+
+fn downgrade_in_place(v: &mut Value) {
+  match v {
+    Value::Array(a) => a.iter_mut().for_each(downgrade_in_place),
+    Value::Object(o) => {
+      if matches!(o.get("type").and_then(Value::as_str), Some("angularGradient" | "diamondGradient")) {
+        o.insert("type".into(), json!("radialGradient"));
+        o.remove("handles");
+      }
+      if o.get("scaleMode").and_then(Value::as_str) == Some("crop") {
+        o.insert("scaleMode".into(), json!("fill"));
+        o.remove("crop");
+      }
+      if let Some(Value::Array(list)) = o.get_mut("interactions") {
+        *list = std::mem::take(list).into_iter().filter_map(downgrade_interaction).collect();
+      }
+      o.values_mut().for_each(downgrade_in_place);
+    }
+    _ => {}
+  }
+}
+
+/// An interaction as an old relay knows it, or None when it has no old equivalent.
+fn downgrade_interaction(mut i: Value) -> Option<Value> {
+  let o = i.as_object_mut()?;
+  let name = |o: &Map<String, Value>, k: &str| o.get(k).and_then(Value::as_str).map(str::to_string);
+  match name(o, "trigger").as_deref() {
+    Some("mouseLeave" | "key") => return None,
+    Some("mouseEnter") => drop(o.insert("trigger".into(), json!("onHover"))),
+    Some("mouseDown") => drop(o.insert("trigger".into(), json!("onPress"))),
+    Some("mouseUp") => drop(o.insert("trigger".into(), json!("onClick"))),
+    _ => {}
+  }
+  if name(o, "action").as_deref() == Some("changeTo") {
+    return None;
+  }
+  if matches!(name(o, "transition").as_deref(), Some("moveIn" | "moveOut" | "push")) {
+    // The direction defaults to left (see `Direction`).
+    let slide = match name(o, "direction").as_deref() {
+      None | Some("left") => "slideLeft",
+      Some("right") => "slideRight",
+      Some("up") => "slideUp",
+      Some("down") => "slideDown",
+      Some(_) => "dissolve",
+    };
+    o.insert("transition".into(), json!(slide));
+  }
+  Some(i)
+}
+
 /// This engine can read and write the per-id form of pages, styles and variables.
 pub const GRANULAR: bool = true;
 
@@ -802,6 +867,73 @@ mod tests {
   use crate::engine::{Command, Engine};
   use crate::model::NodeType;
   use crate::text::HeuristicMeasurer;
+
+  #[test]
+  fn downgrade_maps_new_names_to_old_ones() {
+    let paints = json!([
+      { "type": "angularGradient", "stops": [{ "position": 0, "color": "#000" }], "opacity": 0.5, "visible": false, "blend": "multiply", "handles": [1, 2] },
+      { "type": "diamondGradient", "stops": [] },
+      { "type": "image", "src": "asset:x", "scaleMode": "crop", "crop": { "x": 0 }, "opacity": 1 },
+      { "type": "solid", "color": "#fff" }
+    ]);
+    let d = json!({ "nodes": { "a": { "fills": paints, "strokes": paints } }, "patch": { "b": { "fills": paints } },
+      "colorStyles": { "added": [{ "id": "s", "paints": paints }] }, "x": { "overrides": { "c": { "fills": paints } } } });
+    let out = downgrade(&d, 0);
+    let check = |p: &Value| {
+      assert_eq!(p[0]["type"], "radialGradient");
+      assert_eq!(
+        (p[0]["opacity"].clone(), p[0]["visible"].clone(), p[0]["blend"].clone()),
+        (json!(0.5), json!(false), json!("multiply"))
+      );
+      assert!(p[0].get("handles").is_none() && p[0]["stops"].as_array().unwrap().len() == 1);
+      assert_eq!(p[1]["type"], "radialGradient");
+      assert_eq!(p[2]["scaleMode"], "fill");
+      assert!(p[2].get("crop").is_none());
+      assert_eq!(p[3], json!({ "type": "solid", "color": "#fff" }));
+    };
+    check(&out["nodes"]["a"]["fills"]);
+    check(&out["nodes"]["a"]["strokes"]);
+    check(&out["patch"]["b"]["fills"]);
+    check(&out["colorStyles"]["added"][0]["paints"]);
+    check(&out["x"]["overrides"]["c"]["fills"]);
+    assert_eq!(d["nodes"]["a"]["fills"][0]["type"], "angularGradient", "the input is untouched");
+  }
+
+  #[test]
+  fn downgrade_maps_interactions() {
+    let list = json!([
+      { "trigger": "mouseEnter", "action": "navigate", "transition": "moveIn", "direction": "down" },
+      { "trigger": "mouseDown", "transition": "push", "direction": "right" },
+      { "trigger": "mouseUp", "transition": "moveOut" },
+      { "trigger": "mouseLeave" },
+      { "trigger": "key", "key": "k" },
+      { "trigger": "onClick", "action": "changeTo" },
+      { "trigger": "onClick", "action": "navigate", "transition": "smartAnimate" }
+    ]);
+    let out = downgrade(&json!({ "patch": { "n": { "interactions": list } } }), 1);
+    let got = out["patch"]["n"]["interactions"].as_array().unwrap();
+    assert_eq!(got.len(), 4);
+    assert_eq!(
+      (got[0]["trigger"].clone(), got[0]["transition"].clone()),
+      (json!("onHover"), json!("slideDown"))
+    );
+    assert_eq!(
+      (got[1]["trigger"].clone(), got[1]["transition"].clone()),
+      (json!("onPress"), json!("slideRight"))
+    );
+    assert_eq!(
+      (got[2]["trigger"].clone(), got[2]["transition"].clone()),
+      (json!("onClick"), json!("slideLeft"))
+    );
+    assert_eq!(got[3]["transition"], "smartAnimate");
+  }
+
+  #[test]
+  fn downgrade_leaves_a_current_relay_alone() {
+    let d = json!({ "nodes": { "a": { "fills": [{ "type": "angularGradient" }], "interactions": [{ "trigger": "key" }] } } });
+    assert_eq!(downgrade(&d, MODEL_REVISION), d);
+    assert_ne!(downgrade(&d, 0), d);
+  }
 
   fn engine(seed: u64) -> Engine {
     Engine::new(Box::new(HeuristicMeasurer), seed)
