@@ -19,11 +19,32 @@ export interface GradientStop {
   position: number;
 }
 
+/** W3-D paint: control points of a gradient in the layer's unit box (0..1, may lie outside it).
+ *  Linear: start to end. Radial and diamond: centre `start`, axis ends `end` and `width`.
+ *  Angular: centre `start`, the sweep begins towards `end`. */
+export interface GradientHandles {
+  start: [number, number];
+  end: [number, number];
+  width: [number, number];
+}
+
+/** Where the whole image sits relative to the layer box (the box is 0..1). */
+export interface ImageCrop {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export type GradientPaintType = "linearGradient" | "radialGradient" | "angularGradient" | "diamondGradient";
+
 export type Paint =
   | { type: "solid"; color: string; opacity: number; visible: boolean }
-  | { type: "linearGradient"; stops: GradientStop[]; angle: number; opacity: number; visible: boolean }
-  | { type: "radialGradient"; stops: GradientStop[]; opacity: number; visible: boolean }
-  | { type: "image"; src: string; scaleMode: "fill" | "fit" | "stretch" | "tile"; opacity: number; visible: boolean };
+  | { type: "linearGradient"; stops: GradientStop[]; angle: number; opacity: number; visible: boolean; handles?: GradientHandles }
+  | { type: "radialGradient"; stops: GradientStop[]; opacity: number; visible: boolean; handles?: GradientHandles }
+  | { type: "angularGradient"; stops: GradientStop[]; opacity: number; visible: boolean; handles?: GradientHandles }
+  | { type: "diamondGradient"; stops: GradientStop[]; opacity: number; visible: boolean; handles?: GradientHandles }
+  | { type: "image"; src: string; scaleMode: "fill" | "fit" | "stretch" | "tile" | "crop"; opacity: number; visible: boolean; crop?: ImageCrop };
 
 export type EffectType = "dropShadow" | "innerShadow" | "layerBlur" | "backgroundBlur";
 
@@ -162,6 +183,11 @@ export interface Node {
   strokeWeight: number;
   strokeAlign: "inside" | "center" | "outside";
   strokeDash: number[];
+  // Strokes (W3-D)
+  /** One weight per side (top, right, bottom, left); boxes only. Absent: `strokeWeight` on every side. */
+  strokeWeights?: [number, number, number, number];
+  /** Absent keeps the historical round joins. */
+  strokeJoin?: "miter" | "bevel" | "round";
   cornerRadius: number;
   cornerRadii: [number, number, number, number] | null;
   effects: Effect[];

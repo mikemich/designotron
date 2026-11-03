@@ -145,11 +145,13 @@ export function SelectField<T extends string | number>(props: {
   title?: string;
   /** Accessible name; defaults to the title, or the label when that is text. */
   ariaLabel?: string;
+  disabled?: boolean;
 }) {
   return (
     <label className="field" title={props.title}>
       {props.label !== undefined && <span className="lbl">{props.label}</span>}
       <select
+        disabled={props.disabled}
         aria-label={props.ariaLabel ?? props.title ?? (typeof props.label === "string" ? props.label : undefined)}
         value={props.value === MIXED ? "__mixed" : String(props.value)}
         onChange={(e) => {
@@ -216,6 +218,8 @@ export function Popover(props: { anchor: DOMRect; onClose: () => void; children:
   }, [props.anchor]);
   useEffect(() => {
     const down = (e: PointerEvent) => {
+      // Canvas overlays that edit what the popover edits (gradient handles, crop) keep it open.
+      if ((e.target as Element).closest?.("[data-keep-popover]")) return;
       if (ref.current && !ref.current.contains(e.target as globalThis.Node)) props.onClose();
     };
     const key = (e: KeyboardEvent) => {

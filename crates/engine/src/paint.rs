@@ -13,8 +13,8 @@ use crate::render::stops_svg;
 const WEDGES: usize = 180;
 const WEDGES_LARGE: usize = 360;
 const LARGE_BOX: f64 = 1000.0;
-/// Each wedge reaches this much (of its own angle) into the next, hiding anti-aliasing seams.
-const WEDGE_OVERLAP: f64 = 0.03;
+/// Each wedge reaches this many pixels (a third of the way out) into the next, hiding anti-aliasing seams.
+const WEDGE_OVERLAP_PX: f64 = 2.0;
 
 /// Handles of a gradient that has none: what the renderer draws today, in the unit box.
 pub fn default_handles(angular: bool) -> GradientHandles {
@@ -81,7 +81,7 @@ pub fn diamond_pattern(id: &str, stops: &[GradientStop], opacity: f64, hd: &Grad
     })
     .fold(0.0_f64, f64::max)
     + 1.0;
-  let overlap = (0.3 / ax.min_len().max(1e-6)).min(0.05);
+  let overlap = (1.0 / ax.min_len().max(1e-6)).min(0.05);
   let stops = stops_svg(stops, opacity);
   let mut grads = String::new();
   let mut rects = String::new();
@@ -133,11 +133,12 @@ pub fn angular_pattern(id: &str, stops: &[GradientStop], opacity: f64, hd: &Grad
     + 2.0;
   let step = TAU / n as f64;
   // The chord between two rim points sits inside the circle, so push the rim out.
-  let rim = far / (step * (1.0 + WEDGE_OVERLAP) / 2.0).cos();
+  let overlap = (WEDGE_OVERLAP_PX / (far * 0.3)).min(step * 0.5);
+  let rim = far / ((step + overlap) / 2.0).cos();
   let mut out = String::new();
   for i in 0..n {
     let a0 = start + step * i as f64;
-    let a1 = start + step * (i as f64 + 1.0 + WEDGE_OVERLAP);
+    let a1 = start + step * (i as f64 + 1.0) + overlap;
     let (c, alpha) = samples.at((i as f64 + 0.5) / n as f64);
     out.push_str(&format!(
       "<path d=\"M{} {}L{} {}L{} {}Z\" fill=\"{}\"{}/>",

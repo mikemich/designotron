@@ -21,6 +21,8 @@ import { GridOverlay, PageGuides, Rulers } from "./Rulers";
 import { CommentLayer } from "./Comments";
 import { Measure, SpacingGaps, trackPointer } from "./Measure";
 import { RemoteCursors, RemoteSelections } from "./RemoteCursors";
+import { PaintHandles } from "./PaintHandles";
+import { CropMode } from "./CropMode";
 import { reportCursor } from "../collab";
 import { insertImageFile, openDtronFile, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu } from "./contextMenu";
@@ -505,6 +507,8 @@ export function Canvas() {
 
   function onPointerDown(e: React.PointerEvent) {
     if (e.button === 2) return;
+    // Gradient handles and the crop frame run their own drags.
+    if ((e.target as Element).closest?.("[data-paint-overlay]")) return;
     ref.current!.focus();
     (e.target as Element).setPointerCapture?.(e.pointerId);
     const p = pagePt(e);
@@ -1202,6 +1206,8 @@ export function Canvas() {
         {(pen.length > 0 || penFrom) && <PenPreview pts={penFrom ? [penFrom.anchor, ...pen] : pen} cursor={penCursor} v={v} />}
         {vectorNode?.vector && vectorM && <VectorPoints node={vectorNode} m={vectorM} v={v} selected={vectorPts} hover={vHover} />}
       </svg>
+      <PaintHandles v={v} />
+      <CropMode v={v} />
       <CommentLayer v={v} />
       <RemoteCursors v={v} />
       {showRulers && <Rulers v={v} width={size.w} height={size.h} selection={selItems.union} />}

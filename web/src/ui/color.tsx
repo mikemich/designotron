@@ -1,10 +1,10 @@
 import { useRef, useState } from "react";
 import { Image as ImageIcon, Pipette, Plus, Trash2 } from "lucide-react";
-import type { Paint } from "../types";
+import type { GradientHandles, GradientPaintType, ImageCrop, Paint } from "../types";
 import { NumberField, Popover, Seg, SelectField } from "./controls";
 import { addAsset, assetUrl, readFileAsDataUrl } from "../assets";
 import { pickFile } from "../files";
-import { getDoc } from "../store";
+import { getDoc, useStore } from "../store";
 
 export interface Rgba {
   r: number;
@@ -185,19 +185,48 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
   );
 }
 
+export type GradientPaint = Extract<Paint, { type: GradientPaintType }>;
+
+export const GRADIENT_TYPES: GradientPaintType[] = ["linearGradient", "radialGradient", "angularGradient", "diamondGradient"];
+
+export function isGradient(p: Paint): p is GradientPaint {
+  return (GRADIENT_TYPES as string[]).includes(p.type);
+}
+
+/** CSS angle (0 = up, 90 = right) of the start to end line, on a square box. */
+function handleAngle(h: GradientHandles): number {
+  const deg = (Math.atan2(h.end[0] - h.start[0], -(h.end[1] - h.start[1])) * 180) / Math.PI;
+  return Math.round(((deg % 360) + 360) % 360);
+}
+
 export function paintCss(p: Paint): string {
+  const stops = (g: GradientPaint) => g.stops.map((s) => `${cssColor(s.color, g.opacity)} ${s.position * 100}%`).join(", ");
   switch (p.type) {
     case "solid":
       return cssColor(p.color, p.opacity);
     case "linearGradient":
-      return `linear-gradient(${p.angle}deg, ${p.stops.map((s) => `${cssColor(s.color, p.opacity)} ${s.position * 100}%`).join(", ")})`;
+      return `linear-gradient(${p.angle}deg, ${stops(p)})`;
+    // CSS has no diamond gradient: the swatch shows the radial approximation, like code export.
     case "radialGradient":
-      return `radial-gradient(circle, ${p.stops.map((s) => `${cssColor(s.color, p.opacity)} ${s.position * 100}%`).join(", ")})`;
+    case "diamondGradient":
+      return `radial-gradient(circle, ${stops(p)})`;
+    case "angularGradient": {
+      const h = p.handles;
+      return `conic-gradient(from ${h ? handleAngle(h) : 0}deg at ${(h?.start[0] ?? 0.5) * 100}% ${(h?.start[1] ?? 0.5) * 100}%, ${stops(p)})`;
+    }
     case "image": {
       const src = p.src.startsWith("asset:") ? assetUrl(p.src.slice(6)) ?? "" : p.src;
       return `center / cover no-repeat url("${src}")`;
     }
   }
+}
+
+/** Where the whole image sits in a `w` x `h` layer for a scale mode: the starting rectangle of a crop. */
+export function cropRectFor(mode: string, nw: number, nh: number, w: number, h: number): ImageCrop {
+  if (mode === "stretch" || !nw || !nh || !w || !h) return { x: 0, y: 0, w: 1, h: 1 };
+  const k = mode === "fit" ? Math.min(w / nw, h / nh) : Math.max(w / nw, h / nh);
+  const [iw, ih] = [nw * k, nh * k];
+  return { x: (w - iw) / 2 / w, y: (h - ih) / 2 / h, w: iw / w, h: ih / h };
 }
 
 export function paintLabel(p: Paint): string {
@@ -208,6 +237,10 @@ export function paintLabel(p: Paint): string {
       return "Linear";
     case "radialGradient":
       return "Radial";
+    case "angularGradient":
+      return "Angular";
+    case "diamondGradient":
+      return "Diamond";
     case "image":
       return "Image";
   }
@@ -220,10 +253,16 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
   const toType = (t: Paint["type"]) => {
     const base = p.type === "solid" ? p.color : p.type === "image" ? "#D9D9D9" : p.stops[0]?.color ?? "#000000";
     if (t === "solid") props.onChange({ type: "solid", color: base, opacity: p.opacity, visible: p.visible });
-    else if (t === "linearGradient" || t === "radialGradient") {
-      const stops = p.type === "linearGradient" || p.type === "radialGradient" ? p.stops : [{ color: base, position: 0 }, { color: "#FFFFFF", position: 1 }];
-      props.onChange(t === "linearGradient" ? { type: t, stops, angle: 180, opacity: p.opacity, visible: p.visible } : { type: t, stops, opacity: p.opacity, visible: p.visible });
-    } else props.onChange({ type: "image", src: "", scaleMode: "fill", opacity: p.opacity, visible: p.visible });
+    else if (t === "image") props.onChange({ type: "image", src: "", scaleMode: "fill", opacity: p.opacity, visible: p.visible });
+    else {
+      // Gradients keep their stops and handles when you switch between the four kinds.
+      const from = isGradient(p) ? p : null;
+      const stops = from?.stops ?? [{ color: base, position: 0 }, { color: "#FFFFFF", position: 1 }];
+      const handles = from?.handles;
+      const angle = from?.type === "linearGradient" ? from.angle : handles ? handleAngle(handles) : 180;
+      const common = { stops, opacity: p.opacity, visible: p.visible, ...(handles ? { handles } : {}) };
+      props.onChange(t === "linearGradient" ? { type: t, angle, ...common } : { type: t, ...common });
+    }
   };
   return (
     <div>
@@ -235,12 +274,14 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
             { value: "solid", label: "Solid" },
             { value: "linearGradient", label: "Linear" },
             { value: "radialGradient", label: "Radial" },
+            { value: "angularGradient", label: "Angular" },
+            { value: "diamondGradient", label: "Diamond" },
             { value: "image", label: <ImageIcon size={13} />, title: "Image" },
           ]}
         />
       </div>
       {p.type === "solid" && <ColorPicker key="solid" color={p.color} onChange={(color) => props.onChange({ ...p, color })} />}
-      {(p.type === "linearGradient" || p.type === "radialGradient") && (
+      {isGradient(p) && (
         <>
           <div className="picker-bar" style={{ background: paintCss({ ...p, type: "linearGradient", angle: 90 } as Paint), height: 16, marginBottom: 12 }}>
             {p.stops.map((s, i) => (
@@ -304,12 +345,24 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
             <SelectField
               ariaLabel="Image scale mode"
               value={p.scaleMode}
-              onChange={(scaleMode) => props.onChange({ ...p, scaleMode })}
+              onChange={(scaleMode) => {
+                props.onChange({ ...p, scaleMode });
+                if (scaleMode !== "crop" || p.crop) return;
+                // The first time: the whole image starts where the mode it came from shows it.
+                const id = useStore.getState().paintEdit?.id;
+                const box = id ? getDoc().nodes[id] : undefined;
+                const url = p.src.startsWith("asset:") ? assetUrl(p.src.slice(6)) : p.src;
+                if (!box || !url) return;
+                const img = new Image();
+                img.onload = () => props.onChange({ ...p, scaleMode, crop: cropRectFor(p.scaleMode, img.naturalWidth, img.naturalHeight, box.width, box.height) });
+                img.src = url;
+              }}
               options={[
                 { value: "fill", label: "Fill" },
                 { value: "fit", label: "Fit" },
                 { value: "stretch", label: "Stretch" },
                 { value: "tile", label: "Tile" },
+                { value: "crop", label: "Crop" },
               ]}
             />
           </div>
@@ -335,6 +388,7 @@ export function PaintSwatch(props: { paint: Paint; onChange: (p: Paint) => void;
       </div>
       {anchor && (
         <Popover
+          width={300}
           anchor={anchor}
           onClose={() => {
             setAnchor(null);

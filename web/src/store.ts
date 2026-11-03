@@ -150,6 +150,8 @@ interface Store {
   openComment: string | null;
   /** New comment being written at a page position. */
   draftComment: { x: number; y: number; node: string | null } | null;
+  /** The gradient or image paint whose popover is open: its handles / crop frame show on the canvas (W3-D). */
+  paintEdit: { id: string; key: "fills" | "strokes"; index: number } | null;
 }
 
 const pref = (k: string, d: boolean) => {
@@ -202,6 +204,7 @@ export const useStore = create<Store>(() => ({
   figmaOpen: false,
   openComment: null,
   draftComment: null,
+  paintEdit: null,
 }));
 
 /** Applies a style to the selected characters of the text being edited; false if none. */

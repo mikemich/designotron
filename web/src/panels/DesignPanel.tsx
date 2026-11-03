@@ -791,11 +791,26 @@ function LinkList({ nodes }: { nodes: Node[] }) {
   );
 }
 
+/** The join the renderer uses when a layer has none set (it varies with shape and position). */
+function defaultJoin(n: Node): "miter" | "round" {
+  const boxy = ["rectangle", "frame", "component", "componentSet", "instance"].includes(n.type);
+  if (boxy) return n.strokeAlign === "center" ? "round" : "miter";
+  if (n.type === "polygon" || n.type === "star") return n.strokeAlign === "inside" ? "miter" : "round";
+  return "round";
+}
+
 function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: Node[]; ids: string[]; keyName: "fills" | "strokes" }) {
   const paints = common(nodes, (n) => n[keyName]);
   const list: Paint[] = paints === MIXED ? [] : paints;
   const set = (next: Paint[]) => update(ids, { [keyName]: next, ...(keyName === "fills" ? { fillStyle: null } : {}) });
   const isLineish = nodes.every((n) => n.type === "line" || n.type === "vector");
+  // Individual strokes: rectangles, frames, components and instances.
+  const boxy = nodes.every((n) => ["rectangle", "frame", "component", "componentSet", "instance"].includes(n.type));
+  const individual = nodes.every((n) => n.strokeWeights);
+  const sides = nodes[0]?.strokeWeights ?? [0, 0, 0, 0];
+  const setSides = (next: number[]) => update(ids, { strokeWeights: next, strokeWeight: Math.max(...next) });
+  const dashed = common(nodes, (n) => n.strokeDash.length > 0) === true;
+  const dash = nodes[0]?.strokeDash ?? [];
   return (
     <Section
       title={title}
@@ -827,7 +842,19 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
         return (
           <div className="row" key={i}>
             <label className="field" style={{ paddingLeft: 5, gap: 6 }}>
-              <PaintSwatch paint={p} onChange={setP} onOpen={begin} onClose={end} />
+              <PaintSwatch
+                paint={p}
+                onChange={setP}
+                onOpen={() => {
+                  begin();
+                  // Gradient handles and the crop frame show on the canvas while the popover is open.
+                  if (nodes.length === 1) useStore.setState({ paintEdit: { id: ids[0], key: keyName, index: i } });
+                }}
+                onClose={() => {
+                  useStore.setState({ paintEdit: null });
+                  end();
+                }}
+              />
               {p.type === "solid" ? (
                 <input
                   key={p.color}
@@ -861,7 +888,15 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
       {keyName === "strokes" && list.length > 0 && (
         <>
           <div className="grid2">
-            <NumberField label="≡" title="Stroke weight" min={0} value={common(nodes, (n) => n.strokeWeight)} onChange={(strokeWeight) => update(ids, { strokeWeight })} onScrubStart={begin} onScrubEnd={end} />
+            <NumberField
+              label="≡"
+              title="Stroke weight"
+              min={0}
+              value={individual ? common(nodes, (n) => Math.max(...(n.strokeWeights ?? [0]))) : common(nodes, (n) => n.strokeWeight)}
+              onChange={(strokeWeight) => (individual ? setSides([strokeWeight, strokeWeight, strokeWeight, strokeWeight]) : update(ids, { strokeWeight }))}
+              onScrubStart={begin}
+              onScrubEnd={end}
+            />
             <SelectField
               ariaLabel="Stroke position"
               value={common(nodes, (n) => n.strokeAlign)}
@@ -882,6 +917,8 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
                 { value: "dashed", label: "Dashed" },
               ]}
               onChange={(v) => update(ids, { strokeDash: v === "dashed" ? [6, 4] : [] })}
+              disabled={individual}
+              title={individual ? "Dashes don't apply to individual strokes" : undefined}
             />
             {isLineish && (
               <SelectField
@@ -897,6 +934,50 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
               />
             )}
           </div>
+          {dashed && !individual && (
+            <div className="grid2">
+              <NumberField label="Dash" ariaLabel="Dash length" min={0} value={dash[0] ?? 0} onChange={(d) => update(ids, { strokeDash: [d, dash[1] ?? d] })} />
+              <NumberField label="Gap" ariaLabel="Gap length" min={0} value={dash[1] ?? dash[0] ?? 0} onChange={(g) => update(ids, { strokeDash: [dash[0] ?? g, g] })} />
+            </div>
+          )}
+          <div className="grid2">
+            <SelectField
+              ariaLabel="Stroke join"
+              value={common(nodes, (n) => n.strokeJoin ?? defaultJoin(n))}
+              options={[
+                { value: "miter", label: "Miter join" },
+                { value: "bevel", label: "Bevel join" },
+                { value: "round", label: "Round join" },
+              ]}
+              onChange={(strokeJoin) => update(ids, { strokeJoin })}
+            />
+            {boxy && (
+              <button
+                className={"btn" + (individual ? " on" : "")}
+                aria-pressed={individual}
+                title="Individual strokes"
+                onClick={() => (individual ? update(ids, { strokeWeights: null, strokeWeight: Math.max(...sides) }) : setSides(Array(4).fill(nodes[0].strokeWeight)))}
+              >
+                Individual
+              </button>
+            )}
+          </div>
+          {boxy && individual && (
+            <div className="grid2">
+              {(["Top", "Right", "Bottom", "Left"] as const).map((side, k) => (
+                <NumberField
+                  key={side}
+                  label={side[0]}
+                  ariaLabel={`${side} stroke weight`}
+                  min={0}
+                  value={common(nodes, (n) => n.strokeWeights?.[k] ?? 0)}
+                  onChange={(v) => setSides(sides.map((x, j) => (j === k ? v : x)))}
+                  onScrubStart={begin}
+                  onScrubEnd={end}
+                />
+              ))}
+            </div>
+          )}
         </>
       )}
     </Section>

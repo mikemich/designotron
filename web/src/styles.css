@@ -2247,3 +2247,45 @@ body:has(.phone-note) .toast {
   white-space: nowrap;
   border: 0;
 }
+
+/* W3-D paint: gradient handles and the image crop frame, drawn over the canvas. */
+.canvas > svg.paint-overlay {
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.paint-overlay .paint-line {
+  fill: none;
+  stroke: var(--select);
+  stroke-width: 1.5;
+}
+.paint-overlay .paint-line.dashed {
+  stroke-dasharray: 4 3;
+  stroke-width: 1;
+}
+.paint-overlay .paint-handle {
+  pointer-events: all;
+  fill: #fff;
+  stroke: var(--select);
+  stroke-width: 1.5;
+  cursor: pointer;
+}
+.paint-overlay .paint-handle.width {
+  fill: var(--select);
+  stroke: #fff;
+}
+.paint-overlay .paint-handle.stop {
+  stroke: #fff;
+  stroke-width: 2;
+  cursor: ew-resize;
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.6));
+}
+.paint-overlay .paint-handle.crop-body {
+  fill: transparent;
+  stroke: var(--select);
+  stroke-width: 1;
+  cursor: move;
+}
+.paint-overlay .paint-handle.crop-corner {
+  cursor: nwse-resize;
+}
