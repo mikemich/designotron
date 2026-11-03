@@ -13,16 +13,17 @@ use crate::editor::Target;
 use crate::Shared;
 
 const SUPPORTED_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
-/// Set by the bridge in the MCP config of an in-app chat: the editor tab that started it.
+/// Set by the bridge in the MCP config of an in-app chat: the secret of the running turn, which
+/// the bridge maps to the tab that started it (see `EditorLink::start_run`).
 const EDITOR_HEADER: &str = "x-designotron-editor";
-/// The chat turn (the tab's own number) the call belongs to.
-const TURN_HEADER: &str = "x-designotron-turn";
 
-/// Where a tool call goes and which undo step it belongs to.
-struct Route {
-  target: Target,
-  /// Calls of one chat turn share a group, so the tab undoes the turn in one step.
-  group: Option<String>,
+/// Where a tool call goes.
+#[derive(Debug, PartialEq, Eq)]
+enum Route {
+  /// No header (Claude Code in a terminal, a plugin): the active tab.
+  Active,
+  /// An in-app chat turn, by its secret.
+  Run(String),
 }
 
 pub async fn handle(State(state): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
@@ -128,11 +129,18 @@ fn tool_list() -> Vec<Value> {
 async fn call_tool(state: &Shared, route: &Route, params: &Value) -> Value {
   let name = params["name"].as_str().unwrap_or("").to_string();
   let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-  if let Some(reply) = state
-    .editor
-    .call_tool(route.target, &name, args.clone(), route.group.as_deref())
-    .await
-  {
+  // Calls of one chat turn share an undo group, so the tab undoes the turn in one step.
+  let (target, group) = match route {
+    Route::Active => (Target::Active, None),
+    Route::Run(token) => match state.editor.run(token) {
+      Some(run) => (Target::Conn(run.conn), Some(format!("chat-{}-{}", run.conn, run.turn))),
+      None => {
+        let text = "the editor tab that started this chat was closed, or the chat turn has ended";
+        return json!({ "content": [{ "type": "text", "text": text }], "isError": true });
+      }
+    },
+  };
+  if let Some(reply) = state.editor.call_tool(target, &name, args.clone(), group.as_deref()).await {
     let text = match &reply.result {
       Value::String(s) => s.clone(),
       other => other.to_string(),
@@ -151,24 +159,11 @@ async fn call_tool(state: &Shared, route: &Route, params: &Value) -> Value {
   }
 }
 
-/// A chat's calls name their tab and turn in headers; anything else (Claude Code in a terminal,
-/// a plugin) goes to the active tab.
+/// A chat's calls carry the secret of their turn in a header; anything else goes to the active tab.
 fn route_of(headers: &HeaderMap) -> Route {
-  let number = |name: &str| {
-    headers
-      .get(name)
-      .and_then(|v| v.to_str().ok())
-      .and_then(|v| v.trim().parse::<u64>().ok())
-  };
-  match number(EDITOR_HEADER) {
-    Some(conn) => Route {
-      target: Target::Conn(conn),
-      group: number(TURN_HEADER).map(|turn| format!("chat-{conn}-{turn}")),
-    },
-    None => Route {
-      target: Target::Active,
-      group: None,
-    },
+  match headers.get(EDITOR_HEADER).and_then(|v| v.to_str().ok()).map(str::trim) {
+    Some(token) if !token.is_empty() => Route::Run(token.to_string()),
+    _ => Route::Active,
   }
 }
 
@@ -203,17 +198,13 @@ mod tests {
   }
 
   #[test]
-  fn headers_pick_the_tab_and_the_undo_group() {
+  fn the_header_names_a_chat_run() {
     let mut h = HeaderMap::new();
-    let r = route_of(&h);
-    assert_eq!((r.target, r.group), (Target::Active, None));
-    h.insert(EDITOR_HEADER, "7".parse().unwrap());
-    h.insert(TURN_HEADER, "3".parse().unwrap());
-    let r = route_of(&h);
-    assert_eq!(r.target, Target::Conn(7));
-    assert_eq!(r.group.as_deref(), Some("chat-7-3"));
-    h.insert(EDITOR_HEADER, "not a number".parse().unwrap());
-    assert_eq!(route_of(&h).target, Target::Active, "a bad header is no header");
+    assert_eq!(route_of(&h), Route::Active);
+    h.insert(EDITOR_HEADER, " abc123 ".parse().unwrap());
+    assert_eq!(route_of(&h), Route::Run("abc123".into()));
+    h.insert(EDITOR_HEADER, "".parse().unwrap());
+    assert_eq!(route_of(&h), Route::Active);
   }
 
   #[test]

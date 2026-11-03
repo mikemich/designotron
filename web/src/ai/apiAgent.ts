@@ -3,7 +3,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { useChat, push, appendText, patchItem, showScreenshot } from "./chatState";
-import { executeTool, systemPrompt, toolDefs } from "./tools";
+import { executeTool, systemPrompt, toolDefs, whenCanvasIdle } from "./tools";
 import type { Attachment } from "./bridgeClient";
 
 let messages: Anthropic.Beta.BetaMessageParam[] = [];
@@ -17,8 +17,24 @@ export function resetApiConversation() {
 /** Aborts the request that is running now (each run has its own controller, so a message sent
  *  right after this one is not affected). */
 export function abortApiAgent() {
-  controller?.abort();
+  if (!controller) return;
+  controller.abort();
   controller = null;
+  // Stopped between a reply with tool calls and their results: answer each call, so the next
+  // message (it joins this user turn) is accepted. The run itself runs no further tools.
+  const last = messages[messages.length - 1];
+  if (last?.role !== "assistant" || typeof last.content === "string") return;
+  const calls = last.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
+  if (calls.length) {
+    messages.push({
+      role: "user",
+      content: calls.map((c) => ({ type: "tool_result" as const, tool_use_id: c.id, is_error: true, content: "Stopped by the user" })),
+    });
+  }
+}
+
+function aborted(): Error {
+  return new DOMException("The run was stopped.", "AbortError");
 }
 
 const MAX_TURNS = 40;
@@ -110,8 +126,12 @@ async function runTurns(client: Anthropic, tools: Anthropic.Beta.BetaTool[], sys
 
     const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
     for (const use of uses) {
+      // Stop pressed: no further tool runs (`abortApiAgent` already answered the calls).
+      if (signal.aborted) throw aborted();
       const chip = push({ kind: "tool", name: use.name, ok: null });
+      await whenCanvasIdle();
       const out = await executeTool(use.name, use.input, { group });
+      if (signal.aborted) throw aborted();
       patchItem(chip, { ok: out.ok, detail: out.ok ? undefined : String(out.result) });
       showScreenshot(out);
       const text = typeof out.result === "string" ? out.result : JSON.stringify(out.result);

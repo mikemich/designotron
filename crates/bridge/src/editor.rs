@@ -1,7 +1,9 @@
 //! WebSocket link to the open editor. Tool calls are forwarded to the editor
 //! (the live source of truth) and answered asynchronously.
 
+use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
+use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -49,6 +51,8 @@ pub struct EditorLink {
 struct Inner {
   conns: HashMap<u64, Conn>,
   pending: HashMap<u64, Pending>,
+  /// Running chat turns by the secret token in their MCP config.
+  runs: HashMap<String, Run>,
   /// Last number handed out for `Conn::focus`.
   focus_seq: u64,
 }
@@ -64,6 +68,13 @@ struct Pending {
   tx: oneshot::Sender<ToolReply>,
 }
 
+/// The tab and turn a running chat belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Run {
+  pub conn: u64,
+  pub turn: u64,
+}
+
 impl EditorLink {
   /// Adds a tab. Returns its id.
   pub fn connect(&self, tx: mpsc::UnboundedSender<Message>) -> u64 {
@@ -76,6 +87,7 @@ impl EditorLink {
   pub fn disconnect(&self, conn: u64) -> Option<u64> {
     let mut g = self.lock();
     g.conns.remove(&conn);
+    g.runs.retain(|_, r| r.conn != conn);
     let owed: Vec<u64> = g.pending.iter().filter(|(_, p)| p.conn == conn).map(|(id, _)| *id).collect();
     for id in owed {
       if let Some(p) = g.pending.remove(&id) {
@@ -99,6 +111,29 @@ impl EditorLink {
     self.lock().active()
   }
 
+  /// Whether the tab is still connected.
+  pub fn has(&self, conn: u64) -> bool {
+    self.lock().conns.contains_key(&conn)
+  }
+
+  /// Registers a chat turn of a tab and returns the secret that names it in the MCP config.
+  /// Calls made with it reach that tab only, and only while the turn runs: a `claude`
+  /// process that outlives its turn (or the bridge) can't touch anything.
+  pub fn start_run(&self, conn: u64, turn: u64) -> String {
+    let token = new_token();
+    self.lock().runs.insert(token.clone(), Run { conn, turn });
+    token
+  }
+
+  pub fn end_run(&self, token: &str) {
+    self.lock().runs.remove(token);
+  }
+
+  /// The tab and turn a token belongs to, while its turn runs.
+  pub fn run(&self, token: &str) -> Option<Run> {
+    self.lock().runs.get(token).copied()
+  }
+
   pub async fn is_connected(&self) -> bool {
     !self.lock().conns.is_empty()
   }
@@ -109,6 +144,14 @@ impl EditorLink {
     match g.active().and_then(|id| g.conns.get(&id)) {
       Some(c) => c.tx.send(Message::Text(msg.to_string())).is_ok(),
       None => false,
+    }
+  }
+
+  /// Sends to every tab (preview status and logs belong to the workspace, not a tab).
+  pub async fn broadcast(&self, msg: Value) {
+    let text = msg.to_string();
+    for c in self.lock().conns.values() {
+      let _ = c.tx.send(Message::Text(text.clone()));
     }
   }
 
@@ -179,6 +222,22 @@ impl Inner {
   fn active(&self) -> Option<u64> {
     self.conns.iter().max_by_key(|(id, c)| (c.focus, **id)).map(|(id, _)| *id)
   }
+}
+
+/// 128 random bits as hex. The std hasher is keyed from the OS's randomness per instance.
+fn new_token() -> String {
+  let mut out = String::new();
+  for _ in 0..2 {
+    let mut h = RandomState::new().build_hasher();
+    h.write_u128(
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0),
+    );
+    out.push_str(&format!("{:016x}", h.finish()));
+  }
+  out
 }
 
 fn closed_reply() -> ToolReply {
@@ -287,9 +346,10 @@ async fn serve(socket: WebSocket, state: Shared) {
   }
 
   // The tab's chat has nobody to talk to any more; the tab that takes over sends its document.
-  state.chat.cancel(conn_id).await;
+  // Disconnect first: a chat that starts its process after this sees the tab gone and stops.
   let was_active = state.editor.active() == Some(conn_id);
   let next = state.editor.disconnect(conn_id);
+  state.chat.cancel(conn_id).await;
   if let Some(next) = next.filter(|_| was_active) {
     state.editor.send_to(next, json!({ "type": "send_doc" }));
   }
@@ -393,6 +453,34 @@ mod tests {
     assert_eq!(link.disconnect(a), Some(b));
     assert_eq!(link.disconnect(b), None);
     assert!(!link.is_connected().await);
+  }
+
+  #[tokio::test]
+  async fn a_run_token_names_one_tab_while_its_turn_runs() {
+    let link = EditorLink::default();
+    let (a, _ra) = tab(&link);
+    let (b, _rb) = tab(&link);
+    let t1 = link.start_run(a, 3);
+    let t2 = link.start_run(b, 1);
+    assert_ne!(t1, t2);
+    assert_eq!(t1.len(), 32);
+    assert_eq!(link.run(&t1), Some(Run { conn: a, turn: 3 }));
+    assert_eq!(link.run("guess"), None);
+    link.end_run(&t1);
+    assert_eq!(link.run(&t1), None, "a finished turn's token is dead");
+    link.disconnect(b);
+    assert_eq!(link.run(&t2), None, "and so is that of a closed tab");
+    assert!(link.has(a) && !link.has(b));
+  }
+
+  #[tokio::test]
+  async fn broadcast_reaches_every_tab() {
+    let link = EditorLink::default();
+    let (_a, mut ra) = tab(&link);
+    let (_b, mut rb) = tab(&link);
+    link.broadcast(json!({ "type": "preview_log" })).await;
+    assert_eq!(inbox(&mut ra).len(), 1);
+    assert_eq!(inbox(&mut rb).len(), 1);
   }
 
   #[tokio::test]

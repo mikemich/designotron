@@ -73,7 +73,7 @@ impl Preview {
 
 async fn broadcast(state: &Shared) {
   let msg = state.preview.status(&state.workspace).await;
-  state.editor.send(msg).await;
+  state.editor.broadcast(msg).await;
 }
 
 async fn log_line(state: &Shared, run: u64, line: String) {
@@ -96,7 +96,7 @@ async fn log_line(state: &Shared, run: u64, line: String) {
   }
   g.logs.push_back(clean.clone());
   drop(g);
-  state.editor.send(json!({ "type": "preview_log", "line": clean })).await;
+  state.editor.broadcast(json!({ "type": "preview_log", "line": clean })).await;
 }
 
 async fn set_phase(state: &Shared, run: u64, phase: Phase, message: Option<String>) {

@@ -11,6 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+use crate::editor::EditorLink;
 use crate::Shared;
 
 const CLAUDE_BIN_ENV: &str = "CLAUDE_BIN";
@@ -73,11 +74,18 @@ impl ChatControl {
     }
   }
 
-  /// Registers a tab's new process; returns its run number for `take`.
-  async fn start(&self, conn: u64, child: Child) -> u64 {
+  /// Registers a tab's new process; returns its run number for `take`. A tab that has gone in
+  /// the meantime (it closed right after sending its message) gets no process: it is killed.
+  async fn adopt(&self, editor: &EditorLink, conn: u64, child: Child) -> Option<u64> {
     let run = self.next_run.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     self.children.lock().await.insert(conn, (run, child));
-    run
+    // After registering, so a tab that closes from here on is cancelled by its own cleanup,
+    // and one that already closed is seen here (its cleanup disconnects before it cancels).
+    if !editor.has(conn) {
+      self.cancel(conn).await;
+      return None;
+    }
+    Some(run)
   }
 
   /// Takes back the process of this run. `None` when it was cancelled, or replaced by a newer
@@ -92,16 +100,16 @@ impl ChatControl {
 }
 
 /// MCP server entry handed to the CLI for one chat turn. Tools load up front (`alwaysLoad`)
-/// instead of behind a ToolSearch round trip, and the headers tell the bridge which tab and
-/// turn a tool call belongs to.
-pub fn mcp_config(port: u16, conn: u64, turn: u64) -> Value {
+/// instead of behind a ToolSearch round trip, and the header carries the turn's secret, which
+/// tells the bridge which tab and turn a tool call belongs to.
+pub fn mcp_config(port: u16, token: &str) -> Value {
   json!({
     "mcpServers": {
       "designotron": {
         "type": "http",
         "url": format!("http://127.0.0.1:{port}/mcp"),
         "alwaysLoad": true,
-        "headers": { "X-Designotron-Editor": conn.to_string(), "X-Designotron-Turn": turn.to_string() },
+        "headers": { "X-Designotron-Editor": token },
       }
     }
   })
@@ -113,6 +121,21 @@ pub fn mcp_config(port: u16, conn: u64, turn: u64) -> Value {
 /// `turn` is the editor's number for this message, echoed in chat_done/chat_error so a late
 /// reply from an earlier turn can't end the current one.
 pub async fn run_chat(state: Shared, conn: u64, prompt: String, session: Option<String>, images: Vec<crate::fetch::ChatImage>, turn: u64) {
+  // The turn's secret is valid for exactly as long as the turn runs.
+  let token = state.editor.start_run(conn, turn);
+  run_turn(&state, conn, &token, prompt, session, images, turn).await;
+  state.editor.end_run(&token);
+}
+
+async fn run_turn(
+  state: &Shared,
+  conn: u64,
+  token: &str,
+  prompt: String,
+  session: Option<String>,
+  images: Vec<crate::fetch::ChatImage>,
+  turn: u64,
+) {
   if state.claude.version.is_none() {
     state.editor.send_to(
       conn,
@@ -146,7 +169,7 @@ pub async fn run_chat(state: Shared, conn: u64, prompt: String, session: Option<
   cmd
     .args(["--output-format", "stream-json", "--verbose", "--include-partial-messages"])
     .arg("--mcp-config")
-    .arg(mcp_config(state.port, conn, turn).to_string())
+    .arg(mcp_config(state.port, token).to_string())
     .arg("--permission-mode")
     .arg("acceptEdits")
     .arg("--append-system-prompt")
@@ -188,7 +211,9 @@ pub async fn run_chat(state: Shared, conn: u64, prompt: String, session: Option<
   }
   let stdout = child.stdout.take();
   let stderr = child.stderr.take();
-  let run = state.chat.start(conn, child).await;
+  let Some(run) = state.chat.adopt(&state.editor, conn, child).await else {
+    return;
+  };
 
   let stderr_task = tokio::spawn(async move {
     let mut buf = String::new();
@@ -209,7 +234,11 @@ pub async fn run_chat(state: Shared, conn: u64, prompt: String, session: Option<
         session_id = Some(s.to_string());
       }
       let done = event["type"] == "result";
-      state.editor.send_to(conn, json!({ "type": "chat_event", "event": event }));
+      // The tab has gone: nobody is watching, so don't spend the rest of the turn.
+      if !state.editor.send_to(conn, json!({ "type": "chat_event", "event": event })) {
+        state.chat.cancel(conn).await;
+        break;
+      }
       // The result ends the turn; newer CLIs can keep running for a while afterwards.
       if done {
         break;
@@ -264,30 +293,59 @@ mod tests {
   use super::*;
 
   #[test]
-  fn chat_mcp_config_loads_tools_up_front_and_names_the_tab() {
-    let c = mcp_config(5174, 4, 9);
+  fn chat_mcp_config_loads_tools_up_front_and_carries_the_turn_secret() {
+    let c = mcp_config(5174, "s3cret");
     let s = &c["mcpServers"]["designotron"];
     assert_eq!(s["type"], "http");
     assert_eq!(s["url"], "http://127.0.0.1:5174/mcp");
     assert_eq!(s["alwaysLoad"], true);
-    assert_eq!(s["headers"]["X-Designotron-Editor"], "4");
-    assert_eq!(s["headers"]["X-Designotron-Turn"], "9");
+    assert_eq!(s["headers"]["X-Designotron-Editor"], "s3cret");
+  }
+
+  fn sleeper() -> Child {
+    Command::new("sleep").arg("30").kill_on_drop(true).spawn().unwrap()
+  }
+
+  fn tab(editor: &EditorLink) -> u64 {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::mem::forget(rx);
+    editor.connect(tx)
   }
 
   #[tokio::test]
   async fn each_tab_has_its_own_process_and_a_newer_run_keeps_it() {
     let ctl = ChatControl::default();
-    let sleeper = || Command::new("sleep").arg("30").kill_on_drop(true).spawn().unwrap();
-    let r1 = ctl.start(1, sleeper()).await;
-    let r2 = ctl.start(2, sleeper()).await;
-    ctl.cancel(1).await;
-    assert!(ctl.take(1, r1).await.is_none(), "cancelled");
-    assert!(ctl.children.lock().await.contains_key(&2), "the other tab's chat keeps running");
+    let editor = EditorLink::default();
+    let (t1, t2) = (tab(&editor), tab(&editor));
+    let r1 = ctl.adopt(&editor, t1, sleeper()).await.unwrap();
+    let r2 = ctl.adopt(&editor, t2, sleeper()).await.unwrap();
+    ctl.cancel(t1).await;
+    assert!(ctl.take(t1, r1).await.is_none(), "cancelled");
+    assert!(ctl.children.lock().await.contains_key(&t2), "the other tab's chat keeps running");
     // Tab 2 starts a new run (replacing the old process); the old run's cleanup must not
     // take the new process.
-    ctl.cancel(2).await;
-    let r2b = ctl.start(2, sleeper()).await;
-    assert!(ctl.take(2, r2).await.is_none());
-    assert!(ctl.take(2, r2b).await.is_some());
+    ctl.cancel(t2).await;
+    let r2b = ctl.adopt(&editor, t2, sleeper()).await.unwrap();
+    assert!(ctl.take(t2, r2).await.is_none());
+    assert!(ctl.take(t2, r2b).await.is_some());
+  }
+
+  #[tokio::test]
+  async fn a_chat_that_starts_after_its_tab_left_is_killed() {
+    let ctl = ChatControl::default();
+    let editor = EditorLink::default();
+    let gone = tab(&editor);
+    // The tab's cleanup (disconnect, then cancel) ran before the chat got to register.
+    editor.disconnect(gone);
+    ctl.cancel(gone).await;
+    assert!(ctl.adopt(&editor, gone, sleeper()).await.is_none());
+    assert!(
+      ctl.children.lock().await.is_empty(),
+      "no process is left for a tab that isn't there"
+    );
+    // A tab that is there keeps its process.
+    let here = tab(&editor);
+    assert!(ctl.adopt(&editor, here, sleeper()).await.is_some());
+    ctl.cancel(here).await;
   }
 }

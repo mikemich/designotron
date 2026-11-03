@@ -74,9 +74,10 @@ const names = (page, prefix) =>
 const chat = (page) => page.evaluate(() => window.__dt.chat());
 const doneIn = (page, timeout = 30000) =>
   page.waitForFunction(() => !window.__dt.chat().running && window.__dt.chat().items.some((i) => i.text?.startsWith("Done in")), null, { timeout });
+/** The secret of the turn's MCP config, as the fake CLI reported it. */
 const connOf = async (page) => {
   const t = (await chat(page)).items.map((i) => i.text ?? "").join("\n");
-  return Number(t.match(/conn=(\d+)/)?.[1]);
+  return t.match(/conn=([0-9a-f]+)/)?.[1] ?? "";
 };
 const undoCount = (page) => page.evaluate(() => window.__dt.state().canUndo);
 
@@ -98,7 +99,7 @@ try {
   check("A's document has the 3 layers", (await names(A, "A-")).length === 3);
   check("B's document has none", (await names(B, "A-")).length === 0 && (await names(B, "L-")).length === 0);
   const connA = await connOf(A);
-  check("the fake CLI got an editor id and turn from the MCP config", connA > 0, `conn=${connA}`);
+  check("the fake CLI got a random run secret in the MCP config", /^[0-9a-f]{32}$/.test(connA), `conn=${connA}`);
   check("the Done line has no cost, the title carries it", await A.evaluate(() => {
     const d = window.__dt.chat().items.find((i) => i.text?.startsWith("Done in"));
     return !!d && !d.text.includes("$") && /API-equivalent, not billed/.test(d.title ?? "");
@@ -141,21 +142,21 @@ try {
   await doneIn(C);
   const connC = await connOf(C);
   const frame = await C.evaluate(() => Object.values(window.__dt.doc().nodes).find((n) => n.name === "C-0").id);
-  // A busy page doesn't answer: the call is pending when the tab goes away.
+  // A busy page doesn't answer: the call (no secret, so it goes to the active tab C) is pending when the tab goes away.
   await C.evaluate(() => {
     setTimeout(() => {
       const t = Date.now();
       while (Date.now() - t < 4000);
     }, 0);
   });
-  const pendingCall = mcp("get_screenshot", { id: frame }, { "X-Designotron-Editor": String(connC), "X-Designotron-Turn": "99" });
+  const pendingCall = mcp("get_screenshot", { id: frame });
   await sleep(300);
   const closing = C.close({ runBeforeUnload: false }).catch(() => {});
   const reply = await pendingCall;
   await closing;
   check("a call pending on a closed tab fails in under 5 s", reply.ms < 5000 && reply.isError === true, `${reply.ms} ms`);
-  check("with the tab-closed message", /closed/.test(reply.content?.at(-1)?.text ?? ""), reply.content?.at(-1)?.text);
-  const late = await mcp("get_document", {}, { "X-Designotron-Editor": String(connC) });
+  check("with the closed-before-answering message", /closed before it answered/.test(reply.content?.at(-1)?.text ?? ""), reply.content?.at(-1)?.text);
+  const late = await mcp("get_document", {}, { "X-Designotron-Editor": connC });
   check("a later call for that tab fails instead of editing another tab", late.isError === true && /closed/.test(late.content?.[0]?.text ?? ""), late.content?.[0]?.text);
   check("the other tabs are still connected and did not receive it", (await names(A, "C-")).length === 0 && (await names(B, "C-")).length === 0);
 
@@ -196,14 +197,47 @@ try {
     console.log("SKIP  headless file checks (set E2E_WORKSPACE)");
   }
 
+  // A call that arrives during the person's drag waits for it, and survives the drag's next step.
+  await focusTab(B);
+  await B.evaluate(() => {
+    window.__dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: "Dragged", x: 200, y: 600, width: 120, height: 120, fill: "#f00" }] });
+    window.__dt.zoomToFit();
+  });
+  await sleep(300);
+  const at = async (x, y) => {
+    const box = await B.locator("#dt-canvas").boundingBox();
+    const v = await B.evaluate(() => window.__dt.viewport());
+    return { x: box.x + v.x + x * v.zoom, y: box.y + v.y + y * v.zoom, zoom: v.zoom };
+  };
+  const from = await at(260, 660);
+  await B.mouse.move(from.x, from.y);
+  await B.mouse.down();
+  for (let i = 1; i <= 5; i++) {
+    await B.mouse.move(from.x + 10 * i, from.y);
+    await sleep(15);
+  }
+  const during = mcp("create_nodes", { nodes: [{ type: "frame", name: "DuringDrag", x: 0, y: 900, width: 30, height: 30 }] });
+  await sleep(500);
+  check("the call waits while the drag is on", (await names(B, "DuringDrag")).length === 0);
+  for (let i = 6; i <= 10; i++) {
+    await B.mouse.move(from.x + 10 * i, from.y);
+    await sleep(15);
+  }
+  await B.mouse.up();
+  const dragReply = await during;
+  await sleep(200);
+  check("then it is applied", !dragReply.isError && (await names(B, "DuringDrag")).length === 1, JSON.stringify(dragReply.content?.at(-1)?.text).slice(0, 100));
+  const movedX = await B.evaluate(() => Object.values(window.__dt.doc().nodes).find((n) => n.name === "Dragged").x);
+  check("and the drag itself still landed", movedX > 200, `x=${movedX}`);
+
   // 7. With every tab gone, MCP falls back to the headless document.
   await A.close();
   await B.close();
   await sleep(500);
   const headless = await mcp("get_document", {});
   check("with no tab open, MCP answers headless", !headless.isError, (headless.content?.[0]?.text ?? "").slice(0, 80));
-  const noTab = await mcp("get_document", {}, { "X-Designotron-Editor": String(connA) });
-  check("but a call for a closed chat's tab still fails", noTab.isError === true && /closed/.test(noTab.content?.[0]?.text ?? ""));
+  const noTab = await mcp("get_document", {}, { "X-Designotron-Editor": connA });
+  check("but a call with a finished chat's secret still fails", noTab.isError === true && /closed/.test(noTab.content?.[0]?.text ?? ""));
 
   // 8. API mode with a stubbed Messages endpoint: Stop, then a queued message gets its reply.
   const apiCtx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
@@ -243,17 +277,42 @@ try {
     { type: "message_stop" },
   ];
   const requests = [];
+  const pairingErrors = [];
   let release = () => {};
   await api.route("**/v1/messages*", async (route) => {
     const body = JSON.parse(route.request().postData() ?? "{}");
     const lastUser = JSON.stringify(body.messages?.at(-1)?.content ?? "");
     requests.push(lastUser);
+    // Like the real API: every tool_use needs its tool_result in the very next message.
+    const msgs = body.messages ?? [];
+    for (let i = 0; i < msgs.length; i++) {
+      const ids = (Array.isArray(msgs[i].content) && msgs[i].role === "assistant" ? msgs[i].content : []).filter((b) => b.type === "tool_use").map((b) => b.id);
+      const next = msgs[i + 1];
+      const got = (Array.isArray(next?.content) ? next.content : []).filter((b) => b.type === "tool_result").map((b) => b.tool_use_id);
+      if (ids.length && !ids.every((id) => got.includes(id))) {
+        pairingErrors.push(ids.join(","));
+        return route.fulfill({
+          status: 400,
+          contentType: "application/json",
+          body: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "tool_use ids were found without tool_result blocks immediately after" } }),
+        });
+      }
+    }
     const respond = (blocks, stop) => route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: sse(message(blocks, stop)) });
     // The queued message joins the stopped prompt's turn, so both tags can be in one request.
     if (lastUser.includes("[hang]") && !lastUser.includes("[queued]")) {
       // Never answers: the page aborts it when the person presses Stop.
       await new Promise((r) => (release = r));
       return route.abort().catch(() => {});
+    }
+    if (lastUser.includes("[slowtool]") && !lastUser.includes("tool_result")) {
+      return respond(
+        [
+          { type: "tool_use", id: "tu_s1", name: "import_html", input: { html: `<html><body><img src="${URL}/__slow.png"><p>slow</p></body></html>` } },
+          { type: "tool_use", id: "tu_s2", name: "create_nodes", input: { nodes: [{ type: "frame", name: "AfterStop", width: 40, height: 40 }] } },
+        ],
+        "tool_use",
+      );
     }
     if (lastUser.includes("[tools]") && !lastUser.includes("tool_result")) {
       return respond(
@@ -290,6 +349,28 @@ try {
   check("no 'aborted' error is shown", !apiChat.items.some((i) => i.kind === "error"), JSON.stringify(apiChat.items.filter((i) => i.kind === "error")));
   check("and the chat is idle afterwards", !apiChat.running);
   release();
+
+  // Stop while a tool is running, with a message queued: the stopped calls are answered (the API
+  // would refuse the queued request otherwise) and no further tool runs.
+  await apiCtx.route("**/__slow*", async (route) => {
+    await sleep(3500);
+    await route.fulfill({ status: 200, contentType: "image/png", body: Buffer.alloc(10) }).catch(() => {});
+  });
+  await api.evaluate(() => { window.__dt.send("[slowtool] third"); });
+  await sleep(1200);
+  check("the slow tool is running", (await chat(api)).items.some((i) => i.kind === "tool" && i.name === "import_html" && i.ok === null));
+  await api.evaluate(() => { window.__dt.send("[queued] fourth"); });
+  await api.click(".chat-input button:has-text('Stop')");
+  await api
+    .waitForFunction(() => window.__dt.chat().items.filter((i) => i.kind === "assistant" && i.text.includes("Reply to the queued message")).length >= 2, null, { timeout: 15000 })
+    .catch(async (e) => {
+      console.log("requests:", JSON.stringify(requests), "pairing:", pairingErrors, "items:", JSON.stringify((await chat(api)).items.map((i) => [i.kind, i.name ?? i.text?.slice(0, 80)])));
+      throw e;
+    });
+  check("the queued message after Stop during a tool is accepted and answered", pairingErrors.length === 0, pairingErrors.join(" | "));
+  await sleep(4000);
+  check("the stopped run runs no further tool", (await names(api, "AfterStop")).length === 0);
+  check("and shows no error", !(await chat(api)).items.some((i) => i.kind === "error"), JSON.stringify((await chat(api)).items.filter((i) => i.kind === "error")));
 
   // API mode groups its tool calls too: one Ctrl+Z undoes the run.
   await api.evaluate(() => { window.__dt.send("[tools] build"); });

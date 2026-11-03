@@ -10,7 +10,7 @@
 //   [delay=MS]     pause before each call (default 0)
 //   [tool=NAME]    make one call of this tool (empty arguments) instead, e.g. get_screenshot
 //   [fail]         end with an error result
-// It says which tab and turn it was configured for ("conn=4 turn=2") in its reply.
+// It says the secret its MCP config carries ("conn=<token>") in its reply.
 
 import fs from "node:fs";
 
@@ -54,7 +54,7 @@ emit({
   mcp_servers: [{ name: "designotron", status: server.url ? "connected" : "failed" }],
   alwaysLoad: server.alwaysLoad === true,
 });
-emit({ type: "assistant", message: { content: [{ type: "text", text: `conn=${headers["X-Designotron-Editor"]} turn=${headers["X-Designotron-Turn"]}` }] } });
+emit({ type: "assistant", message: { content: [{ type: "text", text: `conn=${headers["X-Designotron-Editor"]}` }] } });
 
 const started = Date.now();
 for (let i = 0; i < (tool ? 1 : calls); i++) {

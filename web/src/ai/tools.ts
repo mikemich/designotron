@@ -1,7 +1,7 @@
 // Executes AI tool calls in the browser: engine tools go through the WASM
 // engine (one undo step each), browser-only tools are handled here.
 
-import { aiDispatch, getDoc, query, selection, useStore, zoomToSelection } from "../store";
+import { aiDispatch, getDoc, pointerDrag, query, selection, useStore, zoomToSelection } from "../store";
 import { getScreenshot, importHtml, importUrl } from "./browserTools";
 
 export interface ToolOutcome {
@@ -34,6 +34,15 @@ export function contextLine(): string {
     .filter(Boolean)
     .map((n) => `${n.id} (${n.type} "${n.name}")`);
   return `[Editor context] Document "${doc.name}", page "${page?.name}" (${page?.id}). ${sel.length ? `Selected: ${sel.join(", ")}.` : "Nothing selected."}`;
+}
+
+/** Resolves once the person isn't dragging on the canvas (or has no gesture open), or after
+ *  `timeoutMs`. A tool call that landed mid-drag would be undone by the drag's next step, which
+ *  starts again from the gesture's base document. Chat calls wait here before `executeTool`. */
+export async function whenCanvasIdle(timeoutMs = 5000): Promise<void> {
+  const busy = () => pointerDrag.active || useStore.getState().es.inGesture;
+  const until = Date.now() + timeoutMs;
+  while (busy() && Date.now() < until) await new Promise((r) => setTimeout(r, 40));
 }
 
 /** `opts.group`: undo group of the chat turn the call belongs to (see `aiDispatch`). */
