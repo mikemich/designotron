@@ -47,16 +47,17 @@ export async function fillLayers(r: PhotoResult, ids: string[], opts: { fit?: Fi
 
 /** A new image layer. With `parentId` it goes into that layer (appended in auto layout); without,
  *  it is centred on `x`,`y` (its top-left with `corner`) inside the frame under that point, or on
- *  the page. One undo step; the width is capped to the target frame's inner width. */
+ *  the page (only on the page with `inFrame: false`, which Claude uses: it can't see the viewport).
+ *  One undo step; the width is capped to the target frame's inner width. */
 export async function placeNewLayer(
   r: PhotoResult,
-  o: { x: number; y: number; parentId?: string; width?: number; fit?: Fit; name?: string; group?: string; corner?: boolean },
+  o: { x: number; y: number; parentId?: string; width?: number; fit?: Fit; name?: string; group?: string; corner?: boolean; inFrame?: boolean },
 ): Promise<string> {
   const { paint, width: pw, height: ph } = await photoPaint(r, o.fit);
   // The document may have changed during the download: look at it now.
   const doc = getDoc();
   if (o.parentId && !doc.nodes[o.parentId]) throw new PhotoError("bad", `parentId: no layer ${o.parentId}`);
-  const target = o.parentId ? { id: o.parentId, ...pagePosition(doc, o.parentId) } : o.corner ? null : frameAt(doc, o.x, o.y);
+  const target = o.parentId ? { id: o.parentId, ...pagePosition(doc, o.parentId) } : o.corner || o.inFrame === false ? null : frameAt(doc, o.x, o.y);
   const parent = target ? doc.nodes[target.id] : undefined;
   let w = Math.max(16, Math.min(MAX_WIDTH, Math.round(o.width ?? DEFAULT_WIDTH)));
   if (parent) {

@@ -70,6 +70,7 @@ async function place(input: any, group?: string): Promise<ToolOutcome> {
         x: corner ? input.x : c.x,
         y: corner ? input.y : c.y,
         corner,
+        inFrame: false,
         parentId: typeof input.parentId === "string" ? input.parentId : undefined,
         width: Number.isFinite(input.width) ? input.width : undefined,
         fit,
