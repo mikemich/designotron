@@ -681,7 +681,8 @@ mod scale_bookkeeping {
     let per = t.elapsed() / 10;
     e.dispatch(Command::EndGesture).unwrap();
     // Single-digit milliseconds in a release build; the test profile is unoptimised, so it only guards against a blow-up.
-    assert!(per.as_millis() < 60, "{per:?} per step");
+    // Loose bound: the full suite runs tests in parallel, which slows this one down several times.
+    assert!(per.as_millis() < 250, "{per:?} per step");
   }
 
   #[test]
