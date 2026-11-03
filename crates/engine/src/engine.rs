@@ -1416,6 +1416,18 @@ impl Engine {
   }
 
   fn after_mutation(&mut self, prev: &Document) {
+    // Layers added to or reordered in a device frame stay below its system UI (before instances
+    // of a main device frame sync from it).
+    let device_frames: Vec<NodeId> = self
+      .changed_by_root(prev)
+      .values()
+      .flatten()
+      .filter(|id| self.doc.get(id).is_some_and(|n| n.device.is_some()))
+      .cloned()
+      .collect();
+    for id in &device_frames {
+      devices::raise_chrome(&mut self.doc, id);
+    }
     crate::props::follow_variants(&mut self.doc, prev);
     crate::variables::normalize(&mut self.doc);
     crate::variables::apply(&mut self.doc);
@@ -1459,12 +1471,6 @@ impl Engine {
     // Only trees that changed need layout (layout never reaches across top-level layers),
     // and moving a whole top-level layer changes nothing inside it.
     let by_root = self.changed_by_root(prev);
-    // Layers added to or reordered in a device frame stay below its system UI.
-    for id in by_root.values().flatten() {
-      if self.doc.get(id).is_some_and(|n| n.device.is_some()) {
-        devices::raise_chrome(&mut self.doc, id);
-      }
-    }
     for (root, changed) in by_root {
       if !self.only_moved(prev, &root, &changed) {
         layout::layout_node(&mut self.doc, &root, self.measurer.as_ref());
@@ -1629,12 +1635,41 @@ impl Engine {
     id
   }
 
+  /// Structural commands never take a device frame's system UI: those layers are dropped from the
+  /// command, and it fails when nothing is left (the Device section turns system UI on and off).
+  fn without_chrome(&self, mut cmd: Command) -> Result<Command, String> {
+    let wrap = match &cmd {
+      Command::AddAutoLayout { ids } => !(ids.len() == 1 && self.doc.get(&ids[0]).is_some_and(|n| n.kind.is_frame_like())),
+      _ => true,
+    };
+    let ids = match &mut cmd {
+      Command::Group { ids }
+      | Command::Ungroup { ids }
+      | Command::FrameSelection { ids }
+      | Command::CreateComponent { ids }
+      | Command::BooleanOp { ids, .. }
+      | Command::Flatten { ids }
+      | Command::OutlineStroke { ids }
+      | Command::UseAsMask { ids }
+      | Command::MoveToPage { ids, .. } => ids,
+      Command::AddAutoLayout { ids } if wrap => ids,
+      _ => return Ok(cmd),
+    };
+    let before = ids.len();
+    ids.retain(|i| !devices::in_part(&self.doc, i));
+    if before > 0 && ids.is_empty() {
+      return Err("system UI of a device frame can't be changed this way; turn it on or off in the Device section".into());
+    }
+    Ok(cmd)
+  }
+
   /// Applies a command without touching history (used by AI tools inside one step).
   pub(crate) fn dispatch_inner(&mut self, cmd: Command) -> Result<Value, String> {
     self.apply(cmd)
   }
 
   fn apply(&mut self, cmd: Command) -> Result<Value, String> {
+    let cmd = self.without_chrome(cmd)?;
     match cmd {
       Command::AddPage { name } => {
         let id = self.gen.next("p_");

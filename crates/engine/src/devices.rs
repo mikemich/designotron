@@ -490,11 +490,11 @@ pub fn apply(doc: &mut Document, gen: &mut IdGen, id: &str, device: Option<Devic
   let old_dev = n.device.clone();
   let old_applied = old_dev.as_ref().map(|d| d.applied).unwrap_or([0.0; 4]);
   let old_preset = old_dev.as_ref().and_then(|d| find(&d.preset));
-  let old_parts: Vec<NodeId> = n
-    .children
-    .iter()
-    .filter(|c| doc.get(c).is_some_and(|c| c.device_part.is_some()))
-    .cloned()
+  // Every part of this frame, wherever it ended up in the subtree, so none can be left behind.
+  let old_parts: Vec<NodeId> = doc
+    .subtree(id)
+    .into_iter()
+    .filter(|c| c != id && doc.get(c).is_some_and(|c| c.device_part.is_some()))
     .collect();
   let time = text_of(doc, &old_parts, "Time");
   let title = text_of(doc, &old_parts, "Title");
@@ -548,7 +548,8 @@ pub fn apply(doc: &mut Document, gen: &mut IdGen, id: &str, device: Option<Devic
     } else {
       ("#000000", "#FFFFFF")
     };
-    let plain = f.fills.is_empty()
+    // A new device frame also takes the plain fill when it has none; a transparent frame stays so.
+    let plain = (old_dev.is_none() && f.fills.is_empty())
       || matches!(f.fills.as_slice(), [Paint::Solid { color, opacity, visible: true }] if color.eq_ignore_ascii_case(from) && *opacity == 1.0);
     if plain {
       f.fills = vec![Paint::solid(to)];
@@ -1770,6 +1771,89 @@ mod tests {
     assert!(find_named(&e, &f, "Home indicator").is_none() && find_named(&e, &f, "Status bar").is_some());
     e.dispatch(Command::Undo).unwrap();
     assert!(e.doc.get(&f).unwrap().device.as_ref().unwrap().home_indicator && find_named(&e, &f, "Home indicator").is_some());
+  }
+
+  #[test]
+  fn structural_commands_refuse_system_ui() {
+    let mut e = engine();
+    let f = frame_id(&mut e);
+    set(&mut e, &f, "iphone-17", true);
+    let bar = find_named(&e, &f, "Status bar").unwrap().id;
+    let home = find_named(&e, &f, "Home indicator").unwrap().id;
+    let before = e.doc.clone();
+    let ids = vec![bar.clone(), home.clone()];
+    let cmds = vec![
+      Command::Group { ids: ids.clone() },
+      Command::Ungroup { ids: ids.clone() },
+      Command::FrameSelection { ids: ids.clone() },
+      Command::AddAutoLayout { ids: ids.clone() },
+      Command::CreateComponent { ids: ids.clone() },
+      Command::BooleanOp {
+        ids: ids.clone(),
+        operation: serde_json::from_value(json!("union")).unwrap(),
+      },
+      Command::Flatten { ids: ids.clone() },
+      Command::OutlineStroke { ids: ids.clone() },
+      Command::UseAsMask { ids: ids.clone() },
+    ];
+    for c in cmds {
+      let name = format!("{c:?}");
+      let err = e.dispatch(c).unwrap_err();
+      assert!(err.contains("system UI"), "{name}: {err}");
+      assert!(e.doc == before, "{name} changed the document");
+    }
+    // Claude's arrange tool gets the same error.
+    for action in ["group", "flatten", "frame"] {
+      let err = e
+        .dispatch(Command::Ai {
+          tool: "arrange".into(),
+          input: json!({ "action": action, "ids": [home] }),
+        })
+        .unwrap_err();
+      assert!(err.contains("system UI"), "{action}: {err}");
+    }
+    assert!(e.doc == before);
+    // Content next to the chrome still groups; the chrome is left out of it.
+    let r = e
+      .dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 10.0,
+        y: 200.0,
+        width: 30.0,
+        height: 30.0,
+        parent: Option::None,
+      })
+      .unwrap();
+    let rect = r["id"].as_str().unwrap().to_string();
+    e.dispatch(Command::Group {
+      ids: vec![rect, home.clone()],
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&home).unwrap().parent.as_deref(), Some(f.as_str()));
+    // A theme switch leaves exactly one of each part.
+    set_theme(&mut e, &f, "dark");
+    assert_eq!(
+      e.doc
+        .nodes
+        .values()
+        .filter(|n| n.device_part.as_deref() == Some("homeIndicator"))
+        .count(),
+      1
+    );
+  }
+
+  #[test]
+  fn a_transparent_frame_stays_transparent_on_a_theme_switch() {
+    let mut e = engine();
+    let f = frame_id(&mut e);
+    e.dispatch(Command::Update {
+      ids: vec![f.clone()],
+      patch: json!({ "fills": [] }),
+    })
+    .unwrap();
+    set(&mut e, &f, "iphone-17", true);
+    set_theme(&mut e, &f, "dark");
+    assert!(fill(&e, &f).is_none());
   }
 
   #[test]
