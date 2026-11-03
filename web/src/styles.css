@@ -839,6 +839,25 @@ textarea.textinput {
 .msg.assistant a {
   color: var(--accent-2);
 }
+.msg.assistant .md-table {
+  overflow-x: auto;
+  margin: 0 0 0.6em;
+}
+.msg.assistant table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.msg.assistant th,
+.msg.assistant td {
+  border: 1px solid var(--border, #3a3a3a);
+  padding: 3px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.msg.assistant th {
+  background: var(--panel-2);
+  font-weight: 600;
+}
 .msg.error {
   color: #ff8a73;
 }

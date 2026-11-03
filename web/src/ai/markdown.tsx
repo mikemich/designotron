@@ -1,5 +1,5 @@
 // A small, safe Markdown renderer for Claude's replies: paragraphs, **bold**, *italic*, `code`,
-// fenced code, bullet and numbered lists, headings (shown as bold lines) and http(s) links.
+// fenced code, bullet and numbered lists, tables, headings (shown as bold lines) and http(s) links.
 // It builds React elements, never HTML strings, so nothing in a reply can inject markup.
 // Inline spans are found by a scanner that looks at most a few hundred characters ahead, so
 // no input makes it slow (regular expressions with nested quantifiers could).
@@ -10,7 +10,8 @@ export type Block =
   | { kind: "p"; text: string }
   | { kind: "heading"; text: string }
   | { kind: "code"; text: string; lang: string }
-  | { kind: "list"; ordered: boolean; start: number; items: string[] };
+  | { kind: "list"; ordered: boolean; start: number; items: string[] }
+  | { kind: "table"; head: string[]; align: ("left" | "center" | "right" | undefined)[]; rows: string[][] };
 
 /** Lines longer than this are shown as they are (no Markdown), which bounds the work per line. */
 const MAX_LINE = 10_000;
@@ -18,6 +19,8 @@ const MAX_LINE = 10_000;
 const MAX_SPAN = 500;
 const MAX_CODE = 2000;
 const MAX_LINK_TEXT = 300;
+/** Columns beyond this are dropped from a table. */
+const MAX_COLS = 20;
 
 const FENCE = /^\s*```(.*)$/;
 const ITEM = /^\s*(?:([-*+])|(\d{1,9})[.)])\s+(.*)$/;
@@ -51,6 +54,20 @@ export function parseBlocks(text: string): Block[] {
       blocks.push({ kind: "heading", text: heading });
       continue;
     }
+    const head = i + 1 < lines.length ? tableRow(line) : null;
+    const sep = head ? tableSeparator(lines[i + 1], head.length) : null;
+    if (head && sep) {
+      flush();
+      const rows: string[][] = [];
+      for (i += 2; i < lines.length && lines[i].length <= MAX_LINE; i++) {
+        const row = tableRow(lines[i]);
+        if (!row) break;
+        rows.push(Array.from({ length: head.length }, (_, c) => row[c] ?? ""));
+      }
+      i--;
+      blocks.push({ kind: "table", head, align: sep, rows });
+      continue;
+    }
     const item = line.match(ITEM);
     if (item) {
       flush();
@@ -74,6 +91,40 @@ export function parseBlocks(text: string): Block[] {
   }
   flush();
   return blocks;
+}
+
+/** The cells of a table row ("| a | b |" or "a | b"), or null when the line has no pipe. */
+function tableRow(line: string): string[] | null {
+  let t = line.trim();
+  if (!t.includes("|")) return null;
+  if (t.startsWith("|")) t = t.slice(1);
+  if (t.endsWith("|") && !t.endsWith("\\|")) t = t.slice(0, -1);
+  const cells: string[] = [];
+  let cur = "";
+  for (let k = 0; k < t.length; k++) {
+    if (t[k] === "\\" && t[k + 1] === "|") {
+      cur += "|";
+      k++;
+    } else if (t[k] === "|") {
+      cells.push(cur.trim());
+      cur = "";
+    } else cur += t[k];
+  }
+  cells.push(cur.trim());
+  return cells.slice(0, MAX_COLS);
+}
+
+/** The column alignments of a separator line ("|---|:--:|"), or null when it isn't one. */
+function tableSeparator(line: string, cols: number): ("left" | "center" | "right" | undefined)[] | null {
+  if (line.length > MAX_LINE) return null;
+  const cells = tableRow(line);
+  if (!cells || cells.length !== cols) return null;
+  const out: ("left" | "center" | "right" | undefined)[] = [];
+  for (const c of cells) {
+    if (!/^:?-+:?$/.test(c)) return null;
+    out.push(c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : undefined);
+  }
+  return out;
 }
 
 /** The text of an ATX heading line ("## Plan ##" gives "Plan"), or null for any other line. */
@@ -216,6 +267,31 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
           <p key={i} className="md-heading">
             <strong>{renderInline(b.text)}</strong>
           </p>
+        ) : b.kind === "table" ? (
+          <div key={i} className="md-table">
+            <table>
+              <thead>
+                <tr>
+                  {b.head.map((t, j) => (
+                    <th key={j} style={{ textAlign: b.align[j] }}>
+                      {renderInline(t)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {b.rows.map((r, j) => (
+                  <tr key={j}>
+                    {r.map((t, k) => (
+                      <td key={k} style={{ textAlign: b.align[k] }}>
+                        {renderInline(t)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : b.kind === "list" ? (
           b.ordered ? (
             <ol key={i} start={b.start === 1 ? undefined : b.start}>

@@ -71,3 +71,21 @@ describe("Markdown", () => {
     }
   });
 });
+
+describe("tables and replies from the field", () => {
+  it("renders a pipe table with a header and rows", () => {
+    const b = parseBlocks("Done.\n\n| Card | Name | Price |\n|---|---|--:|\n| 1 | Aero Runner 3 | $134 |\n| 2 | Cloud Court Low | $112 |\n\nAfter.");
+    expect(b.map((x) => x.kind)).toEqual(["p", "table", "p"]);
+    const t = b[1] as Extract<ReturnType<typeof parseBlocks>[number], { kind: "table" }>;
+    expect(t.head).toEqual(["Card", "Name", "Price"]);
+    expect(t.align).toEqual([undefined, undefined, "right"]);
+    expect(t.rows).toEqual([["1", "Aero Runner 3", "$134"], ["2", "Cloud Court Low", "$112"]]);
+  });
+  it("keeps a lone pipe line as text", () => {
+    expect(parseBlocks("a | b\nnot a separator").map((x) => x.kind)).toEqual(["p"]);
+  });
+  it("renders a list that follows a paragraph line directly", () => {
+    const b = parseBlocks("What I can do instead:\n- **Draw vector illustrations.** I can build\n- **Import images you supply.** If you give");
+    expect(b.map((x) => x.kind)).toEqual(["p", "list"]);
+  });
+});
