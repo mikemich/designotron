@@ -1,0 +1,22 @@
+[
+  {
+    "id": 1,
+    "name": "fitness-home",
+    "prompt": "Design a mobile home screen for a fitness app: greeting, today's progress ring, a row of 3 workout cards and a bottom tab bar."
+  },
+  {
+    "id": 2,
+    "name": "pricing",
+    "prompt": "Design a pricing section for a SaaS product with Free, Pro and Team plans and a monthly/yearly toggle."
+  },
+  {
+    "id": 3,
+    "name": "analytics",
+    "prompt": "Design a desktop analytics dashboard: sidebar navigation, 4 KPI cards, a revenue chart card and a recent orders table with 6 rows."
+  },
+  {
+    "id": 4,
+    "name": "signup-states",
+    "prompt": "Design a sign-up form for a mobile app with default, error and success states, in light and dark mode."
+  }
+]
