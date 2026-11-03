@@ -13,8 +13,7 @@ use crate::codegen;
 use crate::engine::{Command, Engine};
 use crate::geom::Point;
 use crate::model::{
-  Action, Align, AutoLayout, ColorStyle, Document, Effect, EffectType, GradientHandles, GradientStop, Interaction, LayoutDirection, Node,
-  NodeId, NodeType, OverlayBackground, OverlayPosition, OverlaySettings, Paint, RawPath, ScaleMode, Sizing, StrokeAlign, StrokeJoin,
+  Action, Align, AutoLayout, ColorStyle, Document, Effect, EffectStyle, EffectType, GradientHandles, GradientStop, GridStyle, Interaction, LayoutDirection, LayoutGrid, Node, NodeId, NodeType, OverlayBackground, OverlayPosition, OverlaySettings, Paint, RawPath, ScaleMode, Sizing, StrokeAlign, StrokeJoin,
   SubPath, TextAlignH, TextAlignV, TextAutoResize, TextCase, TextDecoration, TextStyle, Transition, Trigger, VectorData, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
@@ -133,7 +132,9 @@ fn spec_schema() -> Value {
       "textCase": { "type": "string", "enum": ["original", "upper", "lower", "title"] },
       "imageUrl": { "type": "string", "description": "Image fill: http(s) URL, data:image/ URL or asset:<id>" },
       "fillStyle": { "type": ["string", "null"], "description": "Colour style name or id (from define_styles): sets the fill (the text colour on text) and links the layer to it; null unlinks" },
-      "strokeStyle": { "type": ["string", "null"], "description": "Colour style name or id: copies its colour to the stroke (strokes have no style link)" },
+      "strokeStyle": { "type": ["string", "null"], "description": "Colour style name or id: sets the stroke colour and links the stroke to it; null unlinks" },
+      "effectStyle": { "type": ["string", "null"], "description": "Effect style name or id (from define_styles effects): sets the layer's effects and links it; null unlinks" },
+      "gridStyle": { "type": ["string", "null"], "description": "Grid style name or id (from define_styles grids): sets a frame's layout grids and links it; null unlinks" },
       "textStyle": { "type": ["string", "null"], "description": "Text style name or id (from define_styles): sets font, size, weight, line height and letter spacing and links the layer to it; null unlinks" },
       "svgPath": { "type": "string", "description": "SVG path data for an icon (type vector)" },
       "viewBox": { "type": "array", "description": "[minX, minY, width, height] for svgPath, default [0,0,24,24]" },
@@ -317,24 +318,27 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "define_variables",
-      "description": "Create or update a variable collection with modes and colour/number/string/boolean variables. For a theme or dark mode, use modes [\"Light\", \"Dark\"] and give each colour `values` {Light, Dark}. Bind layer properties with bind: {fill: 'Theme/Background', cornerRadius: 'Radius/md'} in create_nodes/update_nodes (bindable: fill, stroke, cornerRadius, gap, padding, opacity, width, height, strokeWeight, fontSize, characters, visible); switch a frame (and its children) to a mode with variableModes: {Theme: 'Dark'}, e.g. on a duplicate of a screen, instead of recolouring it. Bound variables become CSS variables in exported code.",
+      "description": "Create or update a variable collection with modes and colour/number/string/boolean variables. For a theme or dark mode, use modes [\"Light\", \"Dark\"] and give each colour `values` {Light, Dark}. Bind layer properties with bind: {fill: 'Theme/Background', cornerRadius: 'Radius/md'} in create_nodes/update_nodes (bindable: fill, stroke, cornerRadius, gap, counterGap, padding, paddingTop/Right/Bottom/Left, opacity, width, height, strokeWeight, fontSize, fontFamily, fontWeight, lineHeight, letterSpacing, paragraphSpacing, characters, visible); switch a frame (and its children) to a mode with variableModes: {Theme: 'Dark'}, e.g. on a duplicate of a screen, instead of recolouring it. Bound variables become CSS variables in exported code.",
       "input_schema": { "type": "object", "properties": {
         "collection": { "type": "string" },
         "modes": { "type": "array", "items": { "type": "string" }, "description": "Mode names; the first is the default. Default: [\"Default\"]" },
         "variables": { "type": "array", "items": { "type": "object", "properties": {
           "name": { "type": "string" },
           "type": { "type": "string", "enum": ["color", "number", "string", "boolean"] },
-          "value": { "description": "Same value in every mode" },
-          "values": { "type": "object", "description": "Mode name → value" }
+          "value": { "description": "Same value in every mode; {\"alias\": \"Collection/name\"} makes it an alias of another variable of the same type" },
+          "values": { "type": "object", "description": "Mode name → value (or an alias object)" },
+          "scopes": { "type": "array", "items": { "type": "string", "enum": ["fill", "stroke", "cornerRadius", "size", "gap", "opacity", "strokeWidth", "textContent", "fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "paragraphSpacing"] }, "description": "Limit where the variable is offered in the editor (default: everywhere its type fits). Binding it elsewhere only warns." }
         }, "required": ["name", "type"] } }
       }, "required": ["collection", "variables"] }
     },
     {
       "name": "define_styles",
-      "description": "Create shared colour and text styles (design tokens), e.g. a type scale like Heading/H1, Body/Regular. Link layers to them by name with textStyle / fillStyle (colour styles only) in create_nodes/update_nodes, or in bulk with fix_issues (kinds: [\"unlinkedStyle\"]). Variables are bound with bind, not styles.",
+      "description": "Create shared colour, text, effect and grid styles (design tokens), e.g. a type scale like Heading/H1, Body/Regular, or Shadow/Card. Link layers to them by name with textStyle / fillStyle / strokeStyle (colour styles only), effectStyle and gridStyle in create_nodes/update_nodes, or in bulk with fix_issues (kinds: [\"unlinkedStyle\"]). A name with slashes shows as a folder in the Assets panel. Variables are bound with bind, not styles.",
       "input_schema": { "type": "object", "properties": {
         "colors": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "color": { "type": "string", "description": "Hex colour; anything unreadable is an error" } }, "required": ["name", "color"] } },
-        "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": "number" } }, "required": ["name", "fontSize"] } }
+        "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": "number" } }, "required": ["name", "fontSize"] } },
+        "effects": { "type": "array", "description": "Effect styles: {name, description, shadow: {x, y, blur, spread, color, inset} or an array of them, blur (layer blur px), backgroundBlur (px)}", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "shadow": { "type": ["object", "array", "string"] }, "blur": { "type": "number" }, "backgroundBlur": { "type": "number" } }, "required": ["name"] } },
+        "grids": { "type": "array", "description": "Grid styles: {name, description, grids: [{pattern:'columns'|'rows'|'grid', count, gutter, margin, size}]}", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "grids": { "type": "array", "items": { "type": "object" } } }, "required": ["name", "grids"] } }
       } }
     },
     {
@@ -431,7 +435,25 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
     };
     let var = &mut coll.variables[pos];
     var.kind = kind;
+    if let Some(sc) = spec.get("scopes").filter(|v| !v.is_null()) {
+      let list: Vec<String> = sc
+        .as_array()
+        .ok_or_else(|| format!("{vname}: scopes must be an array of names"))?
+        .iter()
+        .filter_map(|x| x.as_str().map(String::from))
+        .collect();
+      if let Some(bad) = list.iter().find(|x| !crate::variables::SCOPES.contains(&x.as_str())) {
+        return Err(format!(
+          "{vname}: unknown scope '{bad}'. Scopes: {}",
+          crate::variables::SCOPES.join(", ")
+        ));
+      }
+      var.scopes = list;
+    }
     let norm = |v: &Value| -> Value {
+      if v.get("alias").is_some() {
+        return v.clone();
+      }
       match (kind, v.as_str()) {
         (VarKind::Color, Some(c)) => json!(crate::color::normalize(c)),
         _ => v.clone(),
@@ -452,8 +474,75 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
       }
     }
   }
+  // Aliases are written by name ("Collection/name"); store the variable id.
+  let lookup = all.clone();
+  for v in all.iter_mut().flat_map(|c| c.variables.iter_mut()) {
+    for val in v.values.values_mut() {
+      let Some(target) = val.get("alias").and_then(|a| a.as_str()).map(String::from) else {
+        continue;
+      };
+      let found = lookup.iter().flat_map(|c| c.variables.iter().map(move |x| (c, x))).find(|(c, x)| {
+        x.id == target || format!("{}/{}", c.name, x.name) == target || (x.name == target && !c.variables.iter().any(|y| y.id == target))
+      });
+      match found {
+        Some((_, x)) if x.kind == v.kind => *val = json!({ "alias": x.id }),
+        Some((_, x)) => {
+          return Err(format!("{}: alias '{target}' is a {:?} variable, expected {:?}", v.name, x.kind, v.kind).to_lowercase())
+        }
+        None => return Err(format!("{}: no variable '{target}' to alias", v.name)),
+      }
+    }
+  }
   e.dispatch_inner(Command::SetVariables { collections: all })?;
   Ok(crate::variables::summary(&e.doc))
+}
+
+/// `shadow` input (an object, an array of them, a CSS box-shadow string, null or "none") to effects.
+fn parse_shadows(cx: &mut Ctx, sh: &Value) -> Result<Vec<Effect>, String> {
+  let list: Vec<Value> = match sh {
+    Value::Array(a) => a.clone(),
+    Value::Null => vec![],
+    Value::Object(_) => vec![sh.clone()],
+    Value::String(css) if css.trim().eq_ignore_ascii_case("none") => vec![],
+    Value::String(css) => parse::css_shadow(cx, "shadow", css)?,
+    other => {
+      return Err(cx.err(
+        "shadow",
+        format!(
+          "must be {{x, y, blur, spread, color}} or an array of them, got {}",
+          parse::kind_of(other)
+        ),
+      ))
+    }
+  };
+  let mut effects = Vec::new();
+  for (i, item) in list.iter().enumerate() {
+    let mark = cx.enter(&format!("shadow[{i}]"));
+    if !item.is_object() {
+      return Err(cx.err(
+        "",
+        format!("must be an object {{x, y, blur, spread, color}}, got {}", parse::kind_of(item)),
+      ));
+    }
+    effects.push(Effect {
+      kind: if item.get("inset").and_then(|v| v.as_bool()).unwrap_or(false) {
+        EffectType::InnerShadow
+      } else {
+        EffectType::DropShadow
+      },
+      color: match item.get("color") {
+        Some(c) if !c.is_null() => parse::color(cx, "color", c)?,
+        _ => crate::color::normalize("#00000026"),
+      },
+      x: parse::opt_number(cx, item, "x")?.unwrap_or(0.0),
+      y: parse::opt_number(cx, item, "y")?.unwrap_or(4.0),
+      blur: parse::opt_number(cx, item, "blur")?.unwrap_or(12.0),
+      spread: parse::opt_number(cx, item, "spread")?.unwrap_or(0.0),
+      visible: true,
+    });
+    cx.leave(mark);
+  }
+  Ok(effects)
 }
 
 /// Executes a tool against the engine. Browser-only tools return an error here.
@@ -785,10 +874,21 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
         ids: vec![id.to_string()],
         patch: diff,
       })?;
-      // Changing the fill detaches a style, so a style named in the same update is linked again.
-      if spec.get("fillStyle").is_some_and(|v| v.is_string()) {
-        if let Some(n) = e.doc.get_mut(id) {
+      // Changing the fill, stroke, effects or grids detaches a style, so a style named in the same
+      // update is linked again.
+      if let Some(n) = e.doc.get_mut(id) {
+        let named = |k: &str| spec.get(k).is_some_and(|v| v.is_string());
+        if named("fillStyle") {
           n.fill_style = after.fill_style.clone();
+        }
+        if named("strokeStyle") {
+          n.stroke_style = after.stroke_style.clone();
+        }
+        if named("effectStyle") {
+          n.effect_style = after.effect_style.clone();
+        }
+        if named("gridStyle") {
+          n.grid_style = after.grid_style.clone();
         }
       }
     }
@@ -1188,6 +1288,99 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
     }
     cx.leave(mark);
   }
+  for (i, f) in input
+    .get("effects")
+    .and_then(|v| v.as_array())
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .enumerate()
+  {
+    let mark = cx.enter(&format!("effects[{i}]"));
+    let name = style_name(&cx, f)?;
+    let mut effects = Vec::new();
+    if let Some(sh) = f.get("shadow").filter(|v| !v.is_null()) {
+      effects.extend(parse_shadows(&mut cx, sh)?);
+    }
+    if let Some(b) = parse::opt_number(&cx, f, "blur")?.filter(|b| *b > 0.0) {
+      effects.push(Effect {
+        kind: EffectType::LayerBlur,
+        blur: b,
+        ..Default::default()
+      });
+    }
+    if let Some(b) = parse::opt_number(&cx, f, "backgroundBlur")?.filter(|b| *b > 0.0) {
+      effects.push(Effect {
+        kind: EffectType::BackgroundBlur,
+        blur: b,
+        ..Default::default()
+      });
+    }
+    let description = f.get("description").and_then(|v| v.as_str()).map(String::from);
+    match e.doc.styles.effects.iter().find(|s| s.name == name).map(|s| s.id.clone()) {
+      Some(id) => {
+        e.dispatch_inner(Command::UpdateEffectStyle {
+          id: id.clone(),
+          name: None,
+          effects: (!effects.is_empty()).then_some(effects),
+          description,
+        })?;
+        updated.push(json!(id));
+      }
+      None => {
+        if effects.is_empty() {
+          return Err(cx.err("", "give a shadow, blur or backgroundBlur"));
+        }
+        let id = e.gen.next("s_");
+        e.doc.styles.effects.push(EffectStyle {
+          id: id.clone(),
+          name,
+          effects,
+          description: description.unwrap_or_default(),
+        });
+        created.push(json!(id));
+      }
+    }
+    cx.leave(mark);
+  }
+  for (i, g) in input
+    .get("grids")
+    .and_then(|v| v.as_array())
+    .cloned()
+    .unwrap_or_default()
+    .iter()
+    .enumerate()
+  {
+    let mark = cx.enter(&format!("grids[{i}]"));
+    let name = style_name(&cx, g)?;
+    let grids: Vec<LayoutGrid> = match g.get("grids") {
+      Some(v) => serde_json::from_value(v.clone()).map_err(|er| cx.err("grids", er))?,
+      None => return Err(cx.err("grids", "required")),
+    };
+    let description = g.get("description").and_then(|v| v.as_str()).map(String::from);
+    match e.doc.styles.grids.iter().find(|s| s.name == name).map(|s| s.id.clone()) {
+      Some(id) => {
+        e.dispatch_inner(Command::UpdateGridStyle {
+          id: id.clone(),
+          name: None,
+          grids: Some(grids),
+          description,
+        })?;
+        updated.push(json!(id));
+      }
+      None => {
+        let id = e.gen.next("s_");
+        e.doc.styles.grids.push(GridStyle {
+          id: id.clone(),
+          name,
+          grids,
+          description: description.unwrap_or_default(),
+        });
+        created.push(json!(id));
+      }
+    }
+    cx.leave(mark);
+  }
   let mut r = json!({ "created": created });
   if !updated.is_empty() {
     r["updated"] = json!(updated);
@@ -1325,7 +1518,7 @@ fn find_nodes(e: &Engine, input: &Value) -> Result<Value, String> {
     }
     if let Some(ids) = &style_ids {
       let linked = |s: &Option<String>| s.as_deref().is_some_and(|s| ids.contains(&s));
-      if !(linked(&n.fill_style) || linked(&n.text_style)) {
+      if !(linked(&n.fill_style) || linked(&n.text_style) || linked(&n.stroke_style) || linked(&n.effect_style) || linked(&n.grid_style)) {
         continue;
       }
     }
@@ -1430,6 +1623,8 @@ pub fn summary(e: &Engine, depth: usize) -> Value {
     "components": e.doc.components().iter().map(|c| component_summary(e, c)).collect::<Vec<_>>(),
     "colorStyles": e.doc.styles.colors,
     "textStyles": e.doc.styles.texts.iter().map(|t| json!({ "id": t.id, "name": t.name, "font": text_style_label(t) })).collect::<Vec<_>>(),
+    "effectStyles": e.doc.styles.effects.iter().map(|s| json!({ "id": s.id, "name": s.name, "effects": s.effects.len() })).collect::<Vec<_>>(),
+    "gridStyles": e.doc.styles.grids.iter().map(|s| json!({ "id": s.id, "name": s.name, "grids": s.grids.len() })).collect::<Vec<_>>(),
     "variables": crate::variables::summary(&e.doc),
     "openComments": e.doc.comments.values().filter(|c| !c.resolved).count(),
     "nextFreeX": roots.iter().map(|r| e.doc.abs_bounds(r).right()).fold(0.0, f64::max) + if roots.is_empty() { 0.0 } else { 100.0 },
@@ -2012,10 +2207,12 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
     stroked = true;
   }
   match s.get("strokeStyle") {
-    None | Some(Value::Null) => {}
+    None => {}
+    Some(Value::Null) => n.stroke_style = None,
     Some(Value::String(name)) => {
       let st = find_color_style(cx, doc, "strokeStyle", name)?;
       n.strokes = vec![Paint::solid(&st.color)];
+      n.stroke_style = Some(st.id.clone());
       stroked = true;
     }
     Some(other) => return Err(cx.err("strokeStyle", format!("must be a colour style name, got {}", parse::kind_of(other)))),
@@ -2083,49 +2280,7 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
     }
   }
   if let Some(sh) = s.get("shadow") {
-    let list: Vec<Value> = match sh {
-      Value::Array(a) => a.clone(),
-      Value::Null => vec![],
-      Value::Object(_) => vec![sh.clone()],
-      Value::String(css) if css.trim().eq_ignore_ascii_case("none") => vec![],
-      Value::String(css) => parse::css_shadow(cx, "shadow", css)?,
-      other => {
-        return Err(cx.err(
-          "shadow",
-          format!(
-            "must be {{x, y, blur, spread, color}} or an array of them, got {}",
-            parse::kind_of(other)
-          ),
-        ))
-      }
-    };
-    let mut effects = Vec::new();
-    for (i, item) in list.iter().enumerate() {
-      let mark = cx.enter(&format!("shadow[{i}]"));
-      if !item.is_object() {
-        return Err(cx.err(
-          "",
-          format!("must be an object {{x, y, blur, spread, color}}, got {}", parse::kind_of(item)),
-        ));
-      }
-      effects.push(Effect {
-        kind: if item.get("inset").and_then(|v| v.as_bool()).unwrap_or(false) {
-          EffectType::InnerShadow
-        } else {
-          EffectType::DropShadow
-        },
-        color: match item.get("color") {
-          Some(c) if !c.is_null() => parse::color(cx, "color", c)?,
-          _ => crate::color::normalize("#00000026"),
-        },
-        x: parse::opt_number(cx, item, "x")?.unwrap_or(0.0),
-        y: parse::opt_number(cx, item, "y")?.unwrap_or(4.0),
-        blur: parse::opt_number(cx, item, "blur")?.unwrap_or(12.0),
-        spread: parse::opt_number(cx, item, "spread")?.unwrap_or(0.0),
-        visible: true,
-      });
-      cx.leave(mark);
-    }
+    let effects = parse_shadows(cx, sh)?;
     n.effects
       .retain(|e| !matches!(e.kind, EffectType::DropShadow | EffectType::InnerShadow));
     n.effects.extend(effects);
@@ -2148,6 +2303,37 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
         blur: b,
         ..Default::default()
       });
+    }
+  }
+  // Effect and grid styles come after the explicit effects, so the named style wins.
+  match s.get("effectStyle") {
+    None => {}
+    Some(Value::Null) => n.effect_style = None,
+    Some(Value::String(name)) => {
+      let st = find_effect_style(cx, doc, "effectStyle", name)?;
+      n.effects = st.effects.clone();
+      n.effect_style = Some(st.id.clone());
+    }
+    Some(other) => {
+      return Err(cx.err(
+        "effectStyle",
+        format!("must be an effect style name or null, got {}", parse::kind_of(other)),
+      ))
+    }
+  }
+  match s.get("gridStyle") {
+    None => {}
+    Some(Value::Null) => n.grid_style = None,
+    Some(Value::String(name)) => {
+      let st = find_grid_style(cx, doc, "gridStyle", name)?;
+      n.layout_grids = st.grids.clone();
+      n.grid_style = Some(st.id.clone());
+    }
+    Some(other) => {
+      return Err(cx.err(
+        "gridStyle",
+        format!("must be a grid style name or null, got {}", parse::kind_of(other)),
+      ))
     }
   }
   apply_layout(cx, n, s, dim_w.is_some(), dim_h.is_some(), creating)?;
@@ -2485,14 +2671,22 @@ fn parse_decoration(cx: &Ctx, key: &str, v: &Value) -> Result<TextDecoration, St
 }
 
 /// A binding must name an existing variable of the kind the property takes.
-fn check_binding(cx: &Ctx, doc: &Document, prop: &str, name: &str) -> Result<(), String> {
+fn check_binding(cx: &mut Ctx, doc: &Document, prop: &str, name: &str) -> Result<(), String> {
   let key = format!("bind.{prop}");
   let kind = crate::variables::property_kind(prop).ok_or_else(|| {
     let props: Vec<&str> = crate::variables::PROPERTIES.iter().map(|(p, _)| *p).collect();
     cx.err(&key, format!("{prop} can't be bound to a variable; bindable: {}", props.join(", ")))
   })?;
   match crate::variables::find(doc, name) {
-    Some((_, v)) if v.kind == kind => Ok(()),
+    Some((_, v)) if v.kind == kind => {
+      if !crate::variables::in_scope(v, prop) {
+        cx.warn(format!(
+          "variable '{name}' is scoped to {} and isn't offered for {prop} in the editor; bound anyway",
+          v.scopes.join(", ")
+        ));
+      }
+      Ok(())
+    }
     Some((_, v)) => Err(cx.err(
       &key,
       format!(
@@ -2563,6 +2757,44 @@ fn find_color_style<'a>(cx: &Ctx, doc: &'a Document, key: &str, name: &str) -> R
         key,
         format!(
           "no colour style '{name}'. Colour styles: {} (define_styles creates them)",
+          parse::listed(&parse::closest(name, &names, 8), "none")
+        ),
+      )
+    })
+}
+
+fn find_effect_style<'a>(cx: &Ctx, doc: &'a Document, key: &str, name: &str) -> Result<&'a EffectStyle, String> {
+  let all = &doc.styles.effects;
+  all
+    .iter()
+    .find(|s| s.id == name)
+    .or_else(|| all.iter().find(|s| s.name == name))
+    .or_else(|| all.iter().find(|s| s.name.eq_ignore_ascii_case(name)))
+    .ok_or_else(|| {
+      let names: Vec<String> = all.iter().map(|s| s.name.clone()).collect();
+      cx.err(
+        key,
+        format!(
+          "no effect style '{name}'. Effect styles: {} (define_styles creates them)",
+          parse::listed(&parse::closest(name, &names, 8), "none")
+        ),
+      )
+    })
+}
+
+fn find_grid_style<'a>(cx: &Ctx, doc: &'a Document, key: &str, name: &str) -> Result<&'a GridStyle, String> {
+  let all = &doc.styles.grids;
+  all
+    .iter()
+    .find(|s| s.id == name)
+    .or_else(|| all.iter().find(|s| s.name == name))
+    .or_else(|| all.iter().find(|s| s.name.eq_ignore_ascii_case(name)))
+    .ok_or_else(|| {
+      let names: Vec<String> = all.iter().map(|s| s.name.clone()).collect();
+      cx.err(
+        key,
+        format!(
+          "no grid style '{name}'. Grid styles: {} (define_styles creates them)",
           parse::listed(&parse::closest(name, &names, 8), "none")
         ),
       )
@@ -2879,9 +3111,15 @@ pub fn diff_patch(before: &Node, after: &Node) -> Value {
   let a = serde_json::to_value(after).unwrap_or(Value::Null);
   let mut out = Map::new();
   if let (Value::Object(bm), Value::Object(am)) = (b, a) {
-    for (k, v) in am {
-      if bm.get(&k) != Some(&v) {
-        out.insert(k, v);
+    for (k, v) in &am {
+      if bm.get(k) != Some(v) {
+        out.insert(k.clone(), v.clone());
+      }
+    }
+    // Links that are left out of saved nodes when unset: a removed one is an explicit null.
+    for k in ["effectStyle", "gridStyle", "strokeStyle"] {
+      if bm.contains_key(k) && !am.contains_key(k) {
+        out.insert(k.into(), Value::Null);
       }
     }
   }

@@ -584,6 +584,7 @@ mod tokens {
     assert_eq!(card.fill_style.as_deref(), Some(brand.as_str()));
     assert!(matches!(&card.fills[0], crate::model::Paint::Solid { color, .. } if color == "#7C5CFF"));
     assert!(matches!(&card.strokes[0], crate::model::Paint::Solid { color, .. } if color == "#111827"));
+    assert_eq!(card.stroke_style.as_deref(), Some(e.doc.styles.colors[1].id.as_str()));
     let title = e.doc.get(r["names"]["Title"].as_str().unwrap()).unwrap().clone();
     let tp = title.text.clone().unwrap();
     assert_eq!((tp.font_size, tp.font_weight), (28.0, 700));
@@ -624,6 +625,113 @@ mod tokens {
       ))
       .unwrap_err();
     assert!(err.contains("Brand") && err.contains("Ink"), "{err}");
+  }
+
+  #[test]
+  fn effect_grid_and_stroke_styles_through_the_tools() {
+    let mut e = engine();
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Ink", "color": "#111827" }],
+        "effects": [{ "name": "Shadow/Card", "shadow": { "y": 8, "blur": 24, "color": "#00000040" }, "description": "Cards" },
+                    { "name": "Glass", "backgroundBlur": 12 }],
+        "grids": [{ "name": "Grid/12", "grids": [{ "pattern": "columns", "count": 12, "gutter": 24 }] }] }),
+    );
+    assert_eq!(e.doc.styles.effects.len(), 2);
+    assert_eq!(e.doc.styles.effects[0].description, "Cards");
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Card", "width": 200, "height": 100, "effectStyle": "Shadow/Card",
+        "gridStyle": "grid/12", "strokeStyle": "Ink" }] }),
+    );
+    let id = r["created"][0]["id"].as_str().unwrap().to_string();
+    let n = e.doc.get(&id).unwrap().clone();
+    assert_eq!(n.effect_style.as_deref(), Some(e.doc.styles.effects[0].id.as_str()));
+    assert_eq!(n.effects, e.doc.styles.effects[0].effects);
+    assert_eq!(n.layout_grids.len(), 1);
+    assert_eq!(n.grid_style.as_deref(), Some(e.doc.styles.grids[0].id.as_str()));
+    assert_eq!(
+      n.stroke_style.as_deref(),
+      Some(e.doc.styles.colors[0].id.as_str()),
+      "strokeStyle links now"
+    );
+    // Redefining a style updates its layers.
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "effects": [{ "name": "Shadow/Card", "shadow": { "y": 2, "blur": 4 } }] }),
+    );
+    assert_eq!(e.doc.get(&id).unwrap().effects[0].blur, 4.0);
+    // Update: switch style, then unlink with null (values stay).
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": id, "effectStyle": "Glass" }] }));
+    let n = e.doc.get(&id).unwrap();
+    assert_eq!(
+      n.effect_style.as_deref(),
+      Some(e.doc.styles.effects[1].id.as_str()),
+      "the new style stays linked"
+    );
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "effectStyle": null, "strokeStyle": null }] }),
+    );
+    let n = e.doc.get(&id).unwrap();
+    assert!(n.effect_style.is_none() && n.stroke_style.is_none() && !n.effects.is_empty());
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "frame", "effectStyle": "Shadw/Card" }] }),
+      ))
+      .unwrap_err();
+    assert!(err.starts_with("nodes[0].effectStyle:") && err.contains("Shadow/Card"), "{err}");
+    let d = run(&mut e, "get_document", json!({}));
+    assert_eq!(d["effectStyles"][0]["name"], "Shadow/Card");
+    assert_eq!(d["gridStyles"][0]["name"], "Grid/12");
+  }
+
+  #[test]
+  fn variable_aliases_and_scopes_through_the_tools() {
+    let mut e = engine();
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Tokens", "variables": [
+        { "name": "Space/base", "type": "number", "value": 8, "scopes": ["gap"] },
+        { "name": "Space/card", "type": "number", "value": { "alias": "Tokens/Space/base" } },
+        { "name": "Radius/md", "type": "number", "value": 12 } ] }),
+    );
+    let c = &e.doc.variables[0];
+    assert_eq!(c.variables[0].scopes, ["gap"]);
+    assert_eq!(
+      c.variables[1].values.values().next().unwrap(),
+      &json!({ "alias": c.variables[0].id }),
+      "stored by id"
+    );
+    let err = e
+      .dispatch(ai(
+        "define_variables",
+        json!({ "collection": "Tokens", "variables": [{ "name": "Space/base", "type": "number", "value": { "alias": "Space/card" } }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("alias cycle"), "{err}");
+    let err = e
+      .dispatch(ai(
+        "define_variables",
+        json!({ "collection": "Tokens", "variables": [{ "name": "x", "type": "number", "scopes": ["nope"] }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("unknown scope"), "{err}");
+    // Binding outside the scope still works and only warns.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": 100, "height": 100, "bind": { "cornerRadius": "Space/base", "paddingLeft": "Space/card" } }] }),
+    );
+    assert!(r["warnings"].to_string().contains("scoped to gap"), "{r}");
+    let n = e.doc.get(r["created"][0]["id"].as_str().unwrap()).unwrap();
+    assert_eq!(n.corner_radius, 8.0);
   }
 
   #[test]
