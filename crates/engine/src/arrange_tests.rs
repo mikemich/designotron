@@ -120,6 +120,32 @@ mod pages {
   }
 
   #[test]
+  fn move_to_page_and_duplicate_page_reach_a_peer() {
+    let mut a = engine();
+    create(
+      &mut a,
+      json!([{ "type": "frame", "name": "F", "x": 40, "y": 50, "width": 100, "height": 100,
+        "children": [{ "type": "rectangle", "name": "R", "x": 5, "y": 5, "width": 20, "height": 20 }] }]),
+    );
+    a.dispatch(Command::AddPage { name: None }).unwrap();
+    let (p2, p1) = (a.page.clone(), a.doc.pages[0].id.clone());
+    let f = named(&a, "F");
+    let base = a.doc.clone();
+    a.dispatch(Command::MoveToPage {
+      ids: vec![f],
+      page: p2.clone(),
+    })
+    .unwrap();
+    a.dispatch(Command::DuplicatePage { id: p2.clone() }).unwrap();
+    let d = crate::collab::delta(&base, &a.doc, true, true);
+    let mut peer = base.clone();
+    crate::collab::apply(&mut peer, &d).unwrap();
+    assert_eq!(peer.pages, a.doc.pages);
+    assert_eq!(peer.nodes, a.doc.nodes);
+    assert!(peer.page(&p1).unwrap().children.is_empty());
+  }
+
+  #[test]
   fn duplicate_page_copies_layers_and_remaps_links() {
     let mut e = engine();
     create(
@@ -219,9 +245,9 @@ mod pages {
     })
     .unwrap();
     assert_eq!(e.page, p2);
-    assert_eq!(e.selection, [f.clone()]);
+    assert_eq!(e.selection, std::slice::from_ref(&f));
     assert_eq!(e.doc.get(&r).unwrap().page, p2);
-    assert_eq!(e.doc.page(&p2).unwrap().children, [f.clone()]);
+    assert_eq!(e.doc.page(&p2).unwrap().children, std::slice::from_ref(&f));
     assert!(e.doc.page(&p1).unwrap().children.is_empty());
     assert!(e.doc.comments.values().all(|c| c.page == p2));
     let n = e.doc.get(&f).unwrap();
