@@ -628,14 +628,19 @@ function useCanvasFocusRing() {
       else el.removeAttribute("data-kbd-focus");
     };
     const clear = () => canvas()?.removeAttribute("data-kbd-focus");
+    // A click focuses the canvas too: that focus didn't come from Tab, whatever key came before.
+    const pointer = () => {
+      viaTab = false;
+      clear();
+    };
     document.addEventListener("keydown", key, true);
     document.addEventListener("focusin", focusin, true);
-    document.addEventListener("pointerdown", clear, true);
+    document.addEventListener("pointerdown", pointer, true);
     document.addEventListener("focusout", clear, true);
     return () => {
       document.removeEventListener("keydown", key, true);
       document.removeEventListener("focusin", focusin, true);
-      document.removeEventListener("pointerdown", clear, true);
+      document.removeEventListener("pointerdown", pointer, true);
       document.removeEventListener("focusout", clear, true);
     };
   }, []);

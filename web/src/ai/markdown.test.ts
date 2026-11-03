@@ -63,7 +63,7 @@ describe("Markdown", () => {
   });
 
   it("is fast on hostile input", () => {
-    const inputs = ["**a ".repeat(5000), "*a" + " b".repeat(20000), "*".repeat(50000), "[".repeat(50000), "[a](" + "(".repeat(50000), "[x](y".repeat(10000), "#" + " ".repeat(50000) + "x", " ".repeat(50000) + "x", "```" + " ".repeat(50000) + "a b", "`a".repeat(2500), "**x" + "y".repeat(5000)];
+    const inputs = ["**a ".repeat(5000), "*a" + " b".repeat(20000), "*".repeat(50000), "[".repeat(50000), "[a](" + "(".repeat(50000), "[x](y".repeat(10000), "[x](y".repeat(1999), "#" + " ".repeat(50000) + "x", " ".repeat(50000) + "x", "```" + " ".repeat(50000) + "a b", "`a".repeat(2500), "**x" + "y".repeat(5000)];
     for (const input of inputs) {
       const start = performance.now();
       html(input);

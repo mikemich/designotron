@@ -63,12 +63,6 @@ function stepPage(dir: 1 | -1) {
 export function installShortcuts(): () => void {
   const onKey = (e: KeyboardEvent) => {
     if (isTyping(e) || useStore.getState().presenting) return;
-    // Enter and Space on a button, link, tab or menu item reached by keyboard activate that
-    // control (without this a selection made Enter select its children instead of opening the
-    // menu). A button that was clicked doesn't keep Enter: it acts on the design, as on the canvas.
-    const target = e.target as HTMLElement | null;
-    const designEnter = e.key === "Enter" && focusedByPointer(target);
-    if ((e.key === "Enter" || e.key === " ") && !designEnter && target?.closest?.("button, a[href], [role=menuitem], [role=tab]")) return;
     const mod = e.metaKey || e.ctrlKey;
     if (!mod && inOverlay(e)) return;
     const k = e.key.toLowerCase();
@@ -172,7 +166,9 @@ export function installShortcuts(): () => void {
         // Sibling selection on the canvas; with nothing selected Tab moves on (no keyboard trap).
         return has && onCanvas(e) && !e.altKey && !st.editingVector && run(() => selectSibling(e.shiftKey ? -1 : 1));
       case "Enter":
-        if (!onCanvasOrBody(e)) return;
+        // A control reached by keyboard keeps Enter; one that was clicked doesn't, so Enter acts on
+        // the design as it does on the canvas.
+        if (!onCanvasOrBody(e) && !focusedByPointer(e.target as Element)) return;
         if (onCanvas(e) && !e.shiftKey && !e.altKey && A.canInsertWithKeyboard()) return run(() => A.insertDefaultLayer(false));
         return has && run(e.shiftKey ? A.selectParent : A.selectChildren);
     }

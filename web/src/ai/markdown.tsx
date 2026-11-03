@@ -188,15 +188,16 @@ const isSpace = (ch: string | undefined) => ch === undefined || ch === " " || ch
 
 /** A `[text](url)` link starting at `i`: its text, url and where it ends. */
 function linkAt(s: string, i: number): { text: string; url: string; end: number } | null {
+  // Both scans are bounded so a reply full of "[" or "[x](y" stays linear.
   const close = s.indexOf("]", i + 1);
   if (close < 0 || close - i - 1 < 1 || close - i - 1 > MAX_LINK_TEXT || s[close + 1] !== "(") return null;
   let depth = 1;
   let j = close + 2;
-  for (; j < s.length && depth > 0 && j - close < 2000; j++) {
-    const ch = s[j];
-    if (/\s/.test(ch)) return null;
-    if (ch === "(") depth++;
-    else if (ch === ")") depth--;
+  for (; j < s.length && depth > 0 && j - close < 500; j++) {
+    const c = s.charCodeAt(j);
+    if (c <= 32 || c === 0xa0 || c === 0x2028 || c === 0x2029) return null;
+    if (c === 40) depth++;
+    else if (c === 41) depth--;
   }
   if (depth !== 0 || j - close - 3 < 1) return null;
   return { text: s.slice(i + 1, close), url: s.slice(close + 2, j - 1), end: j };
