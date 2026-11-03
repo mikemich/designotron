@@ -336,6 +336,8 @@ const SAFE_LINK = /^(https?:\/\/|mailto:|tel:)/i;
 interface InlineCtx {
   link?: string;
   decoration: RunStyle["decoration"];
+  /** px per character that the chips around this text add with their horizontal padding and border. */
+  extra: number;
 }
 
 /** One text box for a block whose content is only text, `<br>` and inline elements without their
@@ -346,7 +348,7 @@ function inlineText(el: HTMLElement, cs: CSSStyleDeclaration, win: Window, auto:
   if (!TEXT_CONTAINERS.includes(cs.display) || cs.whiteSpace.startsWith("pre") || cs.whiteSpace === "break-spaces") return null;
   if (NOT_INLINE_TEXT.includes(el.tagName.toLowerCase())) return null;
   const scan = { pieces: [] as InlinePiece[], structure: false };
-  if (!gatherInline(el, cs, { link: linkOf(el), decoration: decorationOf(cs, undefined) }, win, scan)) return null;
+  if (!gatherInline(el, cs, { link: linkOf(el), decoration: decorationOf(cs, undefined), extra: 0 }, win, scan)) return null;
   const merged = mergeInlineRuns(scan.pieces);
   if (!merged) return null;
   // A lone text node keeps the plain path unless it carries a link or a decoration.
@@ -387,7 +389,7 @@ function inlineText(el: HTMLElement, cs: CSSStyleDeclaration, win: Window, auto:
   if (!Number.isFinite(lh) || lh < 0.8 * fontSize) lh = (box ? box.h : (bottomAll - topAll)) / lines;
   const lineHeight = box && Math.abs(box.h - lines * lh) > 0.5 ? Math.floor((box.h / lines) * 1000) / 1000 : lh;
   const style = (r: RunStyle): Spec => {
-    const out: Spec = { fontWeight: r.fontWeight, italic: r.italic, color: r.color, fontSize: r.fontSize, fontFamily: r.fontFamily };
+    const out: Spec = { fontWeight: r.fontWeight, italic: r.italic, color: r.color, fontSize: r.fontSize, fontFamily: r.fontFamily, letterSpacing: r.letterSpacing ?? 0 };
     // A link the page doesn't underline says so (code export underlines links that don't).
     if (r.decoration || r.link) out.decoration = r.decoration ?? "none";
     if (r.link) out.link = r.link;
@@ -410,7 +412,7 @@ function inlineText(el: HTMLElement, cs: CSSStyleDeclaration, win: Window, auto:
   const rtl = cs.direction === "rtl";
   const align = cs.textAlign === "start" ? (rtl ? "right" : "left") : cs.textAlign === "end" ? (rtl ? "left" : "right") : cs.textAlign;
   spec.textAlign = ["center", "right", "justify"].includes(align) ? align : "left";
-  if (cs.letterSpacing !== "normal") spec.letterSpacing = parseFloat(cs.letterSpacing) || 0;
+  if (!one && cs.letterSpacing !== "normal") spec.letterSpacing = parseFloat(cs.letterSpacing) || 0;
   const w = lines > 1 ? Math.ceil(right - left) + 1 : right - left;
   const rect = !auto
     ? { x: left, y: topAll, w, h: bottomAll - topAll }
@@ -441,22 +443,38 @@ function gatherInline(parent: HTMLElement, pcs: CSSStyleDeclaration, ctx: Inline
     if (NOT_INLINE_TEXT.includes(tag) || cs.display !== "inline" || cs.position !== "static" || cs.float !== "none") return false;
     if (cs.visibility === "hidden" || parseFloat(cs.opacity) < 1 || cs.verticalAlign !== "baseline" || cs.whiteSpace.startsWith("pre")) return false;
     if (hasBoxVisuals(cs)) return false;
+    // A chip is wider than its text by its horizontal padding and border. A run can't carry those, so
+    // the width is spread over its characters as letter spacing: lines then break where the browser's do.
+    let extra = ctx.extra;
+    const sides = chipWidth(cs);
+    if (sides > 0) {
+      const chars = Array.from((e.textContent ?? "").replace(/\s+/g, " ").trim()).length;
+      if (!chars) return false;
+      extra += sides / chars;
+    }
     scan.structure = true;
-    if (!gatherInline(e, cs, { link: linkOf(e) ?? ctx.link, decoration: decorationOf(cs, ctx.decoration) }, win, scan)) return false;
+    if (!gatherInline(e, cs, { link: linkOf(e) ?? ctx.link, decoration: decorationOf(cs, ctx.decoration), extra }, win, scan)) return false;
   }
   return true;
 }
 
-/** An inline element with only a background, border, padding or radius (a code chip) joins the
- *  text as a run and loses that styling. Shadows and side margins can't be carried by a run, so
- *  those elements stay boxes of their own. */
+/** An inline element with only a background colour, border, padding or radius (a code chip) joins
+ *  the text as a run and loses that styling. Shadows, margins and background images (an inline icon)
+ *  can't be carried by a run, so those elements stay boxes of their own. */
 function hasBoxVisuals(cs: CSSStyleDeclaration): boolean {
   if (parseFloat(cs.marginLeft) || parseFloat(cs.marginRight) || parseFloat(cs.marginTop) || parseFloat(cs.marginBottom)) return true;
-  return cs.boxShadow !== "none";
+  return cs.boxShadow !== "none" || cs.backgroundImage !== "none";
+}
+
+/** Left and right padding plus border of an inline element: the width it adds to its text. */
+function chipWidth(cs: CSSStyleDeclaration): number {
+  const border = (side: "Left" | "Right") => (cs[`border${side}Style`] !== "none" ? parseFloat(cs[`border${side}Width`]) || 0 : 0);
+  return (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0) + border("Left") + border("Right");
 }
 
 function runStyle(cs: CSSStyleDeclaration, ctx: InlineCtx): RunStyle {
   return {
+    letterSpacing: Math.round(((parseFloat(cs.letterSpacing) || 0) + ctx.extra) * 1000) / 1000,
     fontWeight: parseInt(cs.fontWeight) || 400,
     italic: cs.fontStyle === "italic" || cs.fontStyle === "oblique",
     color: cs.color,

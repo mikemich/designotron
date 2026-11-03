@@ -254,6 +254,22 @@ try {
     }
   }
 
+  // 3a. Chips with horizontal padding and a border: their width goes into the run as letter spacing, so
+  // the paragraph wraps like the browser's and what follows it doesn't move up. An icon chip (background
+  // image) and an empty padded span keep their own layers.
+  const chips = await importHtml(page, "chips.html", 420, { name: "Chips", y: y - 700 });
+  const chipRefs = chips.id ? await reference("chips.html", 420) : [];
+  const chipLayers = chips.id ? textLayers(chips.d, chips.id) : [];
+  for (const start of ["Set gap", "Some highlighted", "Long paragraph", "After paragraph"]) {
+    const layer = chipLayers.find((n) => n.text.characters.startsWith(start));
+    const ref = chipRefs.filter((q) => q.text.startsWith(start)).sort((p, q) => q.depth - p.depth)[0];
+    const at = layer ? absOf(chips.d, layer.id, chips.id) : { y: NaN };
+    check(`chips.html "${start}…" matches the browser's height and y`, !!layer && !!ref && Math.abs(layer.height - ref.h) <= 2 && Math.abs(at.y - ref.y) <= 2, `layer ${layer?.height} at ${at.y}, browser ${ref?.h} at ${ref?.y}`);
+  }
+  const has = (text) => chipLayers.some((n) => n.text.characters === text);
+  check("icon chip (background image) keeps its own layer", has("Search") && chipLayers.some((n) => n.text.characters.startsWith("with an icon")), chipLayers.map((n) => n.text.characters.slice(0, 12)).join(" | "));
+  check("empty padded span keeps both sides as layers", has("Before") && chipLayers.some((n) => n.text.characters.startsWith("after the empty")));
+
   // 3b. Whole-pixel rounding must not turn hugging items into fixed fractional heights.
   const round = await importHtml(page, "round.html", 500, { name: "Round", y: y + 100 });
   const roundCode = round.id ? (await tool(page, "export_code", { id: round.id, format: "react" })).result?.code ?? "" : "";

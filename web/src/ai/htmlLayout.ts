@@ -100,6 +100,9 @@ export interface RunStyle {
   fontSize: number;
   fontFamily: string;
   decoration?: "underline" | "line-through";
+  /** px added after every character: the element's letter spacing plus the width of a chip's
+   *  horizontal padding and border spread over its characters, so text wraps as in the browser. */
+  letterSpacing?: number;
   link?: string;
 }
 
@@ -149,6 +152,7 @@ function sameStyle(a: RunStyle, b: RunStyle): boolean {
     a.fontSize === b.fontSize &&
     a.fontFamily === b.fontFamily &&
     a.decoration === b.decoration &&
+    (a.letterSpacing ?? 0) === (b.letterSpacing ?? 0) &&
     a.link === b.link
   );
 }

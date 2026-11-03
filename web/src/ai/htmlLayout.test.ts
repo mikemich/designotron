@@ -212,6 +212,12 @@ describe("mergeInlineRuns", () => {
     expect(mergeInlineRuns([])).toBeNull();
   });
 
+  it("keeps runs with different letter spacing (a chip's padding) apart", () => {
+    const chip: RunStyle = { ...base, letterSpacing: 1.6 };
+    const m = mergeInlineRuns([t("Set "), t("gap", chip), t(" now")])!;
+    expect(m.spans.map((s) => [s.text, s.letterSpacing ?? 0])).toEqual([["Set ", 0], ["gap", 1.6], [" now", 0]]);
+  });
+
   it("keeps non-breaking spaces", () => {
     expect(mergeInlineRuns([t("a b")])!.text).toBe("a b");
   });
