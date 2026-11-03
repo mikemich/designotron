@@ -16,6 +16,8 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Text", "T"],
       ["Hand", "H or hold Space"],
       ["Comment", "C"],
+      ["Insert the tool's default layer", "Enter"],
+      ["Insert inside the selected frame", `${MOD}Enter`],
     ],
   },
   {
@@ -63,6 +65,22 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Claude panel", `${MOD}/`],
       ["Save .dtron file", `${MOD}S`],
       ["This list", "?"],
+    ],
+  },
+  {
+    title: "Keyboard navigation",
+    items: [
+      ["Next / previous sibling layer", "Tab / ⇧Tab"],
+      ["Select children / parent", "Enter / ⇧Enter"],
+      ["Move between panels and canvas", `F6 / ${SHIFT}F6`],
+      ["Next / previous page", `${ALT}Page Down / ${ALT}Page Up`],
+      ["Layers: move and select", "↑ ↓ Home End"],
+      ["Layers: expand / collapse", "→ / ←"],
+      ["Layers: rename", "F2"],
+      ["Layers: select the row / delete", "Space / Delete"],
+      ["Layers: reorder", `${ALT}${SHIFT}↑ / ${ALT}${SHIFT}↓`],
+      ["Layers: focus the canvas", "Enter"],
+      ["Pages: move / switch / rename", "↑ ↓ / Enter / F2"],
     ],
   },
 ];

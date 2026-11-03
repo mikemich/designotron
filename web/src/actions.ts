@@ -16,7 +16,8 @@ import {
   toast,
   useStore,
 } from "./store";
-import type { Rect } from "./types";
+import { openTextGesture } from "./canvas/TextEditor";
+import type { Rect, Tool } from "./types";
 
 const CLIPBOARD_TAG = "designotron/nodes";
 
@@ -127,6 +128,61 @@ export function selectChildren() {
     const only = selection().length === 1 ? doc.nodes[selection()[0]] : null;
     if (only?.type === "text") useStore.setState({ editingText: only.id });
   }
+}
+
+// ---------- Keyboard insert ----------
+
+/** Size of the layer Enter inserts for each drawing tool (what a click without a drag makes). */
+const INSERT_SIZE: Partial<Record<Tool, { w: number; h: number }>> = {
+  rectangle: { w: 100, h: 100 },
+  ellipse: { w: 100, h: 100 },
+  polygon: { w: 100, h: 100 },
+  star: { w: 100, h: 100 },
+  line: { w: 100, h: 0 },
+  arrow: { w: 100, h: 0 },
+  frame: { w: 390, h: 844 },
+  text: { w: 0, h: 0 },
+};
+
+/** Whether the active tool draws a layer, so Enter can insert one from the keyboard. */
+export function canInsertWithKeyboard(): boolean {
+  return useStore.getState().tool in INSERT_SIZE;
+}
+
+/** Inserts the active tool's default layer centred in the viewport, selects it and goes back to the
+ * Move tool: one undo step. A frame is 390×844, or 100×100 when a frame is selected (it goes
+ * inside); with `inSelected` (Ctrl+Enter) the layer goes inside the selected frame, at the
+ * viewport centre if that lies in the frame and else at the frame's centre. Text opens for typing. */
+export function insertDefaultLayer(inSelected = false): boolean {
+  const tool = useStore.getState().tool;
+  const size = INSERT_SIZE[tool];
+  if (!size) return false;
+  const target = pasteTarget();
+  const parent = inSelected || (tool === "frame" && target) ? target : null;
+  let { w, h } = size;
+  if (tool === "frame" && parent) w = h = 100;
+  let c = viewportCenter();
+  if (parent) {
+    const box = query<{ items: { bounds: Rect }[] }>({ q: "bounds", ids: [parent] }).items[0]?.bounds;
+    if (box && (c.x < box.x || c.x > box.x + box.width || c.y < box.y || c.y > box.y + box.height)) c = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  }
+  const x = Math.round(c.x - w / 2);
+  const y = Math.round(c.y - h / 2);
+  if (tool === "text") {
+    openTextGesture();
+    const r = dispatch<{ id: string }>({ op: "createText", x: Math.round(c.x), y: Math.round(c.y), characters: "", parent });
+    if (!r) dispatch({ op: "endGesture" });
+    else useStore.setState({ editingText: r.id });
+  } else if (tool === "arrow") {
+    oneStep(() => {
+      const r = dispatch<{ id: string }>({ op: "createShape", kind: "line", x, y, width: w, height: 0, parent });
+      if (r) dispatch({ op: "update", ids: [r.id], patch: { shape: { endCap: "arrow" } } });
+    });
+  } else {
+    dispatch({ op: "createShape", kind: tool === "line" ? "line" : tool, x, y, width: w, height: h, parent });
+  }
+  setTool("move");
+  return true;
 }
 
 // ---------- Copy / paste properties (Figma ⌥⌘C / ⌥⌘V) ----------

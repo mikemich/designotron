@@ -483,3 +483,43 @@ export function zoomBy(factor: number, cx?: number, cy?: number) {
   onDocChange: (fn: () => void) => onDocChange(fn),
   vectorEdit: () => ({ id: useStore.getState().editingVector, points: useStore.getState().vectorPoints }),
 };
+
+// ---------- Keyboard selection helpers ----------
+
+/** Ids of the layers beside `id` (its parent's children, or the page's top-level layers), in document order. */
+function siblingsOf(id: string): string[] {
+  const doc = getDoc();
+  const n = doc.nodes[id];
+  if (!n) return [];
+  return (n.parent ? doc.nodes[n.parent]?.children : doc.pages.find((p) => p.id === n.page)?.children) ?? [];
+}
+
+/** Selects the next (or previous) visible sibling of the first selected layer, wrapping around.
+ * Tab and Shift+Tab on the canvas. False when nothing is selected. */
+export function selectSibling(dir: 1 | -1): boolean {
+  const doc = getDoc();
+  const first = selection()[0];
+  if (!first || !doc.nodes[first]) return false;
+  const sibs = siblingsOf(first);
+  const at = sibs.indexOf(first);
+  for (let step = 1; step <= sibs.length; step++) {
+    const id = sibs[(((at + dir * step) % sibs.length) + sibs.length) % sibs.length];
+    if (doc.nodes[id]?.visible) {
+      dispatch({ op: "select", ids: [id] });
+      return true;
+    }
+  }
+  return true;
+}
+
+/** What a screen reader hears when the selection changes: "Button (frame) 120×40, 2 of 5 in Card". */
+export function describeSelection(): string {
+  const doc = getDoc();
+  const ids = selection().filter((id) => doc.nodes[id]);
+  if (!ids.length) return "Nothing selected";
+  if (ids.length > 1) return `${ids.length} layers selected`;
+  const n = doc.nodes[ids[0]];
+  const sibs = siblingsOf(n.id);
+  const where = n.parent ? doc.nodes[n.parent]?.name : doc.pages.find((p) => p.id === n.page)?.name;
+  return `${n.name || n.type} (${n.type}) ${Math.round(n.width)}×${Math.round(n.height)}, ${sibs.indexOf(n.id) + 1} of ${sibs.length} in ${where ?? "page"}`;
+}

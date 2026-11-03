@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { HistoryPanel } from "./HistoryPanel";
 import { CommentsPanel } from "./CommentsPanel";
 import {
@@ -28,40 +28,63 @@ import {
 import { dispatch, useDoc, useStore, zoomToSelection } from "../store";
 import type { Doc, Node } from "../types";
 import { IconButton, Menu, type MenuItem } from "../ui/controls";
+import * as A from "../actions";
 import { viewportCenter } from "../actions";
 import { ColorStylesSection, TextStylesSection } from "./StyleControls";
 import { swapGroups } from "../componentOps";
 
+const LEFT_TABS = [
+  ["layers", "Layers"],
+  ["assets", "Assets"],
+  ["history", "History"],
+  ["comments", "Comments"],
+] as const;
+
 export function LeftPanel() {
   const tab = useStore((s) => s.leftTab);
+  // Tabs are one tab stop; the arrow keys move between them (and switch, as a click does).
+  const onTabKey = (e: React.KeyboardEvent) => {
+    const at = LEFT_TABS.findIndex(([id]) => id === tab);
+    const to = e.key === "ArrowRight" ? at + 1 : e.key === "ArrowLeft" ? at - 1 : e.key === "Home" ? 0 : e.key === "End" ? LEFT_TABS.length - 1 : -1;
+    if (to < 0 || e.altKey || e.ctrlKey || e.metaKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const [id] = LEFT_TABS[(to + LEFT_TABS.length) % LEFT_TABS.length];
+    useStore.setState({ leftTab: id });
+    requestAnimationFrame(() => document.getElementById(`left-tab-${id}`)?.focus());
+  };
   return (
     <div className="panel">
-      <div className="tabs" role="tablist">
-        <button role="tab" aria-selected={tab === "layers"} className={"tab" + (tab === "layers" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "layers" })}>
-          Layers
-        </button>
-        <button role="tab" aria-selected={tab === "assets"} className={"tab" + (tab === "assets" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "assets" })}>
-          Assets
-        </button>
-        <button role="tab" aria-selected={tab === "history"} className={"tab" + (tab === "history" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "history" })}>
-          History
-        </button>
-        <button role="tab" aria-selected={tab === "comments"} className={"tab" + (tab === "comments" ? " active" : "")} onClick={() => useStore.setState({ leftTab: "comments" })}>
-          Comments
-        </button>
+      <div className="tabs" role="tablist" aria-label="Left panel" onKeyDown={onTabKey}>
+        {LEFT_TABS.map(([id, label]) => (
+          <button
+            key={id}
+            role="tab"
+            id={`left-tab-${id}`}
+            aria-selected={tab === id}
+            aria-controls="left-tabpanel"
+            tabIndex={tab === id ? 0 : -1}
+            className={"tab" + (tab === id ? " active" : "")}
+            onClick={() => useStore.setState({ leftTab: id })}
+          >
+            {label}
+          </button>
+        ))}
       </div>
-      {tab === "layers" ? (
-        <>
-          <Pages />
-          <Layers />
-        </>
-      ) : tab === "assets" ? (
-        <Assets />
-      ) : tab === "comments" ? (
-        <CommentsPanel />
-      ) : (
-        <HistoryPanel />
-      )}
+      <div className="tabpanel" role="tabpanel" id="left-tabpanel" aria-labelledby={`left-tab-${tab}`}>
+        {tab === "layers" ? (
+          <>
+            <Pages />
+            <Layers />
+          </>
+        ) : tab === "assets" ? (
+          <Assets />
+        ) : tab === "comments" ? (
+          <CommentsPanel />
+        ) : (
+          <HistoryPanel />
+        )}
+      </div>
     </div>
   );
 }
@@ -70,54 +93,154 @@ function Pages() {
   const doc = useDoc();
   const page = useStore((s) => s.es.page);
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const [more, setMore] = useState(0);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const tabStop = focusId && doc.pages.some((p) => p.id === focusId) ? focusId : page;
+
+  // "N more" cue for a list that scrolls (27 pages show 8).
+  const measure = () => {
+    const el = listRef.current;
+    if (!el) return;
+    const below = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const item = el.firstElementChild?.getBoundingClientRect().height || 28;
+    setMore(below > 4 ? Math.max(1, Math.round(below / item)) : 0);
+  };
+  useEffect(() => {
+    measure();
+    const el = listRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [doc.pages.length]);
+
+  const focusPage = (id: string) => {
+    setFocusId(id);
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-page="${CSS.escape(id)}"]`);
+    el?.focus();
+    el?.scrollIntoView({ block: "nearest" });
+  };
+  const removePage = (id: string) => {
+    const i = doc.pages.findIndex((p) => p.id === id);
+    const next = doc.pages[i + 1] ?? doc.pages[i - 1];
+    dispatch({ op: "deletePage", id });
+    if (next) requestAnimationFrame(() => focusPage(next.id));
+  };
+  const onKey = (e: React.KeyboardEvent, id: string, i: number) => {
+    if (e.target !== e.currentTarget || e.ctrlKey || e.metaKey || e.altKey) return;
+    const go = (to: number) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const p = doc.pages[Math.max(0, Math.min(doc.pages.length - 1, to))];
+      if (p) focusPage(p.id);
+    };
+    switch (e.key) {
+      case "ArrowDown":
+        return go(i + 1);
+      case "ArrowUp":
+        return go(i - 1);
+      case "Home":
+        return go(0);
+      case "End":
+        return go(doc.pages.length - 1);
+      case "Enter":
+      case " ":
+        e.preventDefault();
+        e.stopPropagation();
+        return dispatch({ op: "setPage", id });
+      case "F2":
+        e.preventDefault();
+        return setRenaming(id);
+      case "Delete":
+        e.preventDefault();
+        e.stopPropagation();
+        if (doc.pages.length > 1) removePage(id);
+    }
+  };
   return (
     <div className="pages">
       <div className="section-head" style={{ marginBottom: 4, padding: "0 4px" }}>
-        <span>Pages</span>
+        <span id="pages-label">Pages</span>
         <IconButton title="Add page" onClick={() => dispatch({ op: "addPage", name: null })}>
           <Plus size={14} />
         </IconButton>
       </div>
-      {doc.pages.map((p) => (
-        <div
-          key={p.id}
-          className={"page-item" + (p.id === page ? " active" : "")}
-          onClick={() => dispatch({ op: "setPage", id: p.id })}
-          onDoubleClick={() => setRenaming(p.id)}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            setMenu({
-              x: e.clientX,
-              y: e.clientY,
-              items: [
-                { label: "Rename", onClick: () => setRenaming(p.id) },
-                { label: "Delete page", disabled: doc.pages.length < 2, onClick: () => dispatch({ op: "deletePage", id: p.id }) },
-              ],
-            });
-          }}
-        >
-          <File size={12} />
-          {renaming === p.id ? (
-            <RenameInput
-              value={p.name}
-              onDone={(name) => {
-                setRenaming(null);
-                if (name && name !== p.name) dispatch({ op: "renamePage", id: p.id, name });
-              }}
-            />
-          ) : (
-            <span style={{ flex: 1 }}>{p.name}</span>
-          )}
+      <div
+        className="pages-list"
+        role="listbox"
+        aria-labelledby="pages-label"
+        ref={listRef}
+        onScroll={measure}
+        onFocus={(e) => {
+          const id = (e.target as HTMLElement).closest<HTMLElement>("[data-page]")?.dataset.page;
+          if (id) setFocusId(id);
+        }}
+        onBlur={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as globalThis.Node | null)) setFocusId(null);
+        }}
+      >
+        {doc.pages.map((p, i) => (
+          <div
+            key={p.id}
+            data-page={p.id}
+            role="option"
+            aria-selected={p.id === page}
+            tabIndex={p.id === tabStop ? 0 : -1}
+            className={"page-item" + (p.id === page ? " active" : "")}
+            onClick={() => dispatch({ op: "setPage", id: p.id })}
+            onDoubleClick={() => setRenaming(p.id)}
+            onKeyDown={(e) => onKey(e, p.id, i)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setMenu({
+                x: e.clientX,
+                y: e.clientY,
+                items: [
+                  { label: "Rename", onClick: () => setRenaming(p.id) },
+                  { label: "Delete page", disabled: doc.pages.length < 2, onClick: () => dispatch({ op: "deletePage", id: p.id }) },
+                ],
+              });
+            }}
+          >
+            <File size={12} aria-hidden="true" />
+            {renaming === p.id ? (
+              <RenameInput
+                value={p.name}
+                label="Page name"
+                onDone={(name, byKey) => {
+                  setRenaming(null);
+                  if (name && name !== p.name) dispatch({ op: "renamePage", id: p.id, name });
+                  if (byKey) requestAnimationFrame(() => focusPage(p.id));
+                }}
+              />
+            ) : (
+              <span style={{ flex: 1 }}>{p.name}</span>
+            )}
+          </div>
+        ))}
+      </div>
+      {more > 0 && (
+        <div className="pages-more" aria-hidden="true">
+          {more} more below
         </div>
-      ))}
+      )}
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>
   );
 }
 
-function RenameInput({ value, onDone }: { value: string; onDone: (v: string) => void }) {
+/** Rename field for a layer or page. `onDone` runs once: with `byKey` true when Enter or Escape
+ * ended it (the caller returns focus to its row), false when focus left. */
+function RenameInput({ value, label, onDone }: { value: string; label: string; onDone: (v: string, byKey: boolean) => void }) {
   const ref = useRef<HTMLInputElement>(null);
+  const done = useRef(false);
+  const finish = (v: string, byKey: boolean) => {
+    if (done.current) return;
+    done.current = true;
+    onDone(v, byKey);
+  };
   useEffect(() => {
     ref.current?.focus();
     ref.current?.select();
@@ -127,13 +250,14 @@ function RenameInput({ value, onDone }: { value: string; onDone: (v: string) => 
       ref={ref}
       defaultValue={value}
       className="textinput"
+      aria-label={label}
       style={{ padding: "2px 4px" }}
       onClick={(e) => e.stopPropagation()}
-      onBlur={(e) => onDone(e.target.value.trim())}
+      onBlur={(e) => finish(e.target.value.trim(), false)}
       onKeyDown={(e) => {
         e.stopPropagation();
-        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-        if (e.key === "Escape") onDone(value);
+        if (e.key === "Enter") finish((e.target as HTMLInputElement).value.trim(), true);
+        if (e.key === "Escape") finish(value, true);
       }}
     />
   );
@@ -180,6 +304,11 @@ function Layers() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const dragId = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** Row with keyboard focus (the tree's one tab stop), and the row focus should move to once drawn. */
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const pendingFocus = useRef<string | null>(null);
+  /** Where Shift+Arrow ranges start. */
+  const anchor = useRef<string | null>(null);
 
   // Reveal selected layers.
   useEffect(() => {
@@ -224,6 +353,120 @@ function Layers() {
   }, [doc, page, expanded]);
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
+
+  // The tree has one tab stop: the row that has focus, else the first selected row, else the first row.
+  const lastFocus = useRef<string | null>(null);
+  const has = (id: string | null) => !!id && rows.some((r) => r.n.id === id);
+  const tabStop = (has(focusId) ? focusId : null) ?? rows.find((r) => sel.includes(r.n.id))?.n.id ?? (has(lastFocus.current) ? lastFocus.current : null) ?? rows[0]?.n.id ?? null;
+
+  /** Moves keyboard focus to a row, drawing it first when a long list has it out of view. */
+  const [, redraw] = useReducer((n: number) => n + 1, 0);
+  const focusRow = (id: string) => {
+    pendingFocus.current = id;
+    setFocusId(id);
+    redraw();
+  };
+  useEffect(() => {
+    const id = pendingFocus.current;
+    const el = scrollRef.current;
+    if (!id || !el) return;
+    const row = el.querySelector<HTMLElement>(`[data-layer="${CSS.escape(id)}"]`);
+    if (row) {
+      pendingFocus.current = null;
+      row.focus();
+      row.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    const i = rows.findIndex((r) => r.n.id === id);
+    if (i < 0) pendingFocus.current = null;
+    else el.scrollTop = Math.max(0, i * ROW - el.clientHeight / 2);
+  });
+
+  const select = (ids: string[], extend: boolean) => {
+    if (extend) {
+      const a = rows.findIndex((r) => r.n.id === (anchor.current ?? sel[0]));
+      const b = rows.findIndex((r) => r.n.id === ids[0]);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        return dispatch({ op: "select", ids: rows.slice(lo, hi + 1).map((r) => r.n.id) });
+      }
+    }
+    anchor.current = ids[0];
+    dispatch({ op: "select", ids });
+  };
+
+  const toggleExpanded = (id: string, open?: boolean) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (open ?? !next.has(id)) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+
+  /** WAI-ARIA tree keys on a row. Keys not handled here (tool letters, Escape, ⌘ combos) go on to the global shortcuts. */
+  const onRowKey = (e: React.KeyboardEvent, i: number) => {
+    if (e.target !== e.currentTarget) return;
+    const { n } = rows[i];
+    const handled = () => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const go = (to: number) => {
+      handled();
+      const r = rows[Math.max(0, Math.min(rows.length - 1, to))];
+      if (!r) return;
+      select([r.n.id], e.shiftKey);
+      focusRow(r.n.id);
+    };
+    if (e.altKey && e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      handled();
+      if (!sel.includes(n.id)) select([n.id], false);
+      return A.reorder(e.key === "ArrowUp" ? "forward" : "backward");
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    switch (e.key) {
+      case "ArrowDown":
+        return go(i + 1);
+      case "ArrowUp":
+        return go(i - 1);
+      case "Home":
+        return go(0);
+      case "End":
+        return go(rows.length - 1);
+      case "ArrowRight":
+        handled();
+        if (!n.children.length) return;
+        if (!expanded.has(n.id)) return toggleExpanded(n.id, true);
+        return go(i + 1);
+      case "ArrowLeft": {
+        handled();
+        if (n.children.length && expanded.has(n.id)) return toggleExpanded(n.id, false);
+        const parent = rows.findIndex((r, j) => j < i && r.n.id === n.parent);
+        return parent >= 0 ? go(parent) : undefined;
+      }
+      case "Enter":
+        handled();
+        if (!sel.includes(n.id)) select([n.id], false);
+        return document.getElementById("dt-canvas")?.focus();
+      case " ":
+        handled();
+        anchor.current = n.id;
+        return dispatch({ op: "select", ids: [n.id], mode: "toggle" });
+      case "F2":
+        handled();
+        return setRenaming(n.id);
+      case "Delete":
+      case "Backspace": {
+        handled();
+        if (!sel.includes(n.id)) select([n.id], false);
+        const gone = new Set(useStore.getState().es.selection);
+        const next = [...rows.slice(i + 1), ...rows.slice(0, i).reverse()].find((r) => !gone.has(r.n.id));
+        A.deleteSelection();
+        if (next) focusRow(next.n.id);
+        else document.getElementById("dt-canvas")?.focus();
+      }
+    }
+  };
 
   // Long lists render only the rows in view (plus a margin): thousands of rows cost
   // ~100 ms per change otherwise.
@@ -271,106 +514,138 @@ function Layers() {
       onScroll={(e) => windowed && setView({ top: e.currentTarget.scrollTop, height: e.currentTarget.clientHeight })}
     >
       {rows.length === 0 && <div className="muted" style={{ padding: 16 }}>No layers on this page yet.</div>}
-      {first > 0 && <div style={{ height: first * ROW }} />}
-      {rows.slice(first, last).map(({ n, depth }) => {
-        const isSel = sel.includes(n.id);
-        const comp = n.type === "component" || n.type === "componentSet" || n.type === "instance";
-        const inInstance = isInsideInstance(doc, n);
-        return (
-          <div
-            key={n.id}
-            data-layer={n.id}
-            className={
-              "layer" +
-              (isSel ? " selected" : selectedAncestors.has(n.id) ? "" : "") +
-              (!n.visible ? " hidden-layer" : "") +
-              (drop?.id === n.id && drop.where === "into" ? " drop-into" : "")
-            }
-            style={{ paddingLeft: 8 + depth * 14 }}
-            draggable={!inInstance && renaming !== n.id}
-            onDragStart={(e) => {
-              dragId.current = n.id;
-              e.dataTransfer.effectAllowed = "move";
-            }}
-            onDragOver={(e) => {
-              e.preventDefault();
-              const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-              const y = (e.clientY - r.top) / r.height;
-              const container = ["frame", "group", "component", "componentSet"].includes(n.type) && !inInstance;
-              const where = container && y > 0.3 && y < 0.7 ? "into" : y < 0.5 ? "before" : "after";
-              if (drop?.id !== n.id || drop.where !== where) setDrop({ id: n.id, where });
-            }}
-            onClick={(e) => {
-              if (e.shiftKey || e.metaKey || e.ctrlKey) dispatch({ op: "select", ids: [n.id], mode: "toggle" });
-              else dispatch({ op: "select", ids: [n.id] });
-            }}
-            onDoubleClick={() => setRenaming(n.id)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              if (!isSel) dispatch({ op: "select", ids: [n.id] });
-              setMenu({
-                x: e.clientX,
-                y: e.clientY,
-                items: [
-                  { label: "Rename", onClick: () => setRenaming(n.id) },
-                  { label: "Zoom to layer", kbd: "⇧2", onClick: zoomToSelection },
-                  { label: "Delete", onClick: () => dispatch({ op: "delete", ids: useStore.getState().es.selection }) },
-                ],
-              });
-            }}
-          >
-            {drop?.id === n.id && drop.where !== "into" && <div className="drop-line" style={{ top: drop.where === "before" ? -1 : undefined, bottom: drop.where === "after" ? -1 : undefined, left: 8 + depth * 14 }} />}
-            <span
-              className="twisty"
-              onClick={(e) => {
-                e.stopPropagation();
-                setExpanded((prev) => {
-                  const next = new Set(prev);
-                  next.has(n.id) ? next.delete(n.id) : next.add(n.id);
-                  return next;
-                });
-              }}
-            >
-              {n.children.length > 0 && (expanded.has(n.id) ? <ChevronDown size={12} /> : <ChevronRight size={12} />)}
-            </span>
-            <span className={"icon" + (comp ? " component" : "")}>{nodeIcon(n)}</span>
-            {renaming === n.id ? (
-              <RenameInput
-                value={n.name}
-                onDone={(name) => {
-                  setRenaming(null);
-                  if (name && name !== n.name) dispatch({ op: "update", ids: [n.id], patch: { name } });
+      {rows.length > 0 && (
+        <div
+          role="tree"
+          aria-label="Layers"
+          aria-multiselectable="true"
+          tabIndex={rows.slice(first, last).some((r) => r.n.id === tabStop) ? undefined : 0}
+          onFocus={(e) => {
+            if (e.target === e.currentTarget) return tabStop && focusRow(tabStop);
+            const id = (e.target as HTMLElement).closest<HTMLElement>("[data-layer]")?.dataset.layer;
+            if (!id) return;
+            lastFocus.current = id;
+            setFocusId(id);
+          }}
+          onBlur={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget as globalThis.Node | null)) setFocusId(null);
+          }}
+        >
+          {first > 0 && <div style={{ height: first * ROW }} aria-hidden="true" />}
+          {rows.slice(first, last).map(({ n, depth }, k) => {
+            const isSel = sel.includes(n.id);
+            const comp = n.type === "component" || n.type === "componentSet" || n.type === "instance";
+            const inInstance = isInsideInstance(doc, n);
+            const open = expanded.has(n.id);
+            const label = (n.name || n.type) + (n.visible ? "" : ", hidden") + (n.locked ? ", locked" : "");
+            return (
+              <div
+                key={n.id}
+                data-layer={n.id}
+                role="treeitem"
+                aria-level={depth + 1}
+                aria-selected={isSel}
+                aria-expanded={n.children.length ? open : undefined}
+                aria-label={label}
+                title={n.name || n.type}
+                tabIndex={n.id === tabStop ? 0 : -1}
+                className={
+                  "layer" +
+                  (isSel ? " selected" : selectedAncestors.has(n.id) ? "" : "") +
+                  (!n.visible ? " hidden-layer" : "") +
+                  (drop?.id === n.id && drop.where === "into" ? " drop-into" : "")
+                }
+                style={{ paddingLeft: 8 + indent(depth) }}
+                draggable={!inInstance && renaming !== n.id}
+                onKeyDown={(e) => onRowKey(e, first + k)}
+                onDragStart={(e) => {
+                  dragId.current = n.id;
+                  e.dataTransfer.effectAllowed = "move";
                 }}
-              />
-            ) : (
-              <span className={"name" + (comp ? " component" : "")}>{n.name || n.type}</span>
-            )}
-            <span className={"tools" + (n.locked || !n.visible ? " pinned" : "")}>
-              <button
-                className="ibtn"
-                title={n.locked ? "Unlock" : "Lock"}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                  const y = (e.clientY - r.top) / r.height;
+                  const container = ["frame", "group", "component", "componentSet"].includes(n.type) && !inInstance;
+                  const where = container && y > 0.3 && y < 0.7 ? "into" : y < 0.5 ? "before" : "after";
+                  if (drop?.id !== n.id || drop.where !== where) setDrop({ id: n.id, where });
+                }}
                 onClick={(e) => {
-                  e.stopPropagation();
-                  dispatch({ op: "update", ids: [n.id], patch: { locked: !n.locked } });
+                  if (e.shiftKey || e.metaKey || e.ctrlKey) dispatch({ op: "select", ids: [n.id], mode: "toggle" });
+                  else select([n.id], false);
+                }}
+                onDoubleClick={() => setRenaming(n.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  if (!isSel) dispatch({ op: "select", ids: [n.id] });
+                  setMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    items: [
+                      { label: "Rename", onClick: () => setRenaming(n.id) },
+                      { label: "Zoom to layer", kbd: "⇧2", onClick: zoomToSelection },
+                      { label: "Delete", onClick: () => dispatch({ op: "delete", ids: useStore.getState().es.selection }) },
+                    ],
+                  });
                 }}
               >
-                {n.locked ? <Lock size={12} /> : <Unlock size={12} />}
-              </button>
-              <button
-                className="ibtn"
-                title={n.visible ? "Hide" : "Show"}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  dispatch({ op: "update", ids: [n.id], patch: { visible: !n.visible } });
-                }}
-              >
-                {n.visible ? <Eye size={12} /> : <EyeOff size={12} />}
-              </button>
-            </span>
-          </div>
-        );
-      })}
-      {last < rows.length && <div style={{ height: (rows.length - last) * ROW }} />}
+                {drop?.id === n.id && drop.where !== "into" && <div className="drop-line" style={{ top: drop.where === "before" ? -1 : undefined, bottom: drop.where === "after" ? -1 : undefined, left: 8 + indent(depth) }} />}
+                <span
+                  className="twisty"
+                  aria-hidden="true"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleExpanded(n.id);
+                  }}
+                >
+                  {n.children.length > 0 && (open ? <ChevronDown size={12} /> : <ChevronRight size={12} />)}
+                </span>
+                <span className={"icon" + (comp ? " component" : "")} aria-hidden="true">
+                  {nodeIcon(n)}
+                </span>
+                {renaming === n.id ? (
+                  <RenameInput
+                    value={n.name}
+                    label="Layer name"
+                    onDone={(name, byKey) => {
+                      setRenaming(null);
+                      if (name && name !== n.name) dispatch({ op: "update", ids: [n.id], patch: { name } });
+                      if (byKey) requestAnimationFrame(() => focusRow(n.id));
+                    }}
+                  />
+                ) : (
+                  <span className={"name" + (comp ? " component" : "")}>{n.name || n.type}</span>
+                )}
+                <span className={"tools" + (n.locked || !n.visible ? " pinned" : "")}>
+                  <button
+                    className="ibtn"
+                    tabIndex={-1}
+                    title={n.locked ? "Unlock" : "Lock"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      dispatch({ op: "update", ids: [n.id], patch: { locked: !n.locked } });
+                    }}
+                  >
+                    {n.locked ? <Lock size={12} /> : <Unlock size={12} />}
+                  </button>
+                  <button
+                    className="ibtn"
+                    tabIndex={-1}
+                    title={n.visible ? "Hide" : "Show"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      dispatch({ op: "update", ids: [n.id], patch: { visible: !n.visible } });
+                    }}
+                  >
+                    {n.visible ? <Eye size={12} /> : <EyeOff size={12} />}
+                  </button>
+                </span>
+              </div>
+            );
+          })}
+          {last < rows.length && <div style={{ height: (rows.length - last) * ROW }} aria-hidden="true" />}
+        </div>
+      )}
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>
   );
@@ -379,6 +654,13 @@ function Layers() {
 /** Layer row height (`.layer` in styles.css) and the list length where windowing starts. */
 const ROW = 30;
 const WINDOW_FROM = 200;
+/** Levels indented a full step before deeper ones get a narrow one, so names stay readable. */
+const FULL_INDENT_LEVELS = 8;
+
+/** Left indent (px) of a layer row at this nesting depth. */
+function indent(depth: number): number {
+  return Math.min(depth, FULL_INDENT_LEVELS) * 14 + Math.max(0, depth - FULL_INDENT_LEVELS) * 4;
+}
 
 function isInsideInstance(doc: Doc, n: Node): boolean {
   for (let p = n.parent; p; p = doc.nodes[p]?.parent ?? null) if (doc.nodes[p]?.type === "instance") return true;

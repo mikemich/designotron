@@ -2084,3 +2084,58 @@ body:has(.phone-note) .toast {
   font-size: 10px;
   cursor: default;
 }
+
+/* W7-F keyboard */
+/* The left panel's tab panel fills the panel like its children did before it wrapped them. */
+.tabpanel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+/* Pages: a list that scrolls on its own under the heading, with a cue when more are below. */
+.pages {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.pages-list {
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}
+.pages-more {
+  flex-shrink: 0;
+  padding: 4px 8px 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-2);
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+}
+.pages-more::before {
+  content: "\25BE";
+  margin-right: 4px;
+}
+.page-item:focus-visible,
+.layer:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: -2px;
+}
+/* The tree's own tab stop when its first row is out of view (long lists). */
+[role="tree"]:focus {
+  outline: none;
+}
+/* Read by screen readers only: what the canvas selection is. */
+.canvas-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

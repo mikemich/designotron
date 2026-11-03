@@ -1,6 +1,6 @@
 import * as A from "./actions";
 import { copySelection, pasteHere, pasteReplace } from "./canvas/contextMenu";
-import { pointerDrag, selection, setTool, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
+import { dispatch, getDoc, pointerDrag, selectSibling, selection, setTool, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
 import { useShortcuts } from "./panels/ShortcutsDialog";
 
 function isTyping(e: KeyboardEvent): boolean {
@@ -8,11 +8,63 @@ function isTyping(e: KeyboardEvent): boolean {
   return !!t && (t.matches("input, textarea, select") || t.isContentEditable);
 }
 
+/** Menus and dialogs own their keys; the canvas shortcuts stay out (⌘ combos still pass). */
+function inOverlay(e: KeyboardEvent): boolean {
+  return !!(e.target as HTMLElement | null)?.closest?.("[role=menu], .menu, [role=dialog]");
+}
+
+/** Focus on the canvas itself (or on nothing): Enter and Tab belong to the design there, and to the
+ * focused control anywhere else. */
+function onCanvas(e: KeyboardEvent): boolean {
+  const t = e.target as HTMLElement | null;
+  return !t || t === document.body || t === document.documentElement || t.id === "dt-canvas";
+}
+
+/** The F6 regions in order, each with how to put focus in it (null: not shown right now). */
+const REGIONS: { root: string; focus: () => HTMLElement | null }[] = [
+  { root: ".topbar", focus: () => document.querySelector<HTMLElement>(".topbar button:not(:disabled)") },
+  {
+    root: ".main > .panel:not(.right)",
+    focus: () =>
+      document.querySelector<HTMLElement>(".main > .panel:not(.right) [role=tree] [tabindex='0']") ??
+      document.querySelector<HTMLElement>(".main > .panel:not(.right) [role=tab][aria-selected=true]"),
+  },
+  { root: "#dt-canvas", focus: () => document.getElementById("dt-canvas") },
+  { root: ".main > .panel.right", focus: () => document.querySelector<HTMLElement>(".main > .panel.right [role=tab][aria-selected=true]") },
+  { root: ".main > .chat", focus: () => document.querySelector<HTMLElement>(".main > .chat textarea") },
+];
+
+/** F6 / Shift+F6: moves focus to the next (previous) region that is on screen. */
+function cycleRegion(dir: 1 | -1) {
+  const shown = REGIONS.map((r) => ({ r, el: document.querySelector<HTMLElement>(r.root) })).filter((x) => x.el && x.el.getClientRects().length);
+  if (!shown.length) return;
+  const at = shown.findIndex((x) => x.el!.contains(document.activeElement));
+  for (let step = 1; step <= shown.length; step++) {
+    const target = shown[(((at < 0 ? (dir > 0 ? -1 : 0) : at) + dir * step) % shown.length + shown.length) % shown.length].r.focus();
+    if (target) return target.focus();
+  }
+}
+
+/** Alt+PageDown / Alt+PageUp: the next / previous page. */
+function stepPage(dir: 1 | -1) {
+  const { pages } = getDoc();
+  const at = pages.findIndex((p) => p.id === useStore.getState().es.page);
+  const next = pages[at + dir];
+  if (next) dispatch({ op: "setPage", id: next.id });
+}
+
 /** Global keyboard shortcuts (Figma-compatible where possible). */
 export function installShortcuts(): () => void {
   const onKey = (e: KeyboardEvent) => {
-    if (isTyping(e) || useStore.getState().presenting) return;
+    if (useStore.getState().presenting) return;
+    // Region cycling works from anywhere (inputs included), except inside a dialog.
+    if (e.key === "F6" && !e.metaKey && !e.ctrlKey && !e.altKey && !(e.target as HTMLElement | null)?.closest?.("[role=dialog]")) {
+      e.preventDefault();
+      return cycleRegion(e.shiftKey ? -1 : 1);
+    }
+    if (isTyping(e)) return;
     const mod = e.metaKey || e.ctrlKey;
+    if (!mod && inOverlay(e)) return;
     const k = e.key.toLowerCase();
     const st = useStore.getState();
     const has = selection().length > 0;
@@ -46,11 +98,14 @@ export function installShortcuts(): () => void {
       if (k === "l" && e.shiftKey) return run(() => A.toggleLock());
       if (k === "]") return run(() => A.reorder(e.altKey ? "front" : "forward"));
       if (k === "[") return run(() => A.reorder(e.altKey ? "back" : "backward"));
+      if (e.key === "Enter" && !e.shiftKey && !e.altKey && onCanvas(e) && A.canInsertWithKeyboard()) return run(() => A.insertDefaultLayer(true));
       if (k === "=" || k === "+") return run(() => zoomBy(1.25));
       if (k === "-") return run(() => zoomBy(0.8));
       if (k === "0") return run(() => zoomBy(1 / st.viewport.zoom));
       return;
     }
+
+    if (e.altKey && !e.shiftKey && (e.key === "PageDown" || e.key === "PageUp")) return run(() => stepPage(e.key === "PageDown" ? 1 : -1));
 
     if (e.altKey && has) {
       const map: Record<string, () => unknown> = {
@@ -107,8 +162,13 @@ export function installShortcuts(): () => void {
         if (st.tool === "pen") return;
         if (st.tool !== "move") return run(() => setTool("move"));
         return run(() => (has ? A.selectParent() : null));
+      case "Tab":
+        // Sibling selection on the canvas; with nothing selected Tab moves on (no keyboard trap).
+        return has && onCanvas(e) && !e.altKey && !st.editingVector && run(() => selectSibling(e.shiftKey ? -1 : 1));
       case "Enter":
-        return has && run(A.selectChildren);
+        if (!onCanvas(e)) return;
+        if (!e.shiftKey && !e.altKey && A.canInsertWithKeyboard()) return run(() => A.insertDefaultLayer(false));
+        return has && run(e.shiftKey ? A.selectParent : A.selectChildren);
     }
     if (e.shiftKey || e.altKey) return;
     const tools: Record<string, Parameters<typeof setTool>[0]> = {

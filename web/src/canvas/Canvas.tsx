@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Handle, Mat, Node, Rect, VectorPoint } from "../types";
 import {
+  describeSelection,
   dispatch,
   getDoc,
   pointerDrag,
@@ -111,6 +112,9 @@ function lodLevel(zoom: number): number {
   while (level + 1 < TEXT_SIZE_STEPS.length && TEXT_SIZE_STEPS[level + 1] * zoom < MIN_TEXT_PX) level++;
   return level;
 }
+
+/** How long the selection must stay put before it is announced to screen readers. */
+const ANNOUNCE_DELAY_MS = 300;
 
 const keys = { space: false };
 window.addEventListener("keydown", (e) => {
@@ -271,6 +275,24 @@ export function Canvas() {
   const lod = lodRef.current;
   const selKey = sel.join(",");
   const selItems = useMemo(() => query<{ items: BoundsItem[]; union: Rect | null }>({ q: "bounds", ids: sel }), [rev, selKey]);
+
+  // Screen readers hear what got selected ("Button (frame) 120×40, 2 of 5 in Card"): worked out once
+  // the selection has settled, never while a drag is running, and only when it changes.
+  const liveRef = useRef<HTMLDivElement>(null);
+  const announced = useRef<string | null>(null);
+  useEffect(() => {
+    if (announced.current === null) {
+      announced.current = selKey;
+      return;
+    }
+    if (announced.current === selKey) return;
+    const t = setTimeout(() => {
+      if (useStore.getState().es.inGesture || !liveRef.current) return;
+      announced.current = selKey;
+      liveRef.current.textContent = describeSelection();
+    }, ANNOUNCE_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [selKey]);
   const hoverItem = useMemo(() => (hover && !sel.includes(hover) ? query<{ items: BoundsItem[] }>({ q: "bounds", ids: [hover] }).items[0] : null), [rev, hover, sel]);
   const topFrames = useMemo(() => {
     const ids = (pageObj?.children ?? []).filter((id) => {
@@ -1048,6 +1070,9 @@ export function Canvas() {
       ref={ref}
       className="canvas"
       tabIndex={0}
+      role="application"
+      aria-roledescription="design canvas"
+      aria-label={`Canvas, ${pageObj?.name ?? "page"}`}
       style={{ background: pageObj?.background ?? "#1a1a1a", cursor }}
       onPointerDown={(e) => {
         onPointerDown(e);
@@ -1071,6 +1096,7 @@ export function Canvas() {
       onDragOver={(e) => e.preventDefault()}
       onDrop={onDrop}
     >
+      <div className="canvas-live" role="status" aria-live="polite" ref={liveRef} />
       <svg className={"dt-content" + (lod >= 0 ? ` lod-${lod}` : "")} xmlns="http://www.w3.org/2000/svg" width={size.w || undefined} height={size.h || undefined}>
         <style>{LOD_CSS}</style>
         <g ref={contentRef} transform={`translate(${v.x} ${v.y}) scale(${v.zoom})`} />
