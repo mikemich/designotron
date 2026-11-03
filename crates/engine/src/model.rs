@@ -517,7 +517,32 @@ pub enum Paint {
     /// Where the whole image sits in the layer's box (`ScaleMode::Crop`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     crop: Option<ImageCrop>,
+    /// Where a stock photo came from and under which licence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credit: Option<Box<ImageCredit>>,
   },
+}
+
+/// Provenance of a stock photo (see `web/src/photos`). Every field is optional so older files
+/// and other writers load.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImageCredit {
+  /// `openverse`, `unsplash` or `pexels`.
+  pub provider: String,
+  pub photo_id: String,
+  pub title: String,
+  pub alt: String,
+  pub author: String,
+  pub author_url: String,
+  /// Where it was found, e.g. "Flickr via Openverse".
+  pub source: String,
+  pub source_url: String,
+  /// "CC BY 2.0", "Pexels License".
+  pub license: String,
+  pub license_url: String,
+  pub attribution_required: bool,
+  pub non_commercial: bool,
 }
 
 impl Paint {

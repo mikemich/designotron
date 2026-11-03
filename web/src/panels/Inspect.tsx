@@ -8,7 +8,7 @@ import { assetUrl } from "../assets";
 import { downloadImageAsset, downloadLayerAsset } from "../exporter";
 import { Seg } from "../ui/controls";
 import { formatColor, parseColor, toHex, type ColorFormat } from "../ui/color";
-import type { Doc, Effect, Node, Paint, TextRun } from "../types";
+import type { Doc, Effect, ImageCredit, Node, Paint, TextRun } from "../types";
 
 const FORMATS: { value: ColorFormat; label: string }[] = [
   { value: "hex", label: "Hex" },
@@ -221,6 +221,7 @@ export function Inspect({ node }: { node: Node }) {
             >
               <Download size={13} />
             </button>
+            {a.credit && <Credit c={a.credit} />}
           </div>
         ))}
       </Group>
@@ -229,6 +230,32 @@ export function Inspect({ node }: { node: Node }) {
 }
 
 // ---------- Pieces ----------
+
+/** Where a stock photo came from and its licence (links are https only, see providers.safeLink). */
+function Credit({ c }: { c: ImageCredit }) {
+  const link = (url: string, text: string) =>
+    url.startsWith("https://") ? (
+      <a href={url} target="_blank" rel="noopener noreferrer">
+        {text}
+      </a>
+    ) : (
+      text
+    );
+  return (
+    <div className="insp-credit small" data-testid="photo-credit">
+      <span>
+        {link(c.sourceUrl, c.title || "Photo")}
+        {c.author && <> by {link(c.authorUrl, c.author)}</>}
+        {c.source && <span className="muted"> ({c.source})</span>}
+      </span>
+      <span>
+        {link(c.licenseUrl, c.license || "Licence unknown")}
+        {c.attributionRequired && <span className="insp-badge">Attribution required</span>}
+        {c.nonCommercial && <span className="insp-badge warn">Non-commercial</span>}
+      </span>
+    </div>
+  );
+}
 
 function Group(props: { title: string; actions?: ReactNode; children: ReactNode }) {
   return (
@@ -384,6 +411,8 @@ interface AssetRow {
   /** Image fills download their original bytes. */
   assetId?: string;
   thumb?: string;
+  /** Stock photo credit. */
+  credit?: ImageCredit;
 }
 
 /** Image fills and exportable layers (own export rows, vectors) in a selection, itself included. */
@@ -399,7 +428,7 @@ function collectAssets(doc: Doc, root: Node): AssetRow[] {
     for (let i = n.children.length - 1; i >= 0; i--) stack.push(n.children[i]);
     for (const p of n.fills) {
       const m = p.type === "image" && p.visible ? p.src.match(/^asset:([a-z0-9_]+)$/) : null;
-      if (m) out.push({ key: `${n.id}:${m[1]}`, name: n.name, kind: "image", nodeId: n.id, assetId: m[1], thumb: assetUrl(m[1]) });
+      if (m) out.push({ key: `${n.id}:${m[1]}`, name: n.name, kind: "image", nodeId: n.id, assetId: m[1], thumb: assetUrl(m[1]), credit: p.type === "image" ? p.credit : undefined });
     }
     const vector = n.type === "vector" || n.type === "polygon" || n.type === "star";
     if (n.exportSettings?.length) {

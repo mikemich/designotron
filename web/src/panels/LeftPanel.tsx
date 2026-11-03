@@ -34,6 +34,8 @@ import { ColorStylesSection, EffectStylesSection, GridStylesSection, TextStylesS
 import { FolderTree } from "./FolderTree";
 import { useThumb } from "./assetThumbs";
 import { swapGroups } from "../componentOps";
+import { PhotoSearch } from "./PhotoSearch";
+import { useCollab } from "../collab";
 
 /** A mouse click on a row, page or tab leaves the keys with the canvas, as it did before these were
  * focusable: Space pans, arrows nudge, Enter selects children. Keyboard activation (detail 0) and
@@ -805,6 +807,7 @@ type AssetEntry = { set: Node | null; items: Node[] };
 
 function Assets() {
   const doc = useDoc();
+  const viewer = useCollab((s) => s.viewer);
   const [q, setQ] = useState("");
   const match = (s: string) => s.toLowerCase().includes(q.toLowerCase());
   // Variants are listed under their set (in the set's order), other components on their own.
@@ -874,6 +877,14 @@ function Assets() {
         {groups.length === 0 && <div className="muted small">Select layers and press ⌥⌘K to create a component.</div>}
         <FolderTree scope="components" items={entries} name={entryName} forceOpen={!!q.trim()} row={(e, label) => entryRow(e, label)} />
       </div>
+      {!viewer && (
+        <div className="section" data-testid="photos-section">
+          <div className="section-head">
+            <span>Photos</span>
+          </div>
+          <PhotoSearch mode={{ kind: "panel" }} />
+        </div>
+      )}
       <ColorStylesSection filter={q} />
       <TextStylesSection filter={q} />
       <EffectStylesSection filter={q} />

@@ -2012,6 +2012,7 @@ impl Engine {
         n.width = width;
         n.height = height;
         n.fills = vec![Paint::Image {
+          credit: None,
           src,
           scale_mode: Default::default(),
           opacity: 1.0,

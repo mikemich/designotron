@@ -1,0 +1,14 @@
+{
+  "id": 1001,
+  "width": 640,
+  "height": 480,
+  "url": "https://www.pexels.com/photo/studio-sneakers-1001/",
+  "photographer": "Pia Park",
+  "photographer_url": "https://www.pexels.com/@piapark",
+  "alt": "Studio sneakers",
+  "src": {
+    "original": "https://images.pexels.com/photos/1001/pexels-photo-1001.jpeg",
+    "large": "https://images.pexels.com/photos/1001/pexels-photo-1001.jpeg?auto=compress&w=940",
+    "medium": "https://images.pexels.com/photos/1001/pexels-photo-1001.jpeg?auto=compress&cs=tinysrgb&h=350"
+  }
+}

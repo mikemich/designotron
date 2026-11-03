@@ -36,6 +36,22 @@ export interface ImageCrop {
   h: number;
 }
 
+/** Where a stock photo came from and under which licence (mirrors `ImageCredit` in model.rs). */
+export interface ImageCredit {
+  provider: "openverse" | "unsplash" | "pexels" | string;
+  photoId: string;
+  title: string;
+  alt: string;
+  author: string;
+  authorUrl: string;
+  source: string;
+  sourceUrl: string;
+  license: string;
+  licenseUrl: string;
+  attributionRequired: boolean;
+  nonCommercial: boolean;
+}
+
 export type GradientPaintType = "linearGradient" | "radialGradient" | "angularGradient" | "diamondGradient";
 
 export type Paint =
@@ -44,7 +60,7 @@ export type Paint =
   | { type: "radialGradient"; stops: GradientStop[]; opacity: number; visible: boolean; handles?: GradientHandles }
   | { type: "angularGradient"; stops: GradientStop[]; opacity: number; visible: boolean; handles?: GradientHandles }
   | { type: "diamondGradient"; stops: GradientStop[]; opacity: number; visible: boolean; handles?: GradientHandles }
-  | { type: "image"; src: string; scaleMode: "fill" | "fit" | "stretch" | "tile" | "crop"; opacity: number; visible: boolean; crop?: ImageCrop };
+  | { type: "image"; src: string; scaleMode: "fill" | "fit" | "stretch" | "tile" | "crop"; opacity: number; visible: boolean; crop?: ImageCrop; credit?: ImageCredit };
 
 export type EffectType = "dropShadow" | "innerShadow" | "layerBlur" | "backgroundBlur";
 

@@ -1,0 +1,18 @@
+{
+  "id": "00000001-aaaa-4bbb-8ccc-dddddddddddd",
+  "title": "White sneakers on concrete",
+  "foreign_landing_url": "https://www.flickr.com/photos/example/100?utm_source=x#frag",
+  "url": "https://live.staticflickr.com/example/1.jpg",
+  "creator": "Ann Lee",
+  "creator_url": "https://www.flickr.com/photos/example1",
+  "license": "by",
+  "license_version": "2.0",
+  "license_url": "https://creativecommons.org/licenses/by/2.0/",
+  "provider": "flickr",
+  "source": "flickr",
+  "category": "photograph",
+  "width": 640,
+  "height": 480,
+  "thumbnail": "https://api.openverse.org/v1/images/00000001-aaaa-4bbb-8ccc-dddddddddddd/thumb/",
+  "mature": false
+}

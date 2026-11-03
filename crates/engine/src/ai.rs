@@ -23,11 +23,19 @@ use crate::render;
 
 mod mini_regex;
 mod parse;
+mod photos;
 #[cfg(test)]
 mod tool_tests;
 
 /// Tools that need a browser (rasterising, DOM). The web shell executes them.
-pub const BROWSER_TOOLS: &[&str] = &["get_screenshot", "import_html", "import_url", "save_plugin"];
+pub const BROWSER_TOOLS: &[&str] = &[
+  "get_screenshot",
+  "import_html",
+  "import_url",
+  "save_plugin",
+  "search_photos",
+  "place_photo",
+];
 
 /// Layers `get_document` outlines before it cuts the tree (deeper levels collapse to a count).
 const OUTLINE_CAP: usize = 250;
@@ -69,6 +77,7 @@ and set them for every instance in one set_component_props call. Never copy and 
 - Themes: for dark mode, duplicate the frame and set variableModes (e.g. {Theme: 'Dark'}) on the copy; don't recolour by hand.\n\
 - Layout: auto layout for every stack and row (width/height 'fill' or 'hug'); absolute only for overlays and decoration. Name \
 layers semantically (Header, Nav, Card, Button, Input): code export reads the names. App and site screens: set device on the frame.\n\
+- Images: for products, people and places call search_photos then place_photo into the image layer (keeps its size); never emoji.\n\
 Use real copy, a 4/8 grid, a clear type scale and accessible contrast. Recreate attached mockups as editable layers. If the \
 context line says \"Page is empty.\", skip get_document. Build every screen and state that was asked for. Finish a new design: if \
 the page had nothing else on it before this turn, call fix_issues once (it lints itself); otherwise call lint_design and fix only \
@@ -132,7 +141,7 @@ fn spec_schema() -> Value {
       "color": { "type": "string", "description": "Text colour" },
       "italic": { "type": "boolean" },
       "textCase": { "type": "string", "enum": ["original", "upper", "lower", "title"] },
-      "imageUrl": { "type": "string", "description": "Image fill: http(s) URL, data:image/ URL or asset:<id>" },
+      "imageUrl": { "type": "string", "description": "Image fill: http(s) URL, data:image/ URL or asset:<id>. For stock photos use search_photos + place_photo instead" },
       "fillStyle": { "type": ["string", "null"], "description": "Colour style name or id (from define_styles): sets the fill (the text colour on text) and links the layer to it; null unlinks" },
       "strokeStyle": { "type": ["string", "null"], "description": "Colour style name or id: sets the stroke colour and links the stroke to it; null unlinks" },
       "effectStyle": { "type": ["string", "null"], "description": "Effect style name or id (from define_styles effects): sets the layer's effects and links it; null unlinks" },
@@ -215,7 +224,7 @@ const ARRANGE_ACTIONS: &[&str] = &[
 pub fn tool_defs() -> Value {
   let spec = spec_schema();
   let update_item = update_item_schema(&spec);
-  json!([
+  let mut defs = json!([
     {
       "name": "get_document",
       "description": "Overview of the open design: pages, current page layer tree (to a depth), selection, components and styles. Call first, unless the editor context says the page is empty.",
@@ -384,7 +393,11 @@ pub fn tool_defs() -> Value {
       "description": "Render an HTML+CSS snippet (inline styles or <style>) at a width and convert it into editable layers, with flex/grid/stacked blocks mapped to auto layout. Good for complex layouts.",
       "input_schema": { "type": "object", "properties": { "html": { "type": "string" }, "width": { "type": "number" }, "x": { "type": "number" }, "y": { "type": "number" }, "parentId": { "type": "string" }, "name": { "type": "string" }, "autoLayout": { "type": "boolean", "description": "Map flex, grid and stacked blocks to auto layout (default true); false keeps absolutely positioned layers" } }, "required": ["html"] }
     }
-  ])
+  ]);
+  if let Some(list) = defs.as_array_mut() {
+    list.extend(photos::defs());
+  }
+  defs
 }
 
 fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
@@ -736,6 +749,7 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       }
       Ok(json!({ "fixed": fixed }))
     }
+    "search_photos" | "place_photo" => Err(photos::NEEDS_EDITOR.to_string()),
     t if BROWSER_TOOLS.contains(&t) => Err(format!("{t} needs the Designotron editor open in a browser")),
     other => Err(format!("unknown tool '{other}'")),
   }
@@ -2238,6 +2252,7 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
   if let Some(url) = s.get("imageUrl").or(s.get("src")).and_then(|v| v.as_str()) {
     parse::image_url(cx, if s.get("imageUrl").is_some() { "imageUrl" } else { "src" }, url)?;
     n.fills = vec![Paint::Image {
+      credit: None,
       src: url.to_string(),
       scale_mode: ScaleMode::Fill,
       opacity: 1.0,
@@ -3436,7 +3451,7 @@ mod tests {
     ] {
       assert!(SYSTEM_PROMPT.contains(word), "SYSTEM_PROMPT should mention {word}");
     }
-    assert!(SYSTEM_PROMPT.len() < 2800, "{} chars", SYSTEM_PROMPT.len());
+    assert!(SYSTEM_PROMPT.len() < 2900, "{} chars", SYSTEM_PROMPT.len());
     // fix_issues changes the whole page, so it is only for a page that had nothing else on it.
     assert!(SYSTEM_PROMPT.contains("had nothing else on it") && SYSTEM_PROMPT.contains("fix only your new layers"));
     // Edits to existing layers stay small, and the short-reply rule is scoped to the chat panel
