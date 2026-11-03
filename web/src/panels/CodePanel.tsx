@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
-import { Copy, Download, Sparkles } from "lucide-react";
-import { getDoc, query, useSelection, useStore } from "../store";
+import { Copy, Download, Image as ImageIcon, Sparkles } from "lucide-react";
+import { getDoc, query, toast, useSelection, useStore } from "../store";
 import { IconButton, Section, SelectField } from "../ui/controls";
 import type { Node } from "../types";
 import { copyText, exportProjectZip, withAssetPaths } from "../exporter";
@@ -17,8 +17,8 @@ export function CodePanel() {
   const [lang, setLang] = useState<Lang>("react");
   const n = nodes[0];
   // The engine writes images as `asset:<id>`. The snippet shows the paths an exported project
-  // serves them from; Copy inlines the bytes instead, because those paths don't exist in the
-  // project the code is pasted into.
+  // serves them from. Copy copies those paths; Copy with images inline embeds the bytes, which
+  // work pasted into any project.
   const raw = useMemo(() => {
     if (!n) return "";
     if (lang === "svg") return query<string>({ q: "exportSvg", id: n.id });
@@ -29,7 +29,7 @@ export function CodePanel() {
   const code = useMemo(() => {
     const shown = withAssetPaths(raw);
     if (!hasImages || lang === "css") return shown;
-    const note = "Images are written as /assets/<id>.<ext>, the files in public/assets of the downloaded project. Copy keeps them inline.";
+    const note = "Images are written as /assets/<id>.<ext>, the files in public/assets of the downloaded project. Use Copy with images inline to embed them.";
     return lang === "html" || lang === "svg" ? `<!-- ${note} -->\n${shown}` : shown.replace("\n\n", `\n// ${note}\n\n`);
   }, [raw, lang, hasImages]);
   return (
@@ -39,9 +39,16 @@ export function CodePanel() {
         <Section
           title={n.name}
           actions={
-            <IconButton title="Copy" onClick={() => copyText(inlineAssets(raw), `Copied code for ${n.name}`, "code")}>
-              <Copy size={13} />
-            </IconButton>
+            <>
+              <IconButton title={hasImages ? "Copy (image paths)" : "Copy"} onClick={() => copyText(withAssetPaths(raw), `Copied code for ${n.name}`, "code")}>
+                <Copy size={13} />
+              </IconButton>
+              {hasImages && (
+                <IconButton title="Copy with images inline" onClick={() => copyInline(raw, n.name)}>
+                  <ImageIcon size={13} />
+                </IconButton>
+              )}
+            </>
           }
         >
           <div className="row">
@@ -86,6 +93,13 @@ export function CodePanel() {
       </Section>
     </div>
   );
+}
+
+/** Copies the code with every image as a data URL, so it works pasted anywhere; big ones say so. */
+async function copyInline(raw: string, name: string) {
+  const text = inlineAssets(raw);
+  await copyText(text, `Copied code for ${name} with images inline`, "code");
+  if (text.length > 1_000_000) toast(`That is ${(text.length / 1_000_000).toFixed(1)} MB of code with the images inline; "Copy" keeps paths instead`);
 }
 
 export function cssFor(n: Node): string {

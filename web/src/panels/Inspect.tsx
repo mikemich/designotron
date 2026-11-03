@@ -3,12 +3,12 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Download } from "lucide-react";
-import { getDoc, useStore } from "../store";
+import { getDoc, query, toast, useStore } from "../store";
 import { assetUrl } from "../assets";
 import { downloadImageAsset, downloadLayerAsset } from "../exporter";
 import { Seg } from "../ui/controls";
-import { formatColor, type ColorFormat } from "../ui/color";
-import type { Doc, Effect, Node, Paint } from "../types";
+import { formatColor, parseColor, toHex, type ColorFormat } from "../ui/color";
+import type { Doc, Effect, Node, Paint, TextRun } from "../types";
 
 const FORMATS: { value: ColorFormat; label: string }[] = [
   { value: "hex", label: "Hex" },
@@ -35,7 +35,7 @@ export function Inspect({ node }: { node: Node }) {
       window.clearTimeout(timer.current);
       timer.current = window.setTimeout(() => setCopied(""), 1400);
     };
-    navigator.clipboard.writeText(text).then(done, () => {});
+    navigator.clipboard.writeText(text).then(done, () => toast("Could not copy: the browser blocked clipboard access", "error"));
   };
   const pick = (f: ColorFormat) => {
     setFormat(f);
@@ -46,7 +46,9 @@ export function Inspect({ node }: { node: Node }) {
     }
   };
   const doc = getDoc();
-  const info = useMemo(() => describe(doc, node), [node, docRev]);
+  // The names the exported code gives styles and variables.
+  const names = useMemo(() => query<Names>({ q: "inspect", id: node.id }), [node.id, docRev]);
+  const info = useMemo(() => describe(doc, node, names), [node, docRev, names]);
   const assets = useMemo(() => collectAssets(doc, node), [node.id, docRev]);
   const val = (text: string, label?: string) => <Val key={label ?? text} text={text} label={label} copied={copied === text} onCopy={copy} />;
   const L = node.layout;
@@ -157,6 +159,18 @@ export function Inspect({ node }: { node: Node }) {
           </Row>
           <Row k="Line height">{val(node.text.lineHeight == null ? "auto" : `${r(node.text.lineHeight)}px`)}</Row>
           <Row k="Letter spacing">{val(`${r(node.text.letterSpacing)}px`)}</Row>
+          {node.text.runs.length > 0 && (
+            <Row k="Mixed">
+              <span className="insp-runs">
+                {node.text.runs.slice(0, 8).map((run, i) => (
+                  <span key={i} className="muted small">
+                    {run.start}-{run.end}: {runLabel(run)}
+                  </span>
+                ))}
+                {node.text.runs.length > 8 && <span className="muted small">+{node.text.runs.length - 8} more</span>}
+              </span>
+            </Row>
+          )}
           <Row k="Align">
             <span className="muted">
               {node.text.alignH}
@@ -249,30 +263,57 @@ function Name(props: { kind: string; name: string }) {
 
 interface Swatch {
   paint: Paint;
-  /** The value in each format. Gradients list their stops. */
+  /** The stops (or the one colour) of the paint. */
   values: { hex: string; opacity: number }[];
   /** Linked colour style or bound variable. */
   link?: { kind: "Style" | "Variable"; name: string; css: string };
 }
 
+/** What a paint is called in the panel. */
+function paintName(p: Paint): string {
+  const t: string = p.type;
+  return t === "solid" ? "Solid" : t === "image" ? "Image" : t.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase());
+}
+
 function ColorRow(props: { kind: string; c: Swatch; format: ColorFormat; val: (text: string, label?: string) => ReactNode }) {
   const { c, format } = props;
-  const text = (v: { hex: string; opacity: number }) => (format === "css" && c.link ? c.link.css : formatColor(v.hex, v.opacity, format));
   const p = c.paint;
+  const one = (v: { hex: string; opacity: number }) => (format === "css" && c.link ? c.link.css : formatColor(v.hex, v.opacity, format));
+  // Linear and radial gradients are one CSS value; other kinds list their stops.
+  const gradient = p.type === "linearGradient" || p.type === "radialGradient" ? gradientText(p, format) : "";
   return (
     <Row k={props.kind}>
       <span className="insp-swatch" style={{ background: swatchCss(p) }} aria-hidden="true" />
       {p.type === "image" ? (
         <span>Image ({p.scaleMode})</span>
+      ) : gradient ? (
+        props.val(gradient, `${props.kind} ${paintName(p)}`)
       ) : (
         <>
-          {p.type !== "solid" && <span className="muted">{p.type === "linearGradient" ? "Linear " : "Radial "}</span>}
-          {c.values.map((v, i) => props.val(text(v), `${props.kind} ${i + 1}`))}
+          {p.type !== "solid" && <span className="muted">{paintName(p)} </span>}
+          {c.values.map((v, i) => props.val(one(v), `${props.kind} ${i + 1}`))}
         </>
       )}
       {c.link && <Name kind={c.link.kind} name={c.link.name} />}
     </Row>
   );
+}
+
+function gradientText(p: Paint, format: ColorFormat): string {
+  if (p.type !== "linearGradient" && p.type !== "radialGradient") return "";
+  const stops = p.stops.map((s) => `${formatColor(s.color, p.opacity, format)} ${Math.round(s.position * 1000) / 10}%`).join(", ");
+  return p.type === "linearGradient" ? `linear-gradient(${Math.round(p.angle * 100) / 100}deg, ${stops})` : `radial-gradient(circle, ${stops})`;
+}
+
+function runLabel(run: TextRun): string {
+  const bits: string[] = [];
+  if (run.fontFamily) bits.push(run.fontFamily);
+  if (run.fontSize) bits.push(`${run.fontSize}px`);
+  if (run.fontWeight) bits.push(`${run.fontWeight}`);
+  if (run.italic) bits.push("italic");
+  if (run.color) bits.push(run.color);
+  if (run.link) bits.push("link");
+  return bits.join(" ") || "styled";
 }
 
 // ---------- Reading the node ----------
@@ -284,29 +325,42 @@ interface Info {
   textStyle: string;
 }
 
+/** Names the engine gives styles and variables in exported code (`Query::Inspect`). */
+interface Names {
+  colorStyles: Record<string, string>;
+  textStyles: Record<string, string>;
+  variables: Record<string, string>;
+}
+
 /** Everything the panel shows that needs the document (linked style and variable names). */
-function describe(doc: Doc, n: Node): Info {
+function describe(doc: Doc, n: Node, names: Names): Info {
   const radii = n.cornerRadii;
   const radius = radii && radii.some((v) => v !== radii[0]) ? radii.map(r).join(" ") : `${r(radii ? radii[0] : n.cornerRadius)}`;
   const colorStyle = n.fillStyle ? doc.styles.colors.find((s) => s.id === n.fillStyle) : undefined;
-  const link = (prop: "fill" | "stroke"): Swatch["link"] => {
+  const sameColor = (a: string, b: string) => toHex(parseColor(a)) === toHex(parseColor(b));
+  const link = (prop: "fill" | "stroke", p: Paint, first: boolean): Swatch["link"] => {
     const id = n.bindings[prop];
-    if (id) {
+    if (id && first) {
       const name = varName(doc, id);
-      return { kind: "Variable", name, css: `var(--${slug(name)})` };
+      return { kind: "Variable", name, css: `var(${names.variables[id] ?? "--" + slug(name)})` };
     }
-    if (prop === "fill" && colorStyle) return { kind: "Style", name: colorStyle.name, css: `var(--color-${slug(colorStyle.name)})` };
+    // The style names a fill only while that fill still has the style's colour.
+    if (prop === "fill" && colorStyle && p.type === "solid" && p.opacity >= 1 && sameColor(p.color, colorStyle.color)) {
+      return { kind: "Style", name: colorStyle.name, css: `var(${names.colorStyles[colorStyle.id] ?? "--color-" + slug(colorStyle.name)})` };
+    }
     return undefined;
   };
-  const swatches = (paints: Paint[], prop: "fill" | "stroke"): Swatch[] =>
-    paints
-      .filter((p) => p.visible)
+  // Top paint first, as in the Design panel (the last paint draws on top).
+  const swatches = (paints: Paint[], prop: "fill" | "stroke"): Swatch[] => {
+    const visible = paints.filter((p) => p.visible);
+    return visible
       .map((p, i) => ({
         paint: p,
         values: p.type === "solid" ? [{ hex: p.color, opacity: p.opacity }] : p.type === "image" ? [] : p.stops.map((s) => ({ hex: s.color, opacity: p.opacity })),
-        // A style or variable names the layer's first paint.
-        link: i === 0 ? link(prop) : undefined,
-      }));
+        link: link(prop, p, i === 0),
+      }))
+      .reverse();
+  };
   return {
     radius: radius === "0" ? "" : radius,
     fills: swatches(n.fills, "fill"),
@@ -377,8 +431,12 @@ function effectCss(e: Effect): string {
 function swatchCss(p: Paint): string {
   if (p.type === "solid") return formatColor(p.color, p.opacity, "rgb");
   if (p.type === "image") return "var(--panel-3)";
-  const stops = p.stops.map((s) => `${formatColor(s.color, p.opacity, "rgb")} ${Math.round(s.position * 100)}%`).join(", ");
-  return p.type === "linearGradient" ? `linear-gradient(${p.angle}deg, ${stops})` : `radial-gradient(circle, ${stops})`;
+  if (p.type !== "linearGradient" && p.type !== "radialGradient") {
+    // Other gradient kinds: a plain preview from their stops.
+    const stops = (p as { stops?: { color: string; position: number }[] }).stops ?? [];
+    return stops.length ? `linear-gradient(90deg, ${stops.map((s) => `${formatColor(s.color, 1, "rgb")} ${Math.round(s.position * 100)}%`).join(", ")})` : "var(--panel-3)";
+  }
+  return gradientText(p, "rgb");
 }
 
 function readFormat(): ColorFormat {

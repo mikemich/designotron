@@ -374,7 +374,7 @@ pub fn tokens_css(doc: &Document) -> String {
   for c in &doc.variables {
     // Every mode gets a block (the default too, so it can be re-selected inside another mode).
     for m in &c.modes {
-      out.push_str(&format!("\n[{}=\"{}\"] {{\n", mode_attr(c), slug(&m.name)));
+      out.push_str(&format!("\n[{}=\"{}\"] {{\n", mode_attr(c), mode_slug(c, m)));
       for v in &c.variables {
         if let Some(val) = css_value(doc, c, v, &m.id) {
           out.push_str(&format!("  {}: {val};\n", css_name(c, v)));
@@ -388,7 +388,18 @@ pub fn tokens_css(doc: &Document) -> String {
 
 /// HTML attribute that switches a collection's mode in generated code.
 pub fn mode_attr(c: &Collection) -> String {
-  format!("data-{}", slug(&c.name))
+  let name = slug(&c.name);
+  format!("data-{}", if name.is_empty() { "collection" } else { &name })
+}
+
+/// A mode's value in that attribute: its slug, or `mode-N` when the name has no ASCII letters.
+pub fn mode_slug(c: &Collection, m: &VarMode) -> String {
+  let name = slug(&m.name);
+  if name.is_empty() {
+    format!("mode-{}", c.modes.iter().position(|x| x.id == m.id).unwrap_or(0) + 1)
+  } else {
+    name
+  }
 }
 
 /// Summary for Claude: collections, modes and variables with their values by mode name.

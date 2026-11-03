@@ -163,6 +163,8 @@ struct El {
   slot: Option<String>,
   /// Named style classes (`text-heading-1`), written before the utilities. React project export only.
   classes: Vec<String>,
+  /// Inside a button or link: the click handler stops there, so only the innermost action runs.
+  stop_click: bool,
 }
 
 impl El {
@@ -187,6 +189,7 @@ impl El {
       text_prop: None,
       slot: None,
       classes: vec![],
+      stop_click: false,
     }
   }
 
@@ -222,6 +225,10 @@ struct Ctx<'a> {
   text_classes: BTreeMap<String, Vec<(String, String)>>,
   /// Colour style custom property → its colour.
   color_vars: BTreeMap<String, String>,
+  /// Names of the styles' classes and custom properties, by style id.
+  names: StyleNames,
+  /// How many button or link elements enclose the layer being built.
+  interactive_depth: usize,
 }
 
 /// Props an instance sets on its component: string attributes and expression attributes.
@@ -266,6 +273,8 @@ impl<'a> Ctx<'a> {
       style_classes: false,
       text_classes: BTreeMap::new(),
       color_vars: BTreeMap::new(),
+      names: StyleNames::default(),
+      interactive_depth: 0,
     };
     for p in &doc.pages {
       for id in &p.children {
@@ -360,7 +369,8 @@ impl<'a> Ctx<'a> {
     if !n.visible && bound.visible.is_none() {
       return None;
     }
-    if self.reuse_components && n.kind == NodeType::Instance && place != Place::Root {
+    // A component function could put a button inside this button or link: write the instance inline.
+    if self.reuse_components && self.interactive_depth == 0 && n.kind == NodeType::Instance && place != Place::Root {
       if let Some(info) = n.instance.as_ref() {
         // Property values and swapped icons become props; any other override inlines the instance.
         let args = self.prop_args(&n);
@@ -406,7 +416,8 @@ impl<'a> Ctx<'a> {
       }
       NodeType::Text => {
         let mut e = self.text_el(&n);
-        e.tag = self.heading_tag(&n);
+        // Text in a button or link is a span, and doesn't use up the screen's h1.
+        e.tag = if self.interactive_depth > 0 { "span" } else { self.heading_tag(&n) };
         e
       }
       NodeType::Vector | NodeType::Polygon | NodeType::Star => {
@@ -507,6 +518,8 @@ impl<'a> Ctx<'a> {
       let fixed = |c: &Node| c.scroll_behavior == crate::model::ScrollBehavior::Fixed && (n.layout.is_none() || c.absolute_position);
       let split = n.overflow != crate::model::Overflow::None && n.layout.is_none();
       let mut stuck = Vec::new();
+      let interactive = matches!(el.tag, "button" | "a");
+      self.interactive_depth += usize::from(interactive);
       for cid in &n.children {
         let Some(c) = self.doc.get(cid).cloned() else { continue };
         if let Some(ce) = self.build(cid, child_place(&c)) {
@@ -536,6 +549,7 @@ impl<'a> Ctx<'a> {
         el.children.push(inner);
         el.children.extend(stuck);
       }
+      self.interactive_depth -= usize::from(interactive);
     }
     self.interactions(&mut el, &n);
     if matches!(place, Place::Root | Place::ComponentRoot) {
@@ -839,7 +853,7 @@ impl<'a> Ctx<'a> {
     for (coll_id, mode_id) in &n.variable_modes {
       if let Some(c) = self.doc.variables.iter().find(|c| &c.id == coll_id) {
         if let Some(m) = c.modes.iter().find(|m| &m.id == mode_id) {
-          el.attrs.push((vars::mode_attr(c), vars::slug(&m.name)));
+          el.attrs.push((vars::mode_attr(c), vars::mode_slug(c, m)));
         }
       }
     }
@@ -903,7 +917,7 @@ impl<'a> Ctx<'a> {
         && t.line_height == style.line_height
         && t.letter_spacing == style.letter_spacing;
       if same && el.raw.is_none() {
-        let class = text_class(&style.name);
+        let class = self.names.texts.get(&style.id).cloned().unwrap_or_else(|| text_class(&style.name));
         const OWN: [&str; 5] = ["font-family", "font-size", "font-weight", "line-height", "letter-spacing"];
         let mut decls: Vec<(String, String)> = el.styles.iter().filter(|(k, _)| OWN.contains(&k.as_str())).cloned().collect();
         if !decls.iter().any(|(k, _)| k == "font-weight") {
@@ -931,12 +945,15 @@ impl<'a> Ctx<'a> {
     let Some(Paint::Solid { color: fill, opacity, .. }) = n.fills.iter().find(|p| p.visible()) else {
       return;
     };
-    if color::normalize(fill) != color::normalize(&style.color) {
+    // A custom property holds the opaque colour, so a see-through fill keeps its literal value.
+    if *opacity < 1.0 || color::normalize(fill) != color::normalize(&style.color) {
       return;
     }
     let key = if n.kind == NodeType::Text { "color" } else { "background-color" };
     let lit = color::css_with_opacity(fill, *opacity);
-    let name = format!("--color-{}", crate::variables::slug(&style.name));
+    let Some(name) = self.names.colors.get(&style.id).cloned() else {
+      return;
+    };
     if let Some((_, v)) = el.styles.iter_mut().find(|(k, v)| k == key && *v == lit) {
       *v = format!("var({name})");
       self.color_vars.insert(name, color::css_with_opacity(&style.color, 1.0));
@@ -1104,7 +1121,7 @@ impl<'a> Ctx<'a> {
       }
       None => {}
     }
-    el.s("font-family", font_stack(&t.font_family));
+    el.s("font-family", css_family(&t.font_family));
     el.s("font-size", px(t.font_size));
     if t.font_weight != 400 {
       el.s("font-weight", t.font_weight.to_string());
@@ -1190,18 +1207,15 @@ impl<'a> Ctx<'a> {
 }
 
 /// Valid nesting: a button or link inside another becomes a `div` (or `span` for text) with the
-/// same classes and loses its click handler (the outermost one keeps it); text inside a button
-/// or link is a `span`, never a paragraph or heading; links inside their text become spans.
+/// same classes; text inside a button or link is a `span`, never a paragraph or heading; links
+/// inside their text become spans. A clickable layer inside a button stops the click there, so
+/// only the innermost action runs, as in the prototype player.
 fn fix_interactive(el: &mut El, inside: bool) {
   let interactive = el.tag == "button" || el.tag == "a";
   if inside {
     if interactive {
       el.tag = "div";
       el.attrs.retain(|(k, _)| k != "type" && k != "href");
-      el.navigate = None;
-      el.overlay = None;
-      el.url = None;
-      el.styles.retain(|(k, v)| !(k == "cursor" && v == "pointer"));
     }
     if matches!(el.tag, "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
       el.tag = "span";
@@ -1209,11 +1223,71 @@ fn fix_interactive(el: &mut El, inside: bool) {
     for sp in &mut el.spans {
       sp.link = None;
     }
+    el.stop_click = el.navigate.is_some() || el.url.is_some();
   }
   let inner = inside || interactive;
   for c in &mut el.children {
     fix_interactive(c, inner);
   }
+}
+
+/// Names of the classes and custom properties of the document's styles, by style id. Every style
+/// gets its own: names that repeat get `-2`, `-3`, an empty name (all non-ASCII) `-N` by position,
+/// and a colour never takes a variable's custom property.
+#[derive(Default)]
+pub(crate) struct StyleNames {
+  pub colors: BTreeMap<String, String>,
+  pub texts: BTreeMap<String, String>,
+}
+
+pub(crate) fn style_names(doc: &Document) -> StyleNames {
+  let mut taken: BTreeSet<String> = doc
+    .variables
+    .iter()
+    .flat_map(|c| c.variables.iter().map(move |v| crate::variables::css_name(c, v)))
+    .collect();
+  let mut out = StyleNames::default();
+  let free = |base: String, taken: &mut BTreeSet<String>| {
+    let mut name = base.clone();
+    let mut i = 2;
+    while taken.contains(&name) {
+      name = format!("{base}-{i}");
+      i += 1;
+    }
+    taken.insert(name.clone());
+    name
+  };
+  for (i, c) in doc.styles.colors.iter().enumerate() {
+    let slug = crate::variables::slug(&c.name);
+    let base = if slug.is_empty() {
+      format!("--color-style-{}", i + 1)
+    } else {
+      format!("--color-{slug}")
+    };
+    out.colors.insert(c.id.clone(), free(base, &mut taken));
+  }
+  let mut taken: BTreeSet<String> = BTreeSet::new();
+  for (i, t) in doc.styles.texts.iter().enumerate() {
+    let base = if crate::variables::slug(&t.name).is_empty() {
+      format!("text-style-{}", i + 1)
+    } else {
+      text_class(&t.name)
+    };
+    out.texts.insert(t.id.clone(), free(base, &mut taken));
+  }
+  out
+}
+
+/// What `Query::Inspect` answers: the custom property of each colour style and variable, and the
+/// class of each text style, as the exported project names them.
+pub fn inspect_names(doc: &Document) -> serde_json::Value {
+  let n = style_names(doc);
+  let vars: BTreeMap<String, String> = doc
+    .variables
+    .iter()
+    .flat_map(|c| c.variables.iter().map(move |v| (v.id.clone(), crate::variables::css_name(c, v))))
+    .collect();
+  json!({ "colorStyles": n.colors, "textStyles": n.texts, "variables": vars })
 }
 
 /// CSS class of a text style: "Heading 1" → `text-heading-1`. Names Tailwind already uses for a
@@ -1314,7 +1388,7 @@ fn text_spans(t: &crate::model::TextProps) -> Vec<Span> {
     if end > start {
       let mut styles: Vec<(String, String)> = Vec::new();
       if let Some(f) = &r.font_family {
-        styles.push(("font-family".into(), font_stack(f)));
+        styles.push(("font-family".into(), css_family(f)));
       }
       if let Some(v) = r.font_size {
         styles.push(("font-size".into(), px(v)));
@@ -1364,6 +1438,11 @@ fn text_spans(t: &crate::model::TextProps) -> Vec<Span> {
     out.push(plain(pos, chars.len()));
   }
   out
+}
+
+/// A font stack for CSS, with quotes and backslashes in the family name escaped.
+fn css_family(family: &str) -> String {
+  font_stack(&family.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
 /// A paint as a CSS background value for a layer of `w` x `h` (gradient handles are in layer units).
@@ -1609,7 +1688,10 @@ fn tw_class_raw(k: &str, v: &str) -> String {
     ("border-radius", _) => format!("rounded-[{a}]"),
     ("opacity", _) => format!("opacity-[{a}]"),
     ("box-shadow", _) => format!("shadow-[{a}]"),
-    ("font-family", _) => format!("font-[{}]", tw_value(&v.replace('\'', "")).replace(",_", ",")),
+    ("font-family", _) => {
+      let bare: String = v.chars().filter(|c| !matches!(c, '\'' | '"' | '\\' | '[' | ']')).collect();
+      format!("font-[{}]", tw_value(&bare).replace(",_", ","))
+    }
     _ => format!("[{k}:{a}]"),
   }
 }
@@ -1675,21 +1757,19 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
   } else {
     class_attr = format!("\"{class_attr}\"");
   }
-  let handler = if let Some(screen) = &el.navigate {
+  let action = if let Some(screen) = &el.navigate {
     let opts = el.overlay.as_ref().map(|o| format!(", {o}")).unwrap_or_default();
-    format!(
-      " onClick={{() => onNavigate?.({}{opts})}}",
-      serde_json::to_string(screen).unwrap_or_default()
-    )
-  } else if let Some(url) = &el.url {
-    format!(
-      " onClick={{() => window.open({}, \"_blank\")}}",
-      serde_json::to_string(url).unwrap_or_default()
-    )
-  } else if el.is_component_root {
-    " onClick={onClick}".to_string()
+    Some(format!("onNavigate?.({}{opts})", serde_json::to_string(screen).unwrap_or_default()))
   } else {
-    String::new()
+    el.url
+      .as_ref()
+      .map(|url| format!("window.open({}, \"_blank\")", serde_json::to_string(url).unwrap_or_default()))
+  };
+  let handler = match action {
+    Some(a) if el.stop_click => format!(" onClick={{(e) => {{ e.stopPropagation(); {a}; }}}}"),
+    Some(a) => format!(" onClick={{() => {a}}}"),
+    None if el.is_component_root => " onClick={onClick}".to_string(),
+    None => String::new(),
   };
   let handler = format!(
     "{handler}{}",
@@ -2202,18 +2282,31 @@ fn style_css(ctx: &Ctx) -> String {
 }
 
 /// Collections with more than one mode: (attribute suffix, mode names as written in CSS).
+/// Collections that share an attribute are one entry with the union of their modes.
 fn themed_collections(doc: &Document) -> Vec<(String, Vec<String>)> {
-  doc
-    .variables
-    .iter()
-    .filter(|c| c.modes.len() > 1)
-    .map(|c| {
-      (
-        crate::variables::slug(&c.name),
-        c.modes.iter().map(|m| crate::variables::slug(&m.name)).collect(),
-      )
-    })
-    .collect()
+  let mut out: Vec<(String, Vec<String>)> = Vec::new();
+  let mut multi: BTreeSet<String> = BTreeSet::new();
+  for c in &doc.variables {
+    let key = crate::variables::mode_attr(c).trim_start_matches("data-").to_string();
+    if c.modes.len() > 1 {
+      multi.insert(key.clone());
+    }
+    let at = match out.iter().position(|(k, _)| *k == key) {
+      Some(i) => i,
+      None => {
+        out.push((key, Vec::new()));
+        out.len() - 1
+      }
+    };
+    for m in &c.modes {
+      let name = crate::variables::mode_slug(c, m);
+      if !out[at].1.contains(&name) {
+        out[at].1.push(name);
+      }
+    }
+  }
+  out.retain(|(k, _)| multi.contains(k));
+  out
 }
 
 /// `tokens.ts`: switches a collection's mode by setting `data-<collection>` on the root element.
@@ -2253,6 +2346,7 @@ pub struct ProjectFile {
 pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> {
   let mut ctx = Ctx::new(doc, m, true);
   ctx.style_classes = true;
+  ctx.names = style_names(doc);
   ctx.register_library();
   let mut files = Vec::new();
   let screens: Vec<(String, String)> = ctx.screen_order.clone();
@@ -3057,9 +3151,202 @@ mod tests {
     assert_eq!(src.matches("<button ").count(), 1, "{src}");
     assert_eq!(
       src.matches("onNavigate?.(").count(),
-      2,
-      "the sample button and the outer button, not the inner one: {src}"
+      3,
+      "the sample button, the outer button and the inner one: {src}"
     );
+    // The downgraded inner button keeps its action but stops the click, so only it runs.
+    assert!(src.contains("(e) => { e.stopPropagation(); onNavigate?.("), "{src}");
+    // A big heading inside a button doesn't use up the screen's h1.
+    let mut doc2 = doc.clone();
+    let page = doc2.pages[0].id.clone();
+    let mut h = crate::ops::default_node(NodeType::Text, "hh".into(), "Heading".into());
+    h.text.as_mut().unwrap().characters = "Title".into();
+    h.text.as_mut().unwrap().font_size = 40.0;
+    doc2.insert(h, Some("home"), &page, None);
+    assert!(export_react(&doc2, "home", &HeuristicMeasurer).contains("<h1 "));
+  }
+
+  #[test]
+  fn instances_inside_buttons_are_written_inline() {
+    let mut doc = sample();
+    let mut gen = IdGen::new(900);
+    let c = make_component(&mut doc, &mut gen, "pay", "Pay button", "Pay");
+    doc.get_mut(&c).unwrap().height = 40.0;
+    let page = doc.pages[0].id.clone();
+    let mut row = crate::ops::default_node(NodeType::Frame, "row".into(), "Row button".into());
+    row.height = 60.0;
+    row.interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    doc.insert(row, Some("home"), &page, None);
+    let inst = crate::components::create_instance(&mut doc, &c, Some("row"), &page, 0.0, 0.0, &mut gen).unwrap();
+    doc.get_mut(&inst).unwrap().interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    // Outside a button the instance is still a component.
+    let loose = crate::components::create_instance(&mut doc, &c, Some("home"), &page, 0.0, 0.0, &mut gen).unwrap();
+    let _ = loose;
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(tag_stack_ok(&src).is_ok(), "{:?}\n{src}", tag_stack_ok(&src));
+    assert!(src.contains("<PayButton "), "{src}");
+    assert!(src.contains("e.stopPropagation()"), "{src}");
+    let files = export_project(&doc, &HeuristicMeasurer);
+    for f in files.iter().filter(|f| f.path.ends_with(".tsx")) {
+      assert!(tag_stack_ok(&f.content).is_ok(), "{}: {:?}", f.path, tag_stack_ok(&f.content));
+    }
+  }
+
+  #[test]
+  fn collections_with_the_same_slug_share_one_key() {
+    use crate::variables::{Collection, VarMode};
+    let mut doc = sample();
+    let col = |id: &str, name: &str, modes: &[&str]| Collection {
+      id: id.into(),
+      name: name.into(),
+      modes: modes
+        .iter()
+        .map(|m| VarMode {
+          id: format!("{id}{m}"),
+          name: (*m).into(),
+        })
+        .collect(),
+      variables: vec![],
+    };
+    doc.variables = vec![
+      col("a", "Theme", &["Light", "Dark"]),
+      col("b", "theme!", &["Light", "Sepia"]),
+      col("c", "主题", &["亮", "暗"]),
+      col("d", "颜色", &["亮", "暗"]),
+    ];
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let ts = &files.iter().find(|f| f.path == "src/tokens.ts").unwrap().content;
+    assert_eq!(ts.matches("\"theme\":").count(), 1, "{ts}");
+    assert!(ts.contains("[\"light\", \"dark\", \"sepia\"]"), "{ts}");
+    assert_eq!(ts.matches("\"collection\":").count(), 1, "{ts}");
+    assert!(ts.contains("\"mode-1\", \"mode-2\""), "{ts}");
+  }
+
+  #[test]
+  fn style_names_are_unique_and_never_take_a_variables_property() {
+    use crate::variables::{Collection, VarKind, VarMode, Variable};
+    let mut doc = sample();
+    doc.variables.push(Collection {
+      id: "c".into(),
+      name: "Color".into(),
+      modes: vec![VarMode {
+        id: "m".into(),
+        name: "Default".into(),
+      }],
+      variables: vec![Variable {
+        id: "v".into(),
+        name: "Color/Primary".into(),
+        kind: VarKind::Color,
+        values: BTreeMap::from([("m".into(), json!("#FF0000"))]),
+        description: String::new(),
+      }],
+    });
+    let color = |id: &str, name: &str, c: &str| crate::model::ColorStyle {
+      id: id.into(),
+      name: name.into(),
+      color: c.into(),
+    };
+    doc.styles.colors = vec![
+      color("c1", "Brand/Primary", "#111111"),
+      color("c2", "Brand Primary", "#222222"),
+      color("c3", "主色", "#333333"),
+      color("c4", "副色", "#444444"),
+      color("c5", "Primary", "#555555"),
+      color("c6", "Color Primary", "#666666"),
+    ];
+    let text = |id: &str, name: &str, size: f64| crate::model::TextStyle {
+      id: id.into(),
+      name: name.into(),
+      font_family: "Inter".into(),
+      font_size: size,
+      font_weight: 400,
+      line_height: None,
+      letter_spacing: 0.0,
+    };
+    doc.styles.texts = vec![
+      text("t1", "Heading 1", 20.0),
+      text("t2", "Heading-1", 30.0),
+      text("t3", "标题", 40.0),
+      text("t4", "正文", 50.0),
+    ];
+    let n = style_names(&doc);
+    let all: BTreeSet<&String> = n.colors.values().chain(n.texts.values()).collect();
+    assert_eq!(all.len(), 10, "{:?} {:?}", n.colors, n.texts);
+    assert_eq!(n.colors["c1"], "--color-brand-primary");
+    assert_eq!(n.colors["c2"], "--color-brand-primary-2");
+    assert_eq!(n.colors["c3"], "--color-style-3");
+    assert_eq!(n.colors["c4"], "--color-style-4");
+    // "--color-primary" is the variable "Color/Primary": the style steps aside.
+    assert_eq!(n.colors["c6"], "--color-color-primary");
+    assert_ne!(n.colors["c5"], "--color-primary");
+    assert_eq!(n.texts["t1"], "text-heading-1");
+    assert_eq!(n.texts["t2"], "text-heading-1-2");
+    assert_eq!(n.texts["t3"], "text-style-3");
+    // Two layers with styles of the same slug each get their own class and values.
+    {
+      let t = doc.get_mut("t").unwrap();
+      t.text_style = Some("t2".into());
+      t.text.as_mut().unwrap().font_size = 30.0;
+    }
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let css = &files.iter().find(|f| f.path == "src/index.css").unwrap().content;
+    assert!(css.contains(".text-heading-1-2 {") && css.contains("30px"), "{css}");
+    let inspect = inspect_names(&doc);
+    assert_eq!(inspect["colorStyles"]["c4"], "--color-style-4");
+    assert_eq!(inspect["variables"]["v"], "--color-primary");
+  }
+
+  #[test]
+  fn colour_style_on_a_see_through_fill_keeps_its_opacity() {
+    let mut doc = sample();
+    doc.styles.colors.push(crate::model::ColorStyle {
+      id: "cs".into(),
+      name: "Brand".into(),
+      color: "#7C5CFF".into(),
+    });
+    let b = doc.get_mut("btn").unwrap();
+    b.fill_style = Some("cs".into());
+    b.fills = vec![Paint::Solid {
+      color: "#7C5CFF".into(),
+      opacity: 0.4,
+      visible: true,
+    }];
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let home = &files.iter().find(|f| f.path == "src/screens/Home.tsx").unwrap().content;
+    assert!(!home.contains("var(--color-brand)"), "{home}");
+    assert!(home.contains("rgba(124,92,255,0.4)") || home.contains("0.4"), "{home}");
+  }
+
+  #[test]
+  fn font_families_with_quotes_are_escaped() {
+    let mut doc = sample();
+    doc.get_mut("t").unwrap().text.as_mut().unwrap().font_family = "Gill's \"Sans\"".into();
+    doc.styles.texts.push(crate::model::TextStyle {
+      id: "ts".into(),
+      name: "Body".into(),
+      font_family: "Gill's \"Sans\"".into(),
+      font_size: 16.0,
+      font_weight: 400,
+      line_height: None,
+      letter_spacing: 0.0,
+    });
+    doc.get_mut("t").unwrap().text_style = Some("ts".into());
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let css = &files.iter().find(|f| f.path == "src/index.css").unwrap().content;
+    assert!(css.contains("'Gill\\'s \"Sans\"'"), "{css}");
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    let class_attrs: Vec<&str> = src.lines().filter(|l| l.contains("className=")).collect();
+    for l in class_attrs {
+      let inner = l.split("className=\"").nth(1).unwrap_or("");
+      let inner = &inner[..inner.find('"').unwrap_or(inner.len())];
+      assert!(!inner.contains('\\'), "{l}");
+    }
   }
 
   #[test]
@@ -3072,6 +3359,7 @@ mod tests {
       scale_mode: ScaleMode::Fill,
       opacity: 1.0,
       visible: true,
+      crop: None,
     }];
     doc.insert(f, Some("home"), &page, None);
     let src = export_react(&doc, "home", &HeuristicMeasurer);

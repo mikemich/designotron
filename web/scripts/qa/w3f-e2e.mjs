@@ -147,6 +147,18 @@ try {
   check("typography shows size, weight and line height", /Size\s*28px/.test(typo) && /Weight\s*700/.test(typo) && /Line height\s*36px/.test(typo), typo);
   check("a colour style shows its name", (await group("Colours").innerText()).includes("Ink"), (await group("Colours").innerText()).replace(/\s+/g, " "));
 
+  // Mixed text styles, gradients as real CSS, top paint first.
+  const title = await byName("Title");
+  await page.evaluate((id) => window.__dt.dispatch({ op: "update", ids: [id], patch: { text: { runs: [{ start: 0, end: 3, fontWeight: 700, fontSize: 40 }] } } }), title.id);
+  await page.waitForTimeout(200);
+  check("mixed text styles are listed", (await group("Typography").innerText()).includes("Mixed") && (await group("Typography").innerText()).includes("0-3"), (await group("Typography").innerText()).replace(/\s+/g, " "));
+  await page.evaluate(() => window.__dt.tool("create_nodes", { parentId: null, nodes: [{ type: "frame", name: "Grad", x: 0, y: 2000, width: 100, height: 100, fill: "linear-gradient(90deg, #FF0000 0%, #0000FF 100%)" }] }));
+  await select("Grad");
+  await group("Colours").getByRole("button", { name: "CSS" }).click();
+  const gradText = await group("Colours").locator(".insp-val").first().innerText();
+  check("a gradient shows as a CSS linear-gradient()", /^linear-gradient\(90deg, #ff0000 0%, #0000ff 100%\)$/.test(gradText), gradText);
+  await group("Colours").getByRole("button", { name: "Hex" }).click();
+
   // ---------- Assets ----------
   await select("Card");
   const assets = group("Assets");
@@ -163,11 +175,16 @@ try {
   const snippet = async () => page.locator(".code-block").innerText();
   const react = await snippet();
   check("the React snippet has no inlined image", !react.includes("data:image"));
-  check("the React snippet shows /assets/ paths with a note", /\/assets\/\w+\.png/.test(react) && react.includes("Copy keeps them inline"), react.slice(0, 200));
-  await page.locator(".section", { has: page.locator(".section-head", { hasText: "Card" }) }).getByRole("button", { name: "Copy" }).click();
+  check("the React snippet shows /assets/ paths with a note", /\/assets\/\w+\.png/.test(react) && react.includes("Copy with images inline"), react.slice(0, 200));
+  const codeSection = page.locator(".section", { has: page.locator(".section-head", { hasText: "Card" }) });
+  await codeSection.getByRole("button", { name: "Copy (image paths)" }).click();
+  await page.waitForTimeout(150);
+  const pathCopy = await page.evaluate(() => navigator.clipboard.readText());
+  check("Copy copies the asset paths", /\/assets\/\w+\.png/.test(pathCopy) && !pathCopy.includes("data:image"), pathCopy.slice(0, 100));
+  await codeSection.getByRole("button", { name: "Copy with images inline" }).click();
   await page.waitForTimeout(150);
   const copied = await page.evaluate(() => navigator.clipboard.readText());
-  check("Copy still copies working code (images inline)", copied.includes("data:image/png") && !copied.includes("asset:"), copied.slice(0, 100));
+  check("Copy with images inline copies working code", copied.includes("data:image/png") && !copied.includes("asset:"), copied.slice(0, 100));
   check("the snippet has no nested interactive elements", !/<button[^>]*>(?:(?!<\/button>)[\s\S])*<button/.test(react), "");
   check("text in the button is a span, not a heading", !/<h1[^>]*>\{"Buy now"\}/.test(react) && /<span[^>]*>\{"Buy now"\}<\/span>/.test(react), react.match(/.*Buy now.*/)?.[0]);
 
