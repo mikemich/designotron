@@ -254,6 +254,16 @@ pub struct Node {
 
   pub fill_style: Option<String>,
   pub text_style: Option<String>,
+  // Styles (W3-C)
+  /// Linked effect style; editing the style rewrites `effects`, editing the effects by hand detaches.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub effect_style: Option<String>,
+  /// Linked grid style (frames), like `effect_style` for `layout_grids`.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub grid_style: Option<String>,
+  /// Linked colour style for the first stroke paint.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub stroke_style: Option<String>,
 
   pub interactions: Vec<Interaction>,
   // Prototype (W3-A)
@@ -329,6 +339,9 @@ impl Default for Node {
       master_id: None,
       fill_style: None,
       text_style: None,
+      effect_style: None,
+      grid_style: None,
+      stroke_style: None,
       interactions: Vec::new(),
       overflow: Overflow::None,
       scroll_behavior: ScrollBehavior::Scroll,
@@ -1261,6 +1274,10 @@ impl Default for ExportSetting {
 pub struct Styles {
   pub colors: Vec<ColorStyle>,
   pub texts: Vec<TextStyle>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub effects: Vec<EffectStyle>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub grids: Vec<GridStyle>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -1281,6 +1298,26 @@ pub struct TextStyle {
   pub font_weight: u32,
   pub line_height: Option<f64>,
   pub letter_spacing: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EffectStyle {
+  pub id: String,
+  pub name: String,
+  pub effects: Vec<Effect>,
+  #[serde(skip_serializing_if = "String::is_empty")]
+  pub description: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GridStyle {
+  pub id: String,
+  pub name: String,
+  pub grids: Vec<LayoutGrid>,
+  #[serde(skip_serializing_if = "String::is_empty")]
+  pub description: String,
 }
 
 fn schema_version() -> u32 {

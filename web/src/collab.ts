@@ -177,7 +177,7 @@ const sentAssets = new Set<string>();
 let unsubscribe: (() => void) | null = null;
 
 /** Delta keys of pages, styles and variables sent per id (see `collab::delta`). */
-const GRANULAR_KEYS = ["pageChanges", "colorStyles", "textStyles", "collectionChanges", "variableChanges"];
+const GRANULAR_KEYS = ["pageChanges", "colorStyles", "textStyles", "effectStyles", "gridStyles", "collectionChanges", "variableChanges"];
 
 function isEmptyDelta(d: any): boolean {
   return (

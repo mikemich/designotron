@@ -342,7 +342,9 @@ fn local_op(e: &mut Engine, r: &mut Rng, solo: bool) {
   let pages: Vec<String> = e.doc.pages.iter().map(|p| p.id.clone()).collect();
   let styles: Vec<String> = e.doc.styles.colors.iter().map(|s| s.id.clone()).collect();
   let page = |r: &mut Rng| pages[r.below(pages.len())].clone();
-  let pick = r.below(16);
+  let effects: Vec<String> = e.doc.styles.effects.iter().map(|s| s.id.clone()).collect();
+  let grids: Vec<String> = e.doc.styles.grids.iter().map(|s| s.id.clone()).collect();
+  let pick = r.below(24);
   let pick = if solo && matches!(pick, 4 | 11..=13) { 15 } else { pick };
   match pick {
     0 => {
@@ -395,6 +397,81 @@ fn local_op(e: &mut Engine, r: &mut Rng, solo: bool) {
     13 => {
       let _ = e.dispatch(Command::Redo);
     }
+    16 | 17 => {
+      // One undo step (a gesture) for the layer and the style made from it.
+      e.dispatch(Command::BeginGesture).unwrap();
+      // A layer with a random shadow, saved as an effect style (or a grid style).
+      let id = e
+        .dispatch(Command::CreateShape {
+          kind: NodeType::Rectangle,
+          x: 0.0,
+          y: 0.0,
+          width: 10.0,
+          height: 10.0,
+          parent: None,
+        })
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+      let (key, patch) = if pick == 16 {
+        ("effects", json!([{ "type": "dropShadow", "blur": r.below(30), "y": r.below(9) }]))
+      } else {
+        ("layoutGrids", json!([{ "pattern": "columns", "count": r.below(12) + 1 }]))
+      };
+      e.dispatch(Command::Update {
+        ids: vec![id.clone()],
+        patch: json!({ key: patch }),
+      })
+      .unwrap();
+      let name = format!("Fx/{}", r.below(1000));
+      let _ = e.dispatch(if pick == 16 {
+        Command::AddEffectStyle {
+          name,
+          from: id,
+          description: String::new(),
+        }
+      } else {
+        Command::AddGridStyle {
+          name,
+          from: id,
+          description: String::new(),
+        }
+      });
+      e.dispatch(Command::EndGesture).unwrap();
+    }
+    18 if !effects.is_empty() => {
+      let _ = e.dispatch(Command::UpdateEffectStyle {
+        id: effects[r.below(effects.len())].clone(),
+        name: (r.below(2) == 0).then(|| format!("E{}", r.below(1000))),
+        effects: (r.below(2) == 0).then(|| {
+          vec![crate::model::Effect {
+            blur: r.below(40) as f64,
+            ..Default::default()
+          }]
+        }),
+        description: (r.below(3) == 0).then(|| format!("d{}", r.below(9))),
+      });
+    }
+    19 if !grids.is_empty() => {
+      let _ = e.dispatch(Command::UpdateGridStyle {
+        id: grids[r.below(grids.len())].clone(),
+        name: (r.below(2) == 0).then(|| format!("G{}", r.below(1000))),
+        grids: (r.below(2) == 0).then(|| {
+          vec![crate::model::LayoutGrid {
+            count: r.below(12) as u32 + 1,
+            ..Default::default()
+          }]
+        }),
+        description: None,
+      });
+    }
+    20 if !effects.is_empty() || !grids.is_empty() => {
+      let all: Vec<&String> = effects.iter().chain(grids.iter()).collect();
+      let _ = e.dispatch(Command::DeleteStyle {
+        id: all[r.below(all.len())].clone(),
+      });
+    }
     _ => rect(e, r.below(500) as f64),
   }
   let d = wire(&delta(&before, &e.doc, true, true));
@@ -411,7 +488,7 @@ fn local_op(e: &mut Engine, r: &mut Rng, solo: bool) {
 
 fn random_variables(mut cs: Vec<Collection>, r: &mut Rng) -> Vec<Collection> {
   let id = |r: &mut Rng| r.below(1_000_000);
-  match r.below(7) {
+  match r.below(8) {
     0 => cs.push(Collection {
       id: format!("c{}", id(r)),
       name: "n".into(),
@@ -467,6 +544,18 @@ fn random_variables(mut cs: Vec<Collection>, r: &mut Rng) -> Vec<Collection> {
     6 if !cs.is_empty() => {
       let k = r.below(cs.len());
       cs[k].name = format!("N{}", r.below(100));
+    }
+    7 if !cs.is_empty() => {
+      let k = r.below(cs.len());
+      if !cs[k].variables.is_empty() {
+        let j = r.below(cs[k].variables.len());
+        let all = crate::variables::SCOPES;
+        cs[k].variables[j].scopes = if r.below(3) == 0 {
+          vec![]
+        } else {
+          vec![all[r.below(all.len())].to_string()]
+        };
+      }
     }
     _ => {}
   }

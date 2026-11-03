@@ -24,8 +24,8 @@ use crate::variables::{Collection, Variable};
 /// per-property `patch`es (whole nodes when `patches` is false, for peers that predate
 /// patches), removed nodes and comments, plus the document-level fields that differ
 /// (name, pages, styles, variables). With `granular`, pages, styles and variables are sent
-/// as per-id changes (`pageChanges`, `colorStyles`, `textStyles`, `collectionChanges`,
-/// `variableChanges`: see `ListDelta`); otherwise as whole lists, for peers that predate them.
+/// as per-id changes (`pageChanges`, `colorStyles`, `textStyles`, `effectStyles`, `gridStyles`,
+/// `collectionChanges`, `variableChanges`: see `ListDelta`); otherwise as whole lists, for peers that predate them.
 pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> Value {
   let mut nodes = Map::new();
   let mut patch = Map::new();
@@ -76,7 +76,15 @@ pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> 
 pub const GRANULAR: bool = true;
 
 /// The wire keys of the per-id form of pages, styles and variables.
-const GRANULAR_KEYS: [&str; 5] = ["pageChanges", "colorStyles", "textStyles", "collectionChanges", "variableChanges"];
+const GRANULAR_KEYS: [&str; 7] = [
+  "pageChanges",
+  "colorStyles",
+  "textStyles",
+  "effectStyles",
+  "gridStyles",
+  "collectionChanges",
+  "variableChanges",
+];
 
 /// True when a delta uses the per-id form of pages, styles or variables.
 pub fn is_granular(d: &Value) -> bool {
@@ -93,7 +101,7 @@ pub fn legacy(d: &Value, doc: &Document) -> Option<Value> {
   let o = out.as_object_mut()?;
   let has = |o: &Map<String, Value>, keys: &[&str]| keys.iter().any(|k| o.contains_key(*k));
   let pages = has(o, &["pageChanges"]);
-  let styles = has(o, &["colorStyles", "textStyles"]);
+  let styles = has(o, &["colorStyles", "textStyles", "effectStyles", "gridStyles"]);
   let vars = has(o, &["collectionChanges", "variableChanges"]);
   for k in GRANULAR_KEYS {
     o.remove(k);
@@ -132,6 +140,15 @@ fn granular_parts(base: &Document, doc: &Document, o: &mut Map<String, Value>) {
   }
   if base.styles.texts != doc.styles.texts {
     put("textStyles", ListDelta::of(&base.styles.texts, &doc.styles.texts, |s| &s.id, &[]));
+  }
+  if base.styles.effects != doc.styles.effects {
+    put(
+      "effectStyles",
+      ListDelta::of(&base.styles.effects, &doc.styles.effects, |s| &s.id, &[]),
+    );
+  }
+  if base.styles.grids != doc.styles.grids {
+    put("gridStyles", ListDelta::of(&base.styles.grids, &doc.styles.grids, |s| &s.id, &[]));
   }
   if base.variables == doc.variables {
     return;
@@ -424,6 +441,12 @@ fn apply_granular(doc: &mut Document, d: &Value) -> Result<(), String> {
   if let Some(c) = d.get("textStyles") {
     ListDelta::apply(&mut doc.styles.texts, c, |s| &s.id, &[], "text style")?;
   }
+  if let Some(c) = d.get("effectStyles") {
+    ListDelta::apply(&mut doc.styles.effects, c, |s| &s.id, &[], "effect style")?;
+  }
+  if let Some(c) = d.get("gridStyles") {
+    ListDelta::apply(&mut doc.styles.grids, c, |s| &s.id, &[], "grid style")?;
+  }
   if let Some(c) = d.get("collectionChanges") {
     // Collections change without their variables, which have their own changes below.
     let kept: BTreeMap<String, Vec<Variable>> = doc.variables.iter().map(|c| (c.id.clone(), c.variables.clone())).collect();
@@ -495,6 +518,8 @@ fn revert_inner(doc: &Document, from: &Document, to: &Document) -> Document {
   merge_list(&mut out.pages, &from.pages, &to.pages, |p| &p.id);
   merge_list(&mut out.styles.colors, &from.styles.colors, &to.styles.colors, |s| &s.id);
   merge_list(&mut out.styles.texts, &from.styles.texts, &to.styles.texts, |s| &s.id);
+  merge_list(&mut out.styles.effects, &from.styles.effects, &to.styles.effects, |s| &s.id);
+  merge_list(&mut out.styles.grids, &from.styles.grids, &to.styles.grids, |s| &s.id);
   merge_collections(&mut out.variables, &from.variables, &to.variables);
   for id in from.comments.keys().chain(to.comments.keys()).collect::<BTreeSet<_>>() {
     if from.comments.get(id) != to.comments.get(id) {
@@ -1493,6 +1518,158 @@ mod tests {
     assert!(legacy(&old, &c.doc).is_none());
     // Nothing changed: nothing sent, in either form.
     assert!(is_empty(&delta(&a.doc, &a.doc, true, true)));
+  }
+
+  /// A rectangle with a drop shadow and a column grid, saved as an effect and a grid style.
+  fn styled_layer(e: &mut Engine, effect_name: &str, grid_name: &str) -> (String, String, String) {
+    let id = effects_layer(e);
+    let (fx, gr) = save_styles(e, &id, effect_name, grid_name);
+    (id, fx, gr)
+  }
+
+  fn effects_layer(e: &mut Engine) -> String {
+    let id = e
+      .dispatch(Command::CreateShape {
+        kind: crate::model::NodeType::Rectangle,
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+        parent: None,
+      })
+      .unwrap()["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    e.dispatch(Command::Update {
+      ids: vec![id.clone()],
+      patch: json!({ "effects": [{ "type": "dropShadow", "blur": 12 }], "layoutGrids": [{ "pattern": "columns", "count": 4 }] }),
+    })
+    .unwrap();
+    id
+  }
+
+  fn save_styles(e: &mut Engine, id: &str, effect_name: &str, grid_name: &str) -> (String, String) {
+    let id = id.to_string();
+    let fx = e
+      .dispatch(Command::AddEffectStyle {
+        name: effect_name.into(),
+        from: id.clone(),
+        description: String::new(),
+      })
+      .unwrap()["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let gr = e
+      .dispatch(Command::AddGridStyle {
+        name: grid_name.into(),
+        from: id.clone(),
+        description: String::new(),
+      })
+      .unwrap()["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    (fx, gr)
+  }
+
+  #[test]
+  fn effect_and_grid_styles_travel_per_id() {
+    let (mut room, _) = Room::new(2);
+    let a = effects_layer(&mut room.editors[0]);
+    sync(&mut room, 0);
+    let b = effects_layer(&mut room.editors[1]);
+    sync(&mut room, 1);
+    // Two people add different styles at the same moment: both are kept.
+    save_styles(&mut room.editors[0], &a, "Shadow/Card", "Grid/4");
+    save_styles(&mut room.editors[1], &b, "Shadow/Pop", "Grid/Wide");
+    concurrent(&mut room);
+    // (The order of two styles added at once is settled by the next flush, not asserted here.)
+    for e in &room.editors {
+      assert_eq!(e.doc.styles.effects.len(), 2);
+      assert_eq!(e.doc.styles.grids.len(), 2);
+    }
+    assert_eq!(room.doc.styles.effects.len(), 2);
+    assert_eq!(room.doc.styles.grids.len(), 2);
+    // The delta of one edit names only that style.
+    let base = room.editors[0].doc.clone();
+    let fx = room.editors[0].doc.styles.effects[0].id.clone();
+    room.editors[0]
+      .dispatch(Command::UpdateEffectStyle {
+        id: fx.clone(),
+        name: Some("Shadow/Big".into()),
+        effects: None,
+        description: None,
+      })
+      .unwrap();
+    let d = delta(&base, &room.editors[0].doc, true, true);
+    assert_eq!(d["effectStyles"]["patch"][&fx], json!({ "name": "Shadow/Big" }));
+    assert!(d.get("gridStyles").is_none() && d.get("colorStyles").is_none());
+    // An old peer gets the whole `styles` with both lists.
+    let old = legacy(&d, &room.editors[0].doc).unwrap();
+    assert_eq!(old["styles"]["effects"].as_array().unwrap().len(), 2);
+    assert_eq!(old["styles"]["grids"].as_array().unwrap().len(), 2);
+    assert!(old.get("effectStyles").is_none());
+    assert!(!is_empty(&d));
+    sync(&mut room, 0);
+    // Deleting one of them while the other person edits the second.
+    let ids: Vec<String> = room.doc.styles.effects.iter().map(|s| s.id.clone()).collect();
+    room.editors[0].dispatch(Command::DeleteStyle { id: ids[0].clone() }).unwrap();
+    room.editors[1]
+      .dispatch(Command::UpdateEffectStyle {
+        id: ids[1].clone(),
+        name: None,
+        effects: Some(vec![crate::model::Effect {
+          blur: 99.0,
+          ..Default::default()
+        }]),
+        description: None,
+      })
+      .unwrap();
+    concurrent(&mut room);
+    assert_eq!(room.doc.styles.effects.len(), 1);
+    assert_eq!(room.doc.styles.effects[0].effects[0].blur, 99.0);
+    for e in &room.editors {
+      assert_eq!(e.doc.styles.effects, room.doc.styles.effects);
+    }
+  }
+
+  #[test]
+  fn undo_of_an_effect_style_edit_keeps_the_peers_newer_changes() {
+    let (mut room, _) = Room::new(2);
+    let (_, mine, _) = styled_layer(&mut room.editors[0], "Mine", "G");
+    sync(&mut room, 0);
+    room.editors[0]
+      .dispatch(Command::UpdateEffectStyle {
+        id: mine.clone(),
+        name: None,
+        effects: Some(vec![crate::model::Effect {
+          blur: 50.0,
+          ..Default::default()
+        }]),
+        description: Some("big".into()),
+      })
+      .unwrap();
+    sync(&mut room, 0);
+    // The peer adds another style and renames mine meanwhile.
+    styled_layer(&mut room.editors[1], "Theirs", "G2");
+    room.editors[1]
+      .dispatch(Command::UpdateEffectStyle {
+        id: mine.clone(),
+        name: Some("Renamed".into()),
+        effects: None,
+        description: None,
+      })
+      .unwrap();
+    sync(&mut room, 1);
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    let styles = &room.editors[0].doc.styles.effects;
+    assert_eq!(styles.len(), 2, "the peer's style is still there");
+    let m = styles.iter().find(|s| s.id == mine).unwrap();
+    assert_eq!(m.name, "Renamed", "the peer's newer rename survives (three-way)");
+    assert_eq!(m.effects[0].blur, 12.0, "my edit is undone");
+    assert_eq!(m.description, "");
   }
 
   #[test]

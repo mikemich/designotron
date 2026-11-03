@@ -13,8 +13,8 @@ use crate::geom::{Mat, Point, Rect};
 use crate::interact::{self, Handle};
 use crate::layout;
 use crate::model::{
-  AutoLayout, ColorStyle, Document, Interaction, LayoutDirection, Node, NodeId, NodeType, Page, Paint, RulerGuide, Sizing, SubPath,
-  TextStyle, VectorData, VectorPoint,
+  AutoLayout, ColorStyle, Document, Effect, EffectStyle, GridStyle, Interaction, LayoutDirection, LayoutGrid, Node, NodeId, NodeType, Page,
+  Paint, RulerGuide, Sizing, SubPath, TextStyle, VectorData, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render::{self, Mode, RenderOptions};
@@ -488,12 +488,51 @@ pub enum Command {
     auto_line_height: bool,
     letter_spacing: Option<f64>,
   },
+  /// Saves a layer's effects as a named effect style and links the layer to it.
+  AddEffectStyle {
+    name: String,
+    from: NodeId,
+    #[serde(default)]
+    description: String,
+  },
+  /// Saves a frame's layout grids as a named grid style and links the layer to it.
+  AddGridStyle {
+    name: String,
+    from: NodeId,
+    #[serde(default)]
+    description: String,
+  },
+  /// Edits an effect style in place and rewrites the effects of every linked layer.
+  UpdateEffectStyle {
+    id: String,
+    name: Option<String>,
+    effects: Option<Vec<Effect>>,
+    description: Option<String>,
+  },
+  /// Edits a grid style in place and rewrites the grids of every linked layer.
+  UpdateGridStyle {
+    id: String,
+    name: Option<String>,
+    grids: Option<Vec<LayoutGrid>>,
+    description: Option<String>,
+  },
   DeleteStyle {
     id: String,
   },
+  /// Unlinks layers from a style and keeps their values. `kind` picks the link of a colour style
+  /// (`fill`, the default, or `stroke`); other styles have one link each.
+  DetachStyle {
+    ids: Vec<NodeId>,
+    style_id: String,
+    #[serde(default)]
+    kind: Option<String>,
+  },
+  /// Applies a style. A colour style goes to the fill, or to the stroke when `kind` is `stroke`.
   ApplyStyle {
     ids: Vec<NodeId>,
     style_id: String,
+    #[serde(default)]
+    kind: Option<String>,
   },
   Ai {
     tool: String,
@@ -1601,6 +1640,7 @@ impl Engine {
         Ok(json!({}))
       }
       Command::SetVariables { collections } => {
+        crate::variables::validate(&collections)?;
         self.doc.variables = collections;
         crate::variables::prune(&mut self.doc);
         Ok(json!({}))
@@ -1909,11 +1949,18 @@ impl Engine {
           if after.kind.is_frame_like() && (after.width != before.width || after.height != before.height) {
             layout::apply_constraints(&mut self.doc, id, before.width, before.height);
           }
-          if let Some(sid) = after.fill_style.clone() {
-            if before.fills != after.fills {
-              self.doc.get_mut(id).unwrap().fill_style = None;
-              let _ = sid;
-            }
+          if after.fill_style.is_some() && before.fills != after.fills {
+            self.doc.get_mut(id).unwrap().fill_style = None;
+          }
+          // Editing a linked layer's effects, grids or stroke by hand detaches it (Styles, W3-C).
+          if after.stroke_style.is_some() && before.strokes != after.strokes {
+            self.doc.get_mut(id).unwrap().stroke_style = None;
+          }
+          if after.effect_style.is_some() && before.effects != after.effects {
+            self.doc.get_mut(id).unwrap().effect_style = None;
+          }
+          if after.grid_style.is_some() && before.layout_grids != after.layout_grids {
+            self.doc.get_mut(id).unwrap().grid_style = None;
           }
         }
         Ok(json!({}))
@@ -2423,20 +2470,124 @@ impl Engine {
           |n| n.fill_style.as_deref() == Some(id.as_str()),
           |n| n.fills = vec![Paint::solid(&color)],
         );
+        self
+          .doc
+          .update_where(|n| n.stroke_style.as_deref() == Some(id.as_str()), |n| set_stroke_color(n, &color));
+        Ok(json!({}))
+      }
+      Command::AddEffectStyle { name, from, description } => {
+        let effects = self.doc.get(&from).map(|n| n.effects.clone()).ok_or("no such node")?;
+        if effects.is_empty() {
+          return Err("the layer has no effects to save as a style".into());
+        }
+        let id = self.gen.next("s_");
+        self.doc.styles.effects.push(EffectStyle {
+          id: id.clone(),
+          name,
+          effects,
+          description,
+        });
+        self.doc.get_mut(&from).unwrap().effect_style = Some(id.clone());
+        Ok(json!({ "id": id }))
+      }
+      Command::AddGridStyle { name, from, description } => {
+        let grids = self.doc.get(&from).map(|n| n.layout_grids.clone()).ok_or("no such node")?;
+        if grids.is_empty() {
+          return Err("the layer has no layout grids to save as a style".into());
+        }
+        let id = self.gen.next("s_");
+        self.doc.styles.grids.push(GridStyle {
+          id: id.clone(),
+          name,
+          grids,
+          description,
+        });
+        self.doc.get_mut(&from).unwrap().grid_style = Some(id.clone());
+        Ok(json!({ "id": id }))
+      }
+      Command::UpdateEffectStyle {
+        id,
+        name,
+        effects,
+        description,
+      } => {
+        let style = self.doc.styles.effects.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
+        if let Some(v) = name {
+          style.name = v;
+        }
+        if let Some(v) = effects {
+          style.effects = v;
+        }
+        if let Some(v) = description {
+          style.description = v;
+        }
+        let effects = style.effects.clone();
+        self
+          .doc
+          .update_where(|n| n.effect_style.as_deref() == Some(id.as_str()), |n| n.effects = effects.clone());
+        Ok(json!({}))
+      }
+      Command::UpdateGridStyle {
+        id,
+        name,
+        grids,
+        description,
+      } => {
+        let style = self.doc.styles.grids.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
+        if let Some(v) = name {
+          style.name = v;
+        }
+        if let Some(v) = grids {
+          style.grids = v;
+        }
+        if let Some(v) = description {
+          style.description = v;
+        }
+        let grids = style.grids.clone();
+        self
+          .doc
+          .update_where(|n| n.grid_style.as_deref() == Some(id.as_str()), |n| n.layout_grids = grids.clone());
         Ok(json!({}))
       }
       Command::DeleteStyle { id } => {
         self.doc.styles.colors.retain(|s| s.id != id);
         self.doc.styles.texts.retain(|s| s.id != id);
-        let uses = |n: &Node| n.fill_style.as_deref() == Some(id.as_str()) || n.text_style.as_deref() == Some(id.as_str());
+        self.doc.styles.effects.retain(|s| s.id != id);
+        self.doc.styles.grids.retain(|s| s.id != id);
+        let is = |l: &Option<String>| l.as_deref() == Some(id.as_str());
+        let uses = |n: &Node| is(&n.fill_style) || is(&n.text_style) || is(&n.stroke_style) || is(&n.effect_style) || is(&n.grid_style);
         self.doc.update_where(uses, |n| {
-          if n.fill_style.as_deref() == Some(id.as_str()) {
-            n.fill_style = None;
-          }
-          if n.text_style.as_deref() == Some(id.as_str()) {
-            n.text_style = None;
+          for l in [
+            &mut n.fill_style,
+            &mut n.text_style,
+            &mut n.stroke_style,
+            &mut n.effect_style,
+            &mut n.grid_style,
+          ] {
+            if l.as_deref() == Some(id.as_str()) {
+              *l = None;
+            }
           }
         });
+        Ok(json!({}))
+      }
+      Command::DetachStyle { ids, style_id, kind } => {
+        let stroke = kind.as_deref() == Some("stroke");
+        for id in &ids {
+          let Some(n) = self.doc.get_mut(id) else { continue };
+          for (link, is_stroke_link) in [
+            (&mut n.fill_style, false),
+            (&mut n.text_style, false),
+            (&mut n.effect_style, false),
+            (&mut n.grid_style, false),
+            (&mut n.stroke_style, true),
+          ] {
+            // The same colour style can be linked as fill and as stroke: `kind` picks one.
+            if link.as_deref() == Some(style_id.as_str()) && (kind.is_none() || stroke == is_stroke_link) {
+              *link = None;
+            }
+          }
+        }
         Ok(json!({}))
       }
       Command::UpdateTextStyle {
@@ -2485,12 +2636,32 @@ impl Engine {
         );
         Ok(json!({}))
       }
-      Command::ApplyStyle { ids, style_id } => {
+      Command::ApplyStyle { ids, style_id, kind } => {
         if let Some(c) = self.doc.styles.colors.iter().find(|s| s.id == style_id).cloned() {
+          let stroke = kind.as_deref() == Some("stroke");
           for id in &ids {
             if let Some(n) = self.doc.get_mut(id) {
-              n.fills = vec![Paint::solid(&c.color)];
-              n.fill_style = Some(style_id.clone());
+              if stroke {
+                set_stroke_color(n, &c.color);
+                n.stroke_style = Some(style_id.clone());
+              } else {
+                n.fills = vec![Paint::solid(&c.color)];
+                n.fill_style = Some(style_id.clone());
+              }
+            }
+          }
+        } else if let Some(e) = self.doc.styles.effects.iter().find(|s| s.id == style_id).cloned() {
+          for id in &ids {
+            if let Some(n) = self.doc.get_mut(id) {
+              n.effects = e.effects.clone();
+              n.effect_style = Some(style_id.clone());
+            }
+          }
+        } else if let Some(g) = self.doc.styles.grids.iter().find(|s| s.id == style_id).cloned() {
+          for id in &ids {
+            if let Some(n) = self.doc.get_mut(id).filter(|n| n.kind.is_frame_like()) {
+              n.layout_grids = g.grids.clone();
+              n.grid_style = Some(style_id.clone());
             }
           }
         } else if let Some(t) = self.doc.styles.texts.iter().find(|s| s.id == style_id).cloned() {
@@ -3108,6 +3279,18 @@ fn without_unsafe_links(mut p: Value) -> Value {
 
 /// Removes links a text's runs may not carry (anything but http(s), mailto and tel), so a
 /// patch from an AI tool, a plugin or a peer can't plant a `javascript:` link.
+/// Sets the first stroke paint to a solid colour (adding a 1 px stroke when the layer has none).
+pub(crate) fn set_stroke_color(n: &mut Node, color: &str) {
+  match n.strokes.first_mut() {
+    Some(Paint::Solid { color: c, .. }) => *c = color.to_string(),
+    Some(first) => *first = Paint::solid(color),
+    None => n.strokes.push(Paint::solid(color)),
+  }
+  if n.stroke_weight <= 0.0 {
+    n.stroke_weight = 1.0;
+  }
+}
+
 fn drop_unsafe_links(n: &mut Node) {
   let Some(t) = n.text.as_mut() else { return };
   if t
@@ -4163,6 +4346,231 @@ mod tests {
     assert_eq!(e.doc.get(&id).unwrap().x, 0.0);
   }
 
+  /// A frame with a shadow, a column grid and a stroke, and a second frame to link.
+  fn styled_frames(e: &mut Engine) -> (String, String) {
+    let mut frame = |x: f64| {
+      id_of(
+        &e.dispatch(Command::CreateShape {
+          kind: NodeType::Frame,
+          x,
+          y: 0.0,
+          width: 100.0,
+          height: 100.0,
+          parent: None,
+        })
+        .unwrap(),
+      )
+    };
+    let (a, b) = (frame(0.0), frame(200.0));
+    e.dispatch(Command::Update {
+      ids: vec![a.clone()],
+      patch: json!({
+        "effects": [{ "type": "dropShadow", "blur": 12 }],
+        "layoutGrids": [{ "pattern": "columns", "count": 4 }],
+        "strokes": [{ "type": "solid", "color": "#112233" }],
+        "strokeWeight": 2,
+      }),
+    })
+    .unwrap();
+    (a, b)
+  }
+
+  #[test]
+  fn effect_styles_link_update_detach_and_delete() {
+    let mut e = engine();
+    let (a, b) = styled_frames(&mut e);
+    let id = id_of(
+      &e.dispatch(Command::AddEffectStyle {
+        name: "Shadow/Card".into(),
+        from: a.clone(),
+        description: "Cards".into(),
+      })
+      .unwrap(),
+    );
+    assert_eq!(e.doc.get(&a).unwrap().effect_style.as_deref(), Some(id.as_str()));
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![b.clone()],
+      style_id: id.clone(),
+      kind: None,
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&b).unwrap().effects, e.doc.get(&a).unwrap().effects);
+    let before_b = e.doc.get(&b).unwrap().clone();
+    let big = vec![crate::model::Effect {
+      blur: 40.0,
+      ..Default::default()
+    }];
+    e.dispatch(Command::UpdateEffectStyle {
+      id: id.clone(),
+      name: None,
+      effects: Some(big.clone()),
+      description: None,
+    })
+    .unwrap();
+    for n in [&a, &b] {
+      assert_eq!(e.doc.get(n).unwrap().effects, big);
+    }
+    let after_b = e.doc.get(&b).unwrap().clone();
+    assert_eq!(
+      Node {
+        effects: before_b.effects.clone(),
+        ..after_b
+      },
+      before_b,
+      "nothing but the effects changed"
+    );
+    // Editing a linked layer's effects by hand detaches it; other edits keep the link.
+    e.dispatch(Command::Update {
+      ids: vec![b.clone()],
+      patch: json!({ "opacity": 0.5 }),
+    })
+    .unwrap();
+    assert!(e.doc.get(&b).unwrap().effect_style.is_some());
+    e.dispatch(Command::Update {
+      ids: vec![b.clone()],
+      patch: json!({ "effects": [] }),
+    })
+    .unwrap();
+    assert!(e.doc.get(&b).unwrap().effect_style.is_none());
+    assert!(e.doc.get(&a).unwrap().effect_style.is_some());
+    // Deleting the style unlinks and keeps the values.
+    e.dispatch(Command::DeleteStyle { id: id.clone() }).unwrap();
+    assert!(e.doc.styles.effects.is_empty());
+    let n = e.doc.get(&a).unwrap();
+    assert!(n.effect_style.is_none() && n.effects == big);
+    // Detach keeps the values too.
+    let id2 = id_of(
+      &e.dispatch(Command::AddEffectStyle {
+        name: "S2".into(),
+        from: a.clone(),
+        description: String::new(),
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::DetachStyle {
+      ids: vec![a.clone()],
+      style_id: id2,
+      kind: None,
+    })
+    .unwrap();
+    assert!(e.doc.get(&a).unwrap().effect_style.is_none());
+    assert!(
+      e.dispatch(Command::AddEffectStyle {
+        name: "x".into(),
+        from: b,
+        description: String::new()
+      })
+      .is_err(),
+      "no effects to save"
+    );
+  }
+
+  #[test]
+  fn grid_and_stroke_styles_follow_the_same_rules() {
+    let mut e = engine();
+    let (a, b) = styled_frames(&mut e);
+    let g = id_of(
+      &e.dispatch(Command::AddGridStyle {
+        name: "Grid/4".into(),
+        from: a.clone(),
+        description: String::new(),
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![b.clone()],
+      style_id: g.clone(),
+      kind: None,
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&b).unwrap().layout_grids.len(), 1);
+    e.dispatch(Command::UpdateGridStyle {
+      id: g.clone(),
+      name: None,
+      grids: Some(vec![crate::model::LayoutGrid {
+        count: 6,
+        ..Default::default()
+      }]),
+      description: None,
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&a).unwrap().layout_grids[0].count, 6);
+    assert_eq!(e.doc.get(&b).unwrap().layout_grids[0].count, 6);
+    e.dispatch(Command::Update {
+      ids: vec![b.clone()],
+      patch: json!({ "layoutGrids": [] }),
+    })
+    .unwrap();
+    assert!(e.doc.get(&b).unwrap().grid_style.is_none());
+    // A colour style applied as a stroke links `stroke_style`, not `fill_style`.
+    let c = id_of(
+      &e.dispatch(Command::AddColorStyle {
+        name: "Brand".into(),
+        color: "#FF0000".into(),
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![b.clone()],
+      style_id: c.clone(),
+      kind: Some("stroke".into()),
+    })
+    .unwrap();
+    let n = e.doc.get(&b).unwrap();
+    assert_eq!(n.stroke_style.as_deref(), Some(c.as_str()));
+    assert!(n.fill_style.is_none());
+    assert_eq!(n.strokes, vec![Paint::solid("#FF0000")]);
+    e.dispatch(Command::UpdateColorStyle {
+      id: c.clone(),
+      name: None,
+      color: Some("#00FF00".into()),
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&b).unwrap().strokes, vec![Paint::solid("#00FF00")]);
+    assert_ne!(e.doc.get(&b).unwrap().fills, vec![Paint::solid("#00FF00")], "the fill is untouched");
+    e.dispatch(Command::Update {
+      ids: vec![b.clone()],
+      patch: json!({ "strokes": [{ "type": "solid", "color": "#0000FF" }] }),
+    })
+    .unwrap();
+    assert!(e.doc.get(&b).unwrap().stroke_style.is_none());
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![b.clone()],
+      style_id: c.clone(),
+      kind: Some("stroke".into()),
+    })
+    .unwrap();
+    e.dispatch(Command::DeleteStyle { id: c }).unwrap();
+    let n = e.doc.get(&b).unwrap();
+    assert!(n.stroke_style.is_none());
+    assert_eq!(n.strokes, vec![Paint::solid("#00FF00")], "the stroke keeps its colour");
+  }
+
+  #[test]
+  fn files_without_the_new_style_fields_round_trip_unchanged() {
+    let mut e = engine();
+    rect(&mut e, 0.0, 0.0, 10.0, 10.0, None);
+    e.dispatch(Command::AddColorStyle {
+      name: "A".into(),
+      color: "#111111".into(),
+    })
+    .unwrap();
+    let before = e.to_json();
+    for k in [
+      "effectStyle",
+      "gridStyle",
+      "strokeStyle",
+      "\"effects\":[{",
+      "\"grids\":[{",
+      "scopes",
+    ] {
+      assert!(!before.contains(k), "{k} must not be written when unused");
+    }
+    let mut e2 = engine();
+    e2.load(&before).unwrap();
+    assert_eq!(e2.to_json(), before);
+  }
+
   #[test]
   fn updating_a_text_style_keeps_its_id_and_updates_its_layers() {
     let mut e = engine();
@@ -4187,6 +4595,7 @@ mod tests {
     e.dispatch(Command::ApplyStyle {
       ids: vec![t.clone()],
       style_id: "ts1".into(),
+      kind: None,
     })
     .unwrap();
     e.dispatch(Command::UpdateTextStyle {

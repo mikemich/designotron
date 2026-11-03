@@ -36,6 +36,9 @@ pub struct Variable {
   /// Mode id → value. A value of `{"alias": "<variable id>"}` refers to another variable.
   pub values: BTreeMap<String, Value>,
   pub description: String,
+  /// Properties the variable is offered for (empty = all). Names from `SCOPES`.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub scopes: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -60,9 +63,124 @@ pub const PROPERTIES: &[(&str, VarKind)] = &[
   ("height", VarKind::Number),
   ("strokeWeight", VarKind::Number),
   ("fontSize", VarKind::Number),
+  ("fontFamily", VarKind::String),
+  ("fontWeight", VarKind::Number),
+  ("lineHeight", VarKind::Number),
+  ("letterSpacing", VarKind::Number),
+  ("paragraphSpacing", VarKind::Number),
+  ("paddingTop", VarKind::Number),
+  ("paddingRight", VarKind::Number),
+  ("paddingBottom", VarKind::Number),
+  ("paddingLeft", VarKind::Number),
+  ("counterGap", VarKind::Number),
   ("characters", VarKind::String),
   ("visible", VarKind::Boolean),
 ];
+
+/// Scope names a variable can be limited to (Figma's `VariableScope`, camel-cased). Empty = all.
+pub const SCOPES: &[&str] = &[
+  "fill",
+  "stroke",
+  "cornerRadius",
+  "size",
+  "gap",
+  "opacity",
+  "strokeWidth",
+  "textContent",
+  "fontFamily",
+  "fontSize",
+  "fontWeight",
+  "lineHeight",
+  "letterSpacing",
+  "paragraphSpacing",
+];
+
+/// The scope that offers a variable for a bindable property (`None`: always offered).
+pub fn scope_of(prop: &str) -> Option<&'static str> {
+  Some(match prop {
+    "fill" => "fill",
+    "stroke" => "stroke",
+    "cornerRadius" => "cornerRadius",
+    "width" | "height" => "size",
+    "gap" | "counterGap" | "padding" | "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft" => "gap",
+    "opacity" => "opacity",
+    "strokeWeight" => "strokeWidth",
+    "characters" => "textContent",
+    "fontFamily" => "fontFamily",
+    "fontSize" => "fontSize",
+    "fontWeight" => "fontWeight",
+    "lineHeight" => "lineHeight",
+    "letterSpacing" => "letterSpacing",
+    "paragraphSpacing" => "paragraphSpacing",
+    _ => return None,
+  })
+}
+
+/// True when the variable's scopes cover the property (no scopes = everything of its type).
+pub fn in_scope(v: &Variable, prop: &str) -> bool {
+  v.scopes.is_empty() || scope_of(prop).is_none_or(|s| v.scopes.iter().any(|x| x == s))
+}
+
+/// Variables (with their collection) a property's picker may list: right type and scope.
+pub fn bindable<'a>(doc: &'a Document, prop: &str) -> Vec<(&'a Collection, &'a Variable)> {
+  let Some(kind) = property_kind(prop) else { return Vec::new() };
+  doc
+    .variables
+    .iter()
+    .flat_map(|c| c.variables.iter().map(move |v| (c, v)))
+    .filter(|(_, v)| v.kind == kind && in_scope(v, prop))
+    .collect()
+}
+
+/// Rejects alias cycles and unknown scope names in a whole set of collections.
+pub fn validate(collections: &[Collection]) -> Result<(), String> {
+  let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+  let mut names: BTreeMap<&str, &str> = BTreeMap::new();
+  for v in collections.iter().flat_map(|c| c.variables.iter()) {
+    if let Some(bad) = v.scopes.iter().find(|s| !SCOPES.contains(&s.as_str())) {
+      return Err(format!("unknown variable scope '{bad}'. Scopes: {}", SCOPES.join(", ")));
+    }
+    names.insert(&v.id, &v.name);
+    let out = edges.entry(&v.id).or_default();
+    out.extend(v.values.values().filter_map(|x| x.get("alias").and_then(|a| a.as_str())));
+  }
+  // Iterative three-colour DFS.
+  let mut state: BTreeMap<&str, u8> = BTreeMap::new();
+  for start in edges.keys() {
+    if state.contains_key(start) {
+      continue;
+    }
+    let mut stack: Vec<(&str, usize)> = vec![(start, 0)];
+    state.insert(start, 1);
+    while let Some((node, i)) = stack.last_mut() {
+      let next = edges.get(*node).and_then(|e| e.get(*i)).copied();
+      *i += 1;
+      match next {
+        None => {
+          state.insert(node, 2);
+          stack.pop();
+        }
+        Some(t) => match state.get(t) {
+          Some(1) => {
+            return Err(format!(
+              "alias cycle: {} refers back to itself through {}",
+              names.get(t).unwrap_or(&t),
+              names.get(*node).unwrap_or(node)
+            ));
+          }
+          Some(_) => {}
+          None => {
+            if edges.contains_key(t) {
+              state.insert(t, 1);
+              stack.push((t, 0));
+            }
+          }
+        },
+      }
+    }
+  }
+  Ok(())
+}
 
 pub fn property_kind(prop: &str) -> Option<VarKind> {
   PROPERTIES.iter().find(|(p, _)| *p == prop).map(|(_, k)| *k)
@@ -235,6 +353,42 @@ pub fn apply(doc: &mut Document) -> bool {
             t.font_size = s.max(1.0);
           }
         }
+        "fontFamily" => {
+          if let (Some(f), Some(t)) = (v.as_str(), n.text.as_mut()) {
+            t.font_family = f.to_string();
+          }
+        }
+        "fontWeight" => {
+          if let (Some(w), Some(t)) = (num, n.text.as_mut()) {
+            t.font_weight = ((w / 100.0).round() * 100.0).clamp(100.0, 900.0) as u32;
+          }
+        }
+        "lineHeight" => {
+          if let (Some(h), Some(t)) = (num, n.text.as_mut()) {
+            t.line_height = (h > 0.0).then_some(h);
+          }
+        }
+        "letterSpacing" => {
+          if let (Some(l), Some(t)) = (num, n.text.as_mut()) {
+            t.letter_spacing = l;
+          }
+        }
+        "paragraphSpacing" => {
+          if let (Some(p), Some(t)) = (num, n.text.as_mut()) {
+            t.paragraph_spacing = p.max(0.0);
+          }
+        }
+        "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft" | "counterGap" => {
+          if let (Some(p), Some(l)) = (num, n.layout.as_mut()) {
+            match prop.as_str() {
+              "paddingTop" => l.padding_top = p,
+              "paddingRight" => l.padding_right = p,
+              "paddingBottom" => l.padding_bottom = p,
+              "paddingLeft" => l.padding_left = p,
+              _ => l.counter_gap = p,
+            }
+          }
+        }
         "characters" => {
           if let (Some(s), Some(t)) = (v.as_str(), n.text.as_mut()) {
             if t.characters != s {
@@ -276,11 +430,14 @@ pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) {
         if v.get("gap").is_some() {
           props.push("gap");
         }
-        if ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"]
-          .iter()
-          .any(|p| v.get(p).is_some())
-        {
-          props.push("padding");
+        if v.get("counterGap").is_some() {
+          props.push("counterGap");
+        }
+        for side in ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"] {
+          if v.get(side).is_some() {
+            props.push("padding");
+            props.push(side);
+          }
         }
       }
       "text" => {
@@ -289,6 +446,11 @@ pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) {
         }
         if v.get("characters").is_some() {
           props.push("characters");
+        }
+        for k in ["fontFamily", "fontWeight", "lineHeight", "letterSpacing", "paragraphSpacing"] {
+          if v.get(k).is_some() {
+            props.push(k);
+          }
         }
       }
       _ => {}
@@ -430,8 +592,196 @@ pub fn summary(doc: &Document) -> Value {
         "id": v.id,
         "name": v.name,
         "type": v.kind,
+        "scopes": v.scopes,
         "values": c.modes.iter().map(|m| (m.name.clone(), v.values.get(&m.id).cloned().unwrap_or(Value::Null))).collect::<serde_json::Map<_, _>>(),
       })).collect::<Vec<_>>(),
     }))
     .collect::<Vec<_>>())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::engine::{Command, Engine};
+  use crate::model::NodeType;
+  use crate::text::HeuristicMeasurer;
+
+  fn var(id: &str, kind: VarKind, v: Value) -> Variable {
+    Variable {
+      id: id.into(),
+      name: id.into(),
+      kind,
+      values: [("m".to_string(), v)].into_iter().collect(),
+      ..Default::default()
+    }
+  }
+
+  fn coll(vars: Vec<Variable>) -> Collection {
+    Collection {
+      id: "c".into(),
+      name: "C".into(),
+      modes: vec![VarMode {
+        id: "m".into(),
+        name: "m".into(),
+      }],
+      variables: vars,
+    }
+  }
+
+  fn engine() -> Engine {
+    Engine::new(Box::new(HeuristicMeasurer), 1)
+  }
+
+  fn id_of(v: Value) -> String {
+    v["id"].as_str().unwrap().to_string()
+  }
+
+  #[test]
+  fn alias_cycles_are_refused() {
+    let mut e = engine();
+    let ok = coll(vec![
+      var("a", VarKind::Number, json!(1)),
+      var("b", VarKind::Number, json!({ "alias": "a" })),
+    ]);
+    e.dispatch(Command::SetVariables {
+      collections: vec![ok.clone()],
+    })
+    .unwrap();
+    let mut cyc = ok;
+    cyc.variables[0].values.insert("m".into(), json!({ "alias": "b" }));
+    let err = e.dispatch(Command::SetVariables { collections: vec![cyc] }).unwrap_err();
+    assert!(err.contains("alias cycle"), "{err}");
+    let mut selfref = coll(vec![var("a", VarKind::Number, json!({ "alias": "a" }))]);
+    assert!(validate(std::slice::from_ref(&selfref)).is_err());
+    selfref.variables[0].scopes = vec!["nope".into()];
+    assert!(validate(&[selfref]).unwrap_err().contains("scope"));
+    // The document keeps the last valid set.
+    assert_eq!(e.doc.variables[0].variables[0].values["m"], json!(1));
+  }
+
+  #[test]
+  fn scope_filter_lists_only_matching_variables() {
+    let mut e = engine();
+    let mut gap = var("gap", VarKind::Number, json!(8));
+    gap.scopes = vec!["gap".into()];
+    let mut radius = var("radius", VarKind::Number, json!(4));
+    radius.scopes = vec!["cornerRadius".into(), "size".into()];
+    let any = var("any", VarKind::Number, json!(1));
+    let colour = var("brand", VarKind::Color, json!("#FF0000"));
+    e.dispatch(Command::SetVariables {
+      collections: vec![coll(vec![gap, radius, any, colour])],
+    })
+    .unwrap();
+    let names = |p: &str| bindable(&e.doc, p).iter().map(|(_, v)| v.id.clone()).collect::<Vec<_>>();
+    assert_eq!(names("gap"), ["gap", "any"]);
+    assert_eq!(names("paddingLeft"), ["gap", "any"], "padding is covered by the gap scope");
+    assert_eq!(names("cornerRadius"), ["radius", "any"]);
+    assert_eq!(names("width"), ["radius", "any"]);
+    assert_eq!(names("fill"), ["brand"]);
+    let bad = Variable {
+      scopes: vec!["bogus".into()],
+      ..var("x", VarKind::Number, json!(1))
+    };
+    let err = e
+      .dispatch(Command::SetVariables {
+        collections: vec![coll(vec![bad])],
+      })
+      .unwrap_err();
+    assert!(err.contains("scope"), "{err}");
+  }
+
+  #[test]
+  fn new_bindings_apply_and_follow_modes() {
+    let mut e = engine();
+    let t = id_of(
+      e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "Hi".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let f = id_of(
+      e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 0.0,
+        y: 100.0,
+        width: 50.0,
+        height: 50.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::Update {
+      ids: vec![f.clone()],
+      patch: json!({ "layout": { "direction": "horizontal" } }),
+    })
+    .unwrap();
+    let mut c = coll(vec![
+      var("lh", VarKind::Number, json!(30)),
+      var("pl", VarKind::Number, json!(7)),
+      var("fam", VarKind::String, json!("Georgia")),
+      var("wt", VarKind::Number, json!(640)),
+      var("cg", VarKind::Number, json!(3)),
+    ]);
+    c.modes.push(VarMode {
+      id: "m2".into(),
+      name: "Big".into(),
+    });
+    for v in &mut c.variables {
+      let big = match v.id.as_str() {
+        "fam" => json!("Times"),
+        "wt" => json!(900),
+        _ => json!(v.values["m"].as_f64().unwrap() * 2.0),
+      };
+      v.values.insert("m2".into(), big);
+    }
+    e.dispatch(Command::SetVariables { collections: vec![c] }).unwrap();
+    for (id, prop, var) in [
+      (&t, "lineHeight", "lh"),
+      (&t, "fontFamily", "fam"),
+      (&t, "fontWeight", "wt"),
+      (&f, "paddingLeft", "pl"),
+      (&f, "counterGap", "cg"),
+    ] {
+      e.dispatch(Command::BindVariable {
+        ids: vec![id.clone()],
+        property: prop.into(),
+        variable: Some(var.into()),
+      })
+      .unwrap();
+    }
+    let read = |e: &Engine| {
+      let tp = e.doc.get(&t).unwrap().text.clone().unwrap();
+      let l = e.doc.get(&f).unwrap().layout.clone().unwrap();
+      (
+        tp.line_height,
+        tp.font_family,
+        tp.font_weight,
+        l.padding_left,
+        l.padding_top,
+        l.counter_gap,
+      )
+    };
+    let (lh, fam, wt, pl, pt, cg) = read(&e);
+    assert_eq!((lh, fam.as_str(), wt, pl, cg), (Some(30.0), "Georgia", 600, 7.0, 3.0));
+    assert_eq!(pt, 10.0, "the other sides are untouched");
+    e.dispatch(Command::SetVariableMode {
+      ids: vec![t.clone(), f.clone()],
+      collection: "c".into(),
+      mode: Some("m2".into()),
+    })
+    .unwrap();
+    let (lh, fam, wt, pl, _, cg) = read(&e);
+    assert_eq!((lh, fam.as_str(), wt, pl, cg), (Some(60.0), "Times", 900, 14.0, 6.0));
+    // A hand edit of the bound property unbinds only that property.
+    e.dispatch(Command::Update {
+      ids: vec![f.clone()],
+      patch: json!({ "layout": { "paddingLeft": 1 } }),
+    })
+    .unwrap();
+    let n = e.doc.get(&f).unwrap();
+    assert!(!n.bindings.contains_key("paddingLeft") && n.bindings.contains_key("counterGap"));
+  }
 }
