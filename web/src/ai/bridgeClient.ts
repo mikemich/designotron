@@ -92,7 +92,20 @@ class BridgeClient {
         clearTimeout(this.retry);
         this.connect();
       }
+      this.announceFocus();
     });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") this.announceFocus();
+    });
+  }
+
+  /** Tells the bridge this is the tab the person is working in: plain MCP calls (a terminal's
+   *  Claude Code) and the headless file follow it. It then sends its document, which the bridge
+   *  only takes from the active tab. */
+  private announceFocus() {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    this.send({ type: "focus" });
+    this.pushDoc();
   }
 
   private async connect() {
@@ -110,6 +123,8 @@ class BridgeClient {
       this.delay = 2000;
       useChat.setState({ bridgeStatus: "connected" });
       ws.send(JSON.stringify({ type: "hello", client: "designotron-editor" }));
+      // A tab opened in the background doesn't take over from the one in use.
+      if (document.hasFocus()) ws.send(JSON.stringify({ type: "focus" }));
       this.pushDoc();
     };
     ws.onclose = () => this.offline();
@@ -167,11 +182,16 @@ class BridgeClient {
         useChat.setState({ claude: { available: !!m.claude?.available, version: m.claude?.version, workspace: m.workspace } });
         break;
       case "tool_call": {
-        const out = await executeTool(m.name, m.input);
+        // `group`: calls of one chat turn share it, so the turn is one undo step.
+        const out = await executeTool(m.name, m.input, { group: typeof m.group === "string" ? m.group : undefined });
         this.send({ type: "tool_result", id: m.id, ok: out.ok, result: out.result, image: out.image ?? null });
         showScreenshot(out);
         break;
       }
+      case "send_doc":
+        // The tab that had the focus closed: this one is the active tab now.
+        this.pushDoc();
+        break;
       case "chat_event":
         this.onClaudeEvent(m.event);
         break;
@@ -258,8 +278,9 @@ class BridgeClient {
     if (e.type === "result") {
       if (e.session_id) useChat.setState({ sessionId: e.session_id });
       if (e.is_error && e.result && !this.turnError) this.reportError(String(e.result));
-      const cost = typeof e.total_cost_usd === "number" ? ` · $${e.total_cost_usd.toFixed(3)} API-equivalent` : "";
-      push({ kind: "system", text: `Done in ${((e.duration_ms ?? 0) / 1000).toFixed(1)}s${cost}` });
+      // The cost is what the turn would cost on the API; Pro/Max plans aren't billed for it.
+      const title = typeof e.total_cost_usd === "number" ? `$${e.total_cost_usd.toFixed(3)} API-equivalent, not billed on Pro/Max` : undefined;
+      push({ kind: "system", text: `Done in ${((e.duration_ms ?? 0) / 1000).toFixed(1)}s`, title });
       // The turn is over at its result, even if the CLI process takes a moment to exit.
       useChat.setState({ running: false });
     }

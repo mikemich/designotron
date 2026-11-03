@@ -1,7 +1,7 @@
 // Executes AI tool calls in the browser: engine tools go through the WASM
 // engine (one undo step each), browser-only tools are handled here.
 
-import { dispatchOrThrow, getDoc, query, selection, useStore, zoomToSelection } from "../store";
+import { aiDispatch, getDoc, query, selection, useStore, zoomToSelection } from "../store";
 import { getScreenshot, importHtml, importUrl } from "./browserTools";
 
 export interface ToolOutcome {
@@ -36,14 +36,15 @@ export function contextLine(): string {
   return `[Editor context] Document "${doc.name}", page "${page?.name}" (${page?.id}). ${sel.length ? `Selected: ${sel.join(", ")}.` : "Nothing selected."}`;
 }
 
-export async function executeTool(name: string, input: any): Promise<ToolOutcome> {
+/** `opts.group`: undo group of the chat turn the call belongs to (see `aiDispatch`). */
+export async function executeTool(name: string, input: any, opts: { group?: string } = {}): Promise<ToolOutcome> {
   try {
     if (name === "get_screenshot") {
       const shot = await getScreenshot(input?.id, input?.scale);
       return { ok: true, result: { nodeId: shot.id, width: shot.width, height: shot.height }, image: { data: shot.data, mediaType: "image/png" } };
     }
     if (name === "import_html") {
-      return { ok: true, result: await importHtml(input ?? {}) };
+      return { ok: true, result: await importHtml({ ...(input ?? {}), group: opts.group }) };
     }
     if (name === "save_plugin") {
       const { savePlugin } = await import("../plugins");
@@ -52,11 +53,11 @@ export async function executeTool(name: string, input: any): Promise<ToolOutcome
       return { ok: true, result: { id, saved: true, note: "The user can run it from the main menu > Plugins." } };
     }
     if (name === "import_url") {
-      return { ok: true, result: await importUrl(input ?? {}) };
+      return { ok: true, result: await importUrl({ ...(input ?? {}), group: opts.group }) };
     }
     // The engine has no clock; stamp Claude's comment replies here.
     if (name === "reply_comment") input = { ...input, time: Date.now() };
-    const result = dispatchOrThrow({ op: "ai", tool: name, input: input ?? {} });
+    const result = aiDispatch(name, input ?? {}, opts.group);
     if (name === "select") setTimeout(zoomToSelection, 0);
     return { ok: true, result };
   } catch (err) {

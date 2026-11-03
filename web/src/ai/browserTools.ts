@@ -2,7 +2,7 @@
 
 import { addAsset, readFileAsDataUrl } from "../assets";
 import { screenshotBase64 } from "../exporter";
-import { dispatchOrThrow, getDoc, selection, useStore, FONTS } from "../store";
+import { aiDispatch, getDoc, selection, useStore, FONTS } from "../store";
 import { bridgeChecked, bridgeHttpBase } from "./bridgeClient";
 import { DEFAULT_CSS, emitSpec, planTree, type BoxNode, type Css, type Rect } from "./htmlLayout";
 
@@ -28,6 +28,8 @@ interface ImportInput {
   name?: string;
   /** Map flex/grid/block flow to auto layout (default). `false` keeps every layer absolutely positioned. */
   autoLayout?: boolean;
+  /** Undo group of the chat turn this import belongs to. */
+  group?: string;
 }
 
 type Spec = Record<string, any>;
@@ -35,7 +37,7 @@ type Spec = Record<string, any>;
 /** Fetches a live page through the local bridge (no CORS there) and imports it. `typed`:
  *  the person entered the address themselves, so pages on their own machine or network are
  *  allowed (Claude's imports reach only the public internet). */
-export async function importUrl(input: { url: string; width?: number; x?: number; y?: number; autoLayout?: boolean }, typed = false) {
+export async function importUrl(input: { url: string; width?: number; x?: number; y?: number; autoLayout?: boolean; group?: string }, typed = false) {
   let url: URL;
   try {
     url = new URL(input.url.includes("://") ? input.url : `https://${input.url}`);
@@ -57,7 +59,7 @@ export async function importUrl(input: { url: string; width?: number; x?: number
   // Resolve relative stylesheets and images against the page. Scripts never run (sandboxed iframe).
   const base = `<base href="${url.href.replace(/"/g, "&quot;")}">`;
   html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => m + base) : `<!doctype html><html><head>${base}</head><body>${html}</body></html>`;
-  return importHtml({ html, width: input.width ?? 1440, x: input.x, y: input.y, name: url.hostname, autoLayout: input.autoLayout });
+  return importHtml({ html, width: input.width ?? 1440, x: input.x, y: input.y, name: url.hostname, autoLayout: input.autoLayout, group: input.group });
 }
 
 /** Renders HTML in a hidden iframe and converts the box tree into layer specs. */
@@ -99,7 +101,7 @@ export async function importHtml(input: ImportInput) {
     const root = emitSpec(rootBox, rootBox.rect, { w: "fixed", h: rootBox.plan?.canHug.h ? "hug" : "fixed" });
     root.x = input.x ?? 0;
     root.y = input.y ?? 0;
-    const r = dispatchOrThrow({ op: "ai", tool: "create_nodes", input: { parentId: input.parentId, nodes: [root] } });
+    const r = aiDispatch("create_nodes", { parentId: input.parentId, nodes: [root] }, input.group);
     return r;
   } finally {
     iframe.remove();

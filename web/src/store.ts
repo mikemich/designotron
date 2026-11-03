@@ -351,6 +351,21 @@ export function dispatchOrThrow<T = any>(cmd: Record<string, unknown>): T {
   return r;
 }
 
+/** Runs an AI tool through the engine. Given a `group`, its undo step joins that chat turn's
+ *  group, so one Ctrl+Z undoes the whole turn. The group is only open for this call, so
+ *  the user's own edits in between are steps of their own. */
+export function aiDispatch<T = any>(tool: string, input: unknown, group?: string): T {
+  const engine = getEngine();
+  const setGroup = (g: string | null) => engine.dispatch(JSON.stringify({ op: "setHistoryGroup", group: g }));
+  try {
+    if (group) setGroup(group);
+    return JSON.parse(engine.dispatch(JSON.stringify({ op: "ai", tool, input })));
+  } finally {
+    if (group) setGroup(null);
+    sync();
+  }
+}
+
 export function query<T = any>(q: Record<string, unknown>): T {
   return JSON.parse(getEngine().query(JSON.stringify(q)));
 }

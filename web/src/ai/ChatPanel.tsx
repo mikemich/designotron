@@ -353,7 +353,7 @@ export function ChatPanel() {
           ) : it.kind === "shot" ? (
             <Shot key={it.id} url={it.url} label={it.label} />
           ) : (
-            <div key={it.id} className={"msg " + it.kind}>
+            <div key={it.id} className={"msg " + it.kind} title={"title" in it ? it.title : undefined}>
               {"images" in it && it.images?.length ? (
                 <div className="msg-images">
                   {it.images.map((u, i) => (

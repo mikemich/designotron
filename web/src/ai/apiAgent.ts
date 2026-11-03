@@ -8,13 +8,17 @@ import type { Attachment } from "./bridgeClient";
 
 let messages: Anthropic.Beta.BetaMessageParam[] = [];
 let controller: AbortController | null = null;
+let runCount = 0;
 
 export function resetApiConversation() {
   messages = [];
 }
 
+/** Aborts the request that is running now (each run has its own controller, so a message sent
+ *  right after this one is not affected). */
 export function abortApiAgent() {
   controller?.abort();
+  controller = null;
 }
 
 const MAX_TURNS = 40;
@@ -41,18 +45,27 @@ export async function runApiAgent(prompt: string, images: Attachment[] = []) {
   } else {
     messages.push({ role: "user", content: images.length ? blocks : prompt });
   }
-  controller = new AbortController();
+  const mine = new AbortController();
+  controller = mine;
+  // One undo step per run: all its tool calls share the group.
+  const run = ++runCount;
+  const group = `api-${run}`;
   try {
-    await runTurns(client, tools, system, model, controller.signal);
+    await runTurns(client, tools, system, model, mine.signal, group);
   } catch (err) {
-    // Nothing came back for this prompt: forget it, so retrying doesn't send it twice.
+    // Nothing came back for this prompt: forget it, so retrying doesn't send it twice. Not when a
+    // newer run has started since (a queued message after Stop): its prompt may sit in the
+    // same message.
+    if (run !== runCount) throw err;
     if (messages.length === start + 1 && messages[start].role === "user") messages.length = start;
     else if (messages.length === start && last?.role === "user") last.content = (last.content as Anthropic.Beta.BetaContentBlockParam[]).slice(0, -blocks.length);
     throw err;
+  } finally {
+    if (controller === mine) controller = null;
   }
 }
 
-async function runTurns(client: Anthropic, tools: Anthropic.Beta.BetaTool[], system: string, model: string, signal: AbortSignal) {
+async function runTurns(client: Anthropic, tools: Anthropic.Beta.BetaTool[], system: string, model: string, signal: AbortSignal, group: string) {
   let jsonRetries = 0;
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     let textItem: number | null = null;
@@ -98,7 +111,7 @@ async function runTurns(client: Anthropic, tools: Anthropic.Beta.BetaTool[], sys
     const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
     for (const use of uses) {
       const chip = push({ kind: "tool", name: use.name, ok: null });
-      const out = await executeTool(use.name, use.input);
+      const out = await executeTool(use.name, use.input, { group });
       patchItem(chip, { ok: out.ok, detail: out.ok ? undefined : String(out.result) });
       showScreenshot(out);
       const text = typeof out.result === "string" ? out.result : JSON.stringify(out.result);

@@ -7,11 +7,11 @@
 import { create } from "zustand";
 import { getDoc, onDocChange, useStore, zoomToFit } from "../store";
 import { bridge, type Attachment } from "./bridgeClient";
-import { runApiAgent, resetApiConversation } from "./apiAgent";
+import { runApiAgent, resetApiConversation, abortApiAgent } from "./apiAgent";
 import { contextLine } from "./tools";
 
 export type ChatItem =
-  | { id: number; kind: "user" | "assistant" | "error" | "system"; text: string; images?: string[] }
+  | { id: number; kind: "user" | "assistant" | "error" | "system"; text: string; images?: string[]; title?: string }
   | { id: number; kind: "tool"; name: string; ok: boolean | null; detail?: string }
   /** A screenshot Claude took to check its work, shown so you see what it saw. */
   | { id: number; kind: "shot"; url: string; label: string };
@@ -190,6 +190,11 @@ export function askClaude(prompt: string, images: string[] = []) {
   send(prompt);
 }
 
+/** Number of the latest turn that started, and the one the person last stopped. A turn that
+ *  isn't the latest mustn't end the latest one's "running" state or report its own abort. */
+let turnToken = 0;
+let stoppedToken = 0;
+
 export async function send(prompt: string) {
   const st = useChat.getState();
   if (!prompt.trim()) return;
@@ -227,6 +232,7 @@ export async function send(prompt: string) {
     push({ kind: "error", text: "Add an Anthropic API key in settings, or use Claude Code mode with your Pro/Max subscription." });
     return;
   }
+  const token = ++turnToken;
   useChat.setState({ running: true });
   try {
     await runApiAgent(full, attachments);
@@ -239,11 +245,12 @@ export async function send(prompt: string) {
       }
     }
   } catch (err) {
-    push({ kind: "error", text: apiErrorText(err) });
+    // Stopping aborts the request on purpose; it isn't an error to report.
+    if (stoppedToken !== token) push({ kind: "error", text: apiErrorText(err) });
     // A rejected key: keep the prompt so it sends once a valid key is entered.
     if ((err as { status?: number })?.status === 401) useChat.setState({ queued: prompt });
   } finally {
-    useChat.setState({ running: false });
+    if (token === turnToken) useChat.setState({ running: false });
   }
 }
 
@@ -258,13 +265,36 @@ function apiErrorText(err: unknown): string {
   if (status === 429) return "Rate limit reached for this API key. Wait a minute and try again.";
   if (status === 529 || status === 503) return "Claude is overloaded right now. Try again in a moment.";
   if (status === 400 && /credit balance/i.test(String((err as Error).message))) return "This API key's account is out of credit. Add credit at console.anthropic.com.";
-  return String(err instanceof Error ? err.message : err);
+  return apiMessage(err) ?? String(err instanceof Error ? err.message : err);
+}
+
+/** The API's own message from an error body (`{"type":"error","error":{"message":…}}`), never the
+ *  raw JSON the SDK puts in `Error.message`. */
+function apiMessage(err: unknown): string | null {
+  const fromBody = (b: any): string | null => (typeof b?.error?.message === "string" ? b.error.message : typeof b?.message === "string" ? b.message : null);
+  const direct = fromBody((err as { error?: unknown })?.error);
+  if (direct) return direct;
+  const text = String(err instanceof Error ? err.message : err);
+  const status = (err as { status?: number })?.status;
+  const brace = text.indexOf("{");
+  // Only SDK errors carry a JSON body in their message ("400 {...}").
+  if (brace < 0 || (!status && !/^\d{3}\s*\{/.test(text))) return null;
+  try {
+    const parsed = fromBody(JSON.parse(text.slice(brace)));
+    if (parsed) return parsed;
+  } catch {
+    /* not JSON after all */
+  }
+  return `The API returned an error${status ? ` (HTTP ${status})` : ""}. Try again, or check the key and model in settings.`;
 }
 
 export function stop() {
   const st = useChat.getState();
+  stoppedToken = turnToken;
   if (st.mode === "bridge") bridge.cancel();
-  else import("./apiAgent").then((m) => m.abortApiAgent());
+  // Now, not after a lazy import: a queued message's request starts right after this, and a late
+  // abort would hit it instead.
+  else abortApiAgent();
   useChat.setState({ running: false });
 }
 
