@@ -3,7 +3,7 @@
 // and a cache keyed by the identity of the component's subtree nodes. `getDoc()` patches the JS copy
 // from the engine's doc_delta, so a node nobody changed is the same object between revisions.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getDoc, useStore } from "../store";
 import { nodeSvg } from "../exporter";
 
@@ -61,6 +61,7 @@ let renders = 0;
 export function thumbRenderCount(): number {
   return renders;
 }
+(globalThis as any).__dtThumbs = thumbRenderCount;
 
 /**
  * Thumbnail URL for a row. Renders when the row scrolls into view, then again (at most every
@@ -71,14 +72,15 @@ export function useThumb(id: string): { ref: (el: HTMLElement | null) => void; u
   const [url, setUrl] = useState<string | null>(null);
   const docRev = useStore((s) => s.es.docRev);
   const observer = useRef<IntersectionObserver | null>(null);
-  const ref = (el: HTMLElement | null) => {
+  // Stable: a new callback each render would be called again (null, then the element) every time.
+  const ref = useCallback((el: HTMLElement | null) => {
     observer.current?.disconnect();
     observer.current = null;
-    if (!el) return setVisible(false);
+    if (!el) return;
     if (typeof IntersectionObserver === "undefined") return setVisible(true);
     observer.current = new IntersectionObserver((entries) => setVisible(entries.some((e) => e.isIntersecting)), { rootMargin: "100px" });
     observer.current.observe(el);
-  };
+  }, []);
   useEffect(() => () => observer.current?.disconnect(), []);
   useEffect(() => {
     if (!visible) return;
