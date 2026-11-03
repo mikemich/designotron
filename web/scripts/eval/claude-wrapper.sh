@@ -28,5 +28,5 @@ exec "$real" \
   --strict-mcp-config \
   --disable-slash-commands \
   --setting-sources project,local \
-  --disallowedTools "Bash,Write,Edit,WebFetch,WebSearch,Task,Agent" \
+  --disallowedTools "Bash,Write,Edit,WebFetch,WebSearch,NotebookEdit,Task,Agent" \
   "$@"

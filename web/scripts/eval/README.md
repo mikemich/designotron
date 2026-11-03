@@ -26,7 +26,7 @@ The bridge runs `claude-wrapper.sh` instead of `claude`. The wrapper `exec`s the
 `--model`, `--max-budget-usd`, and isolation so the numbers don't depend on the machine:
 `--strict-mcp-config` (only the designotron MCP server), `--disable-slash-commands`,
 `--setting-sources project,local` (no user settings, plugins, hooks or memory) and
-`--disallowedTools Bash,Write,Edit,WebFetch,WebSearch,Task,Agent`. The bridge itself is
+`--disallowedTools Bash,Write,Edit,WebFetch,WebSearch,NotebookEdit,Task,Agent`. The bridge itself is
 started without the `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_REMOTE_SESSION_ID`,
 `CLAUDE_CODE_CHILD_SESSION` and `CLAUDE_CODE_MESSAGING_*` variables, so the spawned `claude`
 doesn't believe it is a child of the Claude Code session you run this from.
@@ -81,7 +81,7 @@ node scripts/eval/claude-eval.mjs --rescore <out dir>   # recompute the metrics 
 - Layers inside instances are ignored (they come from the component).
 
 Guards: the score is 0 when the document is empty, the turn ended in an error or no result
-event, or it timed out. It is capped at 60 when there are 6+ text layers in fewer than 3
+event, or it timed out. It is capped at 60 when there are 6+ text layers in a single font size, or 15+ in fewer than 3
 distinct font sizes (no type hierarchy). `results.json` says why in `metrics.scoreNote`.
 
 The score can't see everything (a pricing card that lost its highlight, a design that is

@@ -49,9 +49,11 @@ then open the editor at http://127.0.0.1:5174 (or https://mikemich.github.io/des
    `{Theme: "Dark"}`) on the copy. Don't recolour by hand.
 6. Use real copy and consistent spacing (multiples of 4 or 8).
 7. Link screens with `set_prototype` when the person asks for a flow or prototype (`open_overlay` / `swap_overlay` / `close_overlay` for modals, menus and sheets).
-8. Finish a new design with `fix_issues` once (it lints itself), then one `get_screenshot`
-   of the new frame (when available): fix only clear defects, and take no second
-   screenshot unless the layout changed.
+8. Finish a new design: if the page had nothing else on it before you started, call
+   `fix_issues` once (it lints itself); otherwise call `lint_design` and fix only your new
+   layers with `update_nodes`, because `fix_issues` changes the whole page. Then take one
+   `get_screenshot` of the new frame (when available): fix only clear defects, and take no
+   second screenshot unless the layout changed.
 9. To build the design as an app, use `export_code` (React + Tailwind) and refine the
    generated project.
 

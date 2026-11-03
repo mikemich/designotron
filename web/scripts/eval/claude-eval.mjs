@@ -27,7 +27,8 @@ const CONTAINERS = new Set(["frame", "component", "componentSet"]);
 const MIN_REPEAT_LAYERS = 2;
 /** The score is capped here when the type has no hierarchy (many texts, fewer than 3 font sizes). */
 const FLAT_TYPE_CAP = 60;
-const FLAT_TYPE_TEXTS = 6;
+/** Flat type: 6+ texts all in one size, or 15+ texts in fewer than 3 sizes (2 sizes is normal for a small card). */
+const flatTypeOf = (texts, sizes) => (texts >= 6 && sizes < 2) || (texts >= 15 && sizes < 3);
 
 /**
  * Scores one finished document. `doc` is `__dt.doc()`, `issues` the lint_design issue list, `run`
@@ -138,7 +139,7 @@ export function computeMetrics(doc, issues = [], run = {}) {
   // Colour tokens and type tokens count equally (colour only when there is no text).
   const tokenUse = texts.length ? (fillTokens + textStyled) / 2 : fillTokens;
   const fontSizes = new Set(texts.map((n) => n.text?.fontSize));
-  const flatType = texts.length >= FLAT_TYPE_TEXTS && fontSizes.size < 3;
+  const flatType = flatTypeOf(texts.length, fontSizes.size);
 
   const lintPer100 = (issues.length / Math.max(1, own.length)) * 100;
   const modeFrames = own.filter((n) => Object.keys(n.variableModes ?? {}).length > 0).length;
@@ -199,7 +200,7 @@ export function parseStream(text) {
     }
     if (e.type === "system" && e.subtype === "init") {
       const names = (xs) => (xs ?? []).map((x) => (typeof x === "string" ? x : (x.name ?? x.path ?? "?")));
-      out.init = { model: e.model, mcpServers: names(e.mcp_servers), plugins: names(e.plugins), agents: names(e.agents), tools: (e.tools ?? []).length };
+      out.init = { model: e.model, mcpServers: names(e.mcp_servers), plugins: names((e.plugins ?? []).filter((p) => typeof p === "string" || !(p.path === "builtin" || String(p.source ?? "").endsWith("@builtin")))), agents: names(e.agents), tools: (e.tools ?? []).length };
     } else if (e.type === "assistant") {
       for (const b of e.message?.content ?? []) {
         if (b.type !== "tool_use") continue;
