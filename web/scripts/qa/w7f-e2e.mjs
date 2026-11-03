@@ -438,6 +438,69 @@ try {
   check("F6 works from a rename field", (await active()).tag !== "INPUT");
   await focusCanvas();
 
+  // A stale tree focus must not pull focus back later: keyboard-focus a row, switch to an empty page
+  // with Alt+PageDown, draw, Enter in a field, then the arrows must still nudge.
+  await p.evaluate(() => document.querySelector("[role=treeitem]").focus());
+  await press("Alt+PageDown", 300);
+  const emptyPage = (await doc()).pages[1];
+  check("Alt+PageDown from a row switched to the next page", (await state()).page === emptyPage.id);
+  const drawn = await dispatch({ op: "createShape", kind: "rectangle", x: 50, y: 50, width: 80, height: 80, parent: null });
+  await sleep(300);
+  const widthInput = p.locator("label.field", { hasText: /^W$/ }).locator("input").first();
+  await widthInput.click({ clickCount: 3 });
+  await widthInput.fill("150");
+  await widthInput.press("Enter");
+  await sleep(300);
+  const afterEnter = await active();
+  check("Enter in a field after Alt+PageDown and drawing leaves focus off the tree", !afterEnter.layer, JSON.stringify(afterEnter));
+  const rx = (await doc()).nodes[drawn.id].x;
+  await p.evaluate(() => document.activeElement?.blur?.());
+  await press("ArrowRight");
+  check("...and the arrows still nudge the rectangle", (await doc()).nodes[drawn.id].x === rx + 1 && (await doc()).nodes[drawn.id].width === 150);
+  await dispatch({ op: "delete", ids: [drawn.id] });
+  await dispatch({ op: "setPage", id: pages[0].id });
+  await sleep(200);
+
+  // A long (windowed) list scrolls by wheel while a row has focus: the focused row stays drawn.
+  await dispatch({ op: "setPage", id: pages[2].id });
+  await p.evaluate(() => {
+    const nodes = [];
+    for (let i = 0; i < 300; i++) nodes.push({ type: "rectangle", name: "L" + i, x: i * 12, y: 0, width: 10, height: 10, fill: "#888888" });
+    window.__dt.tool("create_nodes", { nodes });
+  });
+  await sleep(600);
+  await dispatch({ op: "select", ids: [] });
+  const listTop = () => p.evaluate(() => document.querySelector("[role=tree]").parentElement.scrollTop);
+  const longRow = p.locator("[data-layer]").nth(3);
+  await longRow.dblclick();
+  await sleep(200);
+  await p.keyboard.type("Renamed");
+  await press("Enter", 300);
+  check("long list: rename by double-click returns focus to the row", !!(await active()).layer);
+  const box = await longRow.boundingBox();
+  await p.mouse.move(box.x + 60, box.y + 200);
+  for (let i = 0; i < 3; i++) {
+    await p.mouse.wheel(0, 1500);
+    await sleep(300);
+  }
+  check("long list: the wheel scrolls while a row has focus", (await listTop()) > 3000, String(await listTop()));
+  check("long list: the focused row is still drawn and focused", !!(await active()).layer);
+  await press("End", 300);
+  check("long list: End focuses the last row", (await active()).layer === (await sel())[0]);
+  // Drag-reorder in the panel leaves the keys with the canvas.
+  await p.evaluate(() => (document.querySelector("[role=tree]").parentElement.scrollTop = 0));
+  await sleep(300);
+  const rowA = p.locator("[data-layer]").nth(2);
+  const rowB = p.locator("[data-layer]").nth(4);
+  await rowA.dragTo(rowB);
+  await sleep(300);
+  const dragged = (await sel())[0];
+  const dx0 = (await doc()).nodes[dragged].x;
+  await press("ArrowRight");
+  check("after a drag-reorder in the layers panel the arrows nudge", (await active()).id === "dt-canvas" && (await doc()).nodes[dragged].x === dx0 + 1, JSON.stringify(await active()));
+  await dispatch({ op: "setPage", id: pages[0].id });
+  await sleep(200);
+
   // Tree and canvas attributes.
   const pos = await p.evaluate(() =>
     [...document.querySelectorAll("[role=treeitem]")]

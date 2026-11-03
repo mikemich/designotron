@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { HistoryPanel } from "./HistoryPanel";
 import { CommentsPanel } from "./CommentsPanel";
 import {
@@ -373,8 +373,9 @@ function Layers() {
   const has = (id: string | null) => !!id && rows.some((r) => r.n.id === id);
   const selSet = useMemo(() => new Set(sel), [sel]);
   const tabStop = (has(focusId) ? focusId : null) ?? rows.find((r) => selSet.has(r.n.id))?.n.id ?? (has(lastFocus.current) ? lastFocus.current : null) ?? rows[0]?.n.id ?? null;
-  /** Whether keyboard focus was in the tree before the last render (a row that vanishes under it must hand focus on). */
-  const hadFocus = useRef(false);
+  /** The row that has DOM focus, so a row that leaves `rows` under it (deleted, collapsed, page switched)
+   * can hand focus on. Cleared when focus goes anywhere else. */
+  const rowFocus = useRef<string | null>(null);
 
   /** Moves keyboard focus to a row, drawing it first when a long list has it out of view. */
   const [, redraw] = useReducer((n: number) => n + 1, 0);
@@ -384,9 +385,13 @@ function Layers() {
     redraw();
   };
   useEffect(() => {
-    // The focused row went away (deleted here or by a collaborator, page switched): focus the tab stop.
-    const lost = !document.activeElement || document.activeElement === document.body;
-    if (!pendingFocus.current && hadFocus.current && lost && tabStop) pendingFocus.current = tabStop;
+    // The focused row left the list (deleted here or by a collaborator, collapsed, page switched):
+    // focus the tab stop. Scrolling it out of the window doesn't count, it stays drawn.
+    if (rowFocus.current && !has(rowFocus.current)) {
+      rowFocus.current = null;
+      const lost = !document.activeElement || document.activeElement === document.body;
+      if (!pendingFocus.current && lost && tabStop) pendingFocus.current = tabStop;
+    }
     const id = pendingFocus.current;
     const el = scrollRef.current;
     if (!id || !el) return;
@@ -401,6 +406,14 @@ function Layers() {
     if (i < 0) pendingFocus.current = null;
     else el.scrollTop = Math.max(0, i * ROW - el.clientHeight / 2);
   });
+
+  useEffect(() => {
+    const onFocusIn = (e: FocusEvent) => {
+      if (!(e.target as HTMLElement | null)?.closest?.("[role=tree]")) rowFocus.current = null;
+    };
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+  }, []);
 
   const select = (ids: string[], extend: boolean) => {
     if (extend) {
@@ -510,6 +523,13 @@ function Layers() {
   const windowed = rows.length > WINDOW_FROM;
   const first = windowed ? Math.max(0, Math.floor(view.top / ROW) - 20) : 0;
   const last = windowed ? Math.min(rows.length, Math.ceil((view.top + view.height) / ROW) + 20) : rows.length;
+  // Indices of the drawn rows: the window, plus the focused row when scrolled away from it so DOM
+  // focus (and the wheel) survive scrolling.
+  const focusAt = windowed && focusId ? rows.findIndex((r) => r.n.id === focusId) : -1;
+  const drawn: number[] = [];
+  if (focusAt >= 0 && focusAt < first) drawn.push(focusAt);
+  for (let i = first; i < last; i++) drawn.push(i);
+  if (focusAt >= last) drawn.push(focusAt);
 
   const selectedAncestors = useMemo(() => {
     const s = new Set<string>();
@@ -546,20 +566,20 @@ function Layers() {
           role="tree"
           aria-label="Layers"
           aria-multiselectable="true"
-          tabIndex={rows.slice(first, last).some((r) => r.n.id === tabStop) ? undefined : 0}
+          tabIndex={drawn.some((i) => rows[i].n.id === tabStop) ? undefined : 0}
           onFocus={(e) => {
             if (e.target === e.currentTarget) return tabStop && focusRow(tabStop);
             const id = (e.target as HTMLElement).closest<HTMLElement>("[data-layer]")?.dataset.layer;
             if (!id) return;
             lastFocus.current = id;
-            hadFocus.current = true;
+            rowFocus.current = id;
             setFocusId(id);
           }}
           onBlur={(e) => {
             const to = e.relatedTarget as globalThis.Node | null;
             if (e.currentTarget.contains(to)) return;
             if (to) {
-              hadFocus.current = false;
+              rowFocus.current = null;
               return setFocusId(null);
             }
             // Focus went nowhere: a row removed under it keeps its claim (the tree hands focus on),
@@ -567,127 +587,131 @@ function Layers() {
             const row = e.target as HTMLElement;
             setTimeout(() => {
               if (!row.isConnected) return;
-              hadFocus.current = false;
+              rowFocus.current = null;
               setFocusId(null);
             }, 0);
           }}
         >
-          {first > 0 && <div style={{ height: first * ROW }} aria-hidden="true" />}
-          {rows.slice(first, last).map(({ n, depth, pos, size }, k) => {
+          {drawn.map((at, k) => {
+            const { n, depth, pos, size } = rows[at];
+            const gap = at - (k ? drawn[k - 1] + 1 : 0);
             const isSel = selSet.has(n.id);
             const comp = n.type === "component" || n.type === "componentSet" || n.type === "instance";
             const inInstance = isInsideInstance(doc, n);
             const open = expanded.has(n.id);
             const label = (n.name || n.type) + (n.visible ? "" : ", hidden") + (n.locked ? ", locked" : "");
             return (
-              <div
-                key={n.id}
-                data-layer={n.id}
-                role="treeitem"
-                aria-level={depth + 1}
-                aria-setsize={size}
-                aria-posinset={pos}
-                aria-selected={isSel}
-                aria-expanded={n.children.length ? open : undefined}
-                aria-label={label}
-                title={n.name || n.type}
-                tabIndex={n.id === tabStop ? 0 : -1}
-                className={
-                  "layer" +
-                  (isSel ? " selected" : selectedAncestors.has(n.id) ? "" : "") +
-                  (!n.visible ? " hidden-layer" : "") +
-                  (drop?.id === n.id && drop.where === "into" ? " drop-into" : "")
-                }
-                style={{ paddingLeft: 8 + indent(depth) }}
-                draggable={!inInstance && renaming !== n.id}
-                onKeyDown={(e) => onRowKey(e, first + k)}
-                onDragStart={(e) => {
-                  dragId.current = n.id;
-                  e.dataTransfer.effectAllowed = "move";
-                }}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                  const y = (e.clientY - r.top) / r.height;
-                  const container = ["frame", "group", "component", "componentSet"].includes(n.type) && !inInstance;
-                  const where = container && y > 0.3 && y < 0.7 ? "into" : y < 0.5 ? "before" : "after";
-                  if (drop?.id !== n.id || drop.where !== where) setDrop({ id: n.id, where });
-                }}
-                onClick={(e) => {
-                  if (e.shiftKey || e.metaKey || e.ctrlKey) dispatch({ op: "select", ids: [n.id], mode: "toggle" });
-                  else select([n.id], false);
-                  returnFocusToCanvas(e);
-                }}
-                onDoubleClick={() => setRenaming(n.id)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  if (!isSel) dispatch({ op: "select", ids: [n.id] });
-                  setMenu({
-                    x: e.clientX,
-                    y: e.clientY,
-                    items: [
-                      { label: "Rename", onClick: () => setRenaming(n.id) },
-                      { label: "Zoom to layer", kbd: "⇧2", onClick: zoomToSelection },
-                      { label: "Delete", onClick: () => dispatch({ op: "delete", ids: useStore.getState().es.selection }) },
-                    ],
-                  });
-                }}
-              >
-                {drop?.id === n.id && drop.where !== "into" && <div className="drop-line" style={{ top: drop.where === "before" ? -1 : undefined, bottom: drop.where === "after" ? -1 : undefined, left: 8 + indent(depth) }} />}
-                <span
-                  className="twisty"
-                  aria-hidden="true"
+              <Fragment key={n.id}>
+                {gap > 0 && <div style={{ height: gap * ROW }} aria-hidden="true" />}
+                <div
+                  data-layer={n.id}
+                  role="treeitem"
+                  aria-level={depth + 1}
+                  aria-setsize={size}
+                  aria-posinset={pos}
+                  aria-selected={isSel}
+                  aria-expanded={n.children.length ? open : undefined}
+                  aria-label={label}
+                  title={n.name || n.type}
+                  tabIndex={n.id === tabStop ? 0 : -1}
+                  className={
+                    "layer" +
+                    (isSel ? " selected" : selectedAncestors.has(n.id) ? "" : "") +
+                    (!n.visible ? " hidden-layer" : "") +
+                    (drop?.id === n.id && drop.where === "into" ? " drop-into" : "")
+                  }
+                  style={{ paddingLeft: 8 + indent(depth) }}
+                  draggable={!inInstance && renaming !== n.id}
+                  onDragEnd={() => document.getElementById("dt-canvas")?.focus({ preventScroll: true })}
+                  onKeyDown={(e) => onRowKey(e, at)}
+                  onDragStart={(e) => {
+                    dragId.current = n.id;
+                    e.dataTransfer.effectAllowed = "move";
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    const y = (e.clientY - r.top) / r.height;
+                    const container = ["frame", "group", "component", "componentSet"].includes(n.type) && !inInstance;
+                    const where = container && y > 0.3 && y < 0.7 ? "into" : y < 0.5 ? "before" : "after";
+                    if (drop?.id !== n.id || drop.where !== where) setDrop({ id: n.id, where });
+                  }}
                   onClick={(e) => {
-                    e.stopPropagation();
-                    toggleExpanded(n.id);
+                    if (e.shiftKey || e.metaKey || e.ctrlKey) dispatch({ op: "select", ids: [n.id], mode: "toggle" });
+                    else select([n.id], false);
+                    returnFocusToCanvas(e);
+                  }}
+                  onDoubleClick={() => setRenaming(n.id)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    if (!isSel) dispatch({ op: "select", ids: [n.id] });
+                    setMenu({
+                      x: e.clientX,
+                      y: e.clientY,
+                      items: [
+                        { label: "Rename", onClick: () => setRenaming(n.id) },
+                        { label: "Zoom to layer", kbd: "⇧2", onClick: zoomToSelection },
+                        { label: "Delete", onClick: () => dispatch({ op: "delete", ids: useStore.getState().es.selection }) },
+                      ],
+                    });
                   }}
                 >
-                  {n.children.length > 0 && (open ? <ChevronDown size={12} /> : <ChevronRight size={12} />)}
-                </span>
-                <span className={"icon" + (comp ? " component" : "")} aria-hidden="true">
-                  {nodeIcon(n)}
-                </span>
-                {renaming === n.id ? (
-                  <RenameInput
-                    value={n.name}
-                    label="Layer name"
-                    onDone={(name, byKey) => {
-                      setRenaming(null);
-                      if (name && name !== n.name) dispatch({ op: "update", ids: [n.id], patch: { name } });
-                      if (byKey) requestAnimationFrame(() => focusRow(n.id));
-                    }}
-                  />
-                ) : (
-                  <span className={"name" + (comp ? " component" : "")}>{n.name || n.type}</span>
-                )}
-                <span className={"tools" + (n.locked || !n.visible ? " pinned" : "")}>
-                  <button
-                    className="ibtn"
-                    tabIndex={-1}
-                    title={n.locked ? "Unlock" : "Lock"}
+                  {drop?.id === n.id && drop.where !== "into" && <div className="drop-line" style={{ top: drop.where === "before" ? -1 : undefined, bottom: drop.where === "after" ? -1 : undefined, left: 8 + indent(depth) }} />}
+                  <span
+                    className="twisty"
+                    aria-hidden="true"
                     onClick={(e) => {
                       e.stopPropagation();
-                      dispatch({ op: "update", ids: [n.id], patch: { locked: !n.locked } });
+                      toggleExpanded(n.id);
                     }}
                   >
-                    {n.locked ? <Lock size={12} /> : <Unlock size={12} />}
-                  </button>
-                  <button
-                    className="ibtn"
-                    tabIndex={-1}
-                    title={n.visible ? "Hide" : "Show"}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      dispatch({ op: "update", ids: [n.id], patch: { visible: !n.visible } });
-                    }}
-                  >
-                    {n.visible ? <Eye size={12} /> : <EyeOff size={12} />}
-                  </button>
-                </span>
-              </div>
+                    {n.children.length > 0 && (open ? <ChevronDown size={12} /> : <ChevronRight size={12} />)}
+                  </span>
+                  <span className={"icon" + (comp ? " component" : "")} aria-hidden="true">
+                    {nodeIcon(n)}
+                  </span>
+                  {renaming === n.id ? (
+                    <RenameInput
+                      value={n.name}
+                      label="Layer name"
+                      onDone={(name, byKey) => {
+                        setRenaming(null);
+                        if (name && name !== n.name) dispatch({ op: "update", ids: [n.id], patch: { name } });
+                        if (byKey) requestAnimationFrame(() => focusRow(n.id));
+                      }}
+                    />
+                  ) : (
+                    <span className={"name" + (comp ? " component" : "")}>{n.name || n.type}</span>
+                  )}
+                  <span className={"tools" + (n.locked || !n.visible ? " pinned" : "")}>
+                    <button
+                      className="ibtn"
+                      tabIndex={-1}
+                      title={n.locked ? "Unlock" : "Lock"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        dispatch({ op: "update", ids: [n.id], patch: { locked: !n.locked } });
+                      }}
+                    >
+                      {n.locked ? <Lock size={12} /> : <Unlock size={12} />}
+                    </button>
+                    <button
+                      className="ibtn"
+                      tabIndex={-1}
+                      title={n.visible ? "Hide" : "Show"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        dispatch({ op: "update", ids: [n.id], patch: { visible: !n.visible } });
+                      }}
+                    >
+                      {n.visible ? <Eye size={12} /> : <EyeOff size={12} />}
+                    </button>
+                  </span>
+                </div>
+              </Fragment>
             );
           })}
-          {last < rows.length && <div style={{ height: (rows.length - last) * ROW }} aria-hidden="true" />}
+          {drawn.length > 0 && drawn[drawn.length - 1] < rows.length - 1 && <div style={{ height: (rows.length - 1 - drawn[drawn.length - 1]) * ROW }} aria-hidden="true" />}
         </div>
       )}
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
