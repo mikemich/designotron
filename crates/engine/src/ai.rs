@@ -4,6 +4,8 @@
 //! Node specs are a forgiving, CSS-flavoured JSON shape so models can write
 //! whole screens in one call; they are converted into real nodes here.
 
+use std::collections::{HashSet, VecDeque};
+
 use serde_json::{json, Map, Value};
 
 use self::parse::{Ctx, Dim, Radius};
@@ -27,7 +29,17 @@ mod tool_tests;
 pub const BROWSER_TOOLS: &[&str] = &["get_screenshot", "import_html", "import_url", "save_plugin"];
 
 /// Layers `get_document` outlines before it cuts the tree (deeper levels collapse to a count).
-const OUTLINE_CAP: usize = 300;
+const OUTLINE_CAP: usize = 250;
+/// Top-level layers `create_nodes` describes one by one; past it the answer is ids only.
+const CREATED_CAP: usize = 300;
+/// Ids listed when a create is past `CREATED_CAP`.
+const CREATED_IDS_CAP: usize = 500;
+/// Children of one created layer (and of each child) that are listed.
+const CHILDREN_CAP: usize = 50;
+/// Children and grandchildren a whole `create_nodes` answer lists.
+const CREATED_LISTED: usize = 150;
+/// Work a `find_nodes` regex may spend over all layers.
+const REGEX_BUDGET: u64 = 3_000_000;
 /// Named descendants `create_nodes` reports.
 const NAMES_CAP: usize = 300;
 /// Characters of a text layer `get_nodes` returns.
@@ -116,16 +128,32 @@ fn spec_schema() -> Value {
 }
 
 /// An `update_nodes` item: the spec properties (not type or children), plus `id` and `patch`.
+/// Only the types and enums are copied; `create_nodes` carries the descriptions (they cost
+/// prompt tokens on every turn).
 fn update_item_schema(spec: &Value) -> Value {
   let mut props = spec["properties"].as_object().cloned().unwrap_or_default();
   props.remove("type");
   props.remove("children");
+  for p in props.values_mut() {
+    strip_descriptions(p);
+  }
   props.insert("id".into(), json!({ "type": "string", "description": "The layer to change" }));
   props.insert(
     "patch".into(),
     json!({ "type": "object", "description": "Raw model fields to merge (advanced)" }),
   );
   json!({ "type": "object", "properties": props, "required": ["id"] })
+}
+
+fn strip_descriptions(v: &mut Value) {
+  match v {
+    Value::Object(m) => {
+      m.remove("description");
+      m.values_mut().for_each(strip_descriptions);
+    }
+    Value::Array(a) => a.iter_mut().for_each(strip_descriptions),
+    _ => {}
+  }
 }
 
 /// Actions of the `arrange` tool.
@@ -178,7 +206,7 @@ pub fn tool_defs() -> Value {
       "description": "Find layers without reading the whole tree: by name (case-insensitive substring, or /regex/), type, text content, instances of a componentId, or a linked style name. Filters combine (all must match). Returns {total, nodes:[{id,type,name,parentId,page,w,h,text?}]}.",
       "input_schema": { "type": "object", "properties": {
         "name": { "type": "string", "description": "Substring of the layer name, or /regex/ (e.g. /^Button/)" },
-        "type": { "type": "string", "description": "frame, rectangle, ellipse, text, line, polygon, star, vector, group, component, instance" },
+        "type": { "type": "string", "description": "frame, rectangle, ellipse, text, line, polygon, star, vector, group, component, component_set, instance, image (a rectangle with an image fill)" },
         "text": { "type": "string", "description": "Substring of a text layer's characters" },
         "componentId": { "type": "string", "description": "Only instances of this main component" },
         "style": { "type": "string", "description": "Name or id of a colour or text style the layer is linked to" },
@@ -239,7 +267,6 @@ pub fn tool_defs() -> Value {
         "trigger": { "type": "string", "enum": ["click", "hover", "press", "delay"] },
         "transition": { "type": "string", "enum": ["instant", "dissolve", "smart_animate", "slide_left", "slide_right", "slide_up", "slide_down"] },
         "clear": { "type": "boolean", "description": "Remove existing interactions first" },
-        "add": { "type": "boolean", "description": "Keep an existing interaction with the same trigger; by default a new one replaces it" },
         "delay": { "type": "number", "description": "Milliseconds before a delay trigger fires (default 800)" }
       }, "required": ["nodeId"] }
     },
@@ -704,9 +731,17 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
     if spec.get("children").is_some() {
       cx.warn("children can't be changed with update_nodes; use create_nodes with parentId, or move_nodes");
     }
+    if let Some(t) = u.get("type").and_then(|v| v.as_str()) {
+      if parse_kind(&cx, &t.to_lowercase()).ok() != Some(before.kind) {
+        cx.warn(format!(
+          "type can't be changed with update_nodes ('{t}' ignored; the layer is a {})",
+          before.kind.label()
+        ));
+      }
+    }
     if (u.get("x").is_some() || u.get("y").is_some())
       && in_auto_layout(e, &before)
-      && u.get("absolute").and_then(|v| v.as_bool()) != Some(true)
+      && !matches!(parse::opt_bool(&cx, u, "absolute"), Ok(Some(true)))
     {
       cx.warn("x/y ignored: the parent has auto layout; set absolute:true, or reorder with move_nodes index");
       if let Value::Object(m) = &mut spec {
@@ -763,7 +798,7 @@ fn move_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
   let reparent = input.get("parentId").is_some() || input.get("index").is_some();
   let mut cx = Ctx::new();
   let mut moved = found.clone();
-  let (x, y) = (num(input.get("x")), num(input.get("y")));
+  let (x, y) = (parse::opt_number(&cx, input, "x")?, parse::opt_number(&cx, input, "y")?);
   if let (Some(x), Some(y)) = (x, y) {
     let mut skipped = Vec::new();
     for id in &found {
@@ -783,7 +818,7 @@ fn move_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
     cx.warn("x and y must be given together; ignored");
   }
   if reparent {
-    let index = input.get("index").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let index = parse::opt_number(&cx, input, "index")?.filter(|i| *i >= 0.0).map(|i| i as usize);
     e.dispatch_inner(Command::MoveToParent { ids: found, parent, index })?;
   }
   let mut r = json!({ "moved": moved });
@@ -821,11 +856,17 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
   if e.doc.get(id).is_none() {
     return Err(format!("no layer {id}"));
   }
+  // A url alone means "open this link".
+  let default_action = if input.get("action").is_none_or(|a| a.is_null()) && input.get("url").is_some_and(|u| u.is_string()) {
+    Action::OpenUrl
+  } else {
+    Action::Navigate
+  };
   let action = parse::exact(
     &cx,
     "action",
     input.get("action"),
-    Action::Navigate,
+    default_action,
     &[
       ("navigate", Action::Navigate),
       ("back", Action::Back),
@@ -908,11 +949,10 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
   if input.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
     n.interactions.clear();
   }
-  let before = n.interactions.len();
-  if !input.get("add").and_then(|v| v.as_bool()).unwrap_or(false) {
-    n.interactions.retain(|i| i.trigger != trigger);
-  }
-  let replaced = before - n.interactions.len();
+  // A second interaction with the same trigger would never play, so it replaces the first.
+  let (replaced, kept): (Vec<Interaction>, Vec<Interaction>) =
+    std::mem::take(&mut n.interactions).into_iter().partition(|i| i.trigger == trigger);
+  n.interactions = kept;
   n.interactions.push(Interaction {
     trigger,
     delay_ms,
@@ -924,8 +964,11 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
     overlay,
   });
   let mut r = json!({ "ok": true });
-  if replaced > 0 {
-    r["replaced"] = json!(replaced);
+  if !replaced.is_empty() {
+    r["replaced"] = json!(replaced
+      .iter()
+      .map(|i| json!({ "trigger": i.trigger, "action": i.action, "destinationId": i.destination }))
+      .collect::<Vec<_>>());
   }
   Ok(r)
 }
@@ -1057,11 +1100,16 @@ fn find_nodes(e: &Engine, input: &Value) -> Result<Value, String> {
     None => None,
   };
   let kind = match text_filter("type")? {
-    Some(t) => Some(parse_kind(&cx, &t.to_lowercase()).map_err(|_| cx.err("type", format!("unknown layer type '{t}'")))?),
+    Some(t) => Some(find_type(&cx, &t)?),
     None => None,
   };
   let text = text_filter("text")?.map(|t| t.to_lowercase());
   let component = text_filter("componentId")?;
+  if let Some(c) = &component {
+    if !e.doc.get(c).is_some_and(|n| n.kind == NodeType::Component) {
+      return Err(cx.err("componentId", format!("{c} is not a main component")));
+    }
+  }
   let style = text_filter("style")?;
   let within = text_filter("within")?;
   if let Some(w) = &within {
@@ -1099,6 +1147,13 @@ fn find_nodes(e: &Engine, input: &Value) -> Result<Value, String> {
     Some(p) if e.doc.page(p).is_some() => vec![p.to_string()],
     Some(p) => return Err(cx.err("page", format!("no page {p}; use a page id or \"all\""))),
   };
+  if let Some(w) = &within {
+    let page = e.doc.get(w).map(|n| n.page.clone()).unwrap_or_default();
+    if !pages.contains(&page) {
+      return Err(cx.err("within", format!("{w} is on page {page}; pass page: \"{page}\" (or \"all\")")));
+    }
+  }
+  let mut budget = REGEX_BUDGET;
   let candidates: Vec<String> = match &within {
     Some(w) => e.doc.subtree(w),
     None => pages.iter().flat_map(|p| e.doc.page_nodes(p)).collect(),
@@ -1109,13 +1164,18 @@ fn find_nodes(e: &Engine, input: &Value) -> Result<Value, String> {
     if !pages.contains(&n.page) {
       continue;
     }
-    if kind.is_some_and(|k| n.kind != k) {
+    if !kind.as_ref().is_none_or(|k| k.matches(n)) {
       continue;
     }
     let name_ok = match &name {
       None => true,
       Some(NameMatch::Substring(s)) => n.name.to_lowercase().contains(s.as_str()),
-      Some(NameMatch::Pattern(r)) => r.is_match(&n.name),
+      Some(NameMatch::Pattern(r)) => r.is_match(&n.name, &mut budget).map_err(|_| {
+        cx.err(
+          "name",
+          "the pattern is too complex for this many layers; simplify it or narrow the search with within/type",
+        )
+      })?,
     };
     if !name_ok {
       continue;
@@ -1154,6 +1214,46 @@ fn find_nodes(e: &Engine, input: &Value) -> Result<Value, String> {
   Ok(json!({ "total": total, "nodes": out }))
 }
 
+/// What `find_nodes` `type` can select.
+enum FindType {
+  Kind(NodeType),
+  /// A rectangle painted with an image.
+  Image,
+}
+
+impl FindType {
+  fn matches(&self, n: &Node) -> bool {
+    match self {
+      FindType::Kind(k) => n.kind == *k,
+      FindType::Image => n.kind == NodeType::Rectangle && n.fills.iter().any(|p| matches!(p, Paint::Image { .. })),
+    }
+  }
+}
+
+fn find_type(cx: &Ctx, t: &str) -> Result<FindType, String> {
+  Ok(match t.trim().to_lowercase().replace(['_', '-', ' '], "").as_str() {
+    "frame" | "div" | "container" | "screen" => FindType::Kind(NodeType::Frame),
+    "group" => FindType::Kind(NodeType::Group),
+    "rectangle" | "rect" => FindType::Kind(NodeType::Rectangle),
+    "ellipse" | "circle" => FindType::Kind(NodeType::Ellipse),
+    "line" => FindType::Kind(NodeType::Line),
+    "polygon" | "triangle" => FindType::Kind(NodeType::Polygon),
+    "star" => FindType::Kind(NodeType::Star),
+    "vector" | "icon" | "path" => FindType::Kind(NodeType::Vector),
+    "text" => FindType::Kind(NodeType::Text),
+    "component" => FindType::Kind(NodeType::Component),
+    "componentset" => FindType::Kind(NodeType::ComponentSet),
+    "instance" => FindType::Kind(NodeType::Instance),
+    "image" => FindType::Image,
+    _ => {
+      return Err(cx.err(
+        "type",
+        format!("unknown layer type '{t}'; use frame, group, rectangle, ellipse, line, polygon, star, vector, text, component, component_set, instance or image"),
+      ))
+    }
+  })
+}
+
 /// Cuts a very long text layer's characters (and the style runs past them) for the model.
 fn cap_text(m: &mut Map<String, Value>) {
   let Some(Value::Object(t)) = m.get_mut("text") else { return };
@@ -1176,18 +1276,18 @@ fn cap_text(m: &mut Map<String, Value>) {
   m.insert("textLength".into(), json!(len));
 }
 
-/// Compact tree of the current page for the model. Past about `OUTLINE_CAP` layers the deeper
-/// levels collapse to child counts and `truncated` says how to read more.
+/// Compact tree of the current page for the model. It lists layers breadth first until about
+/// `OUTLINE_CAP`; a layer with children left out shows `childCount`, and `moreLayers` counts the
+/// top-level layers left out. `truncated` says how to read the rest.
 pub fn summary(e: &Engine, depth: usize) -> Value {
   let page = e.doc.page(&e.page);
   let roots = page.map(|p| p.children.clone()).unwrap_or_default();
-  let (shown_depth, mut cut) = fitting_depth(e, &roots, depth);
-  let mut budget = Budget {
-    left: OUTLINE_CAP,
-    cut: false,
-  };
-  let layers: Vec<Value> = roots.iter().map(|r| outline_in(e, r, shown_depth, &mut budget)).collect();
-  cut |= budget.cut;
+  let (included, cut) = outline_plan(e, &roots, depth);
+  let layers: Vec<Value> = roots
+    .iter()
+    .filter(|r| included.contains(r.as_str()))
+    .map(|r| outline_in(e, r, depth, Some(&included)))
+    .collect();
   let mut v = json!({
     "document": e.doc.name,
     "pages": e.doc.pages.iter().map(|p| json!({ "id": p.id, "name": p.name, "current": p.id == e.page, "layers": p.children.len() })).collect::<Vec<_>>(),
@@ -1202,8 +1302,12 @@ pub fn summary(e: &Engine, depth: usize) -> Value {
     "nextFreeX": roots.iter().map(|r| e.doc.abs_bounds(r).right()).fold(0.0, f64::max) + if roots.is_empty() { 0.0 } else { 100.0 },
   });
   if cut {
+    let left_out = roots.len() - v["layers"].as_array().map_or(0, |l| l.len());
+    if left_out > 0 {
+      v["moreLayers"] = json!(left_out);
+    }
     v["truncated"] = json!(format!(
-      "the outline stops at about {OUTLINE_CAP} layers (deeper levels show childCount); use get_nodes or find_nodes for the rest"
+      "the outline lists about {OUTLINE_CAP} layers, level by level; layers with children left out show childCount; use get_nodes or find_nodes for the rest"
     ));
   }
   v
@@ -1217,27 +1321,23 @@ fn text_style_label(t: &TextStyle) -> String {
   }
 }
 
-/// The deepest outline level (up to `depth`) whose layers, with all those above it, fit in the
-/// cap, and whether deeper levels had to be left out.
-fn fitting_depth(e: &Engine, roots: &[NodeId], depth: usize) -> (usize, bool) {
-  let mut level: Vec<&NodeId> = roots.iter().collect();
-  let mut total = level.len();
-  for d in 0..depth {
-    let next: Vec<&NodeId> = level
-      .iter()
-      .filter_map(|id| e.doc.get(id.as_str()))
-      .flat_map(|n| n.children.iter())
-      .collect();
-    if next.is_empty() {
-      return (depth, false);
+/// The layers an outline lists: breadth first from the roots down to `depth`, until the cap.
+/// Also whether anything was left out because of the cap.
+fn outline_plan(e: &Engine, roots: &[NodeId], depth: usize) -> (HashSet<String>, bool) {
+  let mut included = HashSet::new();
+  let mut queue: VecDeque<(&str, usize)> = roots.iter().map(|r| (r.as_str(), 0)).collect();
+  while let Some((id, d)) = queue.pop_front() {
+    if included.len() >= OUTLINE_CAP {
+      return (included, true);
     }
-    total += next.len();
-    if total > OUTLINE_CAP {
-      return (d, true);
+    included.insert(id.to_string());
+    if d < depth {
+      if let Some(n) = e.doc.get(id) {
+        queue.extend(n.children.iter().map(|c| (c.as_str(), d + 1)));
+      }
     }
-    level = next;
   }
-  (depth, false)
+  (included, false)
 }
 
 fn component_summary(e: &Engine, c: &Node) -> Value {
@@ -1252,32 +1352,13 @@ fn component_summary(e: &Engine, c: &Node) -> Value {
   m
 }
 
-/// How many more layers an outline may list.
-struct Budget {
-  left: usize,
-  /// A layer was collapsed because the budget ran out.
-  cut: bool,
-}
-
 fn outline(e: &Engine, id: &str, depth: usize) -> Value {
-  outline_in(
-    e,
-    id,
-    depth,
-    &mut Budget {
-      left: usize::MAX,
-      cut: false,
-    },
-  )
+  outline_in(e, id, depth, None)
 }
 
-fn outline_in(e: &Engine, id: &str, depth: usize, budget: &mut Budget) -> Value {
+/// A layer and its descendants down to `depth`; with `only`, just the layers in that set.
+fn outline_in(e: &Engine, id: &str, depth: usize, only: Option<&HashSet<String>>) -> Value {
   let Some(n) = e.doc.get(id) else { return Value::Null };
-  if budget.left == 0 {
-    budget.cut = true;
-    return json!({ "id": n.id, "name": n.name, "type": n.kind, "children": n.children.len() });
-  }
-  budget.left -= 1;
   let mut m = Map::new();
   m.insert("id".into(), json!(n.id));
   m.insert("type".into(), json!(n.kind));
@@ -1322,12 +1403,19 @@ fn outline_in(e: &Engine, id: &str, depth: usize, budget: &mut Budget) -> Value 
     }
   }
   if !n.children.is_empty() {
-    if depth > 0 {
-      m.insert(
-        "children".into(),
-        json!(n.children.iter().map(|c| outline_in(e, c, depth - 1, budget)).collect::<Vec<_>>()),
-      );
+    let shown: Vec<Value> = if depth > 0 {
+      n.children
+        .iter()
+        .filter(|c| only.is_none_or(|o| o.contains(c.as_str())))
+        .map(|c| outline_in(e, c, depth - 1, only))
+        .collect()
     } else {
+      Vec::new()
+    };
+    if !shown.is_empty() {
+      m.insert("children".into(), json!(shown));
+    }
+    if shown.len() < n.children.len() {
       m.insert("childCount".into(), json!(n.children.len()));
     }
   }
@@ -1351,7 +1439,15 @@ pub struct Inserted {
 impl Inserted {
   fn into_json(self) -> Value {
     let mut m = Map::new();
-    m.insert("created".into(), json!(self.created));
+    if self.created.len() > CREATED_CAP {
+      // A huge create: ids only, so the answer stays small.
+      let ids: Vec<Value> = self.created.iter().take(CREATED_IDS_CAP).map(|c| c["id"].clone()).collect();
+      m.insert("createdCount".into(), json!(self.created.len()));
+      m.insert("createdTruncated".into(), json!(true));
+      m.insert("created".into(), json!(ids));
+    } else {
+      m.insert("created".into(), json!(self.created));
+    }
     if !self.names.is_empty() {
       m.insert("names".into(), Value::Object(self.names));
     }
@@ -1393,7 +1489,8 @@ pub fn insert_specs_ex(e: &mut Engine, specs: &[Value], parent: Option<&str>) ->
     settle_fill_in_hug(&mut e.doc, r);
   }
   crate::layout::relayout_all(&mut e.doc, e.measurer.as_ref());
-  let created = roots.iter().map(|r| brief(e, r)).collect();
+  let mut left = CREATED_LISTED;
+  let created = roots.iter().map(|r| brief(e, r, &mut left)).collect();
   let mut names = Map::new();
   let mut names_truncated = false;
   for (name, id) in std::mem::take(&mut cx.names) {
@@ -1414,12 +1511,50 @@ pub fn insert_specs_ex(e: &mut Engine, specs: &[Value], parent: Option<&str>) ->
   })
 }
 
-/// One line about a layer: id, name, type and size.
-fn brief(e: &Engine, id: &str) -> Value {
-  match e.doc.get(id) {
-    Some(n) => json!({ "id": n.id, "name": n.name, "type": n.kind, "w": round(n.width), "h": round(n.height) }),
-    None => Value::Null,
+/// A few lines about a layer: id, name, type, size, and its children and theirs (id, name, type
+/// each). `left` is what the whole answer may still list, so a big create stays small.
+fn brief(e: &Engine, id: &str, left: &mut usize) -> Value {
+  let Some(n) = e.doc.get(id) else { return Value::Null };
+  let mut m = json!({ "id": n.id, "name": n.name, "type": n.kind, "w": round(n.width), "h": round(n.height) });
+  if n.children.is_empty() {
+    return m;
   }
+  let mut kids: Vec<Value> = Vec::new();
+  for c in n.children.iter().take(CHILDREN_CAP).filter_map(|c| e.doc.get(c)) {
+    if *left == 0 {
+      break;
+    }
+    *left -= 1;
+    kids.push(json!({ "id": c.id, "name": c.name, "type": c.kind }));
+  }
+  // Grandchildren after the children, with whatever the answer has room for.
+  for (kid, c) in kids.iter_mut().zip(n.children.iter()) {
+    let Some(c) = e.doc.get(c) else { continue };
+    if c.children.is_empty() {
+      continue;
+    }
+    let mut grand: Vec<Value> = Vec::new();
+    for g in c.children.iter().take(CHILDREN_CAP).filter_map(|g| e.doc.get(g)) {
+      if *left == 0 {
+        break;
+      }
+      *left -= 1;
+      grand.push(json!({ "id": g.id, "name": g.name, "type": g.kind }));
+    }
+    if !grand.is_empty() {
+      kid["children"] = json!(grand);
+    }
+    if grand_len(kid) < c.children.len() {
+      kid["childCount"] = json!(c.children.len());
+    }
+  }
+  m["children"] = json!(kids);
+  m["childCount"] = json!(n.children.len());
+  m
+}
+
+fn grand_len(v: &Value) -> usize {
+  v["children"].as_array().map_or(0, |a| a.len())
 }
 
 /// A layer that fills the main axis of an auto layout frame that hugs on that axis has nothing
@@ -1595,24 +1730,28 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
     n.rotation = v;
   }
   if let Some(v) = parse::opt_number(cx, s, "opacity")? {
-    let o = if v > 1.0 && v <= 100.0 {
+    // 0 to 1; a whole number from 2 up to 100 is most likely a percentage.
+    let o = if (2.0..=100.0).contains(&v) {
       cx.warn(format!("opacity {v} read as {v}%; opacity is 0 to 1"));
       v / 100.0
     } else {
+      if !(0.0..=1.0).contains(&v) {
+        cx.warn(format!("opacity {v} is outside 0 to 1; clamped"));
+      }
       v
     };
     n.opacity = o.clamp(0.0, 1.0);
   }
-  if let Some(v) = s.get("visible").and_then(|v| v.as_bool()) {
+  if let Some(v) = parse::opt_bool(cx, s, "visible")? {
     n.visible = v;
   }
-  if let Some(v) = s.get("locked").and_then(|v| v.as_bool()) {
+  if let Some(v) = parse::opt_bool(cx, s, "locked")? {
     n.locked = v;
   }
-  if let Some(v) = s.get("clip").and_then(|v| v.as_bool()) {
+  if let Some(v) = parse::opt_bool(cx, s, "clip")? {
     n.clip_content = v;
   }
-  if let Some(v) = s.get("absolute").and_then(|v| v.as_bool()) {
+  if let Some(v) = parse::opt_bool(cx, s, "absolute")? {
     n.absolute_position = v;
   }
   for (key, slot) in [
@@ -1761,8 +1900,17 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
       &parse::no_hint,
     )?;
   }
-  if let Some(arr) = s.get("strokeDash").and_then(|v| v.as_array()) {
-    n.stroke_dash = arr.iter().filter_map(|v| v.as_f64()).collect();
+  match s.get("strokeDash") {
+    None | Some(Value::Null) => {}
+    Some(Value::Array(arr)) => {
+      n.stroke_dash = arr.iter().map(|v| parse::number(cx, "strokeDash", v)).collect::<Result<_, _>>()?;
+    }
+    Some(other) => {
+      return Err(cx.err(
+        "strokeDash",
+        format!("must be an array of numbers like [4, 2], got {}", parse::kind_of(other)),
+      ))
+    }
   }
   if let Some(v) = s.get("cornerRadius").filter(|v| !v.is_null()) {
     match parse::radius(cx, "cornerRadius", v)? {
@@ -1778,6 +1926,7 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
       Value::Array(a) => a.clone(),
       Value::Null => vec![],
       Value::Object(_) => vec![sh.clone()],
+      Value::String(css) if css.trim().eq_ignore_ascii_case("none") => vec![],
       Value::String(css) => parse::css_shadow(cx, "shadow", css)?,
       other => {
         return Err(cx.err(
@@ -2001,7 +2150,7 @@ fn apply_layout(cx: &mut Ctx, n: &mut Node, s: &Value, sized_w: bool, sized_h: b
       &align_hint,
     )?;
   }
-  if let Some(w) = l.get("wrap").and_then(|v| v.as_bool()) {
+  if let Some(w) = parse::opt_bool(cx, &l, "wrap")? {
     al.wrap = w;
   }
   cx.leave(mark);
@@ -2085,7 +2234,7 @@ fn apply_text(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creating: b
   if let Some(v) = s.get("letterSpacing").filter(|v| !v.is_null()) {
     t.letter_spacing = parse::letter_spacing(cx, "letterSpacing", v, t.font_size)?;
   }
-  if let Some(v) = s.get("italic").and_then(|v| v.as_bool()) {
+  if let Some(v) = parse::opt_bool(cx, s, "italic")? {
     t.italic = v;
   }
   if let Some(v) = s.get("textAlign").filter(|v| !v.is_null()) {
@@ -2151,7 +2300,7 @@ fn apply_text(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creating: b
   if s.get("maxLines").is_some() {
     t.max_lines = parse::opt_number(cx, s, "maxLines")?.filter(|v| *v >= 1.0).map(|v| v as u32);
   }
-  if let Some(v) = s.get("truncate").and_then(|v| v.as_bool()) {
+  if let Some(v) = parse::opt_bool(cx, s, "truncate")? {
     t.truncate = v;
   }
   if let Some(v) = parse::opt_number(cx, s, "paragraphSpacing")? {
@@ -2307,7 +2456,7 @@ fn spans_to_runs(cx: &mut Ctx, spans: &[Value]) -> Result<(String, Vec<crate::mo
         Some(w) => Some(parse::font_weight(cx, "fontWeight", w)?),
         None => None,
       },
-      italic: sp.get("italic").and_then(|v| v.as_bool()),
+      italic: parse::opt_bool(cx, sp, "italic")?,
       color: match sp.get("color").filter(|v| !v.is_null()) {
         Some(c) => Some(parse::color(cx, "color", c)?),
         None => None,
@@ -2411,7 +2560,7 @@ fn parse_fill_str(s: &str) -> Result<Option<Paint>, String> {
     let parts = split_top_level(inner);
     let stops_src: Vec<String> = parts
       .into_iter()
-      .filter(|p| crate::color::parse(p.split_whitespace().next().unwrap_or("")).is_some())
+      .filter(|p| crate::color::parse(parse::tokens(p).first().map(String::as_str).unwrap_or("")).is_some())
       .collect();
     if stops_src.len() < 2 {
       return Err(format!("gradient '{t}' needs at least two colour stops"));
@@ -2802,7 +2951,7 @@ mod tests {
       execute(
         &mut e,
         "set_prototype",
-        &json!({ "nodeId": btn, "action": "swap_overlay", "destinationId": modal, "add": true,
+        &json!({ "nodeId": btn, "action": "swap_overlay", "destinationId": modal, "trigger": "hover",
           "overlay": { "position": "manual", "offsetX": 12, "offsetY": -4, "background": "#1E293B", "backgroundOpacity": 0.6 } }),
       )
       .unwrap();

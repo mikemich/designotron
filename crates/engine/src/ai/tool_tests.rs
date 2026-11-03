@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 use crate::engine::{Command, Engine};
-use crate::model::{Align, LayoutDirection, Sizing};
+use crate::model::{Action, Align, LayoutDirection, Sizing};
 use crate::text::HeuristicMeasurer;
 
 mod moving {
@@ -418,35 +418,42 @@ mod prototype {
     let (home, other, btn) = (&ids[0], &ids[1], &ids[2]);
     run(&mut e, "set_prototype", json!({ "nodeId": btn, "destinationId": other }));
     let r = run(&mut e, "set_prototype", json!({ "nodeId": btn, "destinationId": home }));
-    assert_eq!(r["replaced"], 1);
+    assert_eq!(
+      r["replaced"],
+      json!([{ "trigger": "onClick", "action": "navigate", "destinationId": other }])
+    );
     let i = &e.doc.get(btn).unwrap().interactions;
     assert_eq!(i.len(), 1);
     assert_eq!(i[0].destination.as_deref(), Some(home.as_str()));
-    // Another trigger, or `add`, keeps both.
+    // Another trigger keeps both.
     run(
       &mut e,
       "set_prototype",
       json!({ "nodeId": btn, "destinationId": other, "trigger": "hover" }),
     );
-    run(
-      &mut e,
-      "set_prototype",
-      json!({ "nodeId": btn, "destinationId": other, "add": true }),
-    );
-    assert_eq!(e.doc.get(btn).unwrap().interactions.len(), 3);
+    assert_eq!(e.doc.get(btn).unwrap().interactions.len(), 2);
     // The delay is settable and defaults to 800.
     run(
       &mut e,
       "set_prototype",
       json!({ "nodeId": btn, "destinationId": other, "trigger": "delay", "delay": 2500 }),
     );
+    assert_eq!(e.doc.get(btn).unwrap().interactions[2].delay_ms, 2500.0);
     run(
       &mut e,
       "set_prototype",
-      json!({ "nodeId": btn, "destinationId": home, "trigger": "delay", "add": true }),
+      json!({ "nodeId": btn, "destinationId": home, "trigger": "delay" }),
     );
     let i = &e.doc.get(btn).unwrap().interactions;
-    assert_eq!((i[3].delay_ms, i[4].delay_ms), (2500.0, 800.0));
+    assert_eq!((i.len(), i[2].delay_ms), (3, 800.0));
+  }
+
+  #[test]
+  fn a_url_alone_opens_the_link() {
+    let (mut e, ids) = screens();
+    run(&mut e, "set_prototype", json!({ "nodeId": ids[2], "url": "https://example.com" }));
+    let i = &e.doc.get(&ids[2]).unwrap().interactions[0];
+    assert_eq!((i.action, i.url.as_deref()), (Action::OpenUrl, Some("https://example.com")));
   }
 
   /// Home, Settings and a button inside Home: [home, settings, button].
@@ -794,7 +801,9 @@ mod size {
     // The roots and their children are there; the level that didn't fit shows counts.
     assert_eq!(d["layers"].as_array().unwrap().len(), 10);
     assert_eq!(d["layers"][0]["children"].as_array().unwrap().len(), 20);
-    assert_eq!(d["layers"][0]["children"][0]["childCount"], 4);
+    assert_eq!(d["layers"][9]["children"][19]["childCount"], 4);
+    assert!(d["layers"][9]["children"][19].get("children").is_none());
+    assert_eq!(d["layers"][0]["children"][0]["children"].as_array().unwrap().len(), 4);
     // A small page is untouched.
     let mut small = engine();
     one(
@@ -820,6 +829,310 @@ mod size {
     let id = one(&mut e, json!({ "type": "text", "text": "short", "x": 400 }));
     let r = run(&mut e, "get_nodes", json!({ "ids": [id] }));
     assert!(r[0].get("textTruncated").is_none());
+  }
+}
+
+mod hostile {
+  use super::*;
+
+  #[test]
+  fn regexes_cannot_crash_or_hang_the_search() {
+    let mut e = engine();
+    one(
+      &mut e,
+      json!({ "type": "frame", "name": "x".repeat(100_000), "width": 5, "height": 5 }),
+    );
+    for pattern in ["/^{100000}x/", "/(a?){100000}/", "/a{100000}/", "/\\bx/", "/(/"] {
+      let r = e.dispatch(ai("find_nodes", json!({ "name": pattern })));
+      assert!(r.is_err(), "{pattern}");
+    }
+    // Linear in the text: a very long name is fine.
+    let r = run(&mut e, "find_nodes", json!({ "name": "/.*x$/" }));
+    assert_eq!(r["total"], 1);
+    let r = run(&mut e, "find_nodes", json!({ "name": "/.*z/" }));
+    assert_eq!(r["total"], 0);
+  }
+
+  #[test]
+  fn an_expensive_pattern_over_many_layers_is_an_error_not_a_hang() {
+    let mut e = engine();
+    let layers: Vec<Value> = (0..1000)
+      .map(|i| json!({ "type": "rectangle", "name": format!("{}{i}", "a".repeat(40)), "width": 2, "height": 2 }))
+      .collect();
+    run(&mut e, "create_nodes", json!({ "nodes": layers }));
+    let start = std::time::Instant::now();
+    let err = e.dispatch(ai("find_nodes", json!({ "name": "/(a?){500}a{500}$/" }))).unwrap_err();
+    assert!(err.contains("too complex"), "{err}");
+    assert!(start.elapsed().as_secs_f64() < 5.0, "{:?}", start.elapsed());
+    // A plain pattern over the same layers is fine.
+    let r = run(&mut e, "find_nodes", json!({ "name": "/^a+9$/" }));
+    assert_eq!(r["total"], 1);
+  }
+}
+
+mod flat {
+  use super::*;
+
+  fn thousands() -> Vec<Value> {
+    (0..3000)
+      .map(|i| json!({ "type": "rectangle", "name": format!("Layer {i}"), "x": i, "width": 5, "height": 5, "fill": "#FF0000" }))
+      .collect()
+  }
+
+  #[test]
+  fn thousands_of_roots_stay_small_in_get_document_and_create_nodes() {
+    let mut e = engine();
+    let r = run(&mut e, "create_nodes", json!({ "nodes": thousands() }));
+    assert_eq!(r["createdTruncated"], true);
+    assert_eq!(r["createdCount"], 3000);
+    assert!(r["created"][0].is_string());
+    assert!(serde_json::to_string(&r).unwrap().len() < 20_000);
+    let d = run(&mut e, "get_document", json!({}));
+    let size = serde_json::to_string(&d).unwrap().len();
+    assert!(size < 40_000, "{size} bytes");
+    assert_eq!(d["layers"].as_array().unwrap().len(), 250);
+    assert_eq!(d["moreLayers"], 2750);
+    assert!(d["truncated"].is_string());
+  }
+
+  #[test]
+  fn the_outline_fills_breadth_first_and_children_are_always_arrays() {
+    let mut e = engine();
+    // One screen with a deep branch and many shallow ones: every branch gets its top levels.
+    let deep = json!({ "type": "frame", "name": "Deep", "width": 10, "height": 10, "children": [{ "type": "frame", "width": 5, "height": 5, "children": [{ "type": "frame", "width": 2, "height": 2, "children": [{ "type": "rectangle", "width": 1, "height": 1 }] }] }] });
+    let shallow: Vec<Value> = (0..100)
+      .map(|i| json!({ "type": "frame", "name": format!("S{i}"), "width": 10, "height": 10, "children": [{ "type": "rectangle", "width": 1, "height": 1 }, { "type": "rectangle", "width": 1, "height": 1 }] }))
+      .collect();
+    let mut kids = vec![deep];
+    kids.extend(shallow);
+    run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Screen", "width": 400, "height": 400, "children": kids }] }),
+    );
+    let d = run(&mut e, "get_document", json!({ "depth": 6 }));
+    let screen = &d["layers"][0];
+    assert_eq!(screen["children"].as_array().unwrap().len(), 101);
+    // 1 + 101 + 1 + 200 + 1 + 1 = 305 layers: the deepest few are left out, never a whole branch.
+    assert!(d["truncated"].is_string());
+    let last = &screen["children"][100];
+    assert!(last["children"].is_array() || last["childCount"] == 2);
+    fn all_children_are_arrays(v: &Value) -> bool {
+      match v.get("children") {
+        None => true,
+        Some(c) => c.as_array().is_some_and(|a| a.iter().all(all_children_are_arrays)),
+      }
+    }
+    assert!(all_children_are_arrays(&d["layers"][0]));
+  }
+
+  #[test]
+  fn created_layers_also_list_grandchildren_within_a_budget() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Card", "width": 100, "children": [
+        { "type": "frame", "name": "Row", "width": 50, "children": [{ "type": "text", "name": "Title", "text": "Hi" }] }] }] }),
+    );
+    assert_eq!(r["created"][0]["children"][0]["children"][0]["name"], "Title");
+    // A big tree keeps the whole answer small.
+    let rows: Vec<Value> = (0..250)
+      .map(|i| {
+        json!({ "type": "frame", "name": format!("Row {i}"), "width": 5, "children": [
+        { "type": "rectangle", "width": 1, "height": 1 }, { "type": "rectangle", "width": 1, "height": 1 }] })
+      })
+      .collect();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "x": 900, "width": 100, "children": rows }] }),
+    );
+    let listed = serde_json::to_string(&r["created"]).unwrap().matches("\"id\"").count();
+    assert!(listed <= 152, "{listed}");
+    assert_eq!(r["created"][0]["childCount"], 250);
+  }
+
+  #[test]
+  fn created_layers_list_their_direct_children() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Card", "width": 100, "children": [
+        { "type": "text", "name": "Title", "text": "Hi" }, { "type": "rectangle", "name": "Bar", "width": 5, "height": 5 }] }] }),
+    );
+    let c = &r["created"][0];
+    assert_eq!(c["childCount"], 2);
+    assert_eq!(c["children"][0]["name"], "Title");
+    assert_eq!(c["children"][1]["type"], "rectangle");
+    assert_eq!(c["children"][1]["id"], r["names"]["Bar"]);
+    let many: Vec<Value> = (0..80).map(|_| json!({ "type": "rectangle", "width": 1, "height": 1 })).collect();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": 100, "x": 500, "children": many }] }),
+    );
+    assert_eq!(r["created"][0]["children"].as_array().unwrap().len(), 50);
+    assert_eq!(r["created"][0]["childCount"], 80);
+  }
+}
+
+mod strictness {
+  use super::*;
+
+  #[test]
+  fn find_nodes_type_knows_every_kind_and_images() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "component", "name": "Btn", "width": 10, "height": 10 },
+        { "type": "rectangle", "name": "Plain", "x": 100, "width": 10, "height": 10 },
+        { "type": "rectangle", "name": "Photo", "x": 200, "width": 10, "height": 10, "imageUrl": "asset:a" }] }),
+    );
+    let btn = created(&r)[0].clone();
+    run(&mut e, "create_instance", json!({ "componentId": btn, "x": 300 }));
+    assert_eq!(run(&mut e, "find_nodes", json!({ "type": "instance" }))["total"], 1);
+    assert_eq!(run(&mut e, "find_nodes", json!({ "type": "image" }))["nodes"][0]["name"], "Photo");
+    assert_eq!(run(&mut e, "find_nodes", json!({ "type": "image" }))["total"], 1);
+    assert_eq!(run(&mut e, "find_nodes", json!({ "type": "rectangle" }))["total"], 2);
+    assert_eq!(run(&mut e, "find_nodes", json!({ "type": "component_set" }))["total"], 0);
+    assert!(e.dispatch(ai("find_nodes", json!({ "type": "blob" }))).is_err());
+    // A component id that isn't a component, and a `within` on another page.
+    assert!(e.dispatch(ai("find_nodes", json!({ "componentId": "n_missing" }))).is_err());
+    assert!(e
+      .dispatch(ai("find_nodes", json!({ "componentId": r["created"][1]["id"] })))
+      .is_err());
+    run(&mut e, "pages", json!({ "action": "add", "name": "Two" }));
+    let page2 = e.doc.pages[1].id.clone();
+    run(&mut e, "pages", json!({ "action": "switch", "id": page2 }));
+    let err = e.dispatch(ai("find_nodes", json!({ "within": btn }))).unwrap_err();
+    assert!(err.contains("page"), "{err}");
+    assert!(e.dispatch(ai("find_nodes", json!({ "within": btn, "page": "all" }))).is_ok());
+  }
+
+  #[test]
+  fn values_that_used_to_be_ignored_are_read_or_rejected() {
+    let mut e = engine();
+    let id = one(
+      &mut e,
+      json!({ "type": "text", "text": "x", "visible": "false", "italic": "true", "locked": "TRUE" }),
+    );
+    let n = e.doc.get(&id).unwrap();
+    assert!(!n.visible && n.locked && n.text.as_ref().unwrap().italic);
+    assert!(e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "rectangle", "visible": "maybe" }] })
+      ))
+      .is_err());
+    let id = one(
+      &mut e,
+      json!({ "type": "rectangle", "width": 5, "height": 5, "strokeDash": ["4", "2px"], "stroke": "#000" }),
+    );
+    assert_eq!(e.doc.get(&id).unwrap().stroke_dash, vec![4.0, 2.0]);
+    assert!(e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "rectangle", "strokeDash": ["a"] }] })
+      ))
+      .is_err());
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "text", "text": "x", "fontWeight": 5 }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("fontWeight"), "{err}");
+    let id = one(
+      &mut e,
+      json!({ "type": "frame", "width": 50, "height": 50, "layout": { "padding": "8px 16px" }, "cornerRadius": "4px 8px" }),
+    );
+    let n = e.doc.get(&id).unwrap();
+    let l = n.layout.clone().unwrap();
+    assert_eq!(
+      (l.padding_top, l.padding_right, l.padding_bottom, l.padding_left),
+      (8.0, 16.0, 8.0, 16.0)
+    );
+    assert_eq!(n.corner_radii, Some([4.0, 8.0, 4.0, 8.0]));
+    // `none` clears shadows like null does.
+    let id = one(
+      &mut e,
+      json!({ "type": "rectangle", "width": 5, "height": 5, "shadow": "0 4px 12px rgba(0,0,0,0.1)" }),
+    );
+    assert_eq!(e.doc.get(&id).unwrap().effects.len(), 1);
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": id, "shadow": "none" }] }));
+    assert!(e.doc.get(&id).unwrap().effects.is_empty());
+  }
+
+  #[test]
+  fn opacity_is_a_percentage_only_from_two_up() {
+    let mut e = engine();
+    let opacity = |e: &mut Engine, v: Value| -> (f64, Value) {
+      let r = run(
+        e,
+        "create_nodes",
+        json!({ "nodes": [{ "type": "rectangle", "width": 5, "height": 5, "opacity": v }] }),
+      );
+      let id = r["created"][0]["id"].as_str().unwrap().to_string();
+      (e.doc.get(&id).unwrap().opacity, r["warnings"].clone())
+    };
+    assert_eq!(opacity(&mut e, json!(0.5)), (0.5, Value::Null));
+    assert_eq!(opacity(&mut e, json!(1)), (1.0, Value::Null));
+    let (o, w) = opacity(&mut e, json!(1.5));
+    assert_eq!(o, 1.0);
+    assert!(w[0].as_str().unwrap().contains("clamped"));
+    let (o, w) = opacity(&mut e, json!(50));
+    assert_eq!(o, 0.5);
+    assert!(w[0].as_str().unwrap().contains("50%"));
+    let (o, w) = opacity(&mut e, json!(500));
+    assert_eq!(o, 1.0);
+    assert!(w[0].as_str().unwrap().contains("clamped"));
+  }
+
+  #[test]
+  fn update_type_warns_and_move_takes_string_numbers() {
+    let mut e = engine();
+    let id = one(&mut e, json!({ "type": "rectangle", "width": 5, "height": 5 }));
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "type": "frame" }, { "id": id, "type": "rectangle", "name": "Same" }] }),
+    );
+    assert_eq!(r["warnings"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(e.doc.get(&id).unwrap().kind, crate::model::NodeType::Rectangle);
+    run(&mut e, "move_nodes", json!({ "ids": [id], "x": "120", "y": "30px" }));
+    assert_eq!((e.doc.get(&id).unwrap().x, e.doc.get(&id).unwrap().y), (120.0, 30.0));
+    assert!(e.dispatch(ai("move_nodes", json!({ "ids": [id], "x": "far", "y": 3 }))).is_err());
+  }
+
+  #[test]
+  fn radial_gradients_keep_rgba_stops_whole() {
+    let mut e = engine();
+    let id = one(
+      &mut e,
+      json!({ "type": "rectangle", "width": 5, "height": 5, "fill": "radial-gradient(circle, rgba(255, 0, 0, 0.5) 0%, rgb(0, 0, 255) 100%)" }),
+    );
+    match &e.doc.get(&id).unwrap().fills[0] {
+      crate::model::Paint::RadialGradient { stops, .. } => assert_eq!(stops.len(), 2),
+      other => panic!("{other:?}"),
+    }
+  }
+
+  #[test]
+  fn update_nodes_schema_carries_types_not_descriptions() {
+    let defs = crate::ai::tool_defs();
+    let size = |name: &str| {
+      let d = defs.as_array().unwrap().iter().find(|d| d["name"] == name).unwrap();
+      serde_json::to_string(&d["input_schema"]).unwrap().len()
+    };
+    assert!(size("update_nodes") < 4_000, "{}", size("update_nodes"));
+    assert!(size("create_nodes") > size("update_nodes"));
+    let update = defs.as_array().unwrap().iter().find(|d| d["name"] == "update_nodes").unwrap();
+    assert!(update["input_schema"]["properties"]["updates"]["items"]["properties"]["fillStyle"]["description"].is_null());
+    assert!(update["input_schema"]["properties"]["updates"]["items"]["properties"]["fillStyle"]["type"].is_array());
   }
 }
 

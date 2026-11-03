@@ -88,7 +88,11 @@ try {
   const screen = c.payload.created[0].id;
   const victim = c.payload.names.Victim;
   const caption = c.payload.names.Caption;
-  check("create_nodes returns top-level layers and a names map, no outlines", !c.isError && c.payload.created.length === 1 && c.payload.created[0].children === undefined && !!victim, c.text);
+  check(
+    "create_nodes returns top-level layers with their direct children, and a names map",
+    !c.isError && c.payload.created.length === 1 && c.payload.created[0].children?.length === 3 && c.payload.created[0].children[0].children === undefined && !!victim,
+    c.text,
+  );
   let m = await call("move_nodes", { ids: [victim], parentId: "n_does_not_exist" });
   check("move to a missing parent is an error", m.isError && m.text.includes("n_does_not_exist"), m.text);
   let n = await node(victim);
@@ -200,6 +204,21 @@ try {
   const bigText = await call("create_nodes", { nodes: [{ type: "text", name: "Huge", x: 6000, width: 300, text: "word ".repeat(30000) }] });
   const g = await call("get_nodes", { ids: [bigText.payload.created[0].id] });
   check("get_nodes cuts huge text", g.payload[0].textTruncated === true && g.bytes < 20000, `${g.bytes} bytes`);
+
+  // --- Hostile input leaves the editor usable ---
+  for (const name of ["/^{8000}x/", "/(a?){100000}/", "/\\bx/"]) {
+    const bad = await call("find_nodes", { name });
+    check(`find_nodes ${name} is an error`, bad.isError, bad.text);
+  }
+  const alive = await call("create_nodes", { nodes: [{ type: "rectangle", name: "Still alive", x: 7000, width: 5, height: 5 }] });
+  check("the editor still answers after hostile regexes", !alive.isError, alive.text);
+  const shallow = await call("create_nodes", { nodes: [{ type: "frame", name: "Kids", x: 7100, width: 50, children: [{ type: "text", name: "K1", text: "a" }, { type: "rectangle", name: "K2", width: 4, height: 4 }] }] });
+  check("created layers list their direct children", shallow.payload.created[0].children?.length === 2 && shallow.payload.created[0].childCount === 2, shallow.text);
+  const flat = Array.from({ length: 3000 }, (_, i) => ({ type: "rectangle", name: `Flat ${i}`, x: 8000 + i * 6, width: 5, height: 5 }));
+  const many = await call("create_nodes", { nodes: flat });
+  check("a 3000-root create answers with ids only", !many.isError && many.payload.createdTruncated === true && many.bytes < 20000, `${many.bytes} bytes`);
+  d = await call("get_document", {});
+  check("get_document on 3000+ roots stays under 40 KB", d.bytes < 40000 && d.payload.moreLayers > 0, `${d.bytes} bytes`);
 
   // --- The hand-written UIs still build without errors ---
   await fresh();

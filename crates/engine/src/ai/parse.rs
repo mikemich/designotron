@@ -296,6 +296,29 @@ pub fn opt_number(cx: &Ctx, s: &Value, key: &str) -> Result<Option<f64>, String>
   }
 }
 
+/// `spec[key]` as a boolean; "true" and "false" are read too. Absent and null are None.
+pub fn opt_bool(cx: &Ctx, s: &Value, key: &str) -> Result<Option<bool>, String> {
+  match s.get(key) {
+    None | Some(Value::Null) => Ok(None),
+    Some(Value::Bool(b)) => Ok(Some(*b)),
+    Some(Value::String(t)) if t.trim().eq_ignore_ascii_case("true") => Ok(Some(true)),
+    Some(Value::String(t)) if t.trim().eq_ignore_ascii_case("false") => Ok(Some(false)),
+    Some(other) => Err(cx.err(key, format!("must be true or false, got {}", kind_of(other)))),
+  }
+}
+
+/// "8px 16px" style lengths as numbers (one to four of them).
+fn css_lengths(cx: &Ctx, key: &str, s: &str) -> Result<Vec<f64>, String> {
+  let parts: Vec<f64> = s
+    .split_whitespace()
+    .map(|t| px(t).ok_or_else(|| cx.err(key, format!("\"{s}\" isn't a number or a list of lengths like \"8px 16px\""))))
+    .collect::<Result<_, _>>()?;
+  if parts.is_empty() || parts.len() > 4 {
+    return Err(cx.err(key, format!("\"{s}\" needs one to four lengths")));
+  }
+  Ok(parts)
+}
+
 /// "24", "24px", " 3.5 " as a number.
 pub fn px(s: &str) -> Option<f64> {
   let t = s.trim();
@@ -353,7 +376,7 @@ pub fn font_weight(cx: &Ctx, key: &str, v: &Value) -> Result<u32, String> {
     }
     other => return Err(cx.err(key, format!("expected a font weight, got {}; {hint}", kind_of(other)))),
   };
-  if !(1.0..=1000.0).contains(&w) {
+  if !(100.0..=1000.0).contains(&w) {
     return Err(cx.err(key, format!("{w} isn't a font weight; {hint}")));
   }
   Ok(w.round() as u32)
@@ -393,6 +416,11 @@ pub fn radius(cx: &Ctx, key: &str, v: &Value) -> Result<Radius, String> {
         r[slot] = number(cx, &format!("{key}.{k}"), x)?;
       }
       Ok(Radius::Each(r))
+    }
+    Value::String(s) if s.split_whitespace().count() > 1 => {
+      let r = css_lengths(cx, key, s)?;
+      let at = |i: usize, fallback: usize| r.get(i).copied().unwrap_or(r[fallback]);
+      Ok(Radius::Each([r[0], at(1, 0), at(2, 0), at(3, 1)]))
     }
     other => number(cx, key, other).map(Radius::All),
   }
@@ -441,6 +469,14 @@ pub fn padding(cx: &Ctx, key: &str, v: &Value) -> Result<[f64; 4], String> {
         }
       }
       Ok(p)
+    }
+    Value::String(s) if s.split_whitespace().count() > 1 => {
+      let f = css_lengths(cx, key, s)?;
+      Ok(match f.len() {
+        2 => [f[0], f[1], f[0], f[1]],
+        3 => [f[0], f[1], f[2], f[1]],
+        _ => [f[0], f[1], f[2], f[3]],
+      })
     }
     other => number(cx, key, other).map(|n| [n; 4]),
   }
@@ -744,7 +780,7 @@ pub fn css_shadow(cx: &Ctx, key: &str, css: &str) -> Result<Vec<Value>, String> 
 }
 
 /// Whitespace-separated tokens, keeping `rgba(0, 0, 0, 0.5)` whole.
-fn tokens(s: &str) -> Vec<String> {
+pub fn tokens(s: &str) -> Vec<String> {
   let mut out = Vec::new();
   let mut cur = String::new();
   let mut depth = 0;
