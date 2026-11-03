@@ -2378,4 +2378,134 @@ body:has(.phone-note) .toast {
 }
 .scale-row .field {
   flex: 1;
+/* W3-F inspect */
+.insp-live {
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--ok);
+}
+.insp-group {
+  margin-bottom: 10px;
+}
+.insp-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-2);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.insp-title .seg {
+  text-transform: none;
+  letter-spacing: 0;
+}
+.insp-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-height: 22px;
+  font-size: 12px;
+}
+.insp-k {
+  flex: 0 0 84px;
+  color: var(--text-2);
+  padding-top: 2px;
+}
+.insp-v {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 6px;
+}
+.insp-val {
+  font: 11px "JetBrains Mono", monospace;
+  color: var(--text);
+  background: var(--panel-2);
+  border-radius: 4px;
+  padding: 2px 5px;
+  cursor: copy;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.insp-val:hover {
+  background: var(--panel-3);
+}
+.insp-val.copied {
+  outline: 1px solid var(--ok);
+}
+.insp-name {
+  color: var(--accent-2);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.insp-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  flex: none;
+}
+.insp-note {
+  background: var(--panel-2);
+  border-left: 3px solid var(--accent-2);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.insp-box {
+  display: grid;
+  gap: 2px;
+  justify-items: center;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  padding: 4px;
+  background: var(--panel-2);
+}
+.insp-mid {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.insp-inner {
+  background: var(--panel-3);
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.insp-box .insp-val {
+  background: transparent;
+  padding: 1px 4px;
+}
+.insp-asset {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+}
+.insp-asset img,
+.insp-thumb {
+  width: 24px;
+  height: 24px;
+  object-fit: cover;
+  border-radius: 3px;
+  background: var(--panel-3);
+  flex: none;
+}
+.insp-asset-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
 }

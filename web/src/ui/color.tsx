@@ -416,3 +416,38 @@ export function PaintSwatch(props: { paint: Paint; onChange: (p: Paint) => void;
     </>
   );
 }
+
+// ---------- Inspect formats ----------
+
+export type ColorFormat = "hex" | "rgb" | "hsl" | "css";
+
+function rgbToHsl({ r, g, b }: Rgba): { h: number; s: number; l: number } {
+  const rr = r / 255;
+  const gg = g / 255;
+  const bb = b / 255;
+  const max = Math.max(rr, gg, bb);
+  const min = Math.min(rr, gg, bb);
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (!d) return { h: 0, s: 0, l };
+  const s = d / (1 - Math.abs(2 * l - 1));
+  let h = max === rr ? ((gg - bb) / d) % 6 : max === gg ? (bb - rr) / d + 2 : (rr - gg) / d + 4;
+  h *= 60;
+  if (h < 0) h += 360;
+  return { h, s, l };
+}
+
+/** A colour as text for the Code tab: `#7C5CFF`, `rgb(124, 92, 255)`, `hsl(250, 100%, 68%)` or CSS (lower-case hex, rgba when see-through). */
+export function formatColor(hex: string, opacity: number, format: ColorFormat): string {
+  const c = parseColor(hex);
+  const a = Math.round(c.a * opacity * 100) / 100;
+  const [r, g, b] = [c.r, c.g, c.b].map((v) => Math.round(v));
+  if (format === "rgb") return a >= 1 ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, ${a})`;
+  if (format === "hsl") {
+    const { h, s, l } = rgbToHsl(c);
+    const body = `${Math.round(h)}, ${Math.round(s * 100)}%, ${Math.round(l * 100)}%`;
+    return a >= 1 ? `hsl(${body})` : `hsla(${body}, ${a})`;
+  }
+  if (format === "css") return a >= 1 ? toHex(c).toLowerCase() : `rgba(${r}, ${g}, ${b}, ${a})`;
+  return toHex8({ ...c, a: c.a * opacity });
+}

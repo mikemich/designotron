@@ -1,16 +1,14 @@
 import { useMemo, useState } from "react";
-import { Copy, Download, Play, Plus, Trash2, Sparkles } from "lucide-react";
-import { dispatch, getDoc, query, useDoc, useSelection, useStore, type RightTab } from "../store";
+import { Play, Plus, Trash2 } from "lucide-react";
+import { dispatch, query, useDoc, useSelection, useStore, type RightTab } from "../store";
 import { DesignPanel } from "./DesignPanel";
+import { CodePanel } from "./CodePanel";
 import { ReviewPanel } from "./ReviewPanel";
 import { AppPanel } from "./AppPanel";
 import { focusedByPointer, IconButton, NumberField, Section, SelectField } from "../ui/controls";
 import type { Direction, Easing, Interaction, Node, Overflow, OverlaySettings } from "../types";
 import { DEFAULT_OVERLAY, enclosingSets, isMissingDestination, newInteraction, overlayDim, SCREEN_TYPES, scrollTargets, startFrame, TRIGGER_LABELS } from "../prototype";
 import { keyName } from "../player";
-import { exportProjectZip, nodeSvg } from "../exporter";
-import { inlineAssets } from "../assets";
-import { askClaude } from "../ai/chatState";
 
 const TABS: { id: RightTab; label: string }[] = [
   { id: "design", label: "Design" },
@@ -436,84 +434,4 @@ function OverlayEditor({ value: o, onChange }: { value: OverlaySettings; onChang
   );
 }
 
-function CodePanel() {
-  const nodes = useSelection();
-  // Generated code depends on the document, not on what is selected beyond the layer's id.
-  const docRev = useStore((s) => s.es.docRev);
-  const [lang, setLang] = useState<"react" | "html" | "svg" | "css">("react");
-  const n = nodes[0];
-  const code = useMemo(() => {
-    if (!n) return "";
-    if (lang === "svg") return nodeSvg(n.id);
-    if (lang === "css") return cssFor(n);
-    return inlineAssets(query<string>({ q: lang === "react" ? "exportReact" : "exportHtml", id: n.id }));
-  }, [n?.id, lang, docRev]);
-  return (
-    <div className="scroll">
-      <Section title="Build the real thing">
-        <div className="muted small" style={{ marginBottom: 8 }}>
-          Every top-level frame becomes a screen; prototype links become navigation.
-        </div>
-        <button className="btn block" style={{ marginBottom: 6 }} onClick={() => exportProjectZip()}>
-          <Download size={13} /> Download React + Tailwind project
-        </button>
-        <button
-          className="btn block primary"
-          onClick={() =>
-            askClaude(
-              "Turn this design into a production-quality React + Tailwind app in the workspace. Use export_code with format 'project' as the starting point, then refactor into clean, responsive components, keep prototype navigation working, run the build to verify it compiles, and tell me how to run it.",
-            )
-          }
-        >
-          <Sparkles size={13} /> Build with Claude Code
-        </button>
-      </Section>
-      {n ? (
-        <Section
-          title={n.name}
-          actions={
-            <IconButton title="Copy" onClick={() => navigator.clipboard.writeText(code)}>
-              <Copy size={13} />
-            </IconButton>
-          }
-        >
-          <div className="row">
-            <SelectField
-              ariaLabel="Code language"
-              value={lang}
-              options={[
-                { value: "react", label: "React + Tailwind" },
-                { value: "html", label: "HTML + CSS" },
-                { value: "css", label: "CSS (this layer)" },
-                { value: "svg", label: "SVG" },
-              ]}
-              onChange={setLang}
-            />
-          </div>
-          <div className="code-block" tabIndex={0} role="region" aria-label={`Code for ${n.name}`}>
-            {code.length > 60000 ? code.slice(0, 60000) + "\n… (truncated, use Copy)" : code}
-          </div>
-        </Section>
-      ) : (
-        <Section title="Inspect">
-          <div className="muted small">Select a layer to see its code.</div>
-        </Section>
-      )}
-    </div>
-  );
-}
-
-export function cssFor(n: Node): string {
-  const html = query<string>({ q: "exportHtml", id: n.id });
-  const m = html.match(/<body>\s*<\w+ style="([^"]*)"/);
-  const decl = (m?.[1] ?? "").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
-  const lines = decl
-    .split(";")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((s) => `  ${s};`);
-  const doc = getDoc();
-  // A "*/" in the note would end the comment early and leak the rest into the stylesheet.
-  const hint = n.notes ? `/* ${n.notes.replace(/\*\//g, "* /")} */\n` : "";
-  return `${hint}.${(doc.nodes[n.id]?.name ?? "layer").replace(/[^\w]+/g, "-").toLowerCase()} {\n${lines.join("\n")}\n}`;
-}
+export { cssFor } from "./CodePanel";

@@ -267,6 +267,22 @@ export interface ProjectFile {
   content: string;
 }
 
+/** File extension of an asset's image type. */
+function assetExt(data: string): string {
+  return data.match(/data:image\/(\w+)/)?.[1]?.replace("jpeg", "jpg").replace("svg+xml", "svg") ?? "png";
+}
+
+/** Where an exported project keeps an asset (`/assets/<id>.png`, served from `public/assets`). */
+export function assetPath(id: string): string | undefined {
+  const data = assetDataUrl(id);
+  return data ? `/assets/${id}.${assetExt(data)}` : undefined;
+}
+
+/** Replaces `asset:` references with the paths an exported project serves them from. */
+export function withAssetPaths(text: string): string {
+  return text.replace(/asset:([a-z0-9_]+)/g, (m, id) => assetPath(id) ?? m);
+}
+
 /** Generated project files with assets moved to `public/assets`. */
 export function projectFiles(): { files: ProjectFile[]; binaries: { path: string; dataUrl: string }[] } {
   const files = query<ProjectFile[]>({ q: "exportProject" });
@@ -278,19 +294,45 @@ export function projectFiles(): { files: ProjectFile[]; binaries: { path: string
       const data = assetDataUrl(id);
       if (data && !seen.has(id)) {
         seen.add(id);
-        const ext = data.match(/data:image\/(\w+)/)?.[1]?.replace("jpeg", "jpg").replace("svg+xml", "svg") ?? "png";
-        binaries.push({ path: `public/assets/${id}.${ext}`, dataUrl: data });
+        binaries.push({ path: `public/assets/${id}.${assetExt(data)}`, dataUrl: data });
       }
     }
-    return {
-      ...f,
-      content: f.content.replace(/asset:([a-z0-9_]+)/g, (m, id) => {
-        const b = binaries.find((x) => x.path.includes(`/${id}.`));
-        return b ? b.path.replace("public", "") : m;
-      }),
-    };
+    return { ...f, content: withAssetPaths(f.content) };
   });
   return { files: out, binaries };
+}
+
+// ---------- Inspect downloads ----------
+
+function dataUrlBlob(url: string): Blob {
+  const [head, body = ""] = url.split(",");
+  const mime = head.match(/data:([^;]+)/)?.[1] ?? "application/octet-stream";
+  if (!head.includes(";base64")) return new Blob([decodeURIComponent(body)], { type: mime });
+  const bin = atob(body);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+/** Downloads the original bytes of an image asset under a file name made from the layer's name. */
+export function downloadImageAsset(assetId: string, layerName: string) {
+  const data = assetDataUrl(assetId);
+  if (!data) {
+    toast("That image is not loaded", "error");
+    return;
+  }
+  const blob = dataUrlBlob(data);
+  download(`${safeName(layerName).replace(/\//g, "-")}.${assetExt(data)}`, blob, blob.type);
+}
+
+/** Downloads a layer as its own export rows, else as SVG (vectors) or a 2x PNG. */
+export async function downloadLayerAsset(id: string) {
+  const node = getDoc().nodes[id];
+  if (!node) return;
+  if (node.exportSettings?.length) return exportLayers([id]);
+  const vector = node.type === "vector" || node.type === "polygon" || node.type === "star";
+  const f = await renderExport(id, vector ? { format: "svg", scale: 1, suffix: "" } : { format: "png", scale: 2, suffix: "" });
+  download(f.name.replace(/\//g, "-"), f.data, f.mime);
 }
 
 export async function exportProjectZip() {
