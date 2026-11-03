@@ -25,8 +25,8 @@ import { PaintHandles } from "./PaintHandles";
 import { CropMode } from "./CropMode";
 import { reportCursor } from "../collab";
 import { insertImageFile, openDtronFile, toggleVectorPointSmooth, vectorPoints } from "../actions";
-import { canvasMenu } from "./contextMenu";
-import { useEyedropper } from "./eyedropper";
+import { canvasMenu, insideInstance } from "./contextMenu";
+import { pickColorAt } from "./eyedropper";
 import { useDemo } from "../Demo";
 import { Menu, type MenuItem } from "../ui/controls";
 import { isOverlayLink, newInteraction } from "../prototype";
@@ -590,7 +590,7 @@ export function Canvas() {
 
     switch (tool) {
       case "eyedropper":
-        void useEyedropper(p, zoom());
+        void pickColorAt(p, zoom());
         break;
       case "scale":
       case "move": {
@@ -1026,7 +1026,7 @@ export function Canvas() {
   const singleNode = single ? doc.nodes[single.id] : null;
   const box: Pt[] | null = single ? corners(v, single.matrix, single.width, single.height) : selItems.union ? rectCorners(v, selItems.union) : null;
   const isLine = singleNode?.type === "line";
-  const showHandles = !!box && !editingText && !editingVector && (tool === "move" || tool === "scale") && sel.every((id) => !doc.nodes[id]?.locked);
+  const showHandles = !!box && !editingText && !editingVector && (tool === "move" || (tool === "scale" && !sel.some((id) => insideInstance(doc.nodes[id])))) && sel.every((id) => !doc.nodes[id]?.locked);
   const handlePts: { h: Handle; p: Pt }[] = box
     ? isLine
       ? [

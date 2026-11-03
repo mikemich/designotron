@@ -53,41 +53,84 @@ pub fn scalable(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
 
 /// Scales layers by `k` around a page-space `anchor`: positions, sizes and everything that
 /// has a length (strokes, radii, effects, type, auto layout spacing, grids). Constraints of
-/// nested layers are ignored; the whole subtree scales as one.
+/// nested layers are ignored; the whole subtree scales as one. What changes inside an instance
+/// is recorded as overrides (so the next edit of the main component keeps it), and bindings and
+/// text styles on the scaled properties are let go (or the bound value would win again).
 pub fn scale_nodes(doc: &mut Document, ids: &[NodeId], k: f64, anchor: Point) {
   for id in scalable(doc, ids) {
     let Some(n) = doc.get(&id) else { continue };
-    let (old_w, old_h) = (n.width, n.height);
     let local_center = Point::new(n.x + n.width / 2.0, n.y + n.height / 2.0);
     let pm = doc.parent_matrix(&id);
     let c = pm.apply(local_center);
     let nc = Point::new(anchor.x + (c.x - anchor.x) * k, anchor.y + (c.y - anchor.y) * k);
     let nc = pm.invert().apply(nc);
-    let is_instance = n.kind == NodeType::Instance;
+    let subtree = doc.subtree(&id);
+    let before: Vec<Value> = subtree
+      .iter()
+      .filter_map(|i| doc.get(i))
+      .map(|n| serde_json::to_value(n).unwrap_or(Value::Null))
+      .collect();
     scale_subtree(doc, &id, k);
     if let Some(n) = doc.get_mut(&id) {
       n.x = tidy(nc.x - n.width / 2.0);
       n.y = tidy(nc.y - n.height / 2.0);
     }
-    if is_instance {
-      crate::layout::apply_constraints(doc, &id, old_w, old_h);
+    for (nid, old) in subtree.iter().zip(before) {
+      let Some(now) = doc.get(nid).and_then(|n| serde_json::to_value(n).ok()) else {
+        continue;
+      };
+      let Some(patch) = diff(&old, &now) else { continue };
+      crate::variables::unbind_for_patch(doc, std::slice::from_ref(nid), &patch);
+      let typography = patch.get("text").and_then(|t| t.as_object()).is_some_and(|t| {
+        ["fontSize", "lineHeight", "letterSpacing", "paragraphSpacing"]
+          .iter()
+          .any(|k| t.contains_key(*k))
+      });
+      if typography {
+        if let Some(n) = doc.get_mut(nid) {
+          n.text_style = None;
+        }
+      }
+      let in_instance = doc.get(nid).is_some_and(|n| n.kind == NodeType::Instance) || doc.instance_ancestor(nid).is_some();
+      if in_instance {
+        crate::components::record_override(doc, nid, &patch);
+      }
     }
   }
 }
 
+/// Merge patch from `a` to `b`: objects recursively, anything else whole. `None` when equal.
+fn diff(a: &Value, b: &Value) -> Option<Value> {
+  match (a, b) {
+    (Value::Object(x), Value::Object(y)) => {
+      let mut out = serde_json::Map::new();
+      for (k, v) in y {
+        match x.get(k) {
+          Some(old) => {
+            if let Some(d) = diff(old, v) {
+              out.insert(k.clone(), d);
+            }
+          }
+          None => {
+            out.insert(k.clone(), v.clone());
+          }
+        }
+      }
+      (!out.is_empty()).then_some(Value::Object(out))
+    }
+    _ => (a != b).then(|| b.clone()),
+  }
+}
+
 /// Scales a layer's own size and lengths and its descendants' positions, sizes and lengths by
-/// `k` (the layer's own position is left to the caller). Instances keep their children: the
-/// component sync lays them out inside the scaled box.
+/// `k` (the layer's own position is left to the caller). Instance contents scale too.
 fn scale_subtree(doc: &mut Document, id: &str, k: f64) {
-  let (kids, descend) = match doc.get(id) {
-    Some(n) => (n.children.clone(), n.kind != NodeType::Instance),
+  let kids = match doc.get(id) {
+    Some(n) => n.children.clone(),
     None => return,
   };
   if let Some(n) = doc.get_mut(id) {
     scale_own(n, k);
-  }
-  if !descend {
-    return;
   }
   for c in kids {
     scale_subtree(doc, &c, k);
@@ -98,6 +141,7 @@ fn scale_subtree(doc: &mut Document, id: &str, k: f64) {
   }
 }
 
+/// Every length a layer has is scaled here: add new length fields to this list.
 fn scale_own(n: &mut Node, k: f64) {
   n.width = tidy(n.width * k).max(if n.kind == NodeType::Line { 0.0 } else { 0.01 });
   n.height = tidy(n.height * k).max(if n.kind == NodeType::Line { 0.0 } else { 0.01 });
@@ -212,17 +256,10 @@ pub fn tidy_up(doc: &mut Document, ids: &[NodeId], spacing: Option<f64>) -> Resu
     h_gaps.extend(r.windows(2).map(|w| (w[1].1.x - w[0].1.right()).max(0.0)));
   }
   let v_gaps: Vec<f64> = row_bounds.windows(2).map(|w| (w[1].0 - w[0].1).max(0.0)).collect();
-  let (mut gap_h, mut gap_v) = (median(&h_gaps), median(&v_gaps));
-  if let Some(s) = spacing {
-    gap_h = Some(s);
-    gap_v = Some(s);
-  }
-  let (gap_h, gap_v) = match (gap_h, gap_v) {
-    (Some(h), Some(v)) => (h, v),
-    (Some(h), None) => (h, h),
-    (None, Some(v)) => (v, v),
-    (None, None) => (DEFAULT_TIDY_GAP, DEFAULT_TIDY_GAP),
-  };
+  // One gap for both axes: the median of every gap between neighbours in the selection.
+  let all_gaps: Vec<f64> = h_gaps.iter().chain(v_gaps.iter()).copied().collect();
+  let gap = spacing.or_else(|| median(&all_gaps)).unwrap_or(DEFAULT_TIDY_GAP);
+  let (gap_h, gap_v) = (gap, gap);
 
   // Column widths: the widest layer at each index; a single row or column only spaces its axis.
   let cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
@@ -403,6 +440,7 @@ pub fn move_to_page(doc: &mut Document, ids: &[NodeId], page: &str) -> Result<Ve
 /// same name path below their top-level layer, same type. The given layers come first.
 pub fn matching_layers(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
   let mut out: Vec<NodeId> = ids.iter().filter(|i| doc.get(i).is_some()).cloned().collect();
+  let mut seen: HashSet<NodeId> = out.iter().cloned().collect();
   let mut wanted: HashMap<(Vec<String>, NodeType), HashSet<NodeId>> = HashMap::new();
   for id in ids {
     let Some(n) = doc.get(id) else { continue };
@@ -427,7 +465,7 @@ pub fn matching_layers(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
       let Some(n) = doc.get(&id) else { continue };
       path.push(n.name.clone());
       if let Some(tops) = wanted.get(&(path.clone(), n.kind)) {
-        if !tops.contains(&root) && !out.contains(&id) {
+        if !tops.contains(&root) && seen.insert(id.clone()) {
           out.push(id.clone());
         }
       }
@@ -449,9 +487,9 @@ fn name_path(doc: &Document, id: &str) -> Vec<String> {
 /// A layer without the property matches only itself.
 pub fn same_property(doc: &Document, id: &str, prop: SameProp) -> Vec<NodeId> {
   let Some(n) = doc.get(id) else { return vec![] };
-  let Some(key) = prop_key(n, prop) else {
+  if !has_prop(n, prop) {
     return vec![id.to_string()];
-  };
+  }
   doc
     .page_nodes(&n.page)
     .into_iter()
@@ -459,33 +497,42 @@ pub fn same_property(doc: &Document, id: &str, prop: SameProp) -> Vec<NodeId> {
       o == id
         || doc
           .get(o)
-          .is_some_and(|m| m.visible && !m.locked && prop_key(m, prop).as_ref() == Some(&key))
+          .is_some_and(|m| m.visible && !m.locked && has_prop(m, prop) && same(n, m, prop))
     })
     .collect()
 }
 
-fn prop_key(n: &Node, prop: SameProp) -> Option<String> {
-  let json = |v: Value| Some(v.to_string());
+fn has_prop(n: &Node, prop: SameProp) -> bool {
   match prop {
-    SameProp::Fill => (!n.fills.is_empty()).then(|| serde_json::to_string(&n.fills).unwrap_or_default()),
-    SameProp::Stroke => (!n.strokes.is_empty()).then(|| serde_json::to_string(&n.strokes).unwrap_or_default()),
-    SameProp::Effect => (!n.effects.is_empty()).then(|| serde_json::to_string(&n.effects).unwrap_or_default()),
-    SameProp::Text => n.text.as_ref().and_then(|t| {
-      json(serde_json::json!([
-        t.font_family,
-        t.font_size,
-        t.font_weight,
-        t.italic,
-        t.line_height,
-        t.letter_spacing,
-        t.paragraph_spacing,
-        t.align_h,
-        t.decoration,
-        t.case
-      ]))
-    }),
-    SameProp::Font => n.text.as_ref().map(|t| t.font_family.clone()),
-    SameProp::Instance => n.instance.as_ref().map(|i| i.component_id.clone()),
+    SameProp::Fill => !n.fills.is_empty(),
+    SameProp::Stroke => !n.strokes.is_empty(),
+    SameProp::Effect => !n.effects.is_empty(),
+    SameProp::Text | SameProp::Font => n.text.is_some(),
+    SameProp::Instance => n.instance.is_some(),
+  }
+}
+
+/// Whether two layers (both with the property) agree on it.
+fn same(a: &Node, b: &Node, prop: SameProp) -> bool {
+  match (prop, a.text.as_ref(), b.text.as_ref()) {
+    (SameProp::Fill, ..) => a.fills == b.fills,
+    (SameProp::Stroke, ..) => a.strokes == b.strokes,
+    (SameProp::Effect, ..) => a.effects == b.effects,
+    (SameProp::Font, Some(x), Some(y)) => x.font_family == y.font_family,
+    (SameProp::Text, Some(x), Some(y)) => {
+      x.font_family == y.font_family
+        && x.font_size == y.font_size
+        && x.font_weight == y.font_weight
+        && x.italic == y.italic
+        && x.line_height == y.line_height
+        && x.letter_spacing == y.letter_spacing
+        && x.paragraph_spacing == y.paragraph_spacing
+        && x.align_h == y.align_h
+        && x.decoration == y.decoration
+        && x.case == y.case
+    }
+    (SameProp::Instance, ..) => a.instance.as_ref().map(|i| &i.component_id) == b.instance.as_ref().map(|i| &i.component_id),
+    _ => false,
   }
 }
 

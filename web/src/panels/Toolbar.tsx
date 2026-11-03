@@ -45,7 +45,7 @@ import { claudeReady, useChat } from "../ai/chatState";
 import { useShortcuts } from "./ShortcutsDialog";
 import { useImport } from "./ImportDialog";
 import { startFrame } from "../prototype";
-import { SAME_PROPS, TIDY_KBD } from "../canvas/contextMenu";
+import { pasteOverSelection, SAME_PROPS, TIDY_KBD } from "../canvas/contextMenu";
 
 const SHAPES: { tool: Tool; label: string; key: string; icon: JSX.Element }[] =
   [
@@ -117,15 +117,16 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     { heading: "Edit" },
     { label: "Undo", kbd: `${MOD}Z`, onClick: A.undo },
     { label: "Redo", kbd: `${SHIFT}${MOD}Z`, onClick: A.redo },
+    { label: "Paste over selection", kbd: `${SHIFT}${MOD}V`, onClick: () => void pasteOverSelection() },
     { label: "Select all", kbd: `${MOD}A`, onClick: A.selectAll },
     { label: "Select matching layers", kbd: `${ALT}${MOD}A`, onClick: A.selectMatching },
     { label: "Invert selection", kbd: `${SHIFT}${MOD}A`, onClick: A.invertSelection },
     ...SAME_PROPS.map(([prop, label]) => ({ label, onClick: () => A.selectSame(prop) })),
     { label: "Select all instances", onClick: () => A.selectInstances(false) },
     { label: "Duplicate", kbd: `${MOD}D`, onClick: A.duplicate },
+    { label: "Tidy up", kbd: TIDY_KBD, onClick: A.tidyUp },
     { sep: true },
     { heading: "Object" },
-    { label: "Tidy up", kbd: TIDY_KBD, onClick: A.tidyUp },
     { label: "Group", kbd: `${MOD}G`, onClick: A.group },
     { label: "Ungroup", kbd: `${SHIFT}${MOD}G`, onClick: A.ungroup },
     {

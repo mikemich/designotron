@@ -13,11 +13,11 @@ export interface Sample {
 
 /** Samples the page point, then fills every selected layer with it (one undo step). With nothing
  * selected the colour is copied to the clipboard instead. The tool is one-shot: it ends here. */
-export async function useEyedropper(p: { x: number; y: number }, zoom: number) {
+export async function pickColorAt(p: { x: number; y: number }, zoom: number) {
   setTool("move");
   const s = await sampleAt(p, zoom);
   if (!s) {
-    toast("Nothing to sample there", "error");
+    toast("Couldn't sample that colour", "error");
     return;
   }
   const ids = selection();
@@ -34,19 +34,31 @@ export async function useEyedropper(p: { x: number; y: number }, zoom: number) {
   dispatch({ op: "update", ids, patch: { fills: [{ type: "solid", color: s.color, opacity: s.opacity, visible: true }] } });
 }
 
-/** The colour of the topmost visible layer at a page point, or null when the point is off every layer. Not
- * blended with the layers beneath: a half transparent layer reads as its own colour with its own alpha. */
+/** The colour of the topmost visible layer at a page point, or null when it can't be read. A layer with one
+ * visible solid fill gives that fill directly. Anything else (no fill, gradients, images, several fills) is
+ * drawn: its top-level layer is rasterised and the pixel at the point read, so what shows through counts;
+ * a transparent pixel reads as the page background. Limitation: images that live on the web (http URLs) can't
+ * be fetched while sampling, so they read as the placeholder the export draws for them. */
 export async function sampleAt(p: { x: number; y: number }, zoom: number): Promise<Sample | null> {
   const doc = getDoc();
   const hit = query<string | null>({ q: "hit", x: p.x, y: p.y, zoom });
-  let n: Node | undefined = hit ? doc.nodes[hit] : undefined;
-  if (!n) return pageBackground();
-  // A layer with no fill (a stroke-only frame, a group) shows what is behind it: its parent's colour.
-  while (n && !n.fills.some((f) => f.visible)) n = n.parent ? doc.nodes[n.parent] : undefined;
+  const n: Node | undefined = hit ? doc.nodes[hit] : undefined;
   if (!n) return pageBackground();
   const visible = n.fills.filter((f) => f.visible);
   if (visible.length === 1 && visible[0].type === "solid") return solid(visible[0].color, visible[0].opacity * n.opacity);
-  return (await rasterSample(n.id, p)) ?? solid("#000000", 1);
+  let top = n;
+  while (top.parent && doc.nodes[top.parent]) top = doc.nodes[top.parent];
+  // The hit's top-level layer first, then the ones under it: the first that paints something at the point.
+  const roots = doc.pages.find((pg) => pg.id === top.page)?.children ?? [];
+  const under = roots.slice(0, roots.indexOf(top.id) + 1).reverse();
+  const boxes = query<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids: under }).items;
+  for (const { id, bounds: b } of boxes) {
+    if (p.x < b.x || p.y < b.y || p.x > b.x + b.width || p.y > b.y + b.height) continue;
+    const px = await rasterSample(id, p);
+    if (!px) return null;
+    if (px.opacity >= 0.01) return px;
+  }
+  return pageBackground();
 }
 
 function pageBackground(): Sample | null {

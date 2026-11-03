@@ -510,6 +510,8 @@ mod tidy {
     assert!(gaps_h.iter().all(|g| (g - gaps_h[0]).abs() <= 1.0), "{gaps_h:?}");
     assert!(b[0].y == b[1].y && b[1].y == b[2].y && b[3].y == b[4].y && b[4].y == b[5].y);
     assert!(b[3].y > b[0].y);
+    let gap_v = b[3].y - b[0].bottom();
+    assert!((gap_v - gaps_h[0]).abs() <= 1.0, "one gap for both axes: {gap_v} vs {gaps_h:?}");
     assert_eq!(b[0].y, 0.0);
     e.dispatch(Command::Undo).unwrap();
     assert_eq!(e.doc.get(&ids[0]).unwrap().x, 3.0);
@@ -527,5 +529,120 @@ mod tidy {
     );
     let ids = vec![named(&e, "a"), named(&e, "b")];
     assert!(e.dispatch(Command::TidyUp { ids, spacing: None }).is_err());
+  }
+}
+
+mod scale_instances {
+  use super::*;
+
+  /// Main "Btn" (80x30, stroke 1) with a 10 px label at (4, 4); returns (main, instance).
+  fn fixture(e: &mut Engine, with_instance_frame: bool) -> (NodeId, NodeId) {
+    create(
+      e,
+      json!([{ "type": "frame", "name": "Btn", "x": 0, "y": 0, "width": 80, "height": 30, "fill": "#EEEEEE",
+        "stroke": "#000000", "strokeWidth": 1,
+        "children": [{ "type": "text", "name": "Label", "characters": "Go", "fontSize": 10, "x": 4, "y": 4 }] }]),
+    );
+    let btn = named(e, "Btn");
+    e.dispatch(Command::CreateComponent { ids: vec![btn] }).unwrap();
+    let main = e.doc.nodes.values().find(|n| n.kind == NodeType::Component).unwrap().id.clone();
+    instance(e, &main, 300.0);
+    let inst = e.doc.nodes.values().find(|n| n.kind == NodeType::Instance).unwrap().id.clone();
+    if with_instance_frame {
+      e.dispatch(Command::FrameSelection { ids: vec![inst.clone()] }).unwrap();
+    }
+    (main, inst)
+  }
+
+  fn label(e: &Engine, inst: &str) -> crate::model::Node {
+    let kid = e.doc.get(inst).unwrap().children[0].clone();
+    e.doc.get(&kid).unwrap().clone()
+  }
+
+  #[test]
+  fn an_instance_scales_its_contents_and_keeps_them_when_the_main_changes() {
+    let mut e = engine();
+    let (main, inst) = fixture(&mut e, false);
+    let before = e.doc.nodes.clone();
+    e.dispatch(Command::ScaleNodes {
+      ids: vec![inst.clone()],
+      factor: 2.0,
+      anchor: None,
+    })
+    .unwrap();
+    let l = label(&e, &inst);
+    assert_eq!(l.text.as_ref().unwrap().font_size, 20.0);
+    assert_eq!((l.x, l.y), (8.0, 8.0));
+    // The main component's fill changes: the instance keeps its scaled look.
+    let red = json!({ "fills": [{ "type": "solid", "color": "#FF0000", "opacity": 1, "visible": true }] });
+    e.dispatch(Command::Update {
+      ids: vec![main],
+      patch: red,
+    })
+    .unwrap();
+    let n = e.doc.get(&inst).unwrap();
+    assert_eq!((n.width, n.height, n.stroke_weight), (160.0, 60.0, 2.0));
+    let l = label(&e, &inst);
+    assert_eq!((l.text.as_ref().unwrap().font_size, l.x, l.y), (20.0, 8.0, 8.0));
+    e.dispatch(Command::Undo).unwrap();
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.nodes, before, "undo is exact");
+  }
+
+  #[test]
+  fn an_instance_in_a_scaled_frame_scales_with_it() {
+    let mut e = engine();
+    let (_, inst) = fixture(&mut e, true);
+    let frame = e.doc.get(&inst).unwrap().parent.clone().unwrap();
+    e.dispatch(Command::ScaleNodes {
+      ids: vec![frame],
+      factor: 2.0,
+      anchor: None,
+    })
+    .unwrap();
+    let n = e.doc.get(&inst).unwrap();
+    assert_eq!((n.width, n.stroke_weight), (160.0, 2.0));
+    assert_eq!(label(&e, &inst).text.as_ref().unwrap().font_size, 20.0);
+  }
+
+  #[test]
+  fn an_existing_override_is_scaled() {
+    let mut e = engine();
+    let (_, inst) = fixture(&mut e, false);
+    let kid = e.doc.get(&inst).unwrap().children[0].clone();
+    e.dispatch(Command::Update {
+      ids: vec![kid],
+      patch: json!({ "text": { "fontSize": 20 } }),
+    })
+    .unwrap();
+    e.dispatch(Command::ScaleNodes {
+      ids: vec![inst.clone()],
+      factor: 2.0,
+      anchor: None,
+    })
+    .unwrap();
+    assert_eq!(label(&e, &inst).text.as_ref().unwrap().font_size, 40.0);
+  }
+
+  #[test]
+  fn scaling_lets_go_of_text_styles() {
+    let mut e = engine();
+    create(&mut e, json!([{ "type": "text", "name": "T", "characters": "Hi", "fontSize": 16 }]));
+    let t = named(&e, "T");
+    e.dispatch(Command::AddTextStyle {
+      name: "Body".into(),
+      from: t.clone(),
+    })
+    .unwrap();
+    assert!(e.doc.get(&t).unwrap().text_style.is_some());
+    e.dispatch(Command::ScaleNodes {
+      ids: vec![t.clone()],
+      factor: 2.0,
+      anchor: None,
+    })
+    .unwrap();
+    let n = e.doc.get(&t).unwrap();
+    assert_eq!(n.text.as_ref().unwrap().font_size, 32.0);
+    assert!(n.text_style.is_none(), "the style link would pull the size back");
   }
 }

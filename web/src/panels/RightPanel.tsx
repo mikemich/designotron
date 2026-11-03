@@ -323,7 +323,14 @@ function InteractionEditor({ node, index, frames }: { node: Node; index: number;
           <SelectField
             ariaLabel="Destination"
             value={it.destination && doc.nodes[it.destination] ? it.destination : ""}
-            options={[{ value: "", label: overlay ? "Choose overlay frame…" : "Choose frame…" }, ...frames.filter((f) => !overlay || f.id !== node.id).map((f) => ({ value: f.id, label: f.name }))]}
+            options={[
+              { value: "", label: overlay ? "Choose overlay frame…" : "Choose frame…" },
+              ...frames.filter((f) => !overlay || f.id !== node.id).map((f) => ({ value: f.id, label: f.name })),
+              // Frames on other pages: the player follows links across pages.
+              ...doc.pages
+                .filter((pg) => pg.id !== useStore.getState().es.page)
+                .flatMap((pg) => pg.children.map((id) => doc.nodes[id]).filter((f) => f && SCREEN_TYPES.includes(f.type)).map((f) => ({ value: f.id, label: `${pg.name} / ${f.name}` }))),
+            ]}
             onChange={(destination) => set({ destination: destination || null })}
           />
         </div>

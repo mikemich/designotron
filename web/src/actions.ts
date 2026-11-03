@@ -283,7 +283,7 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
   if (!text) return;
   e.preventDefault();
   if (text.includes(CLIPBOARD_TAG)) {
-    dispatch({ op: "paste", data: text, parent: pasteTarget(), ...pastePosition(text) });
+    dispatch({ op: "paste", data: text, parent: pasteTarget(), ...pastePosition(text, pasteTarget()) });
     return;
   }
   if (isSvgText(text)) {
@@ -303,7 +303,7 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
  * Where a plain paste lands: at the copied layers' own position when any of it is in the viewport,
  * else centred in the viewport (`null` x/y keep the original position). Paste in place skips this.
  */
-export function pastePosition(text: string): { x: number | null; y: number | null } {
+export function pastePosition(text: string, frame: string | null = null): { x: number | null; y: number | null } {
   try {
     const clip = JSON.parse(text) as { roots?: string[]; nodes?: { id: string; x: number; y: number; width: number; height: number }[] };
     const roots = new Set(clip.roots ?? []);
@@ -316,7 +316,14 @@ export function pastePosition(text: string): { x: number | null; y: number | nul
     const { w, h } = canvasSize();
     const a = screenToPage(0, 0);
     const z = screenToPage(w, h);
-    if (x0 <= z.x && x1 >= a.x && y0 <= z.y && y1 >= a.y) return { x: null, y: null };
+    const inView = (r: Rect) => r.x <= z.x && r.x + r.width >= a.x && r.y <= z.y && r.y + r.height >= a.y;
+    const box = frame ? query<{ union: Rect | null }>({ q: "bounds", ids: [frame] }).union : null;
+    if (box && inView(box)) {
+      // Into a frame: where it was if it fits in the frame there, else in the middle of the frame.
+      if (x0 >= box.x && y0 >= box.y && x1 <= box.x + box.width && y1 <= box.y + box.height) return { x: null, y: null };
+      return { x: Math.round(box.x + box.width / 2 - (x1 - x0) / 2), y: Math.round(box.y + box.height / 2 - (y1 - y0) / 2) };
+    }
+    if (!box && inView({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 })) return { x: null, y: null };
     const c = viewportCenter();
     return { x: Math.round(c.x - (x1 - x0) / 2), y: Math.round(c.y - (y1 - y0) / 2) };
   } catch {
@@ -405,7 +412,7 @@ function selectFound(ids: string[], what: string) {
     return;
   }
   dispatch({ op: "select", ids });
-  toast(`Selected ${ids.length} ${ids.length === 1 ? "layer" : "layers"}`);
+  toast(ids.length > 5000 ? `Selected ${ids.length} layers: that is a lot, edits to all of them may be slow` : `Selected ${ids.length} ${ids.length === 1 ? "layer" : "layers"}`);
 }
 
 /** Select matching layers (⌥⌘A): the same layers in the other top-level frames or groups. */

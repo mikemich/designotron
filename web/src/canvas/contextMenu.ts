@@ -52,11 +52,40 @@ export async function pasteHere(x?: number, y?: number) {
   if (text) dispatch({ op: "paste", data: text, parent: null, x: x ?? null, y: y ?? null });
 }
 
-/** Paste in place (⇧⌘V): at the copied layers' exact position, inside the selected frame if there is one. */
-export async function pasteInPlace() {
+/**
+ * Paste over selection (Figma ⇧⌘V): each selected layer gets a copy of the clipboard layers at its x/y, in the
+ * same parent, directly above it. With nothing selected they land at their original position. One undo step.
+ */
+export async function pasteOverSelection() {
   const text = await clipboardLayers();
-  if (text) dispatch({ op: "paste", data: text, parent: A.pasteTarget(), x: null, y: null });
-  else toast("Copy some layers first, then paste in place", "error");
+  if (!text) {
+    toast("Copy some layers first, then paste over the selection", "error");
+    return;
+  }
+  const targets = selection();
+  if (!targets.length) {
+    dispatch({ op: "paste", data: text, parent: A.pasteTarget(), x: null, y: null });
+    return;
+  }
+  const created: string[] = [];
+  dispatch({ op: "beginGesture" });
+  try {
+    for (const id of targets) {
+      const doc = getDoc();
+      const n = doc.nodes[id];
+      const box = query<{ union: Rect | null }>({ q: "bounds", ids: [id] }).union;
+      if (!n || !box || insideInstance(n)) continue;
+      const siblings = n.parent ? doc.nodes[n.parent]?.children : doc.pages.find((p) => p.id === n.page)?.children;
+      const index = siblings?.indexOf(id) ?? -1;
+      const r = dispatch<{ created: string[] }>({ op: "paste", data: text, parent: n.parent, x: box.x, y: box.y });
+      if (!r?.created?.length) continue;
+      dispatch({ op: "moveToParent", ids: r.created, parent: n.parent, index: index >= 0 ? index + 1 : null });
+      created.push(...r.created);
+    }
+  } finally {
+    dispatch({ op: "endGesture" });
+  }
+  if (created.length) dispatch({ op: "select", ids: created });
 }
 
 /**
@@ -103,7 +132,9 @@ export async function pasteReplace() {
   if (created.length) dispatch({ op: "select", ids: created });
 }
 
-function insideInstance(n: Node): boolean {
+/** Whether a layer is part of an instance (the instance itself is not). */
+export function insideInstance(n: Node | undefined): boolean {
+  if (!n) return false;
   const doc = getDoc();
   if (n.masterId) return true;
   for (let p = n.parent ? doc.nodes[n.parent] : null; p; p = p.parent ? doc.nodes[p.parent] : null) {
@@ -152,7 +183,7 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   const items: MenuItem[] = [
     { label: "Copy", kbd: `${MOD}C`, onClick: copySelection },
     { label: "Paste here", kbd: `${MOD}V`, onClick: () => pasteHere(at.x, at.y) },
-    { label: "Paste in place", kbd: `${SHIFT}${MOD}V`, onClick: pasteInPlace },
+    { label: "Paste over selection", kbd: `${SHIFT}${MOD}V`, onClick: pasteOverSelection },
     { label: "Paste to replace", kbd: `${SHIFT}${MOD}R`, onClick: pasteReplace },
     { label: "Copy properties", kbd: `${ALT}${MOD}C`, onClick: A.copyProperties },
     { label: "Paste properties", kbd: `${ALT}${MOD}V`, onClick: A.pasteProperties },

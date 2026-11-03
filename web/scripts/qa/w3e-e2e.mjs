@@ -242,6 +242,20 @@ try {
   await p.mouse.click(rc.x, rc.y);
   await sleep(400);
   check("with nothing selected it copies the hex and shows a toast", (await p.locator(".toast").first().textContent().catch(() => ""))?.includes("#FF0000"));
+  // A layer with no fill reads what is behind it: here the page background.
+  await create([{ type: "frame", name: "Hollow", x: 50, y: 250, width: 120, height: 80, stroke: "#000000", strokeWidth: 2 }]);
+  const hollow = await named("Hollow");
+  await dispatch({ op: "update", ids: [hollow.id], patch: { fills: [] } });
+  await select((await named("Blue")).id);
+  await focusCanvas();
+  await press("i");
+  const hc = await screenOf(hollow.x + 60, hollow.y + 40);
+  await p.mouse.click(hc.x, hc.y);
+  await sleep(500);
+  const curPage = (await state()).page;
+  const bg = (await doc()).pages.find((pg) => pg.id === curPage).background;
+  check("a click inside a stroke-only frame samples the page background, not black", (await named("Blue")).fills[0]?.color?.toUpperCase().startsWith(bg.toUpperCase().slice(0, 7)), JSON.stringify((await named("Blue")).fills) + " vs " + bg);
+  await dispatch({ op: "delete", ids: [hollow.id] });
   await focusCanvas();
   await press("i");
   await press("Escape");
@@ -294,7 +308,7 @@ try {
   for (let i = 0; i < 6; i++) sq.push(await named(`Sq ${i}`));
   const gapsH = [sq[1].x - (sq[0].x + 60), sq[2].x - (sq[1].x + 60), sq[4].x - (sq[3].x + 60), sq[5].x - (sq[4].x + 60)];
   const gapV = sq[3].y - (sq[0].y + 60);
-  check("Ctrl+Alt+T arranges scattered layers into a 3 x 2 grid with equal gaps (+-1 px)", gapsH.every((g) => Math.abs(g - gapsH[0]) <= 1) && Math.abs(gapV - gapsH[0]) <= 40 && sq[0].y === sq[1].y && sq[1].y === sq[2].y && sq[3].y === sq[4].y && sq[3].x === sq[0].x, JSON.stringify({ gapsH, gapV }));
+  check("Ctrl+Alt+T arranges scattered layers into a 3 x 2 grid with equal gaps (+-1 px)", gapsH.every((g) => Math.abs(g - gapsH[0]) <= 1) && Math.abs(gapV - gapsH[0]) <= 1 && sq[0].y === sq[1].y && sq[1].y === sq[2].y && sq[3].y === sq[4].y && sq[3].x === sq[0].x, JSON.stringify({ gapsH, gapV }));
   await press("Control+z");
   check("one undo puts them back", (await named("Sq 0")).x === 10);
 
@@ -328,8 +342,20 @@ try {
   await press("Control+Shift+v");
   await sleep(200);
   copies = (await allNamed("Copy me")).filter((n) => n.id !== orig.id);
-  check("Ctrl+Shift+V pastes in place, ignoring the viewport", copies.length === 1 && copies[0].x === 100 && copies[0].y === 100, JSON.stringify(copies.map((c) => [c.x, c.y])));
+  check("Ctrl+Shift+V with nothing selected pastes at the original position, ignoring the viewport", copies.length === 1 && copies[0].x === 100 && copies[0].y === 100, JSON.stringify(copies.map((c) => [c.x, c.y])));
   await press("Control+z");
+  await create([{ type: "rectangle", name: "Other", x: 400, y: 400, width: 50, height: 50, fill: "#999999" }]);
+  const other = await named("Other");
+  await select(other.id);
+  await focusCanvas();
+  await press("Control+Shift+v");
+  await sleep(200);
+  const dDoc = await doc();
+  copies = Object.values(dDoc.nodes).filter((n) => n.name === "Copy me" && n.id !== orig.id);
+  const roots = dDoc.pages.find((pg) => pg.id === dDoc.nodes[other.id].page).children;
+  check("Ctrl+Shift+V over a selection puts the copy at its x/y, directly above it", copies.length === 1 && copies[0].x === 400 && copies[0].y === 400 && roots.indexOf(copies[0].id) === roots.indexOf(other.id) + 1, JSON.stringify(copies.map((c) => [c.x, c.y])));
+  await press("Control+z");
+  await dispatch({ op: "delete", ids: [other.id] });
   await view();
   await sleep(200);
   await rightClickPage(400, 300);
@@ -363,7 +389,7 @@ try {
   await focusCanvas();
   await press("?");
   const dlg = (await p.locator(".shortcuts-dialog").textContent()) ?? "";
-  check("the shortcuts dialog lists the new commands", /Tidy up/.test(dlg) && /Paste in place/.test(dlg) && /matching layers/.test(dlg) && /K \/ I/.test(dlg) && /Pages: reorder/.test(dlg));
+  check("the shortcuts dialog lists the new commands", /Tidy up/.test(dlg) && /Paste over selection/.test(dlg) && /matching layers/.test(dlg) && /K \/ I/.test(dlg) && /Pages: reorder/.test(dlg));
   await press("Escape");
   await dispatch({ op: "selectAll" });
   const rowsBefore = (await sel()).length;
