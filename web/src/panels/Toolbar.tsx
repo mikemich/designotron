@@ -44,6 +44,7 @@ import { startSpotlight, stopSpotlight, toggleFollow, useFollow } from "../follo
 import { userName } from "../canvas/Comments";
 import { persistentStorage } from "../files";
 import { claudeReady, useChat } from "../ai/chatState";
+import { FileLocation } from "./FileLocation";
 import { useShortcuts } from "./ShortcutsDialog";
 import { useImport } from "./ImportDialog";
 import { startFrame } from "../prototype";
@@ -309,6 +310,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         )}
       </div>
       <div className="center">
+        <FileLocation />
         <input
           className="filename"
           aria-label="File name"

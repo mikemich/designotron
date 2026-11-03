@@ -30,7 +30,6 @@ const newPage = async (name, { editorUrl } = {}) => {
   const p = await ctx.newPage();
   p.errors = [];
   p.on("pageerror", (e) => p.errors.push(e.message));
-  p.on("dialog", (d) => d.accept(d.type() === "prompt" ? "Renamed file" : undefined));
   await p.addInitScript(
     ([n, editor]) => {
       try {
@@ -108,12 +107,15 @@ try {
     await p.click(`.menu >> text=${label}`).catch(async () => p.click(`text="${label}"`));
   };
   await menu("Rename");
+  await p.fill('input[aria-label="File name"]', "Renamed file");
+  await p.keyboard.press("Enter");
   check("a failed rename shows an error", /Couldn't rename the file/.test(await toastText(p)), await toastText(p));
   await sleep(5200);
   await menu("Duplicate");
   check("a failed duplicate shows an error", /Couldn't duplicate the file/.test(await toastText(p)), await toastText(p));
   await sleep(5200);
   await menu("Delete");
+  await p.click('[role=alertdialog] button:has-text("Delete")');
   check("a failed delete shows an error and keeps the file", /Couldn't delete the file/.test(await toastText(p)) && (await p.locator(".file-card:has(.more)").count()) === 1, await toastText(p));
   await setFlag(p, "failWrite", false);
   check("the file is untouched after the failures", (await p.locator(".file-card .n", { hasText: "Renamed file" }).count()) === 0 && (await p.locator(".file-card:has(.more)").count()) === 1);

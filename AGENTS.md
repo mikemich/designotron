@@ -90,7 +90,8 @@ must never be committed.
   `dt:file:<id>` (`persist.rs` plans the changed layers from the node diff, `saveDelta` in
   `files.ts` stores them in one transaction); single-record files from older versions still load
   and are converted by their first edit. `onDocChange` listeners run only when `docRev` moves, so
-  selecting never serialises or re-queries the document.
+  selecting never serialises or re-queries the document. A file's folder lives in its `dt:index`
+  entry, never in the document; index writes must keep unknown fields (use `upsertEntry`).
 - Room logic lives in `crates/rooms`, used by the bridge (one LAN room) and `crates/relay`
   (many online rooms keyed by an unguessable id). The relay only stores and relays
   documents: never add tools, MCP or Claude to it.

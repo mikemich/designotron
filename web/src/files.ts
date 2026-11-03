@@ -10,12 +10,23 @@ import {
 import { allAssets, assetDataUrl, loadAssets, referencedAssets } from "./assets";
 import { documentLoads, toast } from "./store";
 
-export interface FileMeta {
-  id: string;
-  name: string;
-  updatedAt: number;
-  thumbnail?: string;
-}
+import {
+  FolderGoneError,
+  uniqueName,
+  applyCreateFolder,
+  applyDeleteFolder,
+  applyMoveFiles,
+  applyMoveFolder,
+  applyRenameFolder,
+  newFolderId,
+  sanitizeFolders,
+  upsertEntry,
+  type FileMeta,
+  type Folder,
+  type FolderRecord,
+} from "./folders";
+
+export type { FileMeta, Folder };
 
 interface StoredFile {
   doc: string;
@@ -73,6 +84,7 @@ export interface DtronFile {
 }
 
 const INDEX = "dt:index";
+const FOLDERS = "dt:folders";
 
 // IndexedDB can be missing or throw (private windows, sandboxed previews); fall back to memory.
 const memory = new Map<string, unknown>();
@@ -272,18 +284,111 @@ export async function listFiles(): Promise<FileMeta[]> {
   return idx.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+/** One file's index entry (its name, folder...), or null when it isn't listed. */
+export async function getFileMeta(id: string): Promise<FileMeta | null> {
+  const idx = ((await get(INDEX)) as FileMeta[] | undefined) ?? [];
+  return idx.find((f) => f.id === id) ?? null;
+}
+
+/** Every project and folder (damaged records are repaired on read, never hiding a file). */
+export async function listFolders(): Promise<Folder[]> {
+  return sanitizeFolders(await get(FOLDERS));
+}
+
+/** Reads the folders and the index, lets `fn` change them and writes both, in one transaction
+ * so a move can't be undone by a stale tab and a check sees what is really stored. */
+function folderTx<T>(fn: (folders: Folder[], files: FileMeta[]) => { folders?: Folder[]; files?: FileMeta[]; result: T }): Promise<T> {
+  return queued(async () => {
+    let result!: T;
+    await transact([INDEX, FOLDERS], ([idx, stored]) => {
+      const out = fn(sanitizeFolders(stored), Array.isArray(idx) ? (idx as FileMeta[]) : []);
+      result = out.result;
+      const put: [string, unknown][] = [];
+      if (out.folders) put.push([FOLDERS, { v: 1, folders: out.folders } satisfies FolderRecord]);
+      if (out.files) put.push([INDEX, out.files]);
+      return { put, del: [] };
+    });
+    announceIndex();
+    return result;
+  });
+}
+
+/** A new project (no parent) or folder, named `name` or "New project" / "New folder" (numbered if taken). */
+export function createFolder(parent: string | null, name?: string): Promise<Folder> {
+  return folderTx((folders) => {
+    const taken = folders.filter((f) => f.parent === parent).map((f) => f.name);
+    const { folders: next, folder } = applyCreateFolder(folders, parent, name?.trim() || uniqueName(taken, parent === null ? "New project" : "New folder"), newFolderId());
+    return { folders: next, result: folder };
+  });
+}
+
+export function renameFolder(id: string, name: string): Promise<void> {
+  return folderTx((folders) => ({ folders: applyRenameFolder(folders, id, name), result: undefined }));
+}
+
+export function moveFolder(id: string, parent: string | null): Promise<void> {
+  return folderTx((folders) => ({ folders: applyMoveFolder(folders, id, parent), result: undefined }));
+}
+
+/** Deletes a folder with everything inside it; the files in any of them move to Drafts. */
+export function deleteFolder(id: string): Promise<{ moved: number; removed: number }> {
+  return folderTx((folders, files) => {
+    if (!folders.some((f) => f.id === id)) throw new FolderGoneError();
+    const r = applyDeleteFolder(folders, files, id);
+    return { folders: r.folders, files: r.files, result: { moved: r.moved, removed: r.removed } };
+  });
+}
+
+/** Moves files into a folder (undefined: Drafts). */
+export function moveFiles(ids: string[], target: string | undefined): Promise<void> {
+  return folderTx((folders, files) => ({ files: applyMoveFiles(folders, files, ids, target), result: undefined }));
+}
+
 // The index is read, changed and written back, so two writers (a save and a thumbnail)
-// must not interleave or the later one drops the earlier one's change.
+// must not interleave or the later one drops the earlier one's change. The queue orders the
+// writers of this tab; the transaction keeps another tab's write from landing in between.
 let indexQueue: Promise<unknown> = Promise.resolve();
 
-function writeIndex(fn: (idx: FileMeta[]) => FileMeta[]): Promise<void> {
-  const run = async () => {
-    const idx = ((await get(INDEX)) as FileMeta[] | undefined) ?? [];
-    await set(INDEX, fn(idx));
-  };
+function queued<T>(run: () => Promise<T>): Promise<T> {
   const next = indexQueue.then(run, run);
   indexQueue = next.catch(() => {});
   return next;
+}
+
+// Tells the other tabs (and this one's listeners) that the index or the folders changed. A
+// separate channel from the one the editors use for "this file was saved elsewhere": a move
+// must not mark an open file stale.
+const indexListeners = new Set<() => void>();
+let indexChannel: BroadcastChannel | null | undefined;
+function channel(): BroadcastChannel | null {
+  if (indexChannel === undefined) {
+    try {
+      indexChannel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("dt-index");
+      if (indexChannel) indexChannel.onmessage = () => indexListeners.forEach((cb) => cb());
+    } catch {
+      indexChannel = null;
+    }
+  }
+  return indexChannel;
+}
+
+function announceIndex() {
+  channel()?.postMessage({ kind: "index" });
+  indexListeners.forEach((cb) => cb());
+}
+
+/** Calls `cb` after the file index or the folders change, in this tab or another. Returns the unsubscribe. */
+export function onIndexChange(cb: () => void): () => void {
+  channel();
+  indexListeners.add(cb);
+  return () => indexListeners.delete(cb);
+}
+
+function writeIndex(fn: (idx: FileMeta[]) => FileMeta[], notify = true): Promise<void> {
+  return queued(async () => {
+    await transact([INDEX], ([stored]) => ({ put: [[INDEX, fn(Array.isArray(stored) ? (stored as FileMeta[]) : [])]], del: [] }));
+    if (notify) announceIndex();
+  });
 }
 
 export function newFileId(): string {
@@ -349,7 +454,7 @@ export function storedSize(id: string): number | null {
 const isManifest = (v: unknown): v is Manifest => (v as Manifest | undefined)?.v === 2;
 
 /** Writes a file as one record (used by import, duplicate and the like; autosave uses `saveDelta`). */
-export async function saveFile(id: string, name: string, docJson: string, thumbnail?: string) {
+export async function saveFile(id: string, name: string, docJson: string, opts?: { thumbnail?: string; folder?: string }) {
   const used = new Set(referencedAssets(docJson));
   const assets = Object.fromEntries(Object.entries(allAssets()).filter(([k]) => used.has(k)));
   layered.delete(id);
@@ -359,11 +464,8 @@ export async function saveFile(id: string, name: string, docJson: string, thumbn
     put: [[fileKey(id), { doc: docJson, assets } satisfies StoredFile]],
     del: isManifest(stored) ? layeredKeys(id, stored.roots, stored.assets) : [],
   }));
-  await writeIndex((idx) => {
-    const rest = idx.filter((f) => f.id !== id);
-    const prev = idx.find((f) => f.id === id);
-    return [...rest, { id, name, updatedAt: Date.now(), thumbnail: thumbnail ?? prev?.thumbnail }];
-  });
+  // A file already in the index stays in its folder; `opts.folder` only places a new one.
+  await writeIndex((idx) => upsertEntry(idx, { id, name, updatedAt: Date.now(), thumbnail: opts?.thumbnail }, opts?.folder));
 }
 
 /**
@@ -460,11 +562,8 @@ export async function saveDelta(id: string, name: string, plan: SavePlan): Promi
   }
   // (Not from an editor that has been replaced meanwhile: the new one tracks the name.)
   if (startedPlan.get(id)?.engine === plan.engine) knownName.set(id, writtenName);
-  await writeIndex((idx) => {
-    const rest = idx.filter((f) => f.id !== id);
-    const prev = idx.find((f) => f.id === id);
-    return [...rest, { id, name: writtenName, updatedAt: Date.now(), thumbnail: prev?.thumbnail }];
-  });
+  // (No announcement: the editor tells other tabs it saved, on the channel the dashboard also reads.)
+  await writeIndex((idx) => upsertEntry(idx, { id, name: writtenName, updatedAt: Date.now() }), false);
   return { name: writtenName };
 }
 
@@ -582,7 +681,8 @@ export async function duplicateFile(id: string): Promise<string | null> {
   const doc = JSON.parse(json);
   doc.name = `${doc.name} (copy)`;
   const nid = newFileId();
-  await saveFile(nid, doc.name, JSON.stringify(doc));
+  // A copy stays next to the original.
+  await saveFile(nid, doc.name, JSON.stringify(doc), { folder: (await getFileMeta(id))?.folder });
   return nid;
 }
 
@@ -678,7 +778,7 @@ export function pickFile(accept: string): Promise<File | null> {
 }
 
 /** Saves a .dtron file's contents as a new file (never over an open one) and returns its id. */
-export async function importDtron(text: string, fallbackName: string): Promise<string> {
+export async function importDtron(text: string, fallbackName: string, folder?: string): Promise<string> {
   let json: string;
   try {
     json = fromDtron(text);
@@ -687,7 +787,7 @@ export async function importDtron(text: string, fallbackName: string): Promise<s
   }
   if (!(await documentLoads(json))) throw new Error("That Designotron file is damaged and can't be opened.");
   const id = newFileId();
-  await saveFile(id, JSON.parse(json).name || fallbackName, json);
+  await saveFile(id, JSON.parse(json).name || fallbackName, json, { folder });
   return id;
 }
 

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Copy, History, RotateCcw, Trash2 } from "lucide-react";
 import { dispatchOrThrow, getDoc, getEngine, toast, useStore } from "../store";
-import { deleteVersion, listVersions, loadVersion, newFileId, renameVersion, saveFile, saveVersion, type Version } from "../files";
+import { deleteVersion, getFileMeta, listVersions, loadVersion, newFileId, renameVersion, saveFile, saveVersion, type Version } from "../files";
 import { IconButton, Section } from "../ui/controls";
 import { attempt, reportFailure } from "../errors";
 
@@ -56,7 +56,7 @@ export function HistoryPanel() {
       if (!json) return toast("That version could not be read", "error");
       const doc = JSON.parse(json);
       doc.name = `${getDoc().name} (${v.name})`;
-      await saveFile(newFileId(), doc.name, JSON.stringify(doc));
+      await saveFile(newFileId(), doc.name, JSON.stringify(doc), { folder: (await getFileMeta(fileId))?.folder });
       toast(`Saved “${doc.name}” to your files`);
     });
   };

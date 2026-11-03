@@ -475,11 +475,12 @@ try {
     await sleep(300);
     const cards = await page.locator(".file-card").count();
     const legacyName = "Legacy";
-    page.once("dialog", (d) => d.accept("Renamed legacy"));
     const card = page.locator(".file-card", { hasText: legacyName });
     await card.hover();
     await card.locator(".ibtn.more").click();
     await page.click(".menu >> text=Rename");
+    await page.fill('input[aria-label="File name"]', "Renamed legacy");
+    await page.keyboard.press("Enter");
     await sleep(800);
     check("a layered file can be renamed", (await page.locator(".file-card", { hasText: "Renamed legacy" }).count()) === 1);
     await page.locator(".file-card", { hasText: "Renamed legacy" }).click();
@@ -488,11 +489,11 @@ try {
     check("it opens under its new name with its content", (await page.evaluate(() => window.__dt.doc().name)) === "Renamed legacy" && (await names()).includes("B box"));
     await page.evaluate(() => (location.hash = "#/"));
     await page.waitForSelector(".file-card");
-    page.once("dialog", (d) => d.accept());
     const c2 = page.locator(".file-card", { hasText: "Renamed legacy" });
     await c2.hover();
     await c2.locator(".ibtn.more").click();
     await page.click(".menu >> text=Delete");
+    await page.click('[role=alertdialog] button:has-text("Delete")');
     await sleep(800);
     const left = await keys();
     check("deleting a layered file removes every record", !left.some((k) => k.startsWith("dt:root:flegacy1:") || k === "dt:file:flegacy1"), left.filter((k) => k.includes("flegacy1")).join(","));
@@ -721,11 +722,12 @@ try {
     await B.pg.goto(URL_ + "/#/");
     await B.pg.waitForSelector(".file-card");
     B.pg.removeAllListeners("dialog");
-    B.pg.once("dialog", (d) => d.accept("Renamed elsewhere"));
     const card = B.pg.locator(".file-card", { hasText: "Before" });
     await card.hover();
     await card.locator(".ibtn.more").click();
     await B.pg.click(".menu >> text=Rename");
+    await B.pg.fill('input[aria-label="File name"]', "Renamed elsewhere");
+    await B.pg.keyboard.press("Enter");
     await sleep(800);
     const names3 = [];
     for (let i = 0; i < 3; i++) {

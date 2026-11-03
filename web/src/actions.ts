@@ -2,7 +2,7 @@
 
 import { addAsset, imageSize, readFileAsDataUrl } from "./assets";
 import { exportProjectZip } from "./exporter";
-import { download, importDtron, pickFile, toDtron } from "./files";
+import { download, getFileMeta, importDtron, pickFile, toDtron } from "./files";
 import {
   canvasSize,
   currentPage,
@@ -381,7 +381,8 @@ export function saveDtron() {
 /** Opens a .dtron file as a new file next to this one (the open file is left as it is). */
 export async function openDtronFile(f: File): Promise<boolean> {
   try {
-    const id = await importDtron(await f.text(), f.name.replace(/\.(dtron|json)$/, ""));
+    const here = useStore.getState().fileId;
+    const id = await importDtron(await f.text(), f.name.replace(/\.(dtron|json)$/, ""), here ? (await getFileMeta(here))?.folder : undefined);
     location.hash = `#/file/${id}`;
     toast(`Opened ${f.name} as a new file`);
     return true;
