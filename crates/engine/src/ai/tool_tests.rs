@@ -1333,6 +1333,33 @@ mod w3a_prototype {
   }
 
   #[test]
+  fn export_svg_query_answers_a_bare_string_unless_asked_for_parts() {
+    use crate::engine::Query;
+    let (e, ids) = super::prototype_screens();
+    let ask = |hide: Vec<String>, children_only, with_bounds| {
+      e.query(Query::ExportSvg {
+        id: ids[0].clone(),
+        hide,
+        children_only,
+        with_bounds,
+      })
+      .unwrap()
+    };
+    assert!(ask(vec![], false, false).is_string());
+    assert!(ask(vec![ids[2].clone()], false, false).is_string());
+    let parts = ask(vec![], true, false);
+    assert!(
+      parts["svg"].as_str().unwrap().starts_with("<svg") && parts["width"].as_f64().unwrap() > 0.0,
+      "{parts}"
+    );
+    let whole = ask(vec![], false, true);
+    assert!(whole["svg"].is_string() && whole["x"].is_number(), "{whole}");
+    // The old wire form (no new fields) still parses.
+    let q: Query = serde_json::from_str(r#"{"q":"exportSvg","id":"a"}"#).unwrap();
+    assert!(matches!(q, Query::ExportSvg { children_only: false, .. }));
+  }
+
+  #[test]
   fn scroll_to_needs_a_layer_in_the_same_screen() {
     let (mut e, ids) = super::prototype_screens();
     let (home, other, btn) = (&ids[0], &ids[1], &ids[2]);

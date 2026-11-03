@@ -2350,3 +2350,7 @@ body:has(.phone-note) .toast {
     transform: translateY(100%);
   }
 }
+/* Overlays stay above the screens, including the one that is leaving. */
+.presenter .overlays {
+  z-index: 5;
+}
