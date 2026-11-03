@@ -266,7 +266,7 @@ mod scale {
     create(
       e,
       json!([{ "type": "frame", "name": "F", "x": 100, "y": 100, "width": 100, "height": 100,
-        "strokes": ["#000000"], "strokeWidth": 2, "cornerRadius": 8,
+        "stroke": "#000000", "strokeWidth": 2, "cornerRadius": 8,
         "layout": { "direction": "vertical", "gap": 4, "padding": 10 },
         "children": [{ "type": "text", "name": "T", "characters": "Hi", "fontSize": 16 }] }]),
     );
@@ -644,5 +644,105 @@ mod scale_instances {
     let n = e.doc.get(&t).unwrap();
     assert_eq!(n.text.as_ref().unwrap().font_size, 32.0);
     assert!(n.text_style.is_none(), "the style link would pull the size back");
+  }
+}
+
+mod scale_bookkeeping {
+  use super::*;
+
+  #[test]
+  fn a_big_plain_frame_snapshots_nothing_and_scales_fast() {
+    let mut e = engine();
+    let kids: Vec<Value> = (0..2000)
+      .map(|i| json!({ "type": "rectangle", "name": format!("R{i}"), "x": (i % 50) * 20, "y": (i / 50) * 20, "width": 10, "height": 10, "fill": "#FF0000" }))
+      .collect();
+    create(
+      &mut e,
+      json!([{ "type": "frame", "name": "Big", "x": 0, "y": 0, "width": 1000, "height": 800, "children": kids }]),
+    );
+    let big = named(&e, "Big");
+    assert!(crate::arrange::watched_count(&e.doc, &big) == 0, "plain layers need no snapshot");
+    e.dispatch(Command::BeginGesture).unwrap();
+    let t = std::time::Instant::now();
+    for s in 1..=10 {
+      e.dispatch(Command::Resize {
+        ids: vec![big.clone()],
+        handle: Handle::Se,
+        dx: s as f64 * 5.0,
+        dy: 0.0,
+        keep_aspect: false,
+        from_center: false,
+        snap: false,
+        zoom: 1.0,
+        scale: true,
+      })
+      .unwrap();
+    }
+    let per = t.elapsed() / 10;
+    e.dispatch(Command::EndGesture).unwrap();
+    // Single-digit milliseconds in a release build; the test profile is unoptimised, so it only guards against a blow-up.
+    assert!(per.as_millis() < 60, "{per:?} per step");
+  }
+
+  #[test]
+  fn no_stroke_means_no_stroke_weight_override() {
+    let mut e = engine();
+    create(
+      &mut e,
+      json!([{ "type": "frame", "name": "Btn", "x": 0, "y": 0, "width": 80, "height": 30, "fill": "#EEEEEE" }]),
+    );
+    let btn = named(&e, "Btn");
+    e.dispatch(Command::CreateComponent { ids: vec![btn] }).unwrap();
+    let main = e.doc.nodes.values().find(|n| n.kind == NodeType::Component).unwrap().id.clone();
+    instance(&mut e, &main, 300.0);
+    let inst = e.doc.nodes.values().find(|n| n.kind == NodeType::Instance).unwrap().id.clone();
+    e.dispatch(Command::ScaleNodes {
+      ids: vec![inst.clone()],
+      factor: 2.0,
+      anchor: None,
+    })
+    .unwrap();
+    let ov = &e.doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides;
+    assert!(!ov.values().any(|v| v.get("strokeWeight").is_some()), "{ov:?}");
+  }
+
+  #[test]
+  fn a_bound_gap_in_an_instance_keeps_following_its_variable() {
+    let mut e = engine();
+    e.dispatch(Command::Ai {
+      tool: "define_variables".into(),
+      input: json!({ "collection": "Space", "variables": [{ "name": "m", "type": "number", "value": 8 }] }),
+    })
+    .unwrap();
+    create(
+      &mut e,
+      json!([{ "type": "frame", "name": "Row", "x": 0, "y": 0, "width": 120, "height": 40, "bind": { "gap": "Space/m" },
+        "layout": { "direction": "horizontal", "gap": 8, "padding": 4 },
+        "children": [{ "type": "rectangle", "name": "a", "width": 20, "height": 20 }, { "type": "rectangle", "name": "b", "width": 20, "height": 20 }] }]),
+    );
+    let row = named(&e, "Row");
+    assert!(!e.doc.get(&row).unwrap().bindings.is_empty(), "the gap is bound");
+    e.dispatch(Command::CreateComponent { ids: vec![row] }).unwrap();
+    let main = e.doc.nodes.values().find(|n| n.kind == NodeType::Component).unwrap().id.clone();
+    instance(&mut e, &main, 300.0);
+    let inst = e.doc.nodes.values().find(|n| n.kind == NodeType::Instance).unwrap().id.clone();
+    e.dispatch(Command::ScaleNodes {
+      ids: vec![inst.clone()],
+      factor: 2.0,
+      anchor: None,
+    })
+    .unwrap();
+    let gap_now = e.doc.get(&inst).unwrap().layout.as_ref().unwrap().gap;
+    let pad_now = e.doc.get(&inst).unwrap().layout.as_ref().unwrap().padding_top;
+    // Touching the main again (sync) doesn't change the answer: the gap is not scaled and stays bound.
+    e.dispatch(Command::Update {
+      ids: vec![main],
+      patch: json!({ "opacity": 0.9 }),
+    })
+    .unwrap();
+    let l = e.doc.get(&inst).unwrap().layout.clone().unwrap();
+    assert_eq!((l.gap, l.padding_top), (gap_now, pad_now));
+    assert_eq!(l.gap, 8.0);
+    assert_eq!(l.padding_top, 8.0, "unbound padding scaled");
   }
 }

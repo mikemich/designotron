@@ -43,18 +43,19 @@ export async function sampleAt(p: { x: number; y: number }, zoom: number): Promi
   const doc = getDoc();
   const hit = query<string | null>({ q: "hit", x: p.x, y: p.y, zoom });
   const n: Node | undefined = hit ? doc.nodes[hit] : undefined;
-  if (!n) return pageBackground();
-  const visible = n.fills.filter((f) => f.visible);
-  if (visible.length === 1 && visible[0].type === "solid") return solid(visible[0].color, visible[0].opacity * n.opacity);
-  let top = n;
-  while (top.parent && doc.nodes[top.parent]) top = doc.nodes[top.parent];
+  const visible = n?.fills.filter((f) => f.visible) ?? [];
+  if (n && visible.length === 1 && visible[0].type === "solid") return solid(visible[0].color, visible[0].opacity * n.opacity);
   // The hit's top-level layer first, then the ones under it: the first that paints something at the point.
-  const roots = doc.pages.find((pg) => pg.id === top.page)?.children ?? [];
-  const under = roots.slice(0, roots.indexOf(top.id) + 1).reverse();
-  const boxes = query<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids: under }).items;
-  for (const { id, bounds: b } of boxes) {
+  // Off every layer's geometry (a drop shadow, say) all top-level layers are candidates.
+  let top = n;
+  while (top?.parent && doc.nodes[top.parent]) top = doc.nodes[top.parent];
+  const roots = doc.pages.find((pg) => pg.id === (top?.page ?? useStore.getState().es.page))?.children ?? [];
+  const under = (top ? roots.slice(0, roots.indexOf(top.id) + 1) : roots).slice().reverse();
+  // Painted bounds (shadows, outside strokes): that is the area the export covers and where its pixels start.
+  const boxes = query<{ items: { id: string; painted: Rect }[] }>({ q: "bounds", ids: under, painted: true }).items;
+  for (const { id, painted: b } of boxes) {
     if (p.x < b.x || p.y < b.y || p.x > b.x + b.width || p.y > b.y + b.height) continue;
-    const px = await rasterSample(id, p);
+    const px = await rasterSample(id, p, b);
     if (!px) return null;
     if (px.opacity >= 0.01) return px;
   }
@@ -75,24 +76,19 @@ function solid(color: string, opacity: number): Sample {
   return { color: "#" + m[1].toUpperCase(), opacity: Math.round(opacity * alpha * 1000) / 1000 };
 }
 
-/** Draws one layer on its own and reads the pixel at a page point (gradients, images, stacked fills). The export is
- * cropped to everything the layer paints, so it is lined up on the layer's box by its centre. */
-async function rasterSample(id: string, p: { x: number; y: number }): Promise<Sample | null> {
+/** Draws one layer on its own and reads the pixel at a page point (gradients, images, stacked fills). The export
+ * is cropped to what the layer paints, so `painted` (page space) is where its pixels start. */
+async function rasterSample(id: string, p: { x: number; y: number }, painted: Rect): Promise<Sample | null> {
   try {
-    const svg = nodeSvg(id);
-    const w = Number(/width="([\d.]+)"/.exec(svg)?.[1] ?? 0);
-    const h = Number(/height="([\d.]+)"/.exec(svg)?.[1] ?? 0);
-    const box = query<{ items: { bounds: Rect }[] }>({ q: "bounds", ids: [id] }).items[0]?.bounds;
-    if (!w || !h || !box) return null;
-    const bmp = await createImageBitmap(await svgToPngBlob(svg, 1));
+    const bmp = await createImageBitmap(await svgToPngBlob(nodeSvg(id), 1));
     const canvas = document.createElement("canvas");
     canvas.width = bmp.width;
     canvas.height = bmp.height;
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
     ctx.drawImage(bmp, 0, 0);
-    const px = Math.max(0, Math.min(bmp.width - 1, Math.round(p.x - box.x + (w - box.width) / 2)));
-    const py = Math.max(0, Math.min(bmp.height - 1, Math.round(p.y - box.y + (h - box.height) / 2)));
+    const px = Math.max(0, Math.min(bmp.width - 1, Math.floor(p.x - painted.x)));
+    const py = Math.max(0, Math.min(bmp.height - 1, Math.floor(p.y - painted.y)));
     const [r, g, b, a] = ctx.getImageData(px, py, 1, 1).data;
     const hex = [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
     return { color: "#" + hex.toUpperCase(), opacity: Math.round((a / 255) * 1000) / 1000 };

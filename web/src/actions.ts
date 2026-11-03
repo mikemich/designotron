@@ -283,7 +283,7 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
   if (!text) return;
   e.preventDefault();
   if (text.includes(CLIPBOARD_TAG)) {
-    dispatch({ op: "paste", data: text, parent: pasteTarget(), ...pastePosition(text, pasteTarget()) });
+    dispatch({ op: "paste", data: text, ...pastePosition(text, pasteTarget()) });
     return;
   }
   if (isSvgText(text)) {
@@ -303,12 +303,13 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
  * Where a plain paste lands: at the copied layers' own position when any of it is in the viewport,
  * else centred in the viewport (`null` x/y keep the original position). Paste in place skips this.
  */
-export function pastePosition(text: string, frame: string | null = null): { x: number | null; y: number | null } {
+export function pastePosition(text: string, frame: string | null = null): { x: number | null; y: number | null; parent: string | null } {
+  const top = { x: null, y: null, parent: null };
   try {
     const clip = JSON.parse(text) as { roots?: string[]; nodes?: { id: string; x: number; y: number; width: number; height: number }[] };
     const roots = new Set(clip.roots ?? []);
     const boxes = (clip.nodes ?? []).filter((n) => roots.has(n.id));
-    if (!boxes.length) return { x: null, y: null };
+    if (!boxes.length) return { ...top, parent: frame };
     const x0 = Math.min(...boxes.map((b) => b.x));
     const y0 = Math.min(...boxes.map((b) => b.y));
     const x1 = Math.max(...boxes.map((b) => b.x + b.width));
@@ -318,16 +319,17 @@ export function pastePosition(text: string, frame: string | null = null): { x: n
     const z = screenToPage(w, h);
     const inView = (r: Rect) => r.x <= z.x && r.x + r.width >= a.x && r.y <= z.y && r.y + r.height >= a.y;
     const box = frame ? query<{ union: Rect | null }>({ q: "bounds", ids: [frame] }).union : null;
-    if (box && inView(box)) {
+    if (frame && box && inView(box)) {
       // Into a frame: where it was if it fits in the frame there, else in the middle of the frame.
-      if (x0 >= box.x && y0 >= box.y && x1 <= box.x + box.width && y1 <= box.y + box.height) return { x: null, y: null };
-      return { x: Math.round(box.x + box.width / 2 - (x1 - x0) / 2), y: Math.round(box.y + box.height / 2 - (y1 - y0) / 2) };
+      if (x0 >= box.x && y0 >= box.y && x1 <= box.x + box.width && y1 <= box.y + box.height) return { x: null, y: null, parent: frame };
+      return { x: Math.round(box.x + box.width / 2 - (x1 - x0) / 2), y: Math.round(box.y + box.height / 2 - (y1 - y0) / 2), parent: frame };
     }
-    if (!box && inView({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 })) return { x: null, y: null };
+    // No frame, or one that is out of view: top level, where it was if that is on screen, else at the view centre.
+    if (inView({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 })) return top;
     const c = viewportCenter();
-    return { x: Math.round(c.x - (x1 - x0) / 2), y: Math.round(c.y - (y1 - y0) / 2) };
+    return { x: Math.round(c.x - (x1 - x0) / 2), y: Math.round(c.y - (y1 - y0) / 2), parent: null };
   } catch {
-    return { x: null, y: null };
+    return { ...top, parent: frame };
   }
 }
 

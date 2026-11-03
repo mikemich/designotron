@@ -256,6 +256,30 @@ try {
   const bg = (await doc()).pages.find((pg) => pg.id === curPage).background;
   check("a click inside a stroke-only frame samples the page background, not black", (await named("Blue")).fills[0]?.color?.toUpperCase().startsWith(bg.toUpperCase().slice(0, 7)), JSON.stringify((await named("Blue")).fills) + " vs " + bg);
   await dispatch({ op: "delete", ids: [hollow.id] });
+  // A drop shadow pushes the painted area off the layer's box: the pixel is read where it really is.
+  await create([
+    {
+      type: "frame",
+      name: "Shadowed",
+      x: 450,
+      y: 250,
+      width: 200,
+      height: 200,
+      fill: "#FFFFFF",
+      children: [{ type: "rectangle", name: "Strip", x: 0, y: 0, width: 200, height: 12, fill: "#0000FF" }],
+    },
+  ]);
+  const shadowed = await named("Shadowed");
+  await dispatch({ op: "update", ids: [shadowed.id], patch: { effects: [{ type: "dropShadow", color: "#000000FF", x: 0, y: 40, blur: 0, spread: 0, visible: true }] } });
+  await select((await named("Blue")).id);
+  await focusCanvas();
+  await press("i");
+  const sc = await screenOf(shadowed.x + 100, shadowed.y + 6);
+  await p.mouse.click(sc.x, sc.y);
+  await sleep(500);
+  check("the eyedropper reads the blue strip of a frame with an offset shadow, not the white under it", (await named("Blue")).fills[0]?.color?.toUpperCase().startsWith("#0000FF"), JSON.stringify((await named("Blue")).fills));
+  await dispatch({ op: "delete", ids: [shadowed.id] });
+  await select((await named("Blue")).id);
   await focusCanvas();
   await press("i");
   await press("Escape");
@@ -363,6 +387,23 @@ try {
   await sleep(300);
   copies = (await allNamed("Copy me")).filter((n) => n.id !== orig.id);
   check("Paste here pastes at the pointer", copies.length === 1 && Math.abs(copies[0].x - 400) <= 2 && Math.abs(copies[0].y - 300) <= 2, JSON.stringify(copies.map((c) => [c.x, c.y])));
+
+  // A selected frame that is out of view doesn't take the paste: it goes to the view centre at the top level.
+  await create([{ type: "frame", name: "FarFrame", x: 4000, y: 4000, width: 300, height: 300, fill: "#FFFFFF" }]);
+  const far = await named("FarFrame");
+  const seen = new Set((await allNamed("Copy me")).map((n) => n.id));
+  await select(far.id);
+  await focusCanvas();
+  await press("Control+v");
+  const fresh = (await allNamed("Copy me")).filter((n) => !seen.has(n.id));
+  const vp2 = await p.evaluate(() => {
+    const b = document.getElementById("dt-canvas").getBoundingClientRect();
+    const v = window.__dt.viewport();
+    return { x0: -v.x / v.zoom, y0: -v.y / v.zoom, x1: (b.width - v.x) / v.zoom, y1: (b.height - v.y) / v.zoom };
+  });
+  check("Ctrl+V with an out-of-view frame selected pastes at the view centre, not into the frame", fresh.length === 1 && !fresh[0].parent && fresh[0].x >= vp2.x0 && fresh[0].x <= vp2.x1 && fresh[0].y >= vp2.y0 && fresh[0].y <= vp2.y1, JSON.stringify(fresh.map((c) => [c.parent, c.x, c.y])));
+  await press("Control+z");
+  await dispatch({ op: "delete", ids: [far.id] });
 
   // ---------- Frame presets ----------
   await clear();

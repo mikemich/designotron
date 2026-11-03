@@ -55,7 +55,10 @@ pub fn scalable(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
 /// has a length (strokes, radii, effects, type, auto layout spacing, grids). Constraints of
 /// nested layers are ignored; the whole subtree scales as one. What changes inside an instance
 /// is recorded as overrides (so the next edit of the main component keeps it), and bindings and
-/// text styles on the scaled properties are let go (or the bound value would win again).
+/// text styles on the scaled properties are let go (or the bound value would win again). Inside
+/// an instance a bound property keeps following its variable instead (an override can't unbind it).
+/// Only layers that need that bookkeeping are snapshotted, so a drag over thousands of plain layers
+/// stays cheap.
 pub fn scale_nodes(doc: &mut Document, ids: &[NodeId], k: f64, anchor: Point) {
   for id in scalable(doc, ids) {
     let Some(n) = doc.get(&id) else { continue };
@@ -64,38 +67,115 @@ pub fn scale_nodes(doc: &mut Document, ids: &[NodeId], k: f64, anchor: Point) {
     let c = pm.apply(local_center);
     let nc = Point::new(anchor.x + (c.x - anchor.x) * k, anchor.y + (c.y - anchor.y) * k);
     let nc = pm.invert().apply(nc);
-    let subtree = doc.subtree(&id);
-    let before: Vec<Value> = subtree
-      .iter()
-      .filter_map(|i| doc.get(i))
-      .map(|n| serde_json::to_value(n).unwrap_or(Value::Null))
-      .collect();
+    let watched = watch(doc, &id);
     scale_subtree(doc, &id, k);
     if let Some(n) = doc.get_mut(&id) {
       n.x = tidy(nc.x - n.width / 2.0);
       n.y = tidy(nc.y - n.height / 2.0);
     }
-    for (nid, old) in subtree.iter().zip(before) {
-      let Some(now) = doc.get(nid).and_then(|n| serde_json::to_value(n).ok()) else {
+    for (nid, in_instance, old) in watched {
+      let Some(now) = doc.get(&nid).and_then(|n| serde_json::to_value(n).ok()) else {
         continue;
       };
       let Some(patch) = diff(&old, &now) else { continue };
-      crate::variables::unbind_for_patch(doc, std::slice::from_ref(nid), &patch);
+      let bound: Vec<String> = doc.get(&nid).map(|n| n.bindings.keys().cloned().collect()).unwrap_or_default();
+      if in_instance && !bound.is_empty() {
+        let mut probe = doc.clone();
+        crate::variables::unbind_for_patch(&mut probe, std::slice::from_ref(&nid), &patch);
+        let gone: Vec<String> = bound
+          .into_iter()
+          .filter(|b| probe.get(&nid).is_some_and(|n| !n.bindings.contains_key(b)))
+          .collect();
+        restore_bound(doc, &nid, &old, &gone);
+      } else {
+        crate::variables::unbind_for_patch(doc, std::slice::from_ref(&nid), &patch);
+      }
       let typography = patch.get("text").and_then(|t| t.as_object()).is_some_and(|t| {
         ["fontSize", "lineHeight", "letterSpacing", "paragraphSpacing"]
           .iter()
           .any(|k| t.contains_key(*k))
       });
-      if typography {
-        if let Some(n) = doc.get_mut(nid) {
+      if typography && !in_instance {
+        if let Some(n) = doc.get_mut(&nid) {
           n.text_style = None;
         }
       }
-      let in_instance = doc.get(nid).is_some_and(|n| n.kind == NodeType::Instance) || doc.instance_ancestor(nid).is_some();
       if in_instance {
-        crate::components::record_override(doc, nid, &patch);
+        let Some(now) = doc.get(&nid).and_then(|n| serde_json::to_value(n).ok()) else {
+          continue;
+        };
+        if let Some(patch) = diff(&old, &now) {
+          crate::components::record_override(doc, &nid, &patch);
+        }
       }
     }
+  }
+}
+
+/// The layers of a subtree that need bookkeeping after a scale, with whether they live in an
+/// instance and their state before: instances and what is inside them (their changes become
+/// overrides), and layers with variable bindings or a text style (those links are let go).
+fn watch(doc: &Document, root: &str) -> Vec<(NodeId, bool, Value)> {
+  let mut out = Vec::new();
+  let mut stack = vec![(root.to_string(), false)];
+  while let Some((id, in_instance)) = stack.pop() {
+    let Some(n) = doc.get(&id) else { continue };
+    let is_instance = n.kind == NodeType::Instance;
+    if in_instance || is_instance || !n.bindings.is_empty() || n.text_style.is_some() {
+      out.push((
+        id.clone(),
+        in_instance || is_instance,
+        serde_json::to_value(n).unwrap_or(Value::Null),
+      ));
+    }
+    stack.extend(n.children.iter().map(|c| (c.clone(), in_instance || is_instance)));
+  }
+  out
+}
+
+/// Puts back the scaled values of bound properties (inside an instance they keep following their variable).
+fn restore_bound(doc: &mut Document, id: &str, old: &Value, props: &[String]) {
+  let mut patch = serde_json::Map::new();
+  let mut put = |path: &[&str]| {
+    let mut v = old;
+    for k in path {
+      match v.get(k) {
+        Some(x) => v = x,
+        None => return,
+      }
+    }
+    let mut target = &mut patch;
+    for k in &path[..path.len() - 1] {
+      target = target
+        .entry(k.to_string())
+        .or_insert_with(|| Value::Object(Default::default()))
+        .as_object_mut()
+        .unwrap();
+    }
+    target.insert(path[path.len() - 1].to_string(), v.clone());
+  };
+  for prop in props {
+    match prop.as_str() {
+      "gap" => {
+        put(&["layout", "gap"]);
+        put(&["layout", "counterGap"]);
+      }
+      "padding" => {
+        for side in ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"] {
+          put(&["layout", side]);
+        }
+      }
+      "strokeWeight" | "width" | "height" => put(&[prop.as_str()]),
+      "cornerRadius" => {
+        put(&["cornerRadius"]);
+        put(&["cornerRadii"]);
+      }
+      "fontSize" => put(&["text", "fontSize"]),
+      _ => {}
+    }
+  }
+  if let Some(n) = doc.get_mut(id) {
+    let _ = crate::patch::apply(n, &Value::Object(patch));
   }
 }
 
@@ -145,7 +225,9 @@ fn scale_subtree(doc: &mut Document, id: &str, k: f64) {
 fn scale_own(n: &mut Node, k: f64) {
   n.width = tidy(n.width * k).max(if n.kind == NodeType::Line { 0.0 } else { 0.01 });
   n.height = tidy(n.height * k).max(if n.kind == NodeType::Line { 0.0 } else { 0.01 });
-  n.stroke_weight = tidy(n.stroke_weight * k);
+  if n.strokes.iter().any(|p| p.visible()) {
+    n.stroke_weight = tidy(n.stroke_weight * k);
+  }
   n.corner_radius = tidy(n.corner_radius * k);
   if let Some(r) = n.corner_radii.as_mut() {
     r.iter_mut().for_each(|v| *v = tidy(*v * k));
@@ -555,4 +637,9 @@ pub fn instances_of(doc: &Document, id: &str, page: &str, all_pages: bool) -> Ve
     }));
   }
   out
+}
+
+#[cfg(test)]
+pub(crate) fn watched_count(doc: &Document, root: &str) -> usize {
+  watch(doc, root).len()
 }

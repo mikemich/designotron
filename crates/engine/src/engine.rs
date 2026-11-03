@@ -539,6 +539,10 @@ pub enum Query {
   },
   Bounds {
     ids: Vec<NodeId>,
+    /// Also give each item's `painted` bounds: everything it draws (shadows, outside strokes, blurs),
+    /// which is what an export of it covers. Costs a walk of the subtree, so it is opt-in.
+    #[serde(default)]
+    painted: bool,
   },
   FrameAt {
     x: f64,
@@ -2924,11 +2928,17 @@ impl Engine {
       Query::Drill { x, y, zoom, container } => json!(interact::drill(&self.doc, &self.page, Point::new(x, y), zoom, &container)),
       Query::Hit { x, y, zoom } => json!(interact::hit_test(&self.doc, &self.page, Point::new(x, y), zoom)),
       Query::Marquee { x, y, width, height } => json!(interact::marquee(&self.doc, &self.page, Rect::new(x, y, width, height))),
-      Query::Bounds { ids } => {
+      Query::Bounds { ids, painted } => {
         let items: Vec<Value> = ids
           .iter()
           .filter_map(|id| self.doc.get(id).map(|n| (id, n)))
-          .map(|(id, n)| json!({ "id": id, "matrix": self.doc.abs_matrix(id), "width": n.width, "height": n.height, "bounds": self.doc.abs_bounds(id) }))
+          .map(|(id, n)| {
+            let mut item = json!({ "id": id, "matrix": self.doc.abs_matrix(id), "width": n.width, "height": n.height, "bounds": self.doc.abs_bounds(id) });
+            if painted {
+              item["painted"] = json!(render::render_bounds(&self.doc, id, self.measurer.as_ref()));
+            }
+            item
+          })
           .collect();
         json!({ "items": items, "union": self.doc.bounds_of_many(&ids) })
       }
