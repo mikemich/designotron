@@ -301,9 +301,11 @@ pub fn opt_bool(cx: &Ctx, s: &Value, key: &str) -> Result<Option<bool>, String> 
   match s.get(key) {
     None | Some(Value::Null) => Ok(None),
     Some(Value::Bool(b)) => Ok(Some(*b)),
+    Some(Value::Number(n)) if n.as_f64() == Some(1.0) => Ok(Some(true)),
+    Some(Value::Number(n)) if n.as_f64() == Some(0.0) => Ok(Some(false)),
     Some(Value::String(t)) if t.trim().eq_ignore_ascii_case("true") => Ok(Some(true)),
     Some(Value::String(t)) if t.trim().eq_ignore_ascii_case("false") => Ok(Some(false)),
-    Some(other) => Err(cx.err(key, format!("must be true or false, got {}", kind_of(other)))),
+    Some(other) => Err(cx.err(key, format!("must be true or false (or 1 or 0), got {}", kind_of(other)))),
   }
 }
 

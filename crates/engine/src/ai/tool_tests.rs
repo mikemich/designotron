@@ -870,6 +870,34 @@ mod hostile {
   }
 }
 
+mod big_files {
+  use super::*;
+
+  /// Plain patterns must work on a big file: the budget grows with the names searched.
+  #[test]
+  fn simple_patterns_succeed_over_twenty_thousand_layers() {
+    let mut e = engine();
+    for chunk in 0..4 {
+      let layers: Vec<Value> = (0..5000)
+        .map(|i| {
+          let n = chunk * 5000 + i;
+          json!({ "type": "rectangle", "name": format!("Heading {n} lorem ipsum dolor sit amet, label"), "x": n, "width": 2, "height": 2 })
+        })
+        .collect();
+      run(&mut e, "create_nodes", json!({ "nodes": layers }));
+    }
+    run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle", "name": "Primary button", "x": -50, "width": 2, "height": 2 }] }),
+    );
+    for (pattern, total) in [("/(foo|bar|baz|lorem)/", 20_000), ("/[a-z]+ [a-z]+ ago/", 0), ("/.*button.*/", 1)] {
+      let r = run(&mut e, "find_nodes", json!({ "name": pattern }));
+      assert_eq!(r["total"], total, "{pattern}");
+    }
+  }
+}
+
 mod flat {
   use super::*;
 
@@ -885,7 +913,7 @@ mod flat {
     let r = run(&mut e, "create_nodes", json!({ "nodes": thousands() }));
     assert_eq!(r["createdTruncated"], true);
     assert_eq!(r["createdCount"], 3000);
-    assert!(r["created"][0].is_string());
+    assert!(r["created"][0]["id"].is_string() && r["created"][0]["name"] == "Layer 0");
     assert!(serde_json::to_string(&r).unwrap().len() < 20_000);
     let d = run(&mut e, "get_document", json!({}));
     let size = serde_json::to_string(&d).unwrap().len();
@@ -1022,12 +1050,16 @@ mod strictness {
     );
     let n = e.doc.get(&id).unwrap();
     assert!(!n.visible && n.locked && n.text.as_ref().unwrap().italic);
-    assert!(e
-      .dispatch(ai(
-        "create_nodes",
-        json!({ "nodes": [{ "type": "rectangle", "visible": "maybe" }] })
-      ))
-      .is_err());
+    for bad in [json!("maybe"), json!(2), json!([])] {
+      assert!(e
+        .dispatch(ai("create_nodes", json!({ "nodes": [{ "type": "rectangle", "visible": bad }] })))
+        .is_err());
+    }
+    let id = one(
+      &mut e,
+      json!({ "type": "rectangle", "x": 900, "width": 5, "height": 5, "visible": 0, "locked": 1 }),
+    );
+    assert!(!e.doc.get(&id).unwrap().visible && e.doc.get(&id).unwrap().locked);
     let id = one(
       &mut e,
       json!({ "type": "rectangle", "width": 5, "height": 5, "strokeDash": ["4", "2px"], "stroke": "#000" }),

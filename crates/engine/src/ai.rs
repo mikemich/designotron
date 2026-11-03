@@ -33,13 +33,16 @@ const OUTLINE_CAP: usize = 250;
 /// Top-level layers `create_nodes` describes one by one; past it the answer is ids only.
 const CREATED_CAP: usize = 300;
 /// Ids listed when a create is past `CREATED_CAP`.
-const CREATED_IDS_CAP: usize = 500;
+const CREATED_IDS_CAP: usize = 300;
 /// Children of one created layer (and of each child) that are listed.
 const CHILDREN_CAP: usize = 50;
 /// Children and grandchildren a whole `create_nodes` answer lists.
 const CREATED_LISTED: usize = 150;
-/// Work a `find_nodes` regex may spend over all layers.
-const REGEX_BUDGET: u64 = 3_000_000;
+/// Work a `find_nodes` regex may spend over all layers: this much per character of layer name
+/// (so it scales with the file, not with the pattern), between the floor and the ceiling.
+const REGEX_STEPS_PER_CHAR: u64 = 40;
+const REGEX_BUDGET_MIN: u64 = 3_000_000;
+const REGEX_BUDGET_MAX: u64 = 30_000_000;
 /// Named descendants `create_nodes` reports.
 const NAMES_CAP: usize = 300;
 /// Characters of a text layer `get_nodes` returns.
@@ -1153,11 +1156,19 @@ fn find_nodes(e: &Engine, input: &Value) -> Result<Value, String> {
       return Err(cx.err("within", format!("{w} is on page {page}; pass page: \"{page}\" (or \"all\")")));
     }
   }
-  let mut budget = REGEX_BUDGET;
   let candidates: Vec<String> = match &within {
     Some(w) => e.doc.subtree(w),
     None => pages.iter().flat_map(|p| e.doc.page_nodes(p)).collect(),
   };
+  let name_chars: u64 = match name {
+    Some(NameMatch::Pattern(_)) => candidates
+      .iter()
+      .filter_map(|id| e.doc.get(id))
+      .map(|n| n.name.chars().count() as u64)
+      .sum(),
+    _ => 0,
+  };
+  let mut budget = (name_chars * REGEX_STEPS_PER_CHAR).clamp(REGEX_BUDGET_MIN, REGEX_BUDGET_MAX);
   let (mut total, mut out) = (0usize, Vec::new());
   for id in &candidates {
     let Some(n) = e.doc.get(id) else { continue };
@@ -1440,8 +1451,13 @@ impl Inserted {
   fn into_json(self) -> Value {
     let mut m = Map::new();
     if self.created.len() > CREATED_CAP {
-      // A huge create: ids only, so the answer stays small.
-      let ids: Vec<Value> = self.created.iter().take(CREATED_IDS_CAP).map(|c| c["id"].clone()).collect();
+      // A huge create: id and name only, so the answer stays small.
+      let ids: Vec<Value> = self
+        .created
+        .iter()
+        .take(CREATED_IDS_CAP)
+        .map(|c| json!({ "id": c["id"], "name": c["name"] }))
+        .collect();
       m.insert("createdCount".into(), json!(self.created.len()));
       m.insert("createdTruncated".into(), json!(true));
       m.insert("created".into(), json!(ids));
