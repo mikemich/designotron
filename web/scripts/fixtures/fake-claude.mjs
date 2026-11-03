@@ -9,6 +9,8 @@
 //   [calls=N]      how many create_nodes calls (default 3)
 //   [delay=MS]     pause before each call (default 0)
 //   [tool=NAME]    make one call of this tool (empty arguments) instead, e.g. get_screenshot
+//   [photo=QUERY]  search_photos for QUERY, then place_photo with the first id (into [node=ID] if given)
+//   [node=ID]      the layer place_photo fills
 //   [fail]         end with an error result
 // It says the secret its MCP config carries ("conn=<token>") in its reply.
 
@@ -26,6 +28,8 @@ const tag = opt("tag", "L");
 const calls = Number(opt("calls", 3));
 const delay = Number(opt("delay", 0));
 const tool = opt("tool", "");
+const photo = opt("photo", "");
+const photoNode = opt("node", "");
 
 const raw = argv[argv.indexOf("--mcp-config") + 1] ?? "{}";
 const config = JSON.parse(raw.trim().startsWith("{") ? raw : fs.readFileSync(raw, "utf8"));
@@ -57,7 +61,26 @@ emit({
 emit({ type: "assistant", message: { content: [{ type: "text", text: `conn=${headers["X-Designotron-Editor"]}` }] } });
 
 const started = Date.now();
-for (let i = 0; i < (tool ? 1 : calls); i++) {
+/** One tool call, as the CLI reports it: tool_use, then the tool_result. */
+async function step(name, args, id) {
+  emit({ type: "assistant", message: { content: [{ type: "tool_use", id, name: `mcp__designotron__${name}`, input: args }] } });
+  const out = await callTool(name, args);
+  const text = out.content?.map((c) => c.text ?? "").join("") ?? "";
+  emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, is_error: !!out.isError, content: text }] } });
+  return { out, text };
+}
+if (photo) {
+  const found = await step("search_photos", { query: photo }, "toolu_search");
+  const first = (() => {
+    try {
+      return JSON.parse(found.text).photos?.[0]?.id;
+    } catch {
+      return undefined;
+    }
+  })();
+  if (first) await step("place_photo", { id: first, ...(photoNode ? { nodeId: photoNode } : {}) }, "toolu_place");
+}
+for (let i = 0; i < (tool || photo ? (tool ? 1 : 0) : calls); i++) {
   await sleep(delay);
   const name = tool || "create_nodes";
   const args = tool ? {} : { nodes: [{ type: "frame", name: `${tag}-${i}`, x: i * 120, y: 0, width: 100, height: 100, fill: "#4F46E5" }] };

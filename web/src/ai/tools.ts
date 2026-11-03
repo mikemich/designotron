@@ -100,6 +100,7 @@ export async function executeTool(name: string, input: any, opts: { group?: stri
     if (name === "import_url") {
       return { ok: true, result: await importUrl({ ...(input ?? {}), group: opts.group }) };
     }
+    if (name === "search_photos" || name === "place_photo") return await (await import("../photos/tool")).run(name, input, opts.group);
     // The engine has no clock; stamp Claude's comment replies here.
     if (name === "reply_comment") input = { ...input, time: Date.now() };
     const result = aiDispatch(name, input ?? {}, opts.group);

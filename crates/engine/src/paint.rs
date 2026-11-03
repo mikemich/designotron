@@ -525,6 +525,7 @@ mod tests {
         handles: None,
       },
       Paint::Image {
+        credit: None,
         src: "asset:a".into(),
         scale_mode: ScaleMode::Crop,
         opacity: 1.0,
@@ -718,6 +719,7 @@ mod tests {
   fn crop_places_the_whole_image_in_the_box() {
     let doc = doc_with(NodeType::Rectangle, 100.0, 50.0, |n| {
       n.fills = vec![Paint::Image {
+        credit: None,
         src: "asset:a".into(),
         scale_mode: ScaleMode::Crop,
         opacity: 1.0,

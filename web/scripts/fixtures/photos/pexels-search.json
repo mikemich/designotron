@@ -1,0 +1,63 @@
+{
+  "page": 1,
+  "per_page": 12,
+  "photos": [
+    {
+      "id": 1001,
+      "width": 640,
+      "height": 480,
+      "url": "https://www.pexels.com/photo/studio-sneakers-1001/",
+      "photographer": "Pia Park",
+      "photographer_url": "https://www.pexels.com/@piapark",
+      "alt": "Studio sneakers",
+      "src": {
+        "original": "https://images.pexels.com/photos/1001/pexels-photo-1001.jpeg",
+        "large": "https://images.pexels.com/photos/1001/pexels-photo-1001.jpeg?auto=compress&w=940",
+        "medium": "https://images.pexels.com/photos/1001/pexels-photo-1001.jpeg?auto=compress&cs=tinysrgb&h=350"
+      }
+    },
+    {
+      "id": 1002,
+      "width": 640,
+      "height": 480,
+      "url": "https://www.pexels.com/photo/lake-and-hills-1002/",
+      "photographer": "Quinn Fox",
+      "photographer_url": "https://www.pexels.com/@quinnfox",
+      "alt": "Lake and hills",
+      "src": {
+        "original": "https://images.pexels.com/photos/1002/pexels-photo-1002.jpeg",
+        "large": "https://images.pexels.com/photos/1002/pexels-photo-1002.jpeg?auto=compress&w=940",
+        "medium": "https://images.pexels.com/photos/1002/pexels-photo-1002.jpeg?auto=compress&cs=tinysrgb&h=350"
+      }
+    },
+    {
+      "id": 1003,
+      "width": 640,
+      "height": 480,
+      "url": "https://www.pexels.com/photo/warm-dunes-1003/",
+      "photographer": "Rae Sun",
+      "photographer_url": "https://www.pexels.com/@raesun",
+      "alt": "Warm dunes",
+      "src": {
+        "original": "https://images.pexels.com/photos/1003/pexels-photo-1003.jpeg",
+        "large": "https://images.pexels.com/photos/1003/pexels-photo-1003.jpeg?auto=compress&w=940",
+        "medium": "https://images.pexels.com/photos/1003/pexels-photo-1003.jpeg?auto=compress&cs=tinysrgb&h=350"
+      }
+    },
+    {
+      "id": 1004,
+      "width": 480,
+      "height": 640,
+      "url": "https://www.pexels.com/photo/photo-1004/",
+      "photographer": "Sol Vega",
+      "photographer_url": "https://www.pexels.com/@solvega",
+      "alt": "",
+      "src": {
+        "original": "https://images.pexels.com/photos/1004/pexels-photo-1004.jpeg",
+        "large": "https://images.pexels.com/photos/1004/pexels-photo-1004.jpeg?auto=compress&w=940",
+        "medium": "https://images.pexels.com/photos/1004/pexels-photo-1004.jpeg?auto=compress&cs=tinysrgb&h=350"
+      }
+    }
+  ],
+  "total_results": 4
+}

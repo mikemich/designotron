@@ -11,6 +11,7 @@ import {
   screenToPage,
   selection,
   setTool,
+  toast,
   useStore,
   zoomBy,
 } from "../store";
@@ -1020,6 +1021,16 @@ export function Canvas() {
     // and dropping onto a main component nests the instance there like Figma.
     if (main) {
       dispatch({ op: "createInstance", componentId: comp, x: p.x - main.width / 2, y: p.y - main.height / 2, parent: null, anchor: p, intoComponents: true });
+    }
+    // A stock photo from the Assets panel: a new image layer at the pointer.
+    const photo = e.dataTransfer.getData("application/x-designotron-photo");
+    if (photo) {
+      try {
+        const [{ photoDetails }, { placeNewLayer }, { photoEnv }] = await Promise.all([import("../photos/providers"), import("../photos/place"), import("../photos/settings")]);
+        await placeNewLayer(await photoDetails(photoEnv(), photo), { x: p.x, y: p.y });
+      } catch (err) {
+        toast(String(err instanceof Error ? err.message : err), "error");
+      }
     }
   }
 

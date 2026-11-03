@@ -5,6 +5,8 @@ import { NumberField, Popover, Seg, SelectField } from "./controls";
 import { addAsset, assetUrl, readFileAsDataUrl } from "../assets";
 import { pickFile } from "../files";
 import { getDoc, useStore } from "../store";
+import { PhotoSearch } from "../panels/PhotoSearch";
+import { photoPaint } from "../photos/place";
 
 export interface Rgba {
   r: number;
@@ -250,6 +252,7 @@ export function paintLabel(p: Paint): string {
 export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void }) {
   const p = props.paint;
   const [stop, setStop] = useState(0);
+  const [finding, setFinding] = useState(false);
   const toType = (t: Paint["type"]) => {
     const base = p.type === "solid" ? p.color : p.type === "image" ? "#D9D9D9" : p.stops[0]?.color ?? "#000000";
     if (t === "solid") props.onChange({ type: "solid", color: base, opacity: p.opacity, visible: p.visible });
@@ -337,10 +340,14 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
               className="btn"
               onClick={async () => {
                 const f = await pickFile("image/*");
-                if (f) props.onChange({ ...p, src: "asset:" + addAsset(await readFileAsDataUrl(f)) });
+                // Another file is not the photo whose credit this paint carried.
+                if (f) props.onChange({ ...p, src: "asset:" + addAsset(await readFileAsDataUrl(f)), credit: undefined });
               }}
             >
               Choose image…
+            </button>
+            <button className="btn" aria-expanded={finding} onClick={() => setFinding(!finding)}>
+              Find a photo…
             </button>
             <SelectField
               ariaLabel="Image scale mode"
@@ -368,6 +375,21 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
               ]}
             />
           </div>
+          {finding && (
+            <div className="photo-pick">
+              <PhotoSearch
+                mode={{
+                  kind: "pick",
+                  onPick: async (r) => {
+                    const { paint } = await photoPaint(r, p.scaleMode === "fit" ? "fit" : "fill");
+                    // A new photo starts uncropped; the opacity of this paint stays.
+                    props.onChange({ ...p, src: paint.src, credit: paint.credit, scaleMode: paint.scaleMode, crop: undefined });
+                    setFinding(false);
+                  },
+                }}
+              />
+            </div>
+          )}
         </>
       )}
     </div>

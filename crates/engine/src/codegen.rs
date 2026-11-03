@@ -9,8 +9,8 @@ use serde_json::json;
 use crate::components;
 use crate::geom::fmt;
 use crate::model::{
-  Action, Align, Document, EffectType, InstanceInfo, LayoutDirection, Node, NodeId, NodeType, OverlayPosition, OverlaySettings, Paint,
-  PropKind, ScaleMode, Sizing, StrokeAlign, TextAlignH, TextAutoResize, TextCase, TextDecoration,
+  Action, Align, Document, EffectType, ImageCredit, InstanceInfo, LayoutDirection, Node, NodeId, NodeType, OverlayPosition,
+  OverlaySettings, Paint, PropKind, ScaleMode, Sizing, StrokeAlign, TextAlignH, TextAutoResize, TextCase, TextDecoration,
 };
 use crate::paint;
 use crate::props;
@@ -448,7 +448,7 @@ impl<'a> Ctx<'a> {
       _ if image_src.is_some() => {
         let mut e = El::new("img");
         e.attrs.push(("src".into(), image_src.clone().unwrap_or_default()));
-        e.attrs.push(("alt".into(), n.name.clone()));
+        e.attrs.push(("alt".into(), photo_alt(&n)));
         e
       }
       _ => El::new(self.container_tag(&n)),
@@ -1369,6 +1369,105 @@ fn split_paragraphs(text: &str, spans: Vec<Span>) -> Vec<(String, Vec<Span>)> {
   out
 }
 
+/// The credit of a layer's visible image fill, if it is a stock photo.
+fn image_credit(n: &Node) -> Option<&ImageCredit> {
+  n.fills.iter().find_map(|p| match p {
+    Paint::Image {
+      credit: Some(c),
+      visible: true,
+      ..
+    } => Some(&**c),
+    _ => None,
+  })
+}
+
+/// `alt` text of an image layer: the photo's description when it has one, else the layer name.
+fn photo_alt(n: &Node) -> String {
+  match image_credit(n) {
+    Some(c) if !c.alt.trim().is_empty() => c.alt.trim().to_string(),
+    Some(c) if !c.title.trim().is_empty() => c.title.trim().to_string(),
+    _ => n.name.clone(),
+  }
+}
+
+/// Distinct credits of the stock photos under `root` (or in the whole file), in layer id order.
+fn credits_under(doc: &Document, root: Option<&str>) -> Vec<ImageCredit> {
+  let mut out: Vec<ImageCredit> = Vec::new();
+  let mut add = |n: &Node| {
+    if let Some(c) = image_credit(n) {
+      if !out.iter().any(|o| o.provider == c.provider && o.photo_id == c.photo_id) {
+        out.push(c.clone());
+      }
+    }
+  };
+  match root {
+    None => doc.nodes.values().for_each(&mut add),
+    Some(id) => {
+      let mut stack = vec![id.to_string()];
+      while let Some(id) = stack.pop() {
+        if let Some(n) = doc.get(&id) {
+          add(n);
+          stack.extend(n.children.iter().cloned());
+        }
+      }
+    }
+  }
+  out
+}
+
+/// One line per credit, for CREDITS.md and the HTML comment.
+fn credit_line(c: &ImageCredit) -> String {
+  let title = if c.title.trim().is_empty() { "Photo" } else { c.title.trim() };
+  let mut line = format!("\"{}\"", title.replace('\n', " "));
+  if !c.author.is_empty() {
+    line.push_str(&format!(" by {}", c.author.replace('\n', " ")));
+  }
+  if !c.source.is_empty() {
+    line.push_str(&format!(" ({})", c.source.replace('\n', " ")));
+  }
+  if !c.license.is_empty() {
+    line.push_str(&format!(", {}", c.license.replace('\n', " ")));
+  }
+  if c.attribution_required {
+    line.push_str(" (attribution required)");
+  }
+  if c.non_commercial {
+    line.push_str(" (non-commercial only)");
+  }
+  line
+}
+
+/// CREDITS.md for a project, empty when no stock photos are used.
+fn credits_md(doc: &Document) -> String {
+  let credits = credits_under(doc, None);
+  if credits.is_empty() {
+    return String::new();
+  }
+  let mut out = String::from("# Photo credits\n\nStock photos used in this design. Keep the attribution where a licence asks for it.\n\n");
+  for c in &credits {
+    out.push_str(&format!("- {}\n", credit_line(c)));
+    for (label, url) in [("Photo", &c.source_url), ("Author", &c.author_url), ("Licence", &c.license_url)] {
+      if url.starts_with("https://") {
+        out.push_str(&format!("  - {label}: {url}\n"));
+      }
+    }
+  }
+  out
+}
+
+/// An HTML comment listing the credits under `root`, empty when there are none.
+fn credits_comment(doc: &Document, root: &str) -> String {
+  let credits = credits_under(doc, Some(root));
+  if credits.is_empty() {
+    return String::new();
+  }
+  let lines: Vec<String> = credits
+    .iter()
+    .map(|c| format!("  {}", credit_line(c).replace("--", "- -")))
+    .collect();
+  format!("<!-- Photo credits:\n{}\n-->\n", lines.join("\n"))
+}
+
 /// The image URL when a rectangle is just an image (one visible image fill).
 fn image_only(n: &Node) -> Option<String> {
   if n.kind != NodeType::Rectangle || !n.children.is_empty() {
@@ -1963,8 +2062,9 @@ pub fn export_html(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
   html(&el, 2, &mut body);
   let fonts = google_fonts_link(doc);
   let name = doc.get(id).map(|n| n.name.clone()).unwrap_or_default();
+  let credits = credits_comment(doc, id);
   format!(
-    "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\" />\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n  <title>{}</title>\n{}  <style>*, *::before, *::after {{ box-sizing: border-box; }} body {{ margin: 0; }}{}</style>\n</head>\n<body>\n{}</body>\n</html>\n",
+    "<!doctype html>\n{credits}<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\" />\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n  <title>{}</title>\n{}  <style>*, *::before, *::after {{ box-sizing: border-box; }} body {{ margin: 0; }}{}</style>\n</head>\n<body>\n{}</body>\n</html>\n",
     esc(&name),
     if fonts.is_empty() { String::new() } else { format!("  <link rel=\"stylesheet\" href=\"{}\" />\n", esc(&fonts)) },
     if doc.variables.is_empty() { String::new() } else { format!("\n{}", crate::variables::tokens_css(doc)) },
@@ -2489,6 +2589,13 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
       readme_themes(&themed)
     ),
   });
+  let credits = credits_md(doc);
+  if !credits.is_empty() {
+    files.push(ProjectFile {
+      path: "CREDITS.md".into(),
+      content: credits,
+    });
+  }
   files.push(ProjectFile {
     path: "design.dtron.json".into(),
     content: serde_json::to_string_pretty(doc).unwrap_or_default(),
@@ -2648,6 +2755,7 @@ mod tests {
     doc.insert(nav, Some("home"), &page, None);
     let mut img = crate::ops::default_node(NodeType::Rectangle, "img".into(), "Product photo".into());
     img.fills = vec![Paint::Image {
+      credit: None,
       src: "https://example.com/p.png".into(),
       scale_mode: ScaleMode::Fill,
       opacity: 1.0,
@@ -2922,6 +3030,7 @@ mod tests {
     r.width = 200.0;
     r.height = 100.0;
     r.fills = vec![Paint::Image {
+      credit: None,
       src: "https://example.com/c.png".into(),
       scale_mode: ScaleMode::Crop,
       opacity: 1.0,
@@ -2948,6 +3057,7 @@ mod tests {
     let page = doc.get("home").unwrap().page.clone();
     let mut r = crate::ops::default_node(NodeType::Rectangle, "pic2".into(), "Pic2".into());
     r.fills = vec![Paint::Image {
+      credit: None,
       src: "https://example.com/it's \"q\".png".into(),
       scale_mode: ScaleMode::Crop,
       opacity: 1.0,
@@ -3413,11 +3523,57 @@ mod tests {
   }
 
   #[test]
+  fn stock_photo_credits_reach_alt_html_and_credits_md() {
+    let mut doc = sample();
+    let page = doc.pages[0].id.clone();
+    let credit = ImageCredit {
+      provider: "openverse".into(),
+      photo_id: "openverse:abc".into(),
+      title: "Sneakers".into(),
+      alt: "White sneakers on concrete".into(),
+      author: "Ann --x".into(),
+      author_url: "https://example.com/ann".into(),
+      license: "CC BY 2.0".into(),
+      attribution_required: true,
+      ..Default::default()
+    };
+    let mut img = crate::ops::default_node(NodeType::Rectangle, "pic".into(), "Product photo".into());
+    img.fills = vec![Paint::Image {
+      credit: Some(Box::new(credit)),
+      src: "asset:abc".into(),
+      scale_mode: ScaleMode::Fill,
+      opacity: 1.0,
+      visible: true,
+      crop: None,
+    }];
+    doc.insert(img, Some("home"), &page, None);
+    let react = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(react.contains("alt=\"White sneakers on concrete\""), "{react}");
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(
+      html.contains("<!-- Photo credits:") && html.contains("\"Sneakers\" by Ann - -x"),
+      "{html}"
+    );
+    assert!(!html.contains("--x"));
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let md = &files.iter().find(|f| f.path == "CREDITS.md").unwrap().content;
+    assert!(
+      md.contains("CC BY 2.0") && md.contains("(attribution required)") && md.contains("https://example.com/ann"),
+      "{md}"
+    );
+    // No photos, no file and no comment.
+    let plain = sample();
+    assert!(export_project(&plain, &HeuristicMeasurer).iter().all(|f| f.path != "CREDITS.md"));
+    assert!(!export_html(&plain, "home", &HeuristicMeasurer).contains("Photo credits"));
+  }
+
+  #[test]
   fn image_filled_frame_keeps_its_class_attribute_valid() {
     let mut doc = sample();
     let page = doc.pages[0].id.clone();
     let mut f = crate::ops::default_node(NodeType::Frame, "ph".into(), "Photo".into());
     f.fills = vec![Paint::Image {
+      credit: None,
       src: "asset:abc".into(),
       scale_mode: ScaleMode::Fill,
       opacity: 1.0,

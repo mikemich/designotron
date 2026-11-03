@@ -69,7 +69,9 @@ must never be committed.
   (`patch.rs`). Add a dedicated command only for structural changes.
 - AI tools are defined and executed in `ai.rs` only. The chat API agent, the MCP server
   and headless mode all call it. Browser-only tools (`get_screenshot`, `import_html`) live
-  in `web/src/ai/` and are listed in `ai::BROWSER_TOOLS`.
+  in `web/src/ai/` and are listed in `ai::BROWSER_TOOLS`. Stock photo tools (`search_photos`,
+  `place_photo`) are defined in `ai/photos.rs` and run in `web/src/photos/`; photo bytes enter the
+  document only as assets, with the licence `credit` on the image paint.
 - The canvas and exports share `render.rs`. Do not add a second renderer.
 - Image bytes never enter the document: paints reference `asset:<id>` and the bytes live
   in `web/src/assets.ts` and the `.dtron` file's `assets` map.

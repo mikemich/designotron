@@ -211,12 +211,19 @@ export function Popover(props: { anchor: DOMRect; onClose: () => void; children:
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const w = el.offsetWidth;
-    const h = el.offsetHeight;
-    let left = props.anchor.left - w - 12;
-    if (left < 8) left = Math.min(window.innerWidth - w - 8, props.anchor.right + 8);
-    let top = Math.min(props.anchor.top, window.innerHeight - h - 8);
-    setPos({ left, top: Math.max(8, top) });
+    const place = () => {
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      let left = props.anchor.left - w - 12;
+      if (left < 8) left = Math.min(window.innerWidth - w - 8, props.anchor.right + 8);
+      let top = Math.min(props.anchor.top, window.innerHeight - h - 8);
+      setPos((p) => (p.left === left && p.top === Math.max(8, top) ? p : { left, top: Math.max(8, top) }));
+    };
+    place();
+    // Content that grows later (a photo search inside the popover) keeps it on screen.
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(place) : null;
+    ro?.observe(el);
+    return () => ro?.disconnect();
   }, [props.anchor]);
   useEffect(() => {
     const down = (e: PointerEvent) => {
