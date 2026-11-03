@@ -113,7 +113,8 @@ export function keyName(e: { key: string; code?: string; ctrlKey: boolean; altKe
   if (e.repeat || e.isComposing) return null;
   if (["Control", "Alt", "Shift", "Meta", "Dead", "Unidentified", "Process"].includes(e.key)) return null;
   const mod = e.ctrlKey || e.altKey || e.shiftKey || e.metaKey;
-  const physical = mod ? /^(?:Key([A-Z])|Digit(\d))$/.exec(e.code ?? "") : null;
+  // A letter or digit the layout already gives wins (AZERTY); otherwise the physical key.
+  const physical = mod && !/^[\p{L}\p{N}]$/u.test(e.key) ? /^(?:Key([A-Z])|Digit(\d))$/.exec(e.code ?? "") : null;
   const k = physical ? (physical[1] ?? physical[2]) : e.key === " " ? "Space" : e.key.length === 1 ? e.key.toUpperCase() : e.key;
   return [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Meta", k].filter(Boolean).join("+");
 }
@@ -242,20 +243,17 @@ export interface ScrollerScene {
   content: { svg: string; x: number; y: number; width: number; height: number };
   hotspots: Hotspot[];
   scrollers: ScrollerScene[];
-  /** Layers painted after (above) the nested scrollers, drawn over them. */
+  /** Layers painted after this scroller, drawn over it (in the container that holds it). */
   above: AboveScene | null;
   /** This scroller's own layer, then the hotspot owners above it (for a click on its empty area). */
   chain: string[];
 }
 
-/** Layers that come after a scroller in paint order, drawn over it with their own hotspots. */
+/** Layers painted after a scroller (and before the next one), drawn over it. Each is its own
+ *  picture, like a fixed layer, so the layers around it stay where they are. */
 export interface AboveScene {
-  svg: string;
-  /** Frame coordinates of the picture. */
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+  /** Pictures in frame coordinates. */
+  pieces: { svg: string; x: number; y: number; width: number; height: number }[];
   hotspots: Hotspot[];
 }
 
@@ -273,7 +271,6 @@ export interface Scene {
   base: string;
   hotspots: Hotspot[];
   scrollers: ScrollerScene[];
-  above: AboveScene | null;
   fixed: FixedScene[];
   keyed: Keyed[];
   /** Every scroller of the screen, by layer id. */
@@ -290,6 +287,12 @@ interface Info {
 }
 
 const FRAME_LIKE = ["frame", "component", "instance"];
+/** Whether `id` is `ancestor` or inside it. */
+const isInside = (doc: Doc, id: string, ancestor: string) => {
+  for (let x: string | null = id; x; x = doc.nodes[x]?.parent ?? null) if (x === ancestor) return true;
+  return false;
+};
+
 const radiusOf = (n: Node) => (n.cornerRadii ? n.cornerRadii.map((r) => `${r}px`).join(" ") : n.cornerRadius ? `${n.cornerRadius}px` : "0");
 
 /** Whether the children of `n` extend past its box in a direction it scrolls. */
@@ -347,23 +350,38 @@ export function buildScene(frameId: string): Scene {
   const owners: { id: string; its: Interaction[] }[] = [];
   const keyed: Keyed[] = [];
   const fixedSet = new Set(fixedIds);
-  // Layers painted after the last scroller of a container (the screen, or a scroller) are drawn
-  // over it: `roots` are those layers, `hide` what the picture of them leaves out (the scroller's
-  // path and everything before it).
-  const aboveOf = new Map<string, { node: string; roots: Set<string>; hide: string[] }>();
+  // Layers painted after a scroller are drawn over it, each as a picture of its own (so the
+  // ancestors between it and the container lose their clipping and opacity there). Every such
+  // layer goes over the last scroller that comes before it, so a badge between two carousels is
+  // above the first and under the second.
+  const order = new Map<string, number>();
+  const number = (id: string) => {
+    order.set(id, order.size);
+    for (const c of doc.nodes[id]?.children ?? []) number(c);
+  };
+  number(frameId);
+  const aboveRoots = new Map<string, string[]>(); // scroller id → layers drawn over it
+  const rootsIn = new Map<string, string[]>(); // container ("" = screen) → all of them
   for (const c of new Set(infos.filter((i) => i.id !== frameId).map((i) => i.parent ?? ""))) {
     const node = c || frameId;
-    const last = infos.filter((i) => i.id !== frameId && (i.parent ?? "") === c).at(-1)!;
-    const roots = new Set<string>();
-    const hide: string[] = [];
-    for (let x: string | null = last.id; x && x !== node; x = doc.nodes[x].parent) {
-      const sibs = doc.nodes[doc.nodes[x].parent!].children;
-      const at = sibs.indexOf(x);
-      hide.push(x, ...sibs.slice(0, at));
-      for (const sib of sibs.slice(at + 1)) if (doc.nodes[sib]?.visible !== false && !fixedSet.has(sib)) roots.add(sib);
+    const mine = infos.filter((i) => i.id !== frameId && (i.parent ?? "") === c);
+    const all: string[] = [];
+    for (const sc of mine) {
+      for (let x: string | null = sc.id; x && x !== node; x = doc.nodes[x].parent) {
+        const sibs = doc.nodes[doc.nodes[x].parent!].children;
+        for (const sib of sibs.slice(sibs.indexOf(x) + 1)) {
+          if (doc.nodes[sib]?.visible === false || fixedSet.has(sib) || infoOf.has(sib) || all.includes(sib)) continue;
+          all.push(sib);
+          let owner: string | null = null;
+          for (const o of mine) if ((order.get(o.id) ?? 0) < (order.get(sib) ?? 0) && !isInside(doc, o.id, sib)) owner = o.id;
+          if (owner) aboveRoots.set(owner, [...(aboveRoots.get(owner) ?? []), sib]);
+        }
+      }
     }
-    if (roots.size) aboveOf.set(c, { node, roots, hide });
+    rootsIn.set(c, all.filter((r) => [...aboveRoots.values()].some((l) => l.includes(r))));
   }
+  const rootOwner = new Map<string, string>();
+  for (const [o, list] of aboveRoots) for (const r of list) rootOwner.set(r, o);
   const visit = (id: string) => {
     const n = doc.nodes[id];
     if (!n) return;
@@ -399,7 +417,8 @@ export function buildScene(frameId: string): Scene {
     if (fixed) key = "fixed:" + fixed;
     else {
       key = line.slice(1).find((l) => infoOf.has(l)) ?? "";
-      if (aboveOf.get(key)?.roots && line.some((l) => aboveOf.get(key)!.roots.has(l))) key = "above:" + key;
+      const root = line.find((l) => rootOwner.has(l));
+      if (root && !line.slice(1).slice(0, line.indexOf(root)).some((l) => infoOf.has(l))) key = "above:" + rootOwner.get(root);
     }
     if (!into.has(key)) into.set(key, []);
     into.get(key)!.push(h);
@@ -407,23 +426,22 @@ export function buildScene(frameId: string): Scene {
 
   // 3. Pictures: the screen without scrolling content and fixed layers, then each scroller's.
   const kids = (id: string) => doc.nodes[id].children;
-  const baseHide = [...infos.filter((i) => i.parent === null).flatMap((i) => kids(i.id)), ...(aboveOf.get("")?.roots ?? [])];
+  const baseHide = [...infos.filter((i) => i.parent === null).flatMap((i) => kids(i.id)), ...(rootsIn.get("") ?? [])];
   const base = svgOf(frameId, baseHide);
-  const aboveScene = (c: string): AboveScene | null => {
-    const a = aboveOf.get(c);
-    if (!a) return null;
-    // Scrollers inside those layers keep their own pictures: leave their children out here.
-    const inside = (id: string) => {
-      for (let x: string | null = id; x; x = doc.nodes[x]?.parent ?? null) if (a.roots.has(x)) return true;
-      return false;
-    };
-    const hide = [...a.hide, ...infos.filter((i) => inside(i.id)).flatMap((i) => kids(i.id))];
-    const r = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id: a.node, hide, childrenOnly: true });
-    return { svg: inlineAssets(r.svg), x: r.x - fb.x, y: r.y - fb.y, width: r.width, height: r.height, hotspots: into.get("above:" + c) ?? [] };
+  const aboveScene = (scroller: string): AboveScene | null => {
+    const roots = aboveRoots.get(scroller);
+    if (!roots?.length) return null;
+    const pieces = roots.map((id) => {
+      // A scroller inside keeps its own picture: leave its children out here.
+      const hide = infos.filter((i) => isInside(doc, i.id, id)).flatMap((i) => kids(i.id));
+      const r = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id, hide, withBounds: true });
+      return { svg: inlineAssets(r.svg), x: r.x - fb.x, y: r.y - fb.y, width: r.width, height: r.height };
+    });
+    return { pieces, hotspots: into.get("above:" + scroller) ?? [] };
   };
   const byId = new Map<string, ScrollerScene>();
   const build = (i: Info): ScrollerScene => {
-    const hide = [...infos.filter((o) => o.parent === i.id).flatMap((o) => kids(o.id)), ...(aboveOf.get(i.id)?.roots ?? [])];
+    const hide = [...infos.filter((o) => o.parent === i.id).flatMap((o) => kids(o.id)), ...(rootsIn.get(i.id) ?? [])];
     if (i.id === frameId) hide.push(...fixedIds);
     const c = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id: i.id, hide, childrenOnly: true });
     const rect = rel(i.rect);
@@ -446,7 +464,7 @@ export function buildScene(frameId: string): Scene {
     const c = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id, withBounds: true });
     return { id, svg: inlineAssets(c.svg), rect: rel(c), hotspots: into.get("fixed:" + id) ?? [] };
   });
-  return { id: frameId, width: frame.width, height: frame.height, base, hotspots: into.get("") ?? [], scrollers, above: aboveScene(""), fixed, keyed, byId, all };
+  return { id: frameId, width: frame.width, height: frame.height, base, hotspots: into.get("") ?? [], scrollers, fixed, keyed, byId, all };
 }
 
 /** The scrollers a layer sits in, innermost first. */

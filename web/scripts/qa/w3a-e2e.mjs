@@ -117,6 +117,25 @@ await tool("create_nodes", {
         { type: "rectangle", name: "Bang box", x: 200, y: 500, width: 150, height: 100, fill: "#AA00AA" },
       ],
     },
+    // Layers after a carousel that sits inside a plain frame: over it, and below it.
+    {
+      type: "frame", name: "Zsec", x: 6000, y: 0, width: 390, height: 844, fill: "#FFFFFF",
+      children: [
+        {
+          type: "frame", name: "Section", x: 0, y: 0, width: 390, height: 700, fill: "#F5F5F5", clipContent: true,
+          children: [
+            {
+              type: "frame", name: "Carousel Z", x: 0, y: 100, width: 390, height: 200, fill: "#DDDDDD",
+              children: [card("Z1", 10), card("Z2", 320), card("Z3", 630)],
+            },
+            { type: "rectangle", name: "Dots over", x: 150, y: 210, width: 90, height: 30, fill: "#FE0000" },
+            { type: "rectangle", name: "Dots below", x: 150, y: 320, width: 90, height: 30, fill: "#FD0000" },
+          ],
+        },
+      ],
+    },
+    { type: "frame", name: "Esc A", x: 6500, y: 0, width: 390, height: 844, fill: "#FFFFFF", children: [{ type: "rectangle", name: "Esc open", x: 20, y: 100, width: 150, height: 60, fill: "#0066FF" }] },
+    { type: "frame", name: "Esc Modal", x: 7000, y: 0, width: 200, height: 100, fill: "#FFFF99" },
     { type: "frame", name: "Hover B", x: 1500, y: 0, width: 390, height: 844, fill: "#FFFF99" },
     // 8-9: durations, easing, push and back.
     {
@@ -221,6 +240,11 @@ await proto("Nav", { action: "navigate", destinationId: "Detail", transition: "i
 await proto("Card 1", { action: "navigate", destinationId: "Detail", transition: "instant" });
 await proto("Jump", { action: "scroll_to", destinationId: "Footer" });
 await proto("Footer", { action: "navigate", destinationId: "Detail", transition: "instant" });
+await update("Carousel Z", { overflow: "horizontal" });
+await proto("Dots over", { action: "navigate", destinationId: "Detail", transition: "instant" });
+await proto("Dots below", { action: "navigate", destinationId: "Detail", transition: "instant" });
+await proto("Esc open", { action: "open_overlay", destinationId: "Esc Modal", transition: "instant" });
+await proto("Esc A", { trigger: "key", key: "Escape", action: "navigate", destinationId: "Detail", transition: "instant" });
 await proto("Dots", { action: "navigate", destinationId: "Detail", transition: "instant" });
 
 // ---------- 1-3: scrolling, nested scrolling, Scroll to ----------
@@ -539,6 +563,35 @@ await closePresent(page);
   check("smart animate: the real screen replaces the animation", (await page.locator(".presenter [data-smart]").count()) === 0 && (await crumb(page)) === "Smart B");
   await closePresent(page);
 }
+
+// ---------- later siblings of a carousel in a plain frame ----------
+
+for (const [name, color] of [["Dots over", "fe0000"], ["Dots below", "fd0000"]]) {
+  await present(page, "Zsec");
+  const r = await rectOf(hot(page, name));
+  const at = [r.x + r.width / 2, r.y + r.height / 2];
+  const top = await page.evaluate(([x, y]) => document.elementFromPoint(x, y)?.getAttribute("data-hotspot"), at);
+  const drawn = await page.evaluate(([x, y, c]) => document.elementsFromPoint(x, y).some((e) => e.tagName === "svg" && e.innerHTML.toLowerCase().includes(c)), [...at, color]);
+  check(`${name}: drawn and on top, inside a plain frame`, top === ids[name] && drawn, `top ${top} drawn ${drawn}`);
+  await hot(page, name).click();
+  await sleep(150);
+  check(`${name}: clicking it navigates`, (await crumb(page)) === "Detail", await crumb(page));
+  await closePresent(page);
+}
+
+// ---------- Escape closes an open overlay and stops there ----------
+
+await present(page, "Esc A");
+await hot(page, "Esc open").click();
+await sleep(300);
+check("escape: the overlay is open", (await page.locator(".presenter .overlay-backdrop").count()) === 1);
+await page.keyboard.press("Escape");
+await sleep(200);
+check("escape: closes the overlay and doesn't run the screen's Escape trigger", (await page.locator(".presenter .overlay-backdrop").count()) === 0 && (await crumb(page)) === "Esc A", await crumb(page));
+await page.keyboard.press("Escape");
+await sleep(200);
+check("escape: with no overlay the screen's Escape trigger runs", (await crumb(page)) === "Detail", await crumb(page));
+await closePresent(page);
 
 // ---------- 11: the view link plays scrolling and the toggle too ----------
 

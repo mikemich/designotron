@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { toast, useStore } from "./store";
 import type { Interaction, OverlaySettings, Rect } from "./types";
@@ -368,18 +368,24 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       // A focused button or link (Back, Close, Remix) keeps Enter and Space.
       if ((e.key === "Enter" || e.key === " ") && t?.closest("button, a[href]")) return;
       const name = keyName(e);
-      // The top overlay's keys first, then the base frame's.
-      const layers = [k.top ? sceneFor(k.top.id) : null, k.scene].filter((x): x is Scene => !!x);
-      const live = name ? layers.find((l) => l.keyed.some((x) => x.it.key === name)) : undefined;
-      const hit = live?.keyed.find((x) => x.it.key === name);
-      if (hit && live) {
+      // Order: the top overlay's keys, then Escape closes an open overlay, then the base frame's
+      // keys, then the built-ins (Escape leaves, the arrows step through the frames).
+      const run = (live: Scene | null, offset: OpenOverlay | null) => {
+        const hit = name ? live?.keyed.find((x) => x.it.key === name) : undefined;
+        if (!hit || !live) return false;
         e.preventDefault();
         e.stopPropagation();
         const r = live.all.get(hit.id)?.rect ?? { x: 0, y: 0, width: live.width, height: live.height };
-        const at = live !== k.scene && k.top ? { ...r, x: r.x + k.top.x, y: r.y + k.top.y } : r;
-        goRef.current(hit.it, at, hit.id, live.id);
+        goRef.current(hit.it, offset ? { ...r, x: r.x + offset.x, y: r.y + offset.y } : r, hit.id, live.id);
+        return true;
+      };
+      if (k.top && run(sceneFor(k.top.id), k.top)) return;
+      if (k.top && e.key === "Escape") {
+        e.preventDefault();
+        setOverlays((o) => o.slice(0, -1));
         return;
       }
+      if (run(k.scene, null)) return;
       if (e.key === "Escape") {
         if (k.overlays.length) setOverlays((o) => o.slice(0, -1));
         else if (!remixUrl) useStore.setState({ presenting: null });
@@ -739,9 +745,11 @@ function SceneView({ scene, flash, interactive, scrolls, scrollEls, onAct, onHov
       <div dangerouslySetInnerHTML={{ __html: scene.base }} />
       {interactive && scene.hotspots.map((h) => spot(h, none))}
       {scene.scrollers.map((s) => (
-        <ScrollerView key={s.id} s={s} origin={none} interactive={interactive} scrolls={scrolls} scrollEls={scrollEls} spot={spot} click={click} />
+        <Fragment key={s.id}>
+          <ScrollerView s={s} origin={none} interactive={interactive} scrolls={scrolls} scrollEls={scrollEls} spot={spot} click={click} />
+          {s.above && <AboveView a={s.above} origin={none} interactive={interactive} spot={spot} />}
+        </Fragment>
       ))}
-      {scene.above && <AboveView a={scene.above} origin={none} interactive={interactive} spot={spot} />}
       {scene.fixed.length > 0 && (
         <div className="fixed-layers">
           {scene.fixed.map((f) => (
@@ -757,7 +765,9 @@ function SceneView({ scene, flash, interactive, scrolls, scrollEls, onAct, onHov
 function AboveView({ a, origin, interactive, spot }: { a: AboveScene; origin: Rect; interactive: boolean; spot: (h: Hotspot, origin: Rect) => React.ReactNode }) {
   return (
     <>
-      <div style={{ position: "absolute", left: a.x - origin.x, top: a.y - origin.y, width: a.width, height: a.height, pointerEvents: "none" }} dangerouslySetInnerHTML={{ __html: a.svg }} />
+      {a.pieces.map((p, i) => (
+        <div key={i} style={{ position: "absolute", left: p.x - origin.x, top: p.y - origin.y, width: p.width, height: p.height, pointerEvents: "none" }} dangerouslySetInnerHTML={{ __html: p.svg }} />
+      ))}
       {interactive && a.hotspots.map((h) => spot(h, origin))}
     </>
   );
@@ -825,9 +835,11 @@ function ScrollerView({
         <div style={{ position: "absolute", left: ox, top: oy, width: s.content.width, height: s.content.height, pointerEvents: "none" }} dangerouslySetInnerHTML={{ __html: s.content.svg }} />
         {interactive && s.hotspots.map((hs) => spot(hs, s.rect))}
         {s.scrollers.map((n) => (
-          <ScrollerView key={n.id} s={n} origin={s.rect} interactive={interactive} scrolls={scrolls} scrollEls={scrollEls} spot={spot} click={click} />
+          <Fragment key={n.id}>
+            <ScrollerView s={n} origin={s.rect} interactive={interactive} scrolls={scrolls} scrollEls={scrollEls} spot={spot} click={click} />
+            {n.above && <AboveView a={n.above} origin={s.rect} interactive={interactive} spot={spot} />}
+          </Fragment>
         ))}
-        {s.above && <AboveView a={s.above} origin={s.rect} interactive={interactive} spot={spot} />}
       </div>
     </div>
   );
