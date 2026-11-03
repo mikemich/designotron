@@ -13,8 +13,10 @@ import {
   MousePointer2,
   Pencil,
   PenTool,
+  Pipette,
   Play,
   Redo2,
+  Scaling,
   Sparkles,
   Square,
   Star,
@@ -43,6 +45,7 @@ import { claudeReady, useChat } from "../ai/chatState";
 import { useShortcuts } from "./ShortcutsDialog";
 import { useImport } from "./ImportDialog";
 import { startFrame } from "../prototype";
+import { SAME_PROPS, TIDY_KBD } from "../canvas/contextMenu";
 
 const SHAPES: { tool: Tool; label: string; key: string; icon: JSX.Element }[] =
   [
@@ -115,9 +118,14 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     { label: "Undo", kbd: `${MOD}Z`, onClick: A.undo },
     { label: "Redo", kbd: `${SHIFT}${MOD}Z`, onClick: A.redo },
     { label: "Select all", kbd: `${MOD}A`, onClick: A.selectAll },
+    { label: "Select matching layers", kbd: `${ALT}${MOD}A`, onClick: A.selectMatching },
+    { label: "Invert selection", kbd: `${SHIFT}${MOD}A`, onClick: A.invertSelection },
+    ...SAME_PROPS.map(([prop, label]) => ({ label, onClick: () => A.selectSame(prop) })),
+    { label: "Select all instances", onClick: () => A.selectInstances(false) },
     { label: "Duplicate", kbd: `${MOD}D`, onClick: A.duplicate },
     { sep: true },
     { heading: "Object" },
+    { label: "Tidy up", kbd: TIDY_KBD, onClick: A.tidyUp },
     { label: "Group", kbd: `${MOD}G`, onClick: A.group },
     { label: "Ungroup", kbd: `${SHIFT}${MOD}G`, onClick: A.ungroup },
     {
@@ -254,6 +262,8 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           >
             <ImageIcon size={16} />
           </button>
+          {toolBtn("scale", "Scale (K)", <Scaling size={16} />)}
+          {toolBtn("eyedropper", "Eyedropper (I)", <Pipette size={16} />)}
         </span>
         {toolBtn("hand", "Hand (H)", <Hand size={16} />)}
         {toolBtn("comment", "Comment (C)", <MessageCircle size={16} />)}

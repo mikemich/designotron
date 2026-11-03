@@ -1,5 +1,5 @@
 import * as A from "./actions";
-import { copySelection, pasteHere, pasteReplace } from "./canvas/contextMenu";
+import { copySelection, pasteHere, pasteInPlace, pasteReplace } from "./canvas/contextMenu";
 import { dispatch, getDoc, pointerDrag, selectSibling, selection, setTool, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
 import { useShortcuts } from "./panels/ShortcutsDialog";
 import { focusedByPointer } from "./ui/controls";
@@ -83,6 +83,12 @@ export function installShortcuts(): () => void {
       if (e.altKey && e.code === "KeyC") return run(A.copyProperties);
       if (e.altKey && e.code === "KeyV") return run(A.pasteProperties);
       if (e.shiftKey && k === "r") return run(() => void pasteReplace());
+      // Paste in place: preventDefault keeps the browser's paste-as-plain-text from also firing.
+      if (e.shiftKey && !e.altKey && k === "v") return run(() => void pasteInPlace());
+      // Selection commands go before Select all below, which takes every "a" whatever Alt and Shift say.
+      if (e.altKey && e.code === "KeyA" && !st.editingVector) return run(A.selectMatching);
+      if (e.shiftKey && !e.altKey && k === "a" && !st.editingVector) return run(A.invertSelection);
+      if (e.ctrlKey && e.altKey && e.code === "KeyT") return run(A.tidyUp);
       if (k === "y") return run(A.redo);
       if (k === "d") return run(A.duplicate);
       if (k === "a") return run(st.editingVector ? () => !pointerDrag.active && A.selectAllVectorPoints() : A.selectAll);
@@ -184,6 +190,8 @@ export function installShortcuts(): () => void {
       t: "text",
       h: "hand",
       c: "comment",
+      k: "scale",
+      i: "eyedropper",
     };
     if (tools[k]) return run(() => setTool(tools[k]));
   };

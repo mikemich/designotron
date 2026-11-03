@@ -106,6 +106,9 @@ function Pages() {
   const [focusId, setFocusId] = useState<string | null>(null);
   const [more, setMore] = useState(0);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  /** Where a dragged page or layer would land: on a page (layers) or before/after it (pages). */
+  const [drop, setDrop] = useState<{ id: string; where: "before" | "after" | "on" } | null>(null);
+  const dragPage = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const tabStop = focusId && doc.pages.some((p) => p.id === focusId) ? focusId : page;
 
@@ -139,6 +142,14 @@ function Pages() {
     if (next) requestAnimationFrame(() => focusPage(next.id));
   };
   const onKey = (e: React.KeyboardEvent, id: string, i: number) => {
+    // Alt+Shift+Arrow reorders, as it does in the layers tree.
+    if (e.target === e.currentTarget && e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      e.preventDefault();
+      e.stopPropagation();
+      A.movePage(id, i + (e.key === "ArrowUp" ? -1 : 1));
+      requestAnimationFrame(() => focusPage(id));
+      return;
+    }
     if (e.target !== e.currentTarget || e.ctrlKey || e.metaKey || e.altKey) return;
     const go = (to: number) => {
       e.preventDefault();
@@ -199,13 +210,51 @@ function Pages() {
             role="option"
             aria-selected={p.id === page}
             tabIndex={p.id === tabStop ? 0 : -1}
-            className={"page-item" + (p.id === page ? " active" : "")}
+            className={"page-item" + (p.id === page ? " active" : "") + (drop?.id === p.id && drop.where === "on" ? " drop-into" : "")}
             onClick={(e) => {
               dispatch({ op: "setPage", id: p.id });
               returnFocusToCanvas(e);
             }}
             onDoubleClick={() => setRenaming(p.id)}
             onKeyDown={(e) => onKey(e, p.id, i)}
+            draggable={renaming !== p.id}
+            onDragStart={(e) => {
+              dragPage.current = p.id;
+              e.dataTransfer.effectAllowed = "move";
+              e.dataTransfer.setData("application/x-designotron-page", p.id);
+            }}
+            onDragEnd={() => {
+              dragPage.current = null;
+              setDrop(null);
+            }}
+            onDragOver={(e) => {
+              const isPage = e.dataTransfer.types.includes("application/x-designotron-page");
+              if (!isPage && !e.dataTransfer.types.includes("application/x-designotron-layer")) return;
+              e.preventDefault();
+              const r = e.currentTarget.getBoundingClientRect();
+              const where = isPage ? ((e.clientY - r.top) / r.height < 0.5 ? "before" : "after") : "on";
+              if (drop?.id !== p.id || drop.where !== where) setDrop({ id: p.id, where });
+            }}
+            onDragLeave={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as globalThis.Node | null)) setDrop((d) => (d?.id === p.id ? null : d));
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              const at = drop?.id === p.id ? drop.where : "on";
+              setDrop(null);
+              const pageId = e.dataTransfer.getData("application/x-designotron-page");
+              if (pageId) {
+                const from = doc.pages.findIndex((x) => x.id === pageId);
+                const slot = i + (at === "after" ? 1 : 0);
+                A.movePage(pageId, slot > from ? slot - 1 : slot);
+                return;
+              }
+              const layer = e.dataTransfer.getData("application/x-designotron-layer");
+              if (!layer || p.id === page) return;
+              // Dragging a layer that is part of the selection takes the whole selection along.
+              const sel = useStore.getState().es.selection;
+              A.moveToPage(sel.includes(layer) ? sel : [layer], p.id);
+            }}
             onContextMenu={(e) => {
               e.preventDefault();
               setMenu({
@@ -213,11 +262,15 @@ function Pages() {
                 y: e.clientY,
                 items: [
                   { label: "Rename", onClick: () => setRenaming(p.id) },
+                  { label: "Duplicate page", onClick: () => A.duplicatePage(p.id) },
+                  { label: "Move up", disabled: i === 0, onClick: () => A.movePage(p.id, i - 1) },
+                  { label: "Move down", disabled: i === doc.pages.length - 1, onClick: () => A.movePage(p.id, i + 1) },
                   { label: "Delete page", disabled: doc.pages.length < 2, onClick: () => dispatch({ op: "deletePage", id: p.id }) },
                 ],
               });
             }}
           >
+            {drop?.id === p.id && drop.where !== "on" && <div className="drop-line" style={{ top: drop.where === "before" ? -1 : undefined, bottom: drop.where === "after" ? -1 : undefined, left: 8 }} />}
             <File size={12} aria-hidden="true" />
             {renaming === p.id ? (
               <RenameInput
@@ -627,6 +680,7 @@ function Layers() {
                   onDragStart={(e) => {
                     dragId.current = n.id;
                     e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("application/x-designotron-layer", n.id);
                   }}
                   onDragOver={(e) => {
                     e.preventDefault();

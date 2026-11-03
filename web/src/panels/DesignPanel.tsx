@@ -60,10 +60,20 @@ const FRAME_PRESETS = [
 
 export function DesignPanel() {
   const nodes = useSelection();
-  if (!nodes.length) return <PagePanel />;
+  const framing = useStore((s) => s.tool) === "frame";
+  if (!nodes.length) {
+    return framing ? (
+      <div className="scroll">
+        <FramePresets />
+      </div>
+    ) : (
+      <PagePanel />
+    );
+  }
   const ids = nodes.map((n) => n.id);
   return (
     <div className="scroll">
+      {framing && <FramePresets />}
       <ComponentSection nodes={nodes} />
       <AlignSection />
       <FrameSection nodes={nodes} ids={ids} />
@@ -198,6 +208,48 @@ function AlignSection() {
   );
 }
 
+/** While the Frame tool is active: the preset sizes, one click makes that frame at the viewport centre. */
+function FramePresets() {
+  return (
+    <Section title="Frame">
+      <div className="frame-presets" role="group" aria-label="Frame presets">
+        {FRAME_PRESETS.map((p) => (
+          <button key={p.label} className="btn block preset" onClick={() => A.createFramePreset(p.w, p.h, p.label)}>
+            <span>{p.label}</span>
+            <span className="muted small">
+              {p.w}×{p.h}
+            </span>
+          </button>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+/** The Scale tool's number: scales the selection around its top-left by a percentage of what it is now. */
+function ScaleField({ ids }: { ids: string[] }) {
+  // The field always reads 100%: a scale applies to the layers as they are, then the field starts over.
+  const [again, setAgain] = useState(0);
+  return (
+    <div className="row scale-row">
+      <span className="muted small">Scale</span>
+      <NumberField
+        key={again}
+        ariaLabel="Scale"
+        title="Scale the selection by this percentage, from its top-left"
+        value={100}
+        min={1}
+        max={10000}
+        suffix="%"
+        onChange={(pct) => {
+          dispatch({ op: "scaleNodes", ids, factor: pct / 100, anchor: null });
+          setAgain((n) => n + 1);
+        }}
+      />
+    </div>
+  );
+}
+
 function FrameSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   if (!nodes.every((n) => ["frame", "component", "instance"].includes(n.type))) return null;
   return (
@@ -223,6 +275,7 @@ function FrameSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
 
 function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const doc = getDoc();
+  const tool = useStore((s) => s.tool);
   const [corners, setCorners] = useState(false);
   const parent = nodes[0].parent ? doc.nodes[nodes[0].parent] : null;
   const inFlow = !!parent?.layout && nodes.every((n) => !n.absolutePosition);
@@ -238,6 +291,7 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   ];
   return (
     <Section title="Position & size">
+      {tool === "scale" && <ScaleField ids={ids} />}
       <div className="grid2">
         <NumberField label="X" ariaLabel="X position" value={common(nodes, (n) => n.x)} onChange={(x) => update(ids, { x })} onScrubStart={begin} onScrubEnd={end} />
         <NumberField label="Y" ariaLabel="Y position" value={common(nodes, (n) => n.y)} onChange={(y) => update(ids, { y })} onScrubStart={begin} onScrubEnd={end} />

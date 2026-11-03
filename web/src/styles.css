@@ -2353,4 +2353,29 @@ body:has(.phone-note) .toast {
 /* Overlays stay above the screens, including the one that is leaving. */
 .presenter .overlays {
   z-index: 5;
+/* W3-E pages and tools */
+.page-item {
+  position: relative;
+}
+.page-item.drop-into {
+  outline: 2px solid var(--select);
+  outline-offset: -2px;
+}
+.frame-presets {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.frame-presets .preset {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.scale-row {
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.scale-row .field {
+  flex: 1;
 }

@@ -26,6 +26,7 @@ import { CropMode } from "./CropMode";
 import { reportCursor } from "../collab";
 import { insertImageFile, openDtronFile, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu } from "./contextMenu";
+import { useEyedropper } from "./eyedropper";
 import { useDemo } from "../Demo";
 import { Menu, type MenuItem } from "../ui/controls";
 import { isOverlayLink, newInteraction } from "../prototype";
@@ -50,7 +51,7 @@ interface BoundsItem {
 type Drag =
   | { kind: "pan"; sx: number; sy: number; vx: number; vy: number }
   | { kind: "move"; start: Pt; ids: string[]; started: boolean; alt: boolean; clickSelect: string | null }
-  | { kind: "resize"; handle: Handle; start: Pt; ids: string[] }
+  | { kind: "resize"; handle: Handle; start: Pt; ids: string[]; scale: boolean }
   | { kind: "rotate"; pivot: Pt; startAngle: number; ids: string[] }
   | { kind: "marquee"; start: Pt; base: string[] }
   | { kind: "draw"; start: Pt; cur: Pt }
@@ -526,7 +527,7 @@ export function Canvas() {
     const handle = target.getAttribute("data-handle") as Handle | null;
     if (handle) {
       dispatch({ op: "beginGesture" });
-      drag.current = { kind: "resize", handle, start: p, ids: [...sel] };
+      drag.current = { kind: "resize", handle, start: p, ids: [...sel], scale: tool === "scale" };
       return;
     }
     if (target.hasAttribute("data-rotate")) {
@@ -588,6 +589,10 @@ export function Canvas() {
     }
 
     switch (tool) {
+      case "eyedropper":
+        void useEyedropper(p, zoom());
+        break;
+      case "scale":
       case "move": {
         if (editingVector) {
           useStore.setState({ editingVector: null });
@@ -695,7 +700,7 @@ export function Canvas() {
       }
       case "resize": {
         const r = dispatch<{ guides: any[]; gaps: any[] }>(
-          { op: "resize", ids: d.ids, handle: d.handle, dx: p.x - d.start.x, dy: p.y - d.start.y, keepAspect: e.shiftKey, fromCenter: e.altKey, snap: !e.ctrlKey, zoom: zoom() },
+          { op: "resize", ids: d.ids, handle: d.handle, dx: p.x - d.start.x, dy: p.y - d.start.y, keepAspect: e.shiftKey, fromCenter: e.altKey, snap: !e.ctrlKey, zoom: zoom(), scale: d.scale },
           { quiet: true },
         );
         useStore.setState({ guides: r?.guides ?? [], gaps: r?.gaps ?? [] });
@@ -1021,7 +1026,7 @@ export function Canvas() {
   const singleNode = single ? doc.nodes[single.id] : null;
   const box: Pt[] | null = single ? corners(v, single.matrix, single.width, single.height) : selItems.union ? rectCorners(v, selItems.union) : null;
   const isLine = singleNode?.type === "line";
-  const showHandles = !!box && !editingText && !editingVector && tool === "move" && sel.every((id) => !doc.nodes[id]?.locked);
+  const showHandles = !!box && !editingText && !editingVector && (tool === "move" || tool === "scale") && sel.every((id) => !doc.nodes[id]?.locked);
   const handlePts: { h: Handle; p: Pt }[] = box
     ? isLine
       ? [

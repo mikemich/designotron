@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { X } from "lucide-react";
 import { ALT, MOD, SHIFT, useDialog } from "../ui/controls";
+import { TIDY_KBD } from "../canvas/contextMenu";
 
 export const useShortcuts = create<{ open: boolean }>(() => ({ open: false }));
 
@@ -16,6 +17,7 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Text", "T"],
       ["Hand", "H or hold Space"],
       ["Comment", "C"],
+      ["Scale (resizes strokes, type and spacing too) / eyedropper", "K / I"],
       ["Enter with a shape, text or frame tool inserts a layer", "Enter"],
       ["Insert inside the selected frame", `${MOD}Enter`],
     ],
@@ -37,6 +39,9 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Use as mask", `${ALT}${MOD}M`],
       ["Copy / paste properties", `${ALT}${MOD}C / ${ALT}${MOD}V`],
       ["Paste to replace", `${SHIFT}${MOD}R`],
+      ["Paste in place", `${SHIFT}${MOD}V`],
+      ["Select matching layers / invert selection", `${ALT}${MOD}A / ${SHIFT}${MOD}A`],
+      ["Tidy up", TIDY_KBD],
       ["Align left / right / top / bottom", `${ALT}A ${ALT}D ${ALT}W ${ALT}S`],
     ],
   },
@@ -81,6 +86,7 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Layers: reorder", `${ALT}${SHIFT}↑ / ${ALT}${SHIFT}↓`],
       ["Layers: focus the canvas", "Enter"],
       ["Pages: move / switch / rename", "↑ ↓ / Enter / F2"],
+      ["Pages: reorder", `${ALT}${SHIFT}↑ / ${ALT}${SHIFT}↓`],
     ],
   },
 ];

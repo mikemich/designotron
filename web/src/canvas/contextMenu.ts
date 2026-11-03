@@ -52,6 +52,13 @@ export async function pasteHere(x?: number, y?: number) {
   if (text) dispatch({ op: "paste", data: text, parent: null, x: x ?? null, y: y ?? null });
 }
 
+/** Paste in place (⇧⌘V): at the copied layers' exact position, inside the selected frame if there is one. */
+export async function pasteInPlace() {
+  const text = await clipboardLayers();
+  if (text) dispatch({ op: "paste", data: text, parent: A.pasteTarget(), x: null, y: null });
+  else toast("Copy some layers first, then paste in place", "error");
+}
+
 /**
  * Paste to replace (Figma ⇧⌘R): each selected layer is swapped for a copy of the clipboard
  * layers, which take its top-left corner, parent and place in the stack. One undo step.
@@ -116,6 +123,18 @@ async function clipboardLayers(): Promise<string> {
   }
 }
 
+/** Tidy up is Ctrl+Alt+T everywhere (⌃⌥T on a Mac, where ⌘ is the other modifier). */
+export const TIDY_KBD = MOD === "⌘" ? "⌃⌥T" : "Ctrl+Alt+T";
+
+/** "Select all with same ..." entries shared by the layer menu and the Edit menu. */
+export const SAME_PROPS: [A.SameProp, string][] = [
+  ["fill", "Select all with same fill"],
+  ["stroke", "Select all with same stroke"],
+  ["effect", "Select all with same effect"],
+  ["text", "Select all with same text properties"],
+  ["font", "Select all with same font"],
+];
+
 /** Right-click menu items for the current selection. */
 export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   const doc = getDoc();
@@ -133,6 +152,7 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   const items: MenuItem[] = [
     { label: "Copy", kbd: `${MOD}C`, onClick: copySelection },
     { label: "Paste here", kbd: `${MOD}V`, onClick: () => pasteHere(at.x, at.y) },
+    { label: "Paste in place", kbd: `${SHIFT}${MOD}V`, onClick: pasteInPlace },
     { label: "Paste to replace", kbd: `${SHIFT}${MOD}R`, onClick: pasteReplace },
     { label: "Copy properties", kbd: `${ALT}${MOD}C`, onClick: A.copyProperties },
     { label: "Paste properties", kbd: `${ALT}${MOD}V`, onClick: A.pasteProperties },
@@ -164,6 +184,19 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   if (nodes.some((n) => n.type !== "text")) items.push({ label: "Flatten", kbd: `${MOD}E`, onClick: A.flatten });
   if (nodes.some((n) => n.strokeWeight > 0 && n.strokes.some((p) => p.visible))) items.push({ label: "Outline stroke", kbd: `${SHIFT}${MOD}O`, onClick: A.outlineStroke });
   items.push({ label: "Add auto layout", kbd: `${SHIFT}A`, onClick: A.addAutoLayout });
+  if (nodes.length > 1 && nodes.every((n) => !n.parent)) items.push({ label: "Tidy up", kbd: TIDY_KBD, onClick: A.tidyUp });
+  items.push({ heading: "Select" });
+  items.push({ label: "Select matching layers", kbd: `${ALT}${MOD}A`, onClick: A.selectMatching });
+  for (const [prop, label] of SAME_PROPS) items.push({ label, onClick: () => A.selectSame(prop) });
+  if (one && ["component", "instance", "componentSet"].includes(one.type)) {
+    items.push({ label: "Select all instances", onClick: () => A.selectInstances(false) });
+    if (one.type !== "instance") items.push({ label: "Select all instances on all pages", onClick: () => A.selectInstances(true) });
+  }
+  const others = doc.pages.filter((pg) => pg.id !== useStore.getState().es.page);
+  if (others.length && !nodes.some(insideInstance)) {
+    items.push({ heading: "Move to page" });
+    for (const pg of others) items.push({ label: `Move to ${pg.name}`, onClick: () => A.moveToPage(sel, pg.id) });
+  }
   items.push({ sep: true });
   if (!nodes.some((n) => n.type === "component" || n.type === "instance")) items.push({ label: "Create component", kbd: `${ALT}${MOD}K`, onClick: A.createComponent });
   if (nodes.length > 1 && nodes.every((n) => n.type === "component")) items.push({ label: "Combine as variants", onClick: A.combineVariants });

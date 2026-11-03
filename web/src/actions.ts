@@ -246,7 +246,7 @@ export function viewportCenter(): { x: number; y: number } {
 }
 
 /** Parent for pasted content: the selected frame, if any. */
-function pasteTarget(): string | null {
+export function pasteTarget(): string | null {
   const doc = getDoc();
   const sel = selection();
   if (sel.length !== 1) return null;
@@ -283,7 +283,7 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
   if (!text) return;
   e.preventDefault();
   if (text.includes(CLIPBOARD_TAG)) {
-    dispatch({ op: "paste", data: text, parent: pasteTarget(), x: null, y: null });
+    dispatch({ op: "paste", data: text, parent: pasteTarget(), ...pastePosition(text) });
     return;
   }
   if (isSvgText(text)) {
@@ -297,6 +297,31 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
   }
   const c = viewportCenter();
   dispatch({ op: "createText", x: c.x, y: c.y, characters: text.slice(0, 5000), parent: pasteTarget() });
+}
+
+/**
+ * Where a plain paste lands: at the copied layers' own position when any of it is in the viewport,
+ * else centred in the viewport (`null` x/y keep the original position). Paste in place skips this.
+ */
+export function pastePosition(text: string): { x: number | null; y: number | null } {
+  try {
+    const clip = JSON.parse(text) as { roots?: string[]; nodes?: { id: string; x: number; y: number; width: number; height: number }[] };
+    const roots = new Set(clip.roots ?? []);
+    const boxes = (clip.nodes ?? []).filter((n) => roots.has(n.id));
+    if (!boxes.length) return { x: null, y: null };
+    const x0 = Math.min(...boxes.map((b) => b.x));
+    const y0 = Math.min(...boxes.map((b) => b.y));
+    const x1 = Math.max(...boxes.map((b) => b.x + b.width));
+    const y1 = Math.max(...boxes.map((b) => b.y + b.height));
+    const { w, h } = canvasSize();
+    const a = screenToPage(0, 0);
+    const z = screenToPage(w, h);
+    if (x0 <= z.x && x1 >= a.x && y0 <= z.y && y1 >= a.y) return { x: null, y: null };
+    const c = viewportCenter();
+    return { x: Math.round(c.x - (x1 - x0) / 2), y: Math.round(c.y - (y1 - y0) / 2) };
+  } catch {
+    return { x: null, y: null };
+  }
 }
 
 /**
@@ -369,4 +394,94 @@ export function selectionBounds(): Rect | null {
 
 export function pageId() {
   return currentPage();
+}
+
+// ---------- Pages, selection and layout commands ----------
+
+/** Selects layers, reporting when there are none. */
+function selectFound(ids: string[], what: string) {
+  if (!ids.length) {
+    toast(`No ${what} found`);
+    return;
+  }
+  dispatch({ op: "select", ids });
+  toast(`Selected ${ids.length} ${ids.length === 1 ? "layer" : "layers"}`);
+}
+
+/** Select matching layers (⌥⌘A): the same layers in the other top-level frames or groups. */
+export function selectMatching() {
+  const ids = selection();
+  if (!ids.length) return toast("Select a layer to find its matches");
+  const found = query<string[]>({ q: "matchingLayers", ids });
+  if (found.length <= ids.length) return toast("No matching layers in other frames");
+  selectFound(found, "matching layers");
+}
+
+export type SameProp = "fill" | "stroke" | "effect" | "text" | "font" | "instance";
+
+/** Select all layers on the page with the same fill, stroke, effect, text properties, font or instance. */
+export function selectSame(prop: SameProp) {
+  const first = selection()[0];
+  if (!first) return toast("Select a layer first");
+  const found = query<string[]>({ q: "sameProperty", id: first, prop });
+  selectFound(found, "layers with the same " + prop);
+}
+
+/** Select all instances of the selected main component or instance, on this page or on every page. */
+export function selectInstances(allPages = false) {
+  const first = selection()[0];
+  const n = first ? getDoc().nodes[first] : null;
+  if (!n || !["component", "instance", "componentSet"].includes(n.type)) return toast("Select a main component or an instance");
+  selectFound(query<string[]>({ q: "instances", component: n.id, allPages }), "instances");
+}
+
+/** Invert selection (⇧⌘A): the siblings of the selection that aren't selected (visible and unlocked). */
+export function invertSelection() {
+  const doc = getDoc();
+  const first = doc.nodes[selection()[0]];
+  if (!first) return;
+  const sibs = first.parent ? (doc.nodes[first.parent]?.children ?? []) : (doc.pages.find((p) => p.id === first.page)?.children ?? []);
+  const chosen = new Set(selection());
+  const rest = sibs.filter((id) => !chosen.has(id) && doc.nodes[id]?.visible && !doc.nodes[id]?.locked);
+  if (rest.length) dispatch({ op: "select", ids: rest });
+}
+
+/** Tidy up (⌃⌥T): arranges the selected layers into an evenly spaced grid. */
+export function tidyUp() {
+  if (selection().length < 2) return toast("Select two or more layers to tidy up");
+  dispatch({ op: "tidyUp", ids: selection(), spacing: null });
+}
+
+export const duplicatePage = (id: string) => dispatch({ op: "duplicatePage", id });
+
+/** Moves layers to the top level of another page, which becomes current; they stay selected. */
+export function moveToPage(ids: string[], page: string) {
+  const r = dispatch<{ ids: string[] }>({ op: "moveToPage", ids, page });
+  if (r) toast(`Moved ${r.ids.length === 1 ? "1 layer" : `${r.ids.length} layers`} to ${getDoc().pages.find((p) => p.id === page)?.name ?? "the page"}`);
+}
+
+/** Moves a page to a new place in the list (`index` is where it ends up). */
+export function movePage(id: string, index: number) {
+  const at = getDoc().pages.findIndex((p) => p.id === id);
+  if (at < 0 || index === at || index < 0 || index >= getDoc().pages.length) return;
+  dispatch({ op: "movePage", id, index });
+}
+
+/** A frame of a preset size at the viewport centre (to the right of what is there when that is taken). */
+export function createFramePreset(w: number, h: number, name: string) {
+  const c = viewportCenter();
+  let x = Math.round(c.x - w / 2);
+  let y = Math.round(c.y - h / 2);
+  const doc = getDoc();
+  const roots = doc.pages.find((p) => p.id === currentPage())?.children ?? [];
+  const boxes = roots.length ? query<{ items: { bounds: Rect }[] }>({ q: "bounds", ids: roots }).items.map((i) => i.bounds) : [];
+  if (boxes.some((b) => x < b.x + b.width && x + w > b.x && y < b.y + b.height && y + h > b.y)) {
+    x = Math.round(Math.max(...boxes.map((b) => b.x + b.width)) + 100);
+    y = Math.round(Math.min(...boxes.map((b) => b.y)));
+  }
+  oneStep(() => {
+    const r = dispatch<{ id: string }>({ op: "createShape", kind: "frame", x, y, width: w, height: h, parent: null });
+    if (r) dispatch({ op: "update", ids: [r.id], patch: { name } });
+  });
+  setTool("move");
 }

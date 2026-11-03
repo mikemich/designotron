@@ -407,4 +407,6 @@ export type Tool =
   | "pen"
   | "pencil"
   | "text"
-  | "comment";
+  | "comment"
+  | "scale"
+  | "eyedropper";
