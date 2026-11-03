@@ -286,11 +286,18 @@ export function Canvas() {
       return;
     }
     if (announced.current === selKey) return;
-    const t = setTimeout(() => {
-      if (useStore.getState().es.inGesture || !liveRef.current) return;
+    // A drag that began meanwhile holds it back; it is tried again until the gesture ends.
+    let t: ReturnType<typeof setTimeout>;
+    const announce = () => {
+      if (useStore.getState().es.inGesture) {
+        t = setTimeout(announce, ANNOUNCE_DELAY_MS);
+        return;
+      }
+      if (!liveRef.current) return;
       announced.current = selKey;
       liveRef.current.textContent = describeSelection();
-    }, ANNOUNCE_DELAY_MS);
+    };
+    t = setTimeout(announce, ANNOUNCE_DELAY_MS);
     return () => clearTimeout(t);
   }, [selKey]);
   const hoverItem = useMemo(() => (hover && !sel.includes(hover) ? query<{ items: BoundsItem[] }>({ q: "bounds", ids: [hover] }).items[0] : null), [rev, hover, sel]);
@@ -1073,6 +1080,7 @@ export function Canvas() {
       role="application"
       aria-roledescription="design canvas"
       aria-label={`Canvas, ${pageObj?.name ?? "page"}`}
+      aria-description="Tab selects layers, F6 moves to panels"
       style={{ background: pageObj?.background ?? "#1a1a1a", cursor }}
       onPointerDown={(e) => {
         onPointerDown(e);

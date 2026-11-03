@@ -345,6 +345,103 @@ try {
   await press("Shift+F6", 80);
   check("Shift+F6 goes the other way", (await region()) === "layers");
 
+  // ---------- Mouse then keyboard: clicks give the keys back to the canvas ----------
+  await dispatch({ op: "select", ids: [] });
+  await dispatch({ op: "setPage", id: pages[0].id });
+  await sleep(200);
+  const heroId = (await named("Hero")).id;
+  const treeRow = (name) => p.locator(`[role=treeitem] .name:text-is("${name}")`).first();
+  await dispatch({ op: "select", ids: [heroId] }); // reveals Hero
+  await dispatch({ op: "select", ids: [] });
+  await sleep(200);
+  await treeRow("Hero").click();
+  await sleep(150);
+  check("click a layer row: focus goes to the canvas", (await active()).id === "dt-canvas", JSON.stringify(await active()));
+  await p.keyboard.down("Space");
+  await p.keyboard.down("Space");
+  await p.keyboard.down("Space");
+  await p.keyboard.up("Space");
+  await sleep(150);
+  check("click a row, hold Space: the layer stays selected (Space is the pan key)", (await selNames()).join() === "Hero");
+  const hx = (await named("Hero")).x;
+  await press("ArrowRight");
+  check("click a row, ArrowRight nudges the layer", (await named("Hero")).x === hx + 1 && (await selNames()).join() === "Hero");
+  await treeRow("Screen A").click();
+  await press("Enter");
+  check("click a frame row, one Enter selects its children", (await sel()).length === 3);
+  await dispatch({ op: "select", ids: [] });
+
+  // A mouse click on a page leaves Delete for the layers; Delete on a keyboard-focused page removes it.
+  await dispatch({ op: "select", ids: [frameA.id] });
+  await p.locator(".page-item").first().click();
+  await sleep(150);
+  await press("Delete");
+  check("click a page item, Delete: the page stays", (await doc()).pages.length === 3);
+  await dispatch({ op: "setPage", id: pages[0].id });
+
+  // Body focus (after Enter in a field) is not the canvas: Tab moves on, Enter does not insert.
+  await dispatch({ op: "select", ids: [frameA.id] });
+  await p.evaluate(() => document.activeElement?.blur?.());
+  await press("Tab", 80);
+  check("Tab from body is not taken for sibling selection", JSON.stringify(await sel()) === JSON.stringify([frameA.id]) && (await active()).id !== "dt-canvas");
+  await focusCanvas();
+  await press("r");
+  await p.evaluate(() => document.activeElement?.blur?.());
+  const nBody = await nodeCount();
+  await press("Enter", 200);
+  check("Enter on body with a drawing tool inserts nothing", (await nodeCount()) === nBody);
+  await press("Escape");
+  await press("Escape");
+
+  // Keyboard delete in the tree hands focus to a surviving row, also when the frame is expanded.
+  await dispatch({ op: "select", ids: [] });
+  await p.evaluate(() => document.querySelector("[role=treeitem]").focus());
+  await press("Home");
+  await press("End");
+  const rowsBefore = await rowNames();
+  const lastRow = rowsBefore[rowsBefore.length - 1];
+  void lastRow;
+  // Focus the expanded frame row with the keyboard and delete it.
+  await p.evaluate((id) => document.querySelector(`[data-layer="${id}"]`).focus(), frameA.id);
+  await press("Delete", 300);
+  const afterDel = await active();
+  check("layers: Delete on an expanded frame leaves focus on a surviving row", !!afterDel.layer && afterDel.layer !== frameA.id, JSON.stringify(afterDel));
+  await press("Control+z", 300);
+  // A row deleted from outside (a collaborator) hands focus on, too.
+  const bId = (await named("Screen B")).id;
+  await p.evaluate((id) => document.querySelector(`[data-layer="${id}"]`).focus(), bId);
+  await dispatch({ op: "delete", ids: [bId] });
+  await sleep(300);
+  check("layers: a focused row deleted elsewhere hands focus to the tab stop", !!(await active()).layer, JSON.stringify(await active()));
+  await press("Control+z", 300);
+  // Keyboard-focused page option: Backspace deletes like Delete.
+  await dispatch({ op: "addPage", name: "Spare" });
+  const nPages = (await doc()).pages.length;
+  await p.evaluate(() => document.querySelector("[role=option]:last-child").focus());
+  await press("Backspace", 300);
+  check("pages: Backspace on a keyboard-focused page deletes it", (await doc()).pages.length === nPages - 1);
+  await dispatch({ op: "setPage", id: pages[0].id });
+  await sleep(200);
+
+  // F6 from a rename field.
+  await treeRow("Screen B").dblclick();
+  await sleep(200);
+  check("double-click still opens the rename field", await p.evaluate(() => document.activeElement?.tagName === "INPUT"));
+  await press("F6", 250);
+  check("F6 works from a rename field", (await active()).tag !== "INPUT");
+  await focusCanvas();
+
+  // Tree and canvas attributes.
+  const pos = await p.evaluate(() =>
+    [...document.querySelectorAll("[role=treeitem]")]
+      .filter((r) => r.getAttribute("aria-level") === "1")
+      .map((r) => `${r.getAttribute("aria-posinset")}/${r.getAttribute("aria-setsize")}`)
+      .join(),
+  );
+  check("layers: treeitems carry aria-posinset and aria-setsize in display order", pos === "1/3,2/3,3/3", pos);
+  const desc = await p.evaluate(() => document.getElementById("dt-canvas").getAttribute("aria-description"));
+  check("canvas: aria-description tells how to leave with Tab and F6", /Tab/.test(desc ?? "") && /F6/.test(desc ?? ""), desc);
+
   // ---------- Deep nesting ----------
   await dispatch({ op: "setPage", id: pages[1].id });
   const nest = { type: "frame", name: "Level 0 with a rather long name", x: 0, y: 0, width: 500, height: 500, fill: "#fff", children: [] };

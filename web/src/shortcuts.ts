@@ -13,9 +13,14 @@ function inOverlay(e: KeyboardEvent): boolean {
   return !!(e.target as HTMLElement | null)?.closest?.("[role=menu], .menu, [role=dialog]");
 }
 
-/** Focus on the canvas itself (or on nothing): Enter and Tab belong to the design there, and to the
- * focused control anywhere else. */
+/** Focus on the canvas itself: Tab and Enter-insert belong to the design there, and to the focused
+ * control (or the browser's focus order, from body) anywhere else. */
 function onCanvas(e: KeyboardEvent): boolean {
+  return (e.target as HTMLElement | null)?.id === "dt-canvas";
+}
+
+/** Focus on the canvas or on nothing: Enter still selects children or the parent. */
+function onCanvasOrBody(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement | null;
   return !t || t === document.body || t === document.documentElement || t.id === "dt-canvas";
 }
@@ -56,13 +61,7 @@ function stepPage(dir: 1 | -1) {
 /** Global keyboard shortcuts (Figma-compatible where possible). */
 export function installShortcuts(): () => void {
   const onKey = (e: KeyboardEvent) => {
-    if (useStore.getState().presenting) return;
-    // Region cycling works from anywhere (inputs included), except inside a dialog.
-    if (e.key === "F6" && !e.metaKey && !e.ctrlKey && !e.altKey && !(e.target as HTMLElement | null)?.closest?.("[role=dialog]")) {
-      e.preventDefault();
-      return cycleRegion(e.shiftKey ? -1 : 1);
-    }
-    if (isTyping(e)) return;
+    if (isTyping(e) || useStore.getState().presenting) return;
     const mod = e.metaKey || e.ctrlKey;
     if (!mod && inOverlay(e)) return;
     const k = e.key.toLowerCase();
@@ -166,8 +165,8 @@ export function installShortcuts(): () => void {
         // Sibling selection on the canvas; with nothing selected Tab moves on (no keyboard trap).
         return has && onCanvas(e) && !e.altKey && !st.editingVector && run(() => selectSibling(e.shiftKey ? -1 : 1));
       case "Enter":
-        if (!onCanvas(e)) return;
-        if (!e.shiftKey && !e.altKey && A.canInsertWithKeyboard()) return run(() => A.insertDefaultLayer(false));
+        if (!onCanvasOrBody(e)) return;
+        if (onCanvas(e) && !e.shiftKey && !e.altKey && A.canInsertWithKeyboard()) return run(() => A.insertDefaultLayer(false));
         return has && run(e.shiftKey ? A.selectParent : A.selectChildren);
     }
     if (e.shiftKey || e.altKey) return;
@@ -184,6 +183,15 @@ export function installShortcuts(): () => void {
       c: "comment",
     };
     if (tools[k]) return run(() => setTool(tools[k]));
+  };
+
+  // Region cycling works from anywhere, rename fields included (they stop their keys from bubbling),
+  // except inside a dialog: so it listens first, on the way down.
+  const onRegionKey = (e: KeyboardEvent) => {
+    if (e.key !== "F6" || e.metaKey || e.ctrlKey || e.altKey || useStore.getState().presenting) return;
+    if ((e.target as HTMLElement | null)?.closest?.("[role=dialog]")) return;
+    e.preventDefault();
+    cycleRegion(e.shiftKey ? -1 : 1);
   };
 
   const onCopy = (e: ClipboardEvent) => {
@@ -203,11 +211,13 @@ export function installShortcuts(): () => void {
     }
     A.pasteFromClipboardData(e);
   };
+  window.addEventListener("keydown", onRegionKey, true);
   window.addEventListener("keydown", onKey);
   window.addEventListener("copy", onCopy);
   window.addEventListener("cut", onCut);
   window.addEventListener("paste", onPaste);
   return () => {
+    window.removeEventListener("keydown", onRegionKey, true);
     window.removeEventListener("keydown", onKey);
     window.removeEventListener("copy", onCopy);
     window.removeEventListener("cut", onCut);

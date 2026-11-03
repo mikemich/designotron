@@ -16,7 +16,7 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Text", "T"],
       ["Hand", "H or hold Space"],
       ["Comment", "C"],
-      ["Insert the tool's default layer", "Enter"],
+      ["Enter with a shape, text or frame tool inserts a layer", "Enter"],
       ["Insert inside the selected frame", `${MOD}Enter`],
     ],
   },

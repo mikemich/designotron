@@ -33,6 +33,13 @@ import { viewportCenter } from "../actions";
 import { ColorStylesSection, TextStylesSection } from "./StyleControls";
 import { swapGroups } from "../componentOps";
 
+/** A mouse click on a row, page or tab leaves the keys with the canvas, as it did before these were
+ * focusable: Space pans, arrows nudge, Enter selects children. Keyboard activation (detail 0) and
+ * double-clicks (rename) keep their focus. */
+function returnFocusToCanvas(e: React.MouseEvent) {
+  if (e.detail === 1) document.getElementById("dt-canvas")?.focus({ preventScroll: true });
+}
+
 const LEFT_TABS = [
   ["layers", "Layers"],
   ["assets", "Assets"],
@@ -65,7 +72,10 @@ export function LeftPanel() {
             aria-controls="left-tabpanel"
             tabIndex={tab === id ? 0 : -1}
             className={"tab" + (tab === id ? " active" : "")}
-            onClick={() => useStore.setState({ leftTab: id })}
+            onClick={(e) => {
+              useStore.setState({ leftTab: id });
+              returnFocusToCanvas(e);
+            }}
           >
             {label}
           </button>
@@ -154,6 +164,7 @@ function Pages() {
         e.preventDefault();
         return setRenaming(id);
       case "Delete":
+      case "Backspace":
         e.preventDefault();
         e.stopPropagation();
         if (doc.pages.length > 1) removePage(id);
@@ -189,7 +200,10 @@ function Pages() {
             aria-selected={p.id === page}
             tabIndex={p.id === tabStop ? 0 : -1}
             className={"page-item" + (p.id === page ? " active" : "")}
-            onClick={() => dispatch({ op: "setPage", id: p.id })}
+            onClick={(e) => {
+              dispatch({ op: "setPage", id: p.id });
+              returnFocusToCanvas(e);
+            }}
             onDoubleClick={() => setRenaming(p.id)}
             onKeyDown={(e) => onKey(e, p.id, i)}
             onContextMenu={(e) => {
@@ -339,14 +353,14 @@ function Layers() {
   }, [sel.join(",")]);
 
   const rows = useMemo(() => {
-    const out: { n: Node; depth: number }[] = [];
+    const out: { n: Node; depth: number; pos: number; size: number }[] = [];
     const walk = (ids: string[], depth: number) => {
-      for (const id of [...ids].reverse()) {
+      const shown = [...ids].reverse().filter((id) => doc.nodes[id]);
+      shown.forEach((id, k) => {
         const n = doc.nodes[id];
-        if (!n) continue;
-        out.push({ n, depth });
+        out.push({ n, depth, pos: k + 1, size: shown.length });
         if (n.children.length && expanded.has(id)) walk(n.children, depth + 1);
-      }
+      });
     };
     walk(doc.pages.find((p) => p.id === page)?.children ?? [], 0);
     return out;
@@ -357,7 +371,10 @@ function Layers() {
   // The tree has one tab stop: the row that has focus, else the first selected row, else the first row.
   const lastFocus = useRef<string | null>(null);
   const has = (id: string | null) => !!id && rows.some((r) => r.n.id === id);
-  const tabStop = (has(focusId) ? focusId : null) ?? rows.find((r) => sel.includes(r.n.id))?.n.id ?? (has(lastFocus.current) ? lastFocus.current : null) ?? rows[0]?.n.id ?? null;
+  const selSet = useMemo(() => new Set(sel), [sel]);
+  const tabStop = (has(focusId) ? focusId : null) ?? rows.find((r) => selSet.has(r.n.id))?.n.id ?? (has(lastFocus.current) ? lastFocus.current : null) ?? rows[0]?.n.id ?? null;
+  /** Whether keyboard focus was in the tree before the last render (a row that vanishes under it must hand focus on). */
+  const hadFocus = useRef(false);
 
   /** Moves keyboard focus to a row, drawing it first when a long list has it out of view. */
   const [, redraw] = useReducer((n: number) => n + 1, 0);
@@ -367,6 +384,9 @@ function Layers() {
     redraw();
   };
   useEffect(() => {
+    // The focused row went away (deleted here or by a collaborator, page switched): focus the tab stop.
+    const lost = !document.activeElement || document.activeElement === document.body;
+    if (!pendingFocus.current && hadFocus.current && lost && tabStop) pendingFocus.current = tabStop;
     const id = pendingFocus.current;
     const el = scrollRef.current;
     if (!id || !el) return;
@@ -446,10 +466,11 @@ function Layers() {
       }
       case "Enter":
         handled();
-        if (!sel.includes(n.id)) select([n.id], false);
+        if (!selSet.has(n.id)) select([n.id], false);
         return document.getElementById("dt-canvas")?.focus();
       case " ":
         handled();
+        if (e.repeat) return;
         anchor.current = n.id;
         return dispatch({ op: "select", ids: [n.id], mode: "toggle" });
       case "F2":
@@ -459,7 +480,13 @@ function Layers() {
       case "Backspace": {
         handled();
         if (!sel.includes(n.id)) select([n.id], false);
-        const gone = new Set(useStore.getState().es.selection);
+        // Focus goes to the next row that survives: not selected, and not inside a selected layer.
+        const gone = new Set<string>();
+        const mark = (id: string) => {
+          gone.add(id);
+          doc.nodes[id]?.children.forEach(mark);
+        };
+        useStore.getState().es.selection.forEach(mark);
         const next = [...rows.slice(i + 1), ...rows.slice(0, i).reverse()].find((r) => !gone.has(r.n.id));
         A.deleteSelection();
         if (next) focusRow(next.n.id);
@@ -525,15 +552,22 @@ function Layers() {
             const id = (e.target as HTMLElement).closest<HTMLElement>("[data-layer]")?.dataset.layer;
             if (!id) return;
             lastFocus.current = id;
+            hadFocus.current = true;
             setFocusId(id);
           }}
           onBlur={(e) => {
-            if (!e.currentTarget.contains(e.relatedTarget as globalThis.Node | null)) setFocusId(null);
+            if (e.currentTarget.contains(e.relatedTarget as globalThis.Node | null)) return;
+            setFocusId(null);
+            // A row removed under focus keeps its claim; focus that really moved on drops it.
+            const row = e.target as HTMLElement;
+            setTimeout(() => {
+              if (row.isConnected) hadFocus.current = false;
+            }, 0);
           }}
         >
           {first > 0 && <div style={{ height: first * ROW }} aria-hidden="true" />}
-          {rows.slice(first, last).map(({ n, depth }, k) => {
-            const isSel = sel.includes(n.id);
+          {rows.slice(first, last).map(({ n, depth, pos, size }, k) => {
+            const isSel = selSet.has(n.id);
             const comp = n.type === "component" || n.type === "componentSet" || n.type === "instance";
             const inInstance = isInsideInstance(doc, n);
             const open = expanded.has(n.id);
@@ -544,6 +578,8 @@ function Layers() {
                 data-layer={n.id}
                 role="treeitem"
                 aria-level={depth + 1}
+                aria-setsize={size}
+                aria-posinset={pos}
                 aria-selected={isSel}
                 aria-expanded={n.children.length ? open : undefined}
                 aria-label={label}
@@ -573,6 +609,7 @@ function Layers() {
                 onClick={(e) => {
                   if (e.shiftKey || e.metaKey || e.ctrlKey) dispatch({ op: "select", ids: [n.id], mode: "toggle" });
                   else select([n.id], false);
+                  returnFocusToCanvas(e);
                 }}
                 onDoubleClick={() => setRenaming(n.id)}
                 onContextMenu={(e) => {
