@@ -33,6 +33,8 @@ import {
   saveDelta,
   saveFile,
   listFolders,
+  getFileMeta,
+  onIndexChange,
   FileDeletedError,
   StaleStorageError,
   storedSize,
@@ -241,9 +243,20 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     let goneFolder: string | undefined;
     const markDeleted = (folder?: string) => {
       stale = true;
-      goneFolder = folder;
+      goneFolder = folder ?? lastFolder;
       setGone(true);
     };
+    // Where the file is, tracked so "Keep it" knows even if the deletion's broadcast was missed.
+    let lastFolder: string | undefined;
+    const trackFolder = () =>
+      getFileMeta(fileId).then(
+        (m) => {
+          if (m) lastFolder = m.folder;
+        },
+        () => {},
+      );
+    trackFolder();
+    const offFolder = onIndexChange(trackFolder);
     if (tabs)
       tabs.onmessage = (e) => {
         // In a live session both tabs stay in sync through the room, so they're not stale.
@@ -259,6 +272,9 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         await saveFile(fileId, getDoc().name, engine.save(), { folder: place, restore: true });
         stale = false;
         setGone(false);
+        // What is on screen is stored whole now, but the next save must say so: a full one.
+        startedRev = -1;
+        lastSnap = null;
         schedule();
       } catch (err) {
         reportFailure("keep the file", err);
@@ -531,6 +547,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
             if (persistentStorage() && !closed && getEngine() === engine && done.rev > useStore.getState().savedDocRev) markSaved(done.rev);
           },
           (err) => {
+            if (err instanceof FileDeletedError) return markDeleted();
             console.error(err);
             startedRev = -1;
             if (!closed) {
@@ -560,6 +577,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     document.addEventListener("visibilitychange", hidden);
     return () => {
       off();
+      offFolder();
       cancelTimers();
       if (retry) clearTimeout(retry);
       window.removeEventListener("beforeunload", beforeUnload);

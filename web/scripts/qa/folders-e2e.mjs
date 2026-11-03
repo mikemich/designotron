@@ -540,6 +540,33 @@ try {
   await sleep(1500);
   check("Keep it restores it in its old folder", (await entry(moveName))?.folder === keysId, JSON.stringify(await entry(moveName)));
   check("...and the bar goes", (await e.locator(".stale-bar").count()) === 0);
+  await e.reload();
+  await e.waitForSelector("#dt-canvas");
+  await sleep(800);
+  check("the whole document came back, edits included", await e.evaluate(() => Object.values(window.__dt.doc().nodes).some((n) => n.name === "After delete")));
+  // The save-error path: the entry vanishes with no broadcast (a missed message).
+  await p.evaluate(
+    (id) =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open("keyval-store");
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const tx = open.result.transaction("keyval", "readwrite");
+          const os = tx.objectStore("keyval");
+          const get = os.get("dt:index");
+          get.onsuccess = () => os.put(get.result.filter((f) => f.id !== id), "dt:index");
+          tx.oncomplete = () => resolve();
+        };
+      }),
+    victim.id,
+  );
+  await addBox(e, "Edit two");
+  check("a save finding the entry gone shows the bar", await waitFor(async () => (await e.locator(".stale-bar:has-text('deleted in another tab')").count()) === 1, 6000));
+  await sleep(1500);
+  check("...and does not recreate the entry", (await entry(moveName)) === undefined);
+  await e.locator(".stale-bar button:has-text('Keep it')").click();
+  await sleep(1500);
+  check("Keep it restores it into its old folder", (await entry(moveName))?.folder === keysId, JSON.stringify(await entry(moveName)));
   await e.close();
 
   // Screenshots (optional).

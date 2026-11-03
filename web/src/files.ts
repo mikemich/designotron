@@ -78,9 +78,9 @@ export class FileDeletedError extends Error {
  * deleted elsewhere, and must not be recreated by an autosave. */
 const listed = new Set<string>();
 
-async function assertNotDeleted(id: string) {
-  if (listed.has(id) && !(await getFileMeta(id))) throw new FileDeletedError();
-}
+/** Whether a save of `id` would bring back a file deleted elsewhere (checked against the index as
+ * it is read inside the write's own transaction, so a delete can't land in between). */
+const wasDeleted = (id: string, idx: unknown) => listed.has(id) && !(Array.isArray(idx) && (idx as FileMeta[]).some((f) => f.id === id));
 
 /** The stored file isn't the one this tab last wrote (another tab or writer saved since), so a
  * save that only adds changes would build on the wrong thing: write the whole file instead. */
@@ -471,18 +471,24 @@ const isManifest = (v: unknown): v is Manifest => (v as Manifest | undefined)?.v
 /** Writes a file as one record (used by import, duplicate and the like; autosave uses `saveDelta`). */
 export async function saveFile(id: string, name: string, docJson: string, opts?: { thumbnail?: string; folder?: string; restore?: boolean }) {
   // (`restore`: the person chose to keep a file that was deleted elsewhere.)
-  if (!opts?.restore) await assertNotDeleted(id);
+  const guard = !opts?.restore;
   const used = new Set(referencedAssets(docJson));
   const assets = Object.fromEntries(Object.entries(allAssets()).filter(([k]) => used.has(k)));
   layered.delete(id);
   knownName.delete(id);
   // Whatever layered records the file has now go in the same transaction as the new record.
-  await transact([fileKey(id)], ([stored]) => ({
-    put: [[fileKey(id), { doc: docJson, assets } satisfies StoredFile]],
-    del: isManifest(stored) ? layeredKeys(id, stored.roots, stored.assets) : [],
-  }));
+  await transact([fileKey(id), INDEX], ([stored, idx]) => {
+    if (guard && wasDeleted(id, idx)) throw new FileDeletedError();
+    return {
+      put: [[fileKey(id), { doc: docJson, assets } satisfies StoredFile]],
+      del: isManifest(stored) ? layeredKeys(id, stored.roots, stored.assets) : [],
+    };
+  });
   // A file already in the index stays in its folder; `opts.folder` only places a new one.
-  await writeIndex((idx) => upsertEntry(idx, { id, name, updatedAt: Date.now(), thumbnail: opts?.thumbnail }, opts?.folder));
+  await writeIndex((idx) => {
+    if (guard && wasDeleted(id, idx)) throw new FileDeletedError();
+    return upsertEntry(idx, { id, name, updatedAt: Date.now(), thumbnail: opts?.thumbnail }, opts?.folder);
+  });
   listed.add(id);
 }
 
@@ -500,7 +506,6 @@ export async function saveFile(id: string, name: string, docJson: string, opts?:
  */
 export async function saveDelta(id: string, name: string, plan: SavePlan): Promise<{ name: string } | null> {
   if (planIsOutdated(id, plan)) return null;
-  await assertNotDeleted(id);
   startedPlan.set(id, { engine: plan.engine, token: plan.token });
   const state = layered.get(id);
   if (!plan.full && !state) throw new StaleStorageError();
@@ -528,7 +533,8 @@ export async function saveDelta(id: string, name: string, plan: SavePlan): Promi
   // Optimistic: a write begun before this one lands builds on this.
   layered.set(id, known);
   try {
-    await transact([fileKey(id)], ([stored]) => {
+    await transact([fileKey(id), INDEX], ([stored, idx]) => {
+      if (wasDeleted(id, idx)) throw new FileDeletedError();
       const m = isManifest(stored) ? stored : null;
       if (!plan.full && (!m || !expected || m.seq !== expected.seq || m.writer !== expected.writer)) throw new StaleStorageError();
       // What is stored, less what goes, plus what changed.
@@ -582,7 +588,10 @@ export async function saveDelta(id: string, name: string, plan: SavePlan): Promi
   // (Not from an editor that has been replaced meanwhile: the new one tracks the name.)
   if (startedPlan.get(id)?.engine === plan.engine) knownName.set(id, writtenName);
   // (No announcement: the editor tells other tabs it saved, on the channel the dashboard also reads.)
-  await writeIndex((idx) => upsertEntry(idx, { id, name: writtenName, updatedAt: Date.now() }), false);
+  await writeIndex((idx) => {
+    if (wasDeleted(id, idx)) throw new FileDeletedError();
+    return upsertEntry(idx, { id, name: writtenName, updatedAt: Date.now() });
+  }, false);
   listed.add(id);
   return { name: writtenName };
 }
@@ -669,7 +678,7 @@ export async function deleteFile(id: string) {
   // data is gone.
   const folder = (await getFileMeta(id))?.folder;
   await writeIndex((idx) => idx.filter((f) => f.id !== id));
-  listed.delete(id);
+  // (The id stays in `listed`: a save still running in this tab must not bring the file back.)
   // Editors that have the file open stop saving it (and offer to keep it).
   try {
     const ch = new BroadcastChannel("dt-files");
@@ -681,11 +690,13 @@ export async function deleteFile(id: string) {
   for (const v of await listVersions(id)) await del(`dt:version:${id}:${v.id}`);
   await del("dt:versions:" + id);
   layered.delete(id);
-  await transact([fileKey(id)], ([stored]) => ({
-    put: [],
-    del: [fileKey(id), ...(isManifest(stored) ? layeredKeys(id, stored.roots, stored.assets) : [])],
-  }));
-  clearRecovery(id);
+  let kept = false;
+  await transact([fileKey(id), INDEX], ([stored, idx]) => {
+    // Kept again meanwhile ("Keep it" in an editor that had it open): leave its records.
+    kept = Array.isArray(idx) && (idx as FileMeta[]).some((f) => f.id === id);
+    return { put: [], del: kept ? [] : [fileKey(id), ...(isManifest(stored) ? layeredKeys(id, stored.roots, stored.assets) : [])] };
+  });
+  if (!kept) clearRecovery(id);
 }
 
 export async function renameFile(id: string, name: string) {

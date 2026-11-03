@@ -720,7 +720,7 @@ export async function remixShared(): Promise<void> {
   const id = fileId ?? newFileId();
   let saved = true;
   try {
-    await saveFile(id, name, getEngine().save());
+    await saveFile(id, name, getEngine().save(), { restore: true });
   } catch (e) {
     // Still editable here, and autosave keeps trying; the room has been left either way.
     saved = false;
@@ -787,7 +787,7 @@ export async function ensureGuestFile(fileId: string) {
   // A placeholder until the room's document arrives.
   newEngine();
   dispatch({ op: "setDocName", name: "Shared design" });
-  await saveFile(fileId, "Shared design", getEngine().save());
+  await saveFile(fileId, "Shared design", getEngine().save(), { restore: true });
 }
 
 /** Called once the editor for the guest file is ready. */
