@@ -102,6 +102,7 @@ await tool("create_nodes", {
           type: "frame", name: "Carousel", x: 0, y: 300, width: 390, height: 200, fill: "#DDDDDD",
           children: [card("Card 1", 10), card("Card 2", 320), card("Card 3", 630), card("Card 4", 940), card("Card 5", 1250)],
         },
+        { type: "rectangle", name: "Dots", x: 150, y: 460, width: 90, height: 30, fill: "#FF0000" },
         { type: "rectangle", name: "Nav", x: 0, y: 0, width: 390, height: 80, fill: "#111111" },
       ],
     },
@@ -113,6 +114,7 @@ await tool("create_nodes", {
         { type: "rectangle", name: "Hover box", x: 20, y: 100, width: 150, height: 100, fill: "#FF0066" },
         { type: "rectangle", name: "Enter box", x: 20, y: 300, width: 150, height: 100, fill: "#0066FF" },
         { type: "rectangle", name: "Key box", x: 20, y: 500, width: 150, height: 100, fill: "#00AA66" },
+        { type: "rectangle", name: "Bang box", x: 200, y: 500, width: 150, height: 100, fill: "#AA00AA" },
       ],
     },
     { type: "frame", name: "Hover B", x: 1500, y: 0, width: 390, height: 844, fill: "#FFFF99" },
@@ -123,6 +125,7 @@ await tool("create_nodes", {
         { type: "rectangle", name: "Dissolve btn", x: 20, y: 100, width: 150, height: 60, fill: "#FF0066" },
         { type: "rectangle", name: "Old btn", x: 20, y: 200, width: 150, height: 60, fill: "#0066FF" },
         { type: "rectangle", name: "Push btn", x: 20, y: 300, width: 150, height: 60, fill: "#00AA66" },
+        { type: "rectangle", name: "Slide btn", x: 20, y: 400, width: 150, height: 60, fill: "#AA00AA" },
       ],
     },
     { type: "frame", name: "Motion B", x: 2500, y: 0, width: 390, height: 844, fill: "#FFFF99" },
@@ -218,6 +221,7 @@ await proto("Nav", { action: "navigate", destinationId: "Detail", transition: "i
 await proto("Card 1", { action: "navigate", destinationId: "Detail", transition: "instant" });
 await proto("Jump", { action: "scroll_to", destinationId: "Footer" });
 await proto("Footer", { action: "navigate", destinationId: "Detail", transition: "instant" });
+await proto("Dots", { action: "navigate", destinationId: "Detail", transition: "instant" });
 
 // ---------- 1-3: scrolling, nested scrolling, Scroll to ----------
 
@@ -262,6 +266,21 @@ async function scrolling(p, label) {
   await sleep(400);
   const page2 = await p.locator(`.presenter [data-scroller="${ids["Feed"]}"]`).evaluate((e) => e.scrollTop);
   check(`${label}: a vertical wheel over the carousel scrolls the page`, near(page2, 200, 2), `scrollTop ${page2}`);
+  await closePresent(p);
+
+  // A layer painted after the carousel is drawn over it and gets the click.
+  await present(p, "Feed");
+  const dots = await rectOf(hot(p, "Dots"));
+  const topEl = await p.evaluate(([x, y]) => document.elementFromPoint(x, y)?.getAttribute("data-hotspot"), [dots.x + dots.width / 2, dots.y + dots.height / 2]);
+  check(`${label}: a layer after the carousel is on top of it`, topEl === ids["Dots"], String(topEl));
+  const red = await p.evaluate(([x, y]) => {
+    const els = document.elementsFromPoint(x, y);
+    return els.some((e) => e.tagName === "svg" && e.innerHTML.toLowerCase().includes("ff0000"));
+  }, [dots.x + dots.width / 2, dots.y + dots.height / 2]);
+  check(`${label}: ...and it is drawn`, red);
+  await hot(p, "Dots").click();
+  await sleep(150);
+  check(`${label}: ...and clicking it navigates`, (await crumb(p)) === "Detail", await crumb(p));
   await closePresent(p);
 }
 await scrolling(page, "scroll");
@@ -337,6 +356,7 @@ await proto("Hover box", { action: "navigate", destinationId: "Hover B", trigger
 await proto("Enter box", { action: "open_url", url: "https://example.com/enter", trigger: "mouse_enter" });
 await tool("set_prototype", { nodeId: ids["Enter box"], action: "open_url", url: "https://example.com/leave", trigger: "mouse_leave" });
 await proto("Key box", { action: "navigate", destinationId: "Hover B", trigger: "key", key: "shift+k", transition: "instant" });
+await proto("Bang box", { action: "navigate", destinationId: "Hover B", trigger: "key", key: "shift+1", transition: "instant" });
 await present(page, "Hover A");
 {
   const hb = await rectOf(hot(page, "Hover box"));
@@ -366,6 +386,11 @@ await present(page, "Hover A");
   await page.keyboard.press("k");
   await sleep(150);
   check("key: K alone does nothing", (await crumb(page)) === "Hover A");
+  await page.keyboard.press("Shift+1");
+  await sleep(150);
+  check("key: Shift+1 fires although the browser sends \"!\"", (await crumb(page)) === "Hover B", await crumb(page));
+  await page.click(".presenter .bar button[title='Back']");
+  await sleep(150);
   await page.keyboard.press("Shift+K");
   await sleep(150);
   check("key: Shift+K navigates", (await crumb(page)) === "Hover B", await crumb(page));
@@ -407,6 +432,7 @@ await dispatch({
 });
 await proto("Push btn", { action: "navigate", destinationId: "Motion B", transition: "push", direction: "left", duration: 700 });
 const anim = (p, sel = ".presenter .stage") => p.locator(sel).first().evaluate((e) => ({ d: getComputedStyle(e).animationDuration, t: getComputedStyle(e).animationTimingFunction, n: getComputedStyle(e).animationName }));
+await proto("Slide btn", { action: "navigate", destinationId: "Motion B", transition: "slide_left", duration: 700 });
 await present(page, "Motion A");
 await hot(page, "Dissolve btn").click();
 await sleep(80);
@@ -443,6 +469,51 @@ await sleep(150);
   await sleep(800);
   check("back: ends on the first screen with one stage", (await crumb(page)) === "Motion A" && (await page.locator(".presenter .stage").count()) === 1);
 }
+
+// Slide plays as it always did: only the new screen moves, over nothing.
+await hot(page, "Slide btn").click();
+await sleep(150);
+{
+  const n = await page.locator(".presenter .stage").count();
+  const a = await anim(page);
+  check("slide: one screen, the new one slides in", n === 1 && a.n === "dt-in-left", JSON.stringify([n, a]));
+  await sleep(700);
+  await page.click(".presenter .bar button[title='Back']");
+  await sleep(150);
+  const b = await anim(page);
+  check("slide: back comes from the other side", (await page.locator(".presenter .stage").count()) === 1 && b.n === "dt-in-right", JSON.stringify(b));
+  await sleep(700);
+}
+await closePresent(page);
+
+// In a small window the screens are scaled down; moving them must not change that.
+await page.setViewportSize({ width: 1400, height: 700 });
+await present(page, "Motion A");
+await hot(page, "Push btn").click();
+await sleep(250);
+{
+  const w = await page.locator(".presenter .stage").evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().height)));
+  check("push in a small window: both screens are drawn at the same scale", w.length === 2 && w[0] === w[1] && w[0] < 700, JSON.stringify(w));
+}
+await sleep(700);
+await closePresent(page);
+await page.setViewportSize({ width: 1400, height: 1100 });
+
+// The screen that is leaving keeps its scroll position while it goes.
+await proto("Item", { action: "navigate", destinationId: "Detail", transition: "push", duration: 900 });
+await present(page, "Feed");
+{
+  const sc = page.locator(`.presenter [data-scroller="${ids["Feed"]}"]`);
+  const sb = await rectOf(sc);
+  await page.mouse.move(sb.x + 200, sb.y + 700);
+  await page.mouse.wheel(0, 600);
+  await sleep(400);
+  await hot(page, "Item").click();
+  await sleep(250);
+  const left = await page.locator(".presenter .stage-leaving [data-scroller]").first().evaluate((e) => e.scrollTop);
+  check("leaving screen keeps its scroll position", near(left, 600, 2), `scrollTop ${left}`);
+}
+await proto("Item", { action: "navigate", destinationId: "Detail", transition: "instant" });
 await closePresent(page);
 
 // ---------- 10: smart animate ----------

@@ -3,7 +3,7 @@
 
 import { inlineAssets } from "./assets";
 import { getDoc, getEngine, toast } from "./store";
-import { WasmEngine } from "./wasm/pkg/designotron_engine_wasm";
+import type { WasmEngine } from "./wasm/pkg/designotron_engine_wasm";
 import type { Direction, Doc, Easing, Interaction, Node, Overflow, Rect } from "./types";
 
 // ---------- the player's engine ----------
@@ -14,8 +14,8 @@ interface PlayerEngine {
   rev: number;
 }
 
-/** Created on the first Change to, from a copy of the editor's document (never `newEngine`,
- *  which would replace the editor's). Holds the variants the viewer has switched. */
+/** Created on the first Change to, as a fork of the editor's engine (never `newEngine`, which
+ *  would replace the editor's). Holds the variants the viewer has switched. */
 let pe: PlayerEngine | null = null;
 /** Moves on every change the player makes to its own engine; scenes are cached per value. */
 let changes = 0;
@@ -46,9 +46,11 @@ export function pdoc(): Doc {
 
 function ensurePlayerEngine(): PlayerEngine {
   if (!pe) {
-    const engine = new WasmEngine(Math.floor(Math.random() * 2 ** 48));
-    engine.load(getEngine().save());
-    pe = { engine, doc: null, rev: -1 };
+    // A copy of the editor's document made without serialising it, and the editor's own document
+    // object (shallow-copied) as the starting point, so nothing is parsed or measured again.
+    const engine = getEngine().fork();
+    const d = getDoc();
+    pe = { engine, doc: { ...d, nodes: { ...d.nodes } }, rev: engine.rev() };
   }
   return pe;
 }
@@ -104,10 +106,15 @@ export function effectiveInteractions(doc: Doc, n: Node): Interaction[] {
 export const isPointerTrigger = (i: Interaction) => i.trigger !== "afterDelay" && i.trigger !== "key";
 
 /** "Shift+K": modifiers ordered Ctrl, Alt, Shift, Meta, then the key (mirrors `normalize_key`
- *  in ai.rs). Null for a bare modifier. */
-export function keyName(e: { key: string; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; metaKey: boolean }): string | null {
-  if (["Control", "Alt", "Shift", "Meta", "Dead", "Unidentified"].includes(e.key)) return null;
-  const k = e.key === " " ? "Space" : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+ *  in ai.rs). With a modifier held the key comes from the physical key (`code`), because the
+ *  browser reports "Shift+1" as "!" and Alt+A on a Mac as "å". Null for a bare modifier, a held
+ *  key repeating, or text being composed. */
+export function keyName(e: { key: string; code?: string; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; metaKey: boolean; repeat?: boolean; isComposing?: boolean }): string | null {
+  if (e.repeat || e.isComposing) return null;
+  if (["Control", "Alt", "Shift", "Meta", "Dead", "Unidentified", "Process"].includes(e.key)) return null;
+  const mod = e.ctrlKey || e.altKey || e.shiftKey || e.metaKey;
+  const physical = mod ? /^(?:Key([A-Z])|Digit(\d))$/.exec(e.code ?? "") : null;
+  const k = physical ? (physical[1] ?? physical[2]) : e.key === " " ? "Space" : e.key.length === 1 ? e.key.toUpperCase() : e.key;
   return [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Meta", k].filter(Boolean).join("+");
 }
 
@@ -123,7 +130,7 @@ export const EASING_CSS: Record<Easing, string> = {
   easeInOutBack: "cubic-bezier(0.68, -0.6, 0.32, 1.6)",
 };
 
-export type MotionKind = "instant" | "dissolve" | "smart" | "moveIn" | "moveOut" | "push";
+export type MotionKind = "instant" | "dissolve" | "smart" | "slide" | "moveIn" | "moveOut" | "push";
 
 /** How a screen change plays: `dir` is the direction things move. */
 export interface Motion {
@@ -156,20 +163,23 @@ export function motionOf(it: Interaction): Motion {
     case "slideRight":
     case "slideUp":
     case "slideDown":
-      return { kind: "moveIn", dir: SLIDES[it.transition], ms, easing };
+      // The classic Slide: only the new screen moves, over nothing.
+      return { kind: "slide", dir: SLIDES[it.transition], ms, easing };
     default:
       return { kind: "dissolve", dir, ms, easing };
   }
 }
 
 /** The slide the next/previous frame buttons and arrow keys play. */
-export const slide = (dir: Direction): Motion => ({ kind: "moveIn", dir, ms: 300, easing: EASING_CSS.easeOut });
+export const slide = (dir: Direction): Motion => ({ kind: "slide", dir, ms: 300, easing: EASING_CSS.easeOut });
 
 export const OPPOSITE: Record<Direction, Direction> = { left: "right", right: "left", up: "down", down: "up" };
 
 /** Back plays the reverse of the transition that led to the screen. */
 export function reverseMotion(m: Motion): Motion {
   switch (m.kind) {
+    case "slide":
+      return { ...m, dir: OPPOSITE[m.dir] };
     case "moveIn":
       return { ...m, kind: "moveOut", dir: OPPOSITE[m.dir] };
     case "moveOut":
@@ -190,6 +200,7 @@ export function motionAnimation(m: Motion, entering: boolean): string | undefine
     case "dissolve":
     case "smart":
       return entering ? `dt-dissolve ${t}` : undefined;
+    case "slide":
     case "moveIn":
       return entering ? `dt-in-${m.dir} ${t}` : undefined;
     case "moveOut":
@@ -225,12 +236,27 @@ export interface ScrollerScene {
   /** The scrolling box, frame coordinates. */
   rect: Rect;
   overflow: Overflow;
+  /** CSS corner radius of the box (the frame's own). */
+  radius: string;
   /** The children's picture; `x`/`y` are frame coordinates. */
   content: { svg: string; x: number; y: number; width: number; height: number };
   hotspots: Hotspot[];
   scrollers: ScrollerScene[];
-  /** Hotspot owners from this scroller up (for a click on its empty area). */
+  /** Layers painted after (above) the nested scrollers, drawn over them. */
+  above: AboveScene | null;
+  /** This scroller's own layer, then the hotspot owners above it (for a click on its empty area). */
   chain: string[];
+}
+
+/** Layers that come after a scroller in paint order, drawn over it with their own hotspots. */
+export interface AboveScene {
+  svg: string;
+  /** Frame coordinates of the picture. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  hotspots: Hotspot[];
 }
 
 export interface FixedScene {
@@ -247,6 +273,7 @@ export interface Scene {
   base: string;
   hotspots: Hotspot[];
   scrollers: ScrollerScene[];
+  above: AboveScene | null;
   fixed: FixedScene[];
   keyed: Keyed[];
   /** Every scroller of the screen, by layer id. */
@@ -263,6 +290,8 @@ interface Info {
 }
 
 const FRAME_LIKE = ["frame", "component", "instance"];
+const radiusOf = (n: Node) => (n.cornerRadii ? n.cornerRadii.map((r) => `${r}px`).join(" ") : n.cornerRadius ? `${n.cornerRadius}px` : "0");
+
 /** Whether the children of `n` extend past its box in a direction it scrolls. */
 function overflows(doc: Doc, n: Node, rect: Rect): boolean {
   if (!n.overflow || n.overflow === "none" || !FRAME_LIKE.includes(n.type)) return false;
@@ -318,6 +347,23 @@ export function buildScene(frameId: string): Scene {
   const owners: { id: string; its: Interaction[] }[] = [];
   const keyed: Keyed[] = [];
   const fixedSet = new Set(fixedIds);
+  // Layers painted after the last scroller of a container (the screen, or a scroller) are drawn
+  // over it: `roots` are those layers, `hide` what the picture of them leaves out (the scroller's
+  // path and everything before it).
+  const aboveOf = new Map<string, { node: string; roots: Set<string>; hide: string[] }>();
+  for (const c of new Set(infos.filter((i) => i.id !== frameId).map((i) => i.parent ?? ""))) {
+    const node = c || frameId;
+    const last = infos.filter((i) => i.id !== frameId && (i.parent ?? "") === c).at(-1)!;
+    const roots = new Set<string>();
+    const hide: string[] = [];
+    for (let x: string | null = last.id; x && x !== node; x = doc.nodes[x].parent) {
+      const sibs = doc.nodes[doc.nodes[x].parent!].children;
+      const at = sibs.indexOf(x);
+      hide.push(x, ...sibs.slice(0, at));
+      for (const sib of sibs.slice(at + 1)) if (doc.nodes[sib]?.visible !== false && !fixedSet.has(sib)) roots.add(sib);
+    }
+    if (roots.size) aboveOf.set(c, { node, roots, hide });
+  }
   const visit = (id: string) => {
     const n = doc.nodes[id];
     if (!n) return;
@@ -351,18 +397,33 @@ export function buildScene(frameId: string): Scene {
     let key = "";
     const fixed = line.find((l) => fixedSet.has(l));
     if (fixed) key = "fixed:" + fixed;
-    else key = line.slice(1).find((l) => infoOf.has(l)) ?? "";
+    else {
+      key = line.slice(1).find((l) => infoOf.has(l)) ?? "";
+      if (aboveOf.get(key)?.roots && line.some((l) => aboveOf.get(key)!.roots.has(l))) key = "above:" + key;
+    }
     if (!into.has(key)) into.set(key, []);
     into.get(key)!.push(h);
   }
 
   // 3. Pictures: the screen without scrolling content and fixed layers, then each scroller's.
   const kids = (id: string) => doc.nodes[id].children;
-  const baseHide = infos.filter((i) => i.parent === null).flatMap((i) => kids(i.id));
+  const baseHide = [...infos.filter((i) => i.parent === null).flatMap((i) => kids(i.id)), ...(aboveOf.get("")?.roots ?? [])];
   const base = svgOf(frameId, baseHide);
+  const aboveScene = (c: string): AboveScene | null => {
+    const a = aboveOf.get(c);
+    if (!a) return null;
+    // Scrollers inside those layers keep their own pictures: leave their children out here.
+    const inside = (id: string) => {
+      for (let x: string | null = id; x; x = doc.nodes[x]?.parent ?? null) if (a.roots.has(x)) return true;
+      return false;
+    };
+    const hide = [...a.hide, ...infos.filter((i) => inside(i.id)).flatMap((i) => kids(i.id))];
+    const r = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id: a.node, hide, childrenOnly: true });
+    return { svg: inlineAssets(r.svg), x: r.x - fb.x, y: r.y - fb.y, width: r.width, height: r.height, hotspots: into.get("above:" + c) ?? [] };
+  };
   const byId = new Map<string, ScrollerScene>();
   const build = (i: Info): ScrollerScene => {
-    const hide = infos.filter((o) => o.parent === i.id).flatMap((o) => kids(o.id));
+    const hide = [...infos.filter((o) => o.parent === i.id).flatMap((o) => kids(o.id)), ...(aboveOf.get(i.id)?.roots ?? [])];
     if (i.id === frameId) hide.push(...fixedIds);
     const c = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id: i.id, hide, childrenOnly: true });
     const rect = rel(i.rect);
@@ -370,10 +431,12 @@ export function buildScene(frameId: string): Scene {
       id: i.id,
       rect,
       overflow: i.overflow,
+      radius: radiusOf(doc.nodes[i.id]),
       content: { svg: inlineAssets(c.svg), x: c.x - fb.x, y: c.y - fb.y, width: c.width, height: c.height },
       hotspots: into.get(i.id) ?? [],
       scrollers: infos.filter((o) => o.parent === i.id).map(build),
-      chain: lineage(i.id).slice(1).filter((l) => withHotspot.has(l)),
+      above: aboveScene(i.id),
+      chain: lineage(i.id).filter((l) => withHotspot.has(l)),
     };
     byId.set(i.id, s);
     return s;
@@ -383,7 +446,7 @@ export function buildScene(frameId: string): Scene {
     const c = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id, withBounds: true });
     return { id, svg: inlineAssets(c.svg), rect: rel(c), hotspots: into.get("fixed:" + id) ?? [] };
   });
-  return { id: frameId, width: frame.width, height: frame.height, base, hotspots: into.get("") ?? [], scrollers, fixed, keyed, byId, all };
+  return { id: frameId, width: frame.width, height: frame.height, base, hotspots: into.get("") ?? [], scrollers, above: aboveScene(""), fixed, keyed, byId, all };
 }
 
 /** The scrollers a layer sits in, innermost first. */

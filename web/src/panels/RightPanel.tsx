@@ -177,6 +177,7 @@ function ScrollingSection({ node: n }: { node: Node }) {
             />
           </div>
           {!canFix && <div className="muted small">In an auto layout frame only layers with an absolute position can be fixed.</div>}
+          {canFix && topLevelParent && parent?.layout && <div className="muted small">Code export keeps fixed layers of an auto layout frame inside the scrolling box, so they scroll there.</div>}
           {canFix && !topLevelParent && <div className="muted small">Fixed layers work in a scrolling top-level frame; inside other frames they scroll with the frame.</div>}
         </>
       )}

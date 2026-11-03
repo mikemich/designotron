@@ -3016,6 +3016,22 @@ fn patch_keys(r: &crate::model::TextRun) -> Vec<&'static str> {
   k
 }
 
+impl Engine {
+  /// A second engine on the same document, in O(1) (the node table is persistent): no history,
+  /// no selection, no collaboration state. The prototype player runs its own copy so playing
+  /// never touches the editor's. The copy starts as already sent to the UI, so its first
+  /// `doc_delta(false)` carries only what the player changed.
+  pub fn fork(&self, measurer: Box<dyn TextMeasurer>) -> Engine {
+    let mut e = Engine::new(measurer, 0);
+    e.doc = self.doc.clone();
+    e.page = self.page.clone();
+    e.gen = self.gen.clone();
+    e.fingerprints = self.fingerprints.clone();
+    e.synced = Some(self.doc.clone());
+    e
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

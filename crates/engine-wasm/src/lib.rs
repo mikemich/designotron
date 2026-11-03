@@ -94,6 +94,14 @@ impl WasmEngine {
     self.inner.load(json).map_err(|e| JsValue::from_str(&e))
   }
 
+  /// A second engine on the same document without serialising it (see `Engine::fork`).
+  pub fn fork(&self) -> WasmEngine {
+    WasmEngine {
+      inner: self.inner.fork(Box::new(CanvasMeasurer)),
+      persist: Persist::default(),
+    }
+  }
+
   pub fn save(&self) -> String {
     self.inner.to_json()
   }

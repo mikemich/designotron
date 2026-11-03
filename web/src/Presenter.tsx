@@ -25,6 +25,7 @@ import {
   slide,
   smartable,
   swapVariant,
+  type AboveScene,
   type FixedScene,
   type Hotspot,
   type Motion,
@@ -57,6 +58,8 @@ interface Leaving {
   key: number;
   id: string;
   motion: Motion;
+  /** Where the leaving screen's scrollers were, so it doesn't jump to the top while it goes. */
+  pos: Map<string, { left: number; top: number }>;
 }
 
 /** A smart animate in progress: the new state's background, and the pieces of both states. */
@@ -140,7 +143,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       const bg = inlineAssets(pq<string>({ q: "exportSvg", id: to, hide: kids }));
       setSmart({ key, motion, bg, from: piecesOf(from, from), to: piecesOf(to, to) });
     }
-    setLeaving({ key, id: from, motion });
+    setLeaving({ key, id: from, motion, pos: new Map(scrolls.current.pos) });
   };
 
   const navigate = (id: string, m: Motion) => {
@@ -246,7 +249,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       const bg = inlineAssets(pq<string>({ q: "exportSvg", id: inFrame, hide: kids }));
       const key = ++motionKey.current;
       setSmart({ key, motion: m, bg, from: pieces, to: piecesOf(instance, inFrame) });
-      setLeaving({ key, id: inFrame, motion: { ...m, kind: "dissolve" } });
+      setLeaving({ key, id: inFrame, motion: { ...m, kind: "dissolve" }, pos: new Map() });
     }
     setRevision((r) => r + 1);
     return () => {
@@ -362,14 +365,18 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       const t = e.target as HTMLElement | null;
       if (t && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable)) return;
       const k = keys.current;
+      // A focused button or link (Back, Close, Remix) keeps Enter and Space.
+      if ((e.key === "Enter" || e.key === " ") && t?.closest("button, a[href]")) return;
       const name = keyName(e);
-      const live = k.top ? sceneFor(k.top.id) : k.scene;
-      const hit = name ? live?.keyed.find((x) => x.it.key === name) : null;
+      // The top overlay's keys first, then the base frame's.
+      const layers = [k.top ? sceneFor(k.top.id) : null, k.scene].filter((x): x is Scene => !!x);
+      const live = name ? layers.find((l) => l.keyed.some((x) => x.it.key === name)) : undefined;
+      const hit = live?.keyed.find((x) => x.it.key === name);
       if (hit && live) {
         e.preventDefault();
         e.stopPropagation();
         const r = live.all.get(hit.id)?.rect ?? { x: 0, y: 0, width: live.width, height: live.height };
-        const at = k.top ? { ...r, x: r.x + k.top.x, y: r.y + k.top.y } : r;
+        const at = live !== k.scene && k.top ? { ...r, x: r.x + k.top.x, y: r.y + k.top.y } : r;
         goRef.current(hit.it, at, hit.id, live.id);
         return;
       }
@@ -401,36 +408,33 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
 
   const m = leaving?.motion;
   const old = leaving && m && keepsOldScreen(m) && pdoc().nodes[leaving.id] ? leaving : null;
+  // The scale sits on a wrapper so the move/push keyframes (which set `transform`) can run on
+  // the stage itself without dropping it.
   const curStage = (
     <div
       key={"s" + history.length}
-      className="stage"
-      style={{
-        width: frame.width,
-        height: frame.height,
-        transform: `scale(${scale})`,
-        transformOrigin: "0 0",
-        animation: m ? motionAnimation(m, true) : undefined,
-        visibility: smart ? "hidden" : undefined,
-        zIndex: m?.kind === "moveOut" ? 0 : 1,
-      }}
+      style={{ position: "absolute", left: 0, top: 0, width: frame.width, height: frame.height, transform: `scale(${scale})`, transformOrigin: "0 0", zIndex: m?.kind === "moveOut" ? 0 : 1 }}
     >
-      <SceneView
-        scene={scene}
-        flash={flash}
-        interactive={!smart}
-        scrolls={scrolls}
-        scrollEls={scrollEls}
-        onAct={(h, it) => go(it, h.rect, h.id, current.id)}
-        onHover={hover}
-        onPress={(h, it, pointerId) => press(it, h.rect, h.id, current.id, pointerId)}
-      />
+      <div
+        className="stage"
+        style={{ width: frame.width, height: frame.height, animation: m ? motionAnimation(m, true) : undefined, visibility: smart ? "hidden" : undefined }}
+      >
+        <SceneView
+          scene={scene}
+          flash={flash}
+          interactive={!smart}
+          scrolls={scrolls}
+          scrollEls={scrollEls}
+          onAct={(h, it) => go(it, h.rect, h.id, current.id)}
+          onHover={hover}
+          onPress={(h, it, pointerId) => press(it, h.rect, h.id, current.id, pointerId)}
+        />
+      </div>
     </div>
   );
   const oldStage = old && (
     <div
       key={"l" + old.key}
-      className="stage stage-leaving"
       aria-hidden="true"
       style={{
         position: "absolute",
@@ -440,12 +444,13 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         height: pdoc().nodes[old.id].height,
         transform: `scale(${scale})`,
         transformOrigin: "0 0",
-        animation: motionAnimation(old.motion, false),
         pointerEvents: "none",
         zIndex: old.motion.kind === "moveOut" ? 2 : 0,
       }}
     >
-      <SceneView scene={sceneFor(old.id)} flash={false} interactive={false} scrolls={scrolls} scrollEls={scrollEls} />
+      <div className="stage stage-leaving" style={{ width: pdoc().nodes[old.id].width, height: pdoc().nodes[old.id].height, animation: motionAnimation(old.motion, false) }}>
+        <SceneView scene={sceneFor(old.id)} flash={false} interactive={false} scrolls={{ current: { key: "", pos: old.pos } }} scrollEls={scrollEls} />
+      </div>
     </div>
   );
   return (
@@ -718,6 +723,7 @@ function SceneView({ scene, flash, interactive, scrolls, scrollEls, onAct, onHov
           if (o?.interactions.some(is("onClick"))) return;
         }
       }}
+      // Mouse up acts when the pointer is released over the layer, wherever the press began.
       onPointerUp={(e) => {
         if (e.button !== 0) return;
         const up = nearest(h.chain, "mouseUp");
@@ -735,6 +741,7 @@ function SceneView({ scene, flash, interactive, scrolls, scrollEls, onAct, onHov
       {scene.scrollers.map((s) => (
         <ScrollerView key={s.id} s={s} origin={none} interactive={interactive} scrolls={scrolls} scrollEls={scrollEls} spot={spot} click={click} />
       ))}
+      {scene.above && <AboveView a={scene.above} origin={none} interactive={interactive} spot={spot} />}
       {scene.fixed.length > 0 && (
         <div className="fixed-layers">
           {scene.fixed.map((f) => (
@@ -742,6 +749,16 @@ function SceneView({ scene, flash, interactive, scrolls, scrollEls, onAct, onHov
           ))}
         </div>
       )}
+    </>
+  );
+}
+
+/** The layers painted after a scrolling box, over it. */
+function AboveView({ a, origin, interactive, spot }: { a: AboveScene; origin: Rect; interactive: boolean; spot: (h: Hotspot, origin: Rect) => React.ReactNode }) {
+  return (
+    <>
+      <div style={{ position: "absolute", left: a.x - origin.x, top: a.y - origin.y, width: a.width, height: a.height, pointerEvents: "none" }} dangerouslySetInnerHTML={{ __html: a.svg }} />
+      {interactive && a.hotspots.map((h) => spot(h, origin))}
     </>
   );
 }
@@ -785,15 +802,19 @@ function ScrollerView({
       className="scroller"
       data-scroller={s.id}
       ref={(el) => {
-        if (!el) return scrollEls.current.delete(s.id);
-        scrollEls.current.set(s.id, el);
+        // The screen that is leaving draws scrollers too; only the live one may be scrolled to.
+        if (interactive) {
+          if (!el) return scrollEls.current.delete(s.id);
+          scrollEls.current.set(s.id, el);
+        }
+        if (!el) return;
         const at = scrolls.current.pos.get(s.id);
         if (at) {
           el.scrollLeft = at.left;
           el.scrollTop = at.top;
         }
       }}
-      style={{ left: s.rect.x - origin.x, top: s.rect.y - origin.y, width: s.rect.width, height: s.rect.height, overflowX: h ? "auto" : "hidden", overflowY: v ? "auto" : "hidden" }}
+      style={{ left: s.rect.x - origin.x, top: s.rect.y - origin.y, width: s.rect.width, height: s.rect.height, overflowX: h ? "auto" : "hidden", overflowY: v ? "auto" : "hidden", borderRadius: s.radius }}
       onScroll={(e) => scrolls.current.pos.set(s.id, { left: e.currentTarget.scrollLeft, top: e.currentTarget.scrollTop })}
       onClick={(e) => {
         // The empty area of the box acts as the box's own layer (or the nearest one above it).
@@ -806,6 +827,7 @@ function ScrollerView({
         {s.scrollers.map((n) => (
           <ScrollerView key={n.id} s={n} origin={s.rect} interactive={interactive} scrolls={scrolls} scrollEls={scrollEls} spot={spot} click={click} />
         ))}
+        {s.above && <AboveView a={s.above} origin={s.rect} interactive={interactive} spot={spot} />}
       </div>
     </div>
   );

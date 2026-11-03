@@ -1360,6 +1360,29 @@ mod w3a_prototype {
   }
 
   #[test]
+  fn a_fork_has_the_document_but_its_changes_stay_in_it() {
+    let (mut e, ids) = super::prototype_screens();
+    let mut f = e.fork(Box::new(HeuristicMeasurer));
+    assert_eq!(f.doc, e.doc);
+    // Its first delta carries only what it changes.
+    assert_eq!(f.doc_delta(false), json!({ "same": true }));
+    f.dispatch(Command::Update {
+      ids: vec![ids[0].clone()],
+      patch: json!({ "name": "Forked" }),
+    })
+    .unwrap();
+    let d = f.doc_delta(false);
+    assert_eq!(d["nodes"].as_object().map(|m| m.len()), Some(1), "{d}");
+    assert_ne!(e.doc.get(&ids[0]).unwrap().name, "Forked");
+    e.dispatch(Command::Update {
+      ids: vec![ids[1].clone()],
+      patch: json!({ "name": "Edited" }),
+    })
+    .unwrap();
+    assert_ne!(f.doc.get(&ids[1]).unwrap().name, "Edited");
+  }
+
+  #[test]
   fn scroll_to_needs_a_layer_in_the_same_screen() {
     let (mut e, ids) = super::prototype_screens();
     let (home, other, btn) = (&ids[0], &ids[1], &ids[2]);
