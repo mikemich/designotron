@@ -161,6 +161,8 @@ struct El {
   text_prop: Option<String>,
   /// Component property that can replace this element (an instance swap prop).
   slot: Option<String>,
+  /// Named style classes (`text-heading-1`), written before the utilities. React project export only.
+  classes: Vec<String>,
 }
 
 impl El {
@@ -184,6 +186,7 @@ impl El {
       show_if: None,
       text_prop: None,
       slot: None,
+      classes: vec![],
     }
   }
 
@@ -211,6 +214,14 @@ struct Ctx<'a> {
   cur_comp: Option<NodeId>,
   /// Properties the function being built uses, in order.
   used_props: Vec<UsedProp>,
+  /// Component ids in the order their functions are written.
+  component_order: Vec<String>,
+  /// Text and colour styles become classes and custom properties (project export).
+  style_classes: bool,
+  /// Text style class → its declarations.
+  text_classes: BTreeMap<String, Vec<(String, String)>>,
+  /// Colour style custom property → its colour.
+  color_vars: BTreeMap<String, String>,
 }
 
 /// Props an instance sets on its component: string attributes and expression attributes.
@@ -251,6 +262,10 @@ impl<'a> Ctx<'a> {
       h1_used: false,
       cur_comp: None,
       used_props: Vec::new(),
+      component_order: Vec::new(),
+      style_classes: false,
+      text_classes: BTreeMap::new(),
+      color_vars: BTreeMap::new(),
     };
     for p in &doc.pages {
       for id in &p.children {
@@ -289,6 +304,7 @@ impl<'a> Ctx<'a> {
         let values: Vec<String> = v.variant_props().into_values().collect();
         let name = self.unique(&format!("{set_name}{}", pascal(&values.join(" "), "Variant")));
         self.components.insert(v.id.clone(), name);
+        self.component_order.push(v.id.clone());
       }
       if let Some(n) = self.components.get(comp_id) {
         return n.clone();
@@ -301,7 +317,34 @@ impl<'a> Ctx<'a> {
       .unwrap_or_else(|| "Component".into());
     let name = self.unique(&base);
     self.components.insert(comp_id.to_string(), name.clone());
+    self.component_order.push(comp_id.to_string());
     name
+  }
+
+  /// Registers every main component and component set of the file (page order, then name), so
+  /// the library is exported whether or not a screen uses it.
+  fn register_library(&mut self) {
+    let mut found: Vec<(usize, String, NodeId)> = Vec::new();
+    for (pi, page) in self.doc.pages.iter().enumerate() {
+      for root in &page.children {
+        for id in self.doc.subtree(root) {
+          let Some(n) = self.doc.get(&id) else { continue };
+          match n.kind {
+            NodeType::ComponentSet => {
+              if let Some(first) = variants(self.doc, n).first() {
+                found.push((pi, n.name.clone(), first.id.clone()));
+              }
+            }
+            NodeType::Component if self.variant_set(&id).is_none() => found.push((pi, n.name.clone(), id.clone())),
+            _ => {}
+          }
+        }
+      }
+    }
+    found.sort();
+    for (_, _, id) in found {
+      self.component_name(&id);
+    }
   }
 
   /// The component set `comp_id` is a variant of.
@@ -395,6 +438,9 @@ impl<'a> Ctx<'a> {
     self.limits(&mut el, &n);
     self.visual(&mut el, &n);
     self.bind_vars(&mut el, &n);
+    if self.style_classes {
+      self.apply_styles(&mut el, &n);
+    }
     if el.tag == "img" {
       let fit = if el.styles.iter().any(|(k, v)| k == "background-size" && v == "contain") {
         "contain"
@@ -492,6 +538,9 @@ impl<'a> Ctx<'a> {
       }
     }
     self.interactions(&mut el, &n);
+    if matches!(place, Place::Root | Place::ComponentRoot) {
+      fix_interactive(&mut el, false);
+    }
     Some(el)
   }
 
@@ -838,6 +887,62 @@ impl<'a> Ctx<'a> {
     }
   }
 
+  /// Text styles become classes (`text-heading-1`) and colour styles custom properties
+  /// (`--color-brand-primary`), where the layer still looks like its style. A fill bound to a
+  /// variable keeps the variable.
+  fn apply_styles(&mut self, el: &mut El, n: &Node) {
+    if let (Some(t), Some(style)) = (
+      n.text.as_ref(),
+      n.text_style
+        .as_ref()
+        .and_then(|id| self.doc.styles.texts.iter().find(|s| &s.id == id)),
+    ) {
+      let same = t.font_family == style.font_family
+        && t.font_size == style.font_size
+        && t.font_weight == style.font_weight
+        && t.line_height == style.line_height
+        && t.letter_spacing == style.letter_spacing;
+      if same && el.raw.is_none() {
+        let class = text_class(&style.name);
+        const OWN: [&str; 5] = ["font-family", "font-size", "font-weight", "line-height", "letter-spacing"];
+        let mut decls: Vec<(String, String)> = el.styles.iter().filter(|(k, _)| OWN.contains(&k.as_str())).cloned().collect();
+        if !decls.iter().any(|(k, _)| k == "font-weight") {
+          decls.push(("font-weight".into(), "400".into()));
+        }
+        if !decls.iter().any(|(k, _)| k == "letter-spacing") {
+          decls.push(("letter-spacing".into(), "0".into()));
+        }
+        decls.sort_by_key(|(k, _)| OWN.iter().position(|o| o == k));
+        el.styles.retain(|(k, _)| !OWN.contains(&k.as_str()));
+        el.classes.push(class.clone());
+        self.text_classes.entry(class).or_insert(decls);
+      }
+    }
+    if n.bindings.contains_key("fill") || el.raw.is_some() {
+      return;
+    }
+    let Some(style) = n
+      .fill_style
+      .as_ref()
+      .and_then(|id| self.doc.styles.colors.iter().find(|s| &s.id == id))
+    else {
+      return;
+    };
+    let Some(Paint::Solid { color: fill, opacity, .. }) = n.fills.iter().find(|p| p.visible()) else {
+      return;
+    };
+    if color::normalize(fill) != color::normalize(&style.color) {
+      return;
+    }
+    let key = if n.kind == NodeType::Text { "color" } else { "background-color" };
+    let lit = color::css_with_opacity(fill, *opacity);
+    let name = format!("--color-{}", crate::variables::slug(&style.name));
+    if let Some((_, v)) = el.styles.iter_mut().find(|(k, v)| k == key && *v == lit) {
+      *v = format!("var({name})");
+      self.color_vars.insert(name, color::css_with_opacity(&style.color, 1.0));
+    }
+  }
+
   fn visual(&self, el: &mut El, n: &Node) {
     if n.opacity < 1.0 {
       el.s("opacity", fmt(n.opacity));
@@ -1081,6 +1186,69 @@ impl<'a> Ctx<'a> {
       }
     }
     el
+  }
+}
+
+/// Valid nesting: a button or link inside another becomes a `div` (or `span` for text) with the
+/// same classes and loses its click handler (the outermost one keeps it); text inside a button
+/// or link is a `span`, never a paragraph or heading; links inside their text become spans.
+fn fix_interactive(el: &mut El, inside: bool) {
+  let interactive = el.tag == "button" || el.tag == "a";
+  if inside {
+    if interactive {
+      el.tag = "div";
+      el.attrs.retain(|(k, _)| k != "type" && k != "href");
+      el.navigate = None;
+      el.overlay = None;
+      el.url = None;
+      el.styles.retain(|(k, v)| !(k == "cursor" && v == "pointer"));
+    }
+    if matches!(el.tag, "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
+      el.tag = "span";
+    }
+    for sp in &mut el.spans {
+      sp.link = None;
+    }
+  }
+  let inner = inside || interactive;
+  for c in &mut el.children {
+    fix_interactive(c, inner);
+  }
+}
+
+/// CSS class of a text style: "Heading 1" → `text-heading-1`. Names Tailwind already uses for a
+/// utility (`text-center`) get a suffix.
+fn text_class(name: &str) -> String {
+  let slug = crate::variables::slug(name);
+  let taken = matches!(
+    slug.as_str(),
+    "left"
+      | "center"
+      | "right"
+      | "justify"
+      | "start"
+      | "end"
+      | "wrap"
+      | "nowrap"
+      | "balance"
+      | "pretty"
+      | "clip"
+      | "ellipsis"
+      | "inherit"
+      | "current"
+      | "transparent"
+      | "black"
+      | "white"
+      | "xs"
+      | "sm"
+      | "base"
+      | "lg"
+      | "xl"
+  ) || slug.ends_with("xl");
+  match (slug.is_empty(), taken) {
+    (true, _) => "text-style".into(),
+    (false, true) => format!("text-{slug}-style"),
+    _ => format!("text-{slug}"),
   }
 }
 
@@ -1495,6 +1663,7 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
   }
   let mut classes: Vec<String> = el.styles.iter().map(|(k, v)| tw_class(k, v)).filter(|c| !c.is_empty()).collect();
   classes.dedup();
+  classes.splice(0..0, el.classes.iter().cloned());
   let mut class_attr = classes.join(" ");
   if el.is_component_root {
     class_attr = format!("{{`{class_attr} ${{className ?? \"\"}}`}}");
@@ -1720,36 +1889,30 @@ fn screen_fn(name: &str, el: &El, export_default: bool) -> String {
   )
 }
 
-/// Generates functions for every component referenced so far (and those they reference).
+/// Generates functions for every component registered so far (and those they reference).
 fn component_fns(ctx: &mut Ctx) -> String {
   let mut out = String::new();
-  let mut done: BTreeSet<String> = BTreeSet::new();
-  loop {
-    let pending: Vec<(String, String)> = ctx
-      .components
-      .iter()
-      .filter(|(id, _)| !done.contains(*id))
-      .map(|(a, b)| (a.clone(), b.clone()))
-      .collect();
-    if pending.is_empty() {
-      break;
-    }
-    for (id, name) in pending {
-      done.insert(id.clone());
-      ctx.cur_comp = Some(id.clone());
-      ctx.used_props.clear();
-      let built = ctx.build(&id, Place::ComponentRoot);
-      ctx.cur_comp = None;
-      if let Some(el) = built {
-        let mut body = String::new();
-        jsx(&el, 2, &mut body);
-        // Variants are reached through their set's component.
-        let export = if ctx.variant_set(&id).is_some() { "" } else { "export " };
-        let (params, types) = prop_params(&ctx.used_props);
-        out.push_str(&format!(
-          "{export}function {name}({{ {params}className, onClick, onNavigate }}: {PROPS_OPEN}{types} }}) {{\n  void onNavigate;\n  return (\n{body}  );\n}}\n\n"
-        ));
-      }
+  let mut i = 0;
+  while i < ctx.component_order.len() {
+    let id = ctx.component_order[i].clone();
+    i += 1;
+    let Some(name) = ctx.components.get(&id).cloned() else { continue };
+    ctx.cur_comp = Some(id.clone());
+    ctx.used_props.clear();
+    let built = ctx.build(&id, Place::ComponentRoot);
+    ctx.cur_comp = None;
+    if let Some(el) = built {
+      let mut body = String::new();
+      jsx(&el, 2, &mut body);
+      // Variants are reached through their set's component.
+      let export = if ctx.variant_set(&id).is_some() { "" } else { "export " };
+      let (params, types) = prop_params(&ctx.used_props);
+      out.push_str(&jsdoc(
+        ctx.doc.get(&id).and_then(|n| n.component.as_ref()).map(|c| c.description.as_str()),
+      ));
+      out.push_str(&format!(
+        "{export}function {name}({{ {params}className, onClick, onNavigate }}: {PROPS_OPEN}{types} }}) {{\n  void onNavigate;\n  return (\n{body}  );\n}}\n\n"
+      ));
     }
   }
   for (set_id, set_name) in ctx.sets.clone() {
@@ -1758,6 +1921,19 @@ fn component_fns(ctx: &mut Ctx) -> String {
     }
   }
   out
+}
+
+/// A description as a JSDoc comment above a function (nothing when it is empty).
+fn jsdoc(description: Option<&str>) -> String {
+  let text = description.unwrap_or("").trim().replace("*/", "* /");
+  if text.is_empty() {
+    String::new()
+  } else if !text.contains('\n') {
+    format!("/** {text} */\n")
+  } else {
+    let lines: Vec<String> = text.lines().map(|l| format!(" * {l}").trim_end().to_string()).collect();
+    format!("/**\n{}\n */\n", lines.join("\n"))
+  }
 }
 
 /// Start of the props type of a component function; component property props follow it.
@@ -1862,7 +2038,7 @@ const RESERVED_PROPS: &[&str] = &[
 pub(crate) fn prop_ident(key: &str) -> String {
   let mut id = camel(key);
   if RESERVED_PROPS.contains(&id.as_str()) {
-    id.push_str("Variant");
+    id.push_str("Prop");
   }
   id
 }
@@ -1975,11 +2151,92 @@ fn set_fn(ctx: &Ctx, set: &Node, name: &str) -> String {
   }
   let default_fn = ctx.components.get(&first.id).cloned().unwrap_or_default();
   body.push_str(&format!("  return <{default_fn} {{...rest}} />;\n"));
+  // The set's description, or its first variant's.
+  let described = std::iter::once(set).chain(vs.iter());
+  let doc_text = described
+    .filter_map(|n| n.component.as_ref())
+    .map(|c| c.description.as_str())
+    .find(|d| !d.trim().is_empty());
   format!(
-    "export function {name}({{ {}, ...rest }}: {{ {}; className?: string; onClick?: () => void; onNavigate?: {NAVIGATE} }}) {{\n{body}}}\n\n",
+    "{}export function {name}({{ {}, ...rest }}: {{ {}; className?: string; onClick?: () => void; onNavigate?: {NAVIGATE} }}) {{\n{body}}}\n\n",
+    jsdoc(doc_text),
     params.join(", "),
     types.join("; ")
   )
+}
+
+/// `index.css` rules for the text style classes and colour style custom properties in use.
+fn style_css(ctx: &Ctx) -> String {
+  if ctx.color_vars.is_empty() && ctx.text_classes.is_empty() {
+    return String::new();
+  }
+  let mut out = String::from("\n/* Styles from Designotron. */\n");
+  if !ctx.color_vars.is_empty() {
+    out.push_str("@layer base {\n  :root {\n");
+    for (name, color) in &ctx.color_vars {
+      out.push_str(&format!("    {name}: {color};\n"));
+    }
+    out.push_str("  }\n}\n");
+  }
+  if !ctx.text_classes.is_empty() {
+    out.push_str("@layer components {\n");
+    for (class, decls) in &ctx.text_classes {
+      let get = |k: &str| decls.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+      let size = get("font-size").unwrap_or_else(|| "16px".into());
+      let line = get("line-height").unwrap_or_else(|| "normal".into());
+      let family = get("font-family").unwrap_or_else(|| "sans-serif".into());
+      let weight = get("font-weight").unwrap_or_else(|| "400".into());
+      out.push_str(&format!(
+        "  .{class} {{\n    font: {weight} {size}/{line} {family};\n    letter-spacing: {};\n  }}\n",
+        get("letter-spacing").unwrap_or_else(|| "0".into())
+      ));
+    }
+    out.push_str("}\n");
+  }
+  out
+}
+
+/// Collections with more than one mode: (attribute suffix, mode names as written in CSS).
+fn themed_collections(doc: &Document) -> Vec<(String, Vec<String>)> {
+  doc
+    .variables
+    .iter()
+    .filter(|c| c.modes.len() > 1)
+    .map(|c| {
+      (
+        crate::variables::slug(&c.name),
+        c.modes.iter().map(|m| crate::variables::slug(&m.name)).collect(),
+      )
+    })
+    .collect()
+}
+
+/// `tokens.ts`: switches a collection's mode by setting `data-<collection>` on the root element.
+fn tokens_ts(themed: &[(String, Vec<String>)]) -> String {
+  let q = |v: &str| serde_json::to_string(v).unwrap_or_default();
+  let rows: String = themed
+    .iter()
+    .map(|(c, modes)| format!("  {}: [{}],\n", q(c), modes.iter().map(|m| q(m)).collect::<Vec<_>>().join(", ")))
+    .collect();
+  format!(
+    "// Theme modes from Designotron variable collections. The first mode of each is the default.\n// Each mode is a [data-<collection>=\"<mode>\"] block in tokens.css.\n\nexport const modes = {{\n{rows}}} as const;\n\nexport type ModeCollection = keyof typeof modes;\n\n/** Switches a collection to one of its modes, for example `setMode(\"{}\", \"{}\")`. */\nexport function setMode<C extends ModeCollection>(collection: C, mode: (typeof modes)[C][number]): void {{\n  document.documentElement.setAttribute(`data-${{collection}}`, mode);\n}}\n",
+    themed[0].0,
+    themed[0].1.last().cloned().unwrap_or_default()
+  )
+}
+
+fn readme_themes(themed: &[(String, Vec<String>)]) -> String {
+  if themed.is_empty() {
+    return String::new();
+  }
+  let mut out = String::from("\n## Theme modes\n\nVariable collections with several modes are CSS custom properties in `src/tokens.css`, one `[data-<collection>=\"<mode>\"]` block per mode. The first mode is the default. Switch one from code with `setMode` in `src/tokens.ts`:\n\n```ts\nimport { setMode } from \"./tokens\";\n\n");
+  for (c, modes) in themed {
+    out.push_str(&format!("setMode({c:?}, {:?});\n", modes.last().cloned().unwrap_or_default()));
+  }
+  out.push_str(
+    "```\n\nA frame that sets a mode in the design keeps its `data-<collection>` attribute, so that screen stays in that mode.\n",
+  );
+  out
 }
 
 pub struct ProjectFile {
@@ -1990,6 +2247,8 @@ pub struct ProjectFile {
 /// A complete Vite + React + Tailwind project: one screen per top-level frame.
 pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> {
   let mut ctx = Ctx::new(doc, m, true);
+  ctx.style_classes = true;
+  ctx.register_library();
   let mut files = Vec::new();
   let screens: Vec<(String, String)> = ctx.screen_order.clone();
   let mut screen_src = Vec::new();
@@ -2052,7 +2311,7 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   files.push(ProjectFile {
     path: "src/index.css".into(),
     content: format!(
-      "{}{}@tailwind base;\n@tailwind components;\n@tailwind utilities;\n",
+      "{}{}@tailwind base;\n@tailwind components;\n@tailwind utilities;\n{}",
       if fonts.is_empty() {
         String::new()
       } else {
@@ -2062,9 +2321,17 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
         ""
       } else {
         "@import \"./tokens.css\";\n"
-      }
+      },
+      style_css(&ctx)
     ),
   });
+  let themed = themed_collections(doc);
+  if !themed.is_empty() {
+    files.push(ProjectFile {
+      path: "src/tokens.ts".into(),
+      content: tokens_ts(&themed),
+    });
+  }
   if !doc.variables.is_empty() {
     files.push(ProjectFile {
       path: "src/tokens.css".into(),
@@ -2112,7 +2379,8 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   files.push(ProjectFile {
     path: "README.md".into(),
     content: format!(
-      "# {title}\n\nGenerated with [Designotron](https://github.com/mikemich/designotron).\n\n```bash\nnpm install\nnpm run dev\n```\n"
+      "# {title}\n\nGenerated with [Designotron](https://github.com/mikemich/designotron).\n\n```bash\nnpm install\nnpm run dev\n```\n{}",
+      readme_themes(&themed)
     ),
   });
   files.push(ProjectFile {
@@ -2622,6 +2890,274 @@ mod tests {
     let css = css_paint(&p, 200.0, 100.0);
     assert!(css.starts_with("linear-gradient(90deg"), "{css}");
     assert!(css.contains("25%") && css.contains("75%"), "{css}");
+  }
+
+
+  // ---------- W3-F: component library, naming, valid HTML, themes, style classes ----------
+
+  /// A frame with a text child, made into a main component named `name`.
+  fn make_component(doc: &mut Document, gen: &mut IdGen, id: &str, name: &str, label: &str) -> NodeId {
+    let page = doc.pages[0].id.clone();
+    let mut f = crate::ops::default_node(NodeType::Frame, id.into(), name.into());
+    f.x = 900.0;
+    f.layout = Some(AutoLayout::default());
+    doc.insert(f, None, &page, None);
+    let mut t = crate::ops::default_node(NodeType::Text, format!("{id}_t"), "Label".into());
+    t.text.as_mut().unwrap().characters = label.into();
+    doc.insert(t, Some(id), &page, None);
+    crate::components::create_component(doc, &[id.to_string()], gen).unwrap()
+  }
+
+  fn tag_stack_ok(src: &str) -> Result<(), String> {
+    // Interactive tags may not nest (JSX or HTML).
+    let mut stack: Vec<String> = Vec::new();
+    let mut i = 0;
+    while let Some(off) = src[i..].find('<') {
+      i += off + 1;
+      let rest = &src[i..];
+      let closing = rest.starts_with('/');
+      let name: String = rest
+        .trim_start_matches('/')
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+      let end = rest.find('>').unwrap_or(rest.len());
+      let self_closing = rest[..end].ends_with('/');
+      if name.is_empty() || self_closing {
+        continue;
+      }
+      if closing {
+        if let Some(p) = stack.iter().rposition(|t| *t == name) {
+          stack.truncate(p);
+        }
+      } else {
+        if (name == "button" || name == "a") && stack.iter().any(|t| t == "button" || t == "a") {
+          return Err(format!("<{name}> inside {stack:?}"));
+        }
+        stack.push(name);
+      }
+    }
+    Ok(())
+  }
+
+  #[test]
+  fn component_library_exports_unused_components_with_descriptions() {
+    let mut doc = sample();
+    let mut gen = IdGen::new(500);
+    let c = make_component(&mut doc, &mut gen, "card", "Card", "Hi");
+    doc.get_mut(&c).unwrap().component.as_mut().unwrap().description = "A card. Ends with */ oops".into();
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let comps = &files.iter().find(|f| f.path == "src/components.tsx").unwrap().content;
+    assert!(comps.contains("export function Card("), "{comps}");
+    assert!(comps.contains("/** A card. Ends with * / oops */\nexport function Card"), "{comps}");
+    // The Code tab for a single screen only has what the screen uses.
+    let one = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(!one.contains("function Card"), "{one}");
+  }
+
+  #[test]
+  fn unused_variant_sets_are_exported_whole() {
+    let mut doc = sample();
+    let mut gen = IdGen::new(600);
+    let a = make_component(&mut doc, &mut gen, "ba", "Button/Primary", "Go");
+    let b = make_component(&mut doc, &mut gen, "bb", "Button/Secondary", "Go");
+    crate::components::combine_as_variants(&mut doc, &[a, b], &mut gen).unwrap();
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let comps = &files.iter().find(|f| f.path == "src/components.tsx").unwrap().content;
+    assert!(comps.contains("function ButtonPrimary("), "{comps}");
+    assert!(comps.contains("function ButtonSecondary("), "{comps}");
+    assert!(comps.contains("export function Button("), "{comps}");
+  }
+
+  #[test]
+  fn variant_instance_function_is_named_after_set_and_value() {
+    let mut doc = sample();
+    let mut gen = IdGen::new(700);
+    let a = make_component(&mut doc, &mut gen, "ba", "Button/Primary", "Go");
+    let b = make_component(&mut doc, &mut gen, "bb", "Button/Secondary", "Go");
+    crate::components::combine_as_variants(&mut doc, &[a, b.clone()], &mut gen).unwrap();
+    let page = doc.pages[0].id.clone();
+    crate::components::create_instance(&mut doc, &b, Some("home"), &page, 0.0, 0.0, &mut gen).unwrap();
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(src.contains("function ButtonSecondary("), "{src}");
+    assert!(!src.contains("Property1"), "{src}");
+  }
+
+  #[test]
+  fn component_property_named_style_is_suffixed() {
+    let mut doc = sample();
+    let mut gen = IdGen::new(800);
+    let c = make_component(&mut doc, &mut gen, "card", "Card", "Hi");
+    let t = "card_t".to_string();
+    let r = crate::props::apply_op(
+      &mut doc,
+      &mut gen,
+      crate::props::PropsOp::Add {
+        component: c.clone(),
+        name: "style".into(),
+        kind: PropKind::Text,
+        default: Some(json!("Hi")),
+        bind: Some(t),
+      },
+    );
+    assert!(r.is_ok(), "{r:?}");
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let comps = &files.iter().find(|f| f.path == "src/components.tsx").unwrap().content;
+    assert!(comps.contains("styleProp"), "{comps}");
+    assert!(!comps.contains("{ style,") && !comps.contains(" style = "), "{comps}");
+  }
+
+  #[test]
+  fn nested_interactive_elements_are_downgraded() {
+    let mut doc = sample();
+    let page = doc.pages[0].id.clone();
+    let mut b = crate::ops::default_node(NodeType::Frame, "cta".into(), "Buy button".into());
+    b.height = 44.0;
+    b.interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    doc.insert(b, Some("home"), &page, None);
+    let mut inner = crate::ops::default_node(NodeType::Frame, "inner".into(), "Inner button".into());
+    inner.height = 30.0;
+    inner.interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    doc.insert(inner, Some("cta"), &page, None);
+    let mut t = crate::ops::default_node(NodeType::Text, "lbl".into(), "Label".into());
+    t.text.as_mut().unwrap().characters = "Buy".into();
+    t.text.as_mut().unwrap().font_size = 40.0;
+    doc.insert(t, Some("inner"), &page, None);
+    let mut link = crate::ops::default_node(NodeType::Text, "lnk".into(), "Link".into());
+    link.text.as_mut().unwrap().characters = "Terms".into();
+    link.text.as_mut().unwrap().runs = vec![crate::model::TextRun {
+      start: 0,
+      end: 5,
+      link: Some("https://example.com".into()),
+      ..Default::default()
+    }];
+    doc.insert(link, Some("cta"), &page, None);
+    for src in [
+      export_react(&doc, "home", &HeuristicMeasurer),
+      export_html(&doc, "home", &HeuristicMeasurer),
+    ] {
+      assert!(tag_stack_ok(&src).is_ok(), "{:?}\n{src}", tag_stack_ok(&src));
+      assert!(src.contains("<button "), "{src}");
+      // Text in a button is a span, never a heading or paragraph.
+      assert!(!src.contains("<h1") && !src.contains("<h2"), "{src}");
+      assert!(!src.contains("<p ") || !src.contains("Buy</p>"), "{src}");
+    }
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    assert_eq!(src.matches("<button ").count(), 1, "{src}");
+    assert_eq!(
+      src.matches("onNavigate?.(").count(),
+      2,
+      "the sample button and the outer button, not the inner one: {src}"
+    );
+  }
+
+  #[test]
+  fn reserved_variant_property_names_get_a_prop_suffix() {
+    assert_eq!(prop_ident("Style"), "styleProp");
+    assert_eq!(prop_ident("Class Name"), "classNameProp");
+    assert_eq!(prop_ident("Size"), "size");
+    assert_eq!(prop_ident("Property 1"), "property1");
+  }
+
+  #[test]
+  fn two_mode_collection_exports_set_mode() {
+    use crate::variables::{Collection, VarKind, VarMode, Variable};
+    let mut doc = sample();
+    doc.variables.push(Collection {
+      id: "c1".into(),
+      name: "Theme".into(),
+      modes: vec![
+        VarMode {
+          id: "m1".into(),
+          name: "Light".into(),
+        },
+        VarMode {
+          id: "m2".into(),
+          name: "Dark".into(),
+        },
+      ],
+      variables: vec![Variable {
+        id: "v1".into(),
+        name: "Brand/bg".into(),
+        kind: VarKind::Color,
+        values: BTreeMap::from([("m1".into(), json!("#FFFFFF")), ("m2".into(), json!("#111111"))]),
+        description: String::new(),
+      }],
+    });
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let get = |p: &str| files.iter().find(|f| f.path == p).map(|f| f.content.clone());
+    let ts = get("src/tokens.ts").expect("tokens.ts");
+    assert!(
+      ts.contains("export function setMode") && ts.contains("\"theme\": [\"light\", \"dark\"]"),
+      "{ts}"
+    );
+    let css = get("src/tokens.css").unwrap();
+    assert!(
+      css.contains("[data-theme=\"light\"]") && css.contains("[data-theme=\"dark\"]"),
+      "{css}"
+    );
+    assert!(get("README.md").unwrap().contains("setMode(\"theme\", \"dark\")"));
+    // One mode: no helper.
+    doc.variables[0].modes.pop();
+    let files = export_project(&doc, &HeuristicMeasurer);
+    assert!(!files.iter().any(|f| f.path == "src/tokens.ts"));
+  }
+
+  #[test]
+  fn linked_text_and_colour_styles_become_classes() {
+    let mut doc = sample();
+    doc.styles.texts.push(crate::model::TextStyle {
+      id: "ts1".into(),
+      name: "Heading 1".into(),
+      font_family: "Inter".into(),
+      font_size: 40.0,
+      font_weight: 700,
+      line_height: Some(48.0),
+      letter_spacing: -0.5,
+    });
+    doc.styles.colors.push(crate::model::ColorStyle {
+      id: "cs1".into(),
+      name: "Brand/Primary".into(),
+      color: "#7C5CFF".into(),
+    });
+    {
+      let t = doc.get_mut("t").unwrap();
+      let tp = t.text.as_mut().unwrap();
+      tp.font_size = 40.0;
+      tp.font_weight = 700;
+      tp.line_height = Some(48.0);
+      tp.letter_spacing = -0.5;
+      t.text_style = Some("ts1".into());
+      t.fills = vec![Paint::solid("#7C5CFF")];
+      t.fill_style = Some("cs1".into());
+    }
+    doc.get_mut("btn").unwrap().fill_style = Some("cs1".into());
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let get = |p: &str| files.iter().find(|f| f.path == p).unwrap().content.clone();
+    let home = get("src/screens/Home.tsx");
+    assert!(home.contains("text-heading-1"), "{home}");
+    assert!(!home.contains("text-[length:40px]") && !home.contains("tracking-"), "{home}");
+    assert!(home.contains("text-[color:var(--color-brand-primary)]"), "{home}");
+    assert!(home.contains("bg-[color:var(--color-brand-primary)]"), "{home}");
+    let css = get("src/index.css");
+    assert!(css.contains(".text-heading-1 {") && css.contains("font: 700 40px/48px"), "{css}");
+    assert!(
+      css.contains("letter-spacing: -0.5px") && css.contains("--color-brand-primary: #7C5CFF;"),
+      "{css}"
+    );
+    // A layer that drifted from its style keeps its own values.
+    doc.get_mut("t").unwrap().text.as_mut().unwrap().font_size = 22.0;
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let home = files.iter().find(|f| f.path == "src/screens/Home.tsx").unwrap().content.clone();
+    assert!(!home.contains("text-heading-1") && home.contains("text-[length:22px]"), "{home}");
+    // The single-layer code has no stylesheet to point at, so it keeps utilities.
+    assert!(!export_react(&doc, "home", &HeuristicMeasurer).contains("text-heading-1"));
   }
 }
 
