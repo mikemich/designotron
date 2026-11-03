@@ -1929,6 +1929,15 @@ impl Engine {
         Ok(json!({ "parent": target }))
       }
       Command::MoveToParent { ids, parent, index } => {
+        if let Some(p) = parent.as_deref() {
+          let kind = self.doc.get(p).map(|n| n.kind).ok_or_else(|| format!("no parent layer {p}"))?;
+          if !kind.is_container() {
+            return Err(format!("{p} is a {} and cannot have children", kind.label()));
+          }
+        }
+        if let Some(missing) = ids.iter().find(|id| self.doc.get(id).is_none()) {
+          return Err(format!("no layer {missing}"));
+        }
         let ids = ops::paint_order(&self.doc, &ops::top_most(&self.doc, &ids));
         if components::would_nest_under(&self.doc, &ids, parent.as_deref()) {
           return Err("a component can't contain an instance of itself".into());

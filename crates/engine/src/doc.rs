@@ -337,14 +337,16 @@ impl Document {
     }
   }
 
-  /// Moves a node under a new parent, keeping its page-space position when `keep_abs`.
-  pub fn reparent(&mut self, id: &str, new_parent: Option<&str>, index: Option<usize>, keep_abs: bool) {
+  /// Moves a node under a new parent, keeping its page-space position when `keep_abs`. Does
+  /// nothing (false) when the layer or the new parent doesn't exist, or the parent is the layer
+  /// itself or inside it, so a layer is never left pointing at a missing parent.
+  pub fn reparent(&mut self, id: &str, new_parent: Option<&str>, index: Option<usize>, keep_abs: bool) -> bool {
     if let Some(p) = new_parent {
-      if p == id || self.is_ancestor(id, p) {
-        return;
+      if p == id || self.is_ancestor(id, p) || self.get(p).is_none() {
+        return false;
       }
     }
-    let Some(node) = self.get(id) else { return };
+    let Some(node) = self.get(id) else { return false };
     let page = node.page.clone();
     let abs = self.abs_matrix(id);
     self.detach(id);
@@ -372,6 +374,7 @@ impl Document {
         n.page = new_page.clone();
       }
     }
+    true
   }
 
   /// Re-derives local x/y/rotation so the node lands on `abs` under a parent transform.

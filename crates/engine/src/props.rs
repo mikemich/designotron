@@ -178,6 +178,16 @@ fn def_of(doc: &Document, comp: &str, prop: &str) -> Option<PropDef> {
   props_of(doc, comp).into_iter().find(|p| p.id == prop)
 }
 
+/// Why a property lookup failed: names the property and lists the ones the component has.
+fn no_prop(doc: &Document, comp: &str, prop: &str) -> String {
+  let have: Vec<String> = props_of(doc, comp).iter().map(|p| format!("{} ({})", p.name, p.id)).collect();
+  if have.is_empty() {
+    format!("no property '{prop}': the component has no properties")
+  } else {
+    format!("no property '{prop}'; the component has: {}", have.join(", "))
+  }
+}
+
 /// The main components that share `owner`'s properties.
 fn comps_of(doc: &Document, owner: &str) -> Vec<NodeId> {
   match doc.get(owner) {
@@ -356,7 +366,7 @@ fn update(
 ) -> Result<Value, String> {
   let owner = owner(doc, component).ok_or("select a main component or a component set")?;
   if def_of(doc, &owner, prop).is_none() {
-    return Err("no such property".into());
+    return Err(no_prop(doc, &owner, prop));
   }
   if let Some(name) = &name {
     check_name(doc, &owner, prop, name.trim())?;
@@ -386,7 +396,7 @@ fn update(
 
 /// Gives the property a new default: layers bound to it in the main components take the value.
 fn apply_default(doc: &mut Document, gen: &mut IdGen, owner: &str, prop: &str, v: &Value) -> Result<(), String> {
-  let def = def_of(doc, owner, prop).ok_or("no such property")?;
+  let def = def_of(doc, owner, prop).ok_or_else(|| no_prop(doc, owner, prop))?;
   let value = coerce(doc, def.kind, v)?;
   let field = PropField::of(def.kind);
   let layers = bound_in_mains(doc, owner, Some(field), prop);
@@ -424,7 +434,7 @@ fn apply_default(doc: &mut Document, gen: &mut IdGen, owner: &str, prop: &str, v
 fn delete(doc: &mut Document, component: &str, prop: &str) -> Result<Value, String> {
   let owner = owner(doc, component).ok_or("select a main component or a component set")?;
   if def_of(doc, &owner, prop).is_none() {
-    return Err("no such property".into());
+    return Err(no_prop(doc, &owner, prop));
   }
   for id in bound_in_mains(doc, &owner, None, prop) {
     if let Some(n) = doc.get_mut(&id) {
@@ -614,7 +624,7 @@ fn bind(doc: &mut Document, node: &str, field: PropField, prop: Option<&str>) ->
     Some(prop) => {
       let host = components::enclosing_component(doc, node).ok_or("only layers of a main component can use properties")?;
       let owner = owner(doc, &host).ok_or("only layers of a main component can use properties")?;
-      let def = def_of(doc, &owner, prop).ok_or("no such property")?;
+      let def = def_of(doc, &owner, prop).ok_or_else(|| no_prop(doc, &owner, prop))?;
       if def.kind != field.kind() {
         return Err(format!(
           "a {} property can't control a layer's {}",
@@ -772,7 +782,7 @@ pub fn follow_variants(doc: &mut Document, prev: &Document) {
 
 fn set(doc: &mut Document, gen: &mut IdGen, instance: &str, prop: &str, value: Option<Value>) -> Result<Value, String> {
   let info = doc.get(instance).and_then(|n| n.instance.clone()).ok_or("not an instance")?;
-  let def = def_of(doc, &info.component_id, prop).ok_or("the component has no such property")?;
+  let def = def_of(doc, &info.component_id, prop).ok_or_else(|| no_prop(doc, &info.component_id, prop))?;
   if def.kind == PropKind::InstanceSwap {
     return set_swap(doc, gen, instance, &def, value).map(|_| json!({}));
   }

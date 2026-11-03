@@ -103,6 +103,12 @@ pub fn normalize(input: &str) -> String {
   parse(input).unwrap_or(Rgba::BLACK).hex()
 }
 
+/// Canonical hex for a colour the parser understands; None for anything else (unlike `normalize`,
+/// which turns it into black).
+pub fn parse_strict(input: &str) -> Option<String> {
+  parse(input).map(|c| c.hex())
+}
+
 /// CSS colour for a stored colour multiplied by an extra opacity.
 pub fn css_with_opacity(color: &str, opacity: f64) -> String {
   parse(color).unwrap_or(Rgba::BLACK).with_alpha(opacity).css()
