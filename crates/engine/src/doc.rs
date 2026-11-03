@@ -516,8 +516,20 @@ mod tests {
       &page,
       None,
     );
-    doc.reparent("a", Some("b"), None, true);
+    assert!(!doc.reparent("a", Some("b"), None, true));
     assert_eq!(doc.get("a").unwrap().parent, None);
+  }
+
+  #[test]
+  fn a_missing_parent_leaves_the_layer_where_it_is() {
+    let mut ids = IdGen::new(7);
+    let mut doc = new_document(&mut ids, "t");
+    let page = doc.pages[0].id.clone();
+    doc.insert(rect("r"), None, &page, None);
+    assert!(!doc.reparent("r", Some("missing"), None, true));
+    assert_eq!(doc.get("r").unwrap().parent, None);
+    assert_eq!(doc.page(&page).unwrap().children, vec!["r".to_string()]);
+    assert!(!doc.reparent("nope", None, None, true));
   }
 
   /// `cargo test --release -p designotron-engine bench_unnamed_imports -- --ignored --nocapture`

@@ -519,7 +519,7 @@ pub fn choice<T: Copy>(cx: &Ctx, key: &str, v: &Value, table: &[(&[&str], T)], h
       return Ok(*t);
     }
   }
-  let extra = hint(&l).map(|h| format!("; {h}")).unwrap_or_default();
+  let extra = hint(&l).map(|h| format!(" ({h})")).unwrap_or_default();
   Err(cx.err(key, format!("'{s}' isn't supported; use {}{extra}", shown(table))))
 }
 

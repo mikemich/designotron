@@ -126,4 +126,11 @@ mod tests {
     assert_eq!(parse("rgba(0,0,0,0.5)").unwrap().css(), "rgba(0, 0, 0, 0.5)");
     assert!(parse("nope").is_none());
   }
+
+  #[test]
+  fn strict_parsing_never_falls_back_to_black() {
+    assert_eq!(parse_strict("rgb(255, 0, 0)").as_deref(), Some("#FF0000"));
+    assert_eq!(parse_strict("not-a-colour"), None);
+    assert_eq!(normalize("not-a-colour"), "#000000");
+  }
 }

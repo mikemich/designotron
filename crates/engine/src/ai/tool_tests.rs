@@ -640,6 +640,35 @@ mod tokens {
   }
 }
 
+mod compat {
+  use super::*;
+
+  /// What the HTML importer and the built-in templates send must neither fail nor warn.
+  #[test]
+  fn importer_shaped_specs_raise_nothing() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{
+        "type": "frame", "name": "Imported", "fill": "rgb(15, 23, 42)", "clip": true, "x": 0, "y": 0, "width": 800, "height": "hug",
+        "layout": { "direction": "vertical", "gap": 12.5, "padding": [24, 24, 24, 24], "align": "start", "crossAlign": "start" },
+        "children": [
+          { "type": "frame", "name": "card", "fill": "rgba(255, 255, 255, 0.9)", "stroke": "rgb(226, 232, 240)", "strokeWidth": 1,
+            "shadow": [{ "color": "rgba(0, 0, 0, 0.1)", "x": 0, "y": 4, "blur": 6, "spread": -1, "inset": false }],
+            "cornerRadius": [8, 8, 0, 0], "opacity": 0.5, "x": 0, "y": 0, "width": "fill", "height": "hug",
+            "layout": { "direction": "horizontal", "gap": 8, "padding": [0, 0, 0, 0], "align": "space-between", "crossAlign": "center", "wrap": true, "counterGap": 4 },
+            "children": [
+              { "type": "text", "text": "Hello", "fontSize": 16, "fontWeight": 400, "fontFamily": "Inter", "lineHeight": 24, "color": "rgb(15, 23, 42)", "italic": false, "textAlign": "left", "letterSpacing": 0.5, "x": 0, "y": 0 },
+              { "type": "rectangle", "name": "Image", "imageUrl": "asset:abc123", "cornerRadius": 4, "x": 0, "y": 0, "width": 20, "height": 20, "absolute": true },
+              { "type": "rectangle", "name": "Icon", "fills": [{ "type": "image", "src": "asset:icon", "scaleMode": "fit" }], "width": 20, "height": 20 },
+              { "type": "frame", "name": "grad", "fill": "linear-gradient(rgb(255, 0, 0) 0%, rgb(0, 0, 255) 100%)", "width": 10, "height": 10 }] }] }] }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+    assert_eq!(e.doc.nodes.len(), 6);
+  }
+}
+
 mod find {
   use super::*;
 

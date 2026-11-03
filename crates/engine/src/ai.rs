@@ -2021,8 +2021,8 @@ fn apply_layout(cx: &mut Ctx, n: &mut Node, s: &Value, sized_w: bool, sized_h: b
 /// Advice for alignment values other tools use that the layout engine doesn't have.
 fn align_hint(v: &str) -> Option<String> {
   match v {
-    "stretch" => Some("stretch isn't supported: set the children's width/height to 'fill' instead".into()),
-    "space-around" | "space-evenly" => Some("space-around/space-evenly aren't supported: use space-between, or gap and padding".into()),
+    "stretch" => Some("to stretch children, set their width/height to 'fill' instead".into()),
+    "space-around" | "space-evenly" => Some("only space-between spreads children; otherwise use gap and padding".into()),
     _ => None,
   }
 }
@@ -2185,7 +2185,11 @@ fn check_binding(cx: &Ctx, doc: &Document, prop: &str, name: &str) -> Result<(),
     Some((_, v)) if v.kind == kind => Ok(()),
     Some((_, v)) => Err(cx.err(
       &key,
-      format!("variable '{name}' is a {:?} variable but {prop} needs a {kind:?} one", v.kind).to_lowercase(),
+      format!(
+        "variable '{name}' is a {} variable but {prop} needs a {} one",
+        format!("{:?}", v.kind).to_lowercase(),
+        format!("{kind:?}").to_lowercase()
+      ),
     )),
     None => {
       let all: Vec<String> = doc
