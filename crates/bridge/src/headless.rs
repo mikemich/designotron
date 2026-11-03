@@ -26,12 +26,9 @@ impl Headless {
 
   /// Stores the editor's document and writes it to the workspace.
   pub async fn mirror(&self, doc: &str) {
-    *self.mirror.lock().await = Some(doc.to_string());
-    let wrapped =
-      json!({ "format": "designotron", "version": 1, "document": serde_json::from_str::<Value>(doc).unwrap_or(Value::Null), "assets": {} });
-    if let Err(e) = tokio::fs::write(&self.path, serde_json::to_string_pretty(&wrapped).unwrap_or_default()).await {
-      log::warn!("could not write {}: {e}", self.path.display());
-    }
+    let mut guard = self.mirror.lock().await;
+    *guard = Some(doc.to_string());
+    self.write(doc).await;
   }
 
   /// Runs a tool against the last known document without an editor.
@@ -43,12 +40,29 @@ impl Headless {
     };
     // The engine is not Send, so it must not live across an await.
     let (result, saved) = run_engine(source.as_deref(), name, input)?;
+    // The lock stays held through the write: calls are one after another, in memory and on
+    // disk, so an older document can never land last.
     if guard.as_deref() != Some(saved.as_str()) {
       *guard = Some(saved.clone());
-      drop(guard);
-      self.mirror(&saved).await;
+      self.write(&saved).await;
     }
     Ok(result)
+  }
+
+  /// Writes the file whole or not at all (a temporary file renamed over it). Callers hold the
+  /// mirror lock.
+  async fn write(&self, doc: &str) {
+    let wrapped =
+      json!({ "format": "designotron", "version": 1, "document": serde_json::from_str::<Value>(doc).unwrap_or(Value::Null), "assets": {} });
+    let text = serde_json::to_string_pretty(&wrapped).unwrap_or_default();
+    let tmp = self.path.with_extension("json.tmp");
+    let written = match tokio::fs::write(&tmp, text).await {
+      Ok(()) => tokio::fs::rename(&tmp, &self.path).await,
+      Err(e) => Err(e),
+    };
+    if let Err(e) = written {
+      log::warn!("could not write {}: {e}", self.path.display());
+    }
   }
 }
 
@@ -104,5 +118,36 @@ mod tests {
     assert_eq!(doc["layers"][0]["name"], "Screen");
     assert!(h2.call_tool("get_screenshot", json!({})).await.is_err());
     std::fs::remove_dir_all(dir).ok();
+  }
+
+  #[tokio::test]
+  async fn concurrent_calls_all_reach_the_file() {
+    for round in 0..10 {
+      let dir = std::env::temp_dir().join(format!("dtron-par-{}-{round}", seed()));
+      std::fs::create_dir_all(&dir).unwrap();
+      let h = std::sync::Arc::new(Headless::new(dir.clone()));
+      let mut calls = Vec::new();
+      for i in 0..20 {
+        let h = h.clone();
+        calls.push(tokio::spawn(async move {
+          let node = json!({ "type": "frame", "name": format!("L{i}"), "width": 10, "height": 10, "x": i * 20 });
+          h.call_tool("create_nodes", json!({ "nodes": [node] })).await.unwrap();
+        }));
+      }
+      for c in calls {
+        c.await.unwrap();
+      }
+      let text = std::fs::read_to_string(dir.join(DESIGN_FILE)).unwrap();
+      let file: Value = serde_json::from_str(&text).unwrap();
+      let names: Vec<&str> = file["document"]["nodes"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter_map(|n| n["name"].as_str())
+        .collect();
+      assert_eq!(names.iter().filter(|n| n.starts_with('L')).count(), 20, "round {round}");
+      assert!(!dir.join("design.dtron.json.tmp").exists());
+      std::fs::remove_dir_all(dir).ok();
+    }
   }
 }

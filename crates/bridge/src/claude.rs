@@ -2,6 +2,7 @@
 //! `claude -p` with this server as an MCP server, so chat uses whatever the
 //! CLI is signed in with (Claude Pro/Max subscription or an API key).
 
+use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -55,43 +56,71 @@ pub async fn detect() -> ClaudeInfo {
   ClaudeInfo { bin, version }
 }
 
+/// The running `claude` process of each editor tab's chat (one per tab, so a chat started in
+/// one tab never ends another's).
 #[derive(Default)]
 pub struct ChatControl {
-  child: Mutex<Option<Child>>,
+  children: Mutex<HashMap<u64, (u64, Child)>>,
+  next_run: std::sync::atomic::AtomicU64,
 }
 
 impl ChatControl {
-  pub async fn cancel(&self) {
-    if let Some(mut c) = self.child.lock().await.take() {
+  /// Stops the tab's chat, if one is running.
+  pub async fn cancel(&self, conn: u64) {
+    let child = self.children.lock().await.remove(&conn);
+    if let Some((_, mut c)) = child {
       let _ = c.kill().await;
     }
   }
+
+  /// Registers a tab's new process; returns its run number for `take`.
+  async fn start(&self, conn: u64, child: Child) -> u64 {
+    let run = self.next_run.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    self.children.lock().await.insert(conn, (run, child));
+    run
+  }
+
+  /// Takes back the process of this run. `None` when it was cancelled, or replaced by a newer
+  /// run of the same tab (which must keep its process).
+  async fn take(&self, conn: u64, run: u64) -> Option<Child> {
+    let mut map = self.children.lock().await;
+    if map.get(&conn).is_some_and(|(r, _)| *r == run) {
+      return map.remove(&conn).map(|(_, c)| c);
+    }
+    None
+  }
 }
 
-/// Runs one chat turn and streams Claude Code's `stream-json` events to the editor.
-/// Runs one chat turn. Images go to Claude Code as image blocks of a stream-json user
+/// MCP server entry handed to the CLI for one chat turn. Tools load up front (`alwaysLoad`)
+/// instead of behind a ToolSearch round trip, and the headers tell the bridge which tab and
+/// turn a tool call belongs to.
+pub fn mcp_config(port: u16, conn: u64, turn: u64) -> Value {
+  json!({
+    "mcpServers": {
+      "designotron": {
+        "type": "http",
+        "url": format!("http://127.0.0.1:{port}/mcp"),
+        "alwaysLoad": true,
+        "headers": { "X-Designotron-Editor": conn.to_string(), "X-Designotron-Turn": turn.to_string() },
+      }
+    }
+  })
+}
+
+/// Runs one chat turn and streams Claude Code's `stream-json` events to the editor tab `conn`
+/// that asked (and only to it). Images go to Claude Code as image blocks of a stream-json user
 /// message (so it sees them directly); otherwise the prompt is a plain argument.
 /// `turn` is the editor's number for this message, echoed in chat_done/chat_error so a late
 /// reply from an earlier turn can't end the current one.
-pub async fn run_chat(state: Shared, prompt: String, session: Option<String>, images: Vec<crate::fetch::ChatImage>, turn: u64) {
+pub async fn run_chat(state: Shared, conn: u64, prompt: String, session: Option<String>, images: Vec<crate::fetch::ChatImage>, turn: u64) {
   if state.claude.version.is_none() {
-    state
-      .editor
-      .send(json!({ "type": "chat_error", "turn": turn, "message": "Claude Code CLI not found. Install it and sign in (`claude`, then /login)." }))
-      .await;
+    state.editor.send_to(
+      conn,
+      json!({ "type": "chat_error", "turn": turn, "message": "Claude Code CLI not found. Install it and sign in (`claude`, then /login)." }),
+    );
     return;
   }
-  state.chat.cancel().await;
-
-  let mcp_config = json!({ "mcpServers": { "designotron": { "type": "http", "url": format!("http://127.0.0.1:{}/mcp", state.port) } } });
-  let config_path = std::env::temp_dir().join(format!("designotron-mcp-{}.json", state.port));
-  if let Err(e) = tokio::fs::write(&config_path, mcp_config.to_string()).await {
-    state
-      .editor
-      .send(json!({ "type": "chat_error", "turn": turn, "message": format!("could not write MCP config: {e}") }))
-      .await;
-    return;
-  }
+  state.chat.cancel(conn).await;
 
   let mut allowed: Vec<String> = DEFAULT_ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect();
   if let Ok(extra) = std::env::var(ALLOWED_TOOLS_ENV) {
@@ -117,7 +146,7 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>, im
   cmd
     .args(["--output-format", "stream-json", "--verbose", "--include-partial-messages"])
     .arg("--mcp-config")
-    .arg(&config_path)
+    .arg(mcp_config(state.port, conn, turn).to_string())
     .arg("--permission-mode")
     .arg("acceptEdits")
     .arg("--append-system-prompt")
@@ -137,10 +166,10 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>, im
   let mut child = match cmd.spawn() {
     Ok(c) => c,
     Err(e) => {
-      state
-        .editor
-        .send(json!({ "type": "chat_error", "turn": turn, "message": format!("could not start Claude Code: {e}") }))
-        .await;
+      state.editor.send_to(
+        conn,
+        json!({ "type": "chat_error", "turn": turn, "message": format!("could not start Claude Code: {e}") }),
+      );
       return;
     }
   };
@@ -159,7 +188,7 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>, im
   }
   let stdout = child.stdout.take();
   let stderr = child.stderr.take();
-  *state.chat.child.lock().await = Some(child);
+  let run = state.chat.start(conn, child).await;
 
   let stderr_task = tokio::spawn(async move {
     let mut buf = String::new();
@@ -180,7 +209,7 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>, im
         session_id = Some(s.to_string());
       }
       let done = event["type"] == "result";
-      state.editor.send(json!({ "type": "chat_event", "event": event })).await;
+      state.editor.send_to(conn, json!({ "type": "chat_event", "event": event }));
       // The result ends the turn; newer CLIs can keep running for a while afterwards.
       if done {
         break;
@@ -188,7 +217,7 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>, im
     }
   }
 
-  let status = match state.chat.child.lock().await.take() {
+  let status = match state.chat.take(conn, run).await {
     Some(mut c) => match tokio::time::timeout(std::time::Duration::from_secs(3), c.wait()).await {
       Ok(s) => s.ok(),
       Err(_) => {
@@ -218,16 +247,47 @@ pub async fn run_chat(state: Shared, prompt: String, session: Option<String>, im
       };
       state
         .editor
-        .send(json!({ "type": "chat_error", "turn": turn, "message": message }))
-        .await;
+        .send_to(conn, json!({ "type": "chat_error", "turn": turn, "message": message }));
     }
     None => {
-      state.editor.send(json!({ "type": "log", "message": "Stopped." })).await;
+      state.editor.send_to(conn, json!({ "type": "log", "message": "Stopped." }));
     }
     _ => {}
   }
   state
     .editor
-    .send(json!({ "type": "chat_done", "turn": turn, "sessionId": session_id }))
-    .await;
+    .send_to(conn, json!({ "type": "chat_done", "turn": turn, "sessionId": session_id }));
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn chat_mcp_config_loads_tools_up_front_and_names_the_tab() {
+    let c = mcp_config(5174, 4, 9);
+    let s = &c["mcpServers"]["designotron"];
+    assert_eq!(s["type"], "http");
+    assert_eq!(s["url"], "http://127.0.0.1:5174/mcp");
+    assert_eq!(s["alwaysLoad"], true);
+    assert_eq!(s["headers"]["X-Designotron-Editor"], "4");
+    assert_eq!(s["headers"]["X-Designotron-Turn"], "9");
+  }
+
+  #[tokio::test]
+  async fn each_tab_has_its_own_process_and_a_newer_run_keeps_it() {
+    let ctl = ChatControl::default();
+    let sleeper = || Command::new("sleep").arg("30").kill_on_drop(true).spawn().unwrap();
+    let r1 = ctl.start(1, sleeper()).await;
+    let r2 = ctl.start(2, sleeper()).await;
+    ctl.cancel(1).await;
+    assert!(ctl.take(1, r1).await.is_none(), "cancelled");
+    assert!(ctl.children.lock().await.contains_key(&2), "the other tab's chat keeps running");
+    // Tab 2 starts a new run (replacing the old process); the old run's cleanup must not
+    // take the new process.
+    ctl.cancel(2).await;
+    let r2b = ctl.start(2, sleeper()).await;
+    assert!(ctl.take(2, r2).await.is_none());
+    assert!(ctl.take(2, r2b).await.is_some());
+  }
 }

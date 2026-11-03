@@ -38,6 +38,9 @@ struct Step {
   after: Document,
   after_page: String,
   after_selection: Vec<NodeId>,
+  /// Steps of one AI chat turn share a group (see `Command::SetHistoryGroup`); undo and redo
+  /// move through the whole group at once.
+  group: Option<String>,
 }
 
 #[derive(Clone)]
@@ -63,6 +66,12 @@ pub enum Command {
   Relayout,
   Undo,
   Redo,
+  /// Tags the steps that `Command::Ai` pushes from now on with `group` (`None` stops), so a
+  /// whole chat turn undoes and redoes as one step. Not an edit: no revision bump and the redo
+  /// stack stays. Other commands, and AI commands inside a gesture, are never grouped.
+  SetHistoryGroup {
+    group: Option<String>,
+  },
   BeginGesture,
   /// Within a gesture: makes the current document the base that gesture-relative commands
   /// (translate, resize, rotate) work from, while undo still returns to where the gesture
@@ -596,6 +605,8 @@ pub struct Engine {
   pub doc_rev: u64,
   past: Vec<Step>,
   future: Vec<Step>,
+  /// Group for the steps of `Command::Ai` (see `Command::SetHistoryGroup`).
+  history_group: Option<String>,
   gesture: Option<Snapshot>,
   /// Where undo returns to when the gesture was rebased (`RebaseGesture`).
   gesture_undo: Option<Snapshot>,
@@ -643,6 +654,7 @@ impl Engine {
       doc_rev: 1,
       past: vec![],
       future: vec![],
+      history_group: None,
       gesture: None,
       gesture_undo: None,
       drag_delta: None,
@@ -673,6 +685,7 @@ impl Engine {
     self.selection.clear();
     self.past.clear();
     self.future.clear();
+    self.history_group = None;
     self.gesture = None;
     self.gesture_undo = None;
     self.collab_confirmed = None;
@@ -915,25 +928,13 @@ impl Engine {
       }
       Command::Undo => {
         if let Some(step) = self.past.pop() {
-          let prev = self.doc.clone();
-          // Nobody else changed anything since: the saved state is exact (and laid out).
-          let exact = self.doc == step.after;
-          self.doc = crate::collab::revert(&self.doc, &step.after, &step.before.doc);
-          self.selection = step
-            .before
-            .selection
-            .iter()
-            .filter(|id| self.doc.get(id).is_some())
-            .cloned()
-            .collect();
-          if self.doc.page(&step.before.page).is_some() {
-            self.page = step.before.page.clone();
+          let group = step.group.clone();
+          self.undo_step(step);
+          // The rest of a chat turn's steps go with it.
+          while group.is_some() && self.past.last().is_some_and(|s| s.group == group) {
+            let step = self.past.pop().unwrap();
+            self.undo_step(step);
           }
-          self.refresh_fingerprints();
-          if !exact {
-            self.after_mutation(&prev);
-          }
-          self.future.push(step);
           self.doc_rev += 1;
         }
         self.rev += 1;
@@ -941,28 +942,19 @@ impl Engine {
       }
       Command::Redo => {
         if let Some(step) = self.future.pop() {
-          let prev = self.doc.clone();
-          // As for undo: re-running layout on the saved state could move a value by a
-          // rounding error.
-          let exact = self.doc == step.before.doc;
-          self.doc = crate::collab::revert(&self.doc, &step.before.doc, &step.after);
-          self.selection = step
-            .after_selection
-            .iter()
-            .filter(|id| self.doc.get(id).is_some())
-            .cloned()
-            .collect();
-          if self.doc.page(&step.after_page).is_some() {
-            self.page = step.after_page.clone();
+          let group = step.group.clone();
+          self.redo_step(step);
+          while group.is_some() && self.future.last().is_some_and(|s| s.group == group) {
+            let step = self.future.pop().unwrap();
+            self.redo_step(step);
           }
-          self.refresh_fingerprints();
-          if !exact {
-            self.after_mutation(&prev);
-          }
-          self.past.push(step);
           self.doc_rev += 1;
         }
         self.rev += 1;
+        return Ok(json!({}));
+      }
+      Command::SetHistoryGroup { group } => {
+        self.history_group = group.filter(|g| !g.is_empty());
         return Ok(json!({}));
       }
       Command::ApplyRemote { delta, local } => {
@@ -1034,7 +1026,7 @@ impl Engine {
         let gesture = self.gesture.take();
         if let Some(base) = self.gesture_undo.take().or(gesture) {
           if base.doc != self.doc {
-            self.push_past(base);
+            self.push_past(base, None);
           }
         }
         self.rev += 1;
@@ -1110,7 +1102,15 @@ impl Engine {
 
     // O(1) with the persistent node map; diffed later to find what needs layout.
     let prev = self.doc.clone();
+    let group = if matches!(cmd, Command::Ai { .. }) {
+      self.history_group.clone()
+    } else {
+      None
+    };
     let gesture_relative = matches!(cmd, Command::Translate { .. } | Command::Resize { .. } | Command::Rotate { .. });
+    // Inside a gesture there's no undo snapshot, but a command that fails still has to leave
+    // nothing behind: AI tools change several layers before they can fail on a later one.
+    let rollback = self.gesture.is_some().then(|| self.snapshot());
     if gesture_relative {
       if let Some(base) = self.gesture.clone() {
         self.doc = base.doc;
@@ -1123,14 +1123,14 @@ impl Engine {
         self.after_mutation(&prev);
         if let Some(b) = before {
           if b.doc != self.doc {
-            self.push_past(b);
+            self.push_past(b, group);
           }
         }
         self.rev += 1;
         Ok(v)
       }
       Err(e) => {
-        if let Some(b) = before {
+        if let Some(b) = before.or(rollback) {
           self.restore(b);
         }
         Err(e)
@@ -1144,17 +1144,64 @@ impl Engine {
     out
   }
 
-  fn push_past(&mut self, s: Snapshot) {
+  fn push_past(&mut self, s: Snapshot, group: Option<String>) {
     self.past.push(Step {
       before: s,
       after: self.doc.clone(),
       after_page: self.page.clone(),
       after_selection: self.selection.clone(),
+      group,
     });
     if self.past.len() > MAX_HISTORY {
       self.past.remove(0);
     }
     self.future.clear();
+  }
+
+  /// Reverts one step on the current document (collaborators' later edits stay) and queues
+  /// it for redo.
+  fn undo_step(&mut self, step: Step) {
+    let prev = self.doc.clone();
+    // Nobody else changed anything since: the saved state is exact (and laid out).
+    let exact = self.doc == step.after;
+    self.doc = crate::collab::revert(&self.doc, &step.after, &step.before.doc);
+    self.selection = step
+      .before
+      .selection
+      .iter()
+      .filter(|id| self.doc.get(id).is_some())
+      .cloned()
+      .collect();
+    if self.doc.page(&step.before.page).is_some() {
+      self.page = step.before.page.clone();
+    }
+    self.refresh_fingerprints();
+    if !exact {
+      self.after_mutation(&prev);
+    }
+    self.future.push(step);
+  }
+
+  /// Re-applies one undone step. As for undo, re-running layout on the saved state could
+  /// move a value by a rounding error, so an untouched document is taken as is.
+  fn redo_step(&mut self, step: Step) {
+    let prev = self.doc.clone();
+    let exact = self.doc == step.before.doc;
+    self.doc = crate::collab::revert(&self.doc, &step.before.doc, &step.after);
+    self.selection = step
+      .after_selection
+      .iter()
+      .filter(|id| self.doc.get(id).is_some())
+      .cloned()
+      .collect();
+    if self.doc.page(&step.after_page).is_some() {
+      self.page = step.after_page.clone();
+    }
+    self.refresh_fingerprints();
+    if !exact {
+      self.after_mutation(&prev);
+    }
+    self.past.push(step);
   }
 
   /// Keeps derived state consistent: instances, layout, selection.
@@ -2338,6 +2385,7 @@ impl Engine {
       Command::Relayout
       | Command::Undo
       | Command::Redo
+      | Command::SetHistoryGroup { .. }
       | Command::BeginGesture
       | Command::RebaseGesture
       | Command::EndGesture
@@ -3043,6 +3091,107 @@ mod tests {
 
   fn ai(e: &mut Engine, tool: &str, input: Value) -> Value {
     e.dispatch(Command::Ai { tool: tool.into(), input }).unwrap()
+  }
+
+  #[test]
+  fn undo_reverts_a_whole_ai_group() {
+    let mut e = engine();
+    let group = |e: &mut Engine, g: Option<&str>| {
+      e.dispatch(Command::SetHistoryGroup { group: g.map(Into::into) }).unwrap();
+    };
+    let add = |e: &mut Engine, name: &str| {
+      ai(
+        e,
+        "create_nodes",
+        json!({ "nodes": [{ "type": "frame", "name": name, "width": 10, "height": 10 }] }),
+      );
+    };
+    let names = |e: &Engine| {
+      let mut v: Vec<String> = e.doc.nodes.values().map(|n| n.name.clone()).collect();
+      v.sort();
+      v
+    };
+    group(&mut e, Some("t1"));
+    add(&mut e, "a1");
+    add(&mut e, "a2");
+    add(&mut e, "a3");
+    group(&mut e, None);
+    let user = rect(&mut e, 0.0, 0.0, 5.0, 5.0, None);
+    group(&mut e, Some("t2"));
+    add(&mut e, "b1");
+    add(&mut e, "b2");
+    group(&mut e, None);
+    assert_eq!(e.past.len(), 6);
+
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(
+      names(&e),
+      ["Rectangle 1", "a1", "a2", "a3"].map(String::from),
+      "t2 is gone as one step"
+    );
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.doc.get(&user).is_none(), "then the user's own edit");
+    assert_eq!(names(&e).len(), 3);
+    e.dispatch(Command::Undo).unwrap();
+    assert!(names(&e).is_empty(), "then all of t1");
+    assert!(!e.state()["canUndo"].as_bool().unwrap());
+
+    e.dispatch(Command::Redo).unwrap();
+    assert_eq!(names(&e), ["a1", "a2", "a3"].map(String::from), "redo restores t1 fully");
+    e.dispatch(Command::Redo).unwrap();
+    assert!(e.doc.get(&user).is_some());
+    e.dispatch(Command::Redo).unwrap();
+    assert_eq!(names(&e).len(), 6);
+    assert!(!e.state()["canRedo"].as_bool().unwrap());
+  }
+
+  #[test]
+  fn ungrouped_ai_steps_are_still_one_each() {
+    let mut e = engine();
+    for n in ["a", "b", "c"] {
+      ai(&mut e, "create_nodes", json!({ "nodes": [{ "type": "frame", "name": n }] }));
+    }
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.nodes.len(), 2);
+    // A group only tags AI commands: a user edit inside it is its own step.
+    e.dispatch(Command::SetHistoryGroup { group: Some("t".into()) }).unwrap();
+    ai(&mut e, "create_nodes", json!({ "nodes": [{ "type": "frame", "name": "d" }] }));
+    rect(&mut e, 0.0, 0.0, 5.0, 5.0, None);
+    ai(&mut e, "create_nodes", json!({ "nodes": [{ "type": "frame", "name": "e" }] }));
+    e.dispatch(Command::SetHistoryGroup { group: None }).unwrap();
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.nodes.len(), 4, "the last AI step alone");
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.nodes.len(), 3, "the user's rectangle splits the turn");
+  }
+
+  #[test]
+  fn set_history_group_is_not_an_edit() {
+    let mut e = engine();
+    rect(&mut e, 0.0, 0.0, 5.0, 5.0, None);
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.state()["canRedo"].as_bool().unwrap());
+    let (rev, doc_rev, future) = (e.rev, e.doc_rev, e.future.len());
+    e.dispatch(Command::SetHistoryGroup { group: Some("t".into()) }).unwrap();
+    e.dispatch(Command::SetHistoryGroup { group: None }).unwrap();
+    assert_eq!((e.rev, e.doc_rev, e.future.len()), (rev, doc_rev, future));
+  }
+
+  #[test]
+  fn failed_ai_in_gesture_leaves_no_partial_change() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    e.dispatch(Command::BeginGesture).unwrap();
+    let before = e.doc.clone();
+    let r = e.dispatch(Command::Ai {
+      tool: "update_nodes".into(),
+      input: json!({ "updates": [{ "id": a, "patch": { "width": 99 } }, { "id": "n_missing", "patch": { "width": 1 } }] }),
+    });
+    assert!(r.is_err());
+    assert!(e.doc == before, "the first update was rolled back");
+    let steps = e.past.len();
+    e.dispatch(Command::EndGesture).unwrap();
+    assert_eq!(e.past.len(), steps, "nothing changed, so no step");
   }
 
   #[test]
