@@ -21,6 +21,7 @@ pub mod layout;
 pub mod lint;
 pub mod model;
 pub mod ops;
+pub mod paint;
 pub mod patch;
 pub mod paths;
 pub mod persist;

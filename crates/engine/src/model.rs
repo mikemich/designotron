@@ -215,6 +215,13 @@ pub struct Node {
   pub stroke_weight: f64,
   pub stroke_align: StrokeAlign,
   pub stroke_dash: Vec<f64>,
+  // Strokes (W3-D)
+  /// One weight per side (top, right, bottom, left) for rectangles, frames, components and instances.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub stroke_weights: Option<[f64; 4]>,
+  /// `None` keeps the historical round joins.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub stroke_join: Option<StrokeJoin>,
   pub corner_radius: f64,
   /// Independent corners: top-left, top-right, bottom-right, bottom-left.
   pub corner_radii: Option<[f64; 4]>,
@@ -292,6 +299,8 @@ impl Default for Node {
       stroke_weight: 1.0,
       stroke_align: StrokeAlign::Inside,
       stroke_dash: Vec::new(),
+      stroke_weights: None,
+      stroke_join: None,
       corner_radius: 0.0,
       corner_radii: None,
       effects: Vec::new(),
@@ -391,6 +400,8 @@ pub enum Paint {
     opacity: f64,
     #[serde(default = "yes")]
     visible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handles: Option<GradientHandles>,
   },
   #[serde(rename_all = "camelCase")]
   RadialGradient {
@@ -399,6 +410,30 @@ pub enum Paint {
     opacity: f64,
     #[serde(default = "yes")]
     visible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handles: Option<GradientHandles>,
+  },
+  /// Colours sweep around `handles.start`; the sweep begins towards `handles.end`.
+  #[serde(rename_all = "camelCase")]
+  AngularGradient {
+    stops: Vec<GradientStop>,
+    #[serde(default = "one")]
+    opacity: f64,
+    #[serde(default = "yes")]
+    visible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handles: Option<GradientHandles>,
+  },
+  /// Like radial, but the colour follows |u| + |v| so the rings are diamonds.
+  #[serde(rename_all = "camelCase")]
+  DiamondGradient {
+    stops: Vec<GradientStop>,
+    #[serde(default = "one")]
+    opacity: f64,
+    #[serde(default = "yes")]
+    visible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handles: Option<GradientHandles>,
   },
   #[serde(rename_all = "camelCase")]
   Image {
@@ -409,6 +444,9 @@ pub enum Paint {
     opacity: f64,
     #[serde(default = "yes")]
     visible: bool,
+    /// Where the whole image sits in the layer's box (`ScaleMode::Crop`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    crop: Option<ImageCrop>,
   },
 }
 
@@ -426,6 +464,8 @@ impl Paint {
       Paint::Solid { visible, .. }
       | Paint::LinearGradient { visible, .. }
       | Paint::RadialGradient { visible, .. }
+      | Paint::AngularGradient { visible, .. }
+      | Paint::DiamondGradient { visible, .. }
       | Paint::Image { visible, .. } => *visible,
     }
   }
@@ -435,9 +475,32 @@ impl Paint {
       Paint::Solid { opacity, .. }
       | Paint::LinearGradient { opacity, .. }
       | Paint::RadialGradient { opacity, .. }
+      | Paint::AngularGradient { opacity, .. }
+      | Paint::DiamondGradient { opacity, .. }
       | Paint::Image { opacity, .. } => *opacity,
     }
   }
+}
+
+/// Gradient control points in the layer's unit box (0..1, may lie outside it).
+/// Linear: `start` to `end`. Radial and diamond: centre `start`, first axis end `end`,
+/// second axis end `width`. Angular: centre `start`, sweep begins towards `end`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct GradientHandles {
+  pub start: [f64; 2],
+  pub end: [f64; 2],
+  pub width: [f64; 2],
+}
+
+/// Rectangle of the whole image relative to the layer box (the box is 0..1).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageCrop {
+  pub x: f64,
+  pub y: f64,
+  pub w: f64,
+  pub h: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -456,6 +519,7 @@ pub enum ScaleMode {
   Fit,
   Stretch,
   Tile,
+  Crop,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -465,6 +529,14 @@ pub enum StrokeAlign {
   Inside,
   Center,
   Outside,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum StrokeJoin {
+  Miter,
+  Bevel,
+  Round,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

@@ -46,6 +46,8 @@ pub const KNOWN_KEYS: &[&str] = &[
   "strokeWidth",
   "strokeAlign",
   "strokeDash",
+  "strokeWeights",
+  "strokeJoin",
   "cornerRadius",
   "shadow",
   "blur",

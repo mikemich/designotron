@@ -1753,6 +1753,7 @@ impl Engine {
           scale_mode: Default::default(),
           opacity: 1.0,
           visible: true,
+          crop: None,
         }];
         let id = self.insert_abs(n, parent.as_deref());
         self.selection = vec![id.clone()];

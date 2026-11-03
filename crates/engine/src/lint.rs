@@ -315,7 +315,10 @@ fn report_unlinked(doc: &Document, unlinked: BTreeMap<String, Vec<NodeId>>, out:
 fn solid(paints: &[Paint]) -> Option<Rgba> {
   paints.iter().rev().find(|p| p.visible()).and_then(|p| match p {
     Paint::Solid { color, opacity, .. } => color::parse(color).map(|c| c.with_alpha(*opacity)),
-    Paint::LinearGradient { stops, .. } | Paint::RadialGradient { stops, .. } => stops.first().and_then(|s| color::parse(&s.color)),
+    Paint::LinearGradient { stops, .. }
+    | Paint::RadialGradient { stops, .. }
+    | Paint::AngularGradient { stops, .. }
+    | Paint::DiamondGradient { stops, .. } => stops.first().and_then(|s| color::parse(&s.color)),
     Paint::Image { .. } => None,
   })
 }

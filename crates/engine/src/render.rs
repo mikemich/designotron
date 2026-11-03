@@ -5,11 +5,12 @@ use std::collections::HashMap;
 
 use crate::geom::{fmt, Mat, Point, Rect};
 use crate::model::{
-  Document, Effect, EffectType, Node, NodeId, NodeType, Paint, ScaleMode, StrokeAlign, StrokeCap, TextAlignH, TextAlignV, TextDecoration,
+  Document, Effect, EffectType, Node, NodeId, NodeType, Paint, ScaleMode, StrokeAlign, StrokeCap, StrokeJoin, TextAlignH, TextAlignV,
+  TextDecoration,
 };
-use crate::shapes;
 use crate::text::{layout_of_node, SpanStyle, TextMeasurer};
 use crate::{color, model};
+use crate::{paint, shapes};
 
 /// Size classes of canvas text (px, rounded up to the next step): about 1.25x apart, so the
 /// editor's level of detail switches rarely while zooming. Mirrors `TEXT_SIZE_STEPS` in
@@ -130,10 +131,10 @@ fn local_render_bounds<'a>(doc: &'a Document, m: &dyn TextMeasurer, memo: &mut H
       return *r;
     }
   }
-  let sm = stroke_margin(n);
+  let [sl, st, sr, sb] = stroke_margins(n);
   let own = match n.kind {
     NodeType::Text => text_box(n, m),
-    _ => Rect::new(-sm, -sm, n.width + 2.0 * sm, n.height + 2.0 * sm),
+    _ => Rect::new(-sl, -st, n.width + sl + sr, n.height + st + sb),
   };
   // A group paints only its children; every other node paints its own box too.
   let mut b: Option<Rect> = (n.kind != NodeType::Group).then_some(own);
@@ -214,6 +215,26 @@ fn intersect(a: &Rect, b: &Rect) -> Option<Rect> {
   let y = a.y.max(b.y);
   let (r, bt) = (a.right().min(b.right()), a.bottom().min(b.bottom()));
   (r > x && bt > y).then(|| Rect::new(x, y, r - x, bt - y))
+}
+
+/// How far the visible strokes reach beyond the node's box: left, top, right, bottom.
+fn stroke_margins(n: &Node) -> [f64; 4] {
+  if let Some(weights) = per_side_weights(n) {
+    if n.strokes.iter().any(|p| p.visible()) {
+      return paint::ring_margins(weights, n.stroke_align).map(f64::ceil);
+    }
+    return [0.0; 4];
+  }
+  [stroke_margin(n); 4]
+}
+
+/// The per-side weights, when the node draws them (boxes only).
+fn per_side_weights(n: &Node) -> Option<[f64; 4]> {
+  let boxy = !matches!(
+    n.kind,
+    NodeType::Ellipse | NodeType::Polygon | NodeType::Star | NodeType::Line | NodeType::Vector | NodeType::Text | NodeType::Group
+  );
+  n.stroke_weights.filter(|_| boxy)
 }
 
 /// How far the visible strokes reach beyond the node's box.
@@ -449,18 +470,24 @@ impl<'a> Renderer<'a> {
     }
     let mut out = String::new();
     for p in n.fills.iter().filter(|p| p.visible()) {
-      let paint = self.paint(p, n.width, n.height);
+      let paint = self.paint(p, n.width, n.height, 0.0);
       out.push_str(&geo_el(geo, &paint));
     }
     out
   }
 
   fn strokes(&mut self, n: &Node, geo: &Geo) -> String {
+    if let (Some(weights), Geo::Rect { w, h, r }) = (per_side_weights(n), geo) {
+      return self.side_strokes(n, weights, paint::ring_path(*w, *h, weights, n.stroke_align, *r));
+    }
     if n.stroke_weight <= 0.0 {
       return String::new();
     }
     let mut out = String::new();
     let sw = n.stroke_weight;
+    let join = n
+      .stroke_join
+      .map_or(String::new(), |j| format!(" stroke-linejoin=\"{}\"", join_name(j)));
     let dash = if n.stroke_dash.is_empty() {
       String::new()
     } else {
@@ -471,19 +498,19 @@ impl<'a> Renderer<'a> {
     };
     let caps = self.line_caps(n);
     for p in n.strokes.iter().filter(|p| p.visible()) {
-      let paint = self.paint(p, n.width, n.height);
+      let paint = self.paint(p, n.width, n.height, sw);
       let stroke = format!(" fill=\"none\" stroke=\"{paint}\"{dash}");
       let el = match (geo, n.stroke_align) {
         (Geo::Rect { w, h, r }, StrokeAlign::Inside) => {
           format!(
-            "<path d=\"{}\" stroke-width=\"{}\"{stroke}/>",
+            "<path d=\"{}\" stroke-width=\"{}\"{stroke}{join}/>",
             shapes::rounded_rect_path(*w, *h, *r, sw / 2.0),
             fmt(sw)
           )
         }
         (Geo::Rect { w, h, r }, StrokeAlign::Outside) => {
           format!(
-            "<path d=\"{}\" stroke-width=\"{}\"{stroke}/>",
+            "<path d=\"{}\" stroke-width=\"{}\"{stroke}{join}/>",
             shapes::rounded_rect_path(*w, *h, *r, -sw / 2.0),
             fmt(sw)
           )
@@ -491,7 +518,7 @@ impl<'a> Renderer<'a> {
         (Geo::Ellipse { w, h }, align) if align != StrokeAlign::Center => {
           let off = if align == StrokeAlign::Inside { sw / 2.0 } else { -sw / 2.0 };
           format!(
-            "<ellipse cx=\"{}\" cy=\"{}\" rx=\"{}\" ry=\"{}\" stroke-width=\"{}\"{stroke}/>",
+            "<ellipse cx=\"{}\" cy=\"{}\" rx=\"{}\" ry=\"{}\" stroke-width=\"{}\"{stroke}{join}/>",
             fmt(w / 2.0),
             fmt(h / 2.0),
             fmt((w / 2.0 - off).max(0.0)),
@@ -506,19 +533,34 @@ impl<'a> Renderer<'a> {
             .push_str(&format!("<clipPath id=\"{cid}\">{}</clipPath>", geo_el(geo, "")));
           format!(
             "<g clip-path=\"url(#{cid})\">{}</g>",
-            geo_el_stroke(geo, &format!(" stroke-width=\"{}\"{stroke}", fmt(sw * 2.0)))
+            geo_el_stroke(geo, &format!(" stroke-width=\"{}\"{stroke}{join}", fmt(sw * 2.0)))
           )
         }
         _ => geo_el_stroke(
           geo,
           &format!(
-            " stroke-width=\"{}\" stroke-linecap=\"{}\" stroke-linejoin=\"round\"{stroke}{caps}",
+            " stroke-width=\"{}\" stroke-linecap=\"{}\" stroke-linejoin=\"{}\"{stroke}{caps}",
             fmt(sw),
-            linecap(n)
+            linecap(n),
+            n.stroke_join.map_or("round", join_name)
           ),
         ),
       };
       out.push_str(&el);
+    }
+    out
+  }
+
+  /// Per-side strokes: one filled ring per visible stroke paint.
+  fn side_strokes(&mut self, n: &Node, weights: [f64; 4], ring: String) -> String {
+    let pad = weights.iter().cloned().fold(0.0_f64, f64::max);
+    if pad <= 0.0 {
+      return String::new();
+    }
+    let mut out = String::new();
+    for p in n.strokes.iter().filter(|p| p.visible()) {
+      let paint = self.paint(p, n.width, n.height, pad);
+      out.push_str(&format!("<path d=\"{ring}\" fill=\"{paint}\" fill-rule=\"evenodd\"/>"));
     }
     out
   }
@@ -564,10 +606,21 @@ impl<'a> Renderer<'a> {
     out
   }
 
-  /// Returns an SVG paint value, registering gradient/pattern defs as needed.
-  fn paint(&mut self, p: &Paint, w: f64, h: f64) -> String {
+  /// Returns an SVG paint value, registering gradient/pattern defs as needed. `pad` is how far
+  /// past the box the paint is used (strokes), for the paints that are patterns.
+  fn paint(&mut self, p: &Paint, w: f64, h: f64, pad: f64) -> String {
     match p {
       Paint::Solid { color, opacity, .. } => color::css_with_opacity(color, *opacity),
+      Paint::LinearGradient {
+        stops,
+        opacity,
+        handles: Some(hd),
+        ..
+      } => {
+        let gid = self.id("lg");
+        self.defs.push_str(&paint::linear_def(&gid, stops, *opacity, hd, w, h));
+        format!("url(#{gid})")
+      }
       Paint::LinearGradient { stops, angle, opacity, .. } => {
         let gid = self.id("lg");
         let a = angle.to_radians();
@@ -584,6 +637,16 @@ impl<'a> Renderer<'a> {
         ));
         format!("url(#{gid})")
       }
+      Paint::RadialGradient {
+        stops,
+        opacity,
+        handles: Some(hd),
+        ..
+      } => {
+        let gid = self.id("rg");
+        self.defs.push_str(&paint::radial_def(&gid, stops, *opacity, hd, w, h));
+        format!("url(#{gid})")
+      }
       Paint::RadialGradient { stops, opacity, .. } => {
         let gid = self.id("rg");
         self.defs.push_str(&format!(
@@ -592,12 +655,50 @@ impl<'a> Renderer<'a> {
         ));
         format!("url(#{gid})")
       }
+      Paint::AngularGradient {
+        stops, opacity, handles, ..
+      } => {
+        let pid = self.id("ag");
+        let hd = handles.unwrap_or_else(|| paint::default_handles(true));
+        match paint::angular_pattern(&pid, stops, *opacity, &hd, w, h, pad) {
+          Some(def) => {
+            self.defs.push_str(&def);
+            format!("url(#{pid})")
+          }
+          None => "none".into(),
+        }
+      }
+      Paint::DiamondGradient {
+        stops, opacity, handles, ..
+      } => {
+        let pid = self.id("dg");
+        let hd = handles.unwrap_or_else(|| paint::default_handles(false));
+        match paint::diamond_pattern(&pid, stops, *opacity, &hd, w, h, pad) {
+          Some(def) => {
+            self.defs.push_str(&def);
+            format!("url(#{pid})")
+          }
+          // Degenerate axes: nothing but the outer colour is left to show.
+          None => stops.last().map_or("none".into(), |s| color::css_with_opacity(&s.color, *opacity)),
+        }
+      }
+      Paint::Image {
+        src,
+        scale_mode: ScaleMode::Crop,
+        opacity,
+        crop: Some(crop),
+        ..
+      } => {
+        let pid = self.id("img");
+        self.defs.push_str(&paint::crop_pattern(&pid, src, *opacity, crop, w, h));
+        format!("url(#{pid})")
+      }
       Paint::Image {
         src, scale_mode, opacity, ..
       } => {
         let pid = self.id("img");
         let (par, pw, ph) = match scale_mode {
-          ScaleMode::Fill => ("xMidYMid slice", w, h),
+          ScaleMode::Fill | ScaleMode::Crop => ("xMidYMid slice", w, h),
           ScaleMode::Fit => ("xMidYMid meet", w, h),
           ScaleMode::Stretch => ("none", w, h),
           ScaleMode::Tile => ("xMidYMid slice", 64.0_f64.min(w), 64.0_f64.min(h)),
@@ -698,7 +799,7 @@ impl<'a> Renderer<'a> {
       .fills
       .iter()
       .find(|p| p.visible())
-      .map(|p| self.paint(p, n.width, n.height))
+      .map(|p| self.paint(p, n.width, n.height, 0.0))
       .unwrap_or_else(|| "none".into());
     let lh = lay.line_height;
     let offset = match t.align_v {
@@ -859,6 +960,14 @@ fn is_closed(n: &Node) -> bool {
     .unwrap_or(false)
 }
 
+fn join_name(j: StrokeJoin) -> &'static str {
+  match j {
+    StrokeJoin::Miter => "miter",
+    StrokeJoin::Bevel => "bevel",
+    StrokeJoin::Round => "round",
+  }
+}
+
 fn linecap(n: &Node) -> &'static str {
   match n.shape.as_ref().map(|s| s.end_cap) {
     Some(StrokeCap::Round) => "round",
@@ -913,7 +1022,7 @@ fn geo_el_stroke(geo: &Geo, stroke_attrs: &str) -> String {
   }
 }
 
-fn stops_svg(stops: &[model::GradientStop], opacity: f64) -> String {
+pub(crate) fn stops_svg(stops: &[model::GradientStop], opacity: f64) -> String {
   stops
     .iter()
     .map(|s| {

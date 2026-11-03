@@ -1209,3 +1209,55 @@ fn screen_with_two_rects(e: &mut Engine) -> (String, Vec<String>) {
   let kids = e.doc.get(&screen).unwrap().children.clone();
   (screen, kids)
 }
+
+#[test]
+fn paint_specs_accept_conic_diamond_handles_and_stroke_keys() {
+  use crate::model::{Paint, StrokeJoin};
+  let mut e = Engine::new(Box::new(crate::text::HeuristicMeasurer), 3);
+  let id = one(
+    &mut e,
+    json!({ "type": "rectangle", "width": 100, "height": 60, "fill": "conic-gradient(red, blue)" }),
+  );
+  assert!(matches!(&e.doc.get(&id).unwrap().fills[0], Paint::AngularGradient { stops, handles: None, .. } if stops.len() == 2));
+  let id = one(
+    &mut e,
+    json!({ "type": "rectangle", "width": 100, "height": 60, "fill": "conic-gradient(from 90deg at 25% 75%, #f00 0%, #00f 100%)" }),
+  );
+  match &e.doc.get(&id).unwrap().fills[0] {
+    Paint::AngularGradient { handles: Some(h), .. } => {
+      assert_eq!(h.start, [0.25, 0.75]);
+      assert!((h.end[0] - 0.75).abs() < 1e-9 && (h.end[1] - 0.75).abs() < 1e-9);
+    }
+    other => panic!("{other:?}"),
+  }
+  let id = one(
+    &mut e,
+    json!({ "type": "rectangle", "width": 100, "height": 60,
+      "fill": { "type": "diamondGradient", "stops": [{ "color": "#fff", "position": 0 }, { "color": "#000", "position": 1 }],
+        "handles": { "start": [0.5, 0.5], "end": [1, 0.5], "width": [0.5, 1] } },
+      "stroke": "#000", "strokeWeights": [4, 0, 0, 0], "strokeJoin": "bevel" }),
+  );
+  let n = e.doc.get(&id).unwrap();
+  assert!(matches!(&n.fills[0], Paint::DiamondGradient { handles: Some(_), .. }));
+  assert_eq!(n.stroke_weights, Some([4.0, 0.0, 0.0, 0.0]));
+  assert_eq!(n.stroke_join, Some(StrokeJoin::Bevel));
+  let id = one(
+    &mut e,
+    json!({ "type": "rectangle", "width": 10, "height": 10, "strokeWeights": { "top": 2, "left": 1 } }),
+  );
+  assert_eq!(e.doc.get(&id).unwrap().stroke_weights, Some([2.0, 0.0, 0.0, 1.0]));
+  for bad in [json!([1, 2]), json!("thick")] {
+    assert!(e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "rectangle", "strokeWeights": bad }] })
+      ))
+      .is_err());
+  }
+  assert!(e
+    .dispatch(ai(
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle", "strokeJoin": "sharp" }] })
+    ))
+    .is_err());
+}

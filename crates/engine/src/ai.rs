@@ -13,9 +13,9 @@ use crate::codegen;
 use crate::engine::{Command, Engine};
 use crate::geom::Point;
 use crate::model::{
-  Action, Align, AutoLayout, ColorStyle, Document, Effect, EffectType, GradientStop, Interaction, LayoutDirection, Node, NodeId, NodeType,
-  OverlayBackground, OverlayPosition, OverlaySettings, Paint, RawPath, ScaleMode, Sizing, StrokeAlign, SubPath, TextAlignH, TextAlignV,
-  TextAutoResize, TextCase, TextDecoration, TextStyle, Transition, Trigger, VectorData, VectorPoint,
+  Action, Align, AutoLayout, ColorStyle, Document, Effect, EffectType, GradientHandles, GradientStop, Interaction, LayoutDirection, Node,
+  NodeId, NodeType, OverlayBackground, OverlayPosition, OverlaySettings, Paint, RawPath, ScaleMode, Sizing, StrokeAlign, StrokeJoin,
+  SubPath, TextAlignH, TextAlignV, TextAutoResize, TextCase, TextDecoration, TextStyle, Transition, Trigger, VectorData, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render;
@@ -86,10 +86,12 @@ fn spec_schema() -> Value {
       "x": { "type": "number" }, "y": { "type": "number" },
       "width": { "description": "number (px), or 'fill' / 'hug' inside auto layout. Percentages other than '100%' are not supported", "type": ["number", "string"] },
       "height": { "description": "number (px), or 'fill' / 'hug'", "type": ["number", "string"] },
-      "fill": { "description": "Hex colour like '#7C5CFF' (rgb()/rgba() also work), a CSS linear-gradient(...) string, or 'none'", "type": "string" },
+      "fill": { "description": "Hex colour like '#7C5CFF' (rgb()/rgba() also work), a CSS linear-gradient(...), radial-gradient(...) or conic-gradient(from 90deg at 50% 50%, ...) string, a paint object (type solid, linearGradient, radialGradient, angularGradient, diamondGradient with stops [{color, position}] and optional handles {start, end, width} in 0..1 box units), or 'none'", "type": "string" },
       "stroke": { "type": "string", "description": "Hex colour" },
       "strokeWidth": { "type": "number" },
       "strokeAlign": { "type": "string", "enum": ["inside", "center", "outside"] },
+      "strokeWeights": { "description": "Individual strokes for rectangles and frames: [top, right, bottom, left] or {top, right, bottom, left}; null goes back to strokeWidth", "type": ["array", "object"] },
+      "strokeJoin": { "type": "string", "enum": ["miter", "bevel", "round"] },
       "cornerRadius": { "description": "number, [r] or [topLeft, topRight, bottomRight, bottomLeft], or {topLeft|tl, topRight|tr, bottomRight|br, bottomLeft|bl}", "type": ["number", "array", "object"] },
       "opacity": { "type": "number" },
       "rotation": { "type": "number" },
@@ -1882,6 +1884,7 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
       scale_mode: ScaleMode::Fill,
       opacity: 1.0,
       visible: true,
+      crop: None,
     }];
   }
   match s.get("fillStyle") {
@@ -1942,6 +1945,28 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
         "strokeDash",
         format!("must be an array of numbers like [4, 2], got {}", parse::kind_of(other)),
       ))
+    }
+  }
+  match s.get("strokeWeights") {
+    None => {}
+    Some(Value::Null) => n.stroke_weights = None,
+    Some(v) => n.stroke_weights = Some(parse_stroke_weights(cx, v)?),
+  }
+  match s.get("strokeJoin") {
+    None => {}
+    Some(Value::Null) => n.stroke_join = None,
+    Some(v) => {
+      n.stroke_join = Some(parse::choice(
+        cx,
+        "strokeJoin",
+        v,
+        &[
+          (&["miter"], StrokeJoin::Miter),
+          (&["bevel"], StrokeJoin::Bevel),
+          (&["round"], StrokeJoin::Round),
+        ],
+        &parse::no_hint,
+      )?)
     }
   }
   if let Some(v) = s.get("cornerRadius").filter(|v| !v.is_null()) {
@@ -2586,6 +2611,7 @@ fn parse_fill_str(s: &str) -> Result<Option<Paint>, String> {
       angle,
       opacity: 1.0,
       visible: true,
+      handles: None,
     }));
   }
   if let Some(inner) = t.strip_prefix("radial-gradient(").and_then(|r| r.strip_suffix(')')) {
@@ -2601,7 +2627,11 @@ fn parse_fill_str(s: &str) -> Result<Option<Paint>, String> {
       stops: parse_stops(&stops_src),
       opacity: 1.0,
       visible: true,
+      handles: None,
     }));
+  }
+  if let Some(inner) = t.strip_prefix("conic-gradient(").and_then(|r| r.strip_suffix(')')) {
+    return parse_conic(t, &split_top_level(inner)).map(Some);
   }
   let c = crate::color::parse(t).ok_or_else(|| format!("unrecognised colour '{t}'"))?;
   Ok(Some(Paint::Solid {
@@ -2609,6 +2639,88 @@ fn parse_fill_str(s: &str) -> Result<Option<Paint>, String> {
     opacity: c.a,
     visible: true,
   }))
+}
+
+/// `strokeWeights`: `[top, right, bottom, left]` or `{top, right, bottom, left}` (a missing side is 0).
+fn parse_stroke_weights(cx: &parse::Ctx, v: &Value) -> Result<[f64; 4], String> {
+  let bad = || {
+    cx.err(
+      "strokeWeights",
+      format!(
+        "must be [top, right, bottom, left] or {{top, right, bottom, left}}, got {}",
+        parse::kind_of(v)
+      ),
+    )
+  };
+  let side = |x: &Value| parse::number(cx, "strokeWeights", x).map(|w| w.max(0.0));
+  match v {
+    Value::Array(a) if a.len() == 4 => Ok([side(&a[0])?, side(&a[1])?, side(&a[2])?, side(&a[3])?]),
+    Value::Object(o) => {
+      let get = |k: &str| o.get(k).map_or(Ok(0.0), side);
+      Ok([get("top")?, get("right")?, get("bottom")?, get("left")?])
+    }
+    _ => Err(bad()),
+  }
+}
+
+/// `conic-gradient([from <angle>] [at <x> <y>], stops...)`. The start angle and centre become
+/// handles (the angle is taken on a square box: the string doesn't know the layer's size).
+fn parse_conic(src: &str, parts: &[String]) -> Result<Paint, String> {
+  let mut from = 0.0_f64;
+  let mut at = [0.5, 0.5];
+  let mut custom = false;
+  let mut stops_src = parts;
+  if let Some(first) = parts.first() {
+    let f = first.trim();
+    if f.starts_with("from ") || f.starts_with("at ") {
+      custom = true;
+      stops_src = &parts[1..];
+      let toks: Vec<&str> = f.split_whitespace().collect();
+      let mut i = 0;
+      while i < toks.len() {
+        match toks[i] {
+          "from" => {
+            from = toks
+              .get(i + 1)
+              .and_then(|t| t.strip_suffix("deg"))
+              .and_then(|t| t.parse().ok())
+              .unwrap_or(0.0);
+            i += 2;
+          }
+          "at" => {
+            let pos = |t: Option<&&str>| match t.copied() {
+              Some("left") | Some("top") => Some(0.0),
+              Some("center") => Some(0.5),
+              Some("right") | Some("bottom") => Some(1.0),
+              Some(v) => v.strip_suffix('%').and_then(|v| v.parse::<f64>().ok()).map(|v| v / 100.0),
+              None => None,
+            };
+            at = [pos(toks.get(i + 1)).unwrap_or(0.5), pos(toks.get(i + 2)).unwrap_or(0.5)];
+            i += 3;
+          }
+          _ => i += 1,
+        }
+      }
+    }
+  }
+  if stops_src.len() < 2 {
+    return Err(format!("gradient '{src}' needs at least two colour stops"));
+  }
+  let handles = custom.then(|| {
+    let a = from.to_radians();
+    let (dx, dy) = (a.sin() * 0.5, -a.cos() * 0.5);
+    GradientHandles {
+      start: at,
+      end: [at[0] + dx, at[1] + dy],
+      width: [at[0] - dy, at[1] + dx],
+    }
+  });
+  Ok(Paint::AngularGradient {
+    stops: parse_stops(stops_src),
+    opacity: 1.0,
+    visible: true,
+    handles,
+  })
 }
 
 fn split_top_level(s: &str) -> Vec<String> {

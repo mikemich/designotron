@@ -12,6 +12,7 @@ use crate::model::{
   Action, Align, Document, EffectType, InstanceInfo, LayoutDirection, Node, NodeId, NodeType, OverlayPosition, OverlaySettings, Paint,
   PropKind, ScaleMode, Sizing, StrokeAlign, TextAlignH, TextAutoResize, TextCase, TextDecoration,
 };
+use crate::paint;
 use crate::props;
 use crate::render::{esc, export_svg_geometry, font_stack};
 use crate::text::TextMeasurer;
@@ -141,6 +142,8 @@ struct El {
   /// Name of a component to reference instead of inlining (`<Button />`).
   component_ref: Option<String>,
   comment: Option<String>,
+  /// Where the CSS only approximates the design (diamond gradients), as a comment in the output.
+  approx: Option<String>,
   /// `onNavigate` target: a screen name, "back", "overlay:<Screen>", "swap-overlay:<Screen>"
   /// or "close-overlay".
   navigate: Option<String>,
@@ -171,6 +174,7 @@ impl El {
       raw: None,
       component_ref: None,
       comment: None,
+      approx: None,
       navigate: None,
       overlay: None,
       url: None,
@@ -784,7 +788,7 @@ impl<'a> Ctx<'a> {
           if let Some(Paint::Solid { color, opacity, .. }) = n.strokes.iter().find(|p| p.visible()) {
             let lit = color::css_with_opacity(color, *opacity);
             for (k, val) in el.styles.iter_mut() {
-              if k == "border" || k == "outline" || k == "border-top" {
+              if k == "border" || k == "outline" || k == "border-top" || k == "border-color" {
                 *val = val.replace(&lit, &var);
               }
             }
@@ -827,7 +831,13 @@ impl<'a> Ctx<'a> {
       return;
     }
     if n.kind != NodeType::Text {
-      let bgs: Vec<String> = n.fills.iter().rev().filter(|p| p.visible()).map(css_paint).collect();
+      let bgs: Vec<String> = n
+        .fills
+        .iter()
+        .rev()
+        .filter(|p| p.visible())
+        .map(|p| css_paint(p, n.width, n.height))
+        .collect();
       if bgs.len() == 1 && !bgs[0].contains('(') {
         el.s("background-color", bgs[0].clone());
       } else if !bgs.is_empty() {
@@ -843,22 +853,36 @@ impl<'a> Ctx<'a> {
           .collect();
         el.s("background", layers.join(", "));
       }
-      if let Some(Paint::Image { scale_mode, .. }) = n.fills.iter().find(|p| matches!(p, Paint::Image { .. }) && p.visible()) {
-        el.s(
-          "background-size",
-          match scale_mode {
-            ScaleMode::Fill => "cover",
-            ScaleMode::Fit => "contain",
-            ScaleMode::Stretch => "100% 100%",
-            ScaleMode::Tile => "64px 64px",
-          },
-        );
-        el.s("background-position", "center");
+      if has_diamond(n) {
+        el.approx = Some(DIAMOND_NOTE.into());
+      }
+      if let Some(Paint::Image { scale_mode, crop, .. }) = n.fills.iter().find(|p| matches!(p, Paint::Image { .. }) && p.visible()) {
+        match (scale_mode, crop) {
+          // The whole image sits at `crop` in the layer's box; what pokes out is clipped by the box.
+          (ScaleMode::Crop, Some(c)) => {
+            el.s("background-size", format!("{} {}", px(c.w * n.width), px(c.h * n.height)));
+            el.s("background-position", format!("{} {}", px(c.x * n.width), px(c.y * n.height)));
+          }
+          _ => {
+            el.s(
+              "background-size",
+              match scale_mode {
+                ScaleMode::Fill | ScaleMode::Crop => "cover",
+                ScaleMode::Fit => "contain",
+                ScaleMode::Stretch => "100% 100%",
+                ScaleMode::Tile => "64px 64px",
+              },
+            );
+            el.s("background-position", "center");
+          }
+        }
         if *scale_mode != ScaleMode::Tile {
           el.s("background-repeat", "no-repeat");
         }
       }
-      if let Some(Paint::Solid { color, opacity, .. }) = n.strokes.iter().find(|p| p.visible()) {
+      if let (Some(weights), Some(Paint::Solid { color, opacity, .. })) = (side_weights(n), n.strokes.iter().find(|p| p.visible())) {
+        side_strokes(el, n, weights, &color::css_with_opacity(color, *opacity));
+      } else if let Some(Paint::Solid { color, opacity, .. }) = n.strokes.iter().find(|p| p.visible()) {
         if n.stroke_weight > 0.0 {
           let style = if n.stroke_dash.is_empty() { "solid" } else { "dashed" };
           let c = color::css_with_opacity(color, *opacity);
@@ -884,7 +908,7 @@ impl<'a> Ctx<'a> {
         el.s("overflow", "hidden");
       }
     }
-    let shadows: Vec<String> = n
+    let mut shadows: Vec<String> = n
       .effects
       .iter()
       .filter(|e| e.visible && matches!(e.kind, EffectType::DropShadow | EffectType::InnerShadow))
@@ -900,6 +924,11 @@ impl<'a> Ctx<'a> {
         )
       })
       .collect();
+    // Per-side strokes that sit outside the box (or half of them) are shadows, see `side_strokes`.
+    if let (Some(weights), Some(Paint::Solid { color, opacity, .. })) = (side_weights(n), n.strokes.iter().find(|p| p.visible())) {
+      let c = color::css_with_opacity(color, *opacity);
+      shadows.splice(0..0, side_shadows(n, weights, &c));
+    }
     if !shadows.is_empty() {
       if n.kind == NodeType::Text {
         let ts: Vec<String> = shadows.iter().map(|s| s.replace("inset ", "")).collect();
@@ -926,7 +955,10 @@ impl<'a> Ctx<'a> {
     match n.fills.iter().find(|p| p.visible()) {
       Some(Paint::Solid { color, opacity, .. }) => el.s("color", color::css_with_opacity(color, *opacity)),
       Some(p) => {
-        el.s("background", css_paint(p));
+        el.s("background", css_paint(p, n.width, n.height));
+        if has_diamond(n) {
+          el.approx = Some(DIAMOND_NOTE.into());
+        }
         el.s("-webkit-background-clip", "text");
         el.s("background-clip", "text");
         el.s("color", "transparent");
@@ -1048,6 +1080,12 @@ fn image_only(n: &Node) -> Option<String> {
   }
   let visible: Vec<&Paint> = n.fills.iter().filter(|p| p.visible()).collect();
   match visible.as_slice() {
+    // A cropped image needs its background offset, which `<img>` can't express.
+    [Paint::Image {
+      scale_mode: ScaleMode::Crop,
+      crop: Some(_),
+      ..
+    }] => None,
     [Paint::Image { src, .. }] => Some(src.clone()),
     _ => None,
   }
@@ -1126,13 +1164,105 @@ fn text_spans(t: &crate::model::TextProps) -> Vec<Span> {
   out
 }
 
-fn css_paint(p: &Paint) -> String {
+/// A paint as a CSS background value for a layer of `w` x `h` (gradient handles are in layer units).
+fn css_paint(p: &Paint, w: f64, h: f64) -> String {
   match p {
     Paint::Solid { color, opacity, .. } => color::css_with_opacity(color, *opacity),
+    Paint::LinearGradient {
+      stops,
+      opacity,
+      handles: Some(hd),
+      ..
+    } => format!(
+      "linear-gradient({}deg, {})",
+      fmt(paint::handle_angle(hd, w, h)),
+      css_stops(stops, *opacity)
+    ),
     Paint::LinearGradient { stops, angle, opacity, .. } => format!("linear-gradient({}deg, {})", fmt(*angle), css_stops(stops, *opacity)),
+    Paint::RadialGradient {
+      stops,
+      opacity,
+      handles: Some(hd),
+      ..
+    } => radial_css(stops, *opacity, hd, w, h),
     Paint::RadialGradient { stops, opacity, .. } => format!("radial-gradient(circle, {})", css_stops(stops, *opacity)),
+    Paint::AngularGradient {
+      stops, opacity, handles, ..
+    } => {
+      let hd = handles.unwrap_or_else(|| paint::default_handles(true));
+      format!(
+        "conic-gradient(from {}deg at {}% {}%, {})",
+        fmt(paint::handle_angle(&hd, w, h)),
+        fmt(hd.start[0] * 100.0),
+        fmt(hd.start[1] * 100.0),
+        css_stops(stops, *opacity)
+      )
+    }
+    // CSS has no diamond gradient: a radial one with the same centre and radii is the closest.
+    Paint::DiamondGradient {
+      stops, opacity, handles, ..
+    } => radial_css(stops, *opacity, &handles.unwrap_or_else(|| paint::default_handles(false)), w, h),
     Paint::Image { src, .. } => format!("url(\"{}\")", src.replace('"', "%22")),
   }
+}
+
+fn radial_css(stops: &[crate::model::GradientStop], opacity: f64, hd: &crate::model::GradientHandles, w: f64, h: f64) -> String {
+  let (rx, ry) = paint::handle_radii(hd, w, h);
+  format!(
+    "radial-gradient({}% {}% at {}% {}%, {})",
+    fmt(rx),
+    fmt(ry),
+    fmt(hd.start[0] * 100.0),
+    fmt(hd.start[1] * 100.0),
+    css_stops(stops, opacity)
+  )
+}
+
+const DIAMOND_NOTE: &str = "diamond gradient approximated";
+
+fn has_diamond(n: &Node) -> bool {
+  n.fills.iter().any(|p| p.visible() && matches!(p, Paint::DiamondGradient { .. }))
+}
+
+/// Per-side stroke weights, for the layers that draw them (boxes with a visible stroke).
+fn side_weights(n: &Node) -> Option<[f64; 4]> {
+  let boxy = matches!(
+    n.kind,
+    NodeType::Rectangle | NodeType::Frame | NodeType::Component | NodeType::ComponentSet | NodeType::Instance
+  );
+  n.stroke_weights.filter(|w| boxy && w.iter().any(|v| *v > 0.0))
+}
+
+/// Per-side strokes as borders (inside) or, outside the box, `box-shadow`s with offsets and no
+/// blur (see `side_shadows`): CSS borders can't sit outside without moving the layout. Corner
+/// squares between two sides are left out of the shadows.
+fn side_strokes(el: &mut El, n: &Node, weights: [f64; 4], color: &str) {
+  let [t, r, b, l] = weights;
+  let (bt, br, bb, bl) = match n.stroke_align {
+    StrokeAlign::Inside => (t, r, b, l),
+    StrokeAlign::Center => (t / 2.0, r / 2.0, b / 2.0, l / 2.0),
+    StrokeAlign::Outside => (0.0, 0.0, 0.0, 0.0),
+  };
+  el.s("border-style", "solid");
+  el.s("border-color", color);
+  for (side, v) in [("top", bt), ("right", br), ("bottom", bb), ("left", bl)] {
+    el.s(&format!("border-{side}-width"), px(v));
+  }
+}
+
+/// The outside half (centre) or all (outside) of a per-side stroke as offset shadows.
+fn side_shadows(n: &Node, weights: [f64; 4], color: &str) -> Vec<String> {
+  let [t, r, b, l] = weights;
+  let k = match n.stroke_align {
+    StrokeAlign::Inside => return vec![],
+    StrokeAlign::Center => 0.5,
+    StrokeAlign::Outside => 1.0,
+  };
+  [(0.0, -t), (r, 0.0), (0.0, b), (-l, 0.0)]
+    .into_iter()
+    .filter(|(x, y)| *x != 0.0 || *y != 0.0)
+    .map(|(x, y)| format!("{} {} 0 0 {color}", px(x * k), px(y * k)))
+    .collect()
 }
 
 fn css_stops(stops: &[crate::model::GradientStop], opacity: f64) -> String {
@@ -1214,6 +1344,13 @@ fn tw_class(k: &str, v: &str) -> String {
     ("text-transform", "capitalize") => "capitalize".into(),
     ("font-style", "italic") => "italic".into(),
     ("border-radius", "50%") => "rounded-full".into(),
+    ("border-style", "solid") => "border-solid".into(),
+    ("border-top-width", _) => tw_border_side("t", v),
+    ("border-right-width", _) => tw_border_side("r", v),
+    ("border-bottom-width", _) => tw_border_side("b", v),
+    ("border-left-width", _) => tw_border_side("l", v),
+    ("border-color", _) if v.starts_with("var(") => format!("border-[color:{a}]"),
+    ("border-color", _) => format!("border-[{a}]"),
     ("background-size", "cover") => "bg-cover".into(),
     ("background-size", "contain") => "bg-contain".into(),
     ("background-position", "center") => "bg-center".into(),
@@ -1252,6 +1389,14 @@ fn tw_class(k: &str, v: &str) -> String {
     ("box-shadow", _) => format!("shadow-[{a}]"),
     ("font-family", _) => format!("font-[{}]", tw_value(&v.replace('\'', "")).replace(",_", ",")),
     _ => format!("[{k}:{a}]"),
+  }
+}
+
+fn tw_border_side(side: &str, v: &str) -> String {
+  if v == "0" || v == "0px" {
+    format!("border-{side}-0")
+  } else {
+    format!("border-{side}-[{}]", tw_value(v))
   }
 }
 
@@ -1295,6 +1440,9 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
   let pad = "  ".repeat(depth);
   if let Some(c) = &el.comment {
     out.push_str(&format!("{pad}{{/* {} */}}\n", c.replace("*/", "")));
+  }
+  if let Some(c) = &el.approx {
+    out.push_str(&format!("{pad}{{/* {c} */}}\n"));
   }
   let mut classes: Vec<String> = el.styles.iter().map(|(k, v)| tw_class(k, v)).filter(|c| !c.is_empty()).collect();
   classes.dedup();
@@ -1418,7 +1566,10 @@ fn html(el: &El, depth: usize, out: &mut String) {
     );
   }
   decls.extend(el.styles.iter().cloned());
-  let style: String = decls.iter().map(|(k, v)| format!("{k}: {v}; ")).collect();
+  let mut style: String = decls.iter().map(|(k, v)| format!("{k}: {v}; ")).collect();
+  if let Some(c) = &el.approx {
+    style.push_str(&format!("/* {c} */"));
+  }
   let style = esc(style.trim_end());
   let mut link = el
     .navigate
@@ -2078,6 +2229,7 @@ mod tests {
       scale_mode: ScaleMode::Fill,
       opacity: 1.0,
       visible: true,
+      crop: None,
     }];
     doc.insert(img, Some("home"), &page, None);
     let mut cta = crate::ops::default_node(NodeType::Frame, "cta".into(), "Primary button".into());
@@ -2271,5 +2423,98 @@ mod tests {
     let h = export_html(&doc, "home", &HeuristicMeasurer);
     assert!(h.contains("display: flex"));
     assert!(h.contains("Hello &quot;world&quot;"));
+  }
+
+  #[test]
+  fn angular_diamond_and_handle_gradients_become_css() {
+    use crate::model::{GradientHandles, GradientStop};
+    let stops = vec![
+      GradientStop {
+        color: "#FF0000".into(),
+        position: 0.0,
+      },
+      GradientStop {
+        color: "#0000FF".into(),
+        position: 1.0,
+      },
+    ];
+    let mut doc = sample();
+    let mut a = crate::ops::default_node(NodeType::Rectangle, "ang".into(), "Ang".into());
+    a.fills = vec![Paint::AngularGradient {
+      stops: stops.clone(),
+      opacity: 1.0,
+      visible: true,
+      handles: Some(GradientHandles {
+        start: [0.25, 0.5],
+        end: [1.0, 0.5],
+        width: [0.25, 1.0],
+      }),
+    }];
+    let page = doc.get("home").unwrap().page.clone();
+    doc.insert(a, Some("home"), &page, None);
+    let mut d = crate::ops::default_node(NodeType::Rectangle, "dia".into(), "Dia".into());
+    d.fills = vec![Paint::DiamondGradient {
+      stops,
+      opacity: 1.0,
+      visible: true,
+      handles: None,
+    }];
+    doc.insert(d, Some("home"), &page, None);
+    let react = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(react.contains("conic-gradient(from_90deg_at_25%_50%"), "{react}");
+    assert!(react.contains("radial-gradient(50%_50%_at_50%_50%"), "{react}");
+    assert!(react.contains("diamond gradient approximated"), "{react}");
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(
+      html.contains("conic-gradient(from 90deg at 25% 50%") && html.contains("/* diamond gradient approximated */"),
+      "{html}"
+    );
+  }
+
+  #[test]
+  fn individual_strokes_become_per_side_borders() {
+    let mut doc = sample();
+    let page = doc.get("home").unwrap().page.clone();
+    let mut r = crate::ops::default_node(NodeType::Rectangle, "bx".into(), "Box".into());
+    r.strokes = vec![Paint::solid("#112233")];
+    r.stroke_weights = Some([2.0, 0.0, 0.0, 0.0]);
+    doc.insert(r, Some("home"), &page, None);
+    let react = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(
+      react.contains("border-t-[2px]") && react.contains("border-r-0") && react.contains("border-solid"),
+      "{react}"
+    );
+    // Outside strokes are offset shadows instead of borders.
+    doc.get_mut("bx").unwrap().stroke_align = StrokeAlign::Outside;
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(html.contains("box-shadow: 0 -2px 0 0 #112233"), "{html}");
+  }
+
+  #[test]
+  fn cropped_images_offset_their_background() {
+    use crate::model::ImageCrop;
+    let mut doc = sample();
+    let page = doc.get("home").unwrap().page.clone();
+    let mut r = crate::ops::default_node(NodeType::Rectangle, "pic".into(), "Pic".into());
+    r.width = 200.0;
+    r.height = 100.0;
+    r.fills = vec![Paint::Image {
+      src: "https://example.com/c.png".into(),
+      scale_mode: ScaleMode::Crop,
+      opacity: 1.0,
+      visible: true,
+      crop: Some(ImageCrop {
+        x: -0.5,
+        y: 0.0,
+        w: 2.0,
+        h: 1.0,
+      }),
+    }];
+    doc.insert(r, Some("home"), &page, None);
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(
+      html.contains("background-size: 400px 100px") && html.contains("background-position: -100px 0"),
+      "{html}"
+    );
   }
 }

@@ -173,10 +173,23 @@ impl Import<'_> {
           } else {
             180.0
           };
-          json!({ "type": "linearGradient", "stops": stops(), "angle": angle, "opacity": opacity, "visible": visible })
+          let mut linear = json!({ "type": "linearGradient", "stops": stops(), "angle": angle, "opacity": opacity, "visible": visible });
+          if let (Some(hd), Some(o)) = (handles(&p), linear.as_object_mut()) {
+            o.insert("handles".into(), hd);
+          }
+          linear
         }
         "GRADIENT_RADIAL" | "GRADIENT_ANGULAR" | "GRADIENT_DIAMOND" => {
-          json!({ "type": "radialGradient", "stops": stops(), "opacity": opacity, "visible": visible })
+          let kind = match str_of(&p, "type") {
+            Some("GRADIENT_ANGULAR") => "angularGradient",
+            Some("GRADIENT_DIAMOND") => "diamondGradient",
+            _ => "radialGradient",
+          };
+          let mut radial = json!({ "type": kind, "stops": stops(), "opacity": opacity, "visible": visible });
+          if let (Some(hd), Some(o)) = (handles(&p), radial.as_object_mut()) {
+            o.insert("handles".into(), hd);
+          }
+          radial
         }
         "IMAGE" => {
           let reference = str_of(&p, "imageRef").unwrap_or("");
@@ -188,9 +201,18 @@ impl Import<'_> {
             "FIT" => "fit",
             "TILE" => "tile",
             "STRETCH" => "stretch",
+            "CROP" => "crop",
             _ => "fill",
           };
-          json!({ "type": "image", "src": src, "scaleMode": mode, "opacity": opacity, "visible": visible })
+          let mut image = json!({ "type": "image", "src": src, "scaleMode": mode, "opacity": opacity, "visible": visible });
+          if mode == "crop" {
+            match crop_rect(&p) {
+              Some(c) => image["crop"] = c,
+              // A rotated or skewed crop can't be kept: fill is the closest.
+              None => image["scaleMode"] = json!("fill"),
+            }
+          }
+          image
         }
         _ => continue,
       };
@@ -361,6 +383,23 @@ impl Import<'_> {
           "CENTER" => "center",
           "OUTSIDE" => "outside",
           _ => "inside",
+        }),
+      );
+    }
+    if let Some(w) = f.get("individualStrokeWeights") {
+      let side = |k: &str| num(w, k).unwrap_or(0.0);
+      n.insert(
+        "strokeWeights".into(),
+        json!([side("top"), side("right"), side("bottom"), side("left")]),
+      );
+    }
+    if let Some(j) = str_of(f, "strokeJoin") {
+      n.insert(
+        "strokeJoin".into(),
+        json!(match j {
+          "BEVEL" => "bevel",
+          "ROUND" => "round",
+          _ => "miter",
         }),
       );
     }
@@ -784,6 +823,28 @@ fn master_figma_id(child: &str, inst: &str) -> Option<String> {
   }
 }
 
+/// `gradientHandlePositions` (start, end, width in the layer's unit box) as our handles.
+fn handles(p: &Value) -> Option<Value> {
+  let hs = p.get("gradientHandlePositions")?.as_array()?;
+  if hs.len() < 3 {
+    return None;
+  }
+  let pt = |i: usize| json!([num(&hs[i], "x").unwrap_or(0.0), num(&hs[i], "y").unwrap_or(0.0)]);
+  Some(json!({ "start": pt(0), "end": pt(1), "width": pt(2) }))
+}
+
+/// Where the whole image sits in the layer for a `CROP` paint: `imageTransform` maps layer
+/// units to image units, so the image rectangle is its inverse. Only without rotation.
+fn crop_rect(p: &Value) -> Option<Value> {
+  let t = p.get("imageTransform")?.as_array()?;
+  let at = |r: usize, c: usize| t.get(r).and_then(|row| row.get(c)).and_then(|v| v.as_f64());
+  let (a, b, tx, c, d, ty) = (at(0, 0)?, at(0, 1)?, at(0, 2)?, at(1, 0)?, at(1, 1)?, at(1, 2)?);
+  if a.abs() < 1e-6 || d.abs() < 1e-6 || b.abs() > 1e-6 || c.abs() > 1e-6 {
+    return None;
+  }
+  Some(json!({ "x": -tx / a, "y": -ty / d, "w": 1.0 / a, "h": 1.0 / d }))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -904,5 +965,49 @@ mod tests {
     assert_eq!(master_figma_id("I3:1;5:6;1:2", "3:1").as_deref(), Some("I5:6;1:2"));
     assert_eq!(master_figma_id("I9:9;5:6;1:2", "I9:9;5:6").as_deref(), Some("1:2"));
     assert_eq!(master_figma_id("4:4", "3:1"), None);
+  }
+
+  #[test]
+  fn imports_angular_gradients_individual_strokes_and_crop() {
+    let stops = json!([
+      { "position": 0, "color": { "r": 1, "g": 0, "b": 0, "a": 1 } },
+      { "position": 1, "color": { "r": 0, "g": 0, "b": 1, "a": 1 } }
+    ]);
+    let file = json!({
+      "name": "Paint",
+      "document": { "id": "0:0", "type": "DOCUMENT", "children": [{
+        "id": "0:1", "type": "CANVAS", "name": "P", "children": [
+          { "id": "1:1", "type": "RECTANGLE", "name": "Sweep",
+            "absoluteBoundingBox": { "x": 0, "y": 0, "width": 100, "height": 60 }, "size": { "x": 100, "y": 60 },
+            "relativeTransform": [[1, 0, 0], [0, 1, 0]],
+            "fills": [
+              { "type": "GRADIENT_ANGULAR", "gradientStops": stops,
+                "gradientHandlePositions": [{ "x": 0.5, "y": 0.5 }, { "x": 1, "y": 0.5 }, { "x": 0.5, "y": 1 }] },
+              { "type": "GRADIENT_DIAMOND", "gradientStops": stops }
+            ],
+            "strokes": [{ "type": "SOLID", "color": { "r": 0, "g": 0, "b": 0, "a": 1 } }], "strokeWeight": 4,
+            "individualStrokeWeights": { "top": 4, "right": 0, "bottom": 1, "left": 2 }, "strokeJoin": "BEVEL" }
+        ] }] }
+    });
+    let mut gen = IdGen::new(7);
+    let mut doc = new_document(&mut gen, "x");
+    import(&mut doc, &mut gen, &file, &BTreeMap::new()).unwrap();
+    let n = doc.nodes.values().find(|n| n.name == "Sweep").unwrap();
+    match &n.fills[0] {
+      crate::model::Paint::AngularGradient { handles: Some(h), .. } => assert_eq!(h.end, [1.0, 0.5]),
+      other => panic!("{other:?}"),
+    }
+    assert!(matches!(&n.fills[1], crate::model::Paint::DiamondGradient { handles: None, .. }));
+    assert_eq!(n.stroke_weights, Some([4.0, 0.0, 1.0, 2.0]));
+    assert_eq!(n.stroke_join, Some(crate::model::StrokeJoin::Bevel));
+  }
+
+  #[test]
+  fn crop_transforms_invert_into_image_rectangles() {
+    let p = json!({ "imageTransform": [[0.5, 0, 0.25], [0, 0.5, 0.1]] });
+    let c = crop_rect(&p).unwrap();
+    assert_eq!((c["x"].as_f64(), c["w"].as_f64()), (Some(-0.5), Some(2.0)));
+    assert!((c["y"].as_f64().unwrap() + 0.2).abs() < 1e-9);
+    assert!(crop_rect(&json!({ "imageTransform": [[0, 1, 0], [1, 0, 0]] })).is_none());
   }
 }
