@@ -230,6 +230,10 @@ export interface Node {
   masterId: string | null;
   fillStyle: string | null;
   textStyle: string | null;
+  // Styles (W3-C): the engine leaves these keys out while unset.
+  effectStyle?: string | null;
+  gridStyle?: string | null;
+  strokeStyle?: string | null;
   interactions: Interaction[];
   // Prototype (W3-A)
   /** Frames: scrolling directions in the prototype player; the engine leaves the key out for "none". */
@@ -293,6 +297,8 @@ export interface Variable {
   /** Mode id → value (or {alias: variableId}). */
   values: Record<string, unknown>;
   description: string;
+  /** Properties the variable is offered for (see variableScopes.ts); empty or missing = all. */
+  scopes?: string[];
 }
 
 export interface VariableCollection {
@@ -300,6 +306,20 @@ export interface VariableCollection {
   name: string;
   modes: { id: string; name: string }[];
   variables: Variable[];
+}
+
+export interface EffectStyle {
+  id: string;
+  name: string;
+  effects: Effect[];
+  description?: string;
+}
+
+export interface GridStyle {
+  id: string;
+  name: string;
+  grids: LayoutGrid[];
+  description?: string;
 }
 
 export interface LayoutGrid {
@@ -336,6 +356,9 @@ export interface Doc {
   styles: {
     colors: { id: string; name: string; color: string }[];
     texts: { id: string; name: string; fontFamily: string; fontSize: number; fontWeight: number; lineHeight: number | null; letterSpacing: number }[];
+    /** Left out of files that have none. */
+    effects?: EffectStyle[];
+    grids?: GridStyle[];
   };
   variables: VariableCollection[];
   comments: Record<string, CommentThread>;

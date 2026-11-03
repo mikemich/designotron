@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
-import { Hash, Palette, Plus, ToggleLeft, Trash2, Type as TypeIcon, X } from "lucide-react";
-import { dispatch, useDoc, useStore } from "../store";
+import { ChevronDown, ChevronRight, Hash, Link2, Palette, Plus, SlidersHorizontal, ToggleLeft, Trash2, Type as TypeIcon, Unlink, X } from "lucide-react";
+import { dispatch, toast, useDoc, useStore } from "../store";
 import type { VarKind, Variable, VariableCollection } from "../types";
-import { Menu, type MenuItem, useDialog } from "../ui/controls";
+import { Menu, type MenuItem, Popover, useDialog } from "../ui/controls";
 import { cssColor } from "../ui/color";
+import { useFolderState } from "./FolderTree";
+import { folderSize, groupBySlash, type Folder } from "./groupBySlash";
+import { aliasCycle, SCOPES, SCOPES_FOR_KIND } from "./variableScopes";
 
 const uid = (p: string) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
@@ -40,13 +43,73 @@ function Commit({ value, onCommit, className, type = "text" }: { value: string; 
   );
 }
 
-function ValueCell({ v, mode, onChange }: { v: Variable; mode: string; onChange: (val: unknown) => void }) {
+const aliasOf = (val: unknown): string | null => {
+  const a = val && typeof val === "object" ? (val as { alias?: unknown }).alias : null;
+  return typeof a === "string" ? a : null;
+};
+
+/** A variable's value in a mode with aliases followed (the first mode's value when this mode has none). */
+export function resolveValue(collections: VariableCollection[], id: string, mode: string): unknown {
+  const all = new Map(collections.flatMap((c) => c.variables.map((v) => [v.id, { v, first: c.modes[0]?.id }] as const)));
+  let cur = id;
+  for (let i = 0; i < 8; i++) {
+    const x = all.get(cur);
+    if (!x) return undefined;
+    const val = x.v.values[mode] ?? (x.first ? x.v.values[x.first] : undefined) ?? Object.values(x.v.values)[0];
+    const next = aliasOf(val);
+    if (!next) return val;
+    cur = next;
+  }
+  return undefined;
+}
+
+function ValueCell({
+  v,
+  mode,
+  collections,
+  onChange,
+  onAlias,
+}: {
+  v: Variable;
+  mode: string;
+  collections: VariableCollection[];
+  onChange: (val: unknown) => void;
+  /** Opens the "Alias…" picker anchored at the button. */
+  onAlias: (anchor: DOMRect) => void;
+}) {
   const val = v.values[mode];
-  if (val && typeof val === "object" && "alias" in (val as any)) return <span className="muted small">alias</span>;
+  const target = aliasOf(val);
+  const aliasBtn = (
+    <button className="ibtn" title="Alias to another variable…" aria-label={`Alias ${v.name} to another variable`} onClick={(e) => onAlias(e.currentTarget.getBoundingClientRect())}>
+      <Link2 size={12} />
+    </button>
+  );
+  if (target) {
+    const found = collections.flatMap((c) => c.variables.map((x) => ({ c, x }))).find((y) => y.x.id === target);
+    const resolved = resolveValue(collections, v.id, mode);
+    return (
+      <div className="row var-alias" style={{ gap: 6 }} data-alias={found?.x.name ?? "missing"}>
+        <span className="wf-chip var-alias-chip" title={found ? `Alias of ${found.c.name} / ${found.x.name}` : "The variable this pointed to is gone"}>
+          <Link2 size={12} className="wf-purple" />
+          <span className="wf-chip-name">{found ? found.x.name : "Missing variable"}</span>
+        </span>
+        {v.type === "color" && typeof resolved === "string" && (
+          <span className="swatch" title={resolved}>
+            <i style={{ background: cssColor(resolved) }} />
+          </span>
+        )}
+        {v.type !== "color" && resolved !== undefined && <span className="muted small">{String(resolved)}</span>}
+        <button className="ibtn" title="Detach alias (keep the current value)" aria-label={`Detach alias of ${v.name}`} onClick={() => onChange(resolved ?? DEFAULTS[v.type])}>
+          <Unlink size={12} />
+        </button>
+      </div>
+    );
+  }
+  let cell: JSX.Element;
   switch (v.type) {
     case "color": {
       const c = typeof val === "string" ? val : "#000000";
-      return (
+      cell = (
         <div className="row" style={{ gap: 6 }}>
           <label className="swatch" title="Pick colour">
             <i style={{ background: cssColor(c) }} />
@@ -55,14 +118,23 @@ function ValueCell({ v, mode, onChange }: { v: Variable; mode: string; onChange:
           <Commit value={c} onCommit={(x) => onChange(x.trim())} className="textinput mono" />
         </div>
       );
+      break;
     }
     case "number":
-      return <Commit value={String(val ?? 0)} type="number" onCommit={(x) => onChange(Number(x) || 0)} />;
+      cell = <Commit value={String(val ?? 0)} type="number" onCommit={(x) => onChange(Number(x) || 0)} />;
+      break;
     case "boolean":
-      return <input type="checkbox" checked={!!val} onChange={(e) => onChange(e.target.checked)} />;
+      cell = <input type="checkbox" checked={!!val} aria-label={v.name} onChange={(e) => onChange(e.target.checked)} />;
+      break;
     default:
-      return <Commit value={String(val ?? "")} onCommit={onChange} />;
+      cell = <Commit value={String(val ?? "")} onCommit={onChange} />;
   }
+  return (
+    <div className="row var-cell" style={{ gap: 2 }}>
+      <div style={{ flex: 1, minWidth: 0 }}>{cell}</div>
+      {aliasBtn}
+    </div>
+  );
 }
 
 /** Figma-style local variables editor: collections, modes as columns, variables as rows. */
@@ -71,9 +143,69 @@ export function VariablesDialog() {
   const collections = doc.variables ?? [];
   const [active, setActive] = useState<string | null>(collections[0]?.id ?? null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [scopeFor, setScopeFor] = useState<{ id: string; anchor: DOMRect } | null>(null);
   const coll = collections.find((c) => c.id === active) ?? collections[0];
   const close = () => useStore.setState({ variablesOpen: false });
   const dialogRef = useDialog(close);
+  const folders = useFolderState("variables:" + (coll?.id ?? ""));
+  const colSpan = (coll?.modes.length ?? 0) + 2;
+
+  const variableRow = (v: Variable, label: string, folder: string, depth: number) => (
+    <tr key={v.id} data-variable={v.name}>
+      <td>
+        <div className="row" style={{ gap: 6, paddingLeft: depth * 12 }}>
+          <span className="muted">{KIND_ICON[v.type]}</span>
+          <Commit
+            value={label}
+            onCommit={(name) => {
+              const t = name.trim();
+              if (t) update((c) => ({ ...c, variables: c.variables.map((x) => (x.id === v.id ? { ...x, name: folder ? `${folder}/${t}` : t } : x)) }));
+            }}
+          />
+          {SCOPES_FOR_KIND[v.type].length > 0 && (
+            <button
+              className={"ibtn" + (v.scopes?.length ? " on" : "")}
+              title={v.scopes?.length ? `Shown for: ${v.scopes.map((x) => SCOPES.find((y) => y.id === x)?.label ?? x).join(", ")}` : "Show in: all supported properties"}
+              aria-label={`Where ${v.name} is offered`}
+              onClick={(e) => setScopeFor({ id: v.id, anchor: e.currentTarget.getBoundingClientRect() })}
+            >
+              <SlidersHorizontal size={12} />
+            </button>
+          )}
+        </div>
+      </td>
+      {coll!.modes.map((m) => (
+        <td key={m.id}>
+          <ValueCell v={v} mode={m.id} collections={collections} onChange={(val) => setValue(v.id, m.id, val)} onAlias={(a) => pickAlias(v, m.id, a)} />
+        </td>
+      ))}
+      <td>
+        <button className="ibtn" title="Delete variable" aria-label={`Delete ${v.name}`} onClick={() => update((c) => ({ ...c, variables: c.variables.filter((x) => x.id !== v.id) }))}>
+          <Trash2 size={12} />
+        </button>
+      </td>
+    </tr>
+  );
+
+  /** Folders (names with a slash) as collapsible rows, then the loose variables. */
+  const renderFolder = (f: Folder<Variable>, depth: number): JSX.Element[] => [
+    ...f.folders.flatMap((g) => {
+      const open = folders.isOpen(g.path);
+      return [
+        <tr key={"folder:" + g.path} className="var-folder">
+          <td colSpan={colSpan}>
+            <button className="asset-folder" style={{ paddingLeft: 4 + depth * 12 }} aria-expanded={open} title={g.path} onClick={() => folders.toggle(g.path)}>
+              {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              <span className="asset-folder-name">{g.name}</span>
+              <span className="muted small">{folderSize(g)}</span>
+            </button>
+          </td>
+        </tr>,
+        ...(open ? renderFolder(g, depth + 1) : []),
+      ];
+    }),
+    ...f.items.map((e) => variableRow(e.item, e.label, f.path, depth)),
+  ];
 
   const update = (fn: (c: VariableCollection) => VariableCollection) => save(collections.map((c) => (c.id === coll.id ? fn(c) : c)));
   const addCollection = () => {
@@ -97,6 +229,31 @@ export function VariablesDialog() {
         variables: c.variables.map((v) => ({ ...v, values: { ...v.values, [id]: first ? v.values[first] : DEFAULTS[v.type] } })),
       };
     });
+  /** The "Alias…" picker: variables of the same type from any collection, never the variable itself. */
+  const pickAlias = (v: Variable, mode: string, anchor: DOMRect) => {
+    const items: MenuItem[] = [{ heading: `Alias ${v.name} to…` }];
+    for (const c of collections) {
+      const same = c.variables.filter((x) => x.type === v.type && x.id !== v.id);
+      if (!same.length) continue;
+      items.push({ heading: c.name });
+      for (const x of same) {
+        items.push({
+          label: x.name,
+          onClick: () => {
+            if (aliasCycle(collections, v.id, x.id)) {
+              toast(`Can't alias ${v.name} to ${x.name}: ${x.name} already refers back to ${v.name}.`, "error");
+              return;
+            }
+            setValue(v.id, mode, { alias: x.id });
+          },
+        });
+      }
+    }
+    if (items.length === 1) items.push({ label: `No other ${v.type} variables`, disabled: true });
+    setMenu({ x: anchor.left, y: anchor.bottom + 4, items });
+  };
+  const setScopes = (vid: string, scopes: string[]) =>
+    update((c) => ({ ...c, variables: c.variables.map((v) => (v.id === vid ? withScopes(v, scopes) : v)) }));
   const setValue = (vid: string, mode: string, val: unknown) =>
     update((c) => ({ ...c, variables: c.variables.map((v) => (v.id === vid ? { ...v, values: { ...v.values, [mode]: val } } : v)) }));
 
@@ -152,26 +309,7 @@ export function VariablesDialog() {
                   </tr>
                 </thead>
                 <tbody>
-                  {coll.variables.map((v) => (
-                    <tr key={v.id}>
-                      <td>
-                        <div className="row" style={{ gap: 6 }}>
-                          <span className="muted">{KIND_ICON[v.type]}</span>
-                          <Commit value={v.name} onCommit={(name) => name.trim() && update((c) => ({ ...c, variables: c.variables.map((x) => (x.id === v.id ? { ...x, name: name.trim() } : x)) }))} />
-                        </div>
-                      </td>
-                      {coll.modes.map((m) => (
-                        <td key={m.id}>
-                          <ValueCell v={v} mode={m.id} onChange={(val) => setValue(v.id, m.id, val)} />
-                        </td>
-                      ))}
-                      <td>
-                        <button className="ibtn" title="Delete variable" onClick={() => update((c) => ({ ...c, variables: c.variables.filter((x) => x.id !== v.id) }))}>
-                          <Trash2 size={12} />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {renderFolder(groupBySlash(coll.variables, (v) => v.name), 0)}
                 </tbody>
               </table>
               <button
@@ -202,6 +340,43 @@ export function VariablesDialog() {
         </div>
       </div>
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
+      {scopeFor && coll && (
+        <ScopePopover
+          variable={coll.variables.find((v) => v.id === scopeFor.id)}
+          anchor={scopeFor.anchor}
+          onChange={(scopes) => setScopes(scopeFor.id, scopes)}
+          onClose={() => setScopeFor(null)}
+        />
+      )}
     </div>
+  );
+}
+
+const withScopes = (v: Variable, scopes: string[]): Variable => {
+  const { scopes: _drop, ...rest } = v;
+  return scopes.length ? { ...rest, scopes } : rest;
+};
+
+/** "Show in" checkboxes: all supported properties (nothing ticked), or a subset. */
+function ScopePopover({ variable, anchor, onChange, onClose }: { variable?: Variable; anchor: DOMRect; onChange: (scopes: string[]) => void; onClose: () => void }) {
+  if (!variable) return null;
+  const mine = SCOPES_FOR_KIND[variable.type];
+  const on = variable.scopes ?? [];
+  const toggle = (id: string) => onChange(on.includes(id) ? on.filter((x) => x !== id) : [...on, id]);
+  return (
+    <Popover anchor={anchor} onClose={onClose}>
+      <div className="var-scopes" role="group" aria-label={`Show ${variable.name} in`}>
+        <label className="var-scope">
+          <input type="checkbox" checked={on.length === 0} onChange={() => onChange([])} />
+          <span>All supported properties</span>
+        </label>
+        {SCOPES.filter((sc) => mine.includes(sc.id)).map((sc) => (
+          <label key={sc.id} className="var-scope">
+            <input type="checkbox" checked={on.includes(sc.id)} onChange={() => toggle(sc.id)} />
+            <span>{sc.label}</span>
+          </label>
+        ))}
+      </div>
+    </Popover>
   );
 }

@@ -30,7 +30,9 @@ import type { Doc, Node } from "../types";
 import { IconButton, Menu, type MenuItem } from "../ui/controls";
 import * as A from "../actions";
 import { viewportCenter } from "../actions";
-import { ColorStylesSection, TextStylesSection } from "./StyleControls";
+import { ColorStylesSection, EffectStylesSection, GridStylesSection, TextStylesSection } from "./StyleControls";
+import { FolderTree } from "./FolderTree";
+import { useThumb } from "./assetThumbs";
 import { swapGroups } from "../componentOps";
 
 /** A mouse click on a row, page or tab leaves the keys with the canvas, as it did before these were
@@ -789,6 +791,18 @@ function isInsideInstance(doc: Doc, n: Node): boolean {
   return false;
 }
 
+/** A component rendered small, drawn only once its row is in view. */
+function Thumb({ id, size = 32 }: { id: string; size?: number }) {
+  const { ref, url } = useThumb(id);
+  return (
+    <span ref={ref} className="asset-thumb" style={{ width: size, height: size }} data-thumb={url ? "ready" : "pending"}>
+      {url ? <img src={url} alt="" draggable={false} /> : <Component size={13} />}
+    </span>
+  );
+}
+
+type AssetEntry = { set: Node | null; items: Node[] };
+
 function Assets() {
   const doc = useDoc();
   const [q, setQ] = useState("");
@@ -797,56 +811,73 @@ function Assets() {
   const groups = swapGroups(doc)
     .map((g) => ({ set: g.set, items: g.set && match(g.set.name) ? g.items : g.items.filter((c) => match(c.name)) }))
     .filter((g) => g.items.length);
-  const row = (c: Node, label: string, indent: boolean) => (
-    <div
-      key={c.id}
-      className="layer"
-      draggable
-      onDragStart={(e) => e.dataTransfer.setData("application/x-designotron-component", c.id)}
-      onClick={() => {
-        const p = viewportCenter();
-        // The frame under the viewport centre takes it (never a main component or set).
-        dispatch({ op: "createInstance", componentId: c.id, x: p.x - c.width / 2, y: p.y - c.height / 2, parent: null, anchor: p });
-      }}
-      title="Click or drag to place an instance"
-    >
-      <span className="icon component" style={{ marginLeft: indent ? 20 : 4 }}>
-        <Component size={13} />
-      </span>
-      <span className="name component">{label}</span>
-      <span className="muted small">
-        {Math.round(c.width)}×{Math.round(c.height)}
-      </span>
-    </div>
-  );
+  // One entry per set and per loose component, so "Buttons/Primary" style names fold into folders.
+  const entries: AssetEntry[] = groups.flatMap((g) => (g.set ? [g] : g.items.map((c) => ({ set: null, items: [c] }))));
+  const entryName = (e: AssetEntry) => (e.set ?? e.items[0]).name;
+  const place = (c: Node) => {
+    const p = viewportCenter();
+    // The frame under the viewport centre takes it (never a main component or set).
+    dispatch({ op: "createInstance", componentId: c.id, x: p.x - c.width / 2, y: p.y - c.height / 2, parent: null, anchor: p });
+  };
+  const row = (c: Node, label: string, indent: boolean) => {
+    const description = c.component?.description?.trim();
+    return (
+      <div
+        key={c.id}
+        className="layer asset-row"
+        draggable
+        onDragStart={(e) => e.dataTransfer.setData("application/x-designotron-component", c.id)}
+        onClick={() => place(c)}
+        title={"Click or drag to place an instance" + (description ? `\n${description}` : "")}
+      >
+        <span style={{ marginLeft: indent ? 20 : 4, display: "flex" }}>
+          <Thumb id={c.id} />
+        </span>
+        <span className="asset-text">
+          <span className="name component">{label}</span>
+          {description && <span className="asset-desc muted small">{description}</span>}
+        </span>
+        <span className="muted small">
+          {Math.round(c.width)}×{Math.round(c.height)}
+        </span>
+      </div>
+    );
+  };
+  const entryRow = (e: AssetEntry, label: string) =>
+    e.set ? (
+      <div key={e.set.id}>
+        <div className="layer asset-set" title={"Component set: place one of its variants" + (e.set.component?.description ? `\n${e.set.component.description}` : "")}>
+          <span className="icon component" style={{ marginLeft: 4 }}>
+            <Component size={13} />
+          </span>
+          <span className="name component">{label}</span>
+          <span className="asset-variants" aria-hidden>
+            {e.items.slice(0, 4).map((v) => (
+              <Thumb key={v.id} id={v.id} size={20} />
+            ))}
+          </span>
+        </div>
+        {e.items.map((c) => row(c, Object.values(c.component?.variantProps ?? {}).join(", ") || c.name, true))}
+      </div>
+    ) : (
+      row(e.items[0], label, false)
+    );
   return (
     <div className="scroll">
       <div className="section">
         <input className="textinput" placeholder="Search assets" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} />
       </div>
-      <div className="section">
+      <div className="section" data-styles="components">
         <div className="section-head">
           <span>Components</span>
         </div>
         {groups.length === 0 && <div className="muted small">Select layers and press ⌥⌘K to create a component.</div>}
-        {groups.map((g) =>
-          g.set ? (
-            <div key={g.set.id}>
-              <div className="layer asset-set" title="Component set: place one of its variants">
-                <span className="icon component" style={{ marginLeft: 4 }}>
-                  <Component size={13} />
-                </span>
-                <span className="name component">{g.set.name}</span>
-              </div>
-              {g.items.map((c) => row(c, Object.values(c.component?.variantProps ?? {}).join(", ") || c.name, true))}
-            </div>
-          ) : (
-            g.items.map((c) => row(c, c.name, false))
-          ),
-        )}
+        <FolderTree scope="components" items={entries} name={entryName} forceOpen={!!q.trim()} row={(e, label) => entryRow(e, label)} />
       </div>
       <ColorStylesSection filter={q} />
       <TextStylesSection filter={q} />
+      <EffectStylesSection filter={q} />
+      <GridStylesSection filter={q} />
     </div>
   );
 }

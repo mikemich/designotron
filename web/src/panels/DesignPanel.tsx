@@ -38,7 +38,8 @@ import * as A from "../actions";
 import { Popover } from "../ui/controls";
 import { ComponentSetSection, InstanceSection, MainComponentSection } from "./ComponentControls";
 import { LayerPropsSection } from "./PropertyControls";
-import { ApplyStyleButton, StyleChip } from "./StyleControls";
+import { ApplyStyleButton, BoundChip, CreateStyleButton, StyleChip } from "./StyleControls";
+import { inScope } from "./variableScopes";
 
 const begin = () => dispatch({ op: "beginGesture" });
 const end = () => dispatch({ op: "endGesture" });
@@ -344,6 +345,7 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           </div>
         )}
       </div>
+      {radiusable && <BoundChip nodes={nodes} ids={ids} prop="cornerRadius" label="Corner radius" />}
       {radiusable && corners && (
         <div className="grid2">
           {(["↖", "↗", "↘", "↙"] as const).map((lbl, i) => (
@@ -547,6 +549,9 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         <NumberField label="L" min={0} value={al.paddingLeft} onChange={(paddingLeft) => set({ paddingLeft })} />
       </div>
       {al.wrap && <NumberField label="↧" title="Row gap" min={0} value={al.counterGap} onChange={(counterGap) => set({ counterGap })} />}
+      {(["gap", "padding", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "counterGap"] as const).map((prop) => (
+        <BoundChip key={prop} nodes={nodes} ids={ids} prop={prop} label={BIND_LABELS[prop]} />
+      ))}
     </Section>
   );
 }
@@ -870,7 +875,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
       title={title}
       actions={
         <>
-          {keyName === "fills" && <ApplyStyleButton kind="fill" ids={ids} />}
+          <ApplyStyleButton kind={keyName === "fills" ? "fill" : "stroke"} ids={ids} />
           <IconButton
             title={`Add ${title.toLowerCase()}`}
             onClick={() => {
@@ -884,7 +889,8 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
         </>
       }
     >
-      {keyName === "fills" && <StyleChip kind="fill" nodes={nodes} ids={ids} />}
+      <StyleChip kind={keyName === "fills" ? "fill" : "stroke"} nodes={nodes} ids={ids} />
+      <BoundChip nodes={nodes} ids={ids} prop={keyName === "fills" ? "fill" : "stroke"} label={keyName === "fills" ? "Fill" : "Stroke"} />
       {paints === MIXED && <div className="muted small">Mixed — click + to replace for all</div>}
       {[...list].reverse().map((p, ri) => {
         const i = list.length - 1 - ri;
@@ -1047,11 +1053,16 @@ function EffectsSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
     <Section
       title="Effects"
       actions={
+        <>
+        {nodes.length === 1 && <CreateStyleButton kind="effect" node={nodes[0]} />}
+        <ApplyStyleButton kind="effect" ids={ids} />
         <IconButton title="Add effect" onClick={() => set([...list, { type: "dropShadow", color: "#00000040", x: 0, y: 4, blur: 12, spread: 0, visible: true }])}>
           <Plus size={14} />
         </IconButton>
+        </>
       }
     >
+      <StyleChip kind="effect" nodes={nodes} ids={ids} />
       {list.map((e, i) => {
         const setE = (patch: Partial<Effect>) => set(list.map((x, j) => (j === i ? { ...x, ...patch } : x)));
         const shadow = e.type === "dropShadow" || e.type === "innerShadow";
@@ -1118,11 +1129,16 @@ function GridSection({ node }: { node: Node }) {
     <Section
       title="Layout grid"
       actions={
+        <>
+        <CreateStyleButton kind="grid" node={node} />
+        <ApplyStyleButton kind="grid" ids={[node.id]} />
         <IconButton title="Add layout grid" onClick={() => (set([...list, list.length ? GRID_DEFAULTS.grid : GRID_DEFAULTS.columns]), setOpen(list.length))}>
           <Plus size={14} />
         </IconButton>
+        </>
       }
     >
+      <StyleChip kind="grid" nodes={[node]} ids={[node.id]} />
       {list.map((g, i) => {
         const setG = (patch: Partial<LayoutGrid>) => set(list.map((x, j) => (j === i ? { ...x, ...patch } : x)));
         return (
@@ -1191,16 +1207,37 @@ function GridSection({ node }: { node: Node }) {
   );
 }
 
+const BIND_LABELS: Record<string, string> = {
+  gap: "Gap",
+  counterGap: "Row gap",
+  padding: "Padding",
+  paddingTop: "Padding top",
+  paddingRight: "Padding right",
+  paddingBottom: "Padding bottom",
+  paddingLeft: "Padding left",
+};
+
 const BINDABLE: { prop: string; label: string; kind: VarKind; applies: (n: Node) => boolean }[] = [
   { prop: "fill", label: "Fill", kind: "color", applies: (n) => n.type !== "group" && n.type !== "line" },
   { prop: "stroke", label: "Stroke", kind: "color", applies: (n) => n.type !== "group" },
   { prop: "cornerRadius", label: "Radius", kind: "number", applies: (n) => ["rectangle", "frame", "component", "instance"].includes(n.type) },
   { prop: "gap", label: "Gap", kind: "number", applies: (n) => !!n.layout },
+  { prop: "counterGap", label: "Row gap", kind: "number", applies: (n) => !!n.layout?.wrap },
   { prop: "padding", label: "Padding", kind: "number", applies: (n) => !!n.layout },
+  { prop: "paddingTop", label: "Pad top", kind: "number", applies: (n) => !!n.layout },
+  { prop: "paddingRight", label: "Pad right", kind: "number", applies: (n) => !!n.layout },
+  { prop: "paddingBottom", label: "Pad bottom", kind: "number", applies: (n) => !!n.layout },
+  { prop: "paddingLeft", label: "Pad left", kind: "number", applies: (n) => !!n.layout },
   { prop: "opacity", label: "Opacity", kind: "number", applies: () => true },
   { prop: "width", label: "Width", kind: "number", applies: () => true },
   { prop: "height", label: "Height", kind: "number", applies: () => true },
+  { prop: "strokeWeight", label: "Stroke w", kind: "number", applies: (n) => n.type !== "group" },
+  { prop: "fontFamily", label: "Font", kind: "string", applies: (n) => n.type === "text" },
   { prop: "fontSize", label: "Font size", kind: "number", applies: (n) => n.type === "text" },
+  { prop: "fontWeight", label: "Weight", kind: "number", applies: (n) => n.type === "text" },
+  { prop: "lineHeight", label: "Line height", kind: "number", applies: (n) => n.type === "text" },
+  { prop: "letterSpacing", label: "Letter sp.", kind: "number", applies: (n) => n.type === "text" },
+  { prop: "paragraphSpacing", label: "Para sp.", kind: "number", applies: (n) => n.type === "text" },
   { prop: "characters", label: "Text", kind: "string", applies: (n) => n.type === "text" },
   { prop: "visible", label: "Visible", kind: "boolean", applies: () => true },
 ];
@@ -1244,7 +1281,10 @@ function VariablesSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         })}
       {visibleRows.map((b) => {
         const cur = common(nodes, (n) => n.bindings?.[b.prop] ?? "");
-        const options = colls.flatMap((c) => c.variables.filter((v) => v.type === b.kind).map((v) => ({ value: v.id, label: colls.length > 1 ? `${c.name} / ${v.name}` : v.name })));
+        // Only variables whose scope covers the property; a variable already bound stays listed.
+        const options = colls.flatMap((c) =>
+          c.variables.filter((v) => v.type === b.kind && (inScope(v, b.prop) || v.id === cur)).map((v) => ({ value: v.id, label: colls.length > 1 ? `${c.name} / ${v.name}` : v.name })),
+        );
         return (
           <div key={b.prop} className="row">
             <span className="muted small" style={{ width: 64 }}>

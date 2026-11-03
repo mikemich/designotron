@@ -2,7 +2,7 @@
 // Multi-command edits run inside one gesture so each is a single undo step.
 
 import { dispatch, dispatchOrThrow, getDoc, getEngine, toast } from "./store";
-import type { Doc, Node } from "./types";
+import type { Doc, Effect, LayoutGrid, Node } from "./types";
 import { MOD } from "./ui/controls";
 
 type Props = Record<string, string>;
@@ -270,9 +270,10 @@ export function swapInstances(ids: string[], componentId: string): boolean {
 // ---------- Styles ----------
 
 /** Why `name` can't be used for the style `id` (another style of the kind has it), or null. */
-function takenStyleName(kind: "colors" | "texts", id: string, name: string): string | null {
-  const other = getDoc().styles[kind].some((s) => s.id !== id && s.name.trim().toLowerCase() === name.trim().toLowerCase());
-  return other ? `A ${kind === "colors" ? "colour" : "text"} style named “${name.trim()}” already exists` : null;
+function takenStyleName(kind: "colors" | "texts" | "effects" | "grids", id: string, name: string): string | null {
+  const other = (getDoc().styles[kind] ?? []).some((s) => s.id !== id && s.name.trim().toLowerCase() === name.trim().toLowerCase());
+  const word = { colors: "colour", texts: "text", effects: "effect", grids: "grid" }[kind];
+  return other ? `A ${word} style named “${name.trim()}” already exists` : null;
 }
 
 export function updateColorStyle(id: string, change: { name?: string; color?: string }): boolean {
@@ -284,11 +285,25 @@ export function updateColorStyle(id: string, change: { name?: string; color?: st
 /** Deletes a style; layers using it keep their look but are detached (undoable). */
 export function deleteStyle(id: string): boolean {
   const doc = getDoc();
-  const style = [...doc.styles.colors, ...doc.styles.texts].find((s) => s.id === id);
-  const used = Object.values(doc.nodes).filter((n) => n.fillStyle === id || n.textStyle === id).length;
+  const style = [...doc.styles.colors, ...doc.styles.texts, ...(doc.styles.effects ?? []), ...(doc.styles.grids ?? [])].find((s) => s.id === id);
+  const used = Object.values(doc.nodes).filter((n) => [n.fillStyle, n.textStyle, n.strokeStyle, n.effectStyle, n.gridStyle].includes(id)).length;
   if (dispatch({ op: "deleteStyle", id }) === null) return false;
   if (used) toast(`Deleted “${style?.name ?? "style"}”: ${used} layer${used === 1 ? "" : "s"} keep${used === 1 ? "s" : ""} the look, detached. Undo with ${MOD}Z.`);
   return true;
+}
+
+/** Edits an effect style in place (its id stays) and updates the layers using it. */
+export function updateEffectStyle(id: string, change: { name?: string; description?: string; effects?: Effect[] }): boolean {
+  const taken = change.name !== undefined ? takenStyleName("effects", id, change.name) : null;
+  if (taken) return toast(taken, "error"), false;
+  return dispatch({ op: "updateEffectStyle", id, name: change.name ?? null, description: change.description ?? null, effects: change.effects ?? null }) !== null;
+}
+
+/** Edits a grid style in place and updates the frames using it. */
+export function updateGridStyle(id: string, change: { name?: string; description?: string; grids?: LayoutGrid[] }): boolean {
+  const taken = change.name !== undefined ? takenStyleName("grids", id, change.name) : null;
+  if (taken) return toast(taken, "error"), false;
+  return dispatch({ op: "updateGridStyle", id, name: change.name ?? null, description: change.description ?? null, grids: change.grids ?? null }) !== null;
 }
 
 /** Edits the text style at `index` in place (its id stays) and updates the layers using it. */
