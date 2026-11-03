@@ -1556,7 +1556,11 @@ mod w3a_tests {
   fn hidden_layers_are_left_out_of_the_svg() {
     let doc = scroller();
     let c = export_svg_parts(&doc, "f", &HeuristicMeasurer, &["nav".to_string()], false);
-    assert!(!c.svg.to_lowercase().contains("00ff00"), "the hidden strip isn't painted: {}", c.svg);
+    assert!(
+      !c.svg.to_lowercase().contains("00ff00"),
+      "the hidden strip isn't painted: {}",
+      c.svg
+    );
     assert!(c.svg.to_lowercase().contains("0000ff"), "its sibling is: {}", c.svg);
     assert!(export_svg(&doc, "f", &HeuristicMeasurer).to_lowercase().contains("00ff00"));
     // The crop is still what the whole layer paints.
