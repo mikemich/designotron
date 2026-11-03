@@ -39,7 +39,9 @@ import {
 import type { Tool } from "../types";
 import { ALT, Menu, MOD, SHIFT, type MenuItem } from "../ui/controls";
 import { runPlugin, usePlugins } from "../plugins";
-import { useCollab } from "../collab";
+import { myColor, useCollab } from "../collab";
+import { startSpotlight, stopSpotlight, toggleFollow, useFollow } from "../follow";
+import { userName } from "../canvas/Comments";
 import { persistentStorage } from "../files";
 import { claudeReady, useChat } from "../ai/chatState";
 import { useShortcuts } from "./ShortcutsDialog";
@@ -423,35 +425,86 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
   );
 }
 
-/** Collaborator avatars plus the Share button. */
+/** Collaborator avatars plus the Share button. Clicking a person's avatar follows them; your
+ *  own opens a menu with Spotlight. */
 function ShareButton() {
-  const { peers, role, status } = useCollab();
+  const { peers, role, status, me, viewer } = useCollab();
+  const { leader, spotlight } = useFollow();
+  const doc = useDoc();
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const list = Object.values(peers);
+  const followers = list.filter((p) => me != null && p.presence?.following === me).length;
+  const pageName = (id?: string) => doc.pages.find((x) => x.id === id)?.name;
   return (
     <>
+      {viewer && (
+        <span className="view-badge" title="You can view this file but not edit it">
+          View only
+        </span>
+      )}
+      {role && status === "live" && list.length > 0 && (
+        <button
+          className={"avatar me" + (spotlight ? " spotlighting" : "")}
+          aria-label={`You${userName() ? ` (${userName()})` : ""}${spotlight ? ", spotlighting" : ""}`}
+          aria-haspopup={viewer ? undefined : "menu"}
+          aria-expanded={menu != null}
+          title={spotlight ? `You're spotlighting: ${followers} following` : "You"}
+          data-me="true"
+          disabled={viewer}
+          style={{ width: 24, height: 24, background: myColor, fontSize: 11 }}
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            setMenu({ x: r.left, y: r.bottom + 4 });
+          }}
+        >
+          {(userName() || "You")[0].toUpperCase()}
+          {spotlight > 0 && <span className="spot-count">{followers}</span>}
+        </button>
+      )}
       {list.length > 0 && (
         <div className="peer-avatars">
-          {list.slice(0, 5).map((p) => (
-            <span
-              key={p.id}
-              className="avatar"
-              title={p.name}
-              style={{
-                width: 24,
-                height: 24,
-                background: p.color,
-                fontSize: 11,
-              }}
-            >
-              {p.name[0]?.toUpperCase()}
-            </span>
-          ))}
+          {list.slice(0, 5).map((p) => {
+            const here = pageName(p.presence?.page);
+            return (
+              <button
+                key={p.id}
+                className={"avatar" + (leader === p.id ? " followed" : "")}
+                data-peer={p.id}
+                aria-pressed={leader === p.id}
+                aria-label={`${p.name}${p.role ? " (viewing)" : ""}${here ? `, on ${here}` : ""}. ${leader === p.id ? "Stop following" : "Follow"}`}
+                title={`${p.name}${p.role ? " (view only)" : ""}${here ? ` · ${here}` : ""}. Click to ${leader === p.id ? "stop following" : "follow"}`}
+                style={{
+                  width: 24,
+                  height: 24,
+                  background: p.color,
+                  fontSize: 11,
+                  ["--ring" as string]: p.color,
+                }}
+                onClick={() => toggleFollow(p.id)}
+              >
+                {p.name[0]?.toUpperCase()}
+              </button>
+            );
+          })}
           {list.length > 5 && (
             <span className="avatar more" title={list.slice(5).map((p) => p.name).join(", ")}>
               +{list.length - 5}
             </span>
           )}
         </div>
+      )}
+      {menu && (
+        <Menu
+          x={menu.x}
+          y={menu.y}
+          label="You"
+          onClose={() => setMenu(null)}
+          items={[
+            spotlight
+              ? { label: "Stop spotlight", onClick: stopSpotlight }
+              : { label: "Spotlight me", onClick: startSpotlight, disabled: list.length === 0 },
+          ]}
+        />
       )}
       {role && status === "connecting" && (
         <span className="reconnecting" role="status" title="Your changes are kept and sent when the connection is back">

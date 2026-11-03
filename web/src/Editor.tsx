@@ -76,6 +76,10 @@ interface Snapshot {
 
 export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void }) {
   const chatOpen = useStore((s) => s.chatOpen);
+  /** A view-only link: no Claude, no plugins, no drawing tools (the engine refuses edits anyway). */
+  const engineReadOnly = useStore((s) => !!s.es.readOnly);
+  const viewing = useCollab((s) => s.viewer);
+  const readOnly = engineReadOnly || viewing;
   const presenting = useStore((s) => s.presenting);
   const toast = useStore((s) => s.toast);
   const variablesOpen = useStore((s) => s.variablesOpen);
@@ -575,19 +579,19 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     );
   if (!ready) return <div className="empty-hint">{finishing ? "Finishing the last save…" : "Loading…"}</div>;
   return (
-    <div className="app">
+    <div className={"app" + (readOnly ? " view-only" : "")}>
       <Toolbar onHome={onHome} />
-      <main className={"main" + (chatOpen ? " with-chat" : "")}>
+      <main className={"main" + (chatOpen && !readOnly ? " with-chat" : "")}>
         <LeftPanel />
         <Canvas />
         <RightPanel />
-        {chatOpen && <ChatPanel />}
+        {chatOpen && !readOnly && <ChatPanel />}
       </main>
       {presenting && <Presenter start={presenting} />}
       <Tour />
       {variablesOpen && <VariablesDialog />}
       {figmaOpen && <FigmaImportDialog />}
-      {pluginsOpen && <PluginsDialog />}
+      {pluginsOpen && !readOnly && <PluginsDialog />}
       {shareOpen && <ShareDialog />}
       <GuestBar />
       {stale && (
@@ -602,7 +606,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       <ImportDialog />
       <PhoneNote />
       <DemoOverlay />
-      <PluginWindow />
+      {!readOnly && <PluginWindow />}
       {toast && (
         <div className={"toast " + toast.kind} role="status" aria-live="polite">
           {toast.text}

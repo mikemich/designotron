@@ -373,6 +373,8 @@ export interface EngineState {
   canUndo: boolean;
   canRedo: boolean;
   inGesture: boolean;
+  /** View-only (a view link): the engine refuses edits. */
+  readOnly?: boolean;
 }
 
 export interface Mat {

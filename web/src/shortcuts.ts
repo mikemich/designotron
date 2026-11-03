@@ -3,6 +3,7 @@ import { copySelection, pasteHere, pasteOverSelection, pasteReplace } from "./ca
 import { dispatch, getDoc, pointerDrag, selectSibling, selection, setTool, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
 import { useShortcuts } from "./panels/ShortcutsDialog";
 import { focusedByPointer } from "./ui/controls";
+import { canOpenCursorChat, openCursorChat } from "./follow";
 
 function isTyping(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement;
@@ -127,6 +128,7 @@ export function installShortcuts(): () => void {
     }
 
     if (e.key === "?") return run(() => useShortcuts.setState({ open: true }));
+    if (e.key === "/" && canOpenCursorChat()) return run(openCursorChat);
 
     if (e.shiftKey) {
       if (k === "a") return run(A.addAutoLayout);

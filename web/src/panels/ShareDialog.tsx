@@ -5,14 +5,52 @@ import { myColor, pageIsRelay, relayUrl, remixShared, startOnline, startSharing,
 import { useChat } from "../ai/chatState";
 import { userName } from "../canvas/Comments";
 import { useDialog } from "../ui/controls";
+import { RelayNotice } from "./GuestBar";
 
 const RELAY_DOCS = "https://github.com/mikemich/designotron/blob/main/docs/relay.md";
 
 type CopyKind = "copy" | "view" | "embed" | "badge";
 
+/** A link and a Copy button (each keeps its own "Copied" state). */
+function LinkField({ id, text, label }: { id: string; text: string; label: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <div className="row" style={{ marginTop: 6 }}>
+      <input id={id} className="textinput mono" readOnly aria-label={label} value={text} onFocus={(e) => e.target.select()} />
+      <button
+        className="btn"
+        onClick={() =>
+          (navigator.clipboard?.writeText(text) ?? Promise.reject()).then(
+            () => {
+              setDone(true);
+              setTimeout(() => setDone(false), 1500);
+            },
+            () => (document.getElementById(id) as HTMLInputElement | null)?.select(),
+          )
+        }
+      >
+        {done ? <Check size={13} /> : <Copy size={13} />} {done ? "Copied" : "Copy"}
+      </button>
+    </div>
+  );
+}
+
+/** The link of a view-only copy of the room `link` opens: same editor and relay, `?view=` for `?room=`. */
+function viewLinkOf(link: string, viewId: string): string {
+  try {
+    const u = new URL(link);
+    u.hash = "";
+    u.searchParams.delete("room");
+    u.searchParams.set("view", viewId);
+    return u.toString();
+  } catch {
+    return "";
+  }
+}
+
 /** Share → invite people to edit this file live, online (through a relay) or on the local network. */
 export function ShareDialog() {
-  const { status, role, mode, link, peers, previewLink, reconnecting } = useCollab();
+  const { status, role, mode, link, peers, previewLink, reconnecting, viewer, viewId } = useCollab();
   const bridgeStatus = useChat((s) => s.bridgeStatus);
   const [name, setName] = useState(userName());
   const [relay, setRelay] = useState(relayUrl());
@@ -117,6 +155,10 @@ export function ShareDialog() {
     }
   };
   const list = Object.values(peers);
+  // Online editors (owner or guest) can hand out edit and view links; the edit one is this page's own.
+  const canLink = !!role && !viewer && mode === "online" && !!link;
+  const editLink = canLink ? link!.replace(/#.*$/, "") : "";
+  const viewLink = canLink && viewId ? viewLinkOf(link!, viewId) : "";
   return (
     <div className="modal-bg" onPointerDown={(e) => e.target === e.currentTarget && close()}>
       <div ref={dialogRef} className="modal share-dialog" role="dialog" aria-modal="true" aria-label="Share" onKeyDown={(e) => e.stopPropagation()}>
@@ -231,6 +273,9 @@ export function ShareDialog() {
               </div>
               {role === "owner" && link && (
                 <>
+                  <div className="small" style={{ marginTop: 6 }}>
+                    <b>Can edit</b>
+                  </div>
                   <div className="row" style={{ marginTop: 6 }}>
                     <input id="share-link" className="textinput mono" readOnly value={link} onFocus={(e) => e.target.select()} />
                     <button className="btn primary" onClick={() => copy(link, document.getElementById("share-link") as HTMLInputElement)}>
@@ -255,6 +300,31 @@ export function ShareDialog() {
                   </div>
                 </>
               )}
+              {role === "guest" && canLink && (
+                <>
+                  <div className="small" style={{ marginTop: 6 }}>
+                    <b>Can edit</b>
+                  </div>
+                  <LinkField id="share-edit-link" text={editLink} label="Link that can edit" />
+                </>
+              )}
+              {canLink && viewLink && (
+                <>
+                  <div className="small" style={{ marginTop: 12 }}>
+                    <b>Can view</b>
+                  </div>
+                  <LinkField id="share-view-link" text={viewLink} label="Link that can view" />
+                  <div className="muted small" style={{ marginTop: 6 }}>
+                    Watches the file live and can comment, but can't change it.
+                  </div>
+                </>
+              )}
+              {canLink && !viewLink && status === "live" && (
+                <div className="muted small" style={{ marginTop: 12 }}>
+                  View-only links need an updated relay.
+                </div>
+              )}
+              <RelayNotice />
               {role === "guest" && (
                 <button className="btn primary" style={{ marginTop: 8 }} onClick={() => (remixShared(), close())}>
                   <Copy size={13} /> Make my own copy

@@ -18,6 +18,16 @@ export interface Presence {
   owner?: boolean;
   /** The owner clicked Stop sharing. */
   ended?: boolean;
+  /** The page-space rectangle this person's canvas shows (what followers fit to their own). */
+  view?: { x: number; y: number; w: number; h: number };
+  /** The peer id this person follows. */
+  following?: number;
+  /** A timestamp while this person spotlights themselves; 0 or absent when not. */
+  spotlight?: number;
+  /** Cursor chat: what they typed (`t` counts changes; it isn't a clock). */
+  chat?: { text: string; t: number };
+  /** This person's colour, when it isn't the one they joined with (another person had it). */
+  color?: string;
 }
 
 export interface Peer {
@@ -25,6 +35,8 @@ export interface Peer {
   name: string;
   color: string;
   presence: Presence | null;
+  /** Joined through a view-only link. */
+  role?: "viewer";
 }
 
 interface CollabState {
@@ -42,6 +54,18 @@ interface CollabState {
   previewLink: string | null;
   /** Guests: the person who shared the file has left ("left") or stopped sharing ("ended"). */
   ownerGone: { name: string; how: "left" | "ended"; /** Before this guest ever got the file. */ early?: boolean } | null;
+  /** This connection's id in the room (peers refer to it, e.g. `following`). */
+  me: number | null;
+  /** Joined through a view-only link: the file can be watched and commented on, not edited. */
+  viewer: boolean;
+  /** Viewers: connected, but nobody with edit access has opened the file yet. */
+  waiting: boolean;
+  /** Editors: the id of this room's view-only link (new relays only). */
+  viewId: string | null;
+  /** Online, and the relay didn't say which model it understands: it predates this editor. */
+  relayOld: boolean;
+  /** Viewers: why the view link can't open right now. */
+  viewError: string | null;
 }
 
 export const useCollab = create<CollabState>(() => ({
@@ -54,6 +78,12 @@ export const useCollab = create<CollabState>(() => ({
   reconnecting: false,
   previewLink: null,
   ownerGone: null,
+  me: null,
+  viewer: false,
+  waiting: false,
+  viewId: null,
+  relayOld: false,
+  viewError: null,
 }));
 
 /** Where shared links open when this editor runs on localhost (guests can't reach that). */
@@ -142,8 +172,29 @@ function randomRoomId(): string {
 export const isLocalPage = () => ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
 
 const COLORS = ["#F24822", "#0FA958", "#9747FF", "#FF7A00", "#1BC4FF", "#FF24BD", "#14AE5C", "#E8A400"];
-/** This person's cursor colour, as collaborators see it. */
-export const myColor = COLORS[Math.floor(Math.random() * COLORS.length)];
+/** This person's cursor colour, as collaborators see it. Starts random; changes to the first
+ *  free one when somebody else in the room already has it (see `settleColor`). */
+export let myColor = COLORS[Math.floor(Math.random() * COLORS.length)];
+/** True once the colour was changed from the one joined with: presence then carries it. */
+let colorChanged = false;
+
+/** Keeps colours distinct: if another person uses this editor's colour (and this editor joined
+ *  later, or the other can't change theirs), takes the first colour nobody has. */
+function settleColor() {
+  const { peers, me } = useCollab.getState();
+  const others = Object.values(peers);
+  const same = (c: string) => c.toLowerCase() === myColor.toLowerCase();
+  // The later joiner yields; an older editor (its presence has no `view`) can't, so always yields to it.
+  const clash = others.some((p) => same(p.color) && (me == null || p.id < me || (!!p.presence && p.presence.view === undefined)));
+  if (!clash) return;
+  const taken = new Set(others.map((p) => p.color.toLowerCase()));
+  const free = COLORS.find((c) => !taken.has(c.toLowerCase()));
+  if (!free || free === myColor) return;
+  myColor = free;
+  colorChanged = true;
+  useCollab.setState({ peers: { ...peers } });
+  sendPresence(true);
+}
 const myName = () => userName() || "Anonymous";
 
 let ws: WebSocket | null = null;
@@ -222,8 +273,22 @@ function scheduleFlush() {
   requestAnimationFrame(flush);
 }
 
+/** Shown when the relay's `/health` has no "viewLinks" feature. */
+const NO_VIEW_LINKS = "This relay can't open view-only links. Ask whoever shared it for an edit link or to update the relay.";
+/** This connection joined through a view-only link (never sends a document). */
+let viewing = false;
+/** Relay base of the view link, for the health check after failed attempts. */
+let viewRelay = "";
+/** Failed attempts to open the view link's socket (it never opened). */
+let viewFailures = 0;
+
+/** What a (re)join sends: the file for editors, nothing for viewers. */
+const joinBody = () => (viewing ? {} : currentFile());
+
 /** Whether this session has joined its room before (reconnects keep the view and local edits). */
 let joinedOnce = false;
+/** The room's file has arrived at least once (a viewer can join a room nobody has opened yet). */
+let joinedDoc = false;
 
 function loadShared(doc: unknown, assets: Record<string, string>, fit = true) {
   loadAssets(assets ?? {});
@@ -245,6 +310,8 @@ function onMessage(m: any) {
       const unsent: unknown[] = joinedOnce && m.doc ? JSON.parse(getEngine().collabUnsent()) : [];
       ordered = !!m.ordered;
       granular = !!m.granular;
+      // A viewer's engine refuses every edit (comments still work).
+      if (m.role === "viewer") dispatch({ op: "setReadOnly", on: true }, { quiet: true });
       if (m.doc) loadShared(m.doc, m.assets, !joinedOnce);
       else getEngine().collabReset(ordered, granular);
       // Put them back on top of the room's copy; the flush below sends them, so nothing made
@@ -257,10 +324,25 @@ function onMessage(m: any) {
       }
       joinedOnce = true;
       const peers: Record<number, Peer> = {};
-      for (const p of m.peers ?? []) peers[p.id] = p;
-      useCollab.setState({ status: "live", peers, reconnecting: false });
+      for (const p of m.peers ?? []) peers[p.id] = { ...p, color: p.presence?.color ?? p.color };
+      const online = useCollab.getState().mode === "online";
+      useCollab.setState({
+        status: "live",
+        peers,
+        reconnecting: false,
+        me: m.you,
+        viewer: m.role === "viewer",
+        waiting: m.role === "viewer" && !m.doc && !joinedDoc,
+        viewId: m.view ?? null,
+        // Only relays on the internet are ever too old (the bridge is built with the editor).
+        relayOld: online && m.model === undefined,
+        viewError: null,
+      });
+      if (m.doc) joinedDoc = true;
+      viewFailures = 0;
       if (unsent.length) flush();
       retryDelay = RETRY_MS;
+      settleColor();
       sendPresence(true);
       break;
     }
@@ -282,11 +364,14 @@ function onMessage(m: any) {
       else getEngine().dispatch(JSON.stringify({ op: "collabAck", rejected: false }));
       break;
     case "reload":
+      joinedDoc = true;
+      useCollab.setState({ waiting: false });
       loadShared(m.doc, m.assets);
       toast("The shared file was replaced by its owner");
       break;
     case "peer":
-      useCollab.setState((s) => ({ peers: { ...s.peers, [m.id]: { id: m.id, name: m.name, color: m.color, presence: null } } }));
+      useCollab.setState((s) => ({ peers: { ...s.peers, [m.id]: { id: m.id, name: m.name, color: m.color, presence: null, role: m.role } } }));
+      settleColor();
       break;
     case "leave":
       useCollab.setState((s) => {
@@ -301,11 +386,13 @@ function onMessage(m: any) {
       useCollab.setState((s) => {
         const p = s.peers[m.id];
         if (!p) return s;
-        const peers = { ...s.peers, [m.id]: { ...p, presence: m.presence } };
+        // A colour in presence wins over the one joined with (the person had to change it).
+        const peers = { ...s.peers, [m.id]: { ...p, color: m.presence?.color ?? p.color, presence: m.presence } };
         // The owner stopped sharing, or came back.
         const ownerGone = m.presence?.ended ? { name: p.name, how: "ended" as const } : m.presence?.owner ? null : s.ownerGone;
         return { peers, ownerGone };
       });
+      settleColor();
       break;
     case "rename":
       useCollab.setState((s) => (s.peers[m.id] ? { peers: { ...s.peers, [m.id]: { ...s.peers[m.id], name: m.name } } } : s));
@@ -317,7 +404,9 @@ function onMessage(m: any) {
       useCollab.setState({ status: "off", reconnecting: false, peers: {}, ownerGone: { name: m.name || "The owner", how: "ended", early: !joinedOnce && !Object.keys(getDoc().nodes).length } });
       break;
     case "error":
-      toast(m.message, "error");
+      // A view link the relay doesn't serve right now: say so in the bar, keep trying quietly.
+      if (viewing && /view link/i.test(m.message ?? "")) useCollab.setState({ viewError: m.message });
+      else toast(m.message, "error");
       break;
   }
 }
@@ -359,7 +448,13 @@ function connect(join: Record<string, unknown>) {
     // A busy relay (its error was already shown) or one that turns connections away gets
     // longer and longer pauses, up to a minute.
     if (!opened && retryDelay === RETRY_MS * 4) toast("Can't connect to the relay right now (it may be busy); still trying…", "error");
-    retry = setTimeout(() => connect(currentFile()), retryDelay);
+    // An older relay answers a view link with an HTTP error, so the socket never opens. After two
+    // failed tries ask it what it can do instead of retrying for ever.
+    if (viewing && !opened && ++viewFailures >= 2) {
+      void checkViewSupport();
+      return;
+    }
+    retry = setTimeout(() => connect(joinBody()), retryDelay);
     retryDelay = Math.min(retryDelay * 2, 60_000);
   };
   socket.onopen = () => {
@@ -409,7 +504,26 @@ function onNetwork(online: boolean) {
   if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
   if (retry) clearTimeout(retry);
   retryDelay = RETRY_MS;
-  connect(currentFile());
+  connect(joinBody());
+}
+
+/** After a view link failed to open twice: if the relay has no view links, say so and stop. */
+async function checkViewSupport() {
+  let supported: boolean | null = null;
+  try {
+    const info = await (await fetch(`${viewRelay}/health`)).json();
+    supported = Array.isArray(info?.features) && info.features.includes("viewLinks");
+  } catch {
+    /* can't tell (offline?): keep trying below */
+  }
+  if (!useCollab.getState().role || roomEnded) return;
+  if (supported === false) {
+    roomEnded = true;
+    useCollab.setState({ status: "off", reconnecting: false, peers: {}, viewError: NO_VIEW_LINKS });
+    return;
+  }
+  retry = setTimeout(() => connect(joinBody()), retryDelay);
+  retryDelay = Math.min(retryDelay * 2, 60_000);
 }
 
 function subscribeLocal(): () => void {
@@ -476,11 +590,31 @@ export async function startSharing(): Promise<void> {
 
 export function stopSharing() {
   joinedOnce = false;
+  joinedDoc = false;
   roomEnded = false;
+  viewing = false;
+  viewFailures = 0;
+  colorChanged = false;
+  if (useCollab.getState().viewer) dispatch({ op: "setReadOnly", on: false }, { quiet: true });
   // Tell guests the owner stopped sharing (they keep their copy and can save it).
   if (useCollab.getState().role === "owner") send({ type: "presence", presence: { page: "", cursor: null, selection: [], owner: true, ended: true } satisfies Presence });
   stopHeartbeat();
-  useCollab.setState({ role: null, mode: null, status: "off", reconnecting: false, peers: {}, link: null, previewLink: null, ownerGone: null });
+  useCollab.setState({
+    role: null,
+    mode: null,
+    status: "off",
+    reconnecting: false,
+    peers: {},
+    link: null,
+    previewLink: null,
+    ownerGone: null,
+    me: null,
+    viewer: false,
+    waiting: false,
+    viewId: null,
+    relayOld: false,
+    viewError: null,
+  });
   ws?.close();
   ws = null;
   unsubscribe?.();
@@ -489,9 +623,17 @@ export function stopSharing() {
 
 /** Guest: turns this copy of the shared file into their own file (no second file), leaves
  *  the room and keeps editing it. */
+/** The local-file key of the shared link this page was opened with (null: not a shared link). */
+function linkKey(q: URLSearchParams): string | null {
+  const view = q.get("view");
+  if (view) return `dt:collab:view:${view}`;
+  const token = q.get("room") ?? q.get("collab");
+  return token ? `dt:collab:${token}` : null;
+}
+
 export async function remixShared(): Promise<void> {
   const q = new URLSearchParams(location.search);
-  const token = q.get("room") ?? q.get("collab");
+  const key = linkKey(q);
   stopSharing();
   const fileId = useStore.getState().fileId;
   // Renamed after leaving, so the room doesn't get the new name.
@@ -508,7 +650,7 @@ export async function remixShared(): Promise<void> {
   }
   // Opening the link again joins with a fresh copy instead of this one.
   try {
-    if (token) localStorage.removeItem(`dt:collab:${token}`);
+    if (key) localStorage.removeItem(key);
   } catch {
     /* ignore */
   }
@@ -522,11 +664,11 @@ export async function remixShared(): Promise<void> {
  *  to their files. */
 export async function leaveEndedRoom(): Promise<void> {
   const q = new URLSearchParams(location.search);
-  const token = q.get("room") ?? q.get("collab");
+  const key = linkKey(q);
   const fileId = useStore.getState().fileId;
   stopSharing();
   try {
-    if (token) localStorage.removeItem(`dt:collab:${token}`);
+    if (key) localStorage.removeItem(key);
   } catch {
     /* ignore */
   }
@@ -544,10 +686,8 @@ export async function leaveEndedRoom(): Promise<void> {
 
 /** Guest: opens (or reuses) a local file for the shared link and joins the room. */
 export function joinFromUrl(): string | null {
-  const q = new URLSearchParams(location.search);
-  const token = q.get("room") ?? q.get("collab");
-  if (!token) return null;
-  const key = `dt:collab:${token}`;
+  const key = linkKey(new URLSearchParams(location.search));
+  if (!key) return null;
   let fileId: string | null = null;
   try {
     fileId = localStorage.getItem(key);
@@ -578,8 +718,16 @@ export function joinShared() {
   const q = new URLSearchParams(location.search);
   const room = q.get("room");
   const token = q.get("collab");
+  const view = q.get("view");
   const wsBase = (http: string) => http.replace(/^http/, "ws");
-  if (room) {
+  if (view) {
+    // A view-only link: watches the live file; the relay only takes comments from it.
+    const relay = normalizeRelay(q.get("relay") || location.origin);
+    viewing = true;
+    viewRelay = relay;
+    wsUrl = `${wsBase(relay)}/ws?view=${encodeURIComponent(view)}`;
+    useCollab.setState({ role: "guest", mode: "online", link: location.href, viewer: true });
+  } else if (room) {
     // Online: the relay given in the link, or this page's own origin when the relay serves the editor.
     const relay = normalizeRelay(q.get("relay") || location.origin);
     wsUrl = `${wsBase(relay)}/ws?room=${encodeURIComponent(room)}`;
@@ -589,6 +737,13 @@ export function joinShared() {
     useCollab.setState({ role: "guest", mode: "lan", link: location.href });
   } else return;
   connect({});
+}
+
+/** Extra presence fields (the visible area, following, spotlight, cursor chat), supplied by
+ *  `follow.ts` at the moment presence is sent. */
+let presenceSource: (() => Partial<Presence>) | null = null;
+export function setPresenceSource(fn: () => Partial<Presence>) {
+  presenceSource = fn;
 }
 
 let lastPresence = 0;
@@ -601,14 +756,16 @@ export function reportCursor(p: { x: number; y: number } | null) {
   sendPresence(false);
 }
 
-function sendPresence(now: boolean) {
+/** Sends presence now, or (not `now`) at most every 40 ms. */
+export function sendPresence(now: boolean) {
   if (useCollab.getState().status !== "live") return;
   const go = () => {
     lastPresence = Date.now();
     presenceTimer = null;
     const st = useStore.getState();
     const owner = useCollab.getState().role === "owner" || undefined;
-    send({ type: "presence", presence: { page: st.es.page, cursor, selection: st.es.selection, owner } satisfies Presence });
+    const color = colorChanged ? myColor : undefined;
+    send({ type: "presence", presence: { page: st.es.page, cursor, selection: st.es.selection, owner, color, ...presenceSource?.() } satisfies Presence });
   };
   if (now) return go();
   if (presenceTimer) return;

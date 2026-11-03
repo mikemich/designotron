@@ -7,6 +7,9 @@ import { corners, polyPoints } from "./geometry";
 
 type View = { x: number; y: number; zoom: number };
 
+/** Width of a name tag for `name` at 11 px (an estimate: no text measuring per render). */
+const tagWidth = (name: string) => Math.min(140, name.length * 6.4 + 12);
+
 export function RemoteSelections({ v }: { v: View }) {
   const peers = useCollab((s) => s.peers);
   const page = useStore((s) => s.es.page);
@@ -18,7 +21,32 @@ export function RemoteSelections({ v }: { v: View }) {
         const ids = (p.presence?.page === page ? p.presence.selection : []).filter((id) => doc.nodes[id]);
         if (!ids.length) return null;
         const items = query<{ items: { id: string; matrix: Mat; width: number; height: number }[] }>({ q: "bounds", ids }).items;
-        return items.map((it) => <polygon key={`${p.id}-${it.id}`} points={polyPoints(corners(v, it.matrix, it.width, it.height))} fill="none" stroke={p.color} strokeWidth={1.5} />);
+        // One name tag per person, at the top-left of everything they have selected.
+        let left = Infinity;
+        let top = Infinity;
+        const outlines = items.map((it) => {
+          const pts = corners(v, it.matrix, it.width, it.height);
+          for (const q of pts) {
+            left = Math.min(left, q.x);
+            top = Math.min(top, q.y);
+          }
+          return <polygon key={`${p.id}-${it.id}`} points={polyPoints(pts)} fill="none" stroke={p.color} strokeWidth={1.5} />;
+        });
+        const name = p.name || "Guest";
+        const w = tagWidth(name);
+        return (
+          <g key={p.id}>
+            {outlines}
+            {Number.isFinite(left) && (
+              <g className="remote-tag" data-peer={p.id} transform={`translate(${left - 0.75} ${Math.max(0, top - 18)})`}>
+                <rect width={w} height={17} rx={3} fill={p.color} />
+                <text x={6} y={12} fontSize={11} fontWeight={600} fill="#fff">
+                  {name.length > 20 ? `${name.slice(0, 19)}…` : name}
+                </text>
+              </g>
+            )}
+          </g>
+        );
       })}
     </g>
   );

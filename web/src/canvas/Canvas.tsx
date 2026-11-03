@@ -23,6 +23,8 @@ import { Measure, SpacingGaps, trackPointer } from "./Measure";
 import { RemoteCursors, RemoteSelections } from "./RemoteCursors";
 import { PaintHandles } from "./PaintHandles";
 import { CropMode } from "./CropMode";
+import { FollowFrame } from "./FollowFrame";
+import { CursorChat } from "./CursorChat";
 import { reportCursor } from "../collab";
 import { insertImageFile, openDtronFile, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu, insideInstance } from "./contextMenu";
@@ -1215,6 +1217,8 @@ export function Canvas() {
       <CropMode v={v} />
       <CommentLayer v={v} />
       <RemoteCursors v={v} />
+      <CursorChat v={v} />
+      <FollowFrame />
       {showRulers && <Rulers v={v} width={size.w} height={size.h} selection={selItems.union} />}
       {editingText && <TextEditor id={editingText} />}
       {empty && (tool === "move" || tool === "hand") && <EmptyPrompt />}

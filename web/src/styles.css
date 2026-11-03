@@ -2612,4 +2612,160 @@ body:has(.phone-note) .toast {
   align-items: center;
   gap: 8px;
   cursor: pointer;
+/* W3-B presence */
+.avatar.me,
+.peer-avatars button.avatar {
+  border: 2px solid var(--panel);
+  cursor: pointer;
+  padding: 0;
+  position: relative;
+}
+.avatar.me {
+  margin-right: 6px;
+}
+.avatar.me:disabled {
+  cursor: default;
+}
+.avatar.me.spotlighting {
+  border: 2px dashed #fff;
+}
+.avatar .spot-count {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--panel-3, #333);
+  color: #fff;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+}
+.peer-avatars button.avatar.followed {
+  box-shadow: 0 0 0 2px var(--ring, #0d99ff);
+}
+.peer-avatars button.avatar:focus-visible,
+.avatar.me:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: 1px;
+}
+.view-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--panel-3, #333);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.follow-frame {
+  position: absolute;
+  inset: 0;
+  border: 3px solid #0d99ff;
+  pointer-events: none;
+  z-index: 5;
+}
+.follow-bars {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+.follow-bar {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 6px 5px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--ring, var(--border));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.follow-bar.mine {
+  border-style: dashed;
+}
+.follow-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.chat-bubble {
+  position: absolute;
+  z-index: 4;
+  max-width: 280px;
+  padding: 4px 10px;
+  border-radius: 4px 12px 12px 12px;
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+.chat-bubble.mine {
+  pointer-events: auto;
+  padding: 2px 6px;
+}
+.chat-bubble input {
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: #fff;
+  font: inherit;
+  min-width: 80px;
+}
+.chat-bubble input::placeholder {
+  color: rgba(255, 255, 255, 0.7);
+}
+.relay-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(232, 164, 0, 0.14);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.relay-notice.floating {
+  position: fixed;
+  top: 96px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 39;
+  max-width: min(560px, calc(100vw - 24px));
+  margin-top: 0;
+  background: var(--panel);
+  border: 1px solid #e8a400;
+}
+/* View-only: watching and commenting only. Drawing, Claude and plugins are gone; the design
+   and prototype panels can be read but not changed (the Code tab stays usable). */
+.view-only .draw-tools,
+.view-only #claude-toggle,
+.view-only [title="Boolean operations"] {
+  display: none;
+}
+.view-only [aria-labelledby="right-tab-design"] input,
+.view-only [aria-labelledby="right-tab-design"] select,
+.view-only [aria-labelledby="right-tab-design"] textarea,
+.view-only [aria-labelledby="right-tab-design"] .btn,
+.view-only [aria-labelledby="right-tab-prototype"] input,
+.view-only [aria-labelledby="right-tab-prototype"] select,
+.view-only [aria-labelledby="right-tab-prototype"] textarea,
+.view-only [aria-labelledby="right-tab-prototype"] .btn {
+  pointer-events: none;
+  opacity: 0.7;
 }

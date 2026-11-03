@@ -68,6 +68,8 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Zoom in / out", `${MOD}+ / ${MOD}−`],
       ["Rulers / layout grids", `${SHIFT}R / ${SHIFT}${MOD}4`],
       ["Claude panel", `${MOD}/`],
+      ["Cursor chat (with others in the file)", "/"],
+      ["Stop following someone", "Esc"],
       ["Save .dtron file", `${MOD}S`],
       ["This list", "?"],
     ],
