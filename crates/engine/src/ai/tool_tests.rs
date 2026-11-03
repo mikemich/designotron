@@ -1260,6 +1260,7 @@ fn paint_specs_accept_conic_diamond_handles_and_stroke_keys() {
       json!({ "nodes": [{ "type": "rectangle", "strokeJoin": "sharp" }] })
     ))
     .is_err());
+}
 
 mod w3a_prototype {
   use super::*;
