@@ -45,6 +45,11 @@ export class WasmEngine {
    */
   collabGranular(): boolean;
   /**
+   * `json` (a delta or document) as a relay that knows only model `relay_model` can store it
+   * (see `collab::downgrade`). Applied to what is sent, never to the editor's own copy.
+   */
+  collabDowngrade(json: string, relay_model: number): string;
+  /**
    * JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
    */
   renderIncremental(page: string, hidden: string, reset: boolean): string;
@@ -79,6 +84,7 @@ export interface InitOutput {
   readonly __wbg_wasmengine_free: (a: number, b: number) => void;
   readonly clearMeasureCache: () => void;
   readonly wasmengine_collabDelta: (a: number) => [number, number];
+  readonly wasmengine_collabDowngrade: (a: number, b: number, c: number, d: number) => [number, number];
   readonly wasmengine_collabGranular: (a: number) => number;
   readonly wasmengine_collabReset: (a: number, b: number, c: number) => void;
   readonly wasmengine_collabUnsent: (a: number) => [number, number];

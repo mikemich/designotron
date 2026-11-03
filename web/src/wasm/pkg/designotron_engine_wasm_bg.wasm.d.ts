@@ -4,6 +4,7 @@ export const memory: WebAssembly.Memory;
 export const __wbg_wasmengine_free: (a: number, b: number) => void;
 export const clearMeasureCache: () => void;
 export const wasmengine_collabDelta: (a: number) => [number, number];
+export const wasmengine_collabDowngrade: (a: number, b: number, c: number, d: number) => [number, number];
 export const wasmengine_collabGranular: (a: number) => number;
 export const wasmengine_collabReset: (a: number, b: number, c: number) => void;
 export const wasmengine_collabUnsent: (a: number) => [number, number];

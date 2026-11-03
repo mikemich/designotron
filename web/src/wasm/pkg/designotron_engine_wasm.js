@@ -216,6 +216,27 @@ export class WasmEngine {
         return ret !== 0;
     }
     /**
+     * `json` (a delta or document) as a relay that knows only model `relay_model` can store it
+     * (see `collab::downgrade`). Applied to what is sent, never to the editor's own copy.
+     * @param {string} json
+     * @param {number} relay_model
+     * @returns {string}
+     */
+    collabDowngrade(json, relay_model) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.wasmengine_collabDowngrade(this.__wbg_ptr, ptr0, len0, relay_model);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
      * JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
      * @param {string} page
      * @param {string} hidden
