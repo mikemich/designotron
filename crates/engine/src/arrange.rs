@@ -227,6 +227,9 @@ fn scale_own(n: &mut Node, k: f64) {
   n.height = tidy(n.height * k).max(if n.kind == NodeType::Line { 0.0 } else { 0.01 });
   if n.strokes.iter().any(|p| p.visible()) {
     n.stroke_weight = tidy(n.stroke_weight * k);
+    if let Some(w) = n.stroke_weights.as_mut() {
+      w.iter_mut().for_each(|v| *v = tidy(*v * k));
+    }
   }
   n.corner_radius = tidy(n.corner_radius * k);
   if let Some(r) = n.corner_radii.as_mut() {

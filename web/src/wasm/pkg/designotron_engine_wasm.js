@@ -92,6 +92,14 @@ const WasmEngineFinalization = (typeof FinalizationRegistry === 'undefined')
 
 export class WasmEngine {
 
+    static __wrap(ptr) {
+        ptr = ptr >>> 0;
+        const obj = Object.create(WasmEngine.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmEngineFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -245,6 +253,14 @@ export class WasmEngine {
     rev() {
         const ret = wasm.wasmengine_rev(this.__wbg_ptr);
         return ret;
+    }
+    /**
+     * A second engine on the same document without serialising it (see `Engine::fork`).
+     * @returns {WasmEngine}
+     */
+    fork() {
+        const ret = wasm.wasmengine_fork(this.__wbg_ptr);
+        return WasmEngine.__wrap(ret);
     }
     /**
      * @param {string} json

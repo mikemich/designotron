@@ -50,6 +50,10 @@ export class WasmEngine {
   renderIncremental(page: string, hidden: string, reset: boolean): string;
   constructor(seed: number);
   rev(): number;
+  /**
+   * A second engine on the same document without serialising it (see `Engine::fork`).
+   */
+  fork(): WasmEngine;
   load(json: string): void;
   save(): string;
   query(q: string): string;
@@ -80,6 +84,7 @@ export interface InitOutput {
   readonly wasmengine_collabUnsent: (a: number) => [number, number];
   readonly wasmengine_dispatch: (a: number, b: number, c: number) => [number, number, number, number];
   readonly wasmengine_docDelta: (a: number, b: number) => [number, number];
+  readonly wasmengine_fork: (a: number) => number;
   readonly wasmengine_load: (a: number, b: number, c: number) => [number, number];
   readonly wasmengine_new: (a: number) => number;
   readonly wasmengine_persistAdopt: (a: number) => void;
