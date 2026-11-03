@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Folder as FolderIcon, MoreHorizontal } from "lucide-react";
-import { childrenOf, type Folder } from "../folders";
+import { MAX_NAME, childrenOf, type Folder } from "../folders";
 
 /** What is being dragged (HTML5 drag data can't be read until the drop, so the dashboard keeps it here). */
 export const dragState: { current: { kind: "file" | "folder"; id: string } | null } = { current: null };
 
 /** A text field that commits on Enter or blur and cancels on Escape; always ends with `onDone`. */
-export function NameInput(props: { value: string; label: string; onDone: (name: string | null) => void; className?: string }) {
+export function NameInput(props: { value: string; label: string; onDone: (name: string | null) => boolean | void; className?: string }) {
   const ref = useRef<HTMLInputElement>(null);
   const done = useRef(false);
   useEffect(() => {
@@ -16,7 +16,11 @@ export function NameInput(props: { value: string; label: string; onDone: (name: 
   const finish = (name: string | null) => {
     if (done.current) return;
     done.current = true;
-    props.onDone(name);
+    // A refused name keeps the field open for another try.
+    if (props.onDone(name) === false) {
+      done.current = false;
+      setTimeout(() => ref.current?.focus(), 0);
+    }
   };
   return (
     <input
@@ -24,7 +28,7 @@ export function NameInput(props: { value: string; label: string; onDone: (name: 
       className={"name-input" + (props.className ? " " + props.className : "")}
       aria-label={props.label}
       defaultValue={props.value}
-      maxLength={120}
+      maxLength={MAX_NAME}
       onClick={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
@@ -49,7 +53,9 @@ export interface TopRow {
 }
 
 export interface TreeProps {
-  label: string;
+  label?: string;
+  /** The element that names the tree (instead of `label`). */
+  labelledBy?: string;
   folders: Folder[];
   /** Fixed rows above the projects (All files, Drafts). */
   top: TopRow[];
@@ -61,7 +67,7 @@ export interface TreeProps {
   mode: "nav" | "pick";
   disabled?: Set<string>;
   renaming?: string | null;
-  onRenameDone?: (id: string, name: string | null) => void;
+  onRenameDone?: (id: string, name: string | null) => boolean | void;
   onRenameStart?: (id: string) => void;
   onDelete?: (id: string) => void;
   onMenu?: (id: string, x: number, y: number) => void;
@@ -151,13 +157,14 @@ export function ProjectTree(props: TreeProps) {
         if (r.folder && props.onRenameStart) (e.preventDefault(), props.onRenameStart(r.id));
         return;
       case "Delete":
+      case "Backspace":
         if (r.folder && props.onDelete) (e.preventDefault(), props.onDelete(r.id));
         return;
     }
   };
 
   return (
-    <div className="ptree" role="tree" aria-label={props.label} ref={box}>
+    <div className="ptree" role="tree" aria-label={props.labelledBy ? undefined : props.label} aria-labelledby={props.labelledBy} ref={box}>
       {rows.map((r, i) => {
         const off = !!disabled?.has(r.id);
         const isOpen = open.has(r.id);
@@ -226,8 +233,9 @@ export function ProjectTree(props: TreeProps) {
                 value={r.label}
                 label="Folder name"
                 onDone={(n) => {
-                  props.onRenameDone?.(r.id, n);
-                  focusRow(r.id);
+                  const ok = props.onRenameDone?.(r.id, n);
+                  if (ok !== false) focusRow(r.id);
+                  return ok;
                 }}
               />
             ) : (

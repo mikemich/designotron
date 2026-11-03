@@ -67,6 +67,21 @@ export interface SavePlan {
   removed: string[];
 }
 
+/** The file was deleted (in another tab) while this tab still had it open: saving would bring it back. */
+export class FileDeletedError extends Error {
+  constructor() {
+    super("This file was deleted in another tab");
+  }
+}
+
+/** Files this tab has seen listed in the index (opened or saved). One that is no longer listed was
+ * deleted elsewhere, and must not be recreated by an autosave. */
+const listed = new Set<string>();
+
+async function assertNotDeleted(id: string) {
+  if (listed.has(id) && !(await getFileMeta(id))) throw new FileDeletedError();
+}
+
 /** The stored file isn't the one this tab last wrote (another tab or writer saved since), so a
  * save that only adds changes would build on the wrong thing: write the whole file instead. */
 export class StaleStorageError extends Error {
@@ -454,7 +469,9 @@ export function storedSize(id: string): number | null {
 const isManifest = (v: unknown): v is Manifest => (v as Manifest | undefined)?.v === 2;
 
 /** Writes a file as one record (used by import, duplicate and the like; autosave uses `saveDelta`). */
-export async function saveFile(id: string, name: string, docJson: string, opts?: { thumbnail?: string; folder?: string }) {
+export async function saveFile(id: string, name: string, docJson: string, opts?: { thumbnail?: string; folder?: string; restore?: boolean }) {
+  // (`restore`: the person chose to keep a file that was deleted elsewhere.)
+  if (!opts?.restore) await assertNotDeleted(id);
   const used = new Set(referencedAssets(docJson));
   const assets = Object.fromEntries(Object.entries(allAssets()).filter(([k]) => used.has(k)));
   layered.delete(id);
@@ -466,6 +483,7 @@ export async function saveFile(id: string, name: string, docJson: string, opts?:
   }));
   // A file already in the index stays in its folder; `opts.folder` only places a new one.
   await writeIndex((idx) => upsertEntry(idx, { id, name, updatedAt: Date.now(), thumbnail: opts?.thumbnail }, opts?.folder));
+  listed.add(id);
 }
 
 /**
@@ -482,6 +500,7 @@ export async function saveFile(id: string, name: string, docJson: string, opts?:
  */
 export async function saveDelta(id: string, name: string, plan: SavePlan): Promise<{ name: string } | null> {
   if (planIsOutdated(id, plan)) return null;
+  await assertNotDeleted(id);
   startedPlan.set(id, { engine: plan.engine, token: plan.token });
   const state = layered.get(id);
   if (!plan.full && !state) throw new StaleStorageError();
@@ -564,6 +583,7 @@ export async function saveDelta(id: string, name: string, plan: SavePlan): Promi
   if (startedPlan.get(id)?.engine === plan.engine) knownName.set(id, writtenName);
   // (No announcement: the editor tells other tabs it saved, on the channel the dashboard also reads.)
   await writeIndex((idx) => upsertEntry(idx, { id, name: writtenName, updatedAt: Date.now() }), false);
+  listed.add(id);
   return { name: writtenName };
 }
 
@@ -578,6 +598,7 @@ export async function saveThumbnail(id: string, thumbnail: string) {
 }
 
 export async function loadFile(id: string): Promise<string | null> {
+  if (await getFileMeta(id)) listed.add(id);
   const f = (await get(fileKey(id))) as StoredFile | Manifest | undefined;
   if (!f) return null;
   if (isManifest(f)) return loadLayered(id, f);
@@ -646,7 +667,17 @@ async function loadLayered(id: string, first: Manifest): Promise<string> {
 export async function deleteFile(id: string) {
   // The index first: if that write fails nothing was deleted, instead of a listed file whose
   // data is gone.
+  const folder = (await getFileMeta(id))?.folder;
   await writeIndex((idx) => idx.filter((f) => f.id !== id));
+  listed.delete(id);
+  // Editors that have the file open stop saving it (and offer to keep it).
+  try {
+    const ch = new BroadcastChannel("dt-files");
+    ch.postMessage({ fileId: id, deleted: true, folder });
+    ch.close();
+  } catch {
+    /* no BroadcastChannel */
+  }
   for (const v of await listVersions(id)) await del(`dt:version:${id}:${v.id}`);
   await del("dt:versions:" + id);
   layered.delete(id);

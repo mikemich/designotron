@@ -31,6 +31,9 @@ import {
   planIsOutdated,
   readRecovery,
   saveDelta,
+  saveFile,
+  listFolders,
+  FileDeletedError,
   StaleStorageError,
   storedSize,
   saveThumbnail,
@@ -42,6 +45,7 @@ import { AUTO_VERSION_MS } from "./panels/HistoryPanel";
 import { nodeSvg, svgToPngBlob } from "./exporter";
 import { readFileAsDataUrl } from "./assets";
 import { failureText, reportFailure } from "./errors";
+import { resolveFolder } from "./folders";
 
 /** Largest document (in characters) copied to localStorage when closing: the quota is about
  * 5 MB, and a bigger copy only fails after a slow synchronous write. */
@@ -92,6 +96,9 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const [readError, setReadError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [stale, setStale] = useState(false);
+  /** The file was deleted in another tab; `keep` brings it back. */
+  const [gone, setGone] = useState(false);
+  const keepRef = useRef<(() => void) | null>(null);
   /** The closing editor's last save is still being written. */
   const [finishing, setFinishing] = useState(false);
   /** This editor's number, taken when it starts opening the file (see `claimFile`). */
@@ -230,14 +237,33 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     // can't overwrite the newer work, and offer a reload.
     const tabs = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("dt-files");
     let stale = false;
+    // The folder the file was in when it was deleted elsewhere (kept for "Keep it").
+    let goneFolder: string | undefined;
+    const markDeleted = (folder?: string) => {
+      stale = true;
+      goneFolder = folder;
+      setGone(true);
+    };
     if (tabs)
       tabs.onmessage = (e) => {
         // In a live session both tabs stay in sync through the room, so they're not stale.
         if (e.data?.fileId === fileId && !useCollab.getState().role) {
+          if (e.data.deleted) return markDeleted(e.data.folder);
           stale = true;
           setStale(true);
         }
       };
+    keepRef.current = async () => {
+      try {
+        const place = resolveFolder(await listFolders(), goneFolder);
+        await saveFile(fileId, getDoc().name, engine.save(), { folder: place, restore: true });
+        stale = false;
+        setGone(false);
+        schedule();
+      } catch (err) {
+        reportFailure("keep the file", err);
+      }
+    };
     let closed = false;
     let running = false;
     // A snapshot taken eagerly (the page is closing, or the editor is about to be replaced).
@@ -375,6 +401,11 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
             snap = done;
             startedRev = Math.max(startedRev, snap.rev);
           } catch (err) {
+            // Deleted elsewhere: nothing to retry (the bar offers to keep it).
+            if (err instanceof FileDeletedError) {
+              markDeleted();
+              break;
+            }
             // Not stored (quota, disk): stay dirty, keep what the recovery copy can hold, try again.
             console.error(err);
             keepRecovery();
@@ -594,7 +625,18 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       {pluginsOpen && !readOnly && <PluginsDialog />}
       {shareOpen && <ShareDialog />}
       <GuestBar />
-      {stale && (
+      {gone && (
+        <div className="stale-bar" role="alert">
+          This file was deleted in another tab. Edits here are no longer saved.
+          <button className="btn primary small" onClick={() => keepRef.current?.()}>
+            Keep it
+          </button>
+          <button className="btn small" onClick={onHome}>
+            Back to files
+          </button>
+        </div>
+      )}
+      {stale && !gone && (
         <div className="stale-bar" role="alert">
           This file was changed in another tab. Edits here are no longer saved.
           <button className="btn primary small" onClick={() => location.reload()}>

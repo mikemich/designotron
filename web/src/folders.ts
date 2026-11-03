@@ -56,6 +56,7 @@ export function sanitizeFolders(raw: unknown): Folder[] {
     if (!f || typeof f.id !== "string" || !f.id || typeof f.name !== "string" || seen.has(f.id)) continue;
     seen.add(f.id);
     out.push({
+      ...f,
       id: f.id,
       name: normalizeName(f.name) || "Untitled",
       parent: typeof f.parent === "string" ? f.parent : null,

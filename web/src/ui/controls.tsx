@@ -444,7 +444,7 @@ export function useDialog(close: () => void, active = true) {
     const before = document.activeElement as HTMLElement | null;
     const focusable = () =>
       [...(ref.current?.querySelectorAll<HTMLElement>("input, textarea, select, button, a[href], [tabindex]:not([tabindex='-1'])") ?? [])].filter(
-        (el) => !el.hasAttribute("disabled") && el.offsetParent !== null,
+        (el) => !el.hasAttribute("disabled") && el.getAttribute("tabindex") !== "-1" && el.offsetParent !== null,
       );
     const t = setTimeout(() => {
       const els = focusable();

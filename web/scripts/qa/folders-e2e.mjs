@@ -74,7 +74,7 @@ const go = async (pg, hash) => {
   await pg.evaluate((h) => (location.hash = h), hash);
   await sleep(350);
 };
-const tree = (pg = p) => pg.locator('[role=tree][aria-label="Projects"]');
+const tree = (pg = p) => pg.locator('[role=tree][aria-labelledby="projects-h"]');
 const row = (name, pg = p) => tree(pg).getByRole("treeitem", { name, exact: true });
 const exact = (name) => new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 const card = (name, pg = p) => pg.locator(".file-card", { has: pg.locator(".n", { hasText: exact(name) }) });
@@ -276,7 +276,7 @@ try {
 
   // 6. Drag and drop: a file onto a tree row, a file onto a folder card.
   await go(p, "#/drafts");
-  await p.dragAndDrop(`.file-card:has(.n:text-is("${tgt}"))`, '[role=tree][aria-label="Projects"] [role=treeitem][aria-label="Beta"]');
+  await p.dragAndDrop(`.file-card:has(.n:text-is("${tgt}"))`, '[role=tree][aria-labelledby="projects-h"] [role=treeitem][aria-label="Beta"]');
   await sleep(500);
   check("a file card dropped on a tree row moves there", (await entry(tgt))?.folder === betaId, JSON.stringify(await entry(tgt)));
   await go(p, `#/folder/${betaId}`);
@@ -285,7 +285,7 @@ try {
   check("a file card dropped on a folder card moves there", (await entry(tgt))?.folder === mktId);
   await go(p, `#/folder/${betaId}`);
   // A folder can't be dropped into itself or its own child.
-  await p.dragAndDrop('.folder-card:has(.n:text-is("Marketing"))', '[role=tree][aria-label="Projects"] [role=treeitem][aria-label="Q4"]').catch(() => {});
+  await p.dragAndDrop('.folder-card:has(.n:text-is("Marketing"))', '[role=tree][aria-labelledby="projects-h"] [role=treeitem][aria-label="Q4"]').catch(() => {});
   await sleep(400);
   check("a folder dropped into its own child is refused", (await folderRecs()).find((f) => f.id === mktId)?.parent === betaId);
 
@@ -377,7 +377,7 @@ try {
   await sleep(300);
   const focusedLabel = () => p.evaluate(() => document.activeElement?.getAttribute("aria-label"));
   await row("Keys").focus();
-  check("the tree is one Tab stop", (await p.locator('[role=tree][aria-label="Projects"] [role=treeitem][tabindex="0"]').count()) === 1);
+  check("the tree is one Tab stop", (await p.locator('[role=tree][aria-labelledby="projects-h"] [role=treeitem][tabindex="0"]').count()) === 1);
   check("the parent is expanded and Child is a level 2 row", (await row("Child").count()) === 1 && (await row("Keys").getAttribute("aria-expanded")) === "true");
   await p.keyboard.press("ArrowLeft");
   await sleep(150);
@@ -399,17 +399,18 @@ try {
   const last = await focusedLabel();
   await p.keyboard.press("Home");
   await sleep(100);
-  check("Home and End jump to the ends", (await focusedLabel()) === "All files" && !!last && last !== "All files", String(last));
+  check("Home and End jump to the ends", (await focusedLabel()) === "Acme" && !!last && last !== "Acme", String(last));
   await row("Keys").focus();
   await p.keyboard.press("F2");
   await p.waitForSelector('input[aria-label="Folder name"]');
   await nameIt("Keys 2");
   check("F2 renames in place", (await folderId("Keys 2")) === keysId);
   check("focus returns to the row after renaming", (await focusedLabel()) === "Keys 2", String(await focusedLabel()));
-  await row("Drafts").focus();
+  await row("Beta").focus();
   await p.keyboard.press("Enter");
   await sleep(300);
-  check("Enter navigates", (await p.evaluate(() => location.hash)) === "#/drafts");
+  check("Enter navigates", (await p.evaluate(() => location.hash)) === `#/folder/${betaId}`);
+  check("All files and Drafts are plain links above the Projects heading", (await p.locator(".side-links a").count()) === 2 && (await p.locator('.side-links [role=treeitem]').count()) === 0 && (await p.locator("#projects-h").innerText()) === "Projects");
   await row("Keys 2").focus();
   await p.keyboard.press("Delete");
   await dlg.waitFor();
@@ -417,6 +418,31 @@ try {
   await p.keyboard.press("Escape");
   await sleep(300);
   check("Escape closes it and nothing is deleted", (await dlg.count()) === 0 && (await folderId("Keys 2")) !== undefined);
+  // The project you are in can be collapsed (its parents are only opened on arrival).
+  const childId = await folderId("Child");
+  await go(p, `#/folder/${childId}`);
+  check("arriving in Child shows Keys 2 open", (await row("Child").count()) === 1);
+  await row("Keys 2").focus();
+  await p.keyboard.press("ArrowLeft");
+  await sleep(200);
+  check("a parent of the current folder collapses", (await row("Child").count()) === 0 && (await row("Keys 2").getAttribute("aria-expanded")) === "false");
+  await p.keyboard.press("ArrowRight");
+  await sleep(150);
+  // A subfolder's New folder from its card goes there and shows the name field.
+  await go(p, `#/folder/${keysId}`);
+  await cardMenu(fcard("Child"), "New folder");
+  await p.waitForSelector('input[aria-label="Folder name"]');
+  check("New folder from a card menu opens its parent with the name field", (await p.evaluate(() => location.hash)) === `#/folder/${childId}`);
+  await p.keyboard.press("Control+a");
+  await p.keyboard.press("Backspace");
+  await p.keyboard.press("Enter");
+  await sleep(300);
+  check("a blank name is refused and the field stays", (await p.locator('input[aria-label="Folder name"]').count()) === 1 && /needs a name/.test(await toastText()), await toastText());
+  await nameIt("Grandchild");
+  check("then the name is applied", (await folderId("Grandchild")) !== undefined);
+  await go(p, "#/");
+  await newProject("Temp A");
+  await newProject("Temp B");
 
   // 11. Phone.
   const ph = track(await context.newPage());
@@ -435,6 +461,34 @@ try {
   await sleep(500);
   check("picking a location closes the sheet and goes there", (await ph.locator("[role=dialog]").count()) === 0 && (await ph.evaluate(() => location.hash)) === `#/folder/${sharedId}`);
   check("the button now names it", /Shared/.test(await ph.locator(".loc-btn").innerText()));
+  // Folder actions from the sheet open their dialog above it.
+  await ph.locator(".loc-btn").click();
+  await ph.waitForSelector('[role=dialog][aria-label="Locations"]');
+  await ph.locator('button[aria-label="Sidebar actions for Temp A"]').click();
+  await ph.locator('.menu [role=menuitem]:has-text("Delete")').click();
+  await ph.waitForSelector("[role=alertdialog]");
+  check("Delete from the sheet opens the dialog with the sheet closed", (await ph.locator('[aria-label="Locations"]').count()) === 0);
+  await ph.locator('[role=alertdialog] button:has-text("Delete")').click();
+  await sleep(500);
+  check("...and deletes the folder", (await folderId("Temp A")) === undefined && (await folderId("Temp B")) !== undefined);
+  await ph.locator(".loc-btn").click();
+  await ph.waitForSelector('[role=dialog][aria-label="Locations"]');
+  await ph.locator('button[aria-label="Sidebar actions for Temp B"]').click();
+  await ph.locator('.menu [role=menuitem]:has-text("Move to")').click();
+  await ph.waitForSelector(".move-dialog");
+  check("Move to… from the sheet opens the picker with the sheet closed", (await ph.locator('[aria-label="Locations"]').count()) === 0);
+  await ph.locator(".move-dialog").getByRole("treeitem", { name: "Beta", exact: true }).click();
+  await ph.locator(".move-dialog button.primary").click();
+  await sleep(500);
+  check("...and moves the folder", (await folderRecs()).find((f) => f.name === "Temp B")?.parent === betaId);
+  // Escape while renaming in the sheet leaves nothing behind.
+  await ph.locator(".loc-btn").click();
+  await ph.waitForSelector('[role=dialog][aria-label="Locations"]');
+  await ph.locator('button[aria-label="New project"]').click();
+  await ph.waitForSelector('input[aria-label="Folder name"]');
+  await ph.keyboard.press("Escape");
+  await sleep(300);
+  check("Escape in the sheet closes it and leaves no name field", (await ph.locator('input[aria-label="Folder name"]').count()) === 0 && (await ph.locator("[role=dialog]").count()) === 0);
   await go(ph, "#/drafts");
   const moveName = "Launch deck (copy)";
   await cardMenu(card(moveName, ph), "Move to", ph);
@@ -463,6 +517,30 @@ try {
   await sleep(600);
   check("a copy link opens a new file in Drafts", (await entry("From a link"))?.folder === undefined && (await entry("From a link")) !== undefined && (await locTitle(d)) === "Drafts");
   await d.close();
+
+  // 13. A file deleted in one tab isn't brought back by an editor that has it open.
+  const victim = await entry(moveName);
+  const e = track(await context.newPage());
+  await e.goto(`${URL}/#/file/${victim.id}`);
+  await e.waitForSelector("#dt-canvas");
+  await e.waitForSelector(".file-loc");
+  await sleep(600);
+  await go(p, `#/folder/${keysId}`);
+  await cardMenu(card(moveName), "Delete");
+  await dlg.waitFor();
+  await dlg.getByRole("button", { name: "Delete" }).click();
+  await sleep(500);
+  check("the file is deleted", (await entry(moveName)) === undefined);
+  check("the open editor says so", await waitFor(async () => (await e.locator(".stale-bar:has-text('deleted in another tab')").count()) === 1, 2500));
+  check("...with Keep it and Back to files", (await e.locator(".stale-bar button").allInnerTexts()).join("|") === "Keep it|Back to files");
+  await addBox(e, "After delete");
+  await sleep(3500);
+  check("its autosave does not bring the file back", (await entry(moveName)) === undefined && (await index()).every((f) => f.id !== victim.id));
+  await e.locator(".stale-bar button:has-text('Keep it')").click();
+  await sleep(1500);
+  check("Keep it restores it in its old folder", (await entry(moveName))?.folder === keysId, JSON.stringify(await entry(moveName)));
+  check("...and the bar goes", (await e.locator(".stale-bar").count()) === 0);
+  await e.close();
 
   // Screenshots (optional).
   if (SHOTS) {

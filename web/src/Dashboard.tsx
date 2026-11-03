@@ -111,7 +111,17 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
     stale.current = false;
     try {
       const [f, d] = await Promise.all([listFiles(), listFolders()]);
-      if (mine === gen.current) (setFiles(f), setFolders(d));
+      if (mine === gen.current) {
+        setFiles(f);
+        setFolders(d);
+        // Folders that are gone drop out of the remembered open state.
+        setOpenSet((s) => {
+          const keep = [...s].filter((id) => d.some((x) => x.id === id));
+          if (keep.length === s.size) return s;
+          lsSet("dt:files:open", JSON.stringify(keep));
+          return new Set(keep);
+        });
+      }
     } catch {
       /* keep what is shown */
     }
@@ -168,11 +178,25 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   const missing = files !== null && loc !== "all" && loc !== "drafts" && !current;
   const currentFolder = current?.id;
   const path = useMemo(() => ancestors(folders, current?.id), [folders, current]);
-  const open = useMemo(() => {
-    const o = new Set(openSet);
-    for (const f of path.slice(0, -1)) o.add(f.id);
-    return o;
-  }, [openSet, path]);
+  const open = openSet;
+  // Arriving somewhere opens its parents once (they can be closed again afterwards).
+  useEffect(() => {
+    if (!current) return;
+    const above = ancestors(folders, current.id).slice(0, -1).map((f) => f.id);
+    setOpenSet((s) => {
+      if (above.every((id) => s.has(id))) return s;
+      const n = new Set([...s, ...above]);
+      lsSet("dt:files:open", JSON.stringify([...n]));
+      return n;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loc, current?.id]);
+  // Closing the phone sheet ends a rename that was going on in it.
+  const sheetWas = useRef(false);
+  useEffect(() => {
+    if (sheetWas.current && !sheet) setRenaming((r) => (r?.in === "tree" ? null : r));
+    sheetWas.current = sheet;
+  }, [sheet]);
   const toggle = (id: string) =>
     setOpenSet((s) => {
       const n = new Set(s);
@@ -257,6 +281,8 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
     const f = await attempt(parent === null ? "create the project" : "create the folder", () => createFolder(parent));
     if (!f) return;
     if (parent) reveal(parent);
+    // From a card of a subfolder the new folder isn't on this page: go to where it is.
+    if (where === "card" && parent !== null && parent !== currentFolder) go(parent);
     await refresh();
     setRenaming({ kind: "folder", id: f.id, in: where });
   };
@@ -272,6 +298,15 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
     if (target.kind === "folder") await attempt("rename the folder", () => renameFolder(target.id, clean));
     else await attempt("rename the file", () => renameFile(target.id, clean));
     refresh();
+  };
+
+  /** The input's end: a blank name is refused (false keeps the field open), anything else is applied. */
+  const renameDone = (target: Target, name: string | null): boolean | void => {
+    if (name !== null && !normalizeName(name)) {
+      toast(`A ${target.kind === "folder" ? "folder" : "file"} needs a name`, "error");
+      return false;
+    }
+    finishRename(target, name);
   };
 
   const runDelete = async (target: Target) => {
@@ -363,15 +398,24 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   });
 
   // --- Menus ---
+  // The phone's sheet closes first, so a dialog never opens under it.
+  const askDelete = (t: Target) => {
+    setSheet(false);
+    setConfirm(t);
+  };
+  const askMove = (t: Target) => {
+    setSheet(false);
+    setMoving(t);
+  };
   const openMenu = (x: number, y: number, label: string, items: MenuItem[]) => setMenu({ x, y, items, label });
   const folderMenu = (id: string, x: number, y: number, where: "tree" | "card") =>
     openMenu(x, y, "Folder actions", [
       { label: "Open", onClick: () => go(id) },
       { label: "New folder", onClick: () => addFolder(id, where) },
       { label: "Rename", onClick: () => setRenaming({ kind: "folder", id, in: where }) },
-      { label: "Move to…", onClick: () => setMoving({ kind: "folder", id }) },
+      { label: "Move to…", onClick: () => askMove({ kind: "folder", id }) },
       { sep: true },
-      { label: "Delete", onClick: () => setConfirm({ kind: "folder", id }) },
+      { label: "Delete", onClick: () => askDelete({ kind: "folder", id }) },
     ]);
   const fileMenu = (f: FileMeta, x: number, y: number) =>
     openMenu(x, y, "File actions", [
@@ -384,9 +428,9 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
           refresh();
         },
       },
-      { label: "Move to…", onClick: () => setMoving({ kind: "file", id: f.id }) },
+      { label: "Move to…", onClick: () => askMove({ kind: "file", id: f.id }) },
       { sep: true },
-      { label: "Delete", onClick: () => setConfirm({ kind: "file", id: f.id }) },
+      { label: "Delete", onClick: () => askDelete({ kind: "file", id: f.id }) },
     ]);
   const newMenu = (x: number, y: number) =>
     openMenu(x, y, "New", [
@@ -424,12 +468,25 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
     </nav>
   );
 
-  const treeTop = [
-    { id: "all", label: "All files", icon: <LayoutGrid size={14} /> },
-    { id: "drafts", label: "Drafts", icon: <FileStack size={14} /> },
-  ];
+  const sideLink = (id: "all" | "drafts", label: string, icon: React.ReactNode) => (
+    <a
+      href={hashFor(id)}
+      draggable={false}
+      className={"side-link" + (loc === id ? " current" : "") + (id === "drafts" && dropOver === "drafts" && canDrop("drafts") ? " drop-ok" : "")}
+      aria-current={loc === id ? "page" : undefined}
+      onClick={() => setSheet(false)}
+      {...(id === "drafts" ? dropProps("drafts") : {})}
+    >
+      {icon}
+      {label}
+    </a>
+  );
   const sidebar = (
     <>
+      <div className="side-links">
+        {sideLink("all", "All files", <LayoutGrid size={14} />)}
+        {sideLink("drafts", "Drafts", <FileStack size={14} />)}
+      </div>
       <div className="side-head">
         <span className="section-head" id="projects-h">
           Projects
@@ -439,10 +496,10 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
         </button>
       </div>
       <ProjectTree
-        label="Projects"
+        labelledBy="projects-h"
         mode="nav"
         folders={folders}
-        top={treeTop}
+        top={[]}
         current={loc}
         open={open}
         onToggle={toggle}
@@ -452,8 +509,8 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
         }}
         renaming={renaming?.in === "tree" && renaming.kind === "folder" ? renaming.id : null}
         onRenameStart={(id) => setRenaming({ kind: "folder", id, in: "tree" })}
-        onRenameDone={(id, name) => finishRename({ kind: "folder", id }, name)}
-        onDelete={(id) => setConfirm({ kind: "folder", id })}
+        onRenameDone={(id, name) => renameDone({ kind: "folder", id }, name)}
+        onDelete={(id) => askDelete({ kind: "folder", id })}
         onMenu={(id, x, y) => folderMenu(id, x, y, "tree")}
         canDrop={canDrop}
         onDrop={dropOn}
@@ -476,12 +533,12 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
           <div className="folder-open">
             <FolderIcon size={22} aria-hidden="true" />
             <div className="meta">
-              <NameInput value={f.name} label="Folder name" onDone={(n) => finishRename({ kind: "folder", id: f.id }, n)} />
+              <NameInput value={f.name} label="Folder name" onDone={(n) => renameDone({ kind: "folder", id: f.id }, n)} />
               <div className="muted small">{summary}</div>
             </div>
           </div>
         ) : (
-          <button className="folder-open" aria-label={`Open folder ${f.name}, ${c.files} file${c.files === 1 ? "" : "s"}`} onClick={() => go(f.id)}>
+          <button className="folder-open" aria-label={`${f.name}, ${summary}`} onClick={() => go(f.id)}>
             <FolderIcon size={22} aria-hidden="true" />
             <div className="meta">
               <div className="n">{f.name}</div>
@@ -519,7 +576,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       </button>
       {renaming?.kind === "file" && renaming.id === f.id && (
         <div className="rename-over">
-          <NameInput value={f.name} label="File name" onDone={(n) => finishRename({ kind: "file", id: f.id }, n)} />
+          <NameInput value={f.name} label="File name" onDone={(n) => renameDone({ kind: "file", id: f.id }, n)} />
         </div>
       )}
       <button
@@ -712,7 +769,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
         {!missing && (
           <>
             <div className="section-head" style={{ marginBottom: 12, fontSize: 14 }}>
-              {q ? `Results for “${query.trim()}”` : loc === "all" ? "Your files" : loc === "drafts" ? "Drafts" : "Folders and files"}
+              {q ? `Results for “${query.trim()}”` : loc === "all" ? "Your files" : loc === "drafts" ? "Drafts" : shownFolders.length && shownFiles.length ? "Folders and files" : shownFolders.length ? "Folders" : "Files"}
             </div>
             {shownFolders.length > 0 && (
               <div className="files-grid folders-grid" aria-label="Folders">
