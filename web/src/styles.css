@@ -388,6 +388,12 @@ textarea {
   padding: 0 6px 0 0;
   height: 100%;
 }
+.field .lbl.wide {
+  width: auto;
+  padding: 0 6px 0 8px;
+  cursor: default;
+  white-space: nowrap;
+}
 .field select {
   flex: 1;
   min-width: 0;

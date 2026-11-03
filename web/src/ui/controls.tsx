@@ -149,7 +149,9 @@ export function SelectField<T extends string | number>(props: {
 }) {
   return (
     <label className="field" title={props.title}>
-      {props.label !== undefined && <span className="lbl">{props.label}</span>}
+      {props.label !== undefined && (
+        <span className={typeof props.label === "string" && props.label.length > 2 ? "lbl wide" : "lbl"}>{props.label}</span>
+      )}
       <select
         disabled={props.disabled}
         aria-label={props.ariaLabel ?? props.title ?? (typeof props.label === "string" ? props.label : undefined)}
