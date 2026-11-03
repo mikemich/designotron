@@ -1640,7 +1640,7 @@ impl Engine {
         Ok(json!({}))
       }
       Command::SetVariables { collections } => {
-        crate::variables::validate(&collections)?;
+        crate::variables::validate(&collections, &self.doc.variables)?;
         self.doc.variables = collections;
         crate::variables::prune(&mut self.doc);
         Ok(json!({}))
@@ -1949,18 +1949,27 @@ impl Engine {
           if after.kind.is_frame_like() && (after.width != before.width || after.height != before.height) {
             layout::apply_constraints(&mut self.doc, id, before.width, before.height);
           }
+          // Editing a linked layer's fill, stroke, effects or grids by hand detaches it (Styles, W3-C);
+          // on an instance layer the unlink is an override too, so a main edit doesn't relink it.
+          let mut unlinked = serde_json::Map::new();
           if after.fill_style.is_some() && before.fills != after.fills {
             self.doc.get_mut(id).unwrap().fill_style = None;
+            unlinked.insert("fillStyle".into(), Value::Null);
           }
-          // Editing a linked layer's effects, grids or stroke by hand detaches it (Styles, W3-C).
           if after.stroke_style.is_some() && before.strokes != after.strokes {
             self.doc.get_mut(id).unwrap().stroke_style = None;
+            unlinked.insert("strokeStyle".into(), Value::Null);
           }
           if after.effect_style.is_some() && before.effects != after.effects {
             self.doc.get_mut(id).unwrap().effect_style = None;
+            unlinked.insert("effectStyle".into(), Value::Null);
           }
           if after.grid_style.is_some() && before.layout_grids != after.layout_grids {
             self.doc.get_mut(id).unwrap().grid_style = None;
+            unlinked.insert("gridStyle".into(), Value::Null);
+          }
+          if !unlinked.is_empty() {
+            components::record_override(&mut self.doc, id, &Value::Object(unlinked));
           }
         }
         Ok(json!({}))
@@ -2201,6 +2210,8 @@ impl Engine {
           let mut style = n.clone();
           style.fills = strokes;
           style.strokes.clear();
+          // The new shape is filled with the stroke's colour, so it takes over the stroke's style link.
+          style.fill_style = style.stroke_style.take();
           let keep = n.fills.iter().any(|p| p.visible());
           let new_id = self.insert_vector(
             &style,
@@ -2212,6 +2223,7 @@ impl Engine {
           if keep {
             if let Some(m) = self.doc.get_mut(&id) {
               m.strokes.clear();
+              m.stroke_style = None;
             }
           } else {
             ops::delete(&mut self.doc, std::slice::from_ref(&id));
@@ -2472,7 +2484,7 @@ impl Engine {
         );
         self
           .doc
-          .update_where(|n| n.stroke_style.as_deref() == Some(id.as_str()), |n| set_stroke_color(n, &color));
+          .update_where(|n| n.stroke_style.as_deref() == Some(id.as_str()), |n| recolor_stroke(n, &color));
         Ok(json!({}))
       }
       Command::AddEffectStyle { name, from, description } => {
@@ -2637,6 +2649,8 @@ impl Engine {
         Ok(json!({}))
       }
       Command::ApplyStyle { ids, style_id, kind } => {
+        // What each layer got, recorded as an override when it lives in an instance.
+        let mut applied: Vec<(NodeId, Value)> = Vec::new();
         if let Some(c) = self.doc.styles.colors.iter().find(|s| s.id == style_id).cloned() {
           let stroke = kind.as_deref() == Some("stroke");
           for id in &ids {
@@ -2644,9 +2658,14 @@ impl Engine {
               if stroke {
                 set_stroke_color(n, &c.color);
                 n.stroke_style = Some(style_id.clone());
+                applied.push((
+                  id.clone(),
+                  json!({ "strokes": n.strokes, "strokeWeight": n.stroke_weight, "strokeStyle": style_id }),
+                ));
               } else {
                 n.fills = vec![Paint::solid(&c.color)];
                 n.fill_style = Some(style_id.clone());
+                applied.push((id.clone(), json!({ "fills": n.fills, "fillStyle": style_id })));
               }
             }
           }
@@ -2655,6 +2674,7 @@ impl Engine {
             if let Some(n) = self.doc.get_mut(id) {
               n.effects = e.effects.clone();
               n.effect_style = Some(style_id.clone());
+              applied.push((id.clone(), json!({ "effects": n.effects, "effectStyle": style_id })));
             }
           }
         } else if let Some(g) = self.doc.styles.grids.iter().find(|s| s.id == style_id).cloned() {
@@ -2662,6 +2682,7 @@ impl Engine {
             if let Some(n) = self.doc.get_mut(id).filter(|n| n.kind.is_frame_like()) {
               n.layout_grids = g.grids.clone();
               n.grid_style = Some(style_id.clone());
+              applied.push((id.clone(), json!({ "layoutGrids": n.layout_grids, "gridStyle": style_id })));
             }
           }
         } else if let Some(t) = self.doc.styles.texts.iter().find(|s| s.id == style_id).cloned() {
@@ -2675,10 +2696,17 @@ impl Engine {
             }
             if let Some(n) = self.doc.get_mut(id) {
               n.text_style = Some(style_id.clone());
+              if let Some(tp) = &n.text {
+                let text = json!({ "fontFamily": tp.font_family, "fontSize": tp.font_size, "fontWeight": tp.font_weight, "lineHeight": tp.line_height, "letterSpacing": tp.letter_spacing });
+                applied.push((id.clone(), json!({ "text": text, "textStyle": style_id })));
+              }
             }
           }
         } else {
           return Err("no such style".into());
+        }
+        for (id, p) in &applied {
+          components::record_override(&mut self.doc, id, p);
         }
         Ok(json!({}))
       }
@@ -3277,8 +3305,6 @@ fn without_unsafe_links(mut p: Value) -> Value {
   p
 }
 
-/// Removes links a text's runs may not carry (anything but http(s), mailto and tel), so a
-/// patch from an AI tool, a plugin or a peer can't plant a `javascript:` link.
 /// Sets the first stroke paint to a solid colour (adding a 1 px stroke when the layer has none).
 pub(crate) fn set_stroke_color(n: &mut Node, color: &str) {
   match n.strokes.first_mut() {
@@ -3291,6 +3317,17 @@ pub(crate) fn set_stroke_color(n: &mut Node, color: &str) {
   }
 }
 
+/// Recolours the first stroke paint (style propagation never adds a stroke).
+fn recolor_stroke(n: &mut Node, color: &str) {
+  match n.strokes.first_mut() {
+    Some(Paint::Solid { color: c, .. }) => *c = color.to_string(),
+    Some(first) => *first = Paint::solid(color),
+    None => {}
+  }
+}
+
+/// Removes links a text's runs may not carry (anything but http(s), mailto and tel), so a
+/// patch from an AI tool, a plugin or a peer can't plant a `javascript:` link.
 fn drop_unsafe_links(n: &mut Node) {
   let Some(t) = n.text.as_mut() else { return };
   if t
@@ -4569,6 +4606,116 @@ mod tests {
     let mut e2 = engine();
     e2.load(&before).unwrap();
     assert_eq!(e2.to_json(), before);
+  }
+
+  /// A component with one instance, and an effect style made from a shadowed frame.
+  fn instance_with_style() -> (Engine, String, String, String) {
+    let mut e = engine();
+    let (shadowed, _) = styled_frames(&mut e);
+    let style = id_of(
+      &e.dispatch(Command::AddEffectStyle {
+        name: "Shadow".into(),
+        from: shadowed,
+        description: String::new(),
+      })
+      .unwrap(),
+    );
+    let f = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 0.0,
+        y: 500.0,
+        width: 100.0,
+        height: 40.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let comp = id_of(&e.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap());
+    let inst = place(&mut e, &comp, 300.0, 500.0, None, false).unwrap();
+    (e, comp, inst, style)
+  }
+
+  #[test]
+  fn a_style_applied_to_an_instance_survives_edits_of_the_main() {
+    let (mut e, comp, inst, style) = instance_with_style();
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![inst.clone()],
+      style_id: style.clone(),
+      kind: None,
+    })
+    .unwrap();
+    let want = e.doc.get(&inst).unwrap().effects.clone();
+    assert!(!want.is_empty());
+    e.dispatch(Command::Update {
+      ids: vec![comp],
+      patch: json!({ "cornerRadius": 8 }),
+    })
+    .unwrap();
+    let n = e.doc.get(&inst).unwrap();
+    assert_eq!(
+      (n.effect_style.as_deref(), &n.effects),
+      (Some(style.as_str()), &want),
+      "the link and its effects stay"
+    );
+  }
+
+  #[test]
+  fn detaching_a_style_on_an_instance_survives_edits_of_the_main() {
+    let (mut e, comp, inst, style) = instance_with_style();
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![comp.clone()],
+      style_id: style,
+      kind: None,
+    })
+    .unwrap();
+    assert!(e.doc.get(&inst).unwrap().effect_style.is_some(), "the instance follows the main");
+    e.dispatch(Command::Update {
+      ids: vec![inst.clone()],
+      patch: json!({ "effects": [] }),
+    })
+    .unwrap();
+    assert!(e.doc.get(&inst).unwrap().effect_style.is_none());
+    e.dispatch(Command::Update {
+      ids: vec![comp],
+      patch: json!({ "cornerRadius": 8 }),
+    })
+    .unwrap();
+    let n = e.doc.get(&inst).unwrap();
+    assert!(n.effect_style.is_none() && n.effects.is_empty(), "a main edit doesn't relink it");
+  }
+
+  #[test]
+  fn outlining_a_stroke_unlinks_the_stroke_style_and_propagation_never_adds_strokes() {
+    let mut e = engine();
+    let (a, b) = styled_frames(&mut e);
+    let c = id_of(
+      &e.dispatch(Command::AddColorStyle {
+        name: "Ink".into(),
+        color: "#FF0000".into(),
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![a.clone()],
+      style_id: c.clone(),
+      kind: Some("stroke".into()),
+    })
+    .unwrap();
+    e.dispatch(Command::OutlineStroke { ids: vec![a.clone()] }).unwrap();
+    let n = e.doc.get(&a).unwrap();
+    assert!(
+      n.stroke_style.is_none() && n.strokes.is_empty(),
+      "the kept original has no stroke and no link"
+    );
+    // Recolouring the style doesn't give the stroke-less layers a stroke.
+    e.dispatch(Command::UpdateColorStyle {
+      id: c,
+      name: None,
+      color: Some("#00FF00".into()),
+    })
+    .unwrap();
+    assert!(e.doc.get(&a).unwrap().strokes.is_empty() && e.doc.get(&b).unwrap().strokes.is_empty());
   }
 
   #[test]

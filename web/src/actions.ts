@@ -196,6 +196,8 @@ interface CopiedProps {
   look: Record<string, unknown>;
   text: Record<string, unknown> | null;
   fillStyle: string | null;
+  effectStyle?: string | null;
+  strokeStyle?: string | null;
   textStyle: string | null;
 }
 
@@ -211,7 +213,7 @@ export function copyProperties() {
   const look: Record<string, unknown> = {};
   for (const k of LOOK_KEYS) look[k] = structuredClone(n[k]);
   const text = n.text ? Object.fromEntries(TEXT_KEYS.map((k) => [k, n.text![k]])) : null;
-  copiedProps = { look, text, fillStyle: n.fillStyle, textStyle: n.textStyle };
+  copiedProps = { look, text, fillStyle: n.fillStyle, textStyle: n.textStyle, effectStyle: n.effectStyle ?? null, strokeStyle: n.strokeStyle ?? null };
   toast(`Copied properties of ${n.name}`);
 }
 
@@ -228,13 +230,17 @@ export function pasteProperties() {
   const ids = nodes.map((n) => n.id);
   const texts = nodes.filter((n) => n.type === "text").map((n) => n.id);
   oneStep(() => {
-    dispatch({ op: "update", ids, patch: { ...p.look, ...(p.fillStyle ? {} : { fillStyle: null }) } });
+    dispatch({ op: "update", ids, patch: { ...p.look, ...(p.fillStyle ? {} : { fillStyle: null }), ...(p.effectStyle ? {} : { effectStyle: null }), ...(p.strokeStyle ? {} : { strokeStyle: null }) } });
     // The style link goes in the same patch as the type values, and is cleared when the source has none
     // (a leftover link would let a later edit of the old style overwrite what was pasted).
     const textStyle = p.textStyle && doc.styles.texts.some((s) => s.id === p.textStyle) ? p.textStyle : null;
     if (p.text && texts.length) dispatch({ op: "update", ids: texts, patch: { text: p.text, textStyle } });
     // Editing fills detaches a colour style, so link it again; a plain update records it as an instance override.
     if (p.fillStyle && doc.styles.colors.some((s) => s.id === p.fillStyle)) dispatch({ op: "update", ids, patch: { fillStyle: p.fillStyle } });
+    // Same for the stroke colour style and the effect style.
+    const strokeStyle = p.strokeStyle && doc.styles.colors.some((s) => s.id === p.strokeStyle) ? p.strokeStyle : null;
+    const effectStyle = p.effectStyle && doc.styles.effects?.some((s) => s.id === p.effectStyle) ? p.effectStyle : null;
+    if (strokeStyle || effectStyle) dispatch({ op: "update", ids, patch: { ...(strokeStyle ? { strokeStyle } : {}), ...(effectStyle ? { effectStyle } : {}) } });
   });
   toast(`Pasted properties onto ${nodes.length === 1 ? nodes[0].name : `${nodes.length} layers`}`);
 }

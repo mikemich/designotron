@@ -91,6 +91,24 @@ pub fn is_granular(d: &Value) -> bool {
   GRANULAR_KEYS.iter().any(|k| d.get(*k).is_some())
 }
 
+/// A whole-`styles` delta from an editor that predates effect and grid styles lacks both lists, and
+/// applying it would empty the room's. Puts the document's lists into it; true when it changed `d`.
+pub fn keep_style_lists(d: &mut Value, doc: &Document) -> bool {
+  let Some(styles) = d.get_mut("styles").and_then(|s| s.as_object_mut()) else {
+    return false;
+  };
+  let mut changed = false;
+  if !styles.contains_key("effects") && !doc.styles.effects.is_empty() {
+    styles.insert("effects".into(), json!(doc.styles.effects));
+    changed = true;
+  }
+  if !styles.contains_key("grids") && !doc.styles.grids.is_empty() {
+    styles.insert("grids".into(), json!(doc.styles.grids));
+    changed = true;
+  }
+  changed
+}
+
 /// A granular delta in the whole-list form older peers understand, with the lists taken from
 /// `doc` (the room's document, after applying the delta). `None` when `d` is not granular.
 pub fn legacy(d: &Value, doc: &Document) -> Option<Value> {

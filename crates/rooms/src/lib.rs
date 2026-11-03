@@ -802,10 +802,18 @@ impl Rooms {
         return Step::Close(format!("{} Your latest change wasn't shared.", self.too_large()));
       }
     }
-    let Ok(delta) = serde_json::from_str::<Value>(raw.get()) else {
+    let Ok(mut delta) = serde_json::from_str::<Value>(raw.get()) else {
       self.ack(r, id, true);
       return Step::Go;
     };
+    // An editor that predates effect and grid styles sends whole `styles` without them: keep the room's.
+    let sender_granular = r.peers.get(&id).is_some_and(|p| p.granular);
+    let fixed = if !sender_granular && designotron_engine::collab::keep_style_lists(&mut delta, r.doc.as_ref().unwrap()) {
+      serde_json::value::to_raw_value(&delta).ok()
+    } else {
+      None
+    };
+    let raw: &RawValue = fixed.as_deref().unwrap_or(raw);
     if let Err(e) = designotron_engine::collab::apply(r.doc.as_mut().unwrap(), &delta) {
       log::warn!("rejected collab delta: {e}");
       self.ack(r, id, true);
@@ -1199,5 +1207,66 @@ mod tests {
     tokio::time::timeout(Duration::from_secs(1), kicked)
       .await
       .expect("told to disconnect");
+  }
+
+  fn peer(rooms: &Rooms, granular: bool) -> (Peer, mpsc::UnboundedReceiver<Arc<String>>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let out = Outbox {
+      tx,
+      meter: Arc::new(Meter::new(rooms.conn_bytes.clone())),
+      kick: Arc::new(Notify::new()),
+    };
+    (
+      Peer {
+        out,
+        name: "p".into(),
+        color: "#000".into(),
+        presence: Value::Null,
+        granular,
+      },
+      rx,
+    )
+  }
+
+  /// An editor that predates effect and grid styles sends whole `styles` without them; the room
+  /// keeps its own lists and forwards the repaired delta.
+  #[tokio::test]
+  async fn an_old_editors_whole_styles_do_not_wipe_effect_and_grid_styles() {
+    let rooms = Rooms::new(Limits::default(), None);
+    let mut doc = designotron_engine::doc::new_document(&mut designotron_engine::doc::IdGen::new(1), "t");
+    doc.styles.effects.push(designotron_engine::model::EffectStyle {
+      id: "e1".into(),
+      name: "Shadow".into(),
+      ..Default::default()
+    });
+    doc.styles.grids.push(designotron_engine::model::GridStyle {
+      id: "g1".into(),
+      name: "Grid".into(),
+      ..Default::default()
+    });
+    let mut r = Room {
+      doc: Some(doc),
+      ..Room::default()
+    };
+    let (old, mut old_rx) = peer(&rooms, false);
+    let (new, mut new_rx) = peer(&rooms, true);
+    r.peers.insert(1, old);
+    r.peers.insert(2, new);
+    let msg =
+      r##"{"type":"delta","delta":{"nodes":{},"removed":[],"styles":{"colors":[{"id":"c1","name":"C","color":"#111111"}],"texts":[]}}}"##;
+    let m: Incoming = serde_json::from_str(msg).unwrap();
+    rooms.delta(&mut r, 1, &m, msg.len());
+    let doc = r.doc.as_ref().unwrap();
+    assert_eq!(
+      (doc.styles.colors.len(), doc.styles.effects.len(), doc.styles.grids.len()),
+      (1, 1, 1)
+    );
+    // The granular peer is sent the repaired whole `styles` (its colour change, the room's other lists).
+    let got: Value = serde_json::from_str(&new_rx.try_recv().expect("forwarded")).unwrap();
+    assert_eq!(got["delta"]["styles"]["effects"][0]["id"], "e1");
+    assert_eq!(got["delta"]["styles"]["grids"][0]["id"], "g1");
+    // The sender only gets its ack.
+    let ack: Value = serde_json::from_str(&old_rx.try_recv().unwrap()).unwrap();
+    assert_eq!(ack["type"], "ack");
   }
 }

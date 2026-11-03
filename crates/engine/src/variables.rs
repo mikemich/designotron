@@ -132,10 +132,21 @@ pub fn bindable<'a>(doc: &'a Document, prop: &str) -> Vec<(&'a Collection, &'a V
     .collect()
 }
 
-/// Rejects alias cycles and unknown scope names in a whole set of collections.
-pub fn validate(collections: &[Collection]) -> Result<(), String> {
+/// How many aliases `resolve` follows; `validate` refuses longer chains.
+pub const MAX_ALIAS_DEPTH: usize = 8;
+
+/// Rejects unknown scope names, and alias cycles and chains longer than `resolve` follows. Only
+/// variables this change touched (new, or with other values than in `previous`) are checked, so a
+/// cycle two peers made at once can't block every later edit of unrelated variables.
+pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(), String> {
   let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
   let mut names: BTreeMap<&str, &str> = BTreeMap::new();
+  let old: BTreeMap<&str, &Variable> = previous
+    .iter()
+    .flat_map(|c| c.variables.iter())
+    .map(|v| (v.id.as_str(), v))
+    .collect();
+  let mut changed: Vec<&str> = Vec::new();
   for v in collections.iter().flat_map(|c| c.variables.iter()) {
     if let Some(bad) = v.scopes.iter().find(|s| !SCOPES.contains(&s.as_str())) {
       return Err(format!("unknown variable scope '{bad}'. Scopes: {}", SCOPES.join(", ")));
@@ -143,40 +154,42 @@ pub fn validate(collections: &[Collection]) -> Result<(), String> {
     names.insert(&v.id, &v.name);
     let out = edges.entry(&v.id).or_default();
     out.extend(v.values.values().filter_map(|x| x.get("alias").and_then(|a| a.as_str())));
-  }
-  // Iterative three-colour DFS.
-  let mut state: BTreeMap<&str, u8> = BTreeMap::new();
-  for start in edges.keys() {
-    if state.contains_key(start) {
-      continue;
+    if old.get(v.id.as_str()).is_none_or(|o| o.values != v.values) {
+      changed.push(&v.id);
     }
-    let mut stack: Vec<(&str, usize)> = vec![(start, 0)];
-    state.insert(start, 1);
-    while let Some((node, i)) = stack.last_mut() {
-      let next = edges.get(*node).and_then(|e| e.get(*i)).copied();
-      *i += 1;
-      match next {
-        None => {
-          state.insert(node, 2);
-          stack.pop();
-        }
-        Some(t) => match state.get(t) {
-          Some(1) => {
-            return Err(format!(
-              "alias cycle: {} refers back to itself through {}",
-              names.get(t).unwrap_or(&t),
-              names.get(*node).unwrap_or(node)
-            ));
-          }
-          Some(_) => {}
-          None => {
-            if edges.contains_key(t) {
-              state.insert(t, 1);
-              stack.push((t, 0));
-            }
-          }
-        },
+  }
+  /// Longest alias chain from `node`, or the variable that closes a loop.
+  fn depth<'a>(edges: &BTreeMap<&'a str, Vec<&'a str>>, node: &'a str, path: &mut Vec<&'a str>) -> Result<usize, &'a str> {
+    if path.contains(&node) {
+      return Err(node);
+    }
+    path.push(node);
+    let mut longest = 0;
+    for t in edges.get(node).into_iter().flatten() {
+      if edges.contains_key(t) {
+        longest = longest.max(1 + depth(edges, t, path)?);
       }
+    }
+    path.pop();
+    Ok(longest)
+  }
+  for start in changed {
+    match depth(&edges, start, &mut Vec::new()) {
+      Err(at) => {
+        return Err(format!(
+          "alias cycle: {} refers back to itself through {}",
+          names.get(at).unwrap_or(&at),
+          names.get(start).unwrap_or(&start)
+        ))
+      }
+      Ok(n) if n >= MAX_ALIAS_DEPTH => {
+        return Err(format!(
+          "{} is at the end of an alias chain of {n}; at most {} aliases can be followed",
+          names.get(start).unwrap_or(&start),
+          MAX_ALIAS_DEPTH - 1
+        ))
+      }
+      Ok(_) => {}
     }
   }
   Ok(())
@@ -216,7 +229,7 @@ pub fn mode_for(doc: &Document, node: &str, coll: &Collection) -> Option<String>
 /// A variable's value as seen by `node` (aliases followed).
 pub fn resolve(doc: &Document, node: &str, var: &str) -> Option<Value> {
   let mut key = var.to_string();
-  for _ in 0..8 {
+  for _ in 0..MAX_ALIAS_DEPTH {
     let (c, v) = find(doc, &key)?;
     let mode = mode_for(doc, node, c)?;
     let val = v
@@ -652,9 +665,9 @@ mod tests {
     let err = e.dispatch(Command::SetVariables { collections: vec![cyc] }).unwrap_err();
     assert!(err.contains("alias cycle"), "{err}");
     let mut selfref = coll(vec![var("a", VarKind::Number, json!({ "alias": "a" }))]);
-    assert!(validate(std::slice::from_ref(&selfref)).is_err());
+    assert!(validate(std::slice::from_ref(&selfref), &[]).is_err());
     selfref.variables[0].scopes = vec!["nope".into()];
-    assert!(validate(&[selfref]).unwrap_err().contains("scope"));
+    assert!(validate(&[selfref], &[]).unwrap_err().contains("scope"));
     // The document keeps the last valid set.
     assert_eq!(e.doc.variables[0].variables[0].values["m"], json!(1));
   }
@@ -783,5 +796,54 @@ mod tests {
     .unwrap();
     let n = e.doc.get(&f).unwrap();
     assert!(!n.bindings.contains_key("paddingLeft") && n.bindings.contains_key("counterGap"));
+  }
+
+  #[test]
+  fn only_cycles_through_changed_variables_and_overlong_chains_are_refused() {
+    let alias = |to: &str| json!({ "alias": to });
+    // A cycle that merged in (a <-> b) doesn't block an edit of an unrelated variable.
+    let bad = coll(vec![
+      var("a", VarKind::Number, alias("b")),
+      var("b", VarKind::Number, alias("a")),
+      var("x", VarKind::Number, json!(1)),
+    ]);
+    let mut next = bad.clone();
+    next.variables[2].values.insert("m".into(), json!(2));
+    assert!(validate(std::slice::from_ref(&next), std::slice::from_ref(&bad)).is_ok());
+    // Touching one of the loop's variables is refused.
+    let mut touched = bad.clone();
+    touched.variables[0].values.insert("m".into(), alias("b"));
+    touched.variables[1].values.insert("m".into(), alias("a"));
+    touched.variables[0].values.insert("m2".into(), json!(1));
+    assert!(validate(&[touched], std::slice::from_ref(&bad)).is_err());
+    // A chain `resolve` can't follow is refused; the longest one it can is fine.
+    let chain = |n: usize| {
+      let mut vars = vec![var("v0", VarKind::Number, json!(1))];
+      for i in 1..=n {
+        vars.push(var(&format!("v{i}"), VarKind::Number, alias(&format!("v{}", i - 1))));
+      }
+      coll(vars)
+    };
+    assert!(validate(&[chain(MAX_ALIAS_DEPTH - 1)], &[]).is_ok());
+    assert!(validate(&[chain(MAX_ALIAS_DEPTH)], &[]).unwrap_err().contains("alias chain"));
+    // ...and what validate accepts really resolves.
+    let mut e = engine();
+    let n = MAX_ALIAS_DEPTH - 1;
+    e.dispatch(Command::SetVariables {
+      collections: vec![chain(n)],
+    })
+    .unwrap();
+    let f = id_of(
+      e.dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    assert_eq!(resolve(&e.doc, &f, &format!("v{n}")), Some(json!(1)));
   }
 }

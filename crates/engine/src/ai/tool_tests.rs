@@ -646,6 +646,7 @@ mod tokens {
       json!({ "nodes": [{ "type": "frame", "name": "Card", "width": 200, "height": 100, "effectStyle": "Shadow/Card",
         "gridStyle": "grid/12", "strokeStyle": "Ink" }] }),
     );
+    assert!(r.get("warnings").is_none(), "no unknown-key warnings: {r}");
     let id = r["created"][0]["id"].as_str().unwrap().to_string();
     let n = e.doc.get(&id).unwrap().clone();
     assert_eq!(n.effect_style.as_deref(), Some(e.doc.styles.effects[0].id.as_str()));

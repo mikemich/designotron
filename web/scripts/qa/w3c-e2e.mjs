@@ -273,7 +273,14 @@ const toastText = (p) => p.$$eval("[role=status], .toast", (els) => els.map((e) 
   await p.locator("[data-styles=components] .asset-row", { hasText: "Primary" }).scrollIntoViewIfNeeded();
   await sleep(300);
   const srcBefore = await src();
+  const renders0 = await p.evaluate(() => window.__dtThumbs());
+  // An edit that leaves every component alone costs no thumbnail render (the engine re-sends styles and variables each time).
+  await tool(p, "create_nodes", { nodes: [{ type: "rectangle", name: "Loose", x: 2000, y: 0, width: 50, height: 50, fill: "#123456" }] });
+  const loose = await named(p, "Loose");
+  for (let i = 1; i <= 3; i++) await p.evaluate(([id, x]) => window.__dt.dispatch({ op: "update", ids: [id], patch: { x } }), [loose.id, 2000 + i * 10]);
+  await sleep(1200);
   const renders1 = await p.evaluate(() => window.__dtThumbs());
+  check("edits that don't touch a component don't re-render thumbnails", renders1 === renders0, `${renders1 - renders0} extra renders`);
   await p.evaluate((id) => window.__dt.dispatch({ op: "update", ids: [id], patch: { fills: [{ type: "solid", color: "#00FF00", opacity: 1, visible: true }] } }), prim.id);
   await sleep(1200);
   const renders2 = await p.evaluate(() => window.__dtThumbs());
@@ -282,6 +289,69 @@ const toastText = (p) => p.$$eval("[role=status], .toast", (els) => els.map((e) 
   await shot(p, "c-assets");
   await p.context().close();
 }
+
+// ---------------------------------------------------------------- D: effect styles through a relay
+// Needs E2E_RELAY (a relay serving web/dist) and E2E_URL pointing at that relay.
+if (process.env.E2E_RELAY) {
+  const RELAY = process.env.E2E_RELAY;
+  const owner = await fresh();
+  await tool(owner, "create_nodes", {
+    nodes: [
+      { type: "frame", name: "Mine", x: 0, y: 0, width: 100, height: 80, shadow: { y: 4, blur: 10 } },
+      { type: "frame", name: "Theirs", x: 200, y: 0, width: 100, height: 80, shadow: { y: 2, blur: 30 } },
+    ],
+  });
+  await owner.click(".tbtn[title='Share for live editing']");
+  await owner.fill(".share-dialog input.textinput >> nth=0", "Olga");
+  if (!(await owner.locator(".share-dialog input.mono").count())) await owner.click("text=Use a different relay");
+  await owner.fill(".share-dialog input.mono", RELAY);
+  await owner.click("button:has-text('Share online')");
+  await owner.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 15000 });
+  const link = await owner.evaluate(() => window.__dt.collab().link);
+  await owner.keyboard.press("Escape");
+  const gctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  const guest = await gctx.newPage();
+  await gctx.route("**/*", (route) => {
+    const u = route.request().url();
+    return u.startsWith("data:") || u.startsWith("blob:") || /^https?:\/\/(localhost|127\.0\.0\.1)[:/]/.test(u) ? route.continue() : route.abort();
+  });
+  await guest.addInitScript(() => localStorage.setItem("dt:tour-done", "1"));
+  await guest.goto(link);
+  await guest.waitForSelector("#dt-canvas");
+  await guest.waitForFunction(() => window.__dt.collab().status === "live" && Object.values(window.__dt.doc().nodes).some((n) => n.name === "Theirs"), null, { timeout: 20000 });
+  // Both add a different effect style at the same moment.
+  const add = (p, layer, name) =>
+    p.evaluate(
+      ([layer, name]) => {
+        const n = Object.values(window.__dt.doc().nodes).find((x) => x.name === layer);
+        return window.__dt.dispatch({ op: "addEffectStyle", name, from: n.id });
+      },
+      [layer, name],
+    );
+  await Promise.all([add(owner, "Mine", "Shadow/Mine"), add(guest, "Theirs", "Shadow/Theirs")]);
+  const names = (p) => p.evaluate(() => (window.__dt.doc().styles.effects ?? []).map((s) => s.name).sort());
+  const both = async (p) => {
+    for (let i = 0; i < 40; i++) {
+      const n = await names(p);
+      if (n.length === 2) return n;
+      await sleep(250);
+    }
+    return names(p);
+  };
+  const o = await both(owner);
+  const g = await both(guest);
+  check("two people add different effect styles at once: the owner keeps both", JSON.stringify(o) === '["Shadow/Mine","Shadow/Theirs"]', o.join(","));
+  check("...and the guest keeps both", JSON.stringify(g) === '["Shadow/Mine","Shadow/Theirs"]', g.join(","));
+  // The guest edits one in place; the owner's layer follows through the relay.
+  await guest.evaluate(() => {
+    const st = window.__dt.doc().styles.effects.find((x) => x.name === "Shadow/Mine");
+    window.__dt.dispatch({ op: "updateEffectStyle", id: st.id, effects: [{ ...st.effects[0], blur: 77 }] });
+  });
+  await owner.waitForFunction(() => Object.values(window.__dt.doc().nodes).find((n) => n.name === "Mine")?.effects[0]?.blur === 77, null, { timeout: 10000 }).catch(() => {});
+  check("editing a style in place reaches the other editor's layers", (await named(owner, "Mine")).effects[0].blur === 77);
+  await gctx.close();
+  await owner.context().close();
+} else console.log("SKIP  relay section (set E2E_RELAY and point E2E_URL at the relay)");
 
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

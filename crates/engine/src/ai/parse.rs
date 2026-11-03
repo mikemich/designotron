@@ -79,6 +79,8 @@ pub const KNOWN_KEYS: &[&str] = &[
   "componentId",
   "fillStyle",
   "strokeStyle",
+  "effectStyle",
+  "gridStyle",
   "textStyle",
 ];
 
