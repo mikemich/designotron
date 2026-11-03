@@ -1523,8 +1523,13 @@ fn tw_value(v: &str) -> String {
   v.replace(' ', "_").replace('"', "'")
 }
 
-/// Converts a CSS declaration into Tailwind utility classes.
+/// Converts a CSS declaration into Tailwind utility classes. A double quote would end the
+/// `className="..."` attribute, so values use single quotes (`url('/a.png')`).
 fn tw_class(k: &str, v: &str) -> String {
+  tw_class_raw(k, v).replace('"', "'")
+}
+
+fn tw_class_raw(k: &str, v: &str) -> String {
   let a = tw_value(v);
   match (k, v) {
     ("position", "absolute") => "absolute".into(),
@@ -3055,6 +3060,23 @@ mod tests {
       2,
       "the sample button and the outer button, not the inner one: {src}"
     );
+  }
+
+  #[test]
+  fn image_filled_frame_keeps_its_class_attribute_valid() {
+    let mut doc = sample();
+    let page = doc.pages[0].id.clone();
+    let mut f = crate::ops::default_node(NodeType::Frame, "ph".into(), "Photo".into());
+    f.fills = vec![Paint::Image {
+      src: "asset:abc".into(),
+      scale_mode: ScaleMode::Fill,
+      opacity: 1.0,
+      visible: true,
+    }];
+    doc.insert(f, Some("home"), &page, None);
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(src.contains("[background:url('asset:abc')]"), "{src}");
+    assert!(!src.contains("url(\""), "{src}");
   }
 
   #[test]
