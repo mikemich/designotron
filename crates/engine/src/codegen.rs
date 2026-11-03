@@ -2998,7 +2998,6 @@ mod tests {
     assert!(css.contains("25%") && css.contains("75%"), "{css}");
   }
 
-
   // ---------- W3-F: component library, naming, valid HTML, themes, style classes ----------
 
   /// A frame with a text child, made into a main component named `name`.
