@@ -36,6 +36,7 @@ import { isPhone } from "../panels/PhoneNote";
 const SUGGESTIONS = [
   "Design a 3-screen mobile onboarding flow for a meditation app, with prototype links",
   "Create a modern SaaS landing page at 1440px wide",
+  "Design a mobile sign-up form with default, error and success states, in light and dark mode",
   "Turn the selection into a component with Default / Hover / Disabled variants",
   "Critique this design and fix spacing, hierarchy and contrast",
   "Build this design as a React app in the workspace",
@@ -48,12 +49,14 @@ const QUICK_ACTIONS: {
   fill?: boolean;
   needsSelection?: boolean;
   needsImage?: boolean;
+  /** Needs layers on the current page. */
+  needsContent?: boolean;
 }[] = [
   {
     label: "Rebuild attached screenshot as layers",
     needsImage: true,
     prompt:
-      "Recreate the attached screenshot as editable layers on this page, to the right of existing content. Use frames with auto layout, real text and the closest fonts and colours. Then call get_screenshot and compare it with the original; fix differences in spacing, sizes and colours.",
+      "Recreate the attached screenshot as editable layers on this page, to the right of existing content. Use frames with auto layout, real text and the closest fonts and colours, and build anything that repeats as a component with instances. Then call get_screenshot and compare it with the original; fix differences in spacing, sizes and colours.",
   },
   {
     label: "Import a website by URL…",
@@ -65,13 +68,13 @@ const QUICK_ACTIONS: {
     label: "Design a user flow…",
     fill: true,
     prompt:
-      "Design the complete user flow for: \nInclude every screen (empty, loading and error states too), consistent components, and prototype links between screens.",
+      "Design the complete user flow for: \nInclude every screen (empty, loading and error states too), shared components and colour/type tokens, and prototype links between screens.",
   },
   {
     label: "Make variants of the selection",
     needsSelection: true,
     prompt:
-      "Turn the selected element into a component (if it isn't one) and create a component set with sensible variants (for example Default, Hover, Pressed, Disabled, and size variants where they make sense).",
+      "Turn the selected element into a component (if it isn't one) and combine it with its states into one component set with sensible variants (for example Default, Hover, Pressed, Disabled, and size variants where they make sense).",
   },
   {
     label: "Responsive versions (mobile + desktop)",
@@ -83,7 +86,7 @@ const QUICK_ACTIONS: {
     label: "Dark mode version",
     needsSelection: true,
     prompt:
-      "Duplicate the selected screen next to it and make a polished dark mode version. Keep contrast at WCAG AA or better, then run lint_design on it.",
+      "Make a dark mode version of the selected screen without hard-coding colours: define_variables with a Light and a Dark mode (reuse a collection if the file has one), bind the screen's fills and text colours to them, then duplicate the screen next to it and set variableModes to Dark on the copy. Keep contrast at WCAG AA or better, then run lint_design.",
   },
   {
     label: "Fill with realistic content",
@@ -93,11 +96,13 @@ const QUICK_ACTIONS: {
   },
   {
     label: "Rename layers semantically",
+    needsContent: true,
     prompt:
       "Rename the layers on this page with clear semantic names (e.g. Header, Nav, Hero title, Primary button, Card / Title). Don't change anything else.",
   },
   {
     label: "Sync design → code in the workspace",
+    needsContent: true,
     prompt:
       "Look at the code in the workspace and update it to match the current design: export_code for the screens, then edit the existing components rather than overwriting the project. Run the build to check it compiles.",
   },
@@ -127,6 +132,7 @@ export function ChatPanel() {
     keyChecked,
   } = useChat();
   const hasSelection = useStore((s) => s.es.selection.length > 0);
+  const hasContent = useStore((s) => !!getDoc().pages.find((p) => p.id === s.es.page)?.children.length);
   const [text, setText] = useState("");
   const [settings, setSettings] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -170,7 +176,7 @@ export function ChatPanel() {
   const quickItems: MenuItem[] = QUICK_ACTIONS.map((a) => ({
     label: a.label,
     disabled:
-      (a.needsSelection && !hasSelection) || (a.needsImage && !pending.length),
+      (a.needsSelection && !hasSelection) || (a.needsImage && !pending.length) || (a.needsContent && !hasContent),
     onClick: () => {
       if (a.fill) {
         setText(a.prompt);

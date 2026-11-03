@@ -33,8 +33,19 @@ export function contextLine(): string {
     .map((id) => doc.nodes[id])
     .filter(Boolean)
     .map((n) => `${n.id} (${n.type} "${n.name}")`);
-  return `[Editor context] Document "${doc.name}", page "${page?.name}" (${page?.id}). ${sel.length ? `Selected: ${sel.join(", ")}.` : "Nothing selected."}`;
+  const roots = (page?.children ?? []).map((id) => doc.nodes[id]).filter(Boolean);
+  let layers = "Page is empty.";
+  if (roots.length) {
+    const shown = roots
+      .slice(0, 8)
+      .map((n) => `${n.id} "${n.name}" ${Math.round(n.width)}×${Math.round(n.height)}`)
+      .join(", ");
+    const nextX = Math.ceil(Math.max(...roots.map((n) => n.x + n.width)) / 10) * 10 + 80;
+    layers = `Page has ${roots.length} top-level layer${roots.length === 1 ? "" : "s"}: ${shown}${roots.length > 8 ? ", …" : ""}; place new screens at x >= ${nextX}.`;
+  }
+  return `[Editor context] Document "${doc.name}", page "${page?.name}" (${page?.id}). ${layers} ${sel.length ? `Selected: ${sel.join(", ")}.` : "Nothing selected."}`;
 }
+(globalThis as any).__dt = { ...(globalThis as any).__dt, contextLine };
 
 /** What a chat call gets when the person keeps dragging for too long. */
 export const DRAG_BUSY = "The person is dragging on the canvas; try again in a moment";

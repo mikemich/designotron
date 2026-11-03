@@ -51,14 +51,28 @@ const TEXT_CAP: usize = 2000;
 const FIND_MAX: usize = 500;
 const FIND_DEFAULT: usize = 50;
 
-pub const SYSTEM_PROMPT: &str = "You are the design copilot inside Designotron, a Figma-style design tool. \
-You edit the open document directly through tools. Coordinates are pixels; children are positioned relative to their parent; \
-top-level frames are screens/artboards. Prefer auto layout (layout: {direction, gap, padding, align, crossAlign}) with width/height \
-'fill' or 'hug' for real UI so it converts cleanly to code. Build complete, polished designs in as few create_nodes calls as possible \
-(nest children). Use real copy, consistent spacing (4/8 grid), a clear type scale and accessible contrast. After building, call \
-get_screenshot to check the result visually and fix problems. Place new screens to the right of existing ones so nothing overlaps. \
-When the user attaches a screenshot or mockup, recreate it as editable layers (not an image) and compare with get_screenshot. \
-Use import_url to bring in a live website, and lint_design / fix_issues to check accessibility and consistency before you finish.";
+pub const SYSTEM_PROMPT: &str = "You are the design copilot inside Designotron, a Figma-style design tool. You edit the open document \
+through tools. Coordinates are pixels; children are positioned relative to their parent; top-level frames are screens. Place new \
+screens to the right of existing content so nothing overlaps.\n\
+Build designs that stay editable. Plan the structure first, then build in as few create_nodes calls as you can (nest children).\n\
+- Tokens: before building, define_variables for colours (a Light and a Dark mode when a theme or dark mode is asked for) and \
+define_styles for the type scale. Bind fills with bind: {fill: 'Theme/Surface'}, set type with textStyle and colours with \
+fillStyle (a style name). Raw hex only where no token fits.\n\
+- Components: anything that appears 2+ times with the same structure (cards, rows, nav items, buttons, inputs, plan tiers, table \
+rows) is built once as a component (type 'component', or arrange create_component), kept on the canvas beside the screens, and \
+placed as instances (type 'instance' + componentId, or create_instance). Change an instance's copy with update_nodes on its child \
+ids (create_nodes returns them). Never copy and paste layers.\n\
+- Variants: the states of one control (default, hover, error, success, disabled) are variants of one component: arrange \
+combine_variants; set_component_props for text, icon and show/hide properties.\n\
+- Themes: for dark mode, duplicate the frame and set variableModes (e.g. {Theme: 'Dark'}) on the copy; don't recolour by hand.\n\
+- Layout: auto layout for every stack and row (layout: {direction, gap, padding, align, crossAlign}, width/height 'fill' or \
+'hug'); absolute only for overlays and decoration. Name layers semantically (Header, Nav, Card, Button, Input): code export \
+reads the names.\n\
+Use real copy, a 4/8 spacing grid, a clear type scale and accessible contrast. If the context line says the page is empty, skip \
+get_document. Finish with lint_design (fix_issues) and one get_screenshot, and fix what you see. When the user attaches a \
+screenshot or mockup, recreate it as editable layers and compare. Use import_url for a live website.\n\
+Build every screen and state that was asked for.\n\
+Reply in at most 3 short plain-text sentences (under 50 words, no Markdown, headings or lists): what you built and anything you left out.";
 
 fn spec_schema() -> Value {
   json!({
@@ -196,7 +210,7 @@ pub fn tool_defs() -> Value {
   json!([
     {
       "name": "get_document",
-      "description": "Overview of the open design: pages, current page layer tree (to a depth), selection, components and styles. Call first.",
+      "description": "Overview of the open design: pages, current page layer tree (to a depth), selection, components and styles. Call first, unless the editor context says the page is empty.",
       "input_schema": { "type": "object", "properties": { "depth": { "type": "integer", "description": "Tree depth (default 3)" } } }
     },
     {
@@ -220,7 +234,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "create_nodes",
-      "description": "Create layers (with nested children) on the current page or inside parentId. Returns created ids. Build whole screens in one call.",
+      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). Link tokens with bind (variables), textStyle / fillStyle (style names) and variableModes (theme of a frame). Returns the created layers with their ids, nested; for instances that includes their child layers, whose text you change with update_nodes.",
       "input_schema": { "type": "object", "properties": { "parentId": { "type": "string" }, "nodes": { "type": "array", "items": spec } }, "required": ["nodes"] }
     },
     {
@@ -240,7 +254,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "arrange",
-      "description": "Structural actions on layers: group, ungroup, frame, duplicate, create_component, combine_variants, detach_instance, add_auto_layout, remove_auto_layout, bring_to_front, send_to_back, align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal, distribute_vertical, union, subtract (bottom layer minus the rest), intersect, exclude, flatten, outline_stroke, mask (bottom layer masks the others).",
+      "description": "Structural actions on layers: group, ungroup, frame, duplicate, create_component (turns each layer into a main component; use it for anything that repeats, then place instances), combine_variants (merges components that are states of one control into one component set; name them 'State=Default', 'State=Error' or 'Input/Default', 'Input/Error' first), detach_instance, add_auto_layout, remove_auto_layout, bring_to_front, send_to_back, align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal, distribute_vertical, union, subtract (bottom layer minus the rest), intersect, exclude, flatten, outline_stroke, mask (bottom layer masks the others).",
       "input_schema": { "type": "object", "properties": { "action": { "type": "string", "enum": ARRANGE_ACTIONS }, "ids": { "type": "array", "items": { "type": "string" } } }, "required": ["action", "ids"] }
     },
     {
@@ -295,7 +309,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "define_variables",
-      "description": "Create or update a variable collection with modes (e.g. Light/Dark) and colour/number/string/boolean variables. Bind layer properties with bind: {fill: 'Theme/Background', cornerRadius: 'Radius/md'} in create_nodes/update_nodes (bindable: fill, stroke, cornerRadius, gap, padding, opacity, width, height, strokeWeight, fontSize, characters, visible), and switch a frame's mode with variableModes: {Theme: 'Dark'}. Bound variables become CSS variables in exported code.",
+      "description": "Create or update a variable collection with modes and colour/number/string/boolean variables. For a theme or dark mode, use modes [\"Light\", \"Dark\"] and give each colour `values` {Light, Dark}. Bind layer properties with bind: {fill: 'Theme/Background', cornerRadius: 'Radius/md'} in create_nodes/update_nodes (bindable: fill, stroke, cornerRadius, gap, padding, opacity, width, height, strokeWeight, fontSize, characters, visible); switch a frame (and its children) to a mode with variableModes: {Theme: 'Dark'}, e.g. on a duplicate of a screen, instead of recolouring it. Bound variables become CSS variables in exported code.",
       "input_schema": { "type": "object", "properties": {
         "collection": { "type": "string" },
         "modes": { "type": "array", "items": { "type": "string" }, "description": "Mode names; the first is the default. Default: [\"Default\"]" },
@@ -309,7 +323,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "define_styles",
-      "description": "Create shared colour and text styles (design tokens). Then link layers to them with fix_issues (kinds: [\"unlinkedStyle\"]).",
+      "description": "Create shared colour and text styles (design tokens), e.g. a type scale like Heading/H1, Body/Regular. Link layers to them by name with textStyle / fillStyle in create_nodes/update_nodes, or in bulk with fix_issues (kinds: [\"unlinkedStyle\"]).",
       "input_schema": { "type": "object", "properties": {
         "colors": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "color": { "type": "string", "description": "Hex colour; anything unreadable is an error" } }, "required": ["name", "color"] } },
         "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": "number" } }, "required": ["name", "fontSize"] } }
@@ -342,12 +356,12 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "get_screenshot",
-      "description": "PNG screenshot of a layer (default: current selection or page) so you can visually verify the design.",
+      "description": "PNG screenshot of a layer (default: current selection or page) so you can visually verify the design. The long side is capped at 1600 px, so a big frame at scale 2 is downscaled; screenshot a section by id to see detail.",
       "input_schema": { "type": "object", "properties": { "id": { "type": "string" }, "scale": { "type": "number", "description": "Default 1, max 2" } } }
     },
     {
       "name": "import_url",
-      "description": "Load a live web page (through the local bridge) and convert it into editable layers. Good for redesigning an existing site.",
+      "description": "Load a live web page (through the local bridge) and convert it into editable layers at a 1440 px wide viewport unless `width` says otherwise (use 390 for a mobile layout). Good for redesigning an existing site.",
       "input_schema": { "type": "object", "properties": { "url": { "type": "string" }, "width": { "type": "number", "description": "Viewport width, default 1440" }, "x": { "type": "number" }, "y": { "type": "number" }, "autoLayout": { "type": "boolean", "description": "Map flex, grid and stacked blocks to auto layout (default true); false keeps absolutely positioned layers" } }, "required": ["url"] }
     },
     {
@@ -2798,6 +2812,35 @@ mod tests {
 
   fn engine() -> Engine {
     Engine::new(Box::new(HeuristicMeasurer), 77)
+  }
+
+  #[test]
+  fn system_prompt_asks_for_editable_designs_and_stays_short() {
+    for word in [
+      "component",
+      "variant",
+      "variableModes",
+      "define_variables",
+      "define_styles",
+      "plain-text",
+    ] {
+      assert!(SYSTEM_PROMPT.contains(word), "SYSTEM_PROMPT should mention {word}");
+    }
+    assert!(SYSTEM_PROMPT.len() < 3000, "{} chars", SYSTEM_PROMPT.len());
+  }
+
+  #[test]
+  fn tool_descriptions_name_the_editable_building_blocks() {
+    let defs = tool_defs();
+    let text = |name: &str| {
+      let tool = defs.as_array().unwrap().iter().find(|t| t["name"] == name).unwrap();
+      tool["description"].as_str().unwrap().to_string()
+    };
+    assert!(text("create_nodes").contains("instance") && text("create_nodes").contains("component"));
+    assert!(text("arrange").contains("combine_variants (merges"));
+    assert!(text("define_variables").contains("variableModes") && text("define_variables").contains("Dark"));
+    assert!(text("get_screenshot").contains("1600"));
+    assert!(text("import_url").contains("1440"));
   }
 
   #[test]

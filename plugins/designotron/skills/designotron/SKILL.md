@@ -24,22 +24,32 @@ then open the editor at http://127.0.0.1:5174 (or https://mikemich.github.io/des
 ## How to work
 
 1. Call `get_document` first to see pages, frames and existing components, so you build
-   on what is there instead of duplicating it.
-2. Create screens as top-level frames (for example 1440 wide for desktop, 390 for
+   on what is there instead of duplicating it. Skip it on a page you know is empty.
+2. Define tokens before you build, every time: colours with `define_variables` (a Light
+   and a Dark mode when a theme or dark mode is asked for) and the type scale with
+   `define_styles`. Apply them while building: `bind` for variables, `textStyle` and
+   `fillStyle` (a style name) for styles. Raw hex only where no token fits.
+3. Create screens as top-level frames (for example 1440 wide for desktop, 390 for
    mobile) placed to the right of existing content. Use auto layout (`add_auto_layout`, or
-   `layout` in `create_nodes`) for anything list- or stack-shaped so it resizes cleanly.
-3. Make repeated elements components (`create_component`) and use instances
-   (`create_instance`); combine states into variants with `combine_variants`. Give
+   `layout` in `create_nodes`) for every stack and row; absolute positions only for
+   overlays and decoration. Name layers semantically (Header, Nav, Card, Button, Input)
+   because code export reads the names.
+4. Anything that appears twice or more with the same structure (cards, list rows, nav
+   items, buttons, inputs, table rows) is a component, not a copy: build it once as
+   `type: "component"` (or `create_component`), keep it on the canvas beside the screens,
+   and place instances (`type: "instance"` or `create_instance`). The states of one
+   control (default, hover, error, disabled) are variants: `combine_variants`. Give
    components Boolean (show/hide a layer), Text and Instance swap properties with
    `set_component_props`; instances set them, and code export turns them into React props.
-4. Use real copy, consistent spacing (multiples of 4 or 8) and a small palette. Define
-   colours and type as styles or variables (`define_styles`, `define_variables`) when you
-   create a design system.
-5. Link screens with `set_prototype` when the person asks for a flow or prototype (`open_overlay` / `swap_overlay` / `close_overlay` for modals, menus and sheets).
-6. Check your work: take a screenshot of what you made (`get_screenshot` when available),
-   compare it with what was asked, and fix spacing, alignment and contrast. `lint_design`
-   finds common problems and `fix_issues` applies the fixes.
-7. To build the design as an app, use `export_code` (React + Tailwind) and refine the
+5. Dark mode or another theme: duplicate the frame and set `variableModes` (for example
+   `{Theme: "Dark"}`) on the copy. Don't recolour by hand.
+6. Use real copy and consistent spacing (multiples of 4 or 8).
+7. Link screens with `set_prototype` when the person asks for a flow or prototype (`open_overlay` / `swap_overlay` / `close_overlay` for modals, menus and sheets).
+8. Finish with `lint_design` and `fix_issues`, then one `get_screenshot` (when available):
+   compare it with what was asked and fix spacing, alignment and contrast.
+9. To build the design as an app, use `export_code` (React + Tailwind) and refine the
    generated project.
 
-Keep edits focused: change only what was asked, and say briefly what you changed.
+Keep edits focused: change only what was asked, and build every screen and state that was
+asked for. Reply in at most three short plain-text sentences (under 50 words, no Markdown
+headings or lists) saying what you built and anything you left out.

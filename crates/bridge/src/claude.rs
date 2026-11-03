@@ -154,7 +154,7 @@ async fn run_turn(
      use them for anything about the design (read with get_document / get_nodes, verify with get_screenshot). \
      Your working directory ({}) is where application code goes when the user asks you to build the design for real; \
      prefer the `app/` folder, which the editor's App tab runs with `npm run dev` as a live preview next to the design. \
-     Keep replies short; the user watches the canvas update live.",
+     Reply in at most 3 short plain-text sentences (under 50 words, no Markdown headings or lists): the user watches the canvas update live.",
     designotron_engine::ai::SYSTEM_PROMPT,
     state.workspace.display()
   );
