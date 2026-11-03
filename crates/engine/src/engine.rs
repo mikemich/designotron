@@ -630,9 +630,7 @@ pub enum Query {
   },
   ExportProject,
   /// Names the exported code gives the document's styles and variables (for the Code tab's Inspect).
-  Inspect {
-    id: NodeId,
-  },
+  InspectNames,
   ToolDefs,
   SystemPrompt,
   /// Design lint issues for a page (default: current page).
@@ -3024,7 +3022,7 @@ impl Engine {
           .collect();
         json!(files)
       }
-      Query::Inspect { .. } => codegen::inspect_names(&self.doc),
+      Query::InspectNames => codegen::inspect_names(&self.doc),
       Query::ToolDefs => ai::tool_defs(),
       Query::SystemPrompt => json!(ai::SYSTEM_PROMPT),
       Query::Lint { page } => json!(crate::lint::lint_page(&self.doc, page.as_deref().unwrap_or(&self.page), m)),

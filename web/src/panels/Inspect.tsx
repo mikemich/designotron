@@ -47,7 +47,7 @@ export function Inspect({ node }: { node: Node }) {
   };
   const doc = getDoc();
   // The names the exported code gives styles and variables.
-  const names = useMemo(() => query<Names>({ q: "inspect", id: node.id }), [node.id, docRev]);
+  const names = useMemo(() => query<Names>({ q: "inspectNames" }), [docRev]);
   const info = useMemo(() => describe(doc, node, names), [node, docRev, names]);
   const assets = useMemo(() => collectAssets(doc, node), [node.id, docRev]);
   const val = (text: string, label?: string) => <Val key={label ?? text} text={text} label={label} copied={copied === text} onCopy={copy} />;

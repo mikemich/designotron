@@ -374,7 +374,7 @@ pub fn tokens_css(doc: &Document) -> String {
   for c in &doc.variables {
     // Every mode gets a block (the default too, so it can be re-selected inside another mode).
     for m in &c.modes {
-      out.push_str(&format!("\n[{}=\"{}\"] {{\n", mode_attr(c), mode_slug(c, m)));
+      out.push_str(&format!("\n[{}=\"{}\"] {{\n", mode_attr(doc, c), mode_slug(c, m)));
       for v in &c.variables {
         if let Some(val) = css_value(doc, c, v, &m.id) {
           out.push_str(&format!("  {}: {val};\n", css_name(c, v)));
@@ -386,10 +386,25 @@ pub fn tokens_css(doc: &Document) -> String {
   out
 }
 
-/// HTML attribute that switches a collection's mode in generated code.
-pub fn mode_attr(c: &Collection) -> String {
-  let name = slug(&c.name);
-  format!("data-{}", if name.is_empty() { "collection" } else { &name })
+/// HTML attribute that switches a collection's mode in generated code: `data-<name>`, with `-2`,
+/// `-3` for later collections whose names slug the same (or have no ASCII letters: `collection`).
+pub fn mode_attr(doc: &Document, c: &Collection) -> String {
+  let mut taken: Vec<String> = Vec::new();
+  for x in &doc.variables {
+    let name = slug(&x.name);
+    let base = format!("data-{}", if name.is_empty() { "collection" } else { &name });
+    let mut attr = base.clone();
+    let mut i = 2;
+    while taken.contains(&attr) {
+      attr = format!("{base}-{i}");
+      i += 1;
+    }
+    if x.id == c.id {
+      return attr;
+    }
+    taken.push(attr);
+  }
+  format!("data-{}", slug(&c.name))
 }
 
 /// A mode's value in that attribute: its slug, or `mode-N` when the name has no ASCII letters.

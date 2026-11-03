@@ -229,6 +229,8 @@ struct Ctx<'a> {
   names: StyleNames,
   /// How many button or link elements enclose the layer being built.
   interactive_depth: usize,
+  /// Main component id → whether it renders a button or link.
+  interactive_cache: BTreeMap<String, bool>,
 }
 
 /// Props an instance sets on its component: string attributes and expression attributes.
@@ -275,6 +277,7 @@ impl<'a> Ctx<'a> {
       color_vars: BTreeMap::new(),
       names: StyleNames::default(),
       interactive_depth: 0,
+      interactive_cache: BTreeMap::new(),
     };
     for p in &doc.pages {
       for id in &p.children {
@@ -362,6 +365,20 @@ impl<'a> Ctx<'a> {
     self.doc.get(p).filter(|s| s.kind == NodeType::ComponentSet).cloned()
   }
 
+  /// Whether a main component has a layer that is written as a button or link (memoised).
+  fn renders_interactive(&mut self, comp_id: &str) -> bool {
+    if let Some(v) = self.interactive_cache.get(comp_id) {
+      return *v;
+    }
+    let doc = self.doc;
+    let found = doc.subtree(comp_id).iter().filter_map(|id| doc.get(id)).any(|n| {
+      let link = n.text.as_ref().is_some_and(|t| t.runs.iter().any(|r| r.link.is_some()));
+      link || (n.kind.is_container() && self.container_tag(n) == "button")
+    });
+    self.interactive_cache.insert(comp_id.to_string(), found);
+    found
+  }
+
   fn build(&mut self, id: &str, place: Place) -> Option<El> {
     let n = self.doc.get(id)?.clone();
     // Layers a component property controls are written as expressions in the component's function.
@@ -369,8 +386,11 @@ impl<'a> Ctx<'a> {
     if !n.visible && bound.visible.is_none() {
       return None;
     }
-    // A component function could put a button inside this button or link: write the instance inline.
-    if self.reuse_components && self.interactive_depth == 0 && n.kind == NodeType::Instance && place != Place::Root {
+    // A component function that renders a button or link would put it inside this button or link:
+    // write that instance inline. Slots of an instance swap property stay slots.
+    let inline =
+      self.interactive_depth > 0 && bound.swap.is_none() && n.instance.as_ref().is_some_and(|i| self.renders_interactive(&i.component_id));
+    if self.reuse_components && !inline && n.kind == NodeType::Instance && place != Place::Root {
       if let Some(info) = n.instance.as_ref() {
         // Property values and swapped icons become props; any other override inlines the instance.
         let args = self.prop_args(&n);
@@ -853,7 +873,7 @@ impl<'a> Ctx<'a> {
     for (coll_id, mode_id) in &n.variable_modes {
       if let Some(c) = self.doc.variables.iter().find(|c| &c.id == coll_id) {
         if let Some(m) = c.modes.iter().find(|m| &m.id == mode_id) {
-          el.attrs.push((vars::mode_attr(c), vars::mode_slug(c, m)));
+          el.attrs.push((vars::mode_attr(self.doc, c), vars::mode_slug(c, m)));
         }
       }
     }
@@ -2282,31 +2302,18 @@ fn style_css(ctx: &Ctx) -> String {
 }
 
 /// Collections with more than one mode: (attribute suffix, mode names as written in CSS).
-/// Collections that share an attribute are one entry with the union of their modes.
 fn themed_collections(doc: &Document) -> Vec<(String, Vec<String>)> {
-  let mut out: Vec<(String, Vec<String>)> = Vec::new();
-  let mut multi: BTreeSet<String> = BTreeSet::new();
-  for c in &doc.variables {
-    let key = crate::variables::mode_attr(c).trim_start_matches("data-").to_string();
-    if c.modes.len() > 1 {
-      multi.insert(key.clone());
-    }
-    let at = match out.iter().position(|(k, _)| *k == key) {
-      Some(i) => i,
-      None => {
-        out.push((key, Vec::new()));
-        out.len() - 1
-      }
-    };
-    for m in &c.modes {
-      let name = crate::variables::mode_slug(c, m);
-      if !out[at].1.contains(&name) {
-        out[at].1.push(name);
-      }
-    }
-  }
-  out.retain(|(k, _)| multi.contains(k));
-  out
+  doc
+    .variables
+    .iter()
+    .filter(|c| c.modes.len() > 1)
+    .map(|c| {
+      (
+        crate::variables::mode_attr(doc, c).trim_start_matches("data-").to_string(),
+        c.modes.iter().map(|m| crate::variables::mode_slug(c, m)).collect(),
+      )
+    })
+    .collect()
 }
 
 /// `tokens.ts`: switches a collection's mode by setting `data-<collection>` on the root element.
@@ -3199,7 +3206,47 @@ mod tests {
   }
 
   #[test]
-  fn collections_with_the_same_slug_share_one_key() {
+  fn swap_slots_and_plain_icons_inside_buttons_stay_components() {
+    let mut doc = sample();
+    let mut gen = IdGen::new(1000);
+    let star = make_component(&mut doc, &mut gen, "star", "Star", "*");
+    let pay = make_component(&mut doc, &mut gen, "pay", "Pay button", "Pay");
+    doc.get_mut(&pay).unwrap().height = 40.0;
+    let page = doc.pages[0].id.clone();
+    let slot = crate::components::create_instance(&mut doc, &star, Some(&pay), &page, 0.0, 0.0, &mut gen).unwrap();
+    let added = crate::props::apply_op(
+      &mut doc,
+      &mut gen,
+      crate::props::PropsOp::Add {
+        component: pay.clone(),
+        name: "icon".into(),
+        kind: PropKind::InstanceSwap,
+        default: None,
+        bind: Some(slot),
+      },
+    );
+    assert!(added.is_ok(), "{added:?}");
+    // A clickable row with a plain icon instance: the icon stays `<Star />`, not inlined.
+    let mut row = crate::ops::default_node(NodeType::Frame, "row".into(), "Row button".into());
+    row.height = 60.0;
+    row.interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    doc.insert(row, Some("home"), &page, None);
+    crate::components::create_instance(&mut doc, &star, Some("row"), &page, 0.0, 0.0, &mut gen).unwrap();
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let comps = &files.iter().find(|f| f.path == "src/components.tsx").unwrap().content;
+    assert!(comps.contains("icon ?? <Star"), "{comps}");
+    let home = &files.iter().find(|f| f.path == "src/screens/Home.tsx").unwrap().content;
+    assert!(home.contains("<Star "), "{home}");
+    for f in files.iter().filter(|f| f.path.ends_with(".tsx")) {
+      assert!(tag_stack_ok(&f.content).is_ok(), "{}: {:?}", f.path, tag_stack_ok(&f.content));
+    }
+  }
+
+  #[test]
+  fn collections_with_the_same_slug_get_their_own_attribute() {
     use crate::variables::{Collection, VarMode};
     let mut doc = sample();
     let col = |id: &str, name: &str, modes: &[&str]| Collection {
@@ -3222,10 +3269,26 @@ mod tests {
     ];
     let files = export_project(&doc, &HeuristicMeasurer);
     let ts = &files.iter().find(|f| f.path == "src/tokens.ts").unwrap().content;
-    assert_eq!(ts.matches("\"theme\":").count(), 1, "{ts}");
-    assert!(ts.contains("[\"light\", \"dark\", \"sepia\"]"), "{ts}");
-    assert_eq!(ts.matches("\"collection\":").count(), 1, "{ts}");
-    assert!(ts.contains("\"mode-1\", \"mode-2\""), "{ts}");
+    assert!(ts.contains("\"theme\": [\"light\", \"dark\"]"), "{ts}");
+    assert!(ts.contains("\"theme-2\": [\"light\", \"sepia\"]"), "{ts}");
+    assert!(ts.contains("\"collection\": [\"mode-1\", \"mode-2\"]"), "{ts}");
+    assert!(ts.contains("\"collection-2\": [\"mode-1\", \"mode-2\"]"), "{ts}");
+    let css = &files.iter().find(|f| f.path == "src/tokens.css").unwrap().content;
+    assert!(
+      css.contains("[data-theme-2=\"sepia\"]") && css.contains("[data-theme=\"dark\"]"),
+      "{css}"
+    );
+    // One frame that sets both collections: two distinct attributes, so each switches on its own.
+    let page = doc.pages[0].id.clone();
+    let mut f = crate::ops::default_node(NodeType::Frame, "both".into(), "Both".into());
+    f.variable_modes.insert("a".into(), "aDark".into());
+    f.variable_modes.insert("b".into(), "bSepia".into());
+    doc.insert(f, None, &page, None);
+    let src = export_react(&doc, "both", &HeuristicMeasurer);
+    assert!(
+      src.contains("data-theme=\"dark\"") && src.contains("data-theme-2=\"sepia\""),
+      "{src}"
+    );
   }
 
   #[test]
