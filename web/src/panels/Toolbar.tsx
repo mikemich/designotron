@@ -83,16 +83,19 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     x: number;
     y: number;
     items: MenuItem[];
+    label: string;
   } | null>(null);
   const [lastShape, setLastShape] = useState<Tool>("rectangle");
   const shape = SHAPES.find(
     (s) => s.tool === (SHAPES.some((x) => x.tool === tool) ? tool : lastShape),
   )!;
 
-  const open = (e: React.MouseEvent, items: MenuItem[]) => {
+  const open = (e: React.MouseEvent, label: string, items: MenuItem[]) => {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setMenu({ x: r.left, y: r.bottom + 4, items });
+    setMenu({ x: r.left, y: r.bottom + 4, items, label });
   };
+  /** Attributes for a button that opens a menu. */
+  const opens = (label: string) => ({ "aria-haspopup": "menu" as const, "aria-expanded": menu?.label === label });
 
   const mainMenu: MenuItem[] = [
     { label: "Back to files", onClick: onHome },
@@ -181,6 +184,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     <button
       className={"tbtn" + (tool === t ? " active" : "")}
       title={title}
+      aria-pressed={tool === t}
       onClick={() => setTool(t)}
     >
       {icon}
@@ -188,12 +192,14 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
   );
 
   return (
-    <div className="topbar">
+    <header className="topbar">
+      <h1 className="sr-only">Designotron editor</h1>
       <div className="group">
         <button
           className="tbtn"
-          onClick={(e) => open(e, mainMenu)}
+          onClick={(e) => open(e, "Main menu", mainMenu)}
           title="Main menu"
+          {...opens("Main menu")}
         >
           <div className="logo">D</div>
           <ChevronDown size={12} data-phone="hide" />
@@ -206,6 +212,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
             className={
               "tbtn" + (SHAPES.some((s) => s.tool === tool) ? " active" : "")
             }
+            aria-pressed={SHAPES.some((s) => s.tool === tool)}
             title={`${shape.label} (${shape.key})`}
             onClick={() => setTool(shape.tool)}
           >
@@ -215,8 +222,9 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
             className="tbtn"
             style={{ minWidth: 16, padding: 0 }}
             title="Shape tools"
+            {...opens("Shape tools")}
             onClick={(e) =>
-              open(e, [
+              open(e, "Shape tools", [
                 ...SHAPES.map((s) => ({
                   label: s.label,
                   kbd: s.key,
@@ -253,8 +261,9 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           <button
             className="tbtn"
             title="Boolean operations"
+            {...opens("Boolean operations")}
             onClick={(e) =>
-              open(e, [
+              open(e, "Boolean operations", [
                 {
                   label: "Union selection",
                   onClick: () => A.booleanOp("union"),
@@ -289,6 +298,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
       <div className="center">
         <input
           className="filename"
+          aria-label="File name"
           key={doc.name}
           defaultValue={doc.name}
           onKeyDown={(e) => {
@@ -301,7 +311,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
             dispatch({ op: "setDocName", name: e.target.value.trim() })
           }
         />
-        <span className="small save-state">
+        <span className="small save-state" role="status">
           {saveFailed
             ? "Not saved, retrying"
             : !persistentStorage()
@@ -333,8 +343,9 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         <button
           className="tbtn"
           title="Zoom"
+          {...opens("Zoom")}
           onClick={(e) =>
-            open(e, [
+            open(e, "Zoom", [
               { label: "Zoom in", kbd: `${MOD}+`, onClick: () => zoomBy(1.25) },
               { label: "Zoom out", kbd: `${MOD}-`, onClick: () => zoomBy(0.8) },
               { label: "Zoom to fit", kbd: `${SHIFT}1`, onClick: zoomToFit },
@@ -363,6 +374,8 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         </button>
         <button
           className={"tbtn" + (chatOpen ? " active" : "")}
+          id="claude-toggle"
+          aria-pressed={chatOpen}
           title={`Claude (${MOD}/)`}
           onClick={() => useStore.setState({ chatOpen: !chatOpen })}
         >
@@ -395,7 +408,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         </button>
       </div>
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
-    </div>
+    </header>
   );
 }
 

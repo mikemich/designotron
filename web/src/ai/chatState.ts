@@ -83,17 +83,49 @@ export function claudeReady(s: ChatStore = useChat.getState()): boolean {
 // per-use API billing after they chose Claude Code).
 const modeChosen = () => ls("dt:chatMode", "") !== "";
 
+/** A queued prompt that waited this long for a connection is confirmed before it goes out. */
+const STALE_QUEUE_MS = 10_000;
+
+/** True while a queued prompt is waiting for the person to confirm sending it (see above). */
+export const useQueueConfirm = create<{ stale: boolean }>(() => ({ stale: false }));
+
+/** When the current prompt started waiting for Claude to connect (0: not waiting for that). */
+let offlineSince = 0;
+
 useChat.subscribe((s) => {
-  if (!s.queued || s.running) return;
+  if (!s.queued) {
+    offlineSince = 0;
+    if (useQueueConfirm.getState().stale) useQueueConfirm.setState({ stale: false });
+    return;
+  }
+  if (s.running) return;
   if (!claudeReady(s)) {
+    offlineSince ||= Date.now();
     if (!modeChosen() && s.mode === "api" && bridgeReady(s)) useChat.setState({ mode: "bridge" });
     else if (!modeChosen() && s.mode === "bridge" && s.apiKey && s.bridgeStatus === "offline") useChat.setState({ mode: "api" });
+    return;
+  }
+  // Typed while offline and connected much later: the person may have moved on, so ask first.
+  if (offlineSince && Date.now() - offlineSince > STALE_QUEUE_MS) {
+    if (!useQueueConfirm.getState().stale) useQueueConfirm.setState({ stale: true });
     return;
   }
   const prompt = s.queued;
   useChat.setState({ queued: null });
   send(prompt);
 });
+
+/** Sends the queued prompt the person just confirmed. */
+export function sendQueued() {
+  const prompt = useChat.getState().queued;
+  useChat.setState({ queued: null });
+  if (prompt) send(prompt);
+}
+
+/** Drops the queued prompt. */
+export function discardQueued() {
+  useChat.setState({ queued: null });
+}
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 let nextImage = 1;

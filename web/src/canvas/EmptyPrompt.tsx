@@ -1,17 +1,22 @@
 import { useState } from "react";
-import { Sparkles } from "lucide-react";
-import { askClaude, claudeReady, useChat } from "../ai/chatState";
+import { Loader2, Sparkles } from "lucide-react";
+import { askClaude, claudeReady, discardQueued, sendQueued, useChat, useQueueConfirm } from "../ai/chatState";
 import { playDemo } from "../Demo";
 import { TEMPLATES } from "../templates";
 import { dispatch, zoomToFit } from "../store";
 
 const IDEAS = ["A landing page for a coffee subscription", "A habit tracker mobile app, 3 screens", "An admin dashboard for an online store"];
 
+/** A queued prompt, shortened for display. */
+const preview = (q: string) => (q.length > 160 ? q.slice(0, 160) + "…" : q);
+
 /** Shown on an empty page: describe a design for Claude, or start from a template. */
 export function EmptyPrompt() {
   const [text, setText] = useState("");
   const ready = useChat((s) => claudeReady(s));
   const queued = useChat((s) => s.queued);
+  const running = useChat((s) => s.running);
+  const stale = useQueueConfirm((s) => s.stale);
   const send = (prompt: string) => {
     if (!prompt.trim()) return;
     askClaude(prompt.trim());
@@ -19,44 +24,72 @@ export function EmptyPrompt() {
   };
   return (
     <div className="empty-prompt" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
-      {queued ? (
+      {running ? (
+        <div role="status">
+          <div className="empty-title">
+            <Loader2 size={15} className="spin" style={{ verticalAlign: -2 }} /> Claude is working…
+          </div>
+          <div className="muted small">The design appears here as soon as Claude has built something.</div>
+          {queued && (
+            <div className="queued-prompt" style={{ marginTop: 8 }}>
+              Sends when Claude finishes: <i>“{preview(queued)}”</i>
+            </div>
+          )}
+        </div>
+      ) : queued && ready && stale ? (
+        <>
+          <div className="empty-title">Send queued message?</div>
+          <div className="queued-prompt" role="alert" style={{ marginBottom: 4 }}>
+            You typed this while Claude wasn't connected: <i>“{preview(queued)}”</i>
+            <div className="row" style={{ marginTop: 8, gap: 6 }}>
+              <button className="btn primary" onClick={sendQueued}>
+                Send
+              </button>
+              <button className="btn" onClick={discardQueued}>
+                Discard
+              </button>
+            </div>
+          </div>
+        </>
+      ) : queued ? (
         <>
           <div className="empty-title">Ready when Claude is</div>
           <div className="queued-prompt" style={{ marginBottom: 4 }}>
-            Waiting to send: <i>“{queued.length > 160 ? queued.slice(0, 160) + "…" : queued}”</i>. Connect Claude in the panel on the right
-            and it starts designing here.
+            Waiting to send: <i>“{preview(queued)}”</i>.{" "}
+            {ready ? "It goes out in a moment." : "Connect Claude in the panel on the right and it starts designing here."}
           </div>
         </>
       ) : (
         <>
-        <div className="empty-title">What do you want to design?</div>
-        <textarea
-          id="empty-prompt-input"
-          className="textinput"
-          placeholder="Describe a screen, a flow or a whole app…"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            e.stopPropagation();
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              send(text);
-            }
-          }}
-        />
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <span className="kbd-hint">Claude builds it on the canvas</span>
-          <button className="btn primary" onClick={() => send(text)} disabled={!text.trim()}>
-            <Sparkles size={13} /> Design with Claude
-          </button>
-        </div>
-        <div className="suggestions" style={{ marginTop: 10 }}>
-          {IDEAS.map((i) => (
-            <button key={i} onClick={() => send(i)}>
-              {i}
+          <div className="empty-title">What do you want to design?</div>
+          <textarea
+            id="empty-prompt-input"
+            className="textinput"
+            aria-label="What do you want to design?"
+            placeholder="Describe a screen, a flow or a whole app…"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send(text);
+              }
+            }}
+          />
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <span className="kbd-hint">Claude builds it on the canvas</span>
+            <button className="btn primary" onClick={() => send(text)} disabled={!text.trim()}>
+              <Sparkles size={13} /> Design with Claude
             </button>
-          ))}
-        </div>
+          </div>
+          <div className="suggestions" style={{ marginTop: 10 }}>
+            {IDEAS.map((i) => (
+              <button key={i} onClick={() => send(i)}>
+                {i}
+              </button>
+            ))}
+          </div>
         </>
       )}
       {!ready && (

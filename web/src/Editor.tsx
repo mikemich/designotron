@@ -20,6 +20,7 @@ import { DemoOverlay, stopDemo } from "./Demo";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
 import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
+import { focusCanvas } from "./ui/controls";
 import {
   canSaveDelta,
   claimFile,
@@ -171,6 +172,17 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   }, [fileId, attempt]);
 
   useEffect(() => installShortcuts(), []);
+
+  // A newly opened file takes keyboard focus (unless something such as the chat box already has it).
+  useEffect(() => {
+    if (!ready) return;
+    const id = requestAnimationFrame(() => {
+      if (!document.activeElement || document.activeElement === document.body) focusCanvas();
+    });
+    return () => cancelAnimationFrame(id);
+  }, [ready, fileId]);
+
+  useFrameLabelColors(ready);
 
   // Autosave to IndexedDB, with an occasional thumbnail.
   //
@@ -564,12 +576,12 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   return (
     <div className="app">
       <Toolbar onHome={onHome} />
-      <div className={"main" + (chatOpen ? " with-chat" : "")}>
+      <main className={"main" + (chatOpen ? " with-chat" : "")}>
         <LeftPanel />
         <Canvas />
         <RightPanel />
         {chatOpen && <ChatPanel />}
-      </div>
+      </main>
       {presenting && <Presenter start={presenting} />}
       <Tour />
       {variablesOpen && <VariablesDialog />}
@@ -597,6 +609,44 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       )}
     </div>
   );
+}
+
+/** Frame names on the canvas must read on any page colour: pick the pair of label colours with
+ *  the better contrast against the current page's background (the CSS variables are read by
+ *  `.frame-label`). */
+function useFrameLabelColors(ready: boolean) {
+  const page = useStore((s) => s.es.page);
+  useEffect(() => {
+    if (!ready) return;
+    const root = document.documentElement.style;
+    const apply = () => {
+      const doc = getDoc();
+      const bg = (doc.pages.find((p) => p.id === page) ?? doc.pages[0])?.background ?? "#1a1a1a";
+      const light = contrast(bg, "#595959") > contrast(bg, "#a6a6a6");
+      root.setProperty("--frame-label", light ? "#595959" : "#a6a6a6");
+      root.setProperty("--frame-label-selected", light ? "#0a64b5" : "#0d99ff");
+      root.setProperty("--frame-label-component", light ? "#7a2bd6" : "#c4a5ff");
+    };
+    apply();
+    const off = onDocChange(apply);
+    return () => {
+      off();
+      for (const v of ["--frame-label", "--frame-label-selected", "--frame-label-component"]) root.removeProperty(v);
+    };
+  }, [ready, page]);
+}
+
+/** WCAG contrast ratio of two #rgb / #rrggbb colours (anything else counts as a dark page). */
+function contrast(a: string, b: string): number {
+  const lum = (hex: string) => {
+    const m = hex.match(/^#([\da-f]{6}|[\da-f]{3})/i)?.[1];
+    if (!m) return 0.01;
+    const full = m.length === 3 ? [...m].map((c) => c + c).join("") : m;
+    const [r, g, bl] = [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
 }
 
 async function thumbnail(): Promise<string | undefined> {

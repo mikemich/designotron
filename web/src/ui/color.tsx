@@ -135,7 +135,7 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
           />
         </label>
         <div style={{ width: 70 }}>
-          <NumberField value={Math.round(c.a * 100)} suffix="%" min={0} max={100} onChange={(v) => emit(hsv.h, hsv.s, hsv.v, v / 100)} />
+          <NumberField ariaLabel="Alpha" value={Math.round(c.a * 100)} suffix="%" min={0} max={100} onChange={(v) => emit(hsv.h, hsv.s, hsv.v, v / 100)} />
         </div>
         {"EyeDropper" in window && (
           <button
@@ -302,6 +302,7 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
               Choose image…
             </button>
             <SelectField
+              ariaLabel="Image scale mode"
               value={p.scaleMode}
               onChange={(scaleMode) => props.onChange({ ...p, scaleMode })}
               options={[

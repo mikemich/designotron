@@ -1,11 +1,15 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { dispatch } from "../store";
 
 export const MIXED = Symbol("mixed");
 export type Maybe<T> = T | typeof MIXED;
 
 /** Number input with a scrubbable label, arrow-key stepping and simple math. `null` shows
  *  `autoText` (e.g. an automatic line height); scrubbing and arrows then start at `autoValue`. */
+/** Largest magnitude a number field accepts unless it sets its own range. */
+const MAX_NUMBER = 1e6;
+
 export function NumberField(props: {
   label?: ReactNode;
   value: Maybe<number> | null;
@@ -19,22 +23,27 @@ export function NumberField(props: {
   max?: number;
   suffix?: string;
   title?: string;
+  /** Accessible name; defaults to the title, or the label when that is text. */
+  ariaLabel?: string;
   precision?: number;
 }) {
-  const { label, value, onChange, step = 1, min, max, suffix, title, precision = 2 } = props;
+  const { label, value, onChange, step = 1, min = -MAX_NUMBER, max = MAX_NUMBER, suffix, title, precision = 2 } = props;
   const fmt = (v: Maybe<number> | null) =>
     v === MIXED ? "Mixed" : v === null ? (props.autoText ?? "Auto") : String(Math.round(v * 10 ** precision) / 10 ** precision) + (suffix ?? "");
   const [text, setText] = useState(fmt(value));
   const [focused, setFocused] = useState(false);
-  /** Enter already committed, or Escape cancelled: the blur that follows must not commit. */
-  const settled = useRef(false);
+  /** The text was edited since the last commit: only then does leaving the field commit it. */
+  const edited = useRef(false);
   useEffect(() => {
-    if (!focused) setText(fmt(value));
+    // A focused field keeps what is being typed, but follows the document after a commit or an undo.
+    if (!focused || !edited.current) setText(fmt(value));
   }, [value, focused]);
-  const clamp = (v: number) => Math.min(max ?? Infinity, Math.max(min ?? -Infinity, v));
-  const commit = () => {
+  const clamp = (v: number) => Math.min(max, Math.max(min, v));
+  /** Applies the typed text; returns the value it was clamped to, or null when there was none. */
+  const commit = (): number | null => {
+    edited.current = false;
     const raw = text.replace(suffix ?? "", "").trim();
-    if (!raw || raw === "Mixed" || raw === (props.autoText ?? "Auto")) return;
+    if (!raw || raw === "Mixed" || raw === (props.autoText ?? "Auto")) return null;
     let v: number;
     try {
       // Allow simple expressions like "100/2" or "24+8".
@@ -42,7 +51,10 @@ export function NumberField(props: {
     } catch {
       v = parseFloat(raw);
     }
-    if (Number.isFinite(v)) onChange(clamp(v));
+    if (!Number.isFinite(v)) return null;
+    const out = clamp(v);
+    onChange(out);
+    return out;
   };
   const scrub = (e: React.PointerEvent) => {
     const start = value === null ? props.autoValue : value;
@@ -71,29 +83,40 @@ export function NumberField(props: {
       )}
       <input
         value={text}
+        aria-label={props.ariaLabel ?? title ?? (typeof label === "string" ? label : undefined)}
         onFocus={(e) => {
-          settled.current = false;
+          edited.current = false;
           setFocused(true);
           e.target.select();
         }}
         onBlur={() => {
           setFocused(false);
-          if (!settled.current) commit();
-          settled.current = false;
+          if (edited.current) commit();
         }}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          edited.current = true;
+          setText(e.target.value);
+        }}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             // preventDefault: committing can move focus (e.g. back into text being edited),
-            // and the Enter must not land there as a newline.
+            // and the Enter must not land there as a newline. Focus stays in the field so the
+            // next value can be typed (or Tab moves on).
             e.preventDefault();
-            commit();
-            settled.current = true;
-            (e.target as HTMLInputElement).blur();
+            const input = e.target as HTMLInputElement;
+            const out = commit();
+            if (out !== null) setText(fmt(out));
+            requestAnimationFrame(() => document.activeElement === input && input.select());
+          } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y") && !edited.current) {
+            // Nothing typed since the last commit: undo and redo belong to the design, not the text box.
+            e.preventDefault();
+            dispatch({ op: e.key.toLowerCase() === "y" || e.shiftKey ? "redo" : "undo" });
           } else if (e.key === "Escape") {
             setText(fmt(value));
-            settled.current = true;
-            (e.target as HTMLInputElement).blur();
+            edited.current = false;
+            const input = e.target as HTMLInputElement;
+            input.blur();
+            focusCanvas();
           } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && value !== MIXED && (value ?? props.autoValue) !== undefined) {
             e.preventDefault();
             const d = (e.key === "ArrowUp" ? 1 : -1) * step * (e.shiftKey ? 10 : 1);
@@ -112,11 +135,14 @@ export function SelectField<T extends string | number>(props: {
   options: { value: T; label: string }[];
   onChange: (v: T) => void;
   title?: string;
+  /** Accessible name; defaults to the title, or the label when that is text. */
+  ariaLabel?: string;
 }) {
   return (
     <label className="field" title={props.title}>
       {props.label !== undefined && <span className="lbl">{props.label}</span>}
       <select
+        aria-label={props.ariaLabel ?? props.title ?? (typeof props.label === "string" ? props.label : undefined)}
         value={props.value === MIXED ? "__mixed" : String(props.value)}
         onChange={(e) => {
           const opt = props.options.find((o) => String(o.value) === e.target.value);
@@ -134,11 +160,11 @@ export function SelectField<T extends string | number>(props: {
   );
 }
 
-export function Seg<T extends string>(props: { value: Maybe<T>; options: { value: T; label: ReactNode; title?: string }[]; onChange: (v: T) => void }) {
+export function Seg<T extends string>(props: { value: Maybe<T>; options: { value: T; label: ReactNode; title?: string }[]; onChange: (v: T) => void; ariaLabel?: string }) {
   return (
-    <div className="seg">
+    <div className="seg" role="group" aria-label={props.ariaLabel}>
       {props.options.map((o) => (
-        <button key={o.value} className={props.value === o.value ? "on" : ""} title={o.title} onClick={() => props.onChange(o.value)}>
+        <button key={o.value} className={props.value === o.value ? "on" : ""} title={o.title} aria-label={o.title && typeof o.label !== "string" ? o.title : undefined} aria-pressed={props.value === o.value} onClick={() => props.onChange(o.value)}>
           {o.label}
         </button>
       ))}
@@ -148,7 +174,7 @@ export function Seg<T extends string>(props: { value: Maybe<T>; options: { value
 
 export function IconButton(props: { title: string; onClick?: (e: React.MouseEvent) => void; children: ReactNode; on?: boolean; disabled?: boolean }) {
   return (
-    <button className={"ibtn" + (props.on ? " on" : "")} title={props.title} onClick={props.onClick} disabled={props.disabled}>
+    <button className={"ibtn" + (props.on ? " on" : "")} title={props.title} aria-label={props.title} aria-pressed={props.on} onClick={props.onClick} disabled={props.disabled}>
       {props.children}
     </button>
   );
@@ -211,9 +237,27 @@ export interface MenuItem {
   disabled?: boolean;
 }
 
-export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: () => void }) {
+/** Whether the last thing the person did was press a key (not click or touch): a menu they
+ *  opened by keyboard focuses its first item, one opened by pointer waits for an arrow key. */
+let keyboardModality = false;
+if (typeof window !== "undefined") {
+  window.addEventListener("keydown", (e) => (keyboardModality = !["Shift", "Control", "Alt", "Meta"].includes(e.key) || keyboardModality), true);
+  window.addEventListener("pointerdown", () => (keyboardModality = false), true);
+}
+
+/** Menu following the ARIA menu pattern: focus moves to the first item on open, arrows, Home/End
+ *  and typing a letter move between items, Enter/Space run one, and Escape or Tab close it and
+ *  give focus back to whatever opened it. */
+export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: () => void; label?: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: props.x, top: props.y });
+  /** What had focus when the menu opened (the button, or the canvas for a context menu). */
+  const [opener] = useState(() => document.activeElement as HTMLElement | null);
+  const typed = useRef({ text: "", at: 0 });
+  const enabled = () => [...(ref.current?.querySelectorAll<HTMLElement>("[role=menuitem]:not(:disabled)") ?? [])];
+  const restoreFocus = () => {
+    if (opener?.isConnected) opener.focus({ preventScroll: true });
+  };
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -224,35 +268,95 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
     });
   }, [props.x, props.y]);
   useEffect(() => {
+    (keyboardModality ? enabled()[0] : ref.current)?.focus({ preventScroll: true });
     const down = (e: PointerEvent) => {
       if (ref.current && !ref.current.contains(e.target as globalThis.Node)) props.onClose();
     };
-    const key = (e: KeyboardEvent) => e.key === "Escape" && props.onClose();
-    setTimeout(() => window.addEventListener("pointerdown", down), 0);
+    // Escape when focus is elsewhere (the menu's own keys are handled in onKeyDown).
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      restoreFocus();
+      props.onClose();
+    };
+    const t = setTimeout(() => window.addEventListener("pointerdown", down), 0);
     window.addEventListener("keydown", key);
     return () => {
+      clearTimeout(t);
       window.removeEventListener("pointerdown", down);
       window.removeEventListener("keydown", key);
     };
   }, []);
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    // The editor's shortcuts (Enter selects children, arrows nudge...) must not see these keys.
+    e.stopPropagation();
+    const items = enabled();
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const go = (i: number) => {
+      e.preventDefault();
+      const el = items[(i + items.length) % items.length];
+      el?.focus({ preventScroll: true });
+      el?.scrollIntoView({ block: "nearest" });
+    };
+    if (e.key === "ArrowDown") go(at + 1);
+    else if (e.key === "ArrowUp") go(at < 0 ? -1 : at - 1);
+    else if (e.key === "Home") go(0);
+    else if (e.key === "End") go(items.length - 1);
+    else if (e.key === "Escape") {
+      e.preventDefault();
+      restoreFocus();
+      props.onClose();
+    } else if (e.key === "Tab") {
+      // Focus goes back to the opener first, so Tab carries on from there.
+      restoreFocus();
+      props.onClose();
+    } else if (e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // Type-ahead: the letters typed within the last second pick the first matching item.
+      const now = Date.now();
+      typed.current = { text: (now - typed.current.at < 1000 ? typed.current.text : "") + e.key.toLowerCase(), at: now };
+      const from = typed.current.text.length > 1 ? at : at + 1;
+      for (let i = 0; i < items.length; i++) {
+        const el = items[(from + i + items.length) % items.length];
+        if (el.textContent?.trim().toLowerCase().startsWith(typed.current.text)) {
+          e.preventDefault();
+          el.focus({ preventScroll: true });
+          break;
+        }
+      }
+    }
+  };
   return createPortal(
     // Portalled, but React events still bubble to the component that opened it (e.g. the
     // canvas, which would re-pick the layer under the pointer before the item runs).
-    <div ref={ref} className="menu" style={pos} onContextMenu={(e) => e.preventDefault()} onPointerDown={(e) => e.stopPropagation()}>
+    <div
+      ref={ref}
+      className="menu"
+      role="menu"
+      tabIndex={-1}
+      aria-label={props.label}
+      style={pos}
+      onContextMenu={(e) => e.preventDefault()}
+      onPointerDown={(e) => e.stopPropagation()}
+      onKeyDown={onKeyDown}
+    >
       {props.items.map((it, i) =>
         it.sep ? (
-          <div key={i} className="sep" />
+          <div key={i} className="sep" role="separator" />
         ) : it.heading ? (
-          <div key={i} className="label">
+          <div key={i} className="label" role="presentation">
             {it.heading}
           </div>
         ) : (
           <button
             key={i}
             className="item"
+            role="menuitem"
+            tabIndex={-1}
             disabled={it.disabled}
             style={it.disabled ? { opacity: 0.4 } : undefined}
             onClick={() => {
+              // Focus returns before the item runs, so a dialog it opens remembers the opener
+              // and an item that moves focus (a text box, the canvas) wins.
+              restoreFocus();
               props.onClose();
               it.onClick?.();
             }}
@@ -273,6 +377,12 @@ export function common<T, V>(items: T[], get: (t: T) => V): Maybe<V> {
   const first = get(items[0]);
   const same = items.every((i) => JSON.stringify(get(i)) === JSON.stringify(first));
   return same ? first : (MIXED as Maybe<V>);
+}
+
+/** Puts keyboard focus on the canvas (after a field or panel gives it up). */
+export function focusCanvas() {
+  const el = document.getElementById("dt-canvas");
+  if (el && !document.querySelector(".modal-bg")) el.focus({ preventScroll: true });
 }
 
 export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);

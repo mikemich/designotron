@@ -57,6 +57,25 @@ textarea {
   color: var(--text);
 }
 
+/* Text for screen readers only (live regions, headings the layout doesn't show). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Keyboard focus ring on every control; the canvas, text fields and cards set their own below. */
+:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: 1px;
+}
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -181,6 +200,9 @@ textarea {
   padding: 6px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
+.menu:focus {
+  outline: none;
+}
 .menu .item {
   display: flex;
   align-items: center;
@@ -191,15 +213,19 @@ textarea {
   border-radius: 4px;
   text-align: left;
 }
-.menu .item:hover {
-  background: var(--select);
+/* Hover and keyboard focus: white on this blue is 5.8:1 (the lighter --select was 3:1). */
+.menu .item:hover,
+.menu .item:focus-visible {
+  background: #1565c0;
   color: white;
+  outline: none;
 }
 .menu .item .kbd {
   color: var(--text-3);
   font-size: 11px;
 }
-.menu .item:hover .kbd {
+.menu .item:hover .kbd,
+.menu .item:focus-visible .kbd {
   color: #e0f0ff;
 }
 .menu .sep {
@@ -248,6 +274,13 @@ textarea {
 }
 .scroll {
   overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+/* Wraps a tab's content so it can be the tab's panel without changing the layout. */
+.tabpanel {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
 }
@@ -571,6 +604,10 @@ textarea.textinput {
   contain: strict;
 }
 /* Pixel-sized from the canvas size (not percentages), so they never depend on container layout. */
+.canvas:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: -2px;
+}
 .canvas > svg {
   position: absolute;
   left: 0;
@@ -595,17 +632,18 @@ textarea.textinput {
 .canvas .overlay .handle {
   pointer-events: all;
 }
+/* Colours follow the page background (Editor sets the variables; the fallbacks suit a dark page). */
 .frame-label {
   font-size: 11px;
-  fill: var(--text-2);
+  fill: var(--frame-label, var(--text-2));
   cursor: default;
   pointer-events: all;
 }
 .frame-label.selected {
-  fill: var(--select);
+  fill: var(--frame-label-selected, var(--select));
 }
 .frame-label.component {
-  fill: #c4a5ff;
+  fill: var(--frame-label-component, #c4a5ff);
 }
 .text-editor {
   position: absolute;
@@ -730,6 +768,8 @@ textarea.textinput {
 }
 .chat-head .title {
   font-weight: 600;
+  font-size: inherit;
+  margin: 0;
   flex: 1;
 }
 .chat-log {
@@ -757,6 +797,42 @@ textarea.textinput {
 .msg.assistant {
   color: var(--text);
 }
+/* Rendered Markdown in Claude's replies (see ai/markdown.tsx). */
+.msg.assistant p {
+  margin: 0 0 0.6em;
+}
+.msg.assistant ul,
+.msg.assistant ol {
+  margin: 0 0 0.6em;
+  padding-left: 20px;
+}
+.msg.assistant li {
+  margin: 2px 0;
+}
+.msg.assistant > :last-child {
+  margin-bottom: 0;
+}
+.msg.assistant code {
+  background: var(--panel-2);
+  border-radius: 3px;
+  padding: 0 4px;
+  font: 11px/1.5 "JetBrains Mono", monospace;
+}
+.msg.assistant .md-code {
+  background: #1b1b1b;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: 0 0 0.6em;
+  overflow-x: auto;
+  white-space: pre;
+}
+.msg.assistant .md-code code {
+  background: none;
+  padding: 0;
+}
+.msg.assistant a {
+  color: var(--accent-2);
+}
 .msg.error {
   color: #ff8a73;
 }
@@ -778,6 +854,8 @@ textarea.textinput {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* A log that overflows must scroll, not squash the chips. */
+  flex-shrink: 0;
 }
 .tool-chip.err {
   color: #ff8a73;
@@ -906,8 +984,19 @@ a.btn {
   cursor: pointer;
   position: relative;
 }
-.file-card:hover {
+.file-card:hover,
+.file-card:focus-within {
   border-color: var(--accent);
+}
+/* The whole card opens the file; the "more" button sits on top of it. */
+.file-card .file-open {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border-radius: inherit;
+}
+.file-card .file-open:focus-visible {
+  outline-offset: -3px;
 }
 .file-card .thumb {
   height: 140px;
@@ -955,6 +1044,9 @@ a.btn {
   background: #111;
   display: grid;
   place-items: center;
+}
+.presenter:focus {
+  outline: none;
 }
 .presenter .stage {
   position: relative;
@@ -1022,6 +1114,17 @@ a.btn {
 @keyframes dt-slide-down {
   from {
     transform: translateY(-100%);
+  }
+}
+/* People who ask for less motion get none: prototype transitions, spinners, fades. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 
@@ -1375,8 +1478,10 @@ body:has(.modal-bg) .hint-card {
   max-height: calc(100vh - 64px);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 .modal-head {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   padding: 10px 14px;
@@ -1461,6 +1566,9 @@ body:has(.modal-bg) .hint-card {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* A short window scrolls the body, so a focused control is always reachable. */
+  min-height: 0;
+  overflow-y: auto;
 }
 .figma-body a {
   color: var(--accent-2);

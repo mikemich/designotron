@@ -99,7 +99,7 @@ export function ShortcutsDialog() {
             <X size={14} />
           </button>
         </div>
-        <div className="shortcuts-body">
+        <div className="shortcuts-body" tabIndex={0} role="region" aria-label="Shortcut list">
           {GROUPS.map((g) => (
             <div key={g.title}>
               <div className="section-head">{g.title}</div>

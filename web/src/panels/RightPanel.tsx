@@ -11,34 +11,56 @@ import { exportProjectZip, nodeSvg } from "../exporter";
 import { inlineAssets } from "../assets";
 import { askClaude } from "../ai/chatState";
 
+const TABS: { id: RightTab; label: string }[] = [
+  { id: "design", label: "Design" },
+  { id: "prototype", label: "Prototype" },
+  { id: "code", label: "Code" },
+  { id: "review", label: "Review" },
+  { id: "app", label: "App" },
+];
+
 export function RightPanel() {
   const tab = useStore((s) => s.rightTab);
   const set = (rightTab: RightTab) => useStore.setState({ rightTab });
+  // Arrow keys move between tabs (only the selected one is a Tab stop).
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    const home = e.key === "Home" ? 0 : e.key === "End" ? TABS.length - 1 : -1;
+    if (!step && home < 0) return;
+    // The editor's shortcuts must not take the arrows as a nudge of the selection.
+    e.preventDefault();
+    e.stopPropagation();
+    const at = TABS.findIndex((t) => t.id === tab);
+    const next = TABS[home >= 0 ? home : (at + step + TABS.length) % TABS.length];
+    set(next.id);
+    document.getElementById("right-tab-" + next.id)?.focus();
+  };
   return (
-    <div className="panel right">
-      <div className="tabs" role="tablist">
-        <button role="tab" aria-selected={tab === "design"} className={"tab" + (tab === "design" ? " active" : "")} onClick={() => set("design")}>
-          Design
-        </button>
-        <button role="tab" aria-selected={tab === "prototype"} className={"tab" + (tab === "prototype" ? " active" : "")} onClick={() => set("prototype")}>
-          Prototype
-        </button>
-        <button role="tab" aria-selected={tab === "code"} className={"tab" + (tab === "code" ? " active" : "")} onClick={() => set("code")}>
-          Code
-        </button>
-        <button role="tab" aria-selected={tab === "review"} className={"tab" + (tab === "review" ? " active" : "")} onClick={() => set("review")}>
-          Review
-        </button>
-        <button role="tab" aria-selected={tab === "app"} className={"tab" + (tab === "app" ? " active" : "")} onClick={() => set("app")}>
-          App
-        </button>
+    <aside className="panel right" aria-label="Properties">
+      <div className="tabs" role="tablist" aria-label="Properties" onKeyDown={onKeyDown}>
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            id={"right-tab-" + t.id}
+            role="tab"
+            aria-selected={tab === t.id}
+            aria-controls="right-tabpanel"
+            tabIndex={tab === t.id ? 0 : -1}
+            className={"tab" + (tab === t.id ? " active" : "")}
+            onClick={() => set(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
-      {tab === "design" && <DesignPanel />}
-      {tab === "prototype" && <PrototypePanel />}
-      {tab === "code" && <CodePanel />}
-      {tab === "review" && <ReviewPanel />}
-      {tab === "app" && <AppPanel />}
-    </div>
+      <div className="tabpanel" role="tabpanel" id="right-tabpanel" aria-labelledby={"right-tab-" + tab}>
+        {tab === "design" && <DesignPanel />}
+        {tab === "prototype" && <PrototypePanel />}
+        {tab === "code" && <CodePanel />}
+        {tab === "review" && <ReviewPanel />}
+        {tab === "app" && <AppPanel />}
+      </div>
+    </aside>
   );
 }
 
@@ -103,6 +125,7 @@ function InteractionEditor({ node, index, frames }: { node: Node; index: number;
     <div style={{ background: "var(--panel-2)", borderRadius: 6, padding: 8, marginBottom: 8 }}>
       <div className="row">
         <SelectField
+          ariaLabel="Trigger"
           value={it.trigger}
           options={[
             { value: "onClick", label: "On click" },
@@ -118,6 +141,7 @@ function InteractionEditor({ node, index, frames }: { node: Node; index: number;
       </div>
       <div className="row">
         <SelectField
+          ariaLabel="Action"
           value={it.action}
           options={[
             { value: "navigate", label: "Navigate to" },
@@ -141,6 +165,7 @@ function InteractionEditor({ node, index, frames }: { node: Node; index: number;
       {(it.action === "navigate" || overlay) && (
         <div className="row">
           <SelectField
+            ariaLabel="Destination"
             value={it.destination && doc.nodes[it.destination] ? it.destination : ""}
             options={[{ value: "", label: overlay ? "Choose overlay frame…" : "Choose frame…" }, ...frames.filter((f) => !overlay || f.id !== node.id).map((f) => ({ value: f.id, label: f.name }))]}
             onChange={(destination) => set({ destination: destination || null })}
@@ -163,6 +188,7 @@ function InteractionEditor({ node, index, frames }: { node: Node; index: number;
       {(it.action === "navigate" || overlay) && (
         <div className="row">
           <SelectField
+            ariaLabel="Transition"
             value={it.transition}
             options={[
               { value: "instant", label: "Instant" },
@@ -272,6 +298,7 @@ function CodePanel() {
         >
           <div className="row">
             <SelectField
+              ariaLabel="Code language"
               value={lang}
               options={[
                 { value: "react", label: "React + Tailwind" },
@@ -282,7 +309,9 @@ function CodePanel() {
               onChange={setLang}
             />
           </div>
-          <div className="code-block">{code.length > 60000 ? code.slice(0, 60000) + "\n… (truncated, use Copy)" : code}</div>
+          <div className="code-block" tabIndex={0} role="region" aria-label={`Code for ${n.name}`}>
+            {code.length > 60000 ? code.slice(0, 60000) + "\n… (truncated, use Copy)" : code}
+          </div>
         </Section>
       ) : (
         <Section title="Inspect">

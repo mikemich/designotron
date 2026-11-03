@@ -77,7 +77,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   };
 
   return (
-    <div className="files">
+    <main className="files">
       <div className="files-head">
         <div className="logo">D</div>
         <h1>Designotron</h1>
@@ -121,6 +121,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
           <textarea
             className="textinput"
             rows={2}
+            aria-label="What do you want to design?"
             placeholder="Describe a screen, a flow or a whole app. Claude builds it on the canvas, as editable layers."
             value={idea}
             onChange={(e) => setIdea(e.target.value)}
@@ -148,12 +149,14 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       </div>
       <div className="files-grid" style={{ marginBottom: 32 }}>
         {TEMPLATES.map((t) => (
-          <div key={t.id} className="file-card" onClick={() => !opening && create(t)}>
-            <TemplateThumb t={t} />
-            <div className="meta">
-              <div className="n">{t.name}</div>
-              <div className="muted small">{opening === t.id ? "Loading editor…" : t.description}</div>
-            </div>
+          <div key={t.id} className="file-card">
+            <button className="file-open" onClick={() => !opening && create(t)}>
+              <TemplateThumb t={t} />
+              <div className="meta">
+                <div className="n">{t.name}</div>
+                <div className="muted small">{opening === t.id ? "Loading editor…" : t.description}</div>
+              </div>
+            </button>
           </div>
         ))}
       </div>
@@ -163,21 +166,27 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       {files && files.length === 0 && <div className="muted" style={{ marginBottom: 20 }}>No files yet. Pick a template above or create a new file.</div>}
       <div className="files-grid">
         {files?.map((f) => (
-          <div key={f.id} className="file-card" onClick={() => onOpen(f.id)}>
-            <div className="thumb">{f.thumbnail ? <img src={f.thumbnail} alt="" /> : <span className="muted">No preview yet</span>}</div>
-            <div className="meta">
-              <div className="n">{f.name}</div>
-              <div className="muted small" title={new Date(f.updatedAt).toLocaleString()}>
-                Edited {edited(f.updatedAt)}
+          <div key={f.id} className="file-card">
+            <button className="file-open" onClick={() => onOpen(f.id)}>
+              <div className="thumb">{f.thumbnail ? <img src={f.thumbnail} alt="" /> : <span className="muted">No preview yet</span>}</div>
+              <div className="meta">
+                <div className="n">{f.name}</div>
+                <div className="muted small" title={new Date(f.updatedAt).toLocaleString()}>
+                  Edited {edited(f.updatedAt)}
+                </div>
               </div>
-            </div>
+            </button>
             <button
               className="ibtn more"
+              aria-label={`More actions for ${f.name}`}
+              aria-haspopup="menu"
               onClick={(e) => {
                 e.stopPropagation();
+                // At the button (a keyboard click has no pointer position to use).
+                const r = e.currentTarget.getBoundingClientRect();
                 setMenu({
-                  x: e.clientX,
-                  y: e.clientY,
+                  x: r.left,
+                  y: r.bottom + 4,
                   items: [
                     { label: "Open", onClick: () => onOpen(f.id) },
                     {
@@ -216,9 +225,11 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
           </div>
         ))}
       </div>
-      {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
-      {t && <div className={"toast " + t.kind}>{t.text}</div>}
-    </div>
+      {menu && <Menu {...menu} label="File actions" onClose={() => setMenu(null)} />}
+      <div role="status" aria-live="polite">
+        {t && <div className={"toast " + t.kind}>{t.text}</div>}
+      </div>
+    </main>
   );
 }
 

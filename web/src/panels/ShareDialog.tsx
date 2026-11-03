@@ -126,6 +126,9 @@ export function ShareDialog() {
             <X size={14} />
           </button>
         </div>
+        <div className="sr-only" role="status" aria-live="polite">
+          {copyState ? { copy: "Link copied", view: "View-only link copied", embed: "Embed code copied", badge: "Badge copied" }[copyState] : copied ? "Link copied" : ""}
+        </div>
         <div className="figma-body">
           {!role ? (
             <>

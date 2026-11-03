@@ -173,6 +173,7 @@ export function InstanceSection({ n }: { n: Node }) {
             {k}
           </span>
           <SelectField
+            ariaLabel={`Variant ${k}`}
             value={comp?.component?.variantProps[k] ?? ""}
             options={[...values].map((v) => ({ value: v, label: v }))}
             onChange={(value) => dispatch({ op: "setVariant", id: n.id, prop: k, value })}

@@ -24,6 +24,9 @@ interface OpenOverlay {
   y: number;
 }
 
+/** People who asked for less motion get instant transitions. */
+const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 /** How long the click that follows a released "While pressing" is ignored. */
 const SWALLOW_CLICK_MS = 500;
 
@@ -45,6 +48,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   const [overlays, setOverlays] = useState<OpenOverlay[]>([]);
   const overlayKey = useRef(0);
   const [flash, setFlash] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
   const current = history[history.length - 1];
   const doc = getDoc();
   const frame = doc.nodes[current.id];
@@ -159,6 +163,15 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     return () => clearTimeout(t);
   }, [history.length, current.id]);
 
+  // Focus moves into the player (Tab stays inside) and goes back to the opener on exit.
+  useEffect(() => {
+    const before = document.activeElement as HTMLElement | null;
+    rootRef.current?.focus();
+    return () => {
+      if (before?.isConnected) before.focus?.();
+    };
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -174,10 +187,28 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   }, [current.id, frames, overlays.length]);
 
   if (!frame) return null;
-  const a = ANIM[current.transition];
+  const a = reducedMotion() ? undefined : ANIM[current.transition];
   const onBaseClick = (h: Hotspot, it: Interaction) => go(it, h.rect);
+  const trapTab = (e: React.KeyboardEvent) => {
+    const root = rootRef.current;
+    if (e.key !== "Tab" || !root) return;
+    const els = [...root.querySelectorAll<HTMLElement>("button, a[href]")];
+    const at = document.activeElement;
+    if (!els.length) e.preventDefault();
+    else if (e.shiftKey && (at === els[0] || at === root)) (e.preventDefault(), els[els.length - 1].focus());
+    else if (!e.shiftKey && at === els[els.length - 1]) (e.preventDefault(), els[0].focus());
+  };
   return (
-    <div className="presenter" onClick={() => !baseHotspots.length || (setFlash(true), setTimeout(() => setFlash(false), 400))}>
+    <div
+      ref={rootRef}
+      className="presenter"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Prototype: ${frame.name}`}
+      tabIndex={-1}
+      onKeyDown={trapTab}
+      onClick={() => !baseHotspots.length || (setFlash(true), setTimeout(() => setFlash(false), 400))}
+    >
       <div className="bar" onClick={(e) => e.stopPropagation()}>
         <button className="tbtn" title="Back" onClick={back}>
           <ChevronLeft size={16} />
@@ -267,12 +298,12 @@ function OverlayLayer({
     return () => clearTimeout(t);
   }, []);
   if (!n) return null;
-  const a = ANIM[o.transition];
+  const a = reducedMotion() ? undefined : ANIM[o.transition];
   return (
     <div
       className="overlay-backdrop"
       data-overlay={o.id}
-      style={{ background: overlayDim(o.settings), animation: "dt-dissolve 200ms ease-out" }}
+      style={{ background: overlayDim(o.settings), animation: reducedMotion() ? undefined : "dt-dissolve 200ms ease-out" }}
       onClick={(e) => {
         e.stopPropagation();
         if (isTop && o.settings.closeOnClickOutside) onClose();

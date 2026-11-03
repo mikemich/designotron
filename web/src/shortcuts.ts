@@ -62,6 +62,9 @@ function stepPage(dir: 1 | -1) {
 export function installShortcuts(): () => void {
   const onKey = (e: KeyboardEvent) => {
     if (isTyping(e) || useStore.getState().presenting) return;
+    // Enter and Space on a focused button, link, tab or menu item activate that control
+    // (without this a selection made Enter select its children instead of opening the menu).
+    if ((e.key === "Enter" || e.key === " ") && (e.target as HTMLElement)?.closest?.("button, a[href], [role=menuitem], [role=tab]")) return;
     const mod = e.metaKey || e.ctrlKey;
     if (!mod && inOverlay(e)) return;
     const k = e.key.toLowerCase();

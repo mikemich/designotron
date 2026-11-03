@@ -17,16 +17,20 @@ import {
   attachImage,
   newConversation,
   removeImage,
+  discardQueued,
   send,
+  sendQueued,
   setApiKey,
   setMode,
   setModel,
   stop,
   useChat,
+  useQueueConfirm,
 } from "./chatState";
 import { getDoc, toast, useStore } from "../store";
 import { Menu, MOD, Seg, SelectField, type MenuItem } from "../ui/controls";
 import { imagesFrom } from "./images";
+import { Markdown } from "./markdown";
 import { isPhone } from "../panels/PhoneNote";
 
 const SUGGESTIONS = [
@@ -135,8 +139,16 @@ export function ChatPanel() {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [items]);
   useEffect(() => inputRef.current?.focus(), []);
+  // Closing the panel (the X, Ctrl+/ or the toolbar) must not leave focus on the page body.
+  useEffect(
+    () => () => {
+      if (document.activeElement === document.body || !document.activeElement) document.getElementById("claude-toggle")?.focus();
+    },
+    [],
+  );
 
   const queued = useChat((s) => s.queued);
+  const staleQueue = useQueueConfirm((s) => s.stale);
   const submit = () => {
     if (!text.trim()) return;
     send(text);
@@ -173,12 +185,13 @@ export function ChatPanel() {
   }));
 
   return (
-    <div className="chat">
+    <aside className="chat" aria-label="Claude chat">
       <div className="chat-head">
-        <span className="title">Claude</span>
+        <h2 className="title">Claude</h2>
         <button
           className="ibtn"
           title="New conversation"
+          aria-label="New conversation"
           onClick={newConversation}
         >
           <Plus size={14} />
@@ -186,6 +199,8 @@ export function ChatPanel() {
         <button
           className={"ibtn" + (settings ? " on" : "")}
           title="Settings"
+          aria-label="Settings"
+          aria-pressed={settings}
           onClick={() => setSettings(!settings)}
         >
           <Settings size={14} />
@@ -193,13 +208,19 @@ export function ChatPanel() {
         <button
           className="ibtn"
           title={`Close (${MOD}/)`}
-          onClick={() => useStore.setState({ chatOpen: false })}
+          aria-label="Close Claude panel"
+          onClick={() => {
+            useStore.setState({ chatOpen: false });
+            // The panel unmounts after this click; focus goes to the toolbar button right away.
+            document.getElementById("claude-toggle")?.focus();
+          }}
         >
           <X size={14} />
         </button>
       </div>
       <div className="section" style={{ padding: "8px 10px" }}>
         <Seg
+          ariaLabel="Claude connection"
           value={mode}
           onChange={setMode}
           options={[
@@ -267,6 +288,7 @@ export function ChatPanel() {
                 <input
                   className="textinput"
                   type="password"
+                  aria-label="Anthropic API key"
                   placeholder="sk-ant-…"
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value.trim())}
@@ -274,6 +296,7 @@ export function ChatPanel() {
                 />
                 <div className="row" style={{ marginTop: 6 }}>
                   <SelectField
+                    ariaLabel="Model"
                     value={model}
                     options={MODELS}
                     onChange={setModel}
@@ -311,7 +334,7 @@ export function ChatPanel() {
       {connectCard && <ConnectCard alone={!items.length} />}
       {/* Until Claude is connected, the setup card has the room (the suggestions can't be used yet). */}
       {connectCard && !items.length ? <div style={{ flex: 1 }} /> : (
-      <div className="chat-log" ref={logRef}>
+      <div className="chat-log" ref={logRef} role="log" aria-live="polite" aria-label="Conversation" tabIndex={0}>
         {items.length === 0 && (
           <>
             <div className="muted" style={{ lineHeight: 1.6 }}>
@@ -361,7 +384,7 @@ export function ChatPanel() {
                   ))}
                 </div>
               ) : null}
-              {it.text}
+              {it.kind === "assistant" ? <Markdown text={it.text} /> : it.text}
             </div>
           ),
         )}
@@ -409,8 +432,23 @@ export function ChatPanel() {
             </button>
           </div>
         )}
+        {!running && queued && ready && staleQueue && (
+          <div className="queued-prompt" role="alert">
+            <b>Send queued message?</b> You typed it while Claude wasn't connected:{" "}
+            <i>“{queued.length > 120 ? queued.slice(0, 120) + "…" : queued}”</i>
+            <div className="row" style={{ marginTop: 6, gap: 6 }}>
+              <button className="btn primary small" onClick={sendQueued}>
+                Send
+              </button>
+              <button className="btn small" onClick={discardQueued}>
+                Discard
+              </button>
+            </div>
+          </div>
+        )}
         <textarea
           ref={inputRef}
+          aria-label="Message to Claude"
           placeholder={
             running
               ? "Claude is working. Type to queue a message for when it's done…"
@@ -446,6 +484,9 @@ export function ChatPanel() {
             <button
               className="ibtn"
               title="Quick actions"
+              aria-label="Quick actions"
+              aria-haspopup="menu"
+              aria-expanded={!!menu}
               onClick={(e) => {
                 const r = e.currentTarget.getBoundingClientRect();
                 setMenu({ x: r.left, y: r.top - 8 });
@@ -482,14 +523,18 @@ export function ChatPanel() {
               Enter to send
             </span>
           </div>
-          {running && text.trim() ? (
-            <button className="btn primary" onClick={submit} title="Sends when Claude finishes this turn">
-              Queue
-            </button>
-          ) : running ? (
-            <button className="btn" onClick={stop}>
-              <Square size={12} /> Stop
-            </button>
+          {running ? (
+            // Stop stays in reach while a message is being queued.
+            <div className="row" style={{ gap: 6 }}>
+              <button className="btn" onClick={stop}>
+                <Square size={12} /> Stop
+              </button>
+              {text.trim() && (
+                <button className="btn primary" onClick={submit} title="Sends when Claude finishes this turn">
+                  Queue
+                </button>
+              )}
+            </div>
           ) : (
             <button
               className="btn primary"
@@ -506,10 +551,11 @@ export function ChatPanel() {
           x={menu.x}
           y={menu.y}
           items={quickItems}
+          label="Quick actions"
           onClose={() => setMenu(null)}
         />
       )}
-    </div>
+    </aside>
   );
 }
 
@@ -529,7 +575,7 @@ function CopyLine({ text }: { text: string }) {
     );
   return (
     <div className="copy-line">
-      <code>{text}</code>
+      <code tabIndex={0}>{text}</code>
       <button onClick={copy} title="Copy">
         {copied ? <Check size={12} /> : "Copy"}
       </button>
@@ -555,7 +601,7 @@ function ConnectCard({ alone }: { alone: boolean }) {
         <div className="queued-prompt">
           Waiting to send:{" "}
           <i>“{queued.length > 120 ? queued.slice(0, 120) + "…" : queued}”</i>.
-          It goes out as soon as Claude is connected.
+          It goes out once Claude is connected (you'll be asked first if that takes a while).
         </div>
       )}
       <div>
@@ -573,6 +619,7 @@ function ConnectCard({ alone }: { alone: boolean }) {
         <input
           className="textinput"
           type="password"
+          aria-label="Anthropic API key"
           placeholder="sk-ant-…"
           value={key}
           onChange={(e) => setKey(e.target.value)}

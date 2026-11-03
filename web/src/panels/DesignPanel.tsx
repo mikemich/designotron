@@ -204,6 +204,7 @@ function FrameSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
     <Section title="Frame">
       <div className="row">
         <SelectField
+          ariaLabel="Frame size preset"
           value={"" as string}
           options={[{ value: "", label: "Resize to preset…" }, ...FRAME_PRESETS.map((p) => ({ value: p.label, label: `${p.label}  ${p.w}×${p.h}` }))]}
           onChange={(label) => {
@@ -238,10 +239,11 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   return (
     <Section title="Position & size">
       <div className="grid2">
-        <NumberField label="X" value={common(nodes, (n) => n.x)} onChange={(x) => update(ids, { x })} onScrubStart={begin} onScrubEnd={end} />
-        <NumberField label="Y" value={common(nodes, (n) => n.y)} onChange={(y) => update(ids, { y })} onScrubStart={begin} onScrubEnd={end} />
+        <NumberField label="X" ariaLabel="X position" value={common(nodes, (n) => n.x)} onChange={(x) => update(ids, { x })} onScrubStart={begin} onScrubEnd={end} />
+        <NumberField label="Y" ariaLabel="Y position" value={common(nodes, (n) => n.y)} onChange={(y) => update(ids, { y })} onScrubStart={begin} onScrubEnd={end} />
         <NumberField
           label="W"
+          ariaLabel="Width"
           min={0}
           value={common(nodes, (n) => n.width)}
           onChange={(width) => update(ids, isText ? { width, text: { autoResize: "height" }, sizingH: "fixed" } : { width, sizingH: "fixed" })}
@@ -250,6 +252,7 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         />
         <NumberField
           label="H"
+          ariaLabel="Height"
           min={0}
           value={common(nodes, (n) => n.height)}
           onChange={(height) => update(ids, isText ? { height, text: { autoResize: "none" }, sizingV: "fixed" } : { height, sizingV: "fixed" })}
@@ -261,12 +264,14 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         <div className="grid2">
           <SelectField
             label="W"
+            ariaLabel="Width sizing"
             value={common(nodes, (n) => n.sizingH)}
             options={sizingOptions}
             onChange={(sizingH) => update(ids, { sizingH })}
           />
           <SelectField
             label="H"
+            ariaLabel="Height sizing"
             value={common(nodes, (n) => n.sizingV)}
             options={sizingOptions}
             onChange={(sizingV) => update(ids, { sizingV })}
@@ -289,6 +294,7 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         <div className="grid2">
           {(["↖", "↗", "↘", "↙"] as const).map((lbl, i) => (
             <NumberField
+              ariaLabel={["Top left", "Top right", "Bottom right", "Bottom left"][i] + " corner radius"}
               key={i}
               label={lbl}
               min={0}
@@ -441,16 +447,20 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         </IconButton>
       </div>
       <div className="row" style={{ alignItems: "flex-start" }}>
-        <div className="align-grid" title="Alignment">
+        <div className="align-grid" role="group" aria-label="Alignment" title="Alignment">
           {cells.map((row) =>
             cells.map((col) => {
               const primary = horizontal ? col : row;
               const counter = horizontal ? row : col;
               const on = (al.primaryAlign === primary || (al.primaryAlign === "spaceBetween" && primary === "start")) && (al.counterAlign === counter);
+              // The grid is drawn top to bottom, left to right whichever way the layout runs.
+              const spot = `${{ start: "top", center: "middle", end: "bottom" }[row]} ${{ start: "left", center: "center", end: "right" }[col]}`;
               return (
                 <button
                   key={row + col}
                   className={on ? "on" : ""}
+                  aria-label={`Align ${spot}`}
+                  aria-pressed={on}
                   onClick={() => set({ primaryAlign: al.primaryAlign === "spaceBetween" ? "spaceBetween" : primary, counterAlign: counter })}
                 >
                   <i />
@@ -462,6 +472,7 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 6 }}>
           <NumberField label="⇹" title="Gap between items" value={common(nodes, (n) => n.layout!.gap)} onChange={(gap) => set({ gap })} onScrubStart={begin} onScrubEnd={end} min={0} />
           <SelectField
+            ariaLabel="Spacing mode"
             value={al.primaryAlign === "spaceBetween" ? "between" : "packed"}
             options={[
               { value: "packed", label: "Packed" },
@@ -491,6 +502,7 @@ function LayerSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
     <Section title="Layer">
       <div className="grid2">
         <SelectField
+          ariaLabel="Blend mode"
           value={common(nodes, (n) => n.blendMode)}
           options={["normal", "multiply", "screen", "overlay", "darken", "lighten", "colorDodge", "colorBurn", "hardLight", "softLight", "difference", "exclusion", "hue", "saturation", "color", "luminosity"].map((v) => ({
             value: v,
@@ -551,10 +563,10 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
     <Section title={partial ? `Text · ${sel!.end - sel!.start} characters selected` : "Text"} actions={<ApplyStyleButton kind="text" ids={ids} />}>
       <StyleChip kind="text" nodes={nodes} ids={ids} />
       <div className="row">
-        <SelectField value={r("fontFamily") as Maybe<string>} options={FONTS.map((f) => ({ value: f, label: f }))} onChange={(fontFamily) => set({ fontFamily })} />
+        <SelectField ariaLabel="Font family" value={r("fontFamily") as Maybe<string>} options={FONTS.map((f) => ({ value: f, label: f }))} onChange={(fontFamily) => set({ fontFamily })} />
       </div>
       <div className="grid2">
-        <SelectField value={r("fontWeight") as Maybe<number>} options={WEIGHTS} onChange={(fontWeight) => set({ fontWeight })} />
+        <SelectField ariaLabel="Font weight" value={r("fontWeight") as Maybe<number>} options={WEIGHTS} onChange={(fontWeight) => set({ fontWeight })} />
         <NumberField value={r("fontSize") as Maybe<number>} min={1} onChange={(fontSize) => set({ fontSize })} onScrubStart={begin} onScrubEnd={end} label="Aa" title="Font size" />
       </div>
       <div className="grid2">
@@ -661,6 +673,7 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           <Strikethrough size={13} />
         </IconButton>
         <SelectField
+          ariaLabel="Text case"
           value={t((n) => n.text!.case) as Maybe<string>}
           options={[
             { value: "original", label: "Aa  As typed" },
@@ -818,6 +831,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
               {p.type === "solid" ? (
                 <input
                   key={p.color}
+                  aria-label="Hex colour"
                   defaultValue={p.color.replace("#", "").slice(0, 6)}
                   onKeyDown={(e) => {
                     e.stopPropagation();
@@ -833,7 +847,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
               )}
             </label>
             <div style={{ width: 62 }}>
-              <NumberField value={Math.round(p.opacity * 100)} suffix="%" min={0} max={100} onChange={(v) => setP({ ...p, opacity: v / 100 })} />
+              <NumberField ariaLabel="Opacity" value={Math.round(p.opacity * 100)} suffix="%" min={0} max={100} onChange={(v) => setP({ ...p, opacity: v / 100 })} />
             </div>
             <IconButton title={p.visible ? "Hide" : "Show"} onClick={() => setP({ ...p, visible: !p.visible })}>
               {p.visible ? <Eye size={13} /> : <EyeOff size={13} />}
@@ -849,6 +863,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
           <div className="grid2">
             <NumberField label="≡" title="Stroke weight" min={0} value={common(nodes, (n) => n.strokeWeight)} onChange={(strokeWeight) => update(ids, { strokeWeight })} onScrubStart={begin} onScrubEnd={end} />
             <SelectField
+              ariaLabel="Stroke position"
               value={common(nodes, (n) => n.strokeAlign)}
               options={[
                 { value: "inside", label: "Inside" },
@@ -860,6 +875,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
           </div>
           <div className="grid2">
             <SelectField
+              ariaLabel="Stroke style"
               value={common(nodes, (n) => (n.strokeDash.length ? "dashed" : "solid"))}
               options={[
                 { value: "solid", label: "Solid" },
@@ -869,6 +885,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
             />
             {isLineish && (
               <SelectField
+                ariaLabel="Line end"
                 value={common(nodes, (n) => n.shape?.endCap ?? "none")}
                 options={[
                   { value: "none", label: "No end cap" },
@@ -907,6 +924,7 @@ function EffectsSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           <div key={i} style={{ marginBottom: 8 }}>
             <div className="row">
               <SelectField
+                ariaLabel="Effect type"
                 value={e.type}
                 options={[
                   { value: "dropShadow", label: "Drop shadow" },
@@ -989,6 +1007,7 @@ function GridSection({ node }: { node: Node }) {
               <>
                 <div className="row">
                   <SelectField
+                    ariaLabel="Grid pattern"
                     value={g.pattern}
                     options={[
                       { value: "columns", label: "Columns" },
@@ -999,6 +1018,7 @@ function GridSection({ node }: { node: Node }) {
                   />
                   {g.pattern !== "grid" && (
                     <SelectField
+                      ariaLabel="Grid alignment"
                       value={g.alignment}
                       options={[
                         { value: "stretch", label: "Stretch" },
@@ -1079,6 +1099,7 @@ function VariablesSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
                 {c.name}
               </span>
               <SelectField
+                ariaLabel="Variable mode"
                 value={mode === MIXED ? "" : mode}
                 options={[{ value: "", label: `Auto (${c.modes[0].name})` }, ...c.modes.map((m) => ({ value: m.id, label: m.name }))]}
                 onChange={(m) => dispatch({ op: "setVariableMode", ids, collection: c.id, mode: m || null })}
@@ -1095,6 +1116,7 @@ function VariablesSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
               {b.label}
             </span>
             <SelectField
+              ariaLabel="Bound variable"
               value={cur === MIXED ? "" : cur}
               options={[{ value: "", label: options.length ? "Not bound" : `No ${b.kind} variables` }, ...options]}
               onChange={(v) => dispatch({ op: "bindVariable", ids, property: b.prop, variable: v || null })}
@@ -1172,8 +1194,9 @@ function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         return (
           <div key={i} className="export-row" style={{ marginBottom: 8 }}>
             <div className="grid2" style={svg ? { gridTemplateColumns: "minmax(0, 1fr)" } : undefined}>
-              {!svg && <SelectField value={sizeOf(r)} options={sizeOptions(r)} onChange={(v) => setSize(i, v)} />}
+              {!svg && <SelectField ariaLabel="Export scale" value={sizeOf(r)} options={sizeOptions(r)} onChange={(v) => setSize(i, v)} />}
               <SelectField
+                ariaLabel="Export format"
                 value={r.format}
                 options={[
                   { value: "png", label: "PNG" },
@@ -1186,6 +1209,7 @@ function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
             {fixed && (
               <div className="grid2">
                 <NumberField
+                  ariaLabel="Export size"
                   label={r.width ? "W" : "H"}
                   min={1}
                   suffix="px"
@@ -1200,6 +1224,7 @@ function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
                 className="textinput"
                 placeholder={`Suffix ${rowSuffix(r) || "(none)"}`}
                 title="File name suffix"
+                aria-label="File name suffix"
                 defaultValue={r.suffix}
                 onKeyDown={(e) => (e.key === "Enter" && e.currentTarget.blur(), e.stopPropagation())}
                 onBlur={(e) => e.target.value !== r.suffix && setRow(i, { suffix: e.target.value })}
