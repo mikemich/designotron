@@ -19,7 +19,7 @@ use crate::model::{
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render::{self, Mode, RenderOptions};
 use crate::text::TextMeasurer;
-use crate::{ai, codegen, patch, vector_edit};
+use crate::{ai, arrange, codegen, patch, vector_edit};
 
 const MAX_HISTORY: usize = 300;
 pub const CLIPBOARD_TAG: &str = "designotron/nodes";
@@ -97,6 +97,34 @@ pub enum Command {
   },
   DeletePage {
     id: String,
+  },
+  /// Moves a page to `index` in the pages list.
+  MovePage {
+    id: String,
+    index: usize,
+  },
+  /// Copies a page with all its layers ("<name> copy", right after it) and makes it current.
+  DuplicatePage {
+    id: String,
+  },
+  /// Moves layers to the top level of another page (keeping x/y); the page becomes current.
+  MoveToPage {
+    ids: Vec<NodeId>,
+    page: String,
+  },
+  /// Arranges top-level layers into a grid with equal spacing (median gap unless given).
+  TidyUp {
+    ids: Vec<NodeId>,
+    #[serde(default)]
+    spacing: Option<f64>,
+  },
+  /// Scales layers and everything inside them by `factor` around `anchor` (default: the
+  /// selection's top-left): the Scale tool with a number.
+  ScaleNodes {
+    ids: Vec<NodeId>,
+    factor: f64,
+    #[serde(default)]
+    anchor: Option<Point>,
   },
   SetPageBackground {
     id: String,
@@ -323,6 +351,10 @@ pub enum Command {
     snap: bool,
     #[serde(default = "one")]
     zoom: f64,
+    /// The Scale tool: the handle drag scales the layers and everything inside them
+    /// proportionally (the aspect is always locked).
+    #[serde(default)]
+    scale: bool,
   },
   /// Gesture-relative rotation in degrees around a page-space pivot.
   Rotate {
@@ -543,6 +575,21 @@ pub enum Query {
     x: f64,
     y: f64,
     zoom: f64,
+  },
+  /// Layers identical to `ids` in the other top-level frames or groups of their page.
+  MatchingLayers {
+    ids: Vec<NodeId>,
+  },
+  /// Layers on the page of `id` with the same fill / stroke / effect / text / font / instance.
+  SameProperty {
+    id: NodeId,
+    prop: String,
+  },
+  /// Instances of a main component (or of an instance's component) on the current page or all.
+  Instances {
+    component: NodeId,
+    #[serde(default)]
+    all_pages: bool,
   },
   /// Comment threads on a page with resolved page positions.
   Comments {
@@ -1500,6 +1547,44 @@ impl Engine {
         self.doc.pages.retain(|p| p.id != id);
         Ok(json!({}))
       }
+      Command::MovePage { id, index } => {
+        arrange::move_page(&mut self.doc, &id, index)?;
+        Ok(json!({}))
+      }
+      Command::DuplicatePage { id } => {
+        let new_id = arrange::duplicate_page(&mut self.doc, &mut self.gen, &id)?;
+        self.page = new_id.clone();
+        self.selection.clear();
+        Ok(json!({ "id": new_id }))
+      }
+      Command::MoveToPage { ids, page } => {
+        let moved = arrange::move_to_page(&mut self.doc, &ids, &page)?;
+        if moved.is_empty() {
+          return Err("nothing to move".into());
+        }
+        self.page = page;
+        self.selection = moved.clone();
+        Ok(json!({ "ids": moved }))
+      }
+      Command::TidyUp { ids, spacing } => {
+        arrange::tidy_up(&mut self.doc, &ids, spacing)?;
+        Ok(json!({}))
+      }
+      Command::ScaleNodes { ids, factor, anchor } => {
+        if !(factor.is_finite() && factor > 0.0) {
+          return Err("the scale factor must be above zero".into());
+        }
+        let ids = arrange::scalable(&self.doc, &ids);
+        let anchor = match anchor {
+          Some(a) => a,
+          None => {
+            let b = self.doc.bounds_of_many(&ids).ok_or("nothing to scale")?;
+            Point::new(b.x, b.y)
+          }
+        };
+        arrange::scale_nodes(&mut self.doc, &ids, factor, anchor);
+        Ok(json!({}))
+      }
       Command::SetPageBackground { id, color } => {
         self.doc.page_mut(&id).ok_or("no such page")?.background = crate::color::normalize(&color);
         Ok(json!({}))
@@ -1991,7 +2076,14 @@ impl Engine {
         from_center,
         snap,
         zoom,
-      } => self.resize(&ids, handle, dx, dy, keep_aspect, from_center, snap, zoom),
+        scale,
+      } => {
+        if scale {
+          self.resize_scale(&ids, handle, dx, dy, from_center)
+        } else {
+          self.resize(&ids, handle, dx, dy, keep_aspect, from_center, snap, zoom)
+        }
+      }
       Command::Rotate {
         ids,
         angle,
@@ -2634,6 +2726,60 @@ impl Engine {
     Ok(json!({ "guides": guides, "gaps": gaps }))
   }
 
+  /// The Scale tool's handle drag: proportional (the larger change wins at a corner), around
+  /// the opposite handle, or the centre.
+  fn resize_scale(&mut self, ids: &[NodeId], handle: Handle, dx: f64, dy: f64, from_center: bool) -> Result<Value, String> {
+    let ids = arrange::scalable(&self.doc, ids);
+    let from = self.doc.bounds_of_many(&ids).ok_or("nothing to scale")?;
+    let (fx, fy) = handle.factors();
+    let mult = if from_center { 2.0 } else { 1.0 };
+    let kx = if from.width > 0.0 {
+      (from.width + fx * dx * mult) / from.width
+    } else {
+      1.0
+    };
+    let ky = if from.height > 0.0 {
+      (from.height + fy * dy * mult) / from.height
+    } else {
+      1.0
+    };
+    let k = match (fx != 0.0, fy != 0.0) {
+      (true, true) => {
+        if (kx - 1.0).abs() >= (ky - 1.0).abs() {
+          kx
+        } else {
+          ky
+        }
+      }
+      (true, false) => kx,
+      _ => ky,
+    }
+    .max(0.01);
+    let c = from.center();
+    let anchor = if from_center {
+      c
+    } else {
+      Point::new(
+        if fx < 0.0 {
+          from.right()
+        } else if fx > 0.0 {
+          from.x
+        } else {
+          c.x
+        },
+        if fy < 0.0 {
+          from.bottom()
+        } else if fy > 0.0 {
+          from.y
+        } else {
+          c.y
+        },
+      )
+    };
+    arrange::scale_nodes(&mut self.doc, &ids, k, anchor);
+    Ok(json!({ "guides": [], "gaps": [], "scale": k }))
+  }
+
   fn paste(&mut self, data: &str, parent: Option<NodeId>, x: Option<f64>, y: Option<f64>) -> Result<Value, String> {
     let v: Value = serde_json::from_str(data).map_err(|_| "clipboard does not contain Designotron layers")?;
     if v.get("type").and_then(|t| t.as_str()) != Some(CLIPBOARD_TAG) {
@@ -2831,6 +2977,12 @@ impl Engine {
       Query::Comments { page, include_resolved } => crate::comments::list(&self.doc, page.as_deref(), include_resolved),
       Query::GridOverlay { page } => crate::grids::overlay(&self.doc, page.as_deref().unwrap_or(&self.page)),
       Query::Copy { ids } => json!(self.copy(&ids)),
+      Query::MatchingLayers { ids } => json!(arrange::matching_layers(&self.doc, &ids)),
+      Query::SameProperty { id, prop } => {
+        let prop = arrange::SameProp::parse(&prop).ok_or_else(|| format!("unknown property {prop}"))?;
+        json!(arrange::same_property(&self.doc, &id, prop))
+      }
+      Query::Instances { component, all_pages } => json!(arrange::instances_of(&self.doc, &component, &self.page, all_pages)),
       Query::ExportSvg {
         id,
         hide,
@@ -3787,6 +3939,7 @@ mod tests {
         from_center,
         snap: true,
         zoom: 1.0,
+        scale: false,
       })
       .unwrap();
     e.dispatch(Command::CancelGesture).unwrap();
@@ -4333,6 +4486,7 @@ mod tests {
       from_center: false,
       snap: false,
       zoom: 1.0,
+      scale: false,
     })
     .unwrap();
     let u = e.doc.bounds_of_many(&[a, b]).unwrap();

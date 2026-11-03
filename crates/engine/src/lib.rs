@@ -4,6 +4,9 @@
 //! and linked natively by the bridge server.
 
 pub mod ai;
+pub mod arrange;
+#[cfg(test)]
+mod arrange_tests;
 pub mod codegen;
 pub mod collab;
 #[cfg(test)]
