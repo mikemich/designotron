@@ -895,6 +895,16 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
         }
       }
     }
+    // Auto layout added or removed (or new padding given) on a device frame: its chrome joins or leaves
+    // the flow and the safe area follows. This runs before a device change, which works from `applied`.
+    if before.device.is_some() {
+      let layout_now = e.doc.get(id).is_some_and(|n| n.layout.is_some());
+      if layout_now != before.layout.is_some() {
+        crate::devices::refresh(&mut e.doc, &mut e.gen, id);
+      } else if u.get("layout").is_some_and(|l| l.get("padding").is_some()) {
+        keep_safe_area(e, id);
+      }
+    }
     if let Some(d) = u.get("device") {
       let device = crate::devices::parse_spec(d, before.device.as_ref()).map_err(|m| cx.err("device", m))?;
       let sized = u.get("width").is_some() || u.get("height").is_some();
@@ -908,8 +918,6 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
         resize: !sized && new_preset,
       })
       .map_err(|m| cx.err("device", m))?;
-    } else if u.get("layout").is_some_and(|l| l.get("padding").is_some()) {
-      keep_safe_area(e, id);
     }
     done.push(id.to_string());
     cx.leave(mark);
@@ -1845,6 +1853,12 @@ pub fn insert_specs_ex(e: &mut Engine, specs: &[Value], parent: Option<&str>) ->
     if !pn.kind.is_container() {
       return Err(format!("{p} is a {} and cannot have children", pn.kind.label()));
     }
+    if crate::devices::in_part(&e.doc, p) {
+      return Err(format!(
+        "{p} is system UI of a device frame and cannot have children; use parentId {}",
+        crate::devices::host_of(&e.doc, p)
+      ));
+    }
   }
   let page = parent
     .and_then(|p| e.doc.get(p))
@@ -2026,7 +2040,7 @@ fn build(e: &mut Engine, cx: &mut Ctx, spec: &Value, parent: Option<&str>, page:
       n.fills = vec![Paint::solid("#E5E7EB")];
     }
     let id = n.id.clone();
-    let index = parent.and_then(|p| before_device_ui(&e.doc, p));
+    let index = parent.and_then(|p| crate::devices::before_chrome(&e.doc, p));
     e.doc.insert(n, parent, page, index);
     match spec.get("children") {
       None | Some(Value::Null) => {}
@@ -2062,12 +2076,6 @@ fn build(e: &mut Engine, cx: &mut Ctx, spec: &Value, parent: Option<&str>, page:
     }
   }
   Ok(id)
-}
-
-/// Where a new child of `parent` goes so a device frame's system UI stays on top of it.
-fn before_device_ui(doc: &crate::model::Document, parent: &str) -> Option<usize> {
-  let p = doc.get(parent)?;
-  p.children.iter().position(|c| doc.get(c).is_some_and(|c| c.device_part.is_some()))
 }
 
 fn parse_kind(cx: &Ctx, s: &str) -> Result<NodeType, String> {

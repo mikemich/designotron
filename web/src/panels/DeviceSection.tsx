@@ -82,17 +82,21 @@ export function DeviceSection({ node }: { node: Node }) {
               Pad content to safe area
             </label>
           )}
-          {insets && <div className="muted small device-safe">{safeAreaLine(insets)}</div>}
+          {insets && <div className="muted small device-safe">{safeAreaLine(insets, kind)}</div>}
+          {(kind === "macWindow" || kind === "browser") && (
+            <div className="muted small device-safe">Code export leaves the window bar out; padding in code excludes it.</div>
+          )}
         </>
       )}
     </Section>
   );
 }
 
-/** "Safe area 62 top · 34 bottom". */
-export function safeAreaLine(i: [number, number, number, number]): string {
+/** "Safe area 62 top · 34 bottom"; a window or browser frame has a bar, not a safe area. */
+export function safeAreaLine(i: [number, number, number, number], kind = ""): string {
   const parts = (["top", "right", "bottom", "left"] as const).map((side, k) => (i[k] > 0 ? `${i[k]} ${side}` : "")).filter(Boolean);
-  return parts.length ? `Safe area ${parts.join(" · ")}` : "No safe area";
+  const label = kind === "macWindow" ? "Title bar" : kind === "browser" ? "Browser bar" : "Safe area";
+  return parts.length ? `${label} ${parts.join(" · ")}` : kind === "macWindow" || kind === "browser" ? "No window bar" : "No safe area";
 }
 
 const up = (ids: string[], patch: Record<string, unknown>) => dispatch({ op: "update", ids, patch });

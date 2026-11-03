@@ -346,7 +346,13 @@ pub fn frame_at(doc: &Document, page: &str, p: Point, exclude: &[NodeId], includ
         continue;
       }
       let Some(n) = doc.get(id) else { continue };
-      if !n.visible || !n.kind.is_frame_like() || n.kind == NodeType::Instance || doc.instance_ancestor(id).is_some() {
+      // System UI of a device frame is never a drop target: layers go into the device frame.
+      if !n.visible
+        || !n.kind.is_frame_like()
+        || n.kind == NodeType::Instance
+        || n.device_part.is_some()
+        || doc.instance_ancestor(id).is_some()
+      {
         continue;
       }
       if !include_mains && matches!(n.kind, NodeType::Component | NodeType::ComponentSet) {

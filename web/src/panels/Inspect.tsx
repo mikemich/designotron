@@ -52,6 +52,8 @@ export function Inspect({ node }: { node: Node }) {
   const assets = useMemo(() => collectAssets(doc, node), [node.id, docRev]);
   const val = (text: string, label?: string) => <Val key={label ?? text} text={text} label={label} copied={copied === text} onCopy={copy} />;
   const L = node.layout;
+  // The safe area a device frame added to its padding is not content padding (code writes it as env()).
+  const applied = node.device?.applied ?? [0, 0, 0, 0];
   return (
     <div className="section insp" data-testid="inspect">
       <div className="section-head">
@@ -91,17 +93,22 @@ export function Inspect({ node }: { node: Node }) {
             </Row>
             <Row k="Padding">
               <div className="insp-box" aria-label="Padding">
-                <div className="insp-pt">{val(`${r(L.paddingTop)}`, "Padding top")}</div>
+                <div className="insp-pt">{val(`${r(L.paddingTop - applied[0])}`, "Padding top")}</div>
                 <div className="insp-mid">
-                  <div className="insp-pl">{val(`${r(L.paddingLeft)}`, "Padding left")}</div>
+                  <div className="insp-pl">{val(`${r(L.paddingLeft - applied[3])}`, "Padding left")}</div>
                   <div className="insp-inner">
                     {r(node.width)} x {r(node.height)}
                   </div>
-                  <div className="insp-pr">{val(`${r(L.paddingRight)}`, "Padding right")}</div>
+                  <div className="insp-pr">{val(`${r(L.paddingRight - applied[1])}`, "Padding right")}</div>
                 </div>
-                <div className="insp-pb">{val(`${r(L.paddingBottom)}`, "Padding bottom")}</div>
+                <div className="insp-pb">{val(`${r(L.paddingBottom - applied[2])}`, "Padding bottom")}</div>
               </div>
             </Row>
+            {applied.some((v) => v !== 0) && (
+              <Row k="">
+                <span className="muted small">+ safe area, added by the device ({applied.map((v) => r(v)).join(" ")})</span>
+              </Row>
+            )}
             {node.bindings.padding && (
               <Row k="">
                 <Name kind="Variable" name={varName(doc, node.bindings.padding)} />
@@ -386,7 +393,8 @@ function collectAssets(doc: Doc, root: Node): AssetRow[] {
   let scanned = 0;
   while (stack.length && scanned < MAX_SCAN) {
     const n = doc.nodes[stack.pop() as string];
-    if (!n) continue;
+    // System UI of a device frame is the device's, not an asset of the design.
+    if (!n || n.devicePart) continue;
     scanned++;
     for (let i = n.children.length - 1; i >= 0; i--) stack.push(n.children[i]);
     for (const p of n.fills) {

@@ -1376,6 +1376,77 @@ mod device {
   }
 
   #[test]
+  fn adding_and_removing_auto_layout_by_update_keeps_the_chrome_and_padding_right() {
+    let mut e = engine();
+    let id = one(&mut e, json!({ "type": "frame", "name": "Home", "device": "iphone-17-pro" }));
+    assert!(e.doc.get(&id).unwrap().layout.is_none());
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "layout": { "direction": "vertical", "padding": 8 } }] }),
+    );
+    let n = e.doc.get(&id).unwrap();
+    assert_eq!((n.sizing_h, n.sizing_v, n.height), (Sizing::Fixed, Sizing::Fixed, 874.0));
+    let l = n.layout.clone().unwrap();
+    assert_eq!((l.padding_top, l.padding_bottom), (70.0, 42.0));
+    assert!(n
+      .children
+      .iter()
+      .filter_map(|c| e.doc.get(c))
+      .filter(|c| c.device_part.is_some())
+      .all(|c| c.absolute_position));
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "patch": { "layout": null } }] }),
+    );
+    let n = e.doc.get(&id).unwrap();
+    assert!(n.layout.is_none());
+    assert_eq!(n.device.as_ref().unwrap().applied, [0.0; 4], "no stale insets");
+    assert!(n
+      .children
+      .iter()
+      .filter_map(|c| e.doc.get(c))
+      .filter(|c| c.device_part.is_some())
+      .all(|c| !c.absolute_position));
+  }
+
+  #[test]
+  fn a_device_and_padding_in_one_update_use_the_new_padding_once() {
+    let mut e = engine();
+    let id = screen(&mut e, json!("iphone-16"));
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "device": "iphone-17", "layout": { "padding": 16 } }] }),
+    );
+    let l = e.doc.get(&id).unwrap().layout.clone().unwrap();
+    assert_eq!((l.padding_top, l.padding_bottom), (78.0, 50.0));
+  }
+
+  #[test]
+  fn system_ui_is_not_a_parent() {
+    let mut e = engine();
+    let id = screen(&mut e, json!("iphone-17"));
+    let bar = e
+      .doc
+      .get(&id)
+      .unwrap()
+      .children
+      .iter()
+      .find(|c| e.doc.get(c).unwrap().device_part.as_deref() == Some("statusBar"))
+      .unwrap()
+      .clone();
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "parentId": bar, "nodes": [{ "type": "text", "text": "x" }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("system UI") && err.contains(&id), "{err}");
+  }
+
+  #[test]
   fn new_children_go_below_the_system_ui_and_the_outline_stays_compact() {
     let mut e = engine();
     let id = screen(&mut e, json!("iphone-17"));

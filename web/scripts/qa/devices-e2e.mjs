@@ -71,7 +71,7 @@ try {
   const groups = await p.locator(".frame-presets [role=group]").evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
   check("the picker is grouped (Phone, Tablet, Desktop, Web, Social, Print, Presentation)", ["Phone", "Tablet", "Desktop", "Web", "Social", "Print", "Presentation"].every((g) => groups.includes(g)), groups.join("|"));
   await shot("devices-picker.png");
-  const search = p.locator("[role=searchbox]").first();
+  const search = p.locator(".preset-picker input[type=search]").first();
   await search.click();
   await p.keyboard.type("pro");
   await sleep(150);
@@ -110,7 +110,7 @@ try {
   check("Dark turns the glyphs white", fillOf(time) === "#FFFFFF" && fillOf(await named("Home indicator")) === "#FFFFFF", fillOf(time));
   check("Dark is pressed", (await theme("Dark").getAttribute("aria-pressed")) === "true" && (await theme("Light").getAttribute("aria-pressed")) === "false");
   check("the device records the theme", (await frame()).device.theme === "dark");
-  await dispatch({ op: "update", ids: [f.id], patch: { fills: [{ type: "solid", color: "#000000" }] } });
+  check("the frame's plain white fill follows to black (no invisible glyphs)", fillOf(await frame()) === "#000000", fillOf(await frame()));
   await shot("devices-iphone-dark.png");
 
   // ---------- 3: status bar off and on ----------
@@ -143,7 +143,7 @@ try {
 
   // ---------- 5: resize to a browser preset by keyboard ----------
   await p.locator("button:has-text('Resize to preset')").click();
-  const popSearch = p.locator("[role=searchbox][aria-label='Search size presets']");
+  const popSearch = p.locator("input[type=search][aria-label='Search size presets']");
   await popSearch.waitFor();
   check("the popover search box has focus", await popSearch.evaluate((e) => document.activeElement === e));
   await p.keyboard.type("browser 1440");
@@ -250,7 +250,7 @@ try {
 
   // Plain sizes have no system UI, and a frame can leave its device.
   await p.locator("button:has-text('Resize to preset')").click();
-  await p.locator("[role=searchbox][aria-label='Search size presets']").waitFor();
+  await p.locator("input[type=search][aria-label='Search size presets']").waitFor();
   await p.keyboard.type("instagram post");
   await p.keyboard.press("Enter");
   await sleep(350);
@@ -264,11 +264,61 @@ try {
   // The safe-area overlay shows for the selected device frame.
   await dispatch({ op: "select", ids: [back.id] });
   const areas = await p.evaluate(() => window.__dt.query({ q: "safeAreas" }));
-  check("the safe-area overlay has a top and a bottom band for the selected frame", areas.length === 1 && areas[0].bands.length === 2 && areas[0].bands[0].height === 62 && areas[0].bands[1].height === 34, JSON.stringify(areas[0]?.bands?.map((b) => b.height)));
+  check("the safe-area overlay is a dashed line at 62 from the top and 34 from the bottom", areas.length === 1 && areas[0].lines.length === 2 && areas[0].lines[0][1] === back.y + 62 && areas[0].lines[1][1] === back.y + 874 - 34, JSON.stringify(areas[0]?.lines));
   await dispatch({ op: "select", ids: [] });
   check("and none when nothing is selected", (await p.evaluate(() => window.__dt.query({ q: "safeAreas" }))).length === 0);
   await dispatch({ op: "select", ids: [back.id] });
   await shot("devices-panel.png");
+
+  // ---------- Layers drawn on the chrome, copies, deleting a part ----------
+  const kids = async () => (await doc()).nodes[back.id].children.map((c) => d2.nodes[c]);
+  let d2 = await doc();
+  await dispatch({ op: "createShape", kind: "rectangle", x: back.x + 20, y: back.y + 10, width: 200, height: 30, parent: null });
+  const drawn = (await sel())[0];
+  d2 = await doc();
+  check("a rectangle drawn on the status bar goes into the device frame, not the bar", d2.nodes[drawn].parent === back.id, String(d2.nodes[drawn].parent));
+  let order = (await kids()).map((n) => n.devicePart ?? (n.id === drawn ? "drawn" : "other"));
+  check("it sits below the system UI", order.indexOf("drawn") < order.indexOf("statusBar") && order.slice(-2).join() === "statusBar,homeIndicator", order.join());
+  await dispatch({ op: "reorder", ids: [drawn], to: "front" });
+  d2 = await doc();
+  order = (await kids()).map((n) => n.devicePart ?? (n.id === drawn ? "drawn" : "other"));
+  check("bring to front keeps the chrome on top", order.slice(-2).join() === "statusBar,homeIndicator", order.join());
+  await dispatch({ op: "delete", ids: [drawn] });
+
+  const barNode = (await nodes()).find((n) => n.devicePart === "statusBar");
+  await dispatch({ op: "select", ids: [barNode.id] });
+  await focusCanvas();
+  await press("Control+d");
+  check("Ctrl+D on a chrome part makes no second part", (await allNamed("Status bar")).length === 1 && (await nodes()).filter((n) => n.devicePart === "statusBar").length === 1);
+  const clip = await p.evaluate((id) => window.__dt.query({ q: "copy", ids: [id] }), barNode.id);
+  const pasted = await p.evaluate((data) => window.__dt.dispatch({ op: "paste", data, parent: null, x: 2000, y: 0 }), clip);
+  const copyNode = (await doc()).nodes[pasted.created[0]];
+  check("a pasted chrome part is an ordinary unlocked layer", !copyNode.devicePart && !copyNode.locked);
+  await dispatch({ op: "delete", ids: [copyNode.id] });
+
+  const homeNode = (await nodes()).find((n) => n.devicePart === "homeIndicator");
+  await dispatch({ op: "select", ids: [homeNode.id] });
+  await focusCanvas();
+  await press("Delete");
+  const afterDel = await doc();
+  const dev = afterDel.nodes[back.id].device;
+  check("deleting the home indicator turns its toggle off and drops the inset", dev.homeIndicator === false && dev.statusBar === true && dev.applied[2] === 0 && afterDel.nodes[back.id].layout.paddingBottom === 10, JSON.stringify([dev.homeIndicator, dev.applied, afterDel.nodes[back.id].layout.paddingBottom]));
+  await dispatch({ op: "select", ids: [back.id] });
+  await sleep(200);
+  check("the Device section shows it unchecked", !(await checkbox("Home indicator").isChecked()));
+  await focusCanvas();
+  await press("Control+z");
+  check("undo brings the indicator back with the toggle", !!(await named("Home indicator")) && (await doc()).nodes[back.id].device.homeIndicator === true);
+
+  // ---------- Switching the device kind ----------
+  await dispatch({ op: "select", ids: [back.id] });
+  await sleep(200);
+  await p.selectOption("select[aria-label=Device]", "pixel-9");
+  await sleep(350);
+  const px = (await doc()).nodes[back.id];
+  check("switching to Pixel 9 renames the frame and sizes it", px.name === "Pixel 9" && px.width === 412 && px.height === 923, JSON.stringify([px.name, px.width, px.height]));
+  check("the clock is an Android time, not 9:41", (await named("Time")).text.characters === "12:30", (await named("Time")).text.characters);
+  check("the status bar is Android's (camera hole, no Dynamic Island)", !!(await named("Camera")) && !(await named("Dynamic Island")));
 
   check("no page errors", errors.length === 0, errors.join(" | "));
 } catch (e) {

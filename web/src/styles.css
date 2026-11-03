@@ -2436,7 +2436,7 @@ body:has(.phone-note) .toast {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-3);
-  background: var(--preset-bg, var(--panel));
+  background: #2c2c2c;
 }
 .frame-presets .preset.active {
   outline: 2px solid var(--select);
@@ -2638,7 +2638,7 @@ body:has(.phone-note) .toast {
   overflow: hidden;
   border-radius: 4px;
   background: var(--panel-2);
-  color: var(--text-3);
+  color: var(--muted, #8a8a8a);
 }
 .asset-thumb img {
   max-width: 100%;

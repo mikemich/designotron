@@ -487,7 +487,9 @@ pub fn apply(doc: &mut Document, gen: &mut IdGen, id: &str, device: Option<Devic
     return Err("a device goes on a frame or a main component".into());
   }
   let page = n.page.clone();
-  let old_applied = n.device.as_ref().map(|d| d.applied).unwrap_or([0.0; 4]);
+  let old_dev = n.device.clone();
+  let old_applied = old_dev.as_ref().map(|d| d.applied).unwrap_or([0.0; 4]);
+  let old_preset = old_dev.as_ref().and_then(|d| find(&d.preset));
   let old_parts: Vec<NodeId> = n
     .children
     .iter()
@@ -517,6 +519,8 @@ pub fn apply(doc: &mut Document, gen: &mut IdGen, id: &str, device: Option<Devic
   if dev.nav != "buttons" {
     dev.nav = "gesture".into();
   }
+  // The clock keeps its text only between phones of one family (9:41 is not an Android time).
+  let time = time.filter(|_| old_preset.is_some_and(|o| (o.kind == Android) == (preset.kind == Android)));
   let f = doc.get_mut(id).ok_or("no such layer")?;
   if resize {
     f.width = preset.w;
@@ -525,6 +529,29 @@ pub fn apply(doc: &mut Document, gen: &mut IdGen, id: &str, device: Option<Devic
     f.sizing_v = Sizing::Fixed;
     if preset.kind == MacWindow && f.corner_radius == 0.0 && f.corner_radii.is_none() {
       f.corner_radius = 10.0;
+    }
+  }
+  if let Some(o) = old_preset.filter(|o| o.id != preset.id) {
+    // A frame still named after its old device takes the new one's name; the window radius goes.
+    if f.name == o.label {
+      f.name = preset.label.to_string();
+    }
+    if o.kind == MacWindow && preset.kind != MacWindow && f.corner_radius == 10.0 {
+      f.corner_radius = 0.0;
+    }
+  }
+  // Light and dark: a frame still filled with the other theme's plain colour follows; a custom fill stays.
+  let was_dark = old_dev.as_ref().is_some_and(|d| d.theme == "dark");
+  if was_dark != (dev.theme == "dark") && f.fill_style.is_none() && !f.bindings.contains_key("fill") {
+    let (from, to) = if dev.theme == "dark" {
+      ("#FFFFFF", "#000000")
+    } else {
+      ("#000000", "#FFFFFF")
+    };
+    let plain = f.fills.is_empty()
+      || matches!(f.fills.as_slice(), [Paint::Solid { color, opacity, visible: true }] if color.eq_ignore_ascii_case(from) && *opacity == 1.0);
+    if plain {
+      f.fills = vec![Paint::solid(to)];
     }
   }
   let in_layout = f.layout.is_some();
@@ -544,6 +571,65 @@ pub fn apply(doc: &mut Document, gen: &mut IdGen, id: &str, device: Option<Devic
     put(doc, part, id, &page);
   }
   Ok(())
+}
+
+/// The device frame that holds `id` when it is system UI (or inside it); `id` itself otherwise.
+pub fn host_of(doc: &Document, id: &str) -> NodeId {
+  let mut cur = doc.get(id);
+  while let Some(n) = cur {
+    if n.device_part.is_some() {
+      if let Some(p) = n.parent.clone() {
+        return p;
+      }
+    }
+    cur = n.parent.as_deref().and_then(|p| doc.get(p));
+  }
+  id.to_string()
+}
+
+/// Where a new child of `parent` goes so a device frame's system UI stays on top of it.
+pub fn before_chrome(doc: &Document, parent: &str) -> Option<usize> {
+  let p = doc.get(parent)?;
+  p.children.iter().position(|c| doc.get(c).is_some_and(|c| c.device_part.is_some()))
+}
+
+/// Puts a device frame's system UI back after every other child (the order it keeps otherwise).
+pub fn raise_chrome(doc: &mut Document, id: &str) {
+  let Some(n) = doc.get(id) else { return };
+  let is_part = |c: &NodeId| doc.get(c).is_some_and(|c| c.device_part.is_some());
+  let (parts, rest): (Vec<NodeId>, Vec<NodeId>) = n.children.iter().cloned().partition(is_part);
+  let ordered: Vec<NodeId> = rest.into_iter().chain(parts).collect();
+  if ordered != n.children {
+    if let Some(n) = doc.get_mut(id) {
+      n.children = ordered;
+    }
+  }
+}
+
+/// (device frame, part) for each system UI part among `ids`.
+pub fn parts_among(doc: &Document, ids: &[NodeId]) -> Vec<(NodeId, String)> {
+  ids
+    .iter()
+    .filter_map(|id| {
+      let n = doc.get(id)?;
+      let part = n.device_part.clone()?;
+      let frame = n.parent.clone().filter(|p| doc.get(p).is_some_and(|p| p.device.is_some()))?;
+      Some((frame, part))
+    })
+    .collect()
+}
+
+/// Turns the toggle of a deleted part off, so the Device section, the padding and the guides agree.
+pub fn turn_off(doc: &mut Document, gen: &mut IdGen, frame: &str, part: &str) {
+  let Some(mut dev) = doc.get(frame).and_then(|n| n.device.clone()) else {
+    return;
+  };
+  match part {
+    "statusBar" => dev.status_bar = false,
+    "homeIndicator" | "navBar" => dev.home_indicator = false,
+    _ => dev.chrome = false,
+  }
+  let _ = apply(doc, gen, frame, Some(dev), false);
 }
 
 /// Re-runs `apply` for a device frame whose auto layout was added or removed.
@@ -1513,6 +1599,208 @@ mod tests {
       "{:?}",
       issues.iter().map(|i| &i.message).collect::<Vec<_>>()
     );
+  }
+
+  fn set_theme(e: &mut Engine, f: &str, theme: &str) {
+    let mut d = e.doc.get(f).unwrap().device.clone().unwrap();
+    d.theme = theme.into();
+    e.dispatch(Command::SetDevice {
+      id: f.into(),
+      device: Some(d),
+      resize: false,
+    })
+    .unwrap();
+  }
+
+  fn fill(e: &Engine, id: &str) -> Option<String> {
+    match e.doc.get(id).unwrap().fills.first() {
+      Some(Paint::Solid { color, .. }) => Some(color.clone()),
+      _ => Option::None,
+    }
+  }
+
+  #[test]
+  fn the_frame_fill_follows_the_theme_unless_it_is_custom() {
+    let mut e = engine();
+    let f = frame_id(&mut e);
+    set(&mut e, &f, "iphone-17", true);
+    set_theme(&mut e, &f, "dark");
+    assert_eq!(fill(&e, &f).as_deref(), Some("#000000"));
+    set_theme(&mut e, &f, "light");
+    assert_eq!(fill(&e, &f).as_deref(), Some("#FFFFFF"));
+    e.dispatch(Command::Update {
+      ids: vec![f.clone()],
+      patch: json!({ "fills": [{ "type": "solid", "color": "#FF0000" }] }),
+    })
+    .unwrap();
+    set_theme(&mut e, &f, "dark");
+    assert_eq!(fill(&e, &f).as_deref(), Some("#FF0000"), "a custom fill stays");
+    // One undo step undoes the theme and the fill together.
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.get(&f).unwrap().device.as_ref().unwrap().theme, "light");
+    // A frame created dark starts black.
+    let g = frame_id(&mut e);
+    let d = DeviceFrame {
+      preset: "pixel-9".into(),
+      theme: "dark".into(),
+      ..DeviceFrame::default()
+    };
+    e.dispatch(Command::SetDevice {
+      id: g.clone(),
+      device: Some(d),
+      resize: true,
+    })
+    .unwrap();
+    assert_eq!(fill(&e, &g).as_deref(), Some("#000000"));
+  }
+
+  #[test]
+  fn switching_device_kind_renames_the_frame_and_resets_the_clock() {
+    let mut e = engine();
+    let f = frame_id(&mut e);
+    set(&mut e, &f, "iphone-17", true);
+    e.dispatch(Command::Update {
+      ids: vec![f.clone()],
+      patch: json!({ "name": "iPhone 17" }),
+    })
+    .unwrap();
+    set(&mut e, &f, "iphone-17-pro", true);
+    assert_eq!(e.doc.get(&f).unwrap().name, "iPhone 17 Pro");
+    assert_eq!(find_named(&e, &f, "Time").unwrap().text.unwrap().characters, "9:41");
+    set(&mut e, &f, "pixel-9", true);
+    assert_eq!(e.doc.get(&f).unwrap().name, "Pixel 9");
+    assert_eq!(find_named(&e, &f, "Time").unwrap().text.unwrap().characters, "12:30");
+    e.dispatch(Command::Update {
+      ids: vec![f.clone()],
+      patch: json!({ "name": "Home screen" }),
+    })
+    .unwrap();
+    set(&mut e, &f, "mac-window", true);
+    assert_eq!(e.doc.get(&f).unwrap().name, "Home screen", "a name the user chose stays");
+    assert_eq!(e.doc.get(&f).unwrap().corner_radius, 10.0);
+    set(&mut e, &f, "browser-1440", true);
+    assert_eq!(e.doc.get(&f).unwrap().corner_radius, 0.0);
+  }
+
+  #[test]
+  fn layers_stay_out_of_the_chrome_and_below_it() {
+    let mut e = engine();
+    let f = frame_id(&mut e);
+    set(&mut e, &f, "iphone-17", true);
+    let bar = find_named(&e, &f, "Status bar").unwrap();
+    // Drawn on the status bar: it goes into the device frame, under the system UI.
+    let r = e
+      .dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 20.0,
+        y: 10.0,
+        width: 50.0,
+        height: 20.0,
+        parent: Option::None,
+      })
+      .unwrap();
+    let id = r["id"].as_str().unwrap().to_string();
+    assert_eq!(e.doc.get(&id).unwrap().parent.as_deref(), Some(f.as_str()));
+    let last: Vec<&str> = e
+      .doc
+      .get(&f)
+      .unwrap()
+      .children
+      .iter()
+      .rev()
+      .take(2)
+      .filter_map(|c| e.doc.get(c))
+      .map(|c| c.name.as_str())
+      .collect();
+    assert_eq!(last, ["Home indicator", "Status bar"]);
+    // An explicit parent inside the chrome is the device frame instead.
+    let r = e
+      .dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 0.0,
+        y: 0.0,
+        width: 5.0,
+        height: 5.0,
+        parent: Some(bar.id.clone()),
+      })
+      .unwrap();
+    assert_eq!(e.doc.get(r["id"].as_str().unwrap()).unwrap().parent.as_deref(), Some(f.as_str()));
+    // Bring to front and moves keep the chrome last.
+    e.dispatch(Command::Reorder {
+      ids: vec![id.clone()],
+      to: crate::ops::ReorderTo::Front,
+    })
+    .unwrap();
+    let kids = e.doc.get(&f).unwrap().children.clone();
+    let pos = |n: &str| kids.iter().position(|c| e.doc.get(c).unwrap().name == n).unwrap();
+    assert!(kids.iter().position(|c| *c == id).unwrap() < pos("Status bar") && pos("Status bar") < pos("Home indicator"));
+    // The chrome itself can't be moved into another layer or be a parent.
+    assert!(e
+      .dispatch(Command::MoveToParent {
+        ids: vec![id.clone()],
+        parent: Some(bar.id.clone()),
+        index: Option::None
+      })
+      .is_err());
+  }
+
+  #[test]
+  fn deleting_a_part_turns_its_toggle_off_and_chrome_cannot_be_duplicated() {
+    let mut e = engine();
+    let f = frame_id(&mut e);
+    e.dispatch(Command::AddAutoLayout { ids: vec![f.clone()] }).unwrap();
+    set(&mut e, &f, "iphone-17", true);
+    assert_eq!(pad(&e, &f)[2], 44.0);
+    let home = find_named(&e, &f, "Home indicator").unwrap();
+    let before = e.doc.nodes.len();
+    assert!(e
+      .dispatch(Command::Duplicate {
+        ids: vec![home.id.clone()]
+      })
+      .is_err());
+    assert_eq!(e.doc.nodes.len(), before);
+    e.dispatch(Command::Delete {
+      ids: vec![home.id.clone()],
+    })
+    .unwrap();
+    let d = e.doc.get(&f).unwrap().device.clone().unwrap();
+    assert!(!d.home_indicator && d.status_bar);
+    assert_eq!(d.applied, [62.0, 0.0, 0.0, 0.0]);
+    assert_eq!(pad(&e, &f)[2], 10.0);
+    assert!(find_named(&e, &f, "Home indicator").is_none() && find_named(&e, &f, "Status bar").is_some());
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.doc.get(&f).unwrap().device.as_ref().unwrap().home_indicator && find_named(&e, &f, "Home indicator").is_some());
+  }
+
+  #[test]
+  fn a_pasted_part_is_an_ordinary_layer() {
+    let mut e = engine();
+    let f = frame_id(&mut e);
+    set(&mut e, &f, "iphone-17", true);
+    let bar = find_named(&e, &f, "Status bar").unwrap();
+    let data = e.copy(std::slice::from_ref(&bar.id));
+    let r = e
+      .dispatch(Command::Paste {
+        data,
+        parent: Option::None,
+        x: Some(600.0),
+        y: Some(0.0),
+      })
+      .unwrap();
+    let copy = e.doc.get(r["created"][0].as_str().unwrap()).unwrap();
+    assert!(copy.device_part.is_none() && !copy.locked);
+    // Pasting the whole device frame keeps its system UI.
+    let data = e.copy(std::slice::from_ref(&f));
+    let r = e
+      .dispatch(Command::Paste {
+        data,
+        parent: Option::None,
+        x: Some(1200.0),
+        y: Some(0.0),
+      })
+      .unwrap();
+    let frame2 = r["created"][0].as_str().unwrap().to_string();
+    assert_eq!(parts(&e, &frame2).len(), 2);
   }
 
   #[test]

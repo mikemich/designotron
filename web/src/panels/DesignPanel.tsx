@@ -258,21 +258,26 @@ function ScaleField({ ids }: { ids: string[] }) {
 
 function FrameSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const opener = useRef<HTMLButtonElement>(null);
+  const close = () => {
+    setAnchor(null);
+    opener.current?.focus();
+  };
   if (!nodes.every((n) => ["frame", "component", "instance"].includes(n.type))) return null;
   return (
     <Section title="Frame">
       <div className="row">
-        <button className="btn block preset-btn" aria-haspopup="listbox" onClick={(e) => setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect())}>
+        <button ref={opener} className="btn block preset-btn" aria-haspopup="listbox" aria-expanded={!!anchor} onClick={(e) => setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect())}>
           Resize to preset…
         </button>
       </div>
       {anchor && (
-        <Popover anchor={anchor} width={280} onClose={() => setAnchor(null)}>
+        <Popover anchor={anchor} width={280} onClose={close}>
           <PresetPicker
             autoFocus
             label="Search size presets"
             onPick={(p) => {
-              setAnchor(null);
+              close();
               resizeToPreset(nodes, p);
             }}
           />

@@ -1458,7 +1458,14 @@ impl Engine {
     crate::variables::apply(&mut self.doc);
     // Only trees that changed need layout (layout never reaches across top-level layers),
     // and moving a whole top-level layer changes nothing inside it.
-    for (root, changed) in self.changed_by_root(prev) {
+    let by_root = self.changed_by_root(prev);
+    // Layers added to or reordered in a device frame stay below its system UI.
+    for id in by_root.values().flatten() {
+      if self.doc.get(id).is_some_and(|n| n.device.is_some()) {
+        devices::raise_chrome(&mut self.doc, id);
+      }
+    }
+    for (root, changed) in by_root {
       if !self.only_moved(prev, &root, &changed) {
         layout::layout_node(&mut self.doc, &root, self.measurer.as_ref());
       }
@@ -1603,6 +1610,7 @@ impl Engine {
   fn auto_parent(&self, explicit: Option<NodeId>, x: f64, y: f64) -> Option<NodeId> {
     explicit
       .filter(|p| self.doc.nodes.contains_key(p))
+      .map(|p| devices::host_of(&self.doc, &p))
       .or_else(|| ops::frame_at(&self.doc, &self.page, Point::new(x, y), &[], true))
   }
 
@@ -1616,7 +1624,8 @@ impl Engine {
     }
     let id = n.id.clone();
     let page = self.page.clone();
-    self.doc.insert(n, parent, &page, None);
+    let index = parent.and_then(|p| devices::before_chrome(&self.doc, p));
+    self.doc.insert(n, parent, &page, index);
     id
   }
 
@@ -2098,10 +2107,19 @@ impl Engine {
       }
       Command::Delete { ids } => {
         let ids: Vec<NodeId> = ids.into_iter().filter(|i| self.doc.instance_ancestor(i).is_none()).collect();
+        let parts = devices::parts_among(&self.doc, &ids);
         ops::delete(&mut self.doc, &ids);
+        // Deleting a system UI part is turning it off in the Device section.
+        for (frame, part) in parts {
+          devices::turn_off(&mut self.doc, &mut self.gen, &frame, &part);
+        }
         Ok(json!({}))
       }
       Command::Duplicate { ids } => {
+        let ids: Vec<NodeId> = ids.into_iter().filter(|i| !devices::in_part(&self.doc, i)).collect();
+        if ids.is_empty() {
+          return Err("system UI can't be duplicated; turn it on or off in the Device section".into());
+        }
         let created = ops::duplicate(&mut self.doc, &ids, &mut self.gen, Point::new(0.0, 0.0));
         // Offset only when it would land exactly on top of a page-level original.
         for (orig, new) in ids.iter().zip(created.iter()) {
@@ -2125,6 +2143,7 @@ impl Engine {
         for id in &ids {
           let cur = self.doc.get(id).and_then(|n| n.parent.clone());
           if self.doc.instance_ancestor(id).is_some()
+            || devices::in_part(&self.doc, id)
             || components::would_nest_under(&self.doc, std::slice::from_ref(id), target.as_deref())
           {
             continue;
@@ -2173,6 +2192,12 @@ impl Engine {
         }
         if let Some(missing) = ids.iter().find(|id| self.doc.get(id).is_none()) {
           return Err(format!("no layer {missing}"));
+        }
+        if parent.as_deref().is_some_and(|p| devices::in_part(&self.doc, p)) {
+          return Err("system UI of a device frame can't hold layers; use the device frame".into());
+        }
+        if ids.iter().any(|id| devices::in_part(&self.doc, id)) {
+          return Err("system UI of a device frame can't be moved; turn it on or off in the Device section".into());
         }
         let ids = ops::paint_order(&self.doc, &ops::top_most(&self.doc, &ids));
         if components::would_nest_under(&self.doc, &ids, parent.as_deref()) {
@@ -3070,7 +3095,7 @@ impl Engine {
     for n in &nodes {
       map.insert(n.id.clone(), self.gen.next("n_"));
     }
-    let parent = parent.filter(|p| {
+    let parent = parent.map(|p| devices::host_of(&self.doc, &p)).filter(|p| {
       self
         .doc
         .get(p)
@@ -3104,6 +3129,10 @@ impl Engine {
         c.y += oy;
         c.parent = None;
         c.master_id = None;
+        // A copied piece of system UI is an ordinary layer from here on (code export includes it).
+        if c.device_part.take().is_some() {
+          c.locked = false;
+        }
         let id = c.id.clone();
         self.doc.insert(c, None, &page, None);
         if let Some(p) = &parent {

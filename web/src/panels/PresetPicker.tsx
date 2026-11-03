@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Search } from "lucide-react";
 import { query } from "../store";
 import { filterPresets, groupPresets, nextIndex, type DevicePreset } from "./presetList";
@@ -17,6 +17,9 @@ export function devicePresets(): DevicePreset[] {
  * row (or the first match), Escape clears the filter.
  */
 export function PresetPicker(props: { onPick: (p: DevicePreset) => void; autoFocus?: boolean; label?: string }) {
+  const uid = useId();
+  const listId = `${uid}-list`;
+  const optId = (id: string) => `${uid}-opt-${id}`;
   const [filter, setFilter] = useState("");
   const [active, setActive] = useState(-1);
   const list = useRef<HTMLDivElement>(null);
@@ -36,13 +39,12 @@ export function PresetPicker(props: { onPick: (p: DevicePreset) => void; autoFoc
         <Search size={12} />
         <input
           ref={input}
-          role="searchbox"
           type="search"
           value={filter}
           placeholder="Search devices and sizes"
           aria-label={props.label ?? "Search presets"}
-          aria-controls="preset-list"
-          aria-activedescendant={active >= 0 ? `preset-opt-${matches[active]?.id}` : undefined}
+          aria-controls={listId}
+          aria-activedescendant={active >= 0 && matches[active] ? optId(matches[active].id) : undefined}
           onChange={(e) => {
             setFilter(e.target.value);
             setActive(-1);
@@ -70,7 +72,7 @@ export function PresetPicker(props: { onPick: (p: DevicePreset) => void; autoFoc
           }}
         />
       </label>
-      <div ref={list} id="preset-list" className="frame-presets preset-list" role="listbox" aria-label="Presets">
+      <div ref={list} id={listId} className="frame-presets preset-list" role="listbox" aria-label="Presets">
         {groups.map((g) => (
           <div key={g.group} role="group" aria-label={g.group} className="preset-group">
             <div className="preset-group-label" aria-hidden="true">
@@ -81,7 +83,7 @@ export function PresetPicker(props: { onPick: (p: DevicePreset) => void; autoFoc
               return (
                 <button
                   key={p.id}
-                  id={`preset-opt-${p.id}`}
+                  id={optId(p.id)}
                   data-index={i}
                   role="option"
                   aria-selected={i === active}

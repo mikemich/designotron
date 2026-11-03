@@ -98,29 +98,30 @@ pub fn overlay(doc: &Document, page: &str) -> Value {
   Value::Array(out)
 }
 
-/// Tint of the safe-area bands.
-const SAFE_AREA_COLOR: &str = "rgba(255,59,48,0.14)";
+/// Colour of the safe-area edge lines (drawn dashed, so the system UI keeps its own colours).
+const SAFE_AREA_COLOR: &str = "#FF3B30";
 
-/// The unsafe margins of a frame (page coordinates): bands for each non-zero inset.
-pub fn safe_bands(frame: &Rect, insets: [f64; 4]) -> Vec<Rect> {
+/// The edges of a frame's safe area (page coordinates) as `[x1, y1, x2, y2]` lines, one for each
+/// non-zero inset.
+pub fn safe_lines(frame: &Rect, insets: [f64; 4]) -> Vec<[f64; 4]> {
   let [t, r, b, l] = insets;
   let mut out = Vec::new();
   if t > 0.0 {
-    out.push(Rect::new(frame.x, frame.y, frame.width, t));
+    out.push([frame.x, frame.y + t, frame.right(), frame.y + t]);
   }
   if b > 0.0 {
-    out.push(Rect::new(frame.x, frame.bottom() - b, frame.width, b));
+    out.push([frame.x, frame.bottom() - b, frame.right(), frame.bottom() - b]);
   }
   if l > 0.0 {
-    out.push(Rect::new(frame.x, frame.y + t, l, (frame.height - t - b).max(0.0)));
+    out.push([frame.x + l, frame.y, frame.x + l, frame.bottom()]);
   }
   if r > 0.0 {
-    out.push(Rect::new(frame.right() - r, frame.y + t, r, (frame.height - t - b).max(0.0)));
+    out.push([frame.right() - r, frame.y, frame.right() - r, frame.bottom()]);
   }
   out
 }
 
-/// Safe-area bands for the device frames that are selected, or contain a selected layer.
+/// Safe-area edge lines for the device frames that are selected, or contain a selected layer.
 pub fn safe_areas(doc: &Document, page: &str, selection: &[NodeId]) -> Value {
   let mut frames: Vec<NodeId> = Vec::new();
   for id in selection {
@@ -139,8 +140,8 @@ pub fn safe_areas(doc: &Document, page: &str, selection: &[NodeId]) -> Value {
     .iter()
     .filter_map(|id| {
       let n = doc.get(id)?;
-      let bands = safe_bands(&doc.abs_bounds(id), crate::devices::safe_insets(n)?);
-      (!bands.is_empty()).then(|| json!({ "frameId": id, "color": SAFE_AREA_COLOR, "bands": bands, "frame": doc.abs_bounds(id) }))
+      let lines = safe_lines(&doc.abs_bounds(id), crate::devices::safe_insets(n)?);
+      (!lines.is_empty()).then(|| json!({ "frameId": id, "color": SAFE_AREA_COLOR, "lines": lines, "frame": doc.abs_bounds(id) }))
     })
     .collect();
   Value::Array(out)
@@ -166,12 +167,10 @@ mod tests {
   }
 
   #[test]
-  fn safe_bands_cover_only_the_insets() {
-    let b = safe_bands(&Rect::new(10.0, 20.0, 100.0, 200.0), [30.0, 0.0, 10.0, 0.0]);
-    assert_eq!(b.len(), 2);
-    assert_eq!((b[0].y, b[0].height), (20.0, 30.0));
-    assert_eq!((b[1].y, b[1].height), (210.0, 10.0));
-    assert!(safe_bands(&Rect::new(0.0, 0.0, 10.0, 10.0), [0.0; 4]).is_empty());
+  fn safe_lines_mark_only_the_insets() {
+    let l = safe_lines(&Rect::new(10.0, 20.0, 100.0, 200.0), [30.0, 0.0, 10.0, 0.0]);
+    assert_eq!(l, vec![[10.0, 50.0, 110.0, 50.0], [10.0, 210.0, 110.0, 210.0]]);
+    assert!(safe_lines(&Rect::new(0.0, 0.0, 10.0, 10.0), [0.0; 4]).is_empty());
   }
 
   #[test]
