@@ -224,14 +224,15 @@ try {
   await dispatch({ op: "select", ids: [] });
   const viaTool = await tool("place_photo", { id: (await byCredit("Mountain lake at dawn")).fills[0].credit.photoId, name: "By tool" });
   const toolNode = (await doc()).nodes[viaTool.result.nodeId];
-  check("place_photo without a parent also lands in the frame under the viewport centre", toolNode.parent === frames[0], String(toolNode.parent));
+  // Claude can't see the viewport, so without a parent its photo goes on the page, never into whatever frame is under the centre.
+  check("place_photo without a parent goes on the page, not into the frame under the viewport centre", !toolNode.parent && (await doc()).nodes[frames[0]].children.length === 2, String(toolNode.parent));
   // A locked frame is skipped.
   await dispatch({ op: "update", ids: [frames[0]], patch: { locked: true } });
   await dispatch({ op: "select", ids: [] });
   await tiles().nth(5).click();
   await p.waitForFunction(() => Object.values(window.__dt.doc().nodes).some((n) => n.fills.some((f) => f.type === "image" && f.credit?.title === "Sunset field")), null, { timeout: 8000 });
   const lockedKids = (await doc()).nodes[frames[0]].children.length;
-  check("a locked frame takes no new layers", lockedKids === 3, String(lockedKids));
+  check("a locked frame takes no new layers", lockedKids === 2, String(lockedKids));
   await dispatch({ op: "update", ids: [frames[0]], patch: { locked: false } });
 
   // A text layer can't take a fill: the photo becomes a new layer and the toast says so.
