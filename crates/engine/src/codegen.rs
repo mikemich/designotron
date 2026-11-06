@@ -607,7 +607,10 @@ impl<'a> Ctx<'a> {
       }
       _ if image_src.is_some() => {
         let mut e = El::new("img");
-        e.attrs.push(("src".into(), image_src.clone().unwrap_or_default()));
+        let src = image_src.clone().unwrap_or_default();
+        // A `#` in a raw text data URL would start a fragment: encode it like a CSS url.
+        let text_data = src.starts_with("data:") && src.split(',').next().is_some_and(|h| !h.contains(";base64"));
+        e.attrs.push(("src".into(), if text_data { css_url(&src) } else { src }));
         e.attrs.push(("alt".into(), photo_alt(&n)));
         e
       }
@@ -771,18 +774,22 @@ impl<'a> Ctx<'a> {
           if !el.styles.iter().any(|(k, _)| k == "position") {
             el.s("position", "relative");
           }
-          let mut stroke = El::new("div");
+          // A span, so it is valid inside a button or link.
+          let mut stroke = El::new("span");
           stroke.attrs.push(("aria-hidden".into(), "true".into()));
           stroke.s("position", "absolute");
-          stroke.s(
-            "inset",
-            px(if n.stroke_align == StrokeAlign::Center {
-              -n.stroke_weight / 2.0
-            } else {
-              0.0
-            }),
-          );
-          stroke.s("border", ov);
+          stroke.s("inset", "0");
+          let border = if n.stroke_align == StrokeAlign::Center {
+            // The inside half is the overlay; the outer half stays an outline, which the frame's
+            // own overflow never clips.
+            let half = ov.replacen(&px(n.stroke_weight), &px(n.stroke_weight / 2.0), 1);
+            el.s("outline", half.clone());
+            el.s("outline-offset", "0");
+            half
+          } else {
+            ov
+          };
+          stroke.s("border", border);
           stroke.s("border-radius", "inherit");
           stroke.s("pointer-events", "none");
           el.children.push(stroke);
@@ -4921,6 +4928,47 @@ mod r10_tests {
     }
     let src = export_react(&doc, "f", &HeuristicMeasurer);
     assert!(!src.contains("h-[100%]"), "{src}");
+  }
+
+  #[test]
+  fn a_centre_stroke_keeps_its_outer_half_as_an_outline() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "f", "Card", None);
+    {
+      let f = doc.get_mut("f").unwrap();
+      f.strokes = vec![Paint::solid("#112233")];
+      f.stroke_weight = 4.0;
+      f.stroke_align = StrokeAlign::Center;
+      f.clip_content = true;
+    }
+    add(&mut doc, NodeType::Rectangle, "img", "Cover", Some("f"));
+    let src = export_react(&doc, "f", &HeuristicMeasurer);
+    // Half inside as an overlay span, half outside as an outline the frame's overflow can't clip.
+    assert!(
+      src.contains("[outline:2px_solid_#112233]") && src.contains("[outline-offset:0]"),
+      "{src}"
+    );
+    assert!(
+      src.contains("<span") && src.contains("[border:2px_solid_#112233]") && src.contains("[inset:0]"),
+      "{src}"
+    );
+    assert!(!src.contains("-2px"), "{src}");
+  }
+
+  #[test]
+  fn a_text_svg_image_source_is_encoded_in_img_src() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Rectangle, "r", "Pic", None);
+    doc.get_mut("r").unwrap().fills = vec![Paint::Image {
+      src: "data:image/svg+xml,<svg xmlns='x'><stop stop-color='#00ff00'/></svg>".into(),
+      scale_mode: crate::model::ScaleMode::Fill,
+      opacity: 1.0,
+      visible: true,
+      crop: None,
+      credit: None,
+    }];
+    let src = export_react(&doc, "r", &HeuristicMeasurer);
+    assert!(src.contains("%2300ff00") && !src.contains("#00ff00"), "{src}");
   }
 
   #[test]
