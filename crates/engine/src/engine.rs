@@ -1807,7 +1807,14 @@ impl Engine {
         self.doc.page_mut(&id).ok_or("no such page")?.guides = guides;
         Ok(json!({}))
       }
-      Command::SetVariables { collections } => {
+      Command::SetVariables { mut collections } => {
+        // A mode removed from a collection takes its values with it.
+        for c in &mut collections {
+          let modes: Vec<String> = c.modes.iter().map(|m| m.id.clone()).collect();
+          for v in &mut c.variables {
+            v.values.retain(|m, _| modes.contains(m));
+          }
+        }
         crate::variables::validate(&collections, &self.doc.variables)?;
         self.doc.variables = collections;
         crate::variables::prune(&mut self.doc);
@@ -1819,7 +1826,12 @@ impl Engine {
           Some(key) => {
             let (_, v) = crate::variables::find(&self.doc, key).ok_or_else(|| format!("no variable {key}"))?;
             if v.kind != want {
-              return Err(format!("{property} needs a {want:?} variable, {} is {:?}", v.name, v.kind).to_lowercase());
+              return Err(format!(
+                "{property} needs a {} variable, {} is {}",
+                format!("{want:?}").to_lowercase(),
+                v.name,
+                format!("{:?}", v.kind).to_lowercase()
+              ));
             }
             Some(v.id.clone())
           }
@@ -2557,6 +2569,16 @@ impl Engine {
         Ok(json!({}))
       }
       Command::CreateComponent { ids } => {
+        let already = ids.len() == 1
+          && self
+            .doc
+            .get(&ids[0])
+            .is_some_and(|n| matches!(n.kind, NodeType::Component | NodeType::ComponentSet));
+        if let (false, Some(inner)) = (already, components::main_inside(&self.doc, &ids)) {
+          return Err(format!(
+            "'{inner}' is a main component inside the selection; a component can't contain another main component"
+          ));
+        }
         let id = components::create_component(&mut self.doc, &ids, &mut self.gen).ok_or("select a frame, group or layers")?;
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
@@ -2564,7 +2586,15 @@ impl Engine {
       Command::CreateComponents { ids } => {
         let mut made = Vec::new();
         for id in &ids {
-          if self.doc.get(id).is_none() {
+          // Main components and sets are skipped: they are components already.
+          if self
+            .doc
+            .get(id)
+            .is_none_or(|n| matches!(n.kind, NodeType::Component | NodeType::ComponentSet))
+          {
+            continue;
+          }
+          if components::main_inside(&self.doc, std::slice::from_ref(id)).is_some() {
             continue;
           }
           if let Some(c) = components::create_component(&mut self.doc, std::slice::from_ref(id), &mut self.gen) {
@@ -3230,8 +3260,15 @@ impl Engine {
     if v.get("type").and_then(|t| t.as_str()) != Some(CLIPBOARD_TAG) {
       return Err("clipboard does not contain Designotron layers".into());
     }
-    let nodes: Vec<Node> = serde_json::from_value(v["nodes"].clone()).map_err(|e| e.to_string())?;
+    let mut nodes: Vec<Node> = serde_json::from_value(v["nodes"].clone()).map_err(|e| e.to_string())?;
     let roots: Vec<NodeId> = serde_json::from_value(v["roots"].clone()).map_err(|e| e.to_string())?;
+    let mut comps: Vec<Node> = v
+      .get("components")
+      .and_then(|c| serde_json::from_value(c.clone()).ok())
+      .unwrap_or_default();
+    // Variables and styles the layers use but this file lacks come along (and the layers follow
+    // their new ids), before anything is inserted.
+    let added = crate::clipboard::merge_tokens(&mut self.doc, &v, &mut self.gen, &mut nodes, &mut comps)?;
     let mut map: HashMap<NodeId, NodeId> = HashMap::new();
     for n in &nodes {
       map.insert(n.id.clone(), self.gen.next("n_"));
@@ -3287,10 +3324,6 @@ impl Engine {
     }
     // Instances whose main component isn't in this file: bring it from the clipboard, or
     // detach them so they keep their look instead of showing "Missing component".
-    let comps: Vec<Node> = v
-      .get("components")
-      .and_then(|c| serde_json::from_value(c.clone()).ok())
-      .unwrap_or_default();
     let mut side = None;
     for n in nodes.iter().filter(|n| n.kind == NodeType::Instance) {
       let new_id = map[&n.id].clone();
@@ -3310,7 +3343,7 @@ impl Engine {
       }
     }
     self.selection = created.clone();
-    Ok(json!({ "created": created }))
+    Ok(json!({ "created": created, "added": added.to_json() }))
   }
 
   fn is_component(&self, id: &str) -> bool {
@@ -3481,7 +3514,7 @@ impl Engine {
   /// so a paste into another file can bring them in.
   pub fn copy(&self, ids: &[NodeId]) -> String {
     let roots = ops::paint_order(&self.doc, &ops::top_most(&self.doc, ids));
-    let nodes: Vec<Node> = roots.iter().flat_map(|r| self.clipboard_subtree(r)).collect();
+    let mut nodes: Vec<Node> = roots.iter().flat_map(|r| self.clipboard_subtree(r)).collect();
     let mut seen: HashSet<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
     let mut wanted: Vec<NodeId> = nodes
       .iter()
@@ -3499,7 +3532,12 @@ impl Engine {
       wanted.extend(sub.iter().filter_map(|n| n.instance.as_ref()).map(|i| i.component_id.clone()));
       components.extend(sub);
     }
-    json!({ "type": CLIPBOARD_TAG, "roots": roots, "nodes": nodes, "components": components }).to_string()
+    let tokens = crate::clipboard::attach(&self.doc, &mut nodes, &mut components);
+    let mut out = json!({ "type": CLIPBOARD_TAG, "roots": roots, "nodes": nodes, "components": components });
+    for (key, value) in tokens {
+      out[key] = value;
+    }
+    out.to_string()
   }
 
   /// A subtree for the clipboard: the root detached, at its page-space position.

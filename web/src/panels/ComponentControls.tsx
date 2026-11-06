@@ -97,6 +97,17 @@ export function ComponentSetSection({ n }: { n: Node }) {
 function ComponentSetBody({ n, props, count }: { n: Node; props: { name: string; values: string[] }[]; count: number }) {
   return (
     <Section title={<span style={{ color: PURPLE }}>❖ Component set</span>}>
+      <textarea
+        className="textinput"
+        placeholder="Description (used by Claude and code export)"
+        aria-label="Component set description"
+        defaultValue={n.component?.description ?? ""}
+        key={n.id}
+        onKeyDown={(e) => e.stopPropagation()}
+        onBlur={(e) => {
+          if (e.target.value !== (n.component?.description ?? "")) dispatch({ op: "update", ids: [n.id], patch: { component: { ...n.component, description: e.target.value } } });
+        }}
+      />
       {props.length === 0 && <div className="muted small">No variant properties.</div>}
       {props.map((p) => (
         <div className="wf-prop-block" key={p.name}>

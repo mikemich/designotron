@@ -470,31 +470,7 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
     }
     // A value must fit the variable's type; the error names the variable and the mode.
     let norm = |v: &Value, mode: &str| -> Result<Value, String> {
-      if v.get("alias").is_some() {
-        return Ok(v.clone());
-      }
-      let bad = |want: &str| format!("{vname} ({mode}): expected {want}, got {}", parse::kind_of(v));
-      match kind {
-        VarKind::Color => {
-          let c = v.as_str().ok_or_else(|| bad("a colour like '#7C5CFF'"))?;
-          if crate::color::parse(c).is_none() {
-            return Err(format!(
-              "{vname} ({mode}): unrecognised colour '{c}'; use hex like '#7C5CFF' or rgb()/rgba()"
-            ));
-          }
-          Ok(json!(crate::color::normalize(c)))
-        }
-        VarKind::Number => match v {
-          Value::Number(n) if n.as_f64().is_some_and(f64::is_finite) => Ok(v.clone()),
-          Value::String(s) => match s.trim().parse::<f64>() {
-            Ok(n) if n.is_finite() => Ok(json!(n)),
-            _ => Err(bad("a number")),
-          },
-          _ => Err(bad("a number")),
-        },
-        VarKind::Boolean => v.is_boolean().then(|| v.clone()).ok_or_else(|| bad("true or false")),
-        VarKind::String => v.is_string().then(|| v.clone()).ok_or_else(|| bad("a string")),
-      }
+      crate::variables::check_value(kind, v).map_err(|m| format!("{vname} ({mode}): {m}"))
     };
     if let Some(v) = spec.get("value") {
       for m in &modes {
@@ -524,7 +500,12 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
       match found {
         Some((_, x)) if x.kind == v.kind => *val = json!({ "alias": x.id }),
         Some((_, x)) => {
-          return Err(format!("{}: alias '{target}' is a {:?} variable, expected {:?}", v.name, x.kind, v.kind).to_lowercase())
+          return Err(format!(
+            "{}: alias '{target}' is a {} variable, expected {}",
+            v.name,
+            kind_word(x.kind),
+            kind_word(v.kind)
+          ))
         }
         None => return Err(format!("{}: no variable '{target}' to alias", v.name)),
       }
@@ -532,6 +513,10 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
   }
   e.dispatch_inner(Command::SetVariables { collections: all })?;
   Ok(crate::variables::summary(&e.doc))
+}
+
+fn kind_word(k: crate::variables::VarKind) -> String {
+  format!("{k:?}").to_lowercase()
 }
 
 /// `shadow` input (an object, an array of them, a CSS box-shadow string, null or "none") to effects.
@@ -790,6 +775,8 @@ fn resolve_prop_names(e: &Engine, op: &Value) -> Value {
     .find_map(|k| op.get(*k).and_then(|v| v.as_str()));
   let comp = anchor.and_then(|a| match e.doc.get(a) {
     Some(n) if n.instance.is_some() => n.instance.as_ref().map(|i| i.component_id.clone()),
+    // A set owns its properties itself (it has no enclosing component).
+    Some(n) if n.kind == NodeType::ComponentSet => Some(n.id.clone()),
     Some(n) => crate::components::enclosing_component(&e.doc, &n.id),
     None => None,
   });
@@ -813,6 +800,33 @@ fn arrange(e: &mut Engine, input: &Value) -> Result<Value, String> {
   let (ids, missing) = split_known(e, &ids);
   if !missing.is_empty() && ids.is_empty() {
     return Err(not_found(&missing, action));
+  }
+  let mut warnings: Vec<String> = Vec::new();
+  let mut ids = ids;
+  if action == "create_component" {
+    // A main component (or a set) is already one: wrapping it would nest main components.
+    let mains: Vec<NodeId> = ids
+      .iter()
+      .filter(|i| {
+        e.doc
+          .get(i)
+          .is_some_and(|n| matches!(n.kind, NodeType::Component | NodeType::ComponentSet))
+      })
+      .cloned()
+      .collect();
+    if !mains.is_empty() {
+      let names: Vec<String> = mains
+        .iter()
+        .filter_map(|i| e.doc.get(i))
+        .map(|n| format!("'{}' ({})", n.name, n.id))
+        .collect();
+      warnings.push(format!("{} already a main component; left as it is", names.join(", ")));
+      ids.retain(|i| !mains.contains(i));
+      if ids.is_empty() {
+        e.selection = mains.clone();
+        return Ok(json!({ "id": mains[0], "ids": mains, "selection": e.selection, "warnings": warnings }));
+      }
+    }
   }
   let multi = ids.len() > 1;
   let cmd = match action {
@@ -872,6 +886,9 @@ fn arrange(e: &mut Engine, input: &Value) -> Result<Value, String> {
     m.insert("selection".into(), json!(e.selection));
     if !missing.is_empty() {
       m.insert("notFound".into(), json!(missing));
+    }
+    if !warnings.is_empty() {
+      m.insert("warnings".into(), json!(warnings));
     }
   }
   Ok(r)
@@ -946,6 +963,36 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
         if named("gridStyle") {
           n.grid_style = after.grid_style.clone();
         }
+      }
+    }
+    // A merge patch can't delete map entries: unbound properties and unpinned collections go
+    // through their own commands.
+    // Stale keys (a property this build doesn't know, a collection that is gone) are dropped
+    // directly instead of failing the whole update.
+    for prop in before.bindings.keys().filter(|p| !after.bindings.contains_key(*p)) {
+      if crate::variables::property_kind(prop).is_some() {
+        e.dispatch_inner(Command::BindVariable {
+          ids: vec![id.to_string()],
+          property: prop.clone(),
+          variable: None,
+        })?;
+      } else {
+        e.doc.modify(id, |n| {
+          n.bindings.remove(prop);
+        });
+      }
+    }
+    for coll in before.variable_modes.keys().filter(|c| !after.variable_modes.contains_key(*c)) {
+      if e.doc.variables.iter().any(|c| c.id == *coll || c.name == *coll) {
+        e.dispatch_inner(Command::SetVariableMode {
+          ids: vec![id.to_string()],
+          collection: coll.clone(),
+          mode: None,
+        })?;
+      } else {
+        e.doc.modify(id, |n| {
+          n.variable_modes.remove(coll);
+        });
       }
     }
     // Auto layout added or removed (or new padding given) on a device frame: its chrome joins or leaves
@@ -2280,10 +2327,18 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
         match mode {
           Value::Null => {
             n.variable_modes.remove(coll);
+            if let Some(c) = doc.variables.iter().find(|c| c.id == *coll || c.name == *coll) {
+              n.variable_modes.remove(&c.id);
+              n.variable_modes.remove(&c.name);
+            }
           }
           Value::String(name) => {
-            check_mode(cx, doc, coll, name)?;
-            n.variable_modes.insert(coll.clone(), name.clone());
+            // Stored by id, replacing a pin under either key: a name key next to the id key of
+            // the same collection would otherwise lose to the older pin.
+            let (cid, mid) = check_mode(cx, doc, coll, name)?;
+            n.variable_modes.remove(coll);
+            n.variable_modes.remove(&cid);
+            n.variable_modes.insert(cid, mid);
           }
           other => {
             return Err(cx.err(
@@ -2870,7 +2925,8 @@ fn check_binding(cx: &mut Ctx, doc: &Document, prop: &str, name: &str) -> Result
 }
 
 /// A frame's mode override must name an existing collection and one of its modes.
-fn check_mode(cx: &Ctx, doc: &Document, coll: &str, mode: &str) -> Result<(), String> {
+/// Returns the collection and mode ids.
+fn check_mode(cx: &Ctx, doc: &Document, coll: &str, mode: &str) -> Result<(String, String), String> {
   let key = format!("variableModes.{coll}");
   let Some(c) = doc.variables.iter().find(|c| c.id == coll || c.name == coll) else {
     let names: Vec<String> = doc.variables.iter().map(|c| c.name.clone()).collect();
@@ -2882,8 +2938,8 @@ fn check_mode(cx: &Ctx, doc: &Document, coll: &str, mode: &str) -> Result<(), St
       ),
     ));
   };
-  if c.modes.iter().any(|m| m.id == mode || m.name == mode) {
-    return Ok(());
+  if let Some(m) = c.modes.iter().find(|m| m.id == mode || m.name == mode) {
+    return Ok((c.id.clone(), m.id.clone()));
   }
   let modes: Vec<String> = c.modes.iter().map(|m| m.name.clone()).collect();
   Err(cx.err(

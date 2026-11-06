@@ -219,6 +219,7 @@ impl Sim {
     let variable = Variable {
       id: "v0".into(),
       name: "v0".into(),
+      kind: crate::variables::VarKind::Number,
       values: [("m1".to_string(), json!(1.0))].into_iter().collect(),
       ..Default::default()
     };
@@ -496,6 +497,7 @@ fn random_variables(mut cs: Vec<Collection>, r: &mut Rng) -> Vec<Collection> {
       variables: vec![Variable {
         id: format!("v{}", id(r)),
         name: "x".into(),
+        kind: crate::variables::VarKind::Number,
         ..Default::default()
       }],
     }),
@@ -504,9 +506,11 @@ fn random_variables(mut cs: Vec<Collection>, r: &mut Rng) -> Vec<Collection> {
     }
     2 if !cs.is_empty() => {
       let k = r.below(cs.len());
+      let vid = format!("v{}", id(r));
       cs[k].variables.push(Variable {
-        id: format!("v{}", id(r)),
-        name: "y".into(),
+        name: format!("y {vid}"),
+        id: vid,
+        kind: crate::variables::VarKind::Number,
         values: [("m1".to_string(), json!(r.below(9)))].into_iter().collect(),
         ..Default::default()
       });

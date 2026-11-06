@@ -25,6 +25,30 @@ import { hasDeviceUi, type DevicePreset } from "./panels/presetList";
 
 const CLIPBOARD_TAG = "designotron/nodes";
 
+export interface PasteResult {
+  created: string[];
+  /** Variables, modes and styles the paste added to this file for the layers it carried. */
+  added?: { collections: number; modes: number; variables: number; styles: number };
+}
+
+/** "Added 12 variables and 5 styles from the copied layers", or null when nothing was added. */
+export function addedMessage(a: PasteResult["added"]): string | null {
+  if (!a) return null;
+  const n = (k: number, one: string, many = one + "s") => (k ? `${k} ${k === 1 ? one : many}` : "");
+  const parts = [n(a.collections, "collection"), n(a.variables, "variable"), n(a.modes, "mode"), n(a.styles, "style")].filter(Boolean);
+  if (!parts.length) return null;
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0];
+  return `Added ${list} from the copied layers`;
+}
+
+/** Pastes clipboard layers, and says which variables and styles they brought into this file. */
+export function pasteData(args: { data: string; parent?: string | null; x?: number | null; y?: number | null }): PasteResult | null {
+  const r = dispatch<PasteResult>({ op: "paste", parent: null, x: null, y: null, ...args });
+  const msg = addedMessage(r?.added);
+  if (msg) toast(msg);
+  return r;
+}
+
 export const undo = () => dispatch({ op: "undo" });
 export const redo = () => dispatch({ op: "redo" });
 export const deleteSelection = () => dispatch({ op: "delete", ids: selection() });
@@ -33,7 +57,17 @@ export const group = () => selection().length && dispatch({ op: "group", ids: se
 export const ungroup = () => dispatch({ op: "ungroup", ids: selection() });
 export const frameSelection = () => selection().length && dispatch({ op: "frameSelection", ids: selection() });
 export const addAutoLayout = () => selection().length && dispatch({ op: "addAutoLayout", ids: selection() });
-export const createComponent = () => selection().length && dispatch({ op: "createComponent", ids: selection() });
+export const createComponent = () => {
+  const ids = selection();
+  if (!ids.length) return;
+  const type = getDoc().nodes[ids[0]]?.type;
+  if (ids.length === 1 && (type === "component" || type === "componentSet")) {
+    toast("Already a main component");
+    return;
+  }
+  // The engine's refusal (a main component inside the selection, nothing to wrap) is toasted by dispatch.
+  dispatch({ op: "createComponent", ids });
+};
 export const createComponents = () => selection().length > 1 && dispatch({ op: "createComponents", ids: selection() });
 export const combineVariants = () => dispatch({ op: "combineVariants", ids: selection() });
 export const detachInstance = () => dispatch({ op: "detachInstance", ids: selection() });
@@ -294,7 +328,7 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
   if (!text) return;
   e.preventDefault();
   if (text.includes(CLIPBOARD_TAG)) {
-    dispatch({ op: "paste", data: text, ...pastePosition(text, pasteTarget()) });
+    pasteData({ data: text, ...pastePosition(text, pasteTarget()) });
     return;
   }
   if (isSvgText(text)) {
