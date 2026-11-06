@@ -36,7 +36,7 @@ import { paintLabel, PaintSwatch, cssColor, ColorPicker } from "../ui/color";
 import { DEFAULT_EXPORT, exportLayers, rowSuffix } from "../exporter";
 import * as A from "../actions";
 import { Popover } from "../ui/controls";
-import { ComponentSetSection, InstanceSection, MainComponentSection } from "./ComponentControls";
+import { ComponentSetSection, InstanceSection, MainComponentSection, OverridesRow } from "./ComponentControls";
 import { LayerPropsSection } from "./PropertyControls";
 import { DeviceSection, isDeviceTarget, resizeToPreset } from "./DeviceSection";
 import { PresetPicker } from "./PresetPicker";
@@ -69,6 +69,7 @@ export function DesignPanel() {
   return (
     <div className="scroll">
       {framing && <FramePresets />}
+      {nodes.length === 1 && <OverridesRow n={nodes[0]} />}
       <ComponentSection nodes={nodes} />
       <AlignSection />
       <FrameSection nodes={nodes} ids={ids} />

@@ -460,6 +460,17 @@ pub enum Command {
   ResetInstance {
     ids: Vec<NodeId>,
   },
+  /// Puts property groups (see `components::OVERRIDE_GROUPS`; all when empty) of layers inside
+  /// instances back to what their main components say.
+  ResetOverrideGroups {
+    ids: Vec<NodeId>,
+    #[serde(default)]
+    groups: Vec<String>,
+  },
+  /// Rebuilds the deleted main component of an instance from the instances that remain.
+  RestoreComponent {
+    id: NodeId,
+  },
   SwapComponent {
     id: NodeId,
     component_id: NodeId,
@@ -584,6 +595,10 @@ pub enum Command {
 pub enum Query {
   /// How many layers of an instance differ from its main component.
   OverrideCount {
+    id: NodeId,
+  },
+  /// The property groups a layer inside an instance overrides (`{ groups: [{ key, label }] }`).
+  OverrideGroups {
     id: NodeId,
   },
   /// Component properties for the design panel: of a main component or set, the controls of
@@ -2733,6 +2748,18 @@ impl Engine {
         }
         Ok(json!({}))
       }
+      Command::ResetOverrideGroups { ids, groups } => {
+        let mut changed = false;
+        for id in ids {
+          changed |= components::reset_override_groups(&mut self.doc, &id, &groups, &mut self.gen);
+        }
+        Ok(json!({ "changed": changed }))
+      }
+      Command::RestoreComponent { id } => {
+        let comp = components::restore_component(&mut self.doc, &id, &mut self.gen)?;
+        self.selection = vec![comp.clone()];
+        Ok(json!({ "id": comp }))
+      }
       Command::SwapComponent { id, component_id } => {
         components::swap_component(&mut self.doc, &id, &component_id, &mut self.gen);
         Ok(json!({}))
@@ -3678,6 +3705,13 @@ impl Engine {
         }
         None => Value::Null,
       },
+      Query::OverrideGroups { id } => {
+        let groups: Vec<Value> = components::override_groups(&self.doc, &id)
+          .into_iter()
+          .map(|(key, label)| json!({ "key": key, "label": label }))
+          .collect();
+        json!({ "groups": groups })
+      }
       Query::OverrideCount { id } => json!({ "count": components::override_count(&self.doc, &id) }),
       Query::ComponentProps { id } => crate::props::describe(&self.doc, &id),
       Query::FrameAt { x, y, exclude } => json!(ops::frame_at(&self.doc, &self.page, Point::new(x, y), &exclude, true)),
