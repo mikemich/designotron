@@ -153,16 +153,24 @@ try {
     { type: "rectangle", name: "日本語", x: 120, y: 0, width: 40, height: 40, fill: "#0000FF" },
     { type: "rectangle", name: "中文", x: 180, y: 0, width: 40, height: 40, fill: "#FFFF00" },
     { type: "rectangle", name: "CON", x: 240, y: 0, width: 40, height: 40, fill: "#00FFFF" },
-    { type: "rectangle", name: "photo‮gnp.exe", x: 300, y: 0, width: 40, height: 40, fill: "#FF00FF" },
+    { type: "rectangle", name: "photo\u202Egnp.exe", x: 300, y: 0, width: 40, height: 40, fill: "#FF00FF" },
     { type: "rectangle", name: "../../evil", x: 360, y: 0, width: 40, height: 40, fill: "#888888" },
     { type: "rectangle", name: "a/../b", x: 420, y: 0, width: 40, height: 40, fill: "#444444" },
+    { type: "rectangle", name: "con .v1", x: 480, y: 0, width: 40, height: 40, fill: "#123456" },
+    { type: "rectangle", name: "\u65E5".repeat(150), x: 540, y: 0, width: 40, height: 40, fill: "#654321" },
   ]);
+  await select("\u65E5".repeat(150));
+  const longOne = await download(() => exportBtn().click());
+  check("file name: a 150-character CJK layer name stays under 255 bytes with its extension", Buffer.byteLength(longOne.name) < 255 && longOne.name.endsWith(".png"), `${Buffer.byteLength(longOne.name)} bytes`);
+  await select("con .v1");
+  const conOne = await download(() => exportBtn().click());
+  check("file name: 'con .v1' (a Windows device name) gets a prefix", conOne.name === "_con .v1.png", conOne.name);
   for (const [layer, want] of [
     ["logo.v2", "logo.v2.png"],
     ["Café icon", "Café icon.png"],
     ["日本語", "日本語.png"],
     ["CON", "_CON.png"],
-    ["photo‮gnp.exe", "photognp.exe.png"],
+    ["photo\u202Egnp.exe", "photognp.exe.png"],
   ]) {
     await select(layer);
     const f = await download(() => exportBtn().click());
@@ -304,6 +312,13 @@ try {
   await page.waitForTimeout(100);
   await download(() => pdfBtn().click()).catch(() => null);
   check("hidden layer: the PDF button says so too", (await toasts()).some((t) => /Ghost is hidden/.test(t)));
+  await create([{ type: "rectangle", name: "Ghost 2", x: 100, y: 0, width: 50, height: 50, fill: "#00FF00" }]);
+  await page.evaluate((id) => window.__dt.dispatch({ op: "update", ids: [id], patch: { visible: false } }), (await byName("Ghost 2")).id);
+  await select("Ghost", "Ghost 2");
+  await page.waitForTimeout(3500);
+  await download(() => pdfBtn().click()).catch(() => null);
+  const ghostToasts = (await toasts()).filter((t) => /hidden/.test(t));
+  check("hidden layer: several hidden layers in one PDF give one toast", ghostToasts.length === 1 && /2 selected layers are hidden/.test(ghostToasts[0]), ghostToasts.join("|"));
 
   // ---------------------------------------------------------------- new interaction defaults (U3)
   await newFile();
@@ -405,6 +420,9 @@ try {
   await dropFiles(".dash", [{ name: "photo.png", bytes: tinyPng, type: "image/png" }]);
   await page.waitForTimeout(400);
   check("dashboard drop: a .png gives the explaining toast and imports nothing", (await toasts()).some((t) => /Only \.dtron files open here\. Drop images onto a file's canvas\./.test(t)) && (await cards()) === n0, (await toasts()).join("|"));
+  await dropFiles(".dash", [{ name: "figma.json", bytes: fs.readFileSync(path.join(FIX, "figma-rich.json")), type: "application/json" }]);
+  await page.waitForTimeout(500);
+  check("dashboard drop: a Figma .json points to Import from Figma", (await toasts()).some((t) => /figma\.json looks like a Figma export/.test(t)), (await toasts()).join("|"));
   await dropFiles(".dash", [{ name: "bad.dtron", bytes: Buffer.from("not json"), type: "application/json" }]);
   await page.waitForTimeout(400);
   check("dashboard drop: a damaged .dtron shows the existing error", (await toasts()).some((t) => /bad\.dtron: That isn't a Designotron file/.test(t)), (await toasts()).join("|"));

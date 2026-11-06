@@ -847,14 +847,16 @@ impl Import<'_> {
     let trigger = r.get("trigger").unwrap_or(&Value::Null);
     let ttype = str_of(trigger, "type").unwrap_or("ON_CLICK");
     let mut it = Map::new();
-    let ms = |v: Option<f64>| v.map(|v| (v * unit).round());
     match ttype {
       "ON_CLICK" | "ON_HOVER" | "ON_PRESS" | "MOUSE_ENTER" | "MOUSE_LEAVE" | "MOUSE_DOWN" | "MOUSE_UP" => {
         it.insert("trigger".into(), json!(camel(ttype)));
       }
       "AFTER_TIMEOUT" => {
         it.insert("trigger".into(), json!("afterDelay"));
-        it.insert("delayMs".into(), json!(ms(num(trigger, "timeout")).unwrap_or(800.0)));
+        it.insert(
+          "delayMs".into(),
+          json!(num(trigger, "timeout").map(|v| to_ms(v, unit)).unwrap_or(800.0)),
+        );
       }
       "ON_KEY_DOWN" => match key_name(trigger) {
         Some(k) => {
@@ -920,8 +922,17 @@ impl Import<'_> {
         }
         "URL" => {
           pending.json.insert("action".into(), json!("openUrl"));
-          pending.json.insert("url".into(), json!(str_of(a, "url").unwrap_or("")));
-          true
+          let url = str_of(a, "url").unwrap_or("");
+          match crate::model::safe_link(url) {
+            Some(u) => {
+              pending.json.insert("url".into(), json!(u));
+              true
+            }
+            None => {
+              self.note("Links that aren't http, https, mailto or tel were skipped");
+              false
+            }
+          }
         }
         other => {
           self.note(&format!("The {other} action isn't supported and was skipped"));
@@ -978,9 +989,9 @@ impl Import<'_> {
       out.insert("direction".into(), json!(dir));
     }
     if kind != "instant" {
-      if let Some(d) = t.and_then(|t| num(t, "duration")) {
-        out.insert("durationMs".into(), json!((d * unit).round()));
-      }
+      // A transition without a duration plays for 300 ms, like Figma's default.
+      let d = t.and_then(|t| num(t, "duration")).map(|d| to_ms(d, unit)).unwrap_or(300.0);
+      out.insert("durationMs".into(), json!(d));
       let easing = match t.and_then(|t| t.get("easing")).and_then(|e| str_of(e, "type")) {
         None | Some("EASE_OUT") => None,
         Some("EASE_IN") => Some("easeIn"),
@@ -1124,6 +1135,18 @@ impl Import<'_> {
     for (reason, n) in std::mem::take(&mut self.proto_notes) {
       self.warnings.push(if n == 1 { reason } else { format!("{reason} (×{n})") });
     }
+  }
+}
+
+/// A Figma time as milliseconds, kept within 0 to 10 s. The plugin API counts seconds (`unit`
+/// 1000); REST counts ms, but a value under 20 there can only be seconds (a 20 ms transition
+/// isn't one anyone draws).
+fn to_ms(v: f64, unit: f64) -> f64 {
+  let ms = if unit == 1.0 && v > 0.0 && v < 20.0 { v * 1000.0 } else { v * unit };
+  if ms.is_finite() {
+    ms.clamp(0.0, 10_000.0).round()
+  } else {
+    0.0
   }
 }
 
@@ -1432,12 +1455,17 @@ mod tests {
   }
 
   fn named(doc: &Document, name: &str) -> Node {
-    doc
-      .nodes
-      .values()
-      .find(|n| n.name == name)
-      .unwrap_or_else(|| panic!("no layer {name}"))
-      .clone()
+    // `copy_of` takes a `&Node` or a `&Arc<Node>` alike.
+    fn copy_of(n: &Node) -> Node {
+      n.clone()
+    }
+    copy_of(
+      doc
+        .nodes
+        .values()
+        .find(|n| n.name == name)
+        .unwrap_or_else(|| panic!("no layer {name}")),
+    )
   }
 
   fn warnings(r: &Value) -> Vec<String> {
@@ -1819,5 +1847,34 @@ mod tests {
     assert_eq!(k(json!([16])), None, "a modifier alone");
     assert_eq!(k(json!([65, 66])), None, "two keys");
     assert_eq!(key_name(&json!({})), None);
+  }
+
+  #[test]
+  fn times_are_clamped_and_rest_seconds_are_recognised() {
+    assert_eq!(to_ms(0.3, 1000.0), 300.0);
+    assert_eq!(to_ms(300.0, 1.0), 300.0);
+    assert_eq!(to_ms(0.3, 1.0), 300.0, "REST under 20 is seconds");
+    assert_eq!(to_ms(1e9, 1.0), 10_000.0);
+    assert_eq!(to_ms(-5.0, 1.0), 0.0);
+    assert_eq!(to_ms(f64::NAN, 1.0), 0.0);
+    let file = proto_file(vec![frame(
+      "1:1",
+      "Home",
+      json!({}),
+      vec![
+        rect(
+          "1:2",
+          "A",
+          click(json!([{ "type": "NODE", "destinationId": "1:1", "navigation": "NAVIGATE", "transition": { "type": "DISSOLVE" } }])),
+        ),
+        rect("1:3", "B", click(json!([{ "type": "URL", "url": "javascript:alert(1)" }]))),
+        rect("1:4", "C", click(json!([{ "type": "URL", "url": "https://example.com" }]))),
+      ],
+    )]);
+    let (doc, r) = run(&file);
+    assert_eq!(named(&doc, "A").interactions[0].duration_ms, 300.0, "a missing duration is 300 ms");
+    assert_eq!(named(&doc, "B").interactions.len(), 0);
+    assert!(warnings(&r).iter().any(|w| w.contains("aren't http")), "{:?}", warnings(&r));
+    assert_eq!(named(&doc, "C").interactions[0].url.as_deref(), Some("https://example.com"));
   }
 }

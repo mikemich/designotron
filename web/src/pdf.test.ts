@@ -90,3 +90,12 @@ describe("buildPdf", () => {
     expect(Array.from(clear.alpha!)).toEqual([255, 0]);
   });
 });
+
+describe("page boxes", () => {
+  it("keeps a page within 3 to 14,400 units a side", async () => {
+    const bytes = new Uint8Array(await (await buildPdf([page(1440, 28800, 2, 2), page(1, 100, 2, 2)])).arrayBuffer());
+    const text = latin1(bytes);
+    expect(text).toContain("/MediaBox [0 0 720 14400]");
+    expect(text).toContain("/MediaBox [0 0 3 100]");
+  });
+});

@@ -321,7 +321,15 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       try {
         ids.push(await importDtron(await f.text(), f.name.replace(/\.(dtron|json)$/i, ""), currentFolder));
       } catch (err) {
-        toast(`${f.name}: ${err instanceof Error ? err.message : String(err)}`, "error");
+        // A Figma REST export is also .json: point to where it opens.
+        let figma = false;
+        try {
+          const j = JSON.parse(await f.text());
+          figma = !!(j && (j.document || j.nodes));
+        } catch {
+          /* not JSON: the error above stands */
+        }
+        toast(figma ? `${f.name} looks like a Figma export. Open a file and use File > Import from Figma instead.` : `${f.name}: ${err instanceof Error ? err.message : String(err)}`, "error");
       }
     }
     if (ids.length === 1 && ours.length === 1) onOpen(ids[0]);

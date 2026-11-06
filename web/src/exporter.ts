@@ -106,17 +106,48 @@ export async function svgToPngBlob(svg: string, scale: number, type = "image/png
   return await new Promise<Blob>((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error("toBlob failed"))), type, 0.92));
 }
 
-const MAX_NAME = 120;
+/** Longest file name stem in UTF-8 bytes; file systems stop at 255, and a suffix, an extension and numbering follow. */
+const MAX_NAME_BYTES = 200;
+/** Longest user-typed export suffix, in code points. */
+const MAX_SUFFIX = 40;
 
-/** Characters a file name can't hold or that make it lie: controls, bidi overrides and marks, zero-width characters, path separators and `<>:"|?*`. */
+/** Characters a file name can't hold or that make it lie: controls, bidi overrides and marks, zero-width spaces and marks, path separators and `<>:"|?*`. */
 // eslint-disable-next-line no-control-regex
-const UNSAFE_CHARS = /[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF<>:"/\\|?*]/g;
-const RESERVED_NAME = /^(con|prn|aux|nul|com[0-9\u00B9\u00B2\u00B3]|lpt[0-9\u00B9\u00B2\u00B3])(\..*)?$/i;
+const UNSAFE_CHARS = /[\u0000-\u001F\u007F-\u009F\u061C\u200B\u200E\u200F\u2028-\u202E\u2060-\u2069\uFEFF<>:"/\\|?*]/g;
+/** Look-alikes of a separator or colon that Windows maps to the real one when it converts a name ("best fit"). */
+const BEST_FIT = /[\uFF0F\uFF3C\u2215\uFF0E\uFF1A]/g;
+/** A joiner that doesn't sit between two letters or pictographs (emoji sequences, Persian and Indic words need theirs). */
+const STRAY_JOINER = /(?<![\p{L}\p{M}\p{Extended_Pictographic}\uFE0F])[\u200C\u200D]|[\u200C\u200D](?![\p{L}\p{M}\p{Extended_Pictographic}])/gu;
+/** Windows device names, which it also reads with trailing spaces and after the first dot. */
+const RESERVED_NAME = /^(con|prn|aux|nul|conin\$|conout\$|com[0-9\u00B9\u00B2\u00B3]|lpt[0-9\u00B9\u00B2\u00B3])\s*(\..*)?$/i;
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
 /** Removes what a file name can't hold from a piece of text (a suffix), without trimming or renaming it. */
 export function stripUnsafe(s: string): string {
-  return s.normalize("NFC").replace(LONE_SURROGATE, "").replace(UNSAFE_CHARS, "").replace(/\s+/g, " ");
+  return s
+    .normalize("NFC")
+    .replace(LONE_SURROGATE, "")
+    .replace(BEST_FIT, "-")
+    .replace(UNSAFE_CHARS, "")
+    .replace(STRAY_JOINER, "")
+    .replace(/\s+/g, " ");
+}
+
+/** The longest start of `s` within `bytes` UTF-8 bytes that doesn't split a character or an emoji sequence. */
+function cutBytes(s: string, bytes: number): string {
+  const enc = new TextEncoder();
+  const parts: string[] =
+    typeof Intl !== "undefined" && "Segmenter" in Intl
+      ? Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(s), (g) => g.segment)
+      : Array.from(s);
+  let used = 0;
+  let out = "";
+  for (const p of parts) {
+    used += enc.encode(p).length;
+    if (used > bytes) break;
+    out += p;
+  }
+  return out;
 }
 
 /**
@@ -124,11 +155,11 @@ export function stripUnsafe(s: string): string {
  * digits, dots and spaces; removes path separators, controls, bidi overrides and the characters
  * Windows forbids, trims leading dots, dashes and spaces and trailing dots and spaces (no `..`,
  * no hidden files, no option-looking names), prefixes Windows device names with `_` and caps the
- * length. Never returns an empty name or one that is only dots.
+ * length at 200 UTF-8 bytes (file systems allow 255 and a suffix and extension follow). Never
+ * returns an empty name or one that is only dots.
  */
 export function fileSafe(name: string): string {
-  const cut = (s: string) => Array.from(s).slice(0, MAX_NAME).join("");
-  let s = cut(stripUnsafe(name).replace(/^[\s.-]+/, "")).replace(/[\s.]+$/, "");
+  let s = cutBytes(stripUnsafe(name).replace(/^[\s.-]+/, ""), MAX_NAME_BYTES).replace(/[\s.]+$/, "");
   if (!s) return "export";
   if (RESERVED_NAME.test(s)) s = `_${s}`;
   return s;
@@ -181,7 +212,7 @@ export function rowScale(row: ExportSetting, w: number, h: number): number {
 
 /** File name suffix of a row: what the user typed, else `@2x`, `@512w` or `@1024h` (nothing at 1x). */
 export function rowSuffix(row: ExportSetting, scale = row.scale): string {
-  if (row.suffix) return stripUnsafe(row.suffix);
+  if (row.suffix) return Array.from(stripUnsafe(row.suffix)).slice(0, MAX_SUFFIX).join("");
   if (row.format === "svg") return "";
   if (row.width && row.width > 0) return `@${Math.round(row.width)}w`;
   if (row.height && row.height > 0) return `@${Math.round(row.height)}h`;
@@ -254,10 +285,9 @@ export async function exportLayers(ids: string[]) {
 /** Says so for each hidden layer: the engine draws nothing for it, so its export is empty. */
 function warnHidden(ids: string[]) {
   const doc = getDoc();
-  for (const id of ids) {
-    const n = doc.nodes[id];
-    if (n && n.visible === false) toast(`${n.name} is hidden, so its export is empty`);
-  }
+  const hidden = ids.map((id) => doc.nodes[id]).filter((n) => n && n.visible === false);
+  if (hidden.length === 1) toast(`${hidden[0].name} is hidden, so its export is empty`);
+  else if (hidden.length > 1) toast(`${hidden.length} selected layers are hidden, so their exports are empty`);
 }
 
 /** `a.png`, `a.png` -> `a.png`, `a-2.png` (numbering on until the name is free, even of a real `a-2.png`). */
@@ -283,6 +313,8 @@ function uniqueNames(files: ExportFile[]): ExportFile[] {
 
 /** Pixels per point in a PDF page's image: 2x, so a screen stays sharp when zoomed. */
 const PDF_SCALE = 2;
+/** Most pixels one PDF page's image holds: it is decoded to RGBA and then split, about 7 bytes a pixel at the peak. */
+const PDF_MAX_AREA = 64_000_000;
 
 /** Layers File > Export frames to PDF takes: every visible top-level frame of the page, in layer order. */
 export function pdfFrames(): string[] {
@@ -312,7 +344,9 @@ export async function exportPdf(ids: string[]) {
     try {
       const svg = nodeSvg(id);
       const { w, h } = svgSize(svg);
-      const canvas = await rasterise(svg, PDF_SCALE);
+      const scale = Math.min(PDF_SCALE, Math.sqrt(PDF_MAX_AREA / Math.max(w * h, 1)));
+      if (scale < PDF_SCALE) toast(`${doc.nodes[id].name} is large, so its PDF page is rendered at ${Math.round(scale * 100) / 100}x`);
+      const canvas = await rasterise(svg, scale);
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("the browser could not read the image back");
       const { rgb, alpha } = splitRgba(ctx.getImageData(0, 0, canvas.width, canvas.height).data);

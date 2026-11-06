@@ -88,8 +88,7 @@ export async function buildPdf(pages: PdfPage[]): Promise<Blob> {
   put(`<< /Type /Pages /Count ${pages.length} /Kids [${ids.map((i) => `${i.page} 0 R`).join(" ")}] >>\nendobj\n`);
   pages.forEach((p, k) => {
     const id = ids[k];
-    const w = num(p.widthPt);
-    const h = num(p.heightPt);
+    const [w, h] = pageBox(p.widthPt, p.heightPt);
     begin(id.page);
     put(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Resources << /XObject << /Im0 ${id.image} 0 R >> >> /Contents ${id.content} 0 R >>\nendobj\n`);
     stream(id.content, "", enc.encode(`q ${w} 0 0 ${h} 0 0 cm /Im0 Do Q`));
@@ -116,6 +115,14 @@ export async function buildPdf(pages: PdfPage[]): Promise<Blob> {
 function expectLen(a: Uint8Array | undefined, n: number, what: string): Uint8Array {
   if (!a || a.length !== n) throw new Error(`PDF page ${what} data has the wrong length`);
   return a;
+}
+
+/** Acrobat refuses pages under 3 or over 14,400 units a side: scale the box to fit, keeping the aspect where it can. */
+function pageBox(w: number, h: number): [string, string] {
+  const big = Math.max(w, h);
+  const k = big > 14400 ? 14400 / big : 1;
+  const clamp = (v: number) => Math.min(14400, Math.max(3, v * k));
+  return [num(clamp(w)), num(clamp(h))];
 }
 
 /** A number for a content stream or box: at most 3 decimals, no exponent. */

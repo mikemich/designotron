@@ -1009,7 +1009,32 @@ impl<'a> Ctx<'a> {
         Trigger::OnClick | Trigger::OnPress | Trigger::MouseDown | Trigger::MouseUp
       ) && self.action_of(control, i).is_some()
     });
-    if !clickable || !control.visible || matches!(control.kind, NodeType::Text | NodeType::Instance) {
+    let clicks = |n: &Node| {
+      n.interactions.iter().any(|i| {
+        matches!(
+          i.trigger,
+          Trigger::OnClick | Trigger::OnPress | Trigger::MouseDown | Trigger::MouseUp
+        )
+      })
+    };
+    // Inside a button or link, or around another control, the control isn't named by its own
+    // `aria-label` (it is nested or not a control), so hiding the text would leave no name.
+    if !clickable
+      || !control.visible
+      || control.rotation != 0.0
+      || self.interactive_depth > 0
+      || matches!(
+        control.kind,
+        NodeType::Text | NodeType::Instance | NodeType::Component | NodeType::ComponentSet
+      )
+      || self
+        .doc
+        .subtree(&control.id)
+        .iter()
+        .skip(1)
+        .filter_map(|d| self.doc.get(d))
+        .any(clicks)
+    {
       return Vec::new();
     }
     // A control with text of its own is named by it already.
@@ -1030,7 +1055,16 @@ impl<'a> Ctx<'a> {
       .iter()
       .filter(|id| {
         let Some(t) = self.doc.get(id) else { return false };
-        if t.kind != NodeType::Text || !t.visible || !t.interactions.is_empty() || !has_text(id) || t.width <= 0.0 || t.height <= 0.0 {
+        let bound = t.prop_refs.as_ref().is_some_and(|r| r.characters.is_some());
+        if t.kind != NodeType::Text
+          || !t.visible
+          || !t.interactions.is_empty()
+          || !has_text(id)
+          || bound
+          || t.rotation != 0.0
+          || t.width <= 0.0
+          || t.height <= 0.0
+        {
           return false;
         }
         let w = (t.x + t.width).min(control.x + control.width) - t.x.max(control.x);
@@ -6036,9 +6070,7 @@ mod r13_tests {
   fn text_below_the_control_or_with_its_own_click_is_not_a_label() {
     // Painted below the control: it comes first among the siblings.
     let mut doc = cta(40.0, 120.0);
-    let page = doc.pages[0].id.clone();
     doc.get_mut("home").unwrap().children.reverse();
-    let _ = page;
     for src in exports(&doc) {
       assert!(src.contains("aria-label=\"Cta\""), "{src}");
       assert!(!src.contains("aria-hidden=\"true\""), "{src}");
@@ -6057,8 +6089,7 @@ mod r13_tests {
   fn several_texts_are_joined_in_reading_order() {
     let mut doc = cta(40.0, 120.0);
     let page = doc.pages[0].id.clone();
-    // Added last, so it is above; it sits on the first row to the right of "Open settings"? No:
-    // on the row above, so it reads first.
+    // Added last, so it is above, on the row over "Open settings": it reads first.
     let mut t = crate::ops::default_node(NodeType::Text, "pre".into(), "Pre".into());
     (t.x, t.y, t.width, t.height) = (40.0, 104.0, 60.0, 8.0);
     t.text.as_mut().unwrap().characters = "New".into();
@@ -6089,6 +6120,66 @@ mod r13_tests {
     for src in exports(&doc) {
       assert!(!src.contains("aria-hidden") && !src.contains("pointer-events"), "{src}");
       assert!(src.contains("aria-label=\"Cta\""), "{src}");
+    }
+  }
+
+  #[test]
+  fn text_inside_a_button_or_over_a_card_with_a_control_is_not_hidden() {
+    // (a) A small frame becomes a <button>; the clickable rectangle in it can't be named by `aria-label`.
+    let mut doc = cta(40.0, 120.0);
+    let page = doc.pages[0].id.clone();
+    let mut b = crate::ops::default_node(NodeType::Frame, "btn".into(), "Button".into());
+    (b.x, b.y, b.width, b.height) = (0.0, 300.0, 200.0, 48.0);
+    b.interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    doc.insert(b, Some("home"), &page, None);
+    let mut r = crate::ops::default_node(NodeType::Rectangle, "inner".into(), "Inner".into());
+    (r.x, r.y, r.width, r.height) = (0.0, 0.0, 200.0, 48.0);
+    r.interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    doc.insert(r, Some("btn"), &page, None);
+    let mut t = crate::ops::default_node(NodeType::Text, "buy".into(), "Buy".into());
+    (t.x, t.y, t.width, t.height) = (10.0, 10.0, 80.0, 20.0);
+    t.text.as_mut().unwrap().characters = "Buy now".into();
+    doc.insert(t, Some("btn"), &page, None);
+    for src in exports(&doc) {
+      let buy = src
+        .lines()
+        .find(|l| l.contains("Buy now") && !l.contains("aria-label"))
+        .unwrap_or_else(|| panic!("{src}"));
+      assert!(!buy.contains("aria-hidden"), "{src}");
+    }
+    // (b) A card holding a clickable icon isn't named by its text either.
+    let mut doc = cta(40.0, 120.0);
+    let page = doc.pages[0].id.clone();
+    let mut icon = crate::ops::default_node(NodeType::Rectangle, "icon".into(), "Icon".into());
+    (icon.x, icon.y, icon.width, icon.height) = (180.0, 104.0, 16.0, 16.0);
+    icon.interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    doc.get_mut("cta").unwrap().kind = NodeType::Frame;
+    doc.insert(icon, Some("cta"), &page, None);
+    for src in exports(&doc) {
+      let line = src
+        .lines()
+        .find(|l| l.contains("Open settings") && !l.contains("aria-label"))
+        .unwrap_or_else(|| panic!("{src}"));
+      assert!(!line.contains("aria-hidden"), "{src}");
+    }
+  }
+
+  #[test]
+  fn rotated_text_is_not_a_label() {
+    let mut doc = cta(40.0, 120.0);
+    doc.get_mut("lbl").unwrap().rotation = 5.0;
+    for src in exports(&doc) {
+      assert!(src.contains("aria-label=\"Cta\""), "{src}");
+      assert!(!src.contains("aria-hidden"), "{src}");
     }
   }
 }
