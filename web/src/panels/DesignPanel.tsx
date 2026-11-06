@@ -970,11 +970,18 @@ function defaultJoin(n: Node): "miter" | "round" {
   return "round";
 }
 
+/** A vector whose paths are all closed: line ends do nothing there (open paths and lines have them). */
+function isClosedVector(n: Node): boolean {
+  if (n.type !== "vector" || !n.vector) return false;
+  if (n.vector.raw) return n.vector.raw.d.split(/[Mm]/).slice(1).every((part) => /[Zz]/.test(part));
+  return n.vector.subpaths.length > 0 && n.vector.subpaths.every((sp) => sp.closed);
+}
+
 function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: Node[]; ids: string[]; keyName: "fills" | "strokes" }) {
   const paints = common(nodes, (n) => n[keyName]);
   const list: Paint[] = paints === MIXED ? [] : paints;
   const set = (next: Paint[]) => update(ids, { [keyName]: next, ...(keyName === "fills" ? { fillStyle: null } : {}) });
-  const isLineish = nodes.every((n) => n.type === "line" || n.type === "vector");
+  const isLineish = nodes.every((n) => n.type === "line" || n.type === "vector") && !nodes.every(isClosedVector);
   // Individual strokes: rectangles, frames, components and instances.
   const boxy = nodes.every((n) => ["rectangle", "frame", "component", "componentSet", "instance"].includes(n.type));
   const individual = nodes.every((n) => n.strokeWeights);
@@ -1087,6 +1094,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
                 options={[
                   { value: "none", label: "No end cap" },
                   { value: "round", label: "Round" },
+                  { value: "square", label: "Square" },
                   { value: "arrow", label: "Arrow" },
                   { value: "circle", label: "Circle" },
                 ]}

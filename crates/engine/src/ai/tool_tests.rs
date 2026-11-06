@@ -1676,6 +1676,53 @@ mod r9_p2 {
   }
 }
 
+mod svg {
+  use super::*;
+
+  const ICON: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 12h18M12 3v18"/><circle cx="12" cy="12" r="9"/></svg>"#;
+
+  #[test]
+  fn create_nodes_reads_svg_markup_into_editable_vectors() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "svg", "svg": ICON, "name": "plus-circle", "x": 40, "y": 50, "width": 48, "height": 48 }] }),
+    );
+    let id = created(&r)[0].clone();
+    let f = e.doc.get(&id).unwrap();
+    assert_eq!((f.name.as_str(), f.x, f.y, f.width), ("plus-circle", 40.0, 50.0, 48.0));
+    let path = e.doc.get(&f.children[0]).unwrap();
+    assert!(!path.vector.as_ref().unwrap().subpaths.is_empty());
+    assert_eq!(path.stroke_weight, 4.0);
+    assert!(f.children.iter().all(|c| e.doc.get(c).unwrap().page == e.page));
+  }
+
+  #[test]
+  fn svg_goes_inside_a_parent_and_refusals_say_why() {
+    let mut e = engine();
+    let frame = one(&mut e, json!({ "type": "frame", "width": 100, "height": 100 }));
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "parentId": frame, "nodes": [{ "svg": ICON, "x": 5, "y": 6 }] }),
+    );
+    let id = created(&r)[0].clone();
+    let n = e.doc.get(&id).unwrap();
+    assert_eq!((n.parent.as_deref(), n.x, n.y), (Some(frame.as_str()), 5.0, 6.0));
+    assert!(n.name.starts_with("SVG"));
+    let before = e.doc.clone();
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "svg", "svg": "<svg width='9' height='9'><text>a</text></svg>" }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("uses text") && err.contains("svgPath"), "{err}");
+    assert_eq!(e.doc, before);
+  }
+}
+
 fn engine() -> Engine {
   Engine::new(Box::new(HeuristicMeasurer), 7)
 }

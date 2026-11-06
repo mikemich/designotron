@@ -29,7 +29,7 @@ import { FollowFrame } from "./FollowFrame";
 import { CursorChat } from "./CursorChat";
 import { GuestBar } from "../panels/GuestBar";
 import { reportCursor, useCollab } from "../collab";
-import { insertImageFile, openDtronFile, pasteData, toggleVectorPointSmooth, vectorPoints } from "../actions";
+import { insertImageFile, insertSvgFile, openDtronFile, pasteData, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu, insideInstance } from "./contextMenu";
 import { pickColorAt } from "./eyedropper";
 import { useDemo } from "../Demo";
@@ -40,6 +40,8 @@ import { isOverlayLink, newInteraction } from "../prototype";
  *  neighbour (never below the minimum) so the middle of a short segment can still take a point. */
 const ANCHOR_HIT = 4;
 const ANCHOR_HIT_MIN = 1;
+/** Radius (screen px) of a drawn vector anchor: a circle, so it can't pass for a selection handle (a square). */
+const ANCHOR_R = 4;
 /** Below this screen distance to a neighbouring anchor, control handles show only for selected anchors. */
 const CROWDED_ANCHOR_GAP = 12;
 /** Segments shorter than this (screen px) are duplicate anchors, not neighbours. */
@@ -1093,7 +1095,8 @@ export function Canvas() {
     e.preventDefault();
     const p = pagePt(e);
     for (const f of [...e.dataTransfer.files]) {
-      if (f.type.startsWith("image/")) await insertImageFile(f, p.x, p.y);
+      if (f.type === "image/svg+xml" || /\.svg$/i.test(f.name)) await insertSvgFile(f, p.x, p.y);
+      else if (f.type.startsWith("image/")) await insertImageFile(f, p.x, p.y);
       else if (f.name.endsWith(".dtron") || f.name.endsWith(".json")) await openDtronFile(f);
     }
     const comp = e.dataTransfer.getData("application/x-designotron-component");
@@ -1469,26 +1472,24 @@ function VectorPoints({
         if (hasOut) {
           const o = toScreen(v, apply(m, { x: p.x + p.outX, y: p.y + p.outY }));
           handles.push(<line key={`lo${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
-          handles.push(<circle key={`o${si}-${pi}`} data-vpt={`${si}:${pi}:out`} className="handle" cx={o.x} cy={o.y} r={3.5} fill="white" stroke="#0d99ff" />);
+          handles.push(<circle key={`o${si}-${pi}`} data-vpt={`${si}:${pi}:out`} className="handle" cx={o.x} cy={o.y} r={2.5} fill="white" stroke="#0d99ff" />);
         }
         if (hasIn) {
           const o = toScreen(v, apply(m, { x: p.x + p.inX, y: p.y + p.inY }));
           handles.push(<line key={`li${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
-          handles.push(<circle key={`i${si}-${pi}`} data-vpt={`${si}:${pi}:in`} className="handle" cx={o.x} cy={o.y} r={3.5} fill="white" stroke="#0d99ff" />);
+          handles.push(<circle key={`i${si}-${pi}`} data-vpt={`${si}:${pi}:in`} className="handle" cx={o.x} cy={o.y} r={2.5} fill="white" stroke="#0d99ff" />);
         }
         const hit = Math.max(ANCHOR_HIT_MIN, Math.min(ANCHOR_HIT, gap / 4));
         anchors.push(
           <g key={`a${si}-${pi}`}>
-            <rect
+            <circle
               className={"vector-anchor" + (on ? " selected" : "")}
-              x={a.x - 4}
-              y={a.y - 4}
-              width={8}
-              height={8}
-              rx={on ? 1 : 0}
+              cx={a.x}
+              cy={a.y}
+              r={ANCHOR_R}
               fill={on ? "#0d99ff" : "white"}
-              stroke={on ? "white" : "#0d99ff"}
-              strokeWidth={on ? 1.5 : 1}
+              stroke="#0d99ff"
+              strokeWidth={1.5}
               pointerEvents="none"
             />
             <rect data-vpt={`${si}:${pi}:anchor`} className="handle" x={a.x - hit} y={a.y - hit} width={hit * 2} height={hit * 2} fill="transparent" />
