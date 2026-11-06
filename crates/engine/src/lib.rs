@@ -33,6 +33,7 @@ pub mod persist;
 pub mod props;
 pub mod render;
 pub mod shapes;
+pub mod svg_import;
 pub mod text;
 pub mod variables;
 pub mod vector_edit;

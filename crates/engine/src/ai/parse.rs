@@ -73,6 +73,7 @@ pub const KNOWN_KEYS: &[&str] = &[
   "maxLines",
   "truncate",
   "paragraphSpacing",
+  "svg",
   "svgPath",
   "viewBox",
   "points",

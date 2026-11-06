@@ -2526,6 +2526,11 @@ body:has(.phone-note) .toast {
 .scale-row .field {
   flex: 1;
 }
+/* The image scale mode select has a row of its own: next to the two buttons it was squeezed to "Cr". */
+.scale-mode-row .field {
+  flex: 1;
+  min-width: 7em;
+}
 /* W3-F inspect */
 .insp-live {
   font-weight: 500;

@@ -91,7 +91,7 @@ fn spec_schema() -> Value {
     "type": "object",
     "description": "A layer. Unknown keys are reported in the result's `warnings` and ignored; wrong values are errors that name the field.",
     "properties": {
-      "type": { "type": "string", "enum": ["frame", "rectangle", "ellipse", "text", "line", "polygon", "star", "vector", "group", "image", "instance", "component"], "description": "Default frame (with a warning when missing). Also accepted: div, container, screen (frame), rect, circle, triangle, icon, path" },
+      "type": { "type": "string", "enum": ["frame", "rectangle", "ellipse", "text", "line", "polygon", "star", "vector", "group", "image", "instance", "component", "svg"], "description": "svg: a full SVG document as editable layers (give `svg`). Default frame (with a warning when missing). Also accepted: div, container, screen (frame), rect, circle, triangle, icon, path" },
       "name": { "type": "string" },
       "x": { "type": "number", "description": "Relative to the parent layer (for a layer inside a group too; the editor's X field measures from the frame instead)" },
       "y": { "type": "number", "description": "Relative to the parent layer, like x" },
@@ -150,6 +150,7 @@ fn spec_schema() -> Value {
       "effectStyle": { "type": ["string", "null"], "description": "Effect style name or id (from define_styles effects): sets the layer's effects and links it; null unlinks" },
       "gridStyle": { "type": ["string", "null"], "description": "Grid style name or id (from define_styles grids): sets a frame's layout grids and links it; null unlinks" },
       "textStyle": { "type": ["string", "null"], "description": "Text style name or id (from define_styles): sets font, size, weight, line height and letter spacing and links the layer to it; null unlinks" },
+      "svg": { "type": "string", "description": "Full SVG markup for an editable icon or illustration (type svg): paths, shapes and groups become vector layers with their fills, strokes and gradients; width/height scale it. Text, images, filters and masks are refused" },
       "svgPath": { "type": "string", "description": "SVG path data for an icon (type vector)" },
       "viewBox": { "type": "array", "description": "[minX, minY, width, height] for svgPath, default [0,0,24,24]" },
       "componentId": { "type": "string", "description": "For type instance" },
@@ -254,7 +255,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "create_nodes",
-      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). Returns ids for the created layers.",
+      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), svg (whole SVG markup as editable layers), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). Returns ids for the created layers.",
       "input_schema": { "type": "object", "properties": { "parentId": { "type": "string" }, "nodes": { "type": "array", "items": spec } }, "required": ["nodes"] }
     },
     {
@@ -2106,7 +2107,10 @@ fn build(e: &mut Engine, cx: &mut Ctx, spec: &Value, parent: Option<&str>, page:
     Some(Value::String(t)) => t.trim().to_lowercase(),
     Some(other) => return Err(cx.err("type", format!("must be a string, got {}", parse::kind_of(other)))),
   };
-  let id = if kind_str == "instance" {
+  let svg_markup = spec.get("svg").and_then(|v| v.as_str());
+  let id = if let Some(markup) = svg_markup {
+    build_svg(e, cx, spec, markup, parent, page)?
+  } else if kind_str == "instance" {
     let comp = spec
       .get("componentId")
       .and_then(|v| v.as_str())
@@ -2182,6 +2186,62 @@ fn build(e: &mut Engine, cx: &mut Ctx, spec: &Value, parent: Option<&str>, page:
     if let Some(name) = spec.get("name").and_then(|v| v.as_str()) {
       cx.names.push((name.to_string(), id.clone()));
     }
+  }
+  Ok(id)
+}
+
+/// `svg` on a layer spec: SVG markup read into a frame of editable layers (see `svg_import`).
+fn build_svg(e: &mut Engine, cx: &mut Ctx, spec: &Value, markup: &str, parent: Option<&str>, page: &str) -> Result<NodeId, String> {
+  let size = |k: &str| spec.get(k).and_then(|v| v.as_f64()).filter(|v| *v > 0.0);
+  let opts = crate::svg_import::Options {
+    name: spec.get("name").and_then(|v| v.as_str()).map(String::from),
+    width: size("width"),
+    height: size("height"),
+  };
+  let imported = crate::svg_import::import(markup, &mut e.gen, &opts).map_err(|reason| {
+    let why = if reason == crate::svg_import::NOTHING_TO_DRAW {
+      "this SVG has no shapes the importer can draw".to_string()
+    } else {
+      format!("this SVG uses {reason}")
+    };
+    cx.err(
+      "svg",
+      format!("can't be imported as vectors: {why}. Use svgPath for path data, or build the layers directly"),
+    )
+  })?;
+  for w in &imported.warnings {
+    cx.warn(format!("svg: {w}"));
+  }
+  const USED: [&str; 9] = ["type", "svg", "name", "x", "y", "width", "height", "opacity", "rotation"];
+  let ignored: Vec<&str> = spec
+    .as_object()
+    .map(|o| o.keys().map(String::as_str).filter(|k| !USED.contains(k)).collect())
+    .unwrap_or_default();
+  if !ignored.is_empty() {
+    cx.warn(format!(
+      "svg: {} ignored on an svg layer; style the layers inside it with update_nodes",
+      ignored.join(", ")
+    ));
+  }
+  let mut nodes = imported.nodes.into_iter();
+  let mut root = nodes.next().ok_or_else(|| cx.err("svg", "nothing to import"))?;
+  root.x = parse::opt_number(cx, spec, "x")?.unwrap_or(0.0);
+  root.y = parse::opt_number(cx, spec, "y")?.unwrap_or(0.0);
+  if let Some(o) = parse::opt_number(cx, spec, "opacity")? {
+    root.opacity = o.clamp(0.0, 1.0);
+  }
+  if let Some(r) = parse::opt_number(cx, spec, "rotation")? {
+    root.rotation = r;
+  }
+  if opts.name.is_none() {
+    root.name = e.doc.next_name("SVG");
+  }
+  let id = root.id.clone();
+  let index = parent.and_then(|p| crate::devices::before_chrome(&e.doc, p));
+  e.doc.insert(root, parent, page, index);
+  for mut n in nodes {
+    n.page = page.to_string();
+    e.doc.nodes.insert(n.id.clone(), n);
   }
   Ok(id)
 }

@@ -7,6 +7,7 @@ import {
   canvasSize,
   currentPage,
   dispatch,
+  dispatchOrThrow,
   getDoc,
   getEngine,
   query,
@@ -333,15 +334,84 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
   }
   if (isSvgText(text)) {
     const c = viewportCenter();
-    // Only leading whitespace before the prolog stops the browser loading it; the rest is left
-    // as it was (DOCTYPE entities, comments) so the image renders as the author made it.
-    const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text.replace(/^\uFEFF/, "").trim());
-    const { width, height } = await imageSize(url);
-    dispatch({ op: "createImage", src: "asset:" + addAsset(url), x: c.x - width / 2, y: c.y - height / 2, width, height, name: "SVG", parent: query<string | null>({ q: "frameAt", x: c.x, y: c.y, exclude: [] }) });
+    await placeSvg(text, c.x, c.y);
     return;
   }
   const c = viewportCenter();
   dispatch({ op: "createText", x: c.x, y: c.y, characters: text.slice(0, 5000), parent: pasteTarget() });
+}
+
+const SVG_HINT_KEY = "dt:svgPasteHint";
+
+const PASTE_IMAGE_KBD = /Mac|iPhone|iPad/.test(typeof navigator === "undefined" ? "" : navigator.platform) ? "⇧⌘V" : "Ctrl+Shift+V";
+
+/**
+ * Puts SVG markup on the canvas as editable layers (frame, groups, vectors) centred on x, y. What
+ * the importer can't represent (text, images, filters, masks...) is placed as an image instead,
+ * with a toast saying why. `name` is the file name for a dropped file.
+ */
+export async function placeSvg(text: string, x: number, y: number, name = "SVG"): Promise<void> {
+  // A view-only visitor or a read-only tab can't add layers, as an image either.
+  if (useStore.getState().es.readOnly || useCollab.getState().viewer) {
+    toast("This file is view-only", "error");
+    return;
+  }
+  let reason: string;
+  try {
+    const r = dispatchOrThrow<{ warnings?: string[] }>({ op: "importSvg", svg: text, x, y, parent: null, name });
+    const warnings = r?.warnings ?? [];
+    // Pasting changed from "an image" to "vectors": say once how to get the old behaviour.
+    let seen = true;
+    try {
+      seen = !!localStorage.getItem(SVG_HINT_KEY);
+      if (!seen) localStorage.setItem(SVG_HINT_KEY, "1");
+    } catch {
+      /* private window: no hint */
+    }
+    const hint = seen ? "" : ` ${PASTE_IMAGE_KBD} pastes it as an image instead.`;
+    if (warnings.length) {
+      const more = warnings.length > 1 ? ` (and ${warnings.length - 1} more)` : "";
+      toast(`SVG placed as editable vectors, with changes: ${warnings[0]}${more}.${hint}`);
+    } else if (hint) {
+      toast(`SVG placed as editable vectors.${hint}`);
+    }
+    return;
+  } catch (err) {
+    reason = String(err).replace(/^Error:\s*/, "");
+  }
+  // Nothing drawable (empty, or only collapsed shapes): an image of it would be blank too.
+  if (reason === "nothing it can draw") {
+    toast("Nothing to import: the SVG has only empty or out-of-range shapes", "error");
+    return;
+  }
+  toast(`Placed as an image: this SVG uses ${reason}.`);
+  await placeSvgAsImage(text, x, y, name);
+}
+
+/** An SVG as one rectangle with an image fill (what pasting did before it could import vectors). */
+export async function placeSvgAsImage(text: string, x: number, y: number, name = "SVG"): Promise<void> {
+  // Only leading whitespace before the prolog stops the browser loading it; the rest is left
+  // as it was (DOCTYPE entities, comments) so the image renders as the author made it.
+  const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text.replace(/^\uFEFF/, "").trim());
+  const { width, height } = await imageSize(url);
+  dispatch({ op: "createImage", src: "asset:" + addAsset(url), x: x - width / 2, y: y - height / 2, width, height, name, parent: query<string | null>({ q: "frameAt", x, y, exclude: [] }) });
+}
+
+/** A dropped or picked `.svg` file: editable layers, the file's name on the frame. */
+export async function insertSvgFile(file: File, x: number, y: number): Promise<void> {
+  const name = file.name.replace(/\.\w+$/, "") || "SVG";
+  // The importer refuses over 2 MB anyway; don't read a huge file into a string to find out.
+  if (file.size > 8 * 1024 * 1024) {
+    toast("Placed as an image: this SVG uses more than 2 MB of markup.");
+    await insertImageFile(file, x, y);
+    return;
+  }
+  const text = await file.text();
+  if (!isSvgText(text)) {
+    await insertImageFile(file, x, y);
+    return;
+  }
+  await placeSvg(text, x, y, name);
 }
 
 /**
@@ -410,7 +480,8 @@ export async function placeImage() {
   const f = await pickFile("image/*");
   if (!f) return;
   const c = viewportCenter();
-  await insertImageFile(f, c.x, c.y);
+  if (f.type === "image/svg+xml" || /\.svg$/i.test(f.name)) await insertSvgFile(f, c.x, c.y);
+  else await insertImageFile(f, c.x, c.y);
   setTool("move");
 }
 

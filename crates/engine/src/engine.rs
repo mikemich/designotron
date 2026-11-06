@@ -20,7 +20,7 @@ use crate::model::{
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render::{self, Mode, RenderOptions};
 use crate::text::TextMeasurer;
-use crate::{ai, arrange, codegen, patch, vector_edit};
+use crate::{ai, arrange, codegen, patch, svg_import, vector_edit};
 
 const MAX_HISTORY: usize = 300;
 pub const CLIPBOARD_TAG: &str = "designotron/nodes";
@@ -289,6 +289,18 @@ pub enum Command {
     height: f64,
     name: Option<String>,
     parent: Option<NodeId>,
+  },
+  /// Reads SVG markup into editable layers (see `svg_import`): a frame centred on `x`, `y`
+  /// (inside the frame under that point, or `parent`). Refused markup leaves the file untouched
+  /// and the error says why, so the caller can place the SVG as an image instead.
+  ImportSvg {
+    svg: String,
+    x: f64,
+    y: f64,
+    #[serde(default)]
+    parent: Option<NodeId>,
+    #[serde(default)]
+    name: Option<String>,
   },
   InsertSpecs {
     specs: Vec<Value>,
@@ -2150,6 +2162,7 @@ impl Engine {
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
       }
+      Command::ImportSvg { svg, x, y, parent, name } => self.import_svg(&svg, x, y, parent, name),
       Command::InsertSpecs { specs, parent } => {
         let created = ai::insert_specs(self, &specs, parent.as_deref())?;
         self.selection = created
@@ -3423,6 +3436,32 @@ impl Engine {
     };
     arrange::scale_nodes(&mut self.doc, &ids, k, anchor);
     Ok(json!({ "guides": [], "gaps": [], "scale": k }))
+  }
+
+  fn import_svg(&mut self, svg: &str, x: f64, y: f64, parent: Option<NodeId>, name: Option<String>) -> Result<Value, String> {
+    let opts = svg_import::Options {
+      name,
+      ..Default::default()
+    };
+    let imported = svg_import::import(svg, &mut self.gen, &opts)?;
+    let parent = self.auto_parent(parent, x, y).filter(|p| {
+      self
+        .doc
+        .get(p)
+        .is_some_and(|n| n.kind.is_frame_like() && n.kind != NodeType::Instance)
+    });
+    let page = self.page.clone();
+    let mut nodes = imported.nodes.into_iter();
+    let mut root = nodes.next().ok_or("nothing to import")?;
+    root.x = x - root.width / 2.0;
+    root.y = y - root.height / 2.0;
+    let id = self.insert_abs(root, parent.as_deref());
+    for mut n in nodes {
+      n.page = page.clone();
+      self.doc.nodes.insert(n.id.clone(), n);
+    }
+    self.selection = vec![id.clone()];
+    Ok(json!({ "id": id, "warnings": imported.warnings }))
   }
 
   fn paste(&mut self, data: &str, parent: Option<NodeId>, x: Option<f64>, y: Option<f64>) -> Result<Value, String> {
@@ -5546,6 +5585,77 @@ mod tests {
     // Top-left outside, centre inside: joins the frame.
     let inside = mk(&mut e, -20.0);
     assert_eq!(e.doc.get(&inside).unwrap().parent.as_deref(), Some(f.as_str()));
+  }
+
+  #[test]
+  fn importing_an_svg_is_one_undo_step_and_a_refusal_changes_nothing() {
+    let mut e = engine();
+    let svg = r##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000"><path d="M2 2L22 22"/><circle cx="12" cy="12" r="5"/></svg>"##;
+    let before = e.doc.clone();
+    let r = e
+      .dispatch(Command::ImportSvg {
+        svg: svg.into(),
+        x: 100.0,
+        y: 100.0,
+        parent: None,
+        name: Some("icon".into()),
+      })
+      .unwrap();
+    let id = id_of(&r);
+    let frame = e.doc.get(&id).unwrap();
+    assert_eq!(
+      (frame.name.as_str(), frame.x, frame.y, frame.children.len()),
+      ("icon", 88.0, 88.0, 2)
+    );
+    assert_eq!(e.selection, vec![id.clone()]);
+    let kids = e.doc.subtree(&id);
+    assert_eq!(kids.len(), 3);
+    assert!(kids.iter().all(|k| e.doc.get(k).unwrap().page == e.page));
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc, before, "one undo removes the frame and its layers");
+    e.dispatch(Command::Redo).unwrap();
+    assert!(e.doc.get(&id).is_some());
+    // Refused markup: an error naming why, and the document is untouched.
+    let doc = e.doc.clone();
+    let err = e
+      .dispatch(Command::ImportSvg {
+        svg: "<svg width='9' height='9'><text>hi</text></svg>".into(),
+        x: 0.0,
+        y: 0.0,
+        parent: None,
+        name: None,
+      })
+      .unwrap_err();
+    assert_eq!(err, "text");
+    assert_eq!(e.doc, doc);
+  }
+
+  #[test]
+  fn an_imported_svg_lands_inside_the_frame_under_its_centre() {
+    let mut e = engine();
+    let f = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 0.0,
+        y: 0.0,
+        width: 400.0,
+        height: 400.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let id = id_of(
+      &e.dispatch(Command::ImportSvg {
+        svg: r#"<svg width="20" height="20"><rect width="20" height="20"/></svg>"#.into(),
+        x: 50.0,
+        y: 60.0,
+        parent: None,
+        name: None,
+      })
+      .unwrap(),
+    );
+    let n = e.doc.get(&id).unwrap();
+    assert_eq!((n.parent.as_deref(), n.x, n.y), (Some(f.as_str()), 40.0, 50.0));
   }
 
   #[test]
