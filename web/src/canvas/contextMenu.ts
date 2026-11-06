@@ -9,6 +9,7 @@ import { addVariant } from "../componentOps";
 import { useCollab } from "../collab";
 import { openSwapPicker } from "../panels/ComponentControls";
 import { cssFor } from "../panels/RightPanel";
+import { safeImageSrc } from "../imageSrc";
 import { copyAsPng, copyAsSvg, copyText } from "../exporter";
 
 /** Where the last right-click happened, so pickers opened from the menu appear there. */
@@ -19,6 +20,7 @@ if (typeof window !== "undefined") window.addEventListener("contextmenu", (e) =>
 function layerImage(n: Node): string | null {
   const paint = n.fills.find((f) => f.type === "image" && f.visible);
   if (!paint || paint.type !== "image") return null;
+  if (!safeImageSrc(paint.src)) return null;
   return paint.src.startsWith("asset:") ? (assetDataUrl(paint.src.slice(6)) ?? null) : paint.src;
 }
 

@@ -6,6 +6,7 @@
 import { create } from "zustand";
 import { selection, toast, useStore } from "./store";
 import { DRAG_BUSY, executeTool, whenCanvasIdle } from "./ai/tools";
+import { sandboxDocument } from "./pluginSandbox";
 
 export interface Plugin {
   id: string;
@@ -114,80 +115,10 @@ export const usePlugins = create<{ list: Plugin[]; running: Running | null; dial
   dialogOpen: false,
 }));
 
-/** Frame policy: nothing loads or connects; images only from data: and blob:. Scripts run only
- *  with this run's random nonce (the bootstrap) or through eval (the plugin body), so a frame the
- *  plugin creates inside itself inherits the policy but can run no script of its own: no
- *  inline script, `javascript:` URL or `on*=` attribute (which also means plugin UI HTML can't
- *  use inline handlers; set `.onclick` from the plugin code). */
-const sandboxCsp = (nonce: string) =>
-  `default-src 'none'; script-src 'nonce-${nonce}' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; form-action 'none'; base-uri 'none'`;
-
-const randomNonce = () => {
-  const b = crypto.getRandomValues(new Uint8Array(18));
-  return btoa(String.fromCharCode(...b));
-};
-
 /** Tools a plugin may not call: they reach the network, render remote content or install code. */
 const PLUGIN_REFUSED_TOOLS = new Set(["import_url", "import_html", "save_plugin", "search_photos", "place_photo"]);
 
 let runSeq = 0;
-
-/** Bootstrap inside the sandbox: defines `dt`, then runs the plugin body as an async function. */
-function bootstrap(code: string): string {
-  // `<` is escaped so the code can't close the script element.
-  const body = JSON.stringify(code).replace(/</g, "\\u003c");
-  const nonce = randomNonce();
-  return `<!doctype html><html><head><meta charset="utf-8">
-<meta id="dt-csp" http-equiv="Content-Security-Policy" content="${sandboxCsp(nonce)}">
-<meta http-equiv="x-dns-prefetch-control" content="off">
-</head><body><script nonce="${nonce}">
-(() => {
-  // The plugin must not be able to read the nonce: drop this script and the policy's element
-  // (the policy itself stays in force).
-  try { document.currentScript.remove(); } catch (e) {}
-  try { document.getElementById("dt-csp").remove(); } catch (e) {}
-  // WebRTC isn't covered by the CSP, so it is removed before the plugin runs (a frame the plugin
-  // creates can't run script, so it can't get a fresh one).
-  for (const k of ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel"]) {
-    try { delete window[k]; } catch (e) {}
-    try { Object.defineProperty(window, k, { value: undefined, configurable: false }); } catch (e) {}
-  }
-  let seq = 0;
-  const pending = new Map();
-  const listeners = { selectionchange: [] };
-  const call = (method, args) => new Promise((resolve, reject) => {
-    const id = ++seq;
-    pending.set(id, { resolve, reject });
-    parent.postMessage({ dtPlugin: true, id, method, args }, "*");
-  });
-  window.addEventListener("message", (e) => {
-    const m = e.data;
-    if (!m || !m.dtHost) return;
-    if (m.ping) return parent.postMessage({ dtPlugin: true, pong: true }, "*");
-    if (m.event) return (listeners[m.event] || []).forEach((fn) => fn(m.data));
-    const p = pending.get(m.id);
-    if (!p) return;
-    pending.delete(m.id);
-    m.error ? p.reject(new Error(m.error)) : p.resolve(m.result);
-  });
-  window.dt = {
-    tool: (name, input) => call("tool", [name, input || {}]),
-    selection: () => call("selection", []),
-    getDocument: (depth) => call("tool", ["get_document", { depth: depth || 2 }]),
-    getNodes: (ids) => call("tool", ["get_nodes", { ids }]),
-    notify: (text) => call("notify", [String(text)]),
-    close: () => call("close", []),
-    commitUndo: () => call("commitUndo", []),
-    on: (event, fn) => (listeners[event] || (listeners[event] = [])).push(fn),
-    ui: { show: (html, size) => { document.body.innerHTML = html; return call("showUi", [size || {}]); } },
-  };
-  // Compiled inside the chain so a syntax error is reported like any other plugin error.
-  Promise.resolve()
-    .then(() => new Function("dt", "return (async () => {\\n" + ${body} + "\\n})()")(window.dt))
-    .then(() => call("done", []), (err) => call("error", [String(err && err.stack || err)]));
-})();
-<\/script></body></html>`;
-}
 
 /** Runs a plugin; it stays alive while it shows UI. The whole run is one undo step: its tool
  *  calls share an undo group (`dt.commitUndo()` starts a new one, as in Figma). While a UI is
@@ -282,7 +213,10 @@ export function runPlugin(plugin: Plugin) {
   // that would escape the policy above, so the run stops.
   let loads = 0;
   frame.addEventListener("load", () => {
-    if (++loads > 1) {
+    if (loads++ === 0) {
+      // The page is constant (see pluginSandbox.ts); the code is sent in once it is ready.
+      frame.contentWindow?.postMessage({ dtHost: true, code: plugin.code }, "*");
+    } else {
       toast(`Plugin “${plugin.name}” was stopped: it tried to navigate its frame`, "error");
       stopPlugin();
     }
@@ -297,7 +231,7 @@ export function runPlugin(plugin: Plugin) {
     unsub();
     frame.remove();
   };
-  frame.srcdoc = bootstrap(plugin.code);
+  frame.srcdoc = sandboxDocument();
   document.body.appendChild(frame);
 }
 

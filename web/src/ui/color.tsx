@@ -3,6 +3,7 @@ import { Image as ImageIcon, Pipette, Plus, Trash2 } from "lucide-react";
 import type { GradientHandles, GradientPaintType, ImageCrop, Paint } from "../types";
 import { NumberField, Popover, Seg, SelectField } from "./controls";
 import { addAsset, assetUrl, readFileAsDataUrl } from "../assets";
+import { safeImageSrc } from "../imageSrc";
 import { pickFile } from "../files";
 import { getDoc, useStore } from "../store";
 import { PhotoSearch } from "../panels/PhotoSearch";
@@ -217,7 +218,7 @@ export function paintCss(p: Paint): string {
       return `conic-gradient(from ${h ? handleAngle(h) : 0}deg at ${(h?.start[0] ?? 0.5) * 100}% ${(h?.start[1] ?? 0.5) * 100}%, ${stops(p)})`;
     }
     case "image": {
-      const src = p.src.startsWith("asset:") ? assetUrl(p.src.slice(6)) ?? "" : p.src;
+      const src = !safeImageSrc(p.src) ? "" : p.src.startsWith("asset:") ? assetUrl(p.src.slice(6)) ?? "" : p.src;
       return `center / cover no-repeat url("${src}")`;
     }
   }
@@ -358,7 +359,7 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
                 // the same change as the mode (one undo step, no jump).
                 const id = useStore.getState().paintEdit?.id;
                 const box = id ? getDoc().nodes[id] : undefined;
-                const url = p.src.startsWith("asset:") ? assetUrl(p.src.slice(6)) : p.src;
+                const url = !safeImageSrc(p.src) ? undefined : p.src.startsWith("asset:") ? assetUrl(p.src.slice(6)) : p.src;
                 const whole = { x: 0, y: 0, w: 1, h: 1 };
                 if (!box || !url) return props.onChange({ ...p, scaleMode, crop: whole });
                 const img = new Image();
