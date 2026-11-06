@@ -1,0 +1,31 @@
+import { describe, expect, it } from "vitest";
+import { externalizeDataUrls, hash } from "./assets";
+
+const big = (fill: string) => `data:image/png;base64,${fill.repeat(1500)}`;
+
+describe("externalizeDataUrls", () => {
+  it("moves a data URL out once even when two screens hold it", () => {
+    const url = big("A");
+    const binaries: { path: string; dataUrl: string }[] = [];
+    const seen = new Set<string>();
+    const one = externalizeDataUrls(`<div className="bg-[url('${url}')]" />`, binaries, seen);
+    const two = externalizeDataUrls(`<img src="${url}" />`, binaries, seen);
+    const path = `/assets/${hash(url)}.png`;
+    expect(one).toBe(`<div className="bg-[url('${path}')]" />`);
+    expect(two).toBe(`<img src="${path}" />`);
+    expect(binaries).toEqual([{ path: `public${path}`, dataUrl: url }]);
+  });
+  it("leaves small data URLs inline", () => {
+    const small = "data:image/png;base64,iVBORw0KGgo=";
+    const binaries: { path: string; dataUrl: string }[] = [];
+    expect(externalizeDataUrls(`url('${small}')`, binaries, new Set())).toBe(`url('${small}')`);
+    expect(binaries).toEqual([]);
+  });
+  it("writes SVG text as base64 with an svg extension", () => {
+    const svg = `data:image/svg+xml,${encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg'>" + "<g/>".repeat(400) + "</svg>").replace(/'/g, "%27")}`;
+    const binaries: { path: string; dataUrl: string }[] = [];
+    const out = externalizeDataUrls(`url('${svg}')`, binaries, new Set());
+    expect(out).toBe(`url('/assets/${hash(svg)}.svg')`);
+    expect(binaries[0].dataUrl.startsWith("data:image/svg+xml;base64,")).toBe(true);
+  });
+});

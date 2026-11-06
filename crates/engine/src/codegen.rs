@@ -52,6 +52,9 @@ function keyName(e: KeyboardEvent): string | null {
   return [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Meta", k].filter(Boolean).join("+");
 }
 
+// Frame names that differ from their screen key ("Marketing Dark" is MarketingDark).
+const screenNames: Record<string, string> = __SCREEN_NAMES__;
+
 // Each page's flow starts at its start screen; /#Screen opens a screen directly (another flow).
 function startScreen(): string {
   let hash = window.location.hash.slice(1);
@@ -60,6 +63,8 @@ function startScreen(): string {
   } catch {
     /* keep the raw hash */
   }
+  // A frame's own name works too: /#Marketing%20Dark.
+  if (Object.prototype.hasOwnProperty.call(screenNames, hash)) hash = screenNames[hash];
   return Object.prototype.hasOwnProperty.call(screens, hash) ? hash : __START__;
 }
 
@@ -159,9 +164,9 @@ export default function App() {
   }, [top]);
   const phone = phoneScreens.has(current);
   return (
-    <div className={phone ? "min-h-screen flex items-start justify-center bg-neutral-100 py-10" : "min-h-screen flex justify-center"}>
+    <div className={phone ? "min-h-screen flex items-start justify-center bg-neutral-100 sm:py-10" : "min-h-screen flex justify-center"}>
       <div ref={host} className="relative w-full" style={{ maxWidth: widths[current] }}>
-        {Screen ? <Screen onNavigate={onNavigate} /> : null}
+        <main>{Screen ? <Screen onNavigate={onNavigate} /> : null}</main>
         {overlays.map((o, i) => {
           const Layer = screens[o.screen];
           const manual = o.position === "manual";
@@ -251,6 +256,11 @@ struct El {
   holds_control: bool,
   /// A component reference whose component renders a button or link.
   renders_control: bool,
+  /// The layer name as an accessible name (empty for default names like "Frame 3"), or the
+  /// component name on a component root.
+  label: Option<String>,
+  /// What the click does, as an accessible name ("Go to Detail", "Back").
+  action_label: Option<String>,
 }
 
 impl El {
@@ -279,10 +289,13 @@ impl El {
       focusable: false,
       holds_control: false,
       renders_control: false,
+      label: None,
+      action_label: None,
     }
   }
 
   fn s(&mut self, k: &str, v: impl Into<String>) {
+    self.styles.retain(|(name, _)| name != k);
     self.styles.push((k.to_string(), v.into()));
   }
 }
@@ -460,6 +473,13 @@ impl<'a> Ctx<'a> {
   /// phone or tablet it becomes `env(safe-area-inset-*)` (the real device supplies it), and in a
   /// window or browser frame it is left out (the real chrome takes that space).
   fn padding_value(&self, n: &Node, pad: [f64; 4]) -> String {
+    // Per-side strokes are borders, which take layout space that Figma's strokes don't.
+    let mut pad = pad;
+    if let Some(b) = border_widths(n) {
+      for (p, b) in pad.iter_mut().zip(b) {
+        *p = (*p - b).max(0.0);
+      }
+    }
     let applied = n.device.as_ref().map(|d| d.applied).filter(|a| a.iter().any(|v| *v > 0.0));
     let (Some(applied), Some(d)) = (applied, n.device.as_ref()) else {
       return pad.iter().map(|p| px(*p)).collect::<Vec<_>>().join(" ");
@@ -605,6 +625,13 @@ impl<'a> Ctx<'a> {
       el.comment = Some(n.name.clone());
     }
     el.is_component_root = place == Place::ComponentRoot;
+    el.label = if place == Place::ComponentRoot {
+      // A variant is named by its set.
+      let owner = self.variant_set(&n.id).unwrap_or_else(|| n.clone());
+      Some(owner.name.clone())
+    } else {
+      Some(n.name.clone()).filter(|s| !is_default_name(s))
+    };
     self.position(&mut el, &n, place);
     self.limits(&mut el, &n);
     self.visual(&mut el, &n);
@@ -676,7 +703,7 @@ impl<'a> Ctx<'a> {
       // Fixed layers of a scrolling frame stay put: the scrolling content moves into a box of its
       // own and the fixed layers sit next to it.
       let fixed = |c: &Node| c.scroll_behavior == crate::model::ScrollBehavior::Fixed && (n.layout.is_none() || c.absolute_position);
-      let split = n.overflow != crate::model::Overflow::None && n.layout.is_none();
+      let split = n.overflow != crate::model::Overflow::None;
       let mut stuck = Vec::new();
       let interactive = matches!(el.tag, "button" | "a");
       self.interactive_depth += usize::from(interactive);
@@ -701,10 +728,17 @@ impl<'a> Ctx<'a> {
         ] {
           inner.s(k, v);
         }
-        inner
-          .styles
-          .extend(el.styles.iter().filter(|(k, _)| k.starts_with("overflow")).cloned());
-        el.styles.retain(|(k, _)| !k.starts_with("overflow"));
+        // The scroller takes the overflow and the layout, so auto layout and safe-area padding
+        // scroll with the content; the outer box keeps size, paint and the anchor for the layers.
+        let moves = |k: &str| {
+          k.starts_with("overflow")
+            || k.starts_with("padding")
+            || matches!(k, "flex-direction" | "flex-wrap")
+            || k.ends_with("gap")
+            || matches!(k, "display" | "justify-content" | "align-items" | "align-content")
+        };
+        inner.styles.extend(el.styles.iter().filter(|(k, _)| moves(k)).cloned());
+        el.styles.retain(|(k, _)| !moves(k));
         inner.children = std::mem::take(&mut el.children);
         el.children.push(inner);
         el.children.extend(stuck);
@@ -840,8 +874,6 @@ impl<'a> Ctx<'a> {
       "footer"
     } else if has("sidebar") {
       "aside"
-    } else if has("main") {
-      "main"
     } else if has("hero") || has("section") || has("features") || has("pricing") || has("testimonials") || has("faq") {
       "section"
     } else {
@@ -894,6 +926,20 @@ impl<'a> Ctx<'a> {
           }
           if let Some((nav, overlay, url)) = self.action_of(n, i) {
             best = Some(rank);
+            let target = || {
+              i.destination
+                .as_ref()
+                .and_then(|d| self.doc.get(d))
+                .map(|d| d.name.clone())
+                .unwrap_or_default()
+            };
+            el.action_label = Some(match i.action {
+              Action::Navigate => format!("Go to {}", target()),
+              Action::Back => "Back".into(),
+              Action::OpenOverlay | Action::SwapOverlay => format!("Open {}", target()),
+              Action::CloseOverlay => "Close".into(),
+              _ => "Open link".into(),
+            });
             el.navigate = nav;
             el.overlay = overlay;
             el.url = url;
@@ -1021,7 +1067,13 @@ impl<'a> Ctx<'a> {
       el.s("width", "100%");
       el.s("max-width", px(n.width));
       if !hug_h {
-        el.s("min-height", px(n.height));
+        // A scrolling screen is as tall as its frame, so its content scrolls inside it.
+        let key = if n.overflow != crate::model::Overflow::None {
+          "height"
+        } else {
+          "min-height"
+        };
+        el.s(key, px(n.height));
       }
       return;
     }
@@ -1263,10 +1315,15 @@ impl<'a> Ctx<'a> {
         if n.stroke_weight > 0.0 {
           let style = if n.stroke_dash.is_empty() { "solid" } else { "dashed" };
           let c = color::css_with_opacity(color, *opacity);
-          match n.stroke_align {
-            StrokeAlign::Outside => el.s("outline", format!("{} {style} {c}", px(n.stroke_weight))),
-            _ => el.s("border", format!("{} {style} {c}", px(n.stroke_weight))),
-          }
+          // An outline takes no layout space (a border would grow hug sizes and shift absolute
+          // children), paints above the children like Figma's strokes and follows the radius.
+          el.s("outline", format!("{} {style} {c}", px(n.stroke_weight)));
+          let offset = match n.stroke_align {
+            StrokeAlign::Inside => -n.stroke_weight,
+            StrokeAlign::Center => -n.stroke_weight / 2.0,
+            StrokeAlign::Outside => 0.0,
+          };
+          el.s("outline-offset", px(offset));
         }
       }
       if n.kind == NodeType::Ellipse {
@@ -1496,6 +1553,66 @@ fn fix_nested(el: &mut El, inside: bool, acting: bool) {
   let acting = acting || has_action;
   for c in &mut el.children {
     fix_nested(c, inner, acting);
+  }
+  name_control(el, interactive, has_action);
+}
+
+/// Layer names the editor gives (`Frame 3`, `Image`): no help to a screen reader.
+fn is_default_name(name: &str) -> bool {
+  let name = name.trim();
+  let base = name.trim_end_matches(|c: char| c.is_ascii_digit()).trim_end();
+  name.is_empty()
+    || [
+      "Frame",
+      "Rectangle",
+      "Ellipse",
+      "Vector",
+      "Group",
+      "Line",
+      "Polygon",
+      "Star",
+      "Image",
+      "Instance",
+      "Component",
+    ]
+    .contains(&base)
+      && (base.len() == name.len() || name[base.len()..].starts_with(' '))
+}
+
+/// Whether the element has a name of its own to read: text, or an image with alt text.
+fn has_visible_text(el: &El) -> bool {
+  el.text.as_deref().is_some_and(|t| !t.trim().is_empty())
+    || el.spans.iter().any(|s| !s.text.trim().is_empty())
+    || el.text_prop.is_some()
+    // A component reference is assumed to show text of its own.
+    || el.component_ref.is_some()
+    || (el.tag == "img" && el.attrs.iter().any(|(k, v)| k == "alt" && !v.trim().is_empty()))
+    || el.children.iter().any(has_visible_text)
+}
+
+/// A button, link or focusable element with no text below it gets an `aria-label`.
+fn name_control(el: &mut El, interactive: bool, has_action: bool) {
+  let control = interactive || el.focusable;
+  let root_control = el.is_component_root && !el.holds_control;
+  if (!control && !root_control) || has_visible_text(el) || el.attrs.iter().any(|(k, _)| k == "aria-label") {
+    return;
+  }
+  let label = if el.is_component_root {
+    el.label.clone()
+  } else {
+    el.label.clone().or_else(|| has_action.then(|| el.action_label.clone()).flatten())
+  };
+  let Some(label) = label.filter(|l| !l.trim().is_empty()) else {
+    return;
+  };
+  if control {
+    el.attrs.push(("aria-label".into(), label));
+  } else {
+    // A component root is only a control while `onClick` is set.
+    el.expr_attrs.push((
+      "aria-label".into(),
+      format!("onClick ? {} : undefined", serde_json::to_string(&label).unwrap_or_default()),
+    ));
   }
 }
 
@@ -1930,6 +2047,21 @@ fn side_weights(n: &Node) -> Option<[f64; 4]> {
     NodeType::Rectangle | NodeType::Frame | NodeType::Component | NodeType::ComponentSet | NodeType::Instance
   );
   n.stroke_weights.filter(|w| boxy && w.iter().any(|v| *v > 0.0))
+}
+
+/// The border widths `side_strokes` gives a layer (top, right, bottom, left), when it has any.
+fn border_widths(n: &Node) -> Option<[f64; 4]> {
+  let w = side_weights(n)?;
+  n.strokes
+    .iter()
+    .find(|p| p.visible())
+    .filter(|p| matches!(p, Paint::Solid { .. }))?;
+  let k = match n.stroke_align {
+    StrokeAlign::Inside => 1.0,
+    StrokeAlign::Center => 0.5,
+    StrokeAlign::Outside => 0.0,
+  };
+  Some(w.map(|v| v * k))
 }
 
 /// Per-side strokes as borders (inside) or, outside the box, `box-shadow`s with offsets and no
@@ -2829,7 +2961,7 @@ fn readme_themes(themed: &[(String, Vec<String>)]) -> String {
     out.push_str(&format!("setMode({c:?}, {:?});\n", modes.last().cloned().unwrap_or_default()));
   }
   out.push_str(
-    "```\n\nA frame that sets a mode in the design keeps its `data-<collection>` attribute, so that screen stays in that mode.\n",
+    "```\n\nA frame that sets a mode in the design keeps its `data-<collection>` attribute, so that screen stays in that mode.\n\nNumber tokens are unitless, like Figma's, because one variable can feed both an opacity and a padding. Use them as lengths with `calc(var(--space-8) * 1px)`.\n",
   );
   out
 }
@@ -2896,6 +3028,12 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
     .iter()
     .filter_map(|(id, n)| doc.get(id).map(|f| format!("{n}: {}", fmt(f.width))))
     .collect();
+  let mut screen_aliases = BTreeMap::new();
+  for (id, key) in &screens {
+    if let Some(f) = doc.get(id).filter(|f| &f.name != key) {
+      screen_aliases.entry(f.name.clone()).or_insert_with(|| key.clone());
+    }
+  }
   files.push(ProjectFile {
     path: "src/App.tsx".into(),
     content: APP_TSX
@@ -2903,6 +3041,10 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
       .replace("__MAP__", &map)
       .replace("__WIDTHS__", &widths.join(", "))
       .replace("__PHONES__", &phones.join(", "))
+      .replace(
+        "__SCREEN_NAMES__",
+        &serde_json::to_string(&screen_aliases).unwrap_or_else(|_| "{}".into()),
+      )
       .replace("__KEYS__", &serde_json::to_string(&ctx.keys).unwrap_or_else(|_| "{}".into()))
       .replace("__DELAYS__", &serde_json::to_string(&ctx.delays).unwrap_or_else(|_| "{}".into()))
       .replace("__START__", &format!("{start:?}")),
@@ -2979,19 +3121,24 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   files.push(ProjectFile {
     path: "CLAUDE.md".into(),
     content: format!(
-      "# {title}\n\nThis project was generated from a Designotron design. `design.dtron.json` is the design source.\n\n- Screens live in `src/screens/`, one per top-level frame. Reusable components are in `src/components.tsx`.\n- Layout is generated from auto layout (flexbox) and absolute positioning; refactor toward responsive layouts where it makes sense.\n- Prototype links became `onNavigate(\"Screen\")` calls handled in `src/App.tsx`; overlays (`\"overlay:Screen\"`, `\"swap-overlay:Screen\"`, `\"close-overlay\"`) open on top of the current screen, and Escape closes the topmost.\n- If the Designotron bridge is running, its MCP server (`designotron`) can read the live design: use `get_document`, `get_node` and `get_screenshot` to check details.\n"
-    ),
-  });
-  files.push(ProjectFile {
-    path: "README.md".into(),
-    content: format!(
-      "# {title}\n\nGenerated with [Designotron](https://github.com/mikemich/designotron).\n\n```bash\nnpm install\nnpm run dev\n```\n{}{}{}",
-      readme_flows(doc, &ctx),
-      readme_limits(doc),
-      readme_themes(&themed)
+      "# {title}\n\nThis project was generated from a Designotron design. `design.dtron.json` is the design source.\n\n- Screens live in `src/screens/`, one per top-level frame. Reusable components are in `src/components.tsx`.\n- Layout is generated from auto layout (flexbox) and absolute positioning; refactor toward responsive layouts where it makes sense.\n- Prototype links became `onNavigate(\"Screen\")` calls handled in `src/App.tsx`; overlays (`\"overlay:Screen\"`, `\"swap-overlay:Screen\"`, `\"close-overlay\"`) open on top of the current screen, and Escape closes the topmost.\n- If the Designotron bridge is running, its MCP server (`designotron`) can read the live design: use `get_document`, `get_nodes` and `get_screenshot` to check details.\n"
     ),
   });
   let credits = credits_md(doc);
+  files.push(ProjectFile {
+    path: "README.md".into(),
+    content: format!(
+      "# {title}\n\nGenerated with [Designotron](https://github.com/mikemich/designotron).\n\n```bash\nnpm install\nnpm run dev\n```\n{}{}{}{}",
+      readme_flows(doc, &ctx),
+      readme_limits(doc),
+      readme_themes(&themed),
+      if credits.is_empty() {
+        ""
+      } else {
+        "\n## Credits\n\nStock photos in this design are credited in `CREDITS.md`. Keep it with the project.\n"
+      }
+    ),
+  });
   if !credits.is_empty() {
     files.push(ProjectFile {
       path: "CREDITS.md".into(),
@@ -4418,5 +4565,218 @@ mod r8_tests {
       .find(|f| f.path == path)
       .map(|f| f.content)
       .unwrap_or_default()
+  }
+}
+
+#[cfg(test)]
+mod r10_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::model::{AutoLayout, Interaction, Overflow, ScrollBehavior, Sizing};
+  use crate::text::HeuristicMeasurer;
+
+  fn base() -> Document {
+    let mut gen = IdGen::new(21);
+    new_document(&mut gen, "R10")
+  }
+
+  fn add(doc: &mut Document, kind: NodeType, id: &str, name: &str, parent: Option<&str>) {
+    let page = doc.pages[0].id.clone();
+    let n = crate::ops::default_node(kind, id.into(), name.into());
+    doc.insert(n, parent, &page, None);
+  }
+
+  fn project(doc: &Document, path: &str) -> String {
+    export_project(doc, &HeuristicMeasurer)
+      .into_iter()
+      .find(|f| f.path == path)
+      .map(|f| f.content)
+      .unwrap_or_default()
+  }
+
+  fn pad8() -> AutoLayout {
+    AutoLayout {
+      padding_top: 8.0,
+      padding_right: 8.0,
+      padding_bottom: 8.0,
+      padding_left: 8.0,
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn a_scrolling_auto_layout_screen_has_a_fixed_height_and_an_inner_scroller() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "feed", "Feed", None);
+    {
+      let f = doc.get_mut("feed").unwrap();
+      f.width = 390.0;
+      f.height = 874.0;
+      f.overflow = Overflow::Vertical;
+      f.layout = Some(AutoLayout {
+        gap: 12.0,
+        padding_top: 20.0,
+        ..Default::default()
+      });
+    }
+    for id in ["a", "b"] {
+      add(&mut doc, NodeType::Frame, id, id, Some("feed"));
+      let c = doc.get_mut(id).unwrap();
+      c.width = 390.0;
+      c.height = 900.0;
+    }
+    add(&mut doc, NodeType::Frame, "tab", "Tab bar", Some("feed"));
+    {
+      let t = doc.get_mut("tab").unwrap();
+      t.width = 390.0;
+      t.height = 80.0;
+      t.absolute_position = true;
+      t.scroll_behavior = ScrollBehavior::Fixed;
+    }
+    let src = export_react(&doc, "feed", &HeuristicMeasurer);
+    assert!(src.contains("h-[874px]") && !src.contains("min-h-[874px]"), "{src}");
+    let root = src.lines().find(|l| l.contains("h-[874px]")).unwrap_or_default();
+    assert!(
+      root.contains("relative") && !root.contains("overflow") && !root.contains("flex"),
+      "{src}"
+    );
+    let scroller = src.lines().find(|l| l.contains("overflow-y-auto")).expect("scroller");
+    assert!(
+      scroller.contains("flex-col") && scroller.contains("gap-y-[12px]") && scroller.contains("pt-[20px]"),
+      "{scroller}"
+    );
+    // The fixed layer follows the scroller's closing tag.
+    let end = src.find("</div>").expect("scroller end");
+    assert!(src.contains("h-[80px]"), "{src}");
+    assert!(
+      src[..end].find("h-[80px]").is_none() && src.find("h-[80px]").unwrap() > end,
+      "{src}"
+    );
+  }
+
+  #[test]
+  fn strokes_are_outlines_that_take_no_layout_space() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "f", "Card", None);
+    {
+      let f = doc.get_mut("f").unwrap();
+      f.layout = Some(pad8());
+      f.sizing_h = Sizing::Hug;
+      f.sizing_v = Sizing::Hug;
+      f.strokes = vec![Paint::solid("#112233")];
+      f.stroke_weight = 1.0;
+      f.stroke_align = StrokeAlign::Inside;
+    }
+    let src = export_react(&doc, "f", &HeuristicMeasurer);
+    assert!(!src.contains("border-solid") && !src.contains("[border:"), "{src}");
+    assert!(src.contains("outline-offset:-1px"), "{src}");
+    {
+      let f = doc.get_mut("f").unwrap();
+      f.stroke_align = StrokeAlign::Center;
+      f.stroke_weight = 4.0;
+    }
+    assert!(export_react(&doc, "f", &HeuristicMeasurer).contains("outline-offset:-2px"));
+    doc.get_mut("f").unwrap().stroke_align = StrokeAlign::Outside;
+    assert!(export_react(&doc, "f", &HeuristicMeasurer).contains("outline-offset:0"));
+  }
+
+  #[test]
+  fn per_side_borders_come_out_of_the_padding() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "f", "Card", None);
+    {
+      let f = doc.get_mut("f").unwrap();
+      f.layout = Some(pad8());
+      f.strokes = vec![Paint::solid("#112233")];
+      f.stroke_weight = 2.0;
+      f.stroke_weights = Some([2.0, 0.0, 0.0, 10.0]);
+      f.stroke_align = StrokeAlign::Inside;
+    }
+    let src = export_react(&doc, "f", &HeuristicMeasurer);
+    assert!(src.contains("border-t-[2px]"), "{src}");
+    assert!(src.contains("pt-[6px] pr-[8px] pb-[8px]") && !src.contains("pl-["), "{src}");
+  }
+
+  #[test]
+  fn controls_without_text_get_an_accessible_name() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "home", "Home", None);
+    add(&mut doc, NodeType::Frame, "detail", "Detail", None);
+    for (id, name) in [("e1", "Ellipse 4"), ("e2", "Filter")] {
+      add(&mut doc, NodeType::Ellipse, id, name, Some("home"));
+      let e = doc.get_mut(id).unwrap();
+      e.width = 24.0;
+      e.height = 24.0;
+      e.interactions.push(Interaction {
+        destination: Some("detail".into()),
+        ..Default::default()
+      });
+    }
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(src.contains("aria-label=\"Go to Detail\""), "{src}");
+    assert!(src.contains("aria-label=\"Filter\""), "{src}");
+  }
+
+  #[test]
+  fn default_names_are_recognised() {
+    for n in ["Frame", "Frame 12", "Rectangle 3", "Image", "Instance 2", " "] {
+      assert!(is_default_name(n), "{n}");
+    }
+    for n in ["Frame Home", "Filter", "Framework", "Star 3 big"] {
+      assert!(!is_default_name(n), "{n}");
+    }
+  }
+
+  #[test]
+  fn a_wrap_container_has_one_row_gap() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "f", "Chips", None);
+    doc.get_mut("f").unwrap().layout = Some(AutoLayout {
+      wrap: true,
+      gap: 8.0,
+      counter_gap: 8.0,
+      ..Default::default()
+    });
+    let src = export_react(&doc, "f", &HeuristicMeasurer);
+    assert_eq!(src.matches("gap-y-").count(), 1, "{src}");
+  }
+
+  #[test]
+  fn claude_md_screen_names_and_credits() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "m", "Marketing Dark", None);
+    let claude = project(&doc, "CLAUDE.md");
+    assert!(claude.contains("`get_nodes`") && !claude.contains("`get_node`"), "{claude}");
+    let app = project(&doc, "src/App.tsx");
+    assert!(app.contains("{\"Marketing Dark\":\"MarketingDark\"}"), "{app}");
+    assert!(!project(&doc, "README.md").contains("CREDITS.md"));
+    // A name that equals its key needs no alias.
+    let mut plain = base();
+    add(&mut plain, NodeType::Frame, "h", "Home", None);
+    assert!(project(&plain, "src/App.tsx").contains("screenNames: Record<string, string> = {};"));
+  }
+
+  #[test]
+  fn a_set_description_is_the_jsdoc_of_the_set_function() {
+    let mut doc = base();
+    let mut gen = IdGen::new(900);
+    let mut ids = vec![];
+    for (id, name) in [("ba", "Button/Primary"), ("bb", "Button/Secondary")] {
+      add(&mut doc, NodeType::Frame, id, name, None);
+      doc.get_mut(id).unwrap().layout = Some(AutoLayout::default());
+      let tid = format!("{id}_t");
+      add(&mut doc, NodeType::Text, &tid, "Label", Some(id));
+      doc.get_mut(&tid).unwrap().text.as_mut().unwrap().characters = "Go".into();
+      ids.push(crate::components::create_component(&mut doc, &[id.to_string()], &mut gen).unwrap());
+    }
+    let set = crate::components::combine_as_variants(&mut doc, &ids, &mut gen).unwrap();
+    doc
+      .get_mut(&set)
+      .unwrap()
+      .component
+      .get_or_insert_with(Default::default)
+      .description = "Primary action.".into();
+    let comps = project(&doc, "src/components.tsx");
+    assert!(comps.contains("/** Primary action. */\nexport function Button("), "{comps}");
   }
 }

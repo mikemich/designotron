@@ -538,7 +538,7 @@ fn css_value(doc: &Document, c: &Collection, v: &Variable, mode: &str) -> Option
 
 /// `:root` block for default modes and a `[data-<collection>="<mode>"]` block per other mode.
 pub fn tokens_css(doc: &Document) -> String {
-  let mut out = String::from("/* Design tokens generated from Designotron variables. */\n:root {\n");
+  let mut out = String::from("/* Design tokens generated from Designotron variables.\n   Number tokens are unitless, like Figma's: use calc(var(--space-8) * 1px) for lengths. */\n:root {\n");
   for c in &doc.variables {
     let Some(default) = c.modes.first() else { continue };
     for v in &c.variables {
