@@ -30,8 +30,9 @@ interface FollowState {
   dismissed: string[];
   /** This person's own spotlight (a timestamp; 0 when off). */
   spotlight: number;
-  /** The local cursor chat. `t` counts changes. */
-  chat: { open: boolean; text: string; t: number };
+  /** The local cursor chat: `text` is the draft in the input, `shown` the message everyone
+   *  sees (it outlives the draft after Enter, until `CHAT_MS`). `t` counts changes. */
+  chat: { open: boolean; text: string; shown: string; t: number };
 }
 
 export const useFollow = create<FollowState>(() => ({
@@ -40,7 +41,7 @@ export const useFollow = create<FollowState>(() => ({
   pending: null,
   dismissed: [],
   spotlight: 0,
-  chat: { open: false, text: "", t: 0 },
+  chat: { open: false, text: "", shown: "", t: 0 },
 }));
 
 /** True while following itself moves the view (so it isn't taken for the person moving it). */
@@ -69,7 +70,7 @@ setPresenceSource(() => {
     view: currentView(),
     following: leader ?? undefined,
     spotlight: spotlight || undefined,
-    chat: chat.t ? { text: chat.text, t: chat.t } : undefined,
+    chat: chat.t ? { text: chat.shown, t: chat.t } : undefined,
   };
 });
 
@@ -242,7 +243,7 @@ useCollab.subscribe((s, prev) => {
     // Sharing ended: nothing to follow or announce any more.
     clearPending();
     seenKey = "";
-    useFollow.setState({ leader: null, via: null, spotlight: 0, chat: { open: false, text: "", t: 0 } });
+    useFollow.setState({ leader: null, via: null, spotlight: 0, chat: { open: false, text: "", shown: "", t: 0 } });
   }
 });
 
@@ -287,9 +288,18 @@ export function openCursorChat() {
   armChatTimer();
 }
 
-/** The message changed (typing, or Enter starting a new one). */
+/** The draft changed (typing): what everyone sees follows it. */
 export function setChatText(text: string) {
-  useFollow.setState((s) => ({ chat: { open: true, text: text.slice(0, CHAT_MAX), t: s.chat.t + 1 } }));
+  const t = text.slice(0, CHAT_MAX);
+  useFollow.setState((s) => ({ chat: { open: true, text: t, shown: t, t: s.chat.t + 1 } }));
+  sendPresence(false);
+  armChatTimer();
+}
+
+/** Enter: the draft clears for the next message while the sent one stays up for everyone
+ *  for another `CHAT_MS`. */
+export function sendChatMessage() {
+  useFollow.setState((s) => ({ chat: { ...s.chat, open: true, text: "", t: s.chat.t + 1 } }));
   sendPresence(false);
   armChatTimer();
 }
@@ -299,8 +309,8 @@ export function closeCursorChat() {
   if (chatTimer) clearTimeout(chatTimer);
   chatTimer = null;
   const { chat } = useFollow.getState();
-  if (!chat.open && !chat.text) return;
-  useFollow.setState({ chat: { open: false, text: "", t: chat.t + 1 } });
+  if (!chat.open && !chat.text && !chat.shown) return;
+  useFollow.setState({ chat: { open: false, text: "", shown: "", t: chat.t + 1 } });
   sendPresence(true);
 }
 

@@ -146,6 +146,10 @@ pub struct TokenBucket {
 pub struct Rooms {
   rooms: Mutex<HashMap<String, Arc<Mutex<Room>>>>,
   next_id: AtomicU64,
+  /// Numbers temp files, so two writers never share one.
+  save_seq: AtomicU64,
+  /// Set at shutdown: edits are no longer applied (so none is acknowledged and then lost).
+  closing: std::sync::atomic::AtomicBool,
   limits: Limits,
   data_dir: Option<PathBuf>,
   /// Sum of every room's `bytes()`.
@@ -160,6 +164,11 @@ pub struct Rooms {
   /// Rooms whose owner stopped sharing (id → owner's name), oldest first, bounded.
   ended: std::sync::Mutex<(HashMap<String, String>, std::collections::VecDeque<String>)>,
 }
+
+/// Minimum time between saves of one room, and for rooms over `BIG_ROOM` bytes.
+const SAVE_EVERY: Duration = Duration::from_secs(1);
+const SAVE_EVERY_BIG: Duration = Duration::from_secs(5);
+const BIG_ROOM: usize = 2 << 20;
 
 /// How many ended rooms are remembered.
 const MAX_ENDED: usize = 10_000;
@@ -182,6 +191,8 @@ struct Room {
   asset_bytes: usize,
   /// `doc_bytes` when it was last measured, and when.
   measured: (usize, Option<Instant>),
+  /// When the file on disk was last written.
+  last_saved: Option<Instant>,
 }
 
 /// What a connection may do in a room.
@@ -499,6 +510,8 @@ impl Rooms {
     Arc::new(Rooms {
       rooms: Mutex::new(HashMap::new()),
       next_id: AtomicU64::new(0),
+      save_seq: AtomicU64::new(0),
+      closing: std::sync::atomic::AtomicBool::new(false),
       limits,
       data_dir,
       room_bytes: AtomicUsize::new(0),
@@ -562,24 +575,68 @@ impl Rooms {
     }
   }
 
-  /// Saves changed rooms, drops idle ones and unloads idle rooms while over the memory
-  /// budget. Call periodically.
-  pub async fn maintain(&self) {
+  /// Writes the changed rooms whose last save is old enough: at least `SAVE_EVERY` ago, or
+  /// `SAVE_EVERY_BIG` for rooms over `BIG_ROOM` bytes. Call about once a second.
+  pub async fn save_dirty(&self) {
+    self.save_rooms(false).await;
+  }
+
+  /// Stops applying edits (call first when shutting down; follow with `save_all`). The check
+  /// happens under each room's lock, as does saving, so whatever was applied is saved.
+  pub fn close(&self) {
+    self.closing.store(true, Ordering::SeqCst);
+  }
+
+  /// Writes every changed room now, whatever its size.
+  pub async fn save_all(&self) {
+    self.save_rooms(true).await;
+  }
+
+  async fn save_rooms(&self, force: bool) {
     let entries: Vec<(String, Arc<Mutex<Room>>)> = self.rooms.lock().await.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     for (id, room) in entries {
       let mut r = room.lock().await;
-      if r.dirty {
-        if let (Some(path), Some(doc)) = (self.file(&id), r.doc.as_ref()) {
-          let body = serde_json::to_vec(&Saved { doc, assets: &r.assets }).unwrap_or_default();
-          let doc_bytes = body.len().saturating_sub(r.asset_bytes);
-          let tmp = path.with_extension("json.tmp");
-          if tokio::fs::write(&tmp, body).await.is_ok() {
-            let _ = tokio::fs::rename(&tmp, &path).await;
-          }
-          self.measured(&mut r, doc_bytes);
-        }
-        r.dirty = false;
+      if !r.dirty {
+        continue;
       }
+      if !force {
+        let every = if r.doc_bytes + r.asset_bytes > BIG_ROOM {
+          SAVE_EVERY_BIG
+        } else {
+          SAVE_EVERY
+        };
+        if r.last_saved.is_some_and(|t| t.elapsed() < every) {
+          continue;
+        }
+      }
+      if let (Some(path), Some(doc)) = (self.file(&id), r.doc.as_ref()) {
+        let body = serde_json::to_vec(&Saved { doc, assets: &r.assets }).unwrap_or_default();
+        let doc_bytes = body.len().saturating_sub(r.asset_bytes);
+        let tmp = path.with_extension(format!("json.{}.tmp", self.save_seq.fetch_add(1, Ordering::Relaxed)));
+        let saved = match tokio::fs::write(&tmp, body).await {
+          Ok(()) => tokio::fs::rename(&tmp, &path).await,
+          Err(e) => Err(e),
+        };
+        if let Err(e) = saved {
+          // Stays dirty: the next tick tries again.
+          log::warn!("cannot save room {id}: {e}");
+          let _ = tokio::fs::remove_file(&tmp).await;
+          continue;
+        }
+        self.measured(&mut r, doc_bytes);
+      }
+      r.dirty = false;
+      r.last_saved = Some(Instant::now());
+    }
+  }
+
+  /// Saves changed rooms that are due (see `save_dirty`), drops idle ones and unloads idle
+  /// rooms while over the memory budget. Call periodically.
+  pub async fn maintain(&self) {
+    self.save_rooms(false).await;
+    let entries: Vec<(String, Arc<Mutex<Room>>)> = self.rooms.lock().await.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (_, room) in entries {
+      let mut r = room.lock().await;
       let (measured, _) = r.measured;
       if r.doc_bytes > measured + (1024 * 1024).max(measured / 4) {
         // Deltas mostly replace layers, so the estimate drifts upwards.
@@ -749,6 +806,9 @@ impl Rooms {
           out.send(PONG.to_string());
           Step::Go
         }
+        // Shutting down: not applied and not acknowledged, so the editor keeps the change
+        // and sends it again to the next relay.
+        "delta" if joined && self.closing.load(Ordering::SeqCst) => Step::Go,
         "delta" if joined => self.delta(&mut r, id, role, &m, size),
         "name" if joined => {
           let name = m.name.as_deref().unwrap_or("").trim().chars().take(40).collect::<String>();
@@ -1498,5 +1558,39 @@ mod tests {
     // The sender only gets its ack.
     let ack: Value = serde_json::from_str(&old_rx.try_recv().unwrap()).unwrap();
     assert_eq!(ack["type"], "ack");
+  }
+
+  /// `save_dirty` writes a changed room only when its last save is old enough: a second, or
+  /// five for a big room.
+  #[tokio::test]
+  async fn save_dirty_waits_by_room_size() {
+    let dir = std::env::temp_dir().join(format!("dt-rooms-save-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rooms = Rooms::new(Limits::default(), Some(dir.clone()));
+    let mk = |bytes: usize, saved_ago: u64| Room {
+      doc: Some(designotron_engine::doc::new_document(
+        &mut designotron_engine::doc::IdGen::new(1),
+        "t",
+      )),
+      dirty: true,
+      doc_bytes: bytes,
+      last_saved: Some(Instant::now() - Duration::from_secs(saved_ago)),
+      ..Room::default()
+    };
+    let cases = [
+      ("fresh-small", 1, 0, false),
+      ("old-small", 1, 2, true),
+      ("old-big", BIG_ROOM + 1, 2, false),
+      ("older-big", BIG_ROOM + 1, 6, true),
+    ];
+    for (id, bytes, ago, _) in cases {
+      rooms.rooms.lock().await.insert(id.into(), Arc::new(Mutex::new(mk(bytes, ago))));
+    }
+    rooms.save_dirty().await;
+    for (id, _, _, saved) in cases {
+      assert_eq!(dir.join(format!("{id}.json")).exists(), saved, "{id}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
   }
 }

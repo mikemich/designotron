@@ -854,4 +854,4 @@ export function sendPresence(now: boolean) {
 }
 
 // Automation handle (see store.ts).
-(globalThis as any).__dt = { ...(globalThis as any).__dt, collab: () => useCollab.getState() };
+(globalThis as any).__dt = { ...(globalThis as any).__dt, collab: () => useCollab.getState(), collabSet: (p: Partial<ReturnType<typeof useCollab.getState>>) => useCollab.setState(p) };

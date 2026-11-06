@@ -26,6 +26,7 @@ import { PaintHandles } from "./PaintHandles";
 import { CropMode } from "./CropMode";
 import { FollowFrame } from "./FollowFrame";
 import { CursorChat } from "./CursorChat";
+import { GuestBar } from "../panels/GuestBar";
 import { reportCursor } from "../collab";
 import { insertImageFile, openDtronFile, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu, insideInstance } from "./contextMenu";
@@ -1229,6 +1230,7 @@ export function Canvas() {
       <CommentLayer v={v} />
       <RemoteCursors v={v} />
       <CursorChat v={v} />
+      <GuestBar />
       <FollowFrame />
       {showRulers && <Rulers v={v} width={size.w} height={size.h} selection={selItems.union} />}
       {editingText && <TextEditor id={editingText} />}

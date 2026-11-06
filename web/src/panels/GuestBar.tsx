@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { create } from "zustand";
-import { Copy, Eye, Github, X } from "lucide-react";
+import { Copy, Github, X } from "lucide-react";
 import { leaveEndedRoom, remixShared, setMyName, useCollab } from "../collab";
 import { userName } from "../canvas/Comments";
 
@@ -79,13 +79,9 @@ export function GuestBar() {
     setAsking(false);
   };
   return (
-    <>
+    // Lives inside the canvas: presses on the bar or the notice must not reach its handlers.
+    <div className="guest-bar-root" onPointerDown={(e) => e.stopPropagation()} onContextMenu={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
     <div className="guest-bar">
-      {viewer && (
-        <span className="view-badge">
-          <Eye size={12} /> View only
-        </span>
-      )}
       <span className="live-dot" data-live={status === "live" && !ownerGone && !viewError} />
       <span>{message}</span>
       {asking && status === "live" && !ownerGone ? (
@@ -132,6 +128,6 @@ export function GuestBar() {
       </button>
     </div>
     <RelayNotice className="floating" />
-    </>
+    </div>
   );
 }

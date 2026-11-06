@@ -12,7 +12,6 @@ import { FigmaImportDialog } from "./panels/FigmaImportDialog";
 import { PluginWindow, PluginsDialog } from "./panels/PluginsDialog";
 import { stopPlugin, usePlugins } from "./plugins";
 import { joinShared, stopSharing, useCollab } from "./collab";
-import { GuestBar } from "./panels/GuestBar";
 import { ShortcutsDialog } from "./panels/ShortcutsDialog";
 import { ImportDialog } from "./panels/ImportDialog";
 import { PhoneNote } from "./panels/PhoneNote";
@@ -460,7 +459,6 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     const maybeThumbnail = () => {
       if (closed || thumbBusy || Date.now() - lastThumb < 15000) return;
       thumbBusy = true;
-      lastThumb = Date.now();
       const run = () => {
         if (closed) {
           thumbBusy = false;
@@ -468,14 +466,27 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         }
         thumbnail()
           .then(async (t) => {
-            if (t && !closed) await saveThumbnail(fileId, t);
+            // An empty file makes none: don't hold back the first real one.
+            if (t && !closed) {
+              await saveThumbnail(fileId, t);
+              lastThumb = Date.now();
+            }
           })
-          .catch(() => {})
+          .catch(() => (lastThumb = Date.now()))
           .finally(() => (thumbBusy = false));
       };
       if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 3000 });
       else setTimeout(run, 0);
     };
+
+    // A file opened without a preview (a template, an imported .dtron) gets one without waiting
+    // for the first edit.
+    const openThumb = setTimeout(() => {
+      getFileMeta(fileId).then((m) => {
+        // (Rendering one runs on the main thread: not for very big files.)
+        if (m && !m.thumbnail && Object.keys(getDoc().nodes).length <= 5000) maybeThumbnail();
+      }, () => {});
+    }, 2000);
 
     // 400 ms for ordinary files, rising to 2 s at 18k layers: serialising a big file costs
     // more than the typist notices, so wait for a longer pause. But never longer than
@@ -578,6 +589,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     return () => {
       off();
       offFolder();
+      clearTimeout(openThumb);
       cancelTimers();
       if (retry) clearTimeout(retry);
       window.removeEventListener("beforeunload", beforeUnload);
@@ -642,7 +654,6 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       {figmaOpen && <FigmaImportDialog />}
       {pluginsOpen && !readOnly && <PluginsDialog />}
       {shareOpen && <ShareDialog />}
-      <GuestBar />
       {gone && (
         <div className="stale-bar" role="alert">
           This file was deleted in another tab. Edits here are no longer saved.
