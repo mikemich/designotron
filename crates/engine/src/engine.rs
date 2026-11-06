@@ -416,6 +416,10 @@ pub enum Command {
   CreateComponent {
     ids: Vec<NodeId>,
   },
+  /// One main component per layer (Figma's "Create multiple components"), as one undo step.
+  CreateComponents {
+    ids: Vec<NodeId>,
+  },
   CombineVariants {
     ids: Vec<NodeId>,
   },
@@ -1661,6 +1665,7 @@ impl Engine {
       | Command::Ungroup { ids }
       | Command::FrameSelection { ids }
       | Command::CreateComponent { ids }
+      | Command::CreateComponents { ids }
       | Command::BooleanOp { ids, .. }
       | Command::Flatten { ids }
       | Command::OutlineStroke { ids }
@@ -2507,6 +2512,22 @@ impl Engine {
         let id = components::create_component(&mut self.doc, &ids, &mut self.gen).ok_or("select a frame, group or layers")?;
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
+      }
+      Command::CreateComponents { ids } => {
+        let mut made = Vec::new();
+        for id in &ids {
+          if self.doc.get(id).is_none() {
+            continue;
+          }
+          if let Some(c) = components::create_component(&mut self.doc, std::slice::from_ref(id), &mut self.gen) {
+            made.push(c);
+          }
+        }
+        if made.is_empty() {
+          return Err("select layers to turn into components".into());
+        }
+        self.selection = made.clone();
+        Ok(json!({ "ids": made }))
       }
       Command::CombineVariants { ids } => {
         let id = components::combine_as_variants(&mut self.doc, &ids, &mut self.gen).ok_or("select two or more components")?;

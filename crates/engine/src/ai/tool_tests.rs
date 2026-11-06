@@ -1501,6 +1501,146 @@ mod device {
   }
 }
 
+mod r9_p2 {
+  use super::*;
+
+  fn variable_err(kind: &str, value: Value) -> String {
+    let mut e = engine();
+    e.dispatch(ai(
+      "define_variables",
+      json!({ "collection": "C", "modes": ["Light", "Dark"], "variables": [{ "name": "V", "type": kind, "values": { "Dark": value } }] }),
+    ))
+    .unwrap_err()
+  }
+
+  #[test]
+  fn variable_values_must_fit_their_type() {
+    for (kind, bad) in [
+      ("number", json!("banana")),
+      ("number", json!(true)),
+      ("color", json!(12)),
+      ("color", json!("not-a-colour")),
+      ("boolean", json!("yes")),
+      ("string", json!(3)),
+    ] {
+      let err = variable_err(kind, bad.clone());
+      assert!(err.contains("V (Dark)"), "{kind} {bad}: {err}");
+    }
+    // Good values pass; a numeric string becomes a number; aliases are left to the alias check.
+    let mut e = engine();
+    e.dispatch(ai(
+      "define_variables",
+      json!({ "collection": "C", "variables": [
+        { "name": "N", "type": "number", "value": "16" },
+        { "name": "B", "type": "boolean", "value": false },
+        { "name": "S", "type": "string", "value": "hi" },
+        { "name": "K", "type": "color", "value": "#f00" }] }),
+    ))
+    .unwrap();
+    let c = &e.doc.variables[0];
+    let n = c.variables.iter().find(|v| v.name == "N").unwrap();
+    assert_eq!(n.values.values().next().unwrap(), &json!(16.0));
+  }
+
+  #[test]
+  fn a_rejected_variable_call_changes_nothing() {
+    let mut e = engine();
+    let _ = variable_err("number", json!("x"));
+    let r = e.dispatch(ai(
+      "define_variables",
+      json!({ "collection": "C", "variables": [{ "name": "Ok", "type": "number", "value": 1 }, { "name": "Bad", "type": "number", "value": "x" }] }),
+    ));
+    assert!(r.is_err());
+    assert!(e.doc.variables.is_empty());
+  }
+
+  #[test]
+  fn create_component_on_several_layers_makes_one_each() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "rectangle", "name": "A", "width": 20, "height": 20 },
+        { "type": "rectangle", "name": "B", "x": 40, "width": 20, "height": 20 },
+        { "type": "frame", "name": "C", "x": 80, "width": 20, "height": 20 }] }),
+    );
+    let ids = created(&r);
+    let before = e.doc.nodes.len();
+    let r = run(&mut e, "arrange", json!({ "action": "create_component", "ids": ids }));
+    assert_eq!(r["ids"].as_array().unwrap().len(), 3, "{r}");
+    let comps = e.doc.nodes.values().filter(|n| n.kind == crate::model::NodeType::Component).count();
+    assert_eq!(comps, 3);
+    // Two wrappers (the frame was already a frame): 3 + 2 new nodes.
+    assert_eq!(e.doc.nodes.len(), before + 2);
+    // One undo step.
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(
+      e.doc.nodes.values().filter(|n| n.kind == crate::model::NodeType::Component).count(),
+      0
+    );
+    assert_eq!(e.doc.nodes.len(), before);
+  }
+
+  #[test]
+  fn create_components_is_an_edit() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle" }, { "type": "rectangle" }] }),
+    );
+    let ids = created(&r);
+    e.dispatch(Command::SetReadOnly { on: true }).unwrap();
+    let err = e.dispatch(Command::CreateComponents { ids }).unwrap_err();
+    assert_eq!(err, crate::engine::READ_ONLY);
+  }
+
+  #[test]
+  fn moving_a_layer_into_itself_or_a_descendant_fails() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Outer", "width": 200, "height": 200, "children": [
+        { "type": "frame", "name": "Inner", "width": 50, "height": 50 }] }] }),
+    );
+    let outer = created(&r)[0].clone();
+    let inner = e.doc.get(&outer).unwrap().children[0].clone();
+    let err = e
+      .dispatch(ai("move_nodes", json!({ "ids": [outer], "parentId": outer })))
+      .unwrap_err();
+    assert!(err.contains(&outer) && err.contains("itself"), "{err}");
+    let err = e
+      .dispatch(ai("move_nodes", json!({ "ids": [outer], "parentId": inner })))
+      .unwrap_err();
+    assert!(err.contains(&outer) && err.contains("descendants"), "{err}");
+    assert_eq!(e.doc.get(&inner).unwrap().parent.as_deref(), Some(outer.as_str()));
+  }
+
+  #[test]
+  fn fix_issues_rejects_unknown_kinds_and_arrange_unknown_ids() {
+    let mut e = engine();
+    let err = e
+      .dispatch(ai("fix_issues", json!({ "kinds": ["lowContrast", "bogus"] })))
+      .unwrap_err();
+    assert!(err.contains("bogus") && err.contains("offGrid"), "{err}");
+    let err = e
+      .dispatch(ai("arrange", json!({ "action": "group", "ids": ["n_ghost"] })))
+      .unwrap_err();
+    assert!(err.contains("n_ghost"), "{err}");
+  }
+
+  #[test]
+  fn component_prop_errors_name_the_op() {
+    let mut e = engine();
+    let err = e
+      .dispatch(ai("set_component_props", json!({ "ops": [{ "nonsense": 1 }] })))
+      .unwrap_err();
+    assert!(err.starts_with("ops[0]"), "{err}");
+  }
+}
+
 fn engine() -> Engine {
   Engine::new(Box::new(HeuristicMeasurer), 7)
 }

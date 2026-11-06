@@ -116,7 +116,7 @@ impl WasmEngine {
 
   /// Executes a JSON command; returns the JSON result or throws the error message.
   pub fn dispatch(&mut self, cmd: &str) -> Result<String, JsValue> {
-    let cmd: Command = serde_json::from_str(cmd).map_err(|e| JsValue::from_str(&format!("bad command: {e}")))?;
+    let cmd: Command = serde_json::from_str(cmd).map_err(|e| JsValue::from_str(&parse_error("command", &e)))?;
     self.inner.dispatch(cmd).map(|v| v.to_string()).map_err(|e| JsValue::from_str(&e))
   }
 
@@ -216,5 +216,30 @@ impl WasmEngine {
   #[wasm_bindgen(js_name = persistAdopt)]
   pub fn persist_adopt(&mut self) {
     self.persist.adopt(&self.inner.doc);
+  }
+}
+
+/// A JSON parse failure as a message a person can act on: serde's recursion limit (128 levels)
+/// is about nesting depth, which `bad command: recursion limit exceeded` doesn't say.
+fn parse_error(what: &str, e: &serde_json::Error) -> String {
+  let msg = e.to_string();
+  if msg.contains("recursion limit") {
+    "layers are nested too deeply (about 60 levels max)".into()
+  } else {
+    format!("bad {what}: {msg}")
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn deep_nesting_has_a_clear_message() {
+    let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
+    let e = serde_json::from_str::<serde_json::Value>(&deep).unwrap_err();
+    assert_eq!(parse_error("command", &e), "layers are nested too deeply (about 60 levels max)");
+    let e = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+    assert!(parse_error("command", &e).starts_with("bad command: "));
   }
 }

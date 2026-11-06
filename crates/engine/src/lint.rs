@@ -14,6 +14,18 @@ const MIN_TEXT: f64 = 12.0;
 const MIN_TAP: f64 = 44.0;
 /// Spacing scale; odd pixel values usually mean a nudge went wrong.
 const GRID: f64 = 2.0;
+
+/// Every `Issue::kind` the linter reports (`fix_issues` checks its `kinds` against this).
+pub const KINDS: &[&str] = &[
+  "tinyText",
+  "lowContrast",
+  "clippedText",
+  "offGrid",
+  "smallTapTarget",
+  "defaultName",
+  "nearDuplicateColor",
+  "unlinkedStyle",
+];
 const DEFAULT_NAMES: &[&str] = &["Frame", "Rectangle", "Ellipse", "Group", "Vector", "Polygon", "Star", "Line"];
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -106,35 +118,45 @@ fn check_text(doc: &Document, n: &Node, page_bg: &str, m: &dyn TextMeasurer, out
     let large = t.font_size >= 24.0 || (t.font_size >= 18.66 && t.font_weight >= 700);
     let needed = if large { 3.0 } else { 4.5 };
     if ratio < needed {
-      let dark = Rgba {
-        r: 17,
-        g: 24,
-        b: 39,
-        a: 1.0,
-      };
-      let light = Rgba {
-        r: 255,
-        g: 255,
-        b: 255,
-        a: 1.0,
-      };
-      let better = if contrast(dark, bg) >= contrast(light, bg) { dark } else { light };
-      let fix = if contrast(better, bg) >= needed && better.hex6() != fg.hex6() {
-        let hex = better.hex6();
-        Some((
-          format!("Use {hex}"),
-          update(&n.id, json!({ "fills": [{ "type": "solid", "color": hex }] })),
-        ))
+      // The nearest shade of the text's own colour that passes (same hue, mixed toward black or
+      // white in 2% steps), so a brand grey becomes a darker grey, not a different colour.
+      // Plain black or white text has no hue to keep: it flips to the better of ink or white.
+      let extreme = |c: Rgba| (c.r, c.g, c.b) == (0, 0, 0) || (c.r, c.g, c.b) == (255, 255, 255);
+      let shade = if extreme(fg) {
+        let ink = Rgba {
+          r: 17,
+          g: 24,
+          b: 39,
+          a: 1.0,
+        };
+        let white = Rgba {
+          r: 255,
+          g: 255,
+          b: 255,
+          a: 1.0,
+        };
+        let better = if contrast(ink, bg) >= contrast(white, bg) { ink } else { white };
+        (contrast(better, bg) >= needed && better.hex6() != fg.hex6()).then_some(better)
       } else {
-        // The text colour is already the best choice: adjust the background instead.
-        bg_node.and_then(|bid| {
+        nearest_passing_shade(fg, bg, needed)
+      };
+      let fix = match shade {
+        Some(better) => {
+          let hex = better.hex6();
+          Some((
+            format!("Use {hex}"),
+            update(&n.id, json!({ "fills": [{ "type": "solid", "color": hex }] })),
+          ))
+        }
+        // No shade of the text colour works: adjust the background instead.
+        None => bg_node.and_then(|bid| {
           let adjusted = adjust_for_contrast(fg, bg, needed)?;
           let hex = adjusted.hex6();
           Some((
             format!("Background {hex}"),
             update(&bid, json!({ "fills": [{ "type": "solid", "color": hex }] })),
           ))
-        })
+        }),
       };
       out.push(issue(
         n,
@@ -161,16 +183,28 @@ fn check_text(doc: &Document, n: &Node, page_bg: &str, m: &dyn TextMeasurer, out
 
 fn check_spacing(n: &Node, out: &mut Vec<Issue>) {
   let Some(al) = n.layout.as_ref() else { return };
-  let vals = [al.gap, al.padding_top, al.padding_right, al.padding_bottom, al.padding_left];
-  if vals.iter().any(|v| (v % GRID).abs() > 0.01 && (GRID - v % GRID).abs() > 0.01) {
+  let vals = [
+    ("Gap", al.gap),
+    ("Top padding", al.padding_top),
+    ("Right padding", al.padding_right),
+    ("Bottom padding", al.padding_bottom),
+    ("Left padding", al.padding_left),
+  ];
+  let off: Vec<String> = vals
+    .iter()
+    .filter(|(_, v)| (v % GRID).abs() > 0.01 && (GRID - v % GRID).abs() > 0.01)
+    .map(|(l, v)| format!("{l} {}", crate::geom::fmt(*v)))
+    .collect();
+  if !off.is_empty() {
     let snap = |v: f64| (v / GRID).round() * GRID;
     out.push(issue(
       n,
       "offGrid",
       Severity::Info,
       format!(
-        "Spacing {} isn't on the {GRID}px grid.",
-        vals.iter().map(|v| crate::geom::fmt(*v)).collect::<Vec<_>>().join("/")
+        "{} {} on the {GRID}px grid.",
+        off.join(", "),
+        if off.len() == 1 { "isn't" } else { "aren't" }
       ),
       Some((
         "Snap to grid",
@@ -328,26 +362,36 @@ fn solid(paints: &[Paint]) -> Option<Rgba> {
   })
 }
 
+/// `c` mixed `k` of the way toward black or white.
+fn mix_toward(c: Rgba, white: bool, k: f64) -> Rgba {
+  let target = if white { 255.0 } else { 0.0 };
+  let mix = |v: u8| (v as f64 + (target - v as f64) * k).round() as u8;
+  Rgba {
+    r: mix(c.r),
+    g: mix(c.g),
+    b: mix(c.b),
+    a: 1.0,
+  }
+}
+
+/// The smallest change to `fg` (toward black or white, 2% steps) that reaches `needed` against `bg`.
+fn nearest_passing_shade(fg: Rgba, bg: Rgba, needed: f64) -> Option<Rgba> {
+  (1..=50).find_map(|step| {
+    let k = step as f64 * 0.02;
+    [false, true]
+      .into_iter()
+      .map(|white| mix_toward(fg, white, k))
+      .find(|c| contrast(*c, bg) >= needed && c.hex6() != fg.hex6())
+  })
+}
+
 /// Darkens (for light text) or lightens (for dark text) a background until it passes.
 fn adjust_for_contrast(fg: Rgba, bg: Rgba, needed: f64) -> Option<Rgba> {
-  let toward_black = luminance(fg) > luminance(bg);
-  for step in 1..=50 {
-    let k = step as f64 * 0.02;
-    let mix = |c: u8| {
-      let target = if toward_black { 0.0 } else { 255.0 };
-      (c as f64 + (target - c as f64) * k).round() as u8
-    };
-    let c = Rgba {
-      r: mix(bg.r),
-      g: mix(bg.g),
-      b: mix(bg.b),
-      a: 1.0,
-    };
-    if contrast(fg, c) >= needed {
-      return Some(c);
-    }
-  }
-  None
+  let toward_white = luminance(fg) <= luminance(bg);
+  (1..=50).find_map(|step| {
+    let c = mix_toward(bg, toward_white, step as f64 * 0.02);
+    (contrast(fg, c) >= needed).then_some(c)
+  })
 }
 
 /// The colour behind a node (and the layer that paints it, unless it is the page):
@@ -452,6 +496,58 @@ mod tests {
     let cmd: Command = serde_json::from_value(i.fix.clone().unwrap()).unwrap();
     e.dispatch(cmd).unwrap();
     assert!(!lint_page(&e.doc, &page, &HeuristicMeasurer).iter().any(|i| i.kind == "lowContrast"));
+  }
+
+  #[test]
+  fn grey_text_gets_the_nearest_passing_grey() {
+    let mut e = Engine::new(Box::new(HeuristicMeasurer), 7);
+    e.dispatch(Command::Ai {
+      tool: "create_nodes".into(),
+      input: json!({ "nodes": [{ "type": "frame", "name": "Card", "fill": "#FFFFFF",
+        "children": [{ "type": "text", "text": "Muted", "color": "#AAAAAA" }] }] }),
+    })
+    .unwrap();
+    let page = e.page.clone();
+    let issues = lint_page(&e.doc, &page, &HeuristicMeasurer);
+    let i = issues.iter().find(|i| i.kind == "lowContrast").expect("contrast issue");
+    let hex = i
+      .fix_label
+      .as_deref()
+      .unwrap()
+      .strip_prefix("Use ")
+      .expect("a text fix")
+      .to_string();
+    assert_ne!(hex.to_lowercase(), "#111827");
+    let c = crate::color::parse(&hex).unwrap();
+    let white = Rgba {
+      r: 255,
+      g: 255,
+      b: 255,
+      a: 1.0,
+    };
+    assert!(contrast(c, white) >= 4.5, "{hex}");
+    assert!(c.r == c.g && c.g == c.b, "still a grey: {hex}");
+    // Nearest: one step lighter fails.
+    let lighter = mix_toward(crate::color::parse("#AAAAAA").unwrap(), true, 0.0);
+    assert!(contrast(lighter, white) < 4.5);
+    let cmd: Command = serde_json::from_value(i.fix.clone().unwrap()).unwrap();
+    e.dispatch(cmd).unwrap();
+    assert!(!has(&lint_page(&e.doc, &page, &HeuristicMeasurer), "lowContrast"));
+  }
+
+  #[test]
+  fn off_grid_message_names_only_the_off_values() {
+    let mut e = Engine::new(Box::new(HeuristicMeasurer), 8);
+    e.dispatch(Command::Ai {
+      tool: "create_nodes".into(),
+      input: json!({ "nodes": [{ "type": "frame", "name": "Row", "layout": { "direction": "horizontal", "gap": 13, "padding": 16 },
+        "children": [{ "type": "rectangle", "width": 10, "height": 10 }] }] }),
+    })
+    .unwrap();
+    let page = e.page.clone();
+    let issues = lint_page(&e.doc, &page, &HeuristicMeasurer);
+    let i = issues.iter().find(|i| i.kind == "offGrid").expect("off-grid issue");
+    assert_eq!(i.message, "Gap 13 isn't on the 2px grid.");
   }
 
   #[test]

