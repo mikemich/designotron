@@ -37,9 +37,11 @@ export function PropertiesSection({ n }: { n: Node }) {
   const options = useMemo(() => componentOptions(doc), [docRev]);
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
   if (info.mode !== "main") return null;
+  // A set and its variants list their variant properties above; these are the other kind.
+  const inSet = n.type === "componentSet" || (!!n.parent && doc.nodes[n.parent]?.type === "componentSet");
   return (
     <Section
-      title={<span className="wf-purple-text">Properties</span>}
+      title={<span className="wf-purple-text">{inSet ? "Component properties" : "Properties"}</span>}
       actions={
         <IconButton title="Create component property" onClick={(e) => setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect())}>
           <DiamondPlus size={13} />
@@ -47,7 +49,11 @@ export function PropertiesSection({ n }: { n: Node }) {
       }
     >
       {info.props.length === 0 && (
-        <div className="muted small">No properties yet. Create one here, or from a layer's “Apply component property”.</div>
+        <div className="muted small">
+          {inSet
+            ? "Variant properties are above. Add Boolean, Text or Instance swap properties here, or from a layer's “Apply component property”."
+            : "No properties yet. Create one here, or from a layer's “Apply component property”."}
+        </div>
       )}
       {info.props.map((p) => (
         <MainPropRow key={p.id} owner={n.id} p={p} options={options} />
