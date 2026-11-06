@@ -507,6 +507,9 @@ pub fn apply(doc: &mut Document, gen: &mut IdGen, id: &str, device: Option<Devic
   for part in old_parts {
     doc.remove(&part);
   }
+  // Light/dark is the system UI's theme. The screen's own fill follows it only while the screen
+  // is empty: under real content it would turn the default black text invisible.
+  let empty = doc.get(id).is_some_and(|f| f.children.is_empty());
   let (Some(mut dev), Some(preset)) = (device, preset) else {
     let f = doc.get_mut(id).ok_or("no such layer")?;
     shift_padding(f, old_applied, [0.0; 4]);
@@ -540,9 +543,9 @@ pub fn apply(doc: &mut Document, gen: &mut IdGen, id: &str, device: Option<Devic
       f.corner_radius = 0.0;
     }
   }
-  // Light and dark: a frame still filled with the other theme's plain colour follows; a custom fill stays.
+  // Light and dark: an empty frame still filled with the other theme's plain colour follows; a custom fill stays.
   let was_dark = old_dev.as_ref().is_some_and(|d| d.theme == "dark");
-  if was_dark != (dev.theme == "dark") && f.fill_style.is_none() && !f.bindings.contains_key("fill") {
+  if empty && was_dark != (dev.theme == "dark") && f.fill_style.is_none() && !f.bindings.contains_key("fill") {
     let (from, to) = if dev.theme == "dark" {
       ("#FFFFFF", "#000000")
     } else {
@@ -1653,6 +1656,29 @@ mod tests {
     })
     .unwrap();
     assert_eq!(fill(&e, &g).as_deref(), Some("#000000"));
+  }
+
+  #[test]
+  fn a_frame_with_content_keeps_its_fill_on_a_theme_switch() {
+    let mut e = engine();
+    let f = frame_id(&mut e);
+    set(&mut e, &f, "iphone-17", true);
+    let r = e
+      .dispatch(Command::CreateText {
+        x: 20.0,
+        y: 120.0,
+        characters: "Your cart".into(),
+        parent: Some(f.clone()),
+      })
+      .unwrap();
+    let t = r["id"].as_str().unwrap().to_string();
+    let black = e.doc.get(&t).unwrap().fills.clone();
+    assert!(matches!(black.as_slice(), [Paint::Solid { color, .. }] if color.eq_ignore_ascii_case("#000000")));
+    set_theme(&mut e, &f, "dark");
+    assert_eq!(fill(&e, &f).as_deref(), Some("#FFFFFF"), "black text stays readable");
+    assert_eq!(e.doc.get(&f).unwrap().device.as_ref().unwrap().theme, "dark");
+    // The system UI still follows the theme.
+    assert!(find_named(&e, &f, "Status bar").is_some());
   }
 
   #[test]

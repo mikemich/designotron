@@ -1478,3 +1478,55 @@ mod review {
     }
   }
 }
+
+#[test]
+fn the_first_layer_bound_to_a_text_property_sets_its_default() {
+  let mut k = kit();
+  k.e
+    .dispatch(Command::ComponentProps {
+      edit: PropsOp::Add {
+        component: k.default.clone(),
+        name: "Label".into(),
+        kind: PropKind::Text,
+        default: Some(json!("Text")),
+        bind: None,
+      },
+    })
+    .unwrap();
+  let props = |k: &Kit| k.e.doc.get(&k.set).unwrap().component.as_ref().unwrap().props.clone();
+  let pid = props(&k)[0].id.clone();
+  assert_eq!(props(&k)[0].default, json!("Text"));
+  let label = named(&k.e, &k.default, "Label");
+  k.e
+    .dispatch(Command::ComponentProps {
+      edit: PropsOp::Bind {
+        node: label,
+        field: PropField::Characters,
+        prop: Some(pid.clone()),
+      },
+    })
+    .unwrap();
+  assert_eq!(
+    props(&k)[0].default,
+    json!("Buy"),
+    "the stored default follows the first bound layer"
+  );
+  // A second layer joining later leaves it alone.
+  let hover = named(&k.e, &k.hover, "Label");
+  k.e
+    .dispatch(Command::SetText {
+      id: hover.clone(),
+      characters: "Other".into(),
+    })
+    .unwrap();
+  k.e
+    .dispatch(Command::ComponentProps {
+      edit: PropsOp::Bind {
+        node: hover,
+        field: PropField::Characters,
+        prop: Some(pid),
+      },
+    })
+    .unwrap();
+  assert_eq!(props(&k)[0].default, json!("Buy"));
+}

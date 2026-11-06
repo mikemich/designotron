@@ -14,8 +14,8 @@ use crate::geom::{Mat, Point, Rect};
 use crate::interact::{self, Handle};
 use crate::layout;
 use crate::model::{
-  AutoLayout, ColorStyle, DeviceFrame, Document, Effect, EffectStyle, GridStyle, Interaction, LayoutDirection, LayoutGrid, Node, NodeId,
-  NodeType, Page, Paint, RulerGuide, Sizing, SubPath, TextStyle, VectorData, VectorPoint,
+  AutoLayout, Axis, ColorStyle, DeviceFrame, Document, Effect, EffectStyle, GridStyle, Interaction, LayoutDirection, LayoutGrid, Node,
+  NodeId, NodeType, Page, Paint, RulerGuide, Sizing, SubPath, TextStyle, VectorData, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render::{self, Mode, RenderOptions};
@@ -329,6 +329,9 @@ pub enum Command {
     snap: bool,
     #[serde(default = "one")]
     zoom: f64,
+    /// Shift held: the move stays on this axis, and snapping only runs along it.
+    #[serde(default)]
+    axis: Option<Axis>,
   },
   Nudge {
     ids: Vec<NodeId>,
@@ -1436,6 +1439,21 @@ impl Engine {
       if changed.is_empty() {
         break;
       }
+      // Instances copy their main's size, so the mains settle (text re-measured, hug applied)
+      // before any sync, not after: otherwise instances land one edit behind.
+      let mut roots: Vec<NodeId> = Vec::new();
+      for c in &changed {
+        let root = self.doc.path(c).into_iter().next();
+        if let Some(r) = root.filter(|r| !roots.contains(r)) {
+          roots.push(r);
+        }
+      }
+      for r in &roots {
+        layout::layout_node(&mut self.doc, r, self.measurer.as_ref());
+      }
+      for c in &changed {
+        self.fingerprints.insert(c.clone(), components::fingerprint(&self.doc, c));
+      }
       let instances: Vec<NodeId> = self
         .doc
         .nodes
@@ -2167,7 +2185,14 @@ impl Engine {
         self.selection = created.clone();
         Ok(json!({ "created": created }))
       }
-      Command::Translate { ids, dx, dy, snap, zoom } => self.translate(&ids, dx, dy, snap, zoom),
+      Command::Translate {
+        ids,
+        dx,
+        dy,
+        snap,
+        zoom,
+        axis,
+      } => self.translate(&ids, dx, dy, snap, zoom, axis),
       Command::Nudge { ids, dx, dy } => {
         ops::move_by(&mut self.doc, &ids, dx, dy);
         Ok(json!({}))
@@ -2416,6 +2441,14 @@ impl Engine {
           id
         };
         let horizontal = self.infer_direction(&target);
+        // Hugging nothing collapses the frame to its padding: an empty frame keeps its size.
+        let in_flow = self
+          .doc
+          .get(&target)
+          .map(|n| n.children.clone())
+          .unwrap_or_default()
+          .iter()
+          .any(|c| self.doc.get(c).is_some_and(|c| c.visible && !c.absolute_position));
         let n = self.doc.get_mut(&target).ok_or("missing")?;
         n.layout = Some(AutoLayout {
           direction: if horizontal {
@@ -2425,8 +2458,10 @@ impl Engine {
           },
           ..Default::default()
         });
-        n.sizing_h = Sizing::Hug;
-        n.sizing_v = Sizing::Hug;
+        if in_flow {
+          n.sizing_h = Sizing::Hug;
+          n.sizing_v = Sizing::Hug;
+        }
         // A screen keeps its device size, takes the safe area as padding and its chrome leaves the flow.
         devices::refresh(&mut self.doc, &mut self.gen, &target);
         self.selection = vec![target.clone()];
@@ -2881,7 +2916,12 @@ impl Engine {
     spread_x > spread_y
   }
 
-  fn translate(&mut self, ids: &[NodeId], dx: f64, dy: f64, snap: bool, zoom: f64) -> Result<Value, String> {
+  fn translate(&mut self, ids: &[NodeId], dx: f64, dy: f64, snap: bool, zoom: f64, axis: Option<Axis>) -> Result<Value, String> {
+    let (dx, dy) = match axis {
+      Some(Axis::X) => (dx, 0.0),
+      Some(Axis::Y) => (0.0, dy),
+      None => (dx, dy),
+    };
     let ids = ops::top_most(&self.doc, ids);
     // Children flowing in auto layout reorder instead of moving freely.
     let (flow, free): (Vec<NodeId>, Vec<NodeId>) = ids.iter().cloned().partition(|id| self.in_auto_layout_flow(id));
@@ -2893,7 +2933,7 @@ impl Engine {
     let mut gaps = Vec::new();
     let (mut fdx, mut fdy) = (dx, dy);
     if snap && !free.is_empty() {
-      let s = interact::snap_move(&self.doc, &self.page, &free, dx, dy, zoom);
+      let s = interact::snap_move_on(&self.doc, &self.page, &free, dx, dy, zoom, axis);
       fdx = s.dx;
       fdy = s.dy;
       guides = s.guides;
@@ -4013,6 +4053,7 @@ mod tests {
       dy: 0.0,
       snap: false,
       zoom: 1.0,
+      axis: None,
     })
     .unwrap();
     assert!(e.doc_rev > mid);
@@ -4043,6 +4084,7 @@ mod tests {
       dy: 0.0,
       snap: false,
       zoom: 1.0,
+      axis: None,
     })
     .unwrap();
     let list = ai(&mut e, "get_comments", json!({}));
@@ -4277,6 +4319,7 @@ mod tests {
         dy: 0.0,
         snap: true,
         zoom: 1.0,
+        axis: None,
       })
       .unwrap();
     assert_eq!(e.doc.get(&id).unwrap().x, 1054.0, "{r}");
@@ -4303,6 +4346,7 @@ mod tests {
         dy: 0.0,
         snap: true,
         zoom: 1.0,
+        axis: None,
       })
       .unwrap();
     assert_eq!(e.doc.get(&b).unwrap().x, -90.0, "{r}");
@@ -4430,6 +4474,7 @@ mod tests {
       dy: 0.0,
       snap: true,
       zoom: 1.0,
+      axis: None,
     })
     .unwrap();
     assert_eq!(e.doc.abs_bounds(&child).x, 275.0);
@@ -4557,6 +4602,7 @@ mod tests {
         dy: 0.0,
         snap: false,
         zoom: 1.0,
+        axis: None,
       })
       .unwrap();
     }
@@ -4972,6 +5018,7 @@ mod tests {
         dy: 0.0,
         snap: false,
         zoom: 1.0,
+        axis: None,
       })
       .unwrap();
     }
@@ -5454,6 +5501,145 @@ mod tests {
       .contains("javascript"));
   }
 
+  /// A hugging main "Card" holding one text, and an instance of it.
+  fn hug_main(e: &mut Engine) -> (String, String, String) {
+    let text = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "Hi".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let frame = id_of(&e.dispatch(Command::AddAutoLayout { ids: vec![text.clone()] }).unwrap());
+    let main = id_of(&e.dispatch(Command::CreateComponent { ids: vec![frame] }).unwrap());
+    let inst = id_of(
+      &e.dispatch(Command::CreateInstance {
+        component_id: main.clone(),
+        x: 400.0,
+        y: 0.0,
+        parent: None,
+        anchor: None,
+        into_components: false,
+      })
+      .unwrap(),
+    );
+    (main, inst, text)
+  }
+
+  #[test]
+  fn an_instance_of_a_hugging_main_hugs_and_follows_the_main_in_the_same_edit() {
+    let mut e = engine();
+    let (main, inst, text) = hug_main(&mut e);
+    let i = e.doc.get(&inst).unwrap();
+    assert_eq!((i.sizing_h, i.sizing_v), (Sizing::Hug, Sizing::Hug));
+    // A second instance, set to fixed sizing, copies the main's size all the same.
+    let fixed = id_of(
+      &e.dispatch(Command::CreateInstance {
+        component_id: main.clone(),
+        x: 400.0,
+        y: 200.0,
+        parent: None,
+        anchor: None,
+        into_components: false,
+      })
+      .unwrap(),
+    );
+    update_ids(&mut e, vec![fixed.clone()], json!({ "sizingH": "fixed" }));
+    update_ids(
+      &mut e,
+      vec![text],
+      json!({ "text": { "characters": "A much longer label than before" } }),
+    );
+    let w = e.doc.get(&main).unwrap().width;
+    assert!(w > 100.0, "main hugged its new text: {w}");
+    assert_eq!(e.doc.get(&inst).unwrap().width, w, "hug instance is not one edit behind");
+    assert_eq!(e.doc.get(&fixed).unwrap().width, w, "fixed instance is not one edit behind");
+  }
+
+  #[test]
+  fn an_instance_of_a_variant_is_named_after_its_set() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 20.0, None);
+    let b = rect(&mut e, 100.0, 0.0, 50.0, 20.0, None);
+    let a = id_of(&e.dispatch(Command::CreateComponent { ids: vec![a] }).unwrap());
+    let b = id_of(&e.dispatch(Command::CreateComponent { ids: vec![b] }).unwrap());
+    update_ids(&mut e, vec![a.clone()], json!({ "name": "Style=Primary" }));
+    update_ids(&mut e, vec![b.clone()], json!({ "name": "Style=Ghost" }));
+    let set = id_of(&e.dispatch(Command::CombineVariants { ids: vec![a.clone(), b] }).unwrap());
+    update_ids(&mut e, vec![set.clone()], json!({ "name": "Button" }));
+    let inst = id_of(
+      &e.dispatch(Command::CreateInstance {
+        component_id: a,
+        x: 400.0,
+        y: 0.0,
+        parent: None,
+        anchor: None,
+        into_components: false,
+      })
+      .unwrap(),
+    );
+    assert_eq!(e.doc.get(&inst).unwrap().name, "Button");
+  }
+
+  #[test]
+  fn add_auto_layout_on_an_empty_frame_keeps_its_size() {
+    let mut e = engine();
+    let f = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 0.0,
+        y: 0.0,
+        width: 320.0,
+        height: 200.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::AddAutoLayout { ids: vec![f.clone()] }).unwrap();
+    let n = e.doc.get(&f).unwrap();
+    assert!(n.layout.is_some());
+    assert_eq!((n.width, n.height), (320.0, 200.0));
+    assert_eq!((n.sizing_h, n.sizing_v), (Sizing::Fixed, Sizing::Fixed));
+  }
+
+  #[test]
+  fn an_axis_locked_translate_keeps_the_locked_delta_at_zero_under_snapping() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    // Another layer whose top edge sits 3 px below A's: a free move would snap to it.
+    rect(&mut e, 200.0, 3.0, 50.0, 50.0, None);
+    let r = e
+      .dispatch(Command::Translate {
+        ids: vec![a.clone()],
+        dx: 120.0,
+        dy: 0.0,
+        snap: true,
+        zoom: 1.0,
+        axis: Some(Axis::X),
+      })
+      .unwrap();
+    assert_eq!(r["dy"], json!(0.0), "{r}");
+    assert_eq!(e.doc.get(&a).unwrap().y, 0.0);
+    assert_eq!(e.doc.get(&a).unwrap().x, 120.0);
+    // The same move without the lock snaps to the neighbour's top edge.
+    let r = e
+      .dispatch(Command::Translate {
+        ids: vec![a.clone()],
+        dx: 120.0,
+        dy: 0.0,
+        snap: true,
+        zoom: 1.0,
+        axis: None,
+      })
+      .unwrap();
+    assert_eq!(r["dy"], json!(3.0), "{r}");
+    // `axis` is optional in the wire format.
+    let c: Command = serde_json::from_value(json!({ "op": "translate", "ids": [a], "dx": 1.0, "dy": 2.0 })).unwrap();
+    assert!(matches!(c, Command::Translate { axis: None, .. }));
+  }
+
   #[test]
   fn truncation_renders_an_ellipsis() {
     let mut e = engine();
@@ -5526,6 +5712,7 @@ mod tests {
       dy: 0.0,
       snap: true,
       zoom: 1.0,
+      axis: None,
     })
     .unwrap();
     e.dispatch(Command::EndGesture).unwrap();
@@ -5564,6 +5751,7 @@ mod tests {
         dy,
         snap: false,
         zoom: 1.0,
+        axis: None,
       })
       .unwrap();
       e.dispatch(Command::DropInto {
