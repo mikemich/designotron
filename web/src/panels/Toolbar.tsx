@@ -37,7 +37,7 @@ import {
   zoomToSelection,
 } from "../store";
 import type { Tool } from "../types";
-import { ALT, Menu, MOD, SHIFT, type MenuItem } from "../ui/controls";
+import { Menu, MOD, SHIFT, type MenuItem, ALT_MOD, SHIFT_MOD } from "../ui/controls";
 import { runPlugin, usePlugins } from "../plugins";
 import { myColor, useCollab } from "../collab";
 import { startSpotlight, stopSpotlight, toggleFollow, useFollow } from "../follow";
@@ -110,22 +110,23 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     { sep: true },
     { heading: "File" },
     { label: "Open .dtron file…", onClick: A.openDtron },
-    { label: "Save as .dtron", kbd: `${MOD}S`, onClick: A.saveDtron },
+    { label: "Save as .dtron", kbd: `${SHIFT_MOD}S`, onClick: A.saveDtron },
+    { label: "Save locally", kbd: `${MOD}S`, onClick: () => void A.saveLocally() },
     {
       label: "Import from Figma…",
       onClick: () => useStore.setState({ figmaOpen: true }),
     },
     { label: "Import website or HTML…", onClick: () => useImport.setState({ open: true }) },
-    { label: "Place image…", kbd: `${SHIFT}${MOD}K`, onClick: A.placeImage },
+    { label: "Place image…", kbd: `${SHIFT_MOD}K`, onClick: A.placeImage },
     { label: "Export React project (.zip)", onClick: A.exportProject },
     { sep: true },
     { heading: "Edit" },
     { label: "Undo", kbd: `${MOD}Z`, onClick: A.undo },
-    { label: "Redo", kbd: `${SHIFT}${MOD}Z`, onClick: A.redo },
-    { label: "Paste over selection", kbd: `${SHIFT}${MOD}V`, onClick: () => void pasteOverSelection() },
+    { label: "Redo", kbd: `${SHIFT_MOD}Z`, onClick: A.redo },
+    { label: "Paste over selection", kbd: `${SHIFT_MOD}V`, onClick: () => void pasteOverSelection() },
     { label: "Select all", kbd: `${MOD}A`, onClick: A.selectAll },
-    { label: "Select matching layers", kbd: `${ALT}${MOD}A`, onClick: A.selectMatching },
-    { label: "Invert selection", kbd: `${SHIFT}${MOD}A`, onClick: A.invertSelection },
+    { label: "Select matching layers", kbd: `${ALT_MOD}A`, onClick: A.selectMatching },
+    { label: "Invert selection", kbd: `${SHIFT_MOD}A`, onClick: A.invertSelection },
     ...SAME_PROPS.map(([prop, label]) => ({ label, onClick: () => A.selectSame(prop) })),
     { label: "Select all instances", onClick: () => A.selectInstances(false) },
     { label: "Duplicate", kbd: `${MOD}D`, onClick: A.duplicate },
@@ -133,21 +134,21 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     { sep: true },
     { heading: "Object" },
     { label: "Group", kbd: `${MOD}G`, onClick: A.group },
-    { label: "Ungroup", kbd: `${SHIFT}${MOD}G`, onClick: A.ungroup },
+    { label: "Ungroup", kbd: `${SHIFT_MOD}G`, onClick: A.ungroup },
     {
       label: "Frame selection",
-      kbd: `${ALT}${MOD}G`,
+      kbd: `${ALT_MOD}G`,
       onClick: A.frameSelection,
     },
     { label: "Add auto layout", kbd: `${SHIFT}A`, onClick: A.addAutoLayout },
     {
       label: "Create component",
-      kbd: `${ALT}${MOD}K`,
+      kbd: `${ALT_MOD}K`,
       onClick: A.createComponent,
     },
     {
       label: "Detach instance",
-      kbd: `${ALT}${MOD}B`,
+      kbd: `${ALT_MOD}B`,
       onClick: A.detachInstance,
     },
     { sep: true },
@@ -166,7 +167,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     },
     {
       label: `${useStore.getState().showGrids ? "Hide" : "Show"} layout grids`,
-      kbd: `${SHIFT}${MOD}4`,
+      kbd: `${SHIFT_MOD}4`,
       onClick: () => toggleView("showGrids"),
     },
     {
@@ -250,7 +251,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
                 { sep: true },
                 {
                   label: "Image…",
-                  kbd: `${SHIFT}${MOD}K`,
+                  kbd: `${SHIFT_MOD}K`,
                   onClick: A.placeImage,
                 },
               ])
@@ -263,7 +264,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           {toolBtn("text", "Text (T)", <Type size={16} />)}
           <button
             className="tbtn"
-            title={`Place image (${SHIFT}${MOD}K)`}
+            title={`Place image (${SHIFT_MOD}K)`}
             onClick={A.placeImage}
           >
             <ImageIcon size={16} />
@@ -300,7 +301,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
                 { label: "Flatten", kbd: `${MOD}E`, onClick: A.flatten },
                 {
                   label: "Use as mask",
-                  kbd: `${ALT}${MOD}M`,
+                  kbd: `${ALT_MOD}M`,
                   onClick: A.useAsMask,
                 },
               ])

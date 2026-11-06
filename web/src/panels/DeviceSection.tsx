@@ -33,9 +33,12 @@ export function DeviceSection({ node }: { node: Node }) {
       </div>
       {device && preset && (
         <>
-          <div className="row">
+          <div className="row" title="Status bar and home indicator for a light or dark screen">
+            <span className="muted small" style={{ minWidth: 64 }}>
+              System UI
+            </span>
             <Seg
-              ariaLabel="Theme"
+              ariaLabel="System UI"
               value={device.theme}
               options={[
                 { value: "light", label: "Light" },

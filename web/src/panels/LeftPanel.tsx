@@ -27,7 +27,7 @@ import {
 } from "lucide-react";
 import { dispatch, useDoc, useStore, zoomToSelection } from "../store";
 import type { Doc, Node } from "../types";
-import { IconButton, Menu, type MenuItem } from "../ui/controls";
+import { ALT_MOD, IconButton, Menu, type MenuItem } from "../ui/controls";
 import * as A from "../actions";
 import { viewportCenter } from "../actions";
 import { ColorStylesSection, EffectStylesSection, GridStylesSection, TextStylesSection } from "./StyleControls";
@@ -388,6 +388,14 @@ function Layers() {
   const pendingFocus = useRef<string | null>(null);
   /** Where Shift+Arrow ranges start. */
   const anchor = useRef<string | null>(null);
+
+  // F2 on the canvas: start renaming once the row is revealed and drawn.
+  const renameRequest = useStore((s) => s.renameRequest);
+  useEffect(() => {
+    if (!renameRequest) return;
+    useStore.setState({ renameRequest: null });
+    setTimeout(() => requestAnimationFrame(() => doc.nodes[renameRequest] && setRenaming(renameRequest)), 0);
+  }, [renameRequest]);
 
   // Reveal selected layers.
   useEffect(() => {
@@ -882,7 +890,7 @@ function Assets() {
         <div className="section-head">
           <span>Components</span>
         </div>
-        {groups.length === 0 && <div className="muted small">Select layers and press ⌥⌘K to create a component.</div>}
+        {groups.length === 0 && <div className="muted small">Select layers and press {ALT_MOD}K to create a component.</div>}
         <FolderTree scope="components" items={entries} name={entryName} forceOpen={!!q.trim()} row={(e, label) => entryRow(e, label)} />
       </div>
       {!viewer && (

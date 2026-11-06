@@ -633,6 +633,18 @@ fn bind(doc: &mut Document, node: &str, field: PropField, prop: Option<&str>) ->
         ));
       }
       check_bindable(doc, node, &owner, field)?;
+      // The first layer bound to a text or boolean property is what the property starts as.
+      if field != PropField::Swap && bound_in_mains(doc, &owner, Some(field), prop).is_empty() {
+        if let Some(v) = doc.get(node).and_then(|n| layer_value(n, field)) {
+          if let Some(d) = doc
+            .get_mut(&owner)
+            .and_then(|n| n.component.as_mut())
+            .and_then(|c| c.props.iter_mut().find(|p| p.id == prop))
+          {
+            d.default = v;
+          }
+        }
+      }
     }
     None if doc.get(node).is_none() => return Err(format!("no layer {node}")),
     None => {}

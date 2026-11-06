@@ -12,10 +12,13 @@ import {
   query,
   selection,
   setTool,
+  saveHook,
   screenToPage,
   toast,
   useStore,
 } from "./store";
+import { useCollab } from "./collab";
+import { ALT_MOD } from "./ui/controls";
 import { openTextGesture } from "./canvas/TextEditor";
 import type { DeviceFrame, Rect, Tool } from "./types";
 import { hasDeviceUi, type DevicePreset } from "./panels/presetList";
@@ -222,7 +225,7 @@ export function copyProperties() {
 export function pasteProperties() {
   const p = copiedProps;
   if (!p) {
-    toast("Copy properties first (select a layer, then ⌥⌘C)");
+    toast(`Copy properties first (select a layer, then ${ALT_MOD}C)`);
     return;
   }
   const doc = getDoc();
@@ -374,6 +377,23 @@ export async function placeImage() {
   setTool("move");
 }
 
+/** F2 on the canvas: renames the first selected layer in the Layers tree. */
+export function renameSelection() {
+  const id = selection().find((s) => getDoc().nodes[s]);
+  if (!id || useStore.getState().es.readOnly || useCollab.getState().viewer) return;
+  useStore.setState({ leftTab: "layers", renameRequest: id });
+}
+
+/** Ctrl+S: writes the open file to this browser now (autosave does it a moment after every edit). */
+export async function saveLocally() {
+  // The flush swallows its own errors (failed write, private mode, a stale tab), so ask what is left.
+  await saveHook.flush?.().catch(() => {});
+  const s = useStore.getState();
+  if (!saveHook.flush || s.dirty || s.saveFailed) toast("Couldn't save in this browser (see the bar at the top)", "error");
+  else toast("Saved locally");
+}
+
+/** Downloads the file as .dtron (Ctrl+Shift+S, File menu). */
 export function saveDtron() {
   const doc = getDoc();
   download(`${doc.name || "Untitled"}.dtron`, toDtron(getEngine().save()), "application/json");

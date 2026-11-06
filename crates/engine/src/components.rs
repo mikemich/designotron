@@ -18,7 +18,7 @@ use std::hash::{Hash, Hasher};
 use serde_json::Value;
 
 use crate::doc::IdGen;
-use crate::model::{ComponentInfo, Document, InstanceInfo, Node, NodeId, NodeType};
+use crate::model::{ComponentInfo, Document, InstanceInfo, Node, NodeId, NodeType, Sizing};
 use crate::patch;
 use crate::props;
 
@@ -145,14 +145,19 @@ pub fn create_instance(
     return None;
   }
   let id = gen.next("n_");
+  let name = instance_name(doc, comp_id);
+  // An instance of a hugging main hugs too; Fill depends on a parent the instance doesn't have yet.
+  let hug = |s: Sizing| if s == Sizing::Hug { Sizing::Hug } else { Sizing::Fixed };
   let inst = Node {
     id: id.clone(),
     kind: NodeType::Instance,
-    name: comp.name.clone(),
+    name,
     x,
     y,
     width: comp.width,
     height: comp.height,
+    sizing_h: hug(comp.sizing_h),
+    sizing_v: hug(comp.sizing_v),
     instance: Some(InstanceInfo {
       component_id: comp_id.to_string(),
       overrides: BTreeMap::new(),
@@ -163,6 +168,18 @@ pub fn create_instance(
   doc.insert(inst, parent, page, None);
   sync_instance(doc, &id, gen);
   Some(id)
+}
+
+/// What a new instance of `comp_id` is called: a variant takes its set's name ("Button"), not its
+/// property values ("Style=Primary").
+fn instance_name(doc: &Document, comp_id: &str) -> String {
+  let Some(comp) = doc.get(comp_id) else { return String::new() };
+  comp
+    .parent
+    .as_ref()
+    .and_then(|p| doc.get(p))
+    .filter(|p| p.kind == NodeType::ComponentSet)
+    .map_or_else(|| comp.name.clone(), |p| p.name.clone())
 }
 
 /// Rebuilds an instance's children from its main component and re-applies overrides.
@@ -312,17 +329,19 @@ pub fn reset_overrides(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
 /// everything else follows the new component. An instance inside another instance is
 /// swapped through the outer one, so the swap survives the outer instance re-syncing.
 pub fn swap_component(doc: &mut Document, inst_id: &str, comp_id: &str, gen: &mut IdGen) {
-  let Some(new_name) = doc.get(comp_id).filter(|c| c.kind == NodeType::Component).map(|c| c.name.clone()) else {
+  if doc.get(comp_id).is_none_or(|c| c.kind != NodeType::Component) {
     return;
-  };
+  }
+  let new_name = instance_name(doc, comp_id);
   if comp_id == inst_id || doc.is_ancestor(comp_id, inst_id) || would_nest(doc, comp_id, &enclosing_component(doc, inst_id)) {
     return;
   }
   let Some(inst) = doc.get(inst_id).cloned() else { return };
   let Some(info) = inst.instance.clone() else { return };
   let old_name = doc.get(&info.component_id).map(|c| c.name.clone());
+  let old_default = instance_name(doc, &info.component_id);
   // An instance still named after its component follows the swap; a name of its own stays.
-  let follow = inst.name.is_empty() || Some(&inst.name) == old_name.as_ref();
+  let follow = inst.name.is_empty() || Some(&inst.name) == old_name.as_ref() || inst.name == old_default;
   let scopes = scope_chain(doc, inst_id);
   let Some(parent) = scopes.last().cloned() else {
     let overrides = carry_overrides(doc, &info.component_id, comp_id, &info.overrides, &BTreeMap::new());
@@ -1461,17 +1480,17 @@ mod tests {
   }
 
   #[test]
-  fn an_instance_named_after_its_variant_follows_a_variant_change() {
+  fn an_instance_is_named_after_its_set_across_variant_changes() {
     use crate::engine::Command;
     let (mut e, _, inst, _) = button_set();
-    assert_eq!(e.doc.get(&inst).unwrap().name, "State=Default");
+    assert_eq!(e.doc.get(&inst).unwrap().name, "Button", "named after the set");
     e.dispatch(Command::SetVariant {
       id: inst.clone(),
       prop: "State".into(),
       value: "Pressed".into(),
     })
     .unwrap();
-    assert_eq!(e.doc.get(&inst).unwrap().name, "State=Pressed");
+    assert_eq!(e.doc.get(&inst).unwrap().name, "Button", "every variant keeps the set's name");
     // A name of its own is kept.
     e.dispatch(Command::Update {
       ids: vec![inst.clone()],
@@ -1769,7 +1788,7 @@ mod tests {
       variant(&mut k.e, &nested, "Hover");
       let info = k.e.doc.get(&nested).unwrap().instance.clone().unwrap();
       assert_eq!(info.component_id, k.hover);
-      assert_eq!(k.e.doc.get(&nested).unwrap().name, "State=Hover");
+      assert_eq!(k.e.doc.get(&nested).unwrap().name, "Component Set", "named after the set");
       assert_eq!(fill_of(&k.e, &nested), HOVER_FILL);
       assert_eq!(
         text(&k.e, &named(&k.e, &nested, "Label")),

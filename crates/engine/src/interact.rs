@@ -108,9 +108,9 @@ pub fn pick(doc: &Document, page: &str, p: Point, zoom: f64, selection: &[NodeId
       best = Some(best.map_or(k, |b: usize| b.max(k)));
     } else if let Some(parent) = doc.get(s).and_then(|n| n.parent.clone()) {
       if let Some(k) = path.iter().position(|x| *x == parent) {
-        if k + 1 < path.len() {
-          best = Some(best.map_or(k + 1, |b: usize| b.max(k + 1)));
-        }
+        // When the hit is the parent itself there is nothing deeper: pick the parent.
+        let k = (k + 1).min(path.len() - 1);
+        best = Some(best.map_or(k, |b: usize| b.max(k)));
       }
     }
   }
@@ -275,6 +275,11 @@ fn snap_targets(doc: &Document, page: &str, moving: &[NodeId]) -> Targets {
 
 /// Snaps a page-space move delta of `ids` to nearby edges, centres and equal gaps between siblings.
 pub fn snap_move(doc: &Document, page: &str, ids: &[NodeId], dx: f64, dy: f64, zoom: f64) -> Snap {
+  snap_move_on(doc, page, ids, dx, dy, zoom, None)
+}
+
+/// `snap_move` for a move locked to `axis` (Shift held): only that axis snaps, the other keeps its delta.
+pub fn snap_move_on(doc: &Document, page: &str, ids: &[NodeId], dx: f64, dy: f64, zoom: f64, axis: Option<Axis>) -> Snap {
   let Some(start) = doc.bounds_of_many(ids) else {
     return Snap {
       dx,
@@ -286,8 +291,14 @@ pub fn snap_move(doc: &Document, page: &str, ids: &[NodeId], dx: f64, dy: f64, z
   let targets = snap_targets(doc, page, ids);
   let thr = 6.0 / zoom.max(0.01);
   let (mut sx, mut sy) = best_snap(&moved, &targets, thr, [true, true, true, true]);
-  let hx = spacing_hit(&targets.siblings, Axis::X, &moved, Edge::Both, thr).filter(|h| closer(h.delta, sx));
-  let hy = spacing_hit(&targets.siblings, Axis::Y, &moved, Edge::Both, thr).filter(|h| closer(h.delta, sy));
+  // The locked axis never snaps: its delta (zero) stays exact.
+  match axis {
+    Some(Axis::X) => sy = None,
+    Some(Axis::Y) => sx = None,
+    None => {}
+  }
+  let hx = spacing_hit(&targets.siblings, Axis::X, &moved, Edge::Both, thr).filter(|h| closer(h.delta, sx) && axis != Some(Axis::Y));
+  let hy = spacing_hit(&targets.siblings, Axis::Y, &moved, Edge::Both, thr).filter(|h| closer(h.delta, sy) && axis != Some(Axis::X));
   let (ex, ey) = (sx.is_some() && hx.is_none(), sy.is_some() && hy.is_none());
   if let Some(h) = &hx {
     sx = Some(h.delta);
@@ -296,8 +307,20 @@ pub fn snap_move(doc: &Document, page: &str, ids: &[NodeId], dx: f64, dy: f64, z
     sy = Some(h.delta);
   }
   let mut out = Snap {
-    dx: sx.map(|s| dx + s).unwrap_or_else(|| (start.x + dx).round() - start.x),
-    dy: sy.map(|s| dy + s).unwrap_or_else(|| (start.y + dy).round() - start.y),
+    dx: sx.map(|s| dx + s).unwrap_or_else(|| {
+      if axis == Some(Axis::Y) {
+        dx
+      } else {
+        (start.x + dx).round() - start.x
+      }
+    }),
+    dy: sy.map(|s| dy + s).unwrap_or_else(|| {
+      if axis == Some(Axis::X) {
+        dy
+      } else {
+        (start.y + dy).round() - start.y
+      }
+    }),
     ..Default::default()
   };
   let fin = Rect::new(start.x + out.dx, start.y + out.dy, start.width, start.height);
@@ -1055,6 +1078,21 @@ mod tests {
     assert_eq!(pick(&doc, &page, p, 1.0, &["g".into()], false).as_deref(), Some("g"));
     // Frame plus its child selected: stays at the child's depth.
     assert_eq!(pick(&doc, &page, p, 1.0, &["f".into(), "g".into()], false).as_deref(), Some("g"));
+  }
+
+  #[test]
+  fn pick_on_the_selections_parent_picks_the_parent() {
+    let (mut doc, page) = doc_with_frame();
+    node(&mut doc, &page, "inner", NodeType::Frame, Some("f"), (150.0, 150.0, 140.0, 140.0));
+    node(&mut doc, &page, "leaf", NodeType::Rectangle, Some("inner"), (0.0, 0.0, 20.0, 20.0));
+    // A press on the bare parent area (not on a sibling) selects that parent, not the top frame's child.
+    let p = Point::new(150.0 + 100.0, 150.0 + 100.0);
+    assert_eq!(pick(&doc, &page, p, 1.0, &["leaf".into()], false).as_deref(), Some("inner"));
+    // A press on the selected layer itself keeps it.
+    assert_eq!(
+      pick(&doc, &page, Point::new(160.0, 160.0), 1.0, &["leaf".into()], false).as_deref(),
+      Some("leaf")
+    );
   }
 
   #[test]

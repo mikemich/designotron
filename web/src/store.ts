@@ -120,6 +120,10 @@ interface Store {
   hover: string | null;
   editingText: string | null;
   editingVector: string | null;
+  /** Pages whose empty-page prompt was closed in this session (it still goes away once something is drawn). */
+  emptyPromptClosed: string[];
+  /** A layer the Layers tree should start renaming (F2 on the canvas); the tree clears it. */
+  renameRequest: string | null;
   /** Anchors selected in vector edit mode, as [subpath, index]. */
   vectorPoints: [number, number][];
   guides: Guide[];
@@ -183,6 +187,8 @@ export const useStore = create<Store>(() => ({
   hover: null,
   editingText: null,
   editingVector: null,
+  emptyPromptClosed: [],
+  renameRequest: null,
   vectorPoints: [],
   guides: [],
   gaps: [],
@@ -541,3 +547,15 @@ export function describeSelection(): string {
   const where = n.parent ? doc.nodes[n.parent]?.name : doc.pages.find((p) => p.id === n.page)?.name;
   return `${n.name || n.type} (${n.type}) ${Math.round(n.width)}×${Math.round(n.height)}, ${sibs.indexOf(n.id) + 1} of ${sibs.length} in ${where ?? "page"}`;
 }
+
+/** The open editor's autosave: Ctrl+S runs it at once (set by `Editor`, null while no file is open). */
+export const saveHook: { flush: (() => Promise<void>) | null } = { flush: null };
+
+/** Closes the empty-page prompt for a page until the editor is reloaded. */
+export function closeEmptyPrompt(page: string) {
+  const key = emptyPromptKey(page);
+  useStore.setState((s) => (s.emptyPromptClosed.includes(key) ? s : { emptyPromptClosed: [...s.emptyPromptClosed, key] }));
+}
+
+/** Page ids repeat between files, so the closed prompts are keyed by file too. */
+export const emptyPromptKey = (page: string) => `${useStore.getState().fileId ?? ""}:${page}`;

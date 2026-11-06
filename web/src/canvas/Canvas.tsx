@@ -3,6 +3,7 @@ import type { Handle, Mat, Node, Rect, VectorPoint } from "../types";
 import {
   describeSelection,
   dispatch,
+  emptyPromptKey,
   getDoc,
   pointerDrag,
   noteZooming,
@@ -54,7 +55,7 @@ interface BoundsItem {
 
 type Drag =
   | { kind: "pan"; sx: number; sy: number; vx: number; vy: number }
-  | { kind: "move"; start: Pt; ids: string[]; started: boolean; alt: boolean; clickSelect: string | null }
+  | { kind: "move"; start: Pt; ids: string[]; started: boolean; alt: boolean; clickSelect: string | null; shiftToggle: string | null }
   | { kind: "resize"; handle: Handle; start: Pt; ids: string[]; scale: boolean }
   | { kind: "rotate"; pivot: Pt; startAngle: number; ids: string[] }
   | { kind: "marquee"; start: Pt; base: string[] }
@@ -500,14 +501,19 @@ export function Canvas() {
     const st = useStore.getState();
     const current = st.es.selection;
     let clickSelect: string | null = null;
+    let shiftToggle: string | null = null;
     if (id) {
-      if (e.shiftKey) dispatch({ op: "select", ids: [id], mode: "toggle" });
-      else if (!current.includes(id)) dispatch({ op: "select", ids: [id] });
+      // Shift on an unselected layer adds it now (and the drag moves the whole selection); on a
+      // selected one it removes it on release, unless the press turned into a drag.
+      if (e.shiftKey) {
+        if (!current.includes(id)) dispatch({ op: "select", ids: [id], mode: "toggle" });
+        else shiftToggle = id;
+      } else if (!current.includes(id)) dispatch({ op: "select", ids: [id] });
       else if (current.length > 1) clickSelect = id;
     }
     const ids = selection().filter((s) => !getDoc().nodes[s]?.locked);
     if (!ids.length) return;
-    drag.current = { kind: "move", start: p, ids, started: false, alt: e.altKey, clickSelect };
+    drag.current = { kind: "move", start: p, ids, started: false, alt: e.altKey, clickSelect, shiftToggle };
   }
 
   function onPointerDown(e: React.PointerEvent) {
@@ -683,6 +689,7 @@ export function Canvas() {
           if (Math.hypot(dx, dy) * zoom() < 3) return;
           d.started = true;
           d.clickSelect = null;
+          d.shiftToggle = null;
           dispatch({ op: "beginGesture" });
           if (d.alt) {
             // Alt-drag duplicates in place, then moves the copies. Rebasing makes the drag move
@@ -697,8 +704,12 @@ export function Canvas() {
           }
           useStore.setState({ hover: null });
         }
-        const r = dispatch<{ guides: any[]; gaps: any[] }>({ op: "translate", ids: d.ids, dx, dy, snap: !e.ctrlKey, zoom: zoom() }, { quiet: true });
-        const target = query<string | null>({ q: "frameAt", x: p.x, y: p.y, exclude: d.ids });
+        // Shift locks the move to the dominant axis; the engine snaps only along the free one.
+        const axis = e.shiftKey ? (Math.abs(dx) >= Math.abs(dy) ? "x" : "y") : undefined;
+        const r = dispatch<{ guides: any[]; gaps: any[] }>({ op: "translate", ids: d.ids, dx, dy, snap: !e.ctrlKey, zoom: zoom(), axis }, { quiet: true });
+        // With the axis locked the layers sit at the locked delta, so the drop target is looked up there.
+        const tp = axis === "x" ? { x: p.x, y: d.start.y } : axis === "y" ? { x: d.start.x, y: p.y } : p;
+        const target = query<string | null>({ q: "frameAt", x: tp.x, y: tp.y, exclude: d.ids });
         useStore.setState({ guides: r?.guides ?? [], gaps: r?.gaps ?? [], dropTarget: target });
         break;
       }
@@ -826,6 +837,8 @@ export function Canvas() {
           dispatch({ op: "endGesture" });
         } else if (d.clickSelect) {
           dispatch({ op: "select", ids: [d.clickSelect] });
+        } else if (d.shiftToggle) {
+          dispatch({ op: "select", ids: [d.shiftToggle], mode: "toggle" });
         }
         useStore.setState({ guides: [], gaps: [], dropTarget: null });
         break;
@@ -1092,7 +1105,8 @@ export function Canvas() {
   }
 
   const cursor = panning ? "grabbing" : keys.space || tool === "hand" ? "grab" : tool === "move" ? (vHover ? "crosshair" : "default") : tool === "text" ? "text" : "crosshair";
-  const empty = !pageObj?.children.length;
+  const emptyPromptClosed = useStore((s) => s.emptyPromptClosed);
+  const empty = !pageObj?.children.length && !emptyPromptClosed.includes(emptyPromptKey(pageObj?.id ?? ""));
 
   return (
     <div
@@ -1234,7 +1248,7 @@ export function Canvas() {
       <FollowFrame />
       {showRulers && <Rulers v={v} width={size.w} height={size.h} selection={selItems.union} />}
       {editingText && <TextEditor id={editingText} />}
-      {empty && (tool === "move" || tool === "hand") && <EmptyPrompt />}
+      {empty && (tool === "move" || tool === "hand") && <EmptyPrompt pageId={pageObj?.id ?? ""} />}
       <ZoomFlash zoom={v.zoom} />
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>

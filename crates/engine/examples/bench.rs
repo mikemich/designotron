@@ -77,6 +77,7 @@ fn main() {
       dy: 0.0,
       snap: true,
       zoom: 1.0,
+      axis: None,
     })
     .unwrap();
   });
@@ -88,6 +89,7 @@ fn main() {
       dy: 0.0,
       snap: true,
       zoom: 1.0,
+      axis: None,
     })
     .unwrap();
     let _ = e2.render_incremental(&page, &[]);
