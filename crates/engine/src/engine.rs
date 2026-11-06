@@ -799,12 +799,6 @@ struct RenderCache {
   roots: HashMap<NodeId, String>,
   /// Everything each root paints, in page coordinates (what the canvas culls against).
   bounds: HashMap<NodeId, Rect>,
-  /// Roots that left the page in the last render that dropped any (a delete), with their markup
-  /// and bounds, the document they were rendered from and the hidden set: an undo that brings
-  /// one back unchanged reuses them instead of rendering it again.
-  gone: HashMap<NodeId, (String, Rect)>,
-  gone_doc: Option<Document>,
-  gone_hidden: Vec<NodeId>,
 }
 
 impl Engine {
@@ -919,7 +913,7 @@ impl Engine {
               if nodes.len() > 1 {
                 nodes.push(',');
               }
-              nodes.push_str(&Value::String(k.clone()).to_string());
+              nodes.push_str(&serde_json::to_string(k).unwrap_or_default());
               nodes.push(':');
               nodes.push_str(&serde_json::to_string(v).unwrap_or_else(|_| "null".into()));
             }
@@ -1053,28 +1047,7 @@ impl Engine {
       }
     }
     let mut changed = serde_json::Map::new();
-    // Roots brought back unchanged since they were dropped (undo of a delete).
-    let mut revived: Vec<NodeId> = Vec::new();
-    if let (Some(gd), true) = (&cache.gone_doc, !cache.gone.is_empty() && cache.gone_hidden == hidden) {
-      if roots.iter().any(|r| !cache.roots.contains_key(r) && cache.gone.contains_key(r)) {
-        let touched = self.changed_by_root(gd);
-        revived = roots
-          .iter()
-          .filter(|r| !dirty.contains(r) && !cache.roots.contains_key(*r) && cache.gone.contains_key(*r) && !touched.contains_key(*r))
-          .cloned()
-          .collect();
-      }
-    }
     for r in &roots {
-      if revived.contains(r) {
-        let (svg, b) = cache.gone.get(r).cloned().unwrap();
-        texts.insert(r.clone(), json!(svg.matches("<text").count()));
-        changed.insert(r.clone(), json!(svg));
-        cache.roots.insert(r.clone(), svg);
-        bounds.insert(r.clone(), json!(rect_array(&b)));
-        cache.bounds.insert(r.clone(), b);
-        continue;
-      }
       if dirty.contains(r) || !cache.roots.contains_key(r) {
         let svg = render::render_root(
           &self.doc,
@@ -1093,19 +1066,6 @@ impl Engine {
         bounds.insert(r.clone(), json!(rect_array(&b)));
         cache.bounds.insert(r.clone(), b);
       }
-    }
-    if cache.roots.keys().any(|k| !roots.contains(k)) {
-      let mut gone = HashMap::new();
-      for (k, svg) in &cache.roots {
-        if !roots.contains(k) {
-          if let Some(b) = cache.bounds.get(k) {
-            gone.insert(k.clone(), (svg.clone(), *b));
-          }
-        }
-      }
-      cache.gone = gone;
-      cache.gone_doc = cache.doc.clone();
-      cache.gone_hidden = cache.hidden.clone();
     }
     cache.roots.retain(|k, _| roots.contains(k));
     cache.bounds.retain(|k, _| roots.contains(k));
@@ -3933,26 +3893,31 @@ mod tests {
   }
 
   #[test]
-  fn undone_delete_reuses_the_cached_markup_of_unchanged_roots() {
+  fn render_after_move_delete_page_switch_and_undo_matches_a_fresh_render() {
     let mut e = engine();
     let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
-    let b = rect(&mut e, 100.0, 0.0, 50.0, 50.0, None);
-    let page = e.page.clone();
-    let first = e.render_incremental(&page, &[]);
-    assert_eq!(first["changed"].as_object().unwrap().len(), 2);
+    let p1 = e.page.clone();
+    e.render_incremental(&p1, &[]);
+    ai(&mut e, "update_nodes", json!({ "updates": [{ "id": a, "x": 300 }] }));
+    e.render_incremental(&p1, &[]);
     e.dispatch(Command::Delete { ids: vec![a.clone()] }).unwrap();
-    e.render_incremental(&page, &[]);
+    e.render_incremental(&p1, &[]);
+    e.dispatch(Command::AddPage { name: None }).unwrap();
+    let p2 = e.page.clone();
+    e.render_incremental(&p2, &[]);
     e.dispatch(Command::Undo).unwrap();
-    let back = e.render_incremental(&page, &[]);
-    assert_eq!(back["changed"][&a], first["changed"][&a], "same markup, from the cache");
-    assert!(back["changed"].get(&b).is_none());
-    // A layer edited after the delete is rendered afresh.
-    e.dispatch(Command::Delete { ids: vec![a.clone()] }).unwrap();
-    e.render_incremental(&page, &[]);
     e.dispatch(Command::Undo).unwrap();
-    ai(&mut e, "update_nodes", json!({ "updates": [{ "id": a, "opacity": 0.5 }] }));
-    let after = e.render_incremental(&page, &[]);
-    assert_ne!(after["changed"][&a], first["changed"][&a]);
+    let inc = e.render_incremental(&p1, &[]);
+    let fresh = render::render_root(
+      &e.doc,
+      &a,
+      e.measurer.as_ref(),
+      RenderOptions {
+        mode: Mode::Canvas,
+        hidden: &[],
+      },
+    );
+    assert_eq!(inc["changed"][&a].as_str().unwrap(), fresh, "markup carries the move");
   }
 
   #[test]

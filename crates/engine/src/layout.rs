@@ -457,22 +457,23 @@ fn hug_size(doc: &mut Document, id: &str, horizontal: bool, m: &dyn TextMeasurer
       }
     }
     (k, _) if k.is_frame_like() && n.layout.is_some() => {
-      // Lay it out as hug on that axis, read the size, then put its sizing back.
-      let set = |doc: &mut Document, s: Sizing| {
-        doc.modify(id, |c| {
-          if horizontal {
-            c.sizing_h = s;
-          } else {
-            c.sizing_v = s;
-          }
-        });
-      };
-      set(doc, Sizing::Hug);
-      layout_node(doc, id, m);
-      let c = doc.get(id).unwrap();
-      let size = if horizontal { c.width } else { c.height };
-      set(doc, Sizing::Fill);
-      size
+      // Lay it out as hug on that axis, read the size, then put the node back as it was:
+      // a scratch copy of the document keeps the original's nodes shared (no path copies).
+      let mut scratch = doc.clone();
+      scratch.modify(id, |c| {
+        if horizontal {
+          c.sizing_h = Sizing::Hug;
+        } else {
+          c.sizing_v = Sizing::Hug;
+        }
+      });
+      layout_node(&mut scratch, id, m);
+      let c = scratch.get(id).unwrap();
+      if horizontal {
+        c.width
+      } else {
+        c.height
+      }
     }
     _ if horizontal => n.width,
     _ => n.height,
