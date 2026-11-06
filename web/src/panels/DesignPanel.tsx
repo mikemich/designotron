@@ -1093,13 +1093,13 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
   if (keyName === "fills" && sel && sel.id === editingText && sel.end > sel.start && nodes.length === 1 && nodes[0].id === sel.id && nodes[0].type === "text") {
     const top = list.findIndex((p) => p.visible);
     const base = list[top];
+    // The first visible fill row is the range's, whatever it shows: a solid colour chosen there
+    // colours the characters (a gradient or image row, or mixed colours, show the layer's own fill).
+    rangeTop = top;
     if (base?.type === "solid") {
       const c = rangeValue(nodes[0].text!, sel.start, sel.end, "color", base.color);
       if (c === MIXED) mixedColors = true;
-      else if (typeof c === "string") {
-        rangeTop = top;
-        rangeColor = c;
-      }
+      else if (typeof c === "string") rangeColor = c;
     }
   }
   const set = (next: Paint[]) => update(ids, { [keyName]: next, ...(keyName === "fills" ? { fillStyle: null } : {}) });
@@ -1136,13 +1136,13 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
       {mixedColors && <div className="muted small">Mixed colours in the selection</div>}
       {[...list].reverse().map((real, ri) => {
         const i = list.length - 1 - ri;
-        const ranged = i === rangeTop && real.type === "solid" && rangeColor !== undefined;
-        const p: Paint = ranged ? { ...real, color: rangeColor! } : real;
+        const onRange = i === rangeTop;
+        const p: Paint = onRange && real.type === "solid" && rangeColor !== undefined ? { ...real, color: rangeColor } : real;
         const setP = (np: Paint) => {
-          // A new colour on the row that shows the selected characters' colour styles those characters.
-          if (ranged && np.type === "solid" && np.color !== (p as typeof np).color && styleTextSelection({ color: np.color })) return;
-          // Anything else changes the real fill (the shown colour is the range's, not the fill's).
-          const next = ranged && np.type === "solid" ? { ...np, color: (real as typeof np).color } : np;
+          // A new solid colour on the row that stands for the selected characters styles those characters.
+          if (onRange && np.type === "solid" && (p.type !== "solid" || np.color !== p.color) && styleTextSelection({ color: np.color })) return;
+          // Anything else changes the real fill (the shown colour may be the range's, not the fill's).
+          const next = onRange && np.type === "solid" && real.type === "solid" ? { ...np, color: real.color } : np;
           set(list.map((x, j) => (j === i ? next : x)));
         };
         return (

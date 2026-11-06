@@ -269,6 +269,13 @@ try {
     const y = fieldByAria(p, "Y position");
     check("V-2: the group child's X shows 320 (from the frame), Y 100", (await x.inputValue()) === "320" && (await y.inputValue()) === "100", `${await x.inputValue()} / ${await y.inputValue()}; parent-relative x is ${(await named(p, "Ellipse")).x}`);
     await shot(p, "05-group-child-xy");
+    // Dev mode (Code tab) measures from the frame as well.
+    await p.click("#right-tab-code");
+    await p.locator("[data-testid=inspect]").waitFor({ timeout: 5000 });
+    const insp = (await p.locator("[data-testid=inspect]").innerText()).replace(/\s+/g, " ");
+    check("Inspect shows Position 320 , 100 for the group child", /Position\s*320\s*,\s*100/.test(insp), insp.slice(0, 200));
+    await p.click("#right-tab-design");
+    await sleep(200);
     await type(x, "0");
     const page = async () => {
       const d = await doc(p);
@@ -380,6 +387,25 @@ try {
     const n = await named(p, "Two fills");
     check("a colour typed on the range row styles only the range", (n.text.runs ?? []).some((r) => r.color && r.color.toUpperCase() === "#FF0000" && r.start === 0 && r.end === 5), JSON.stringify(n.text.runs));
     check("and the real fills stay", n.fills[0].color.toUpperCase() === "#112233" && n.fills.length === 2, (await fills()).join(","));
+    // A range with mixed colours: a colour picked there still colours only the range.
+    await ta.focus();
+    await p.keyboard.press("Control+Home");
+    for (let i = 0; i < 3; i++) await p.keyboard.press("ArrowRight");
+    for (let i = 0; i < 5; i++) await p.keyboard.press("Shift+ArrowRight");
+    await sleep(250);
+    check("a mixed-colour range says so", (await p.locator("text=Mixed colours in the selection").count()) === 1);
+    const at2 = await p.locator(".panel.right input").evaluateAll((els) => els.findIndex((e) => e.value === "112233"));
+    const input2 = p.locator(".panel.right input").nth(at2);
+    await input2.click({ clickCount: 3 });
+    await input2.fill("0000FF");
+    await input2.press("Enter");
+    await sleep(300);
+    const m = await named(p, "Two fills");
+    const blue = (m.text.runs ?? []).filter((r) => r.color && r.color.toUpperCase() === "#0000FF");
+    const red = (m.text.runs ?? []).filter((r) => r.color && r.color.toUpperCase() === "#FF0000");
+    check("blue lands on exactly the selected characters (3..8)", blue.length === 1 && blue[0].start === 3 && blue[0].end === 8, JSON.stringify(m.text.runs));
+    check("the red before it stays (0..3)", red.some((r) => r.start === 0 && r.end === 3), JSON.stringify(m.text.runs));
+    check("and the layer fills are untouched", m.fills.length === 2 && m.fills[0].color.toUpperCase() === "#112233", m.fills.map((f) => f.color).join(","));
     await shot(p, "07-range-fills");
     await p.context().close();
   }
