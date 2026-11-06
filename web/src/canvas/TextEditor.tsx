@@ -258,14 +258,21 @@ export function TextEditor({ id }: { id: string }) {
     if (gone) useStore.setState({ editingText: null });
   }, [gone]);
   // A change to the text from elsewhere (a collaborator) shows in the textarea, so the next key
-  // doesn't write the old text back over it. The caret stays at the same offsets where possible.
+  // doesn't write the old text back over it. The caret stays with the content around it: an
+  // offset after the changed span moves by the change in length.
   useEffect(() => {
     const ta = ref.current;
     const c = getDoc().nodes[id]?.text?.characters;
     if (!ta || c === undefined || composing.current || ta.value === c) return;
+    const old = ta.value;
+    let pre = 0;
+    while (pre < old.length && pre < c.length && old[pre] === c[pre]) pre++;
+    let suf = 0;
+    while (suf < old.length - pre && suf < c.length - pre && old[old.length - 1 - suf] === c[c.length - 1 - suf]) suf++;
+    const shift = (o: number) => (o <= pre ? o : o >= old.length - suf ? o + c.length - old.length : c.length - suf);
     const { selectionStart: s0, selectionEnd: e0 } = ta;
     ta.value = c;
-    ta.setSelectionRange(Math.min(s0, c.length), Math.min(e0, c.length));
+    ta.setSelectionRange(shift(s0), shift(e0));
     sync();
   }, [rev]);
 
