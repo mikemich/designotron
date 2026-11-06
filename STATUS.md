@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-03. Keep this file current: move items between sections in the same
+Last updated: 2026-11-06. Keep this file current: move items between sections in the same
 change that finishes, starts or breaks them.
 
 ## In progress
@@ -8,6 +8,7 @@ change that finishes, starts or breaks them.
 - Roadmap phases 1–3 and most of 4 are done. Next steps and the launch checklist are in [ROADMAP.md](ROADMAP.md#next).
 - Figma parity programme (from QA round 6): Waves 1, 2 and 3 are done (below). Wave 4 (smart animate stage 2, sticky and drag, bend tool, background blur and the other items in the plan) needs the owner's design OK before it starts. Performance follow-ups: a render cache below the top-level layer (a file inside one huge frame gets no culling or partial saves), per-layer bridge pushes and auto versions.
 - Stock photo search is done (below). Next: re-run the Claude eval with a product-card prompt that uses `search_photos`; if Pexels is wanted without a key, a small proxy would be needed.
+- QA round 8 (first hour, core editing, prototyping/export, collaboration) is done (below). Behaviour change to mention in the next release notes: Esc now clears the selection like Figma (`\` or Shift+Enter selects the parent); Ctrl+S saves locally and Ctrl+Shift+S downloads a `.dtron`. Follow-ups: the relay keeping acknowledged edits after a hard crash (room sequence number), transitions and hover/press states in exported code, responsive breakpoints, a layers-panel context menu.
 - QA round 7 (Claude loop and accessibility) is done (below). Next: re-run the Claude eval regularly when prompts or tools change; 200% zoom layout, 24px targets and a 12px text floor; layout-time rule for fill children on hug axes.
 
 ## To do
@@ -98,7 +99,8 @@ Verified on 2026-11-03 in this repo's environment (headless Chromium).
 
 | Check                                                  | How it was verified                          |
 |--------------------------------------------------------|----------------------------------------------|
-| 489 engine, bridge, rooms and relay tests (incl. randomised collaboration simulation) | `cargo test --workspace` |
+| 515 engine, bridge, rooms and relay tests (incl. randomised collaboration simulation) | `cargo test --workspace` |
+| QA round 8 fixes: relay saves on SIGTERM/SIGKILL-after-1.6 s and a viewer's read-only UI (`r8a`, starts its own relay: `E2E_RELAY_BIN=… E2E_PORT=…`); presenter clip ids, press+click, exported keys/delays/controls/flows (`r8b`, `E2E_DEPS` builds the export); Shift-drag and axis lock, picking, Esc/`\`, instance sizing, shortcuts, device System UI (`r8c`) | `web/scripts/qa/r8a-e2e.mjs`, `r8b-e2e.mjs`, `r8c-e2e.mjs` |
 | Device frames: preset picker (search, keyboard), iPhone/Android/Mac/browser system UI, light/dark incl. frame fill, toggles, safe-area padding and guides, resize/undo, chrome kept on top and out of drops/duplicates, Presenter scroll keeps bars fixed, code export without chrome and with `env(safe-area-inset-*)`, reload | `web/scripts/qa/devices-e2e.mjs`; presets in `presetList.test.ts`; engine tests in `devices.rs` |
 | Wave 3: prototyping (scrolling, Change to, triggers, transitions, smart animate, view-link scrolling), presence and view-only links (also against a 17065fb relay and editor), variables/styles/assets (also through a relay), paint, pages/tools/selection, inspect and code (with `E2E_DEPS` it builds the exported landing, dashboard, system and mobile templates) | `web/scripts/qa/w3a-e2e.mjs`, `w3b-e2e.mjs` (`E2E_RELAY`, optional `E2E_OLD_RELAY`/`E2E_OLD_EDITOR`), `w3c-e2e.mjs` (`E2E_URL=<relay>` for the relay section), `w3d-e2e.mjs`, `w3e-e2e.mjs`, `w3f-e2e.mjs` |
 | QA round 7: Claude chat routing, per-turn undo, tool validation and `find_nodes`, HTML import fidelity, prompt context, keyboard layers/pages/canvas, menus/dialogs/labels and chat UX | `web/scripts/qa/w7a-e2e.mjs` (bridge with `CLAUDE_BIN=web/scripts/fixtures/fake-claude.mjs`), `w7b`, `w7c`, `w7d`, `w7e`, `w7f` (`AXE=<axe.min.js>` for the axe checks); Markdown and import unit tests (`npm test`) |
