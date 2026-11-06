@@ -103,7 +103,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   const [smart, setSmart] = useState<Smart | null>(null);
   const motionKey = useRef(0);
   // Moves when the player's own engine changes (a Change to), so scenes are rebuilt.
-  const [, setRevision] = useState(0);
+  const [revision, setRevision] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const current = history[history.length - 1];
   const doc = pdoc();
@@ -371,6 +371,13 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       if (before?.isConnected) before.focus?.();
     };
   }, []);
+  // A keyboard-activated hotspot that leaves the screen or opens an overlay takes its focus with
+  // it: put it back in the player, so Tab stays inside. (Declared after the opener effect, which
+  // must see the opener focused when the player mounts.)
+  useEffect(() => {
+    const root = rootRef.current;
+    if (root && !root.contains(document.activeElement)) root.focus({ preventScroll: true });
+  }, [history.length, overlays.length, revision]);
 
   // Keys: a Key interaction of the top overlay, else of the base frame, wins; otherwise Escape
   // closes and the arrows step through the page's frames.
@@ -422,13 +429,14 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   const trapTab = (e: React.KeyboardEvent) => {
     const root = rootRef.current;
     if (e.key !== "Tab" || !root) return;
-    const els = [...root.querySelectorAll<HTMLElement>("button, a[href]")];
+    const els = [...root.querySelectorAll<HTMLElement>('button, a[href], .hotspot[tabindex="0"]')];
     const at = document.activeElement;
     if (!els.length) e.preventDefault();
     else if (e.shiftKey && (at === els[0] || at === root)) (e.preventDefault(), els[els.length - 1].focus());
     else if (!e.shiftKey && at === els[els.length - 1]) (e.preventDefault(), els[0].focus());
   };
 
+  const crumb = frame.name + (top ? ` › ${doc.nodes[top.id]?.name ?? ""}` : "");
   const m = leaving?.motion;
   const old = leaving && m && keepsOldScreen(m) && pdoc().nodes[leaving.id] ? leaving : null;
   // The scale sits on a wrapper so the move/push keyframes (which set `transform`) can run on
@@ -446,6 +454,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
           scene={scene}
           flash={flash}
           interactive={!smart}
+          tabbable={!smart && overlays.length === 0}
           scrolls={scrolls}
           scrollEls={scrollEls}
           onAct={(h, it) => go(it, h.rect, h.id, current.id)}
@@ -491,9 +500,8 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         <button className="tbtn" title="Back" onClick={back}>
           <ChevronLeft size={16} />
         </button>
-        <span className="muted" style={{ padding: "0 8px" }}>
-          {frame.name}
-          {top ? ` › ${doc.nodes[top.id]?.name ?? ""}` : ""}
+        <span className="muted crumb" title={crumb}>
+          {crumb}
         </span>
         <button
           className="tbtn"
@@ -649,7 +657,7 @@ function OverlayLayer({
       }}
     >
       <div className="overlay-frame" style={{ left: o.x, top: o.y, width: n.width, height: n.height, animation: a }} onClick={(e) => e.stopPropagation()}>
-        <SceneView scene={scene} flash={false} interactive scrolls={scrolls} scrollEls={scrollEls} onAct={onAct} onHover={onHover} onPress={onPress} />
+        <SceneView scene={scene} flash={false} interactive tabbable={isTop} scrolls={scrolls} scrollEls={scrollEls} onAct={onAct} onHover={onHover} onPress={onPress} />
       </div>
     </div>
   );
@@ -662,6 +670,8 @@ interface SceneProps {
   scene: Scene;
   flash: boolean;
   interactive: boolean;
+  /** Click hotspots are in the Tab order (not under an overlay or a screen that is leaving). */
+  tabbable?: boolean;
   scrolls: Scrolls;
   scrollEls: ScrollEls;
   onAct?: (h: Hotspot, it: Interaction) => Revert | null;
@@ -673,7 +683,7 @@ interface SceneProps {
  *  interactions. Hotspots are siblings, so a layer without its own click runs its nearest
  *  ancestor's click, and pointer hover counts for every layer in the chain (entering a child is
  *  still hovering the parent). */
-function SceneView({ scene, flash, interactive, scrolls, scrollEls, onAct, onHover, onPress }: SceneProps) {
+function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, onAct, onHover, onPress }: SceneProps) {
   const byId = scene.all;
   const is = (t: Interaction["trigger"]) => (i: Interaction) => i.trigger === t;
   // How many hotspots of each owner's chain the pointer is inside; fire on 0 → 1 and 1 → 0 only.
@@ -704,18 +714,20 @@ function SceneView({ scene, flash, interactive, scrolls, scrollEls, onAct, onHov
       }
     }, 0);
   };
-  /** The nearest layer of `chain` with a click acts; a press on the way owns the tap. */
-  const click = (chain: string[]): boolean => {
+  /** The click a tap on `chain` runs: the nearest layer with one (a press on the way owns the tap). */
+  const clickOf = (chain: string[]) => {
     for (const owner of chain) {
       const o = byId.get(owner);
       const c = o?.interactions.find(is("onClick"));
-      if (o && c) {
-        onAct?.(o, c);
-        return true;
-      }
-      if (o?.interactions.some(is("onPress"))) return true;
+      if (o && c) return { o, c };
+      if (o?.interactions.some(is("onPress"))) return null;
     }
-    return false;
+    return null;
+  };
+  const click = (chain: string[]): boolean => {
+    const hit = clickOf(chain);
+    if (hit) onAct?.(hit.o, hit.c);
+    return hit !== null || chain.some((owner) => byId.get(owner)?.interactions.some(is("onPress")));
   };
   const nearest = (chain: string[], t: Interaction["trigger"]) => {
     for (const owner of chain) {
@@ -725,43 +737,64 @@ function SceneView({ scene, flash, interactive, scrolls, scrollEls, onAct, onHov
     }
     return null;
   };
-  const spot = (h: Hotspot, origin: Rect) => (
-    <div
-      key={h.id}
-      className={"hotspot" + (flash ? " hint-flash" : "")}
-      data-hotspot={h.id}
-      style={{ left: h.rect.x - origin.x, top: h.rect.y - origin.y, width: h.rect.width, height: h.rect.height }}
-      onClick={(e) => {
-        e.stopPropagation();
-        click(h.chain);
-      }}
-      onPointerDown={(e) => {
-        if (e.button !== 0) return;
-        const down = nearest(h.chain, "mouseDown");
-        if (down) onAct?.(down.o, down.it);
-        for (const owner of h.chain) {
-          const o = byId.get(owner);
-          const p = o?.interactions.find(is("onPress"));
-          if (o && p) {
-            const c = o.interactions.find(is("onClick"));
-            // The press owner's own rect (it may be an ancestor of the layer under the pointer).
-            const own = e.currentTarget.closest(".presenter")?.querySelector<HTMLElement>(`[data-hotspot="${CSS.escape(owner)}"]`);
-            const box = (own ?? e.currentTarget).getBoundingClientRect();
-            return onPress?.(o, p, e.pointerId, c ? { act: () => onAct?.(o, c), box, x: e.clientX, y: e.clientY } : undefined);
-          }
-          if (o?.interactions.some(is("onClick"))) return;
+  const spot = (h: Hotspot, origin: Rect) => {
+    // A hotspot whose tap runs a click is reachable by keyboard: Enter or Space acts.
+    const found = tabbable ? clickOf(h.chain) : null;
+    // Only the layer that owns the click is a stop (a child inside it shares that stop).
+    const hit = found && found.o.id === h.id ? found : null;
+    const dest = hit?.c.destination ? pdoc().nodes[hit.c.destination]?.name : null;
+    return (
+      <div
+        key={h.id}
+        className={"hotspot" + (flash ? " hint-flash" : "")}
+        data-hotspot={h.id}
+        {...(hit ? { tabIndex: 0, role: "button", "aria-label": pdoc().nodes[hit.o.id]?.name || (dest ? `Go to ${dest}` : "Button") } : {})}
+        onKeyDown={
+          hit
+            ? (e) => {
+                if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ")) return;
+                // A click that focused it keeps Enter and Space for the screen's Key triggers.
+                if (focusedByPointer(e.currentTarget)) return;
+                // This key is the hotspot's: no Key trigger or Escape handler also runs on it.
+                e.preventDefault();
+                e.stopPropagation();
+                click(h.chain);
+              }
+            : undefined
         }
-      }}
-      // Mouse up acts when the pointer is released over the layer, wherever the press began.
-      onPointerUp={(e) => {
-        if (e.button !== 0) return;
-        const up = nearest(h.chain, "mouseUp");
-        if (up) onAct?.(up.o, up.it);
-      }}
-      onMouseEnter={() => enter(h)}
-      onMouseLeave={() => leave(h)}
-    />
-  );
+        style={{ left: h.rect.x - origin.x, top: h.rect.y - origin.y, width: h.rect.width, height: h.rect.height }}
+        onClick={(e) => {
+          e.stopPropagation();
+          click(h.chain);
+        }}
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          const down = nearest(h.chain, "mouseDown");
+          if (down) onAct?.(down.o, down.it);
+          for (const owner of h.chain) {
+            const o = byId.get(owner);
+            const p = o?.interactions.find(is("onPress"));
+            if (o && p) {
+              const c = o.interactions.find(is("onClick"));
+              // The press owner's own rect (it may be an ancestor of the layer under the pointer).
+              const own = e.currentTarget.closest(".presenter")?.querySelector<HTMLElement>(`[data-hotspot="${CSS.escape(owner)}"]`);
+              const box = (own ?? e.currentTarget).getBoundingClientRect();
+              return onPress?.(o, p, e.pointerId, c ? { act: () => onAct?.(o, c), box, x: e.clientX, y: e.clientY } : undefined);
+            }
+            if (o?.interactions.some(is("onClick"))) return;
+          }
+        }}
+        // Mouse up acts when the pointer is released over the layer, wherever the press began.
+        onPointerUp={(e) => {
+          if (e.button !== 0) return;
+          const up = nearest(h.chain, "mouseUp");
+          if (up) onAct?.(up.o, up.it);
+        }}
+        onMouseEnter={() => enter(h)}
+        onMouseLeave={() => leave(h)}
+      />
+    );
+  };
   const none: Rect = { x: 0, y: 0, width: 0, height: 0 };
   return (
     <>

@@ -47,7 +47,7 @@ export function HistoryPanel() {
       // The file keeps its current name: a version is about the design, not what it's called.
       const doc = JSON.parse(json);
       doc.name = getDoc().name;
-      dispatchOrThrow({ op: "replaceDocument", doc });
+      dispatchOrThrow({ op: "replaceDocument", doc, keepComments: true });
       toast(`Restored “${v.name}”. Undo to go back.`);
     });
     refresh();

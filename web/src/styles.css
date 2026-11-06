@@ -861,6 +861,10 @@ textarea.textinput {
 .msg.error {
   color: #ff8a73;
 }
+.msg .retry-btn {
+  display: block;
+  margin-top: 6px;
+}
 .msg.system {
   color: var(--text-3);
   font-size: 11px;
@@ -1081,6 +1085,11 @@ a.btn {
   position: absolute;
   cursor: pointer;
 }
+.presenter .hotspot:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: 1px;
+  background: rgba(13, 153, 255, 0.15);
+}
 .overlay-settings {
   margin-top: 6px;
   padding-top: 6px;
@@ -1115,6 +1124,15 @@ a.btn {
   display: flex;
   gap: 4px;
   align-items: center;
+  max-width: calc(100vw - 24px);
+}
+/* The crumb stays on one line and shortens with an ellipsis (the full text is its title). */
+.presenter .bar .crumb {
+  padding: 0 8px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 @keyframes dt-dissolve {
   from {
@@ -1236,7 +1254,8 @@ a.btn {
   .topbar .tbtn .label,
   .draw-tools,
   .desk-only,
-  .empty-prompt .kbd-hint:last-child {
+  .empty-prompt .kbd-hint:last-child,
+  .chat-input .kbd-hint {
     display: none !important;
   }
   .topbar .center {
@@ -1465,7 +1484,8 @@ body:has(.modal-bg) .hint-card {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 4px 12px;
+  min-height: 37px;
   border-bottom: 1px solid var(--border);
 }
 .version.auto .version-name {
@@ -1492,8 +1512,8 @@ body:has(.modal-bg) .hint-card {
 .version:hover .ibtn,
 .version:focus-within .ibtn {
   position: static;
-  width: auto;
-  height: auto;
+  width: 28px;
+  height: 28px;
   overflow: visible;
   clip-path: none;
   opacity: 1;
@@ -1502,8 +1522,8 @@ body:has(.modal-bg) .hint-card {
 @media (hover: none) {
   .version .ibtn {
     position: static;
-    width: auto;
-    height: auto;
+    width: 28px;
+    height: 28px;
     overflow: visible;
     clip-path: none;
     opacity: 1;

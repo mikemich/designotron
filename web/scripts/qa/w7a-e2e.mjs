@@ -356,6 +356,9 @@ try {
   await api.evaluate(() => { window.__dt.send("[queued] second"); });
   check("the message sent while running is queued", (await chat(api)).queued?.includes("[queued]"));
   await api.click(".chat-input button:has-text('Stop')");
+  // Stop returns the queued message to the box (round 11); sending it from there is the same turn.
+  await api.waitForFunction(() => document.querySelector(".chat-input textarea").value.includes("[queued]"));
+  await api.press(".chat-input textarea", "Enter");
   await api
     .waitForFunction(() => window.__dt.chat().items.some((i) => i.kind === "assistant" && i.text.includes("Reply to the queued message")), null, { timeout: 15000 })
     .catch(async (e) => {
@@ -379,6 +382,8 @@ try {
   check("the slow tool is running", (await chat(api)).items.some((i) => i.kind === "tool" && i.name === "import_html" && i.ok === null));
   await api.evaluate(() => { window.__dt.send("[queued] fourth"); });
   await api.click(".chat-input button:has-text('Stop')");
+  await api.waitForFunction(() => document.querySelector(".chat-input textarea").value.includes("[queued]"));
+  await api.press(".chat-input textarea", "Enter");
   await api
     .waitForFunction(() => window.__dt.chat().items.filter((i) => i.kind === "assistant" && i.text.includes("Reply to the queued message")).length >= 2, null, { timeout: 15000 })
     .catch(async (e) => {

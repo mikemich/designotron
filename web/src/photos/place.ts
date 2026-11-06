@@ -2,6 +2,7 @@
 // an image paint carrying the credit. Shared by the Photos panel, the fill popover, the canvas
 // drop and Claude's `place_photo`.
 
+import { LEFT_FILE } from "../ai/browserTools";
 import { addAsset } from "../assets";
 import { aiDispatch, dispatchOrThrow, getDoc, useStore } from "../store";
 import type { Doc, Node, Paint } from "../types";
@@ -35,8 +36,9 @@ export async function photoPaint(r: PhotoResult, fit: Fit = "fill"): Promise<Pla
 
 /** Fills each layer in `ids` with the photo (one undo step). The layers are checked again after
  *  the download, so one deleted meanwhile is skipped; none left is an error. */
-export async function fillLayers(r: PhotoResult, ids: string[], opts: { fit?: Fit; group?: string } = {}): Promise<string[]> {
+export async function fillLayers(r: PhotoResult, ids: string[], opts: { fit?: Fit; group?: string; stillOpen?: () => boolean } = {}): Promise<string[]> {
   const { paint } = await photoPaint(r, opts.fit);
+  if (opts.stillOpen && !opts.stillOpen()) throw new Error(LEFT_FILE);
   const doc = getDoc();
   const targets = ids.filter((id) => fillable(doc.nodes[id]));
   if (!targets.length) throw new PhotoError("bad", "The layer is gone or can't hold a photo");
@@ -51,9 +53,10 @@ export async function fillLayers(r: PhotoResult, ids: string[], opts: { fit?: Fi
  *  One undo step; the width is capped to the target frame's inner width. */
 export async function placeNewLayer(
   r: PhotoResult,
-  o: { x: number; y: number; parentId?: string; width?: number; fit?: Fit; name?: string; group?: string; corner?: boolean; inFrame?: boolean },
+  o: { x: number; y: number; parentId?: string; width?: number; fit?: Fit; name?: string; group?: string; corner?: boolean; inFrame?: boolean; stillOpen?: () => boolean },
 ): Promise<string> {
   const { paint, width: pw, height: ph } = await photoPaint(r, o.fit);
+  if (o.stillOpen && !o.stillOpen()) throw new Error(LEFT_FILE);
   // The document may have changed during the download: look at it now.
   const doc = getDoc();
   if (o.parentId && !doc.nodes[o.parentId]) throw new PhotoError("bad", `parentId: no layer ${o.parentId}`);

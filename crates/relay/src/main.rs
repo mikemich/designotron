@@ -308,6 +308,13 @@ async fn health(State(app): State<App>) -> Json<serde_json::Value> {
       "roomBytes": s.room_bytes,
       "connectionBytes": s.connection_bytes,
     },
+    // Room logs: each sync makes a batch of changes durable before they are acknowledged.
+    "log": {
+      "syncs": s.log_syncs,
+      "changes": s.log_lines,
+      "avgSyncMicros": s.log_sync_avg_us,
+      "maxSyncMicros": s.log_sync_max_us,
+    },
   }))
 }
 
@@ -1098,6 +1105,29 @@ mod tests {
       assert!(saved.contains("Just edited"), "the edit reached the disk: {saved}");
     }
 
+    /// The relay is killed (its task aborted, no save) right after an acknowledgement: a new
+    /// relay on the same directory still has the change.
+    #[tokio::test]
+    async fn an_acknowledged_edit_survives_a_crash() {
+      let dir = temp_dir("crash");
+      let (addr, _stop, handle) = start_run(dir.clone()).await;
+      let room = designotron_rooms::random_token();
+      let (mut a, _b) = share_and_rename(addr, &room, "Acked").await;
+      while next_json(&mut a).await["type"] != "ack" {}
+      // The snapshot has not seen the edit (it is about 30 s away), so only the log can bring it back.
+      let snapshot = std::fs::read_to_string(dir.join(format!("{room}.json"))).unwrap();
+      assert!(!snapshot.contains("Acked"), "not in the snapshot yet");
+      // Aborting the run task stops the ticker's owner and the server like a kill does for the
+      // test's purposes: no `save_all` runs, and the new relay starts from the files alone.
+      handle.abort();
+      let (addr2, stop2, handle2) = start_run(dir.clone()).await;
+      let mut c = connect(addr2, &room, None).await.unwrap();
+      let welcome = join(&mut c, None).await;
+      assert_eq!(welcome["doc"]["name"], "Acked");
+      stop2.send(()).unwrap();
+      let _ = tokio::time::timeout(Duration::from_secs(8), handle2).await;
+    }
+
     #[tokio::test]
     async fn an_edit_sent_after_shutdown_started_is_saved_or_never_acknowledged() {
       let dir = temp_dir("late-edit");
@@ -1154,21 +1184,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_changed_room_is_on_disk_within_a_second_or_two() {
+    async fn an_acknowledged_change_is_in_the_rooms_log_without_a_shutdown() {
       let dir = temp_dir("cadence");
       let (addr, _stop, _handle) = start_run(dir.clone()).await;
       let room = designotron_rooms::random_token();
-      let _clients = share_and_rename(addr, &room, "Quick save").await;
-      let file = dir.join(format!("{room}.json"));
-      let mut saved = false;
-      for _ in 0..30 {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        if std::fs::read_to_string(&file).is_ok_and(|s| s.contains("Quick save")) {
-          saved = true;
-          break;
-        }
-      }
-      assert!(saved, "saved within 1.5 s without a shutdown");
+      let (mut a, _b) = share_and_rename(addr, &room, "Quick save").await;
+      while next_json(&mut a).await["type"] != "ack" {}
+      let log = std::fs::read_to_string(dir.join(format!("{room}.log"))).unwrap();
+      assert!(log.contains("Quick save"), "durable by the time it is acknowledged: {log}");
+      let health = start_stats(addr).await;
+      assert!(health["log"]["syncs"].as_u64().unwrap() >= 1, "{health}");
     }
   }
 

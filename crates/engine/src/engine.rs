@@ -208,9 +208,14 @@ pub enum Command {
     #[serde(default)]
     rejected: bool,
   },
-  /// Swaps in a whole document as one undoable step (restoring a version).
+  /// Swaps in a whole document as one undoable step (restoring a version). With
+  /// `keep_comments` the current comments stay, as in Figma: a restore reverts layers, not
+  /// the conversation. A comment on a layer the new document lacks becomes a page comment
+  /// where it was; one on a missing page moves to the first page.
   ReplaceDocument {
     doc: Value,
+    #[serde(default)]
+    keep_comments: bool,
   },
   SetDocName {
     name: String,
@@ -755,6 +760,30 @@ fn allowed_read_only(cmd: &Command) -> bool {
       | Command::ReplyComment { .. }
       | Command::ResolveComment { .. }
   )
+}
+
+/// `current`'s comments as they sit in `restored`: on their layer if it exists there, else a
+/// page comment at the position it had on the page; on the first page if its page is gone.
+fn carry_comments(current: &Document, restored: &Document) -> std::collections::BTreeMap<String, crate::model::Comment> {
+  let mut out = current.comments.clone();
+  for c in out.values_mut() {
+    if let Some(id) = c.node.clone() {
+      if restored.get(&id).is_none() {
+        if current.get(&id).is_some() {
+          let b = current.abs_bounds(&id);
+          c.x += b.x;
+          c.y += b.y;
+        }
+        c.node = None;
+      }
+    }
+    match c.node.as_ref().and_then(|id| restored.get(id)) {
+      Some(n) => c.page = n.page.clone(),
+      None if restored.page(&c.page).is_none() => c.page = restored.pages[0].id.clone(),
+      None => {}
+    }
+  }
+  out
 }
 
 pub struct Engine {
@@ -1940,10 +1969,13 @@ impl Engine {
         }
         Ok(r)
       }
-      Command::ReplaceDocument { doc } => {
-        let doc: Document = serde_json::from_value(doc).map_err(|e| format!("not a Designotron document: {e}"))?;
+      Command::ReplaceDocument { doc, keep_comments } => {
+        let mut doc: Document = serde_json::from_value(doc).map_err(|e| format!("not a Designotron document: {e}"))?;
         if doc.pages.is_empty() {
           return Err("document has no pages".into());
+        }
+        if keep_comments {
+          doc.comments = carry_comments(&self.doc, &doc);
         }
         if doc.page(&self.page).is_none() {
           self.page = doc.pages[0].id.clone();
@@ -4729,10 +4761,64 @@ mod tests {
       )
     );
     check(&e, "deleted again");
-    e.dispatch(Command::ReplaceDocument { doc: snapshot }).unwrap();
+    e.dispatch(Command::ReplaceDocument {
+      doc: snapshot,
+      keep_comments: false,
+    })
+    .unwrap();
     check(&e, "replaced");
     e.dispatch(Command::Undo).unwrap();
     check(&e, "undone replace");
+  }
+
+  fn comment(e: &mut Engine, node: Option<&str>, x: f64, y: f64) -> String {
+    let r = e
+      .dispatch(Command::AddComment {
+        page: None,
+        x,
+        y,
+        node: node.map(String::from),
+        text: "hi".into(),
+        author: "a".into(),
+        time: 1.0,
+      })
+      .unwrap();
+    r["id"].as_str().unwrap().to_string()
+  }
+
+  #[test]
+  fn restore_with_keep_comments_keeps_every_comment() {
+    let mut e = engine();
+    let snapshot: Value = serde_json::from_str(&e.to_json()).unwrap();
+    let kept = rect(&mut e, 100.0, 50.0, 10.0, 10.0, None);
+    let on_layer = comment(&mut e, Some(&kept), 103.0, 54.0);
+    let on_page = comment(&mut e, None, 7.0, 8.0);
+    e.dispatch(Command::ReplaceDocument {
+      doc: snapshot.clone(),
+      keep_comments: true,
+    })
+    .unwrap();
+    assert!(e.doc.get(&kept).is_none());
+    assert_eq!(e.doc.comments.len(), 2);
+    let c = &e.doc.comments[&on_layer];
+    assert_eq!(
+      (c.node.clone(), c.x, c.y),
+      (None, 103.0, 54.0),
+      "orphan: page comment at its old spot"
+    );
+    assert_eq!((e.doc.comments[&on_page].x, e.doc.comments[&on_page].y), (7.0, 8.0));
+    // Undoing the restore brings the layer back and leaves the comments alone.
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.doc.get(&kept).is_some());
+    assert_eq!(e.doc.comments.len(), 2);
+    assert_eq!(e.doc.comments[&on_layer].node.as_deref(), Some(kept.as_str()));
+    // Without the flag the comments go with the document.
+    e.dispatch(Command::ReplaceDocument {
+      doc: snapshot,
+      keep_comments: false,
+    })
+    .unwrap();
+    assert!(e.doc.comments.is_empty());
   }
 
   #[test]
@@ -4741,7 +4827,11 @@ mod tests {
     let before = e.to_json();
     let id = rect(&mut e, 0.0, 0.0, 10.0, 10.0, None);
     let snapshot: Value = serde_json::from_str(&before).unwrap();
-    e.dispatch(Command::ReplaceDocument { doc: snapshot }).unwrap();
+    e.dispatch(Command::ReplaceDocument {
+      doc: snapshot,
+      keep_comments: false,
+    })
+    .unwrap();
     assert!(e.doc.get(&id).is_none());
     e.dispatch(Command::Undo).unwrap();
     assert!(e.doc.get(&id).is_some());

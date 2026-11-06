@@ -98,6 +98,25 @@ export default function App() {
     return { ...opts, x: Number(opts.x ?? 0) + b.left - a.left, y: Number(opts.y ?? 0) + b.top - a.top };
   };
   const onNavigate: Navigate = (s, opts) => {
+    // A Change to nobody owns (its component isn't on this screen) does nothing.
+    if (s.startsWith("change:")) return;
+    if (s.startsWith("scroll:")) {
+      const target = host.current?.querySelector(`[data-scroll-target="${CSS.escape(s.slice(7))}"]`);
+      const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+      // Scroll the boxes around the target, innermost first, and leave the page where it is.
+      let anchor = target;
+      for (let el = target?.parentElement; anchor && el && el !== host.current; el = el.parentElement) {
+        const { overflowX, overflowY } = getComputedStyle(el);
+        const x = /auto|scroll/.test(overflowX);
+        const y = /auto|scroll/.test(overflowY);
+        if (!x && !y) continue;
+        const a = anchor.getBoundingClientRect();
+        const b = el.getBoundingClientRect();
+        el.scrollTo({ left: x ? el.scrollLeft + a.left - b.left : el.scrollLeft, top: y ? el.scrollTop + a.top - b.top : el.scrollTop, behavior });
+        anchor = el;
+      }
+      return;
+    }
     if (s === "close-overlay") return closeTop();
     if (s.startsWith("overlay:")) return setOverlays((o) => [...o, { ...placed(opts), screen: s.slice(8) } as Overlay]);
     if (s.startsWith("swap-overlay:")) return setOverlays((o) => [...o.slice(0, -1), { ...placed(opts), screen: s.slice(13) } as Overlay]);
@@ -228,8 +247,8 @@ struct El {
   comment: Option<String>,
   /// Where the CSS only approximates the design (diamond gradients), as a comment in the output.
   approx: Option<String>,
-  /// `onNavigate` target: a screen name, "back", "overlay:<Screen>", "swap-overlay:<Screen>"
-  /// or "close-overlay".
+  /// `onNavigate` target: a screen name, "back", "overlay:<Screen>", "swap-overlay:<Screen>",
+  /// "close-overlay", "scroll:<target>" or "change:<Set>:<props>" (a component set's variant).
   navigate: Option<String>,
   /// Overlay placement passed as `onNavigate`'s second argument.
   overlay: Option<serde_json::Value>,
@@ -261,6 +280,9 @@ struct El {
   label: Option<String>,
   /// What the click does, as an accessible name ("Go to Detail", "Back").
   action_label: Option<String>,
+  /// A component reference whose component (or a layer nested in it) runs actions: it gets the
+  /// screen's `onNavigate`.
+  pass_navigate: bool,
 }
 
 impl El {
@@ -291,6 +313,7 @@ impl El {
       renders_control: false,
       label: None,
       action_label: None,
+      pass_navigate: false,
     }
   }
 
@@ -338,6 +361,13 @@ struct Ctx<'a> {
   /// Screen name → its key triggers (`{ key, to | url, opts? }`) and delays (`{ ms, to | url, opts? }`).
   keys: BTreeMap<String, Vec<serde_json::Value>>,
   delays: BTreeMap<String, Vec<serde_json::Value>>,
+  /// Layers a Scroll to jumps to: layer id → the `data-scroll-target` value.
+  scroll_targets: BTreeMap<String, String>,
+  /// Component sets some click Change to switches, with the key naming each in `change:<key>:`
+  /// messages: their set functions keep the picked variant.
+  change_keys: BTreeMap<String, String>,
+  /// Main component id → whether it, or a component nested in it, runs click actions.
+  navigate_cache: BTreeMap<String, bool>,
 }
 
 /// Props an instance sets on its component: string attributes and expression attributes.
@@ -388,7 +418,11 @@ impl<'a> Ctx<'a> {
       screen: None,
       keys: BTreeMap::new(),
       delays: BTreeMap::new(),
+      scroll_targets: BTreeMap::new(),
+      change_keys: BTreeMap::new(),
+      navigate_cache: BTreeMap::new(),
     };
+    c.collect_targets();
     for p in &doc.pages {
       for id in &p.children {
         if let Some(n) = doc.get(id) {
@@ -401,6 +435,44 @@ impl<'a> Ctx<'a> {
       }
     }
     c
+  }
+
+  /// Up front: the layers Scroll to jumps to, and the component sets click Change to switches.
+  fn collect_targets(&mut self) {
+    let doc = self.doc;
+    for n in doc.nodes.values() {
+      for i in &n.interactions {
+        let Some(dest) = i.destination.as_ref().and_then(|d| doc.get(d)) else {
+          continue;
+        };
+        match i.action {
+          Action::ScrollTo => {
+            let key: String = dest
+              .id
+              .chars()
+              .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+              .collect();
+            self.scroll_targets.insert(dest.id.clone(), key);
+          }
+          // Only a click on a layer of a variant's own function reaches its set's state.
+          // A destination with no variant properties has nothing to switch to.
+          Action::ChangeTo if is_click(i.trigger) && self.in_component_fn(n) && !dest.variant_props().is_empty() => {
+            let Some(set) = self.variant_set(&dest.id) else { continue };
+            if !self.change_keys.contains_key(&set.id) {
+              let base = pascal(&set.name, "Component");
+              let mut key = base.clone();
+              let mut k = 2;
+              while self.change_keys.values().any(|v| *v == key) {
+                key = format!("{base}{k}");
+                k += 1;
+              }
+              self.change_keys.insert(set.id, key);
+            }
+          }
+          _ => {}
+        }
+      }
+    }
   }
 
   fn unique(&mut self, base: &str) -> String {
@@ -508,6 +580,54 @@ impl<'a> Ctx<'a> {
     self.doc.get(p).filter(|s| s.kind == NodeType::ComponentSet).cloned()
   }
 
+  /// Whether a layer is part of a main component's function (not of a screen, and not below an
+  /// instance, which is written inline or as a reference).
+  fn in_component_fn(&self, n: &Node) -> bool {
+    // An instance is a reference in its parent's function; only what is inside it is out of reach.
+    let mut at = if n.kind == NodeType::Instance {
+      n.parent.as_ref().and_then(|p| self.doc.get(p))
+    } else {
+      Some(n)
+    };
+    while let Some(x) = at {
+      match x.kind {
+        NodeType::Component => return true,
+        NodeType::Instance => return false,
+        _ => at = x.parent.as_ref().and_then(|p| self.doc.get(p)),
+      }
+    }
+    false
+  }
+
+  /// Whether a component, or one nested in it, has a click action the project runs: its function
+  /// calls `onNavigate`, so a reference to it passes the screen's (memoised).
+  fn uses_navigate(&mut self, comp_id: &str) -> bool {
+    if let Some(v) = self.navigate_cache.get(comp_id) {
+      return *v;
+    }
+    // Provisional, so a component nested in itself can't loop.
+    self.navigate_cache.insert(comp_id.to_string(), false);
+    let doc = self.doc;
+    let roots: Vec<String> = match self.variant_set(comp_id) {
+      Some(set) => variants(doc, &set).into_iter().map(|v| v.id).collect(),
+      None => vec![comp_id.to_string()],
+    };
+    let mut nested = Vec::new();
+    let mut found = false;
+    for id in roots.iter().flat_map(|r| doc.subtree(r)) {
+      let Some(n) = doc.get(&id) else { continue };
+      found |= n.interactions.iter().any(|i| is_click(i.trigger) && self.action_of(n, i).is_some());
+      if let Some(info) = n.instance.as_ref() {
+        nested.push(info.component_id.clone());
+      }
+    }
+    for c in nested {
+      found = found || self.uses_navigate(&c);
+    }
+    self.navigate_cache.insert(comp_id.to_string(), found);
+    found
+  }
+
   /// Whether a main component has a layer that is written as a button or link (memoised).
   fn renders_interactive(&mut self, comp_id: &str) -> bool {
     if let Some(v) = self.interactive_cache.get(comp_id) {
@@ -574,6 +694,7 @@ impl<'a> Ctx<'a> {
           el.show_if = bound.visible.clone();
           el.slot = bound.swap.clone();
           el.renders_control = self.renders_interactive(&info.component_id);
+          el.pass_navigate = self.uses_navigate(&info.component_id);
           self.interactions(&mut el, &n);
           return Some(el);
         }
@@ -618,6 +739,9 @@ impl<'a> Ctx<'a> {
     };
     if el.tag == "button" {
       el.attrs.push(("type".into(), "button".into()));
+    }
+    if let Some(key) = self.scroll_targets.get(&n.id) {
+      el.attrs.push(("data-scroll-target".into(), key.clone()));
     }
     el.show_if = bound.visible.clone();
     if let Some(p) = bound.characters.clone() {
@@ -744,6 +868,7 @@ impl<'a> Ctx<'a> {
         // scroll with the content; the outer box keeps size, paint and the anchor for the layers.
         let moves = |k: &str| {
           k.starts_with("overflow")
+            || k.starts_with("overscroll")
             || k.starts_with("padding")
             || matches!(k, "flex-direction" | "flex-wrap")
             || k.ends_with("gap")
@@ -902,10 +1027,11 @@ impl<'a> Ctx<'a> {
   fn container_tag(&self, n: &Node) -> &'static str {
     let name = n.name.to_lowercase();
     let has = |w: &str| name.split(|c: char| !c.is_alphanumeric()).any(|p| p == w);
+    // A layer whose actions the export can't run (Scroll to nothing, hover changes) isn't a control.
     let clickable = n
       .interactions
       .iter()
-      .any(|i| matches!(i.trigger, crate::model::Trigger::OnClick | crate::model::Trigger::OnPress));
+      .any(|i| matches!(i.trigger, crate::model::Trigger::OnClick | crate::model::Trigger::OnPress) && self.action_of(n, i).is_some());
     let small = n.children.len() <= 3 && n.height <= 80.0;
     let has_text = self
       .doc
@@ -934,7 +1060,8 @@ impl<'a> Ctx<'a> {
   }
 
   /// What an interaction does in the project: an `onNavigate` target with its overlay placement,
-  /// or a URL to open. None for actions the export has no equivalent of (scroll to, change to).
+  /// or a URL to open. None for actions the export has no equivalent of (Scroll to a layer that
+  /// isn't there, Change to outside a component).
   fn action_of(&self, n: &Node, i: &crate::model::Interaction) -> Option<(Option<String>, Option<serde_json::Value>, Option<String>)> {
     match i.action {
       Action::Navigate => {
@@ -953,12 +1080,28 @@ impl<'a> Ctx<'a> {
       }
       Action::CloseOverlay => Some((Some("close-overlay".into()), None, None)),
       Action::OpenUrl => i.url.as_deref().and_then(crate::model::safe_link).map(|u| (None, None, Some(u))),
-      Action::ScrollTo | Action::ChangeTo => None,
+      Action::ScrollTo => {
+        let key = self.scroll_targets.get(i.destination.as_ref()?)?;
+        Some((Some(format!("scroll:{key}")), None, None))
+      }
+      Action::ChangeTo => {
+        let dest = i.destination.as_ref().and_then(|d| self.doc.get(d))?;
+        if dest.variant_props().is_empty() {
+          return None;
+        }
+        let key = self.change_keys.get(&self.variant_set(&dest.id)?.id)?;
+        if !self.in_component_fn(n) {
+          return None;
+        }
+        let props: serde_json::Map<String, serde_json::Value> =
+          dest.variant_props().into_iter().map(|(k, v)| (prop_ident(&k), json!(v))).collect();
+        Some((Some(format!("change:{key}:{}", serde_json::Value::Object(props))), None, None))
+      }
     }
   }
 
   /// Clicks and presses become the element's `onNavigate`; keys and delays go into the screen's
-  /// tables in `App.tsx`. Hover, mouse enter/leave and Change to have no equivalent here.
+  /// tables in `App.tsx`. Hover and mouse enter/leave have no equivalent here.
   fn interactions(&mut self, el: &mut El, n: &Node) {
     use crate::model::Trigger;
     let mut best: Option<u8> = None;
@@ -990,7 +1133,17 @@ impl<'a> Ctx<'a> {
               Action::Back => "Back".into(),
               Action::OpenOverlay | Action::SwapOverlay => format!("Open {}", target()),
               Action::CloseOverlay => "Close".into(),
-              _ => "Open link".into(),
+              Action::ScrollTo => format!("Scroll to {}", target()),
+              Action::ChangeTo => {
+                let values: Vec<String> = i
+                  .destination
+                  .as_ref()
+                  .and_then(|d| self.doc.get(d))
+                  .map(|d| d.variant_props().into_values().collect())
+                  .unwrap_or_default();
+                format!("Change to {}", values.join(" "))
+              }
+              Action::OpenUrl => "Open link".into(),
             });
             el.navigate = nav;
             el.overlay = overlay;
@@ -1405,9 +1558,20 @@ impl<'a> Ctx<'a> {
       }
       if n.kind.is_frame_like() {
         match n.overflow {
-          crate::model::Overflow::Horizontal => el.s("overflow-x", "auto"),
-          crate::model::Overflow::Vertical => el.s("overflow-y", "auto"),
-          crate::model::Overflow::Both => el.s("overflow", "auto"),
+          // A scroller keeps its wheel and touch scrolling to itself at its ends, like the screen
+          // in the prototype (the page behind it doesn't move).
+          crate::model::Overflow::Horizontal => {
+            el.s("overflow-x", "auto");
+            el.s("overscroll-behavior-x", "contain");
+          }
+          crate::model::Overflow::Vertical => {
+            el.s("overflow-y", "auto");
+            el.s("overscroll-behavior-y", "contain");
+          }
+          crate::model::Overflow::Both => {
+            el.s("overflow", "auto");
+            el.s("overscroll-behavior", "contain");
+          }
           crate::model::Overflow::None if n.clip_content => el.s("overflow", "hidden"),
           crate::model::Overflow::None => {}
         }
@@ -2263,6 +2427,9 @@ fn tw_class_raw(k: &str, v: &str) -> String {
     ("overflow", "auto") => "overflow-auto".into(),
     ("overflow-x", "auto") => "overflow-x-auto".into(),
     ("overflow-y", "auto") => "overflow-y-auto".into(),
+    ("overscroll-behavior", "contain") => "overscroll-contain".into(),
+    ("overscroll-behavior-x", "contain") => "overscroll-x-contain".into(),
+    ("overscroll-behavior-y", "contain") => "overscroll-y-contain".into(),
     ("margin", "0") => "m-0".into(),
     ("cursor", "pointer") => "cursor-pointer".into(),
     ("white-space", "pre") => "whitespace-pre".into(),
@@ -2460,6 +2627,11 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
     "{handler}{}",
     el.expr_attrs.iter().map(|(k, v)| format!(" {k}={{{v}}}")).collect::<String>()
   );
+  let handler = if el.pass_navigate {
+    format!("{handler} onNavigate={{onNavigate}}")
+  } else {
+    handler
+  };
   if let Some(name) = &el.component_ref {
     match &el.slot {
       Some(slot) => {
@@ -2649,9 +2821,20 @@ pub fn export_react(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
     return String::new();
   };
   let mut out = String::from("// Generated by Designotron. Requires Tailwind CSS.\n\n");
-  out.push_str(&component_fns(&mut ctx));
+  let comps = component_fns(&mut ctx);
+  out.push_str(react_import(&comps));
+  out.push_str(&comps);
   out.push_str(&screen_fn(&name, &el, true));
   out
+}
+
+/// The hooks import for component set functions that keep a picked variant.
+fn react_import(comps: &str) -> &'static str {
+  if comps.contains("useState<") {
+    "import { useEffect, useState } from \"react\";\n\n"
+  } else {
+    ""
+  }
 }
 
 fn screen_fn(name: &str, el: &El, export_default: bool) -> String {
@@ -2735,6 +2918,12 @@ fn prop_params(used: &[UsedProp]) -> (String, String) {
 }
 /// Type of the `onNavigate` prop; the second argument places overlays (see `App.tsx`).
 const NAVIGATE: &str = "(screen: string, overlay?: Record<string, unknown>) => void";
+
+/// The triggers that become a click handler.
+fn is_click(t: crate::model::Trigger) -> bool {
+  use crate::model::Trigger;
+  matches!(t, Trigger::OnClick | Trigger::OnPress | Trigger::MouseDown | Trigger::MouseUp)
+}
 
 fn variants(doc: &Document, set: &Node) -> Vec<Node> {
   set
@@ -2911,28 +3100,62 @@ fn set_fn(ctx: &Ctx, set: &Node, name: &str) -> String {
     };
     types.push(format!("{}?: {ty}", idents.get(&d.id).cloned().unwrap_or_default()));
   }
+  // A click Change to inside the variants picks another variant: the set keeps it as state until
+  // its parent passes other props.
+  let change_key = ctx.change_keys.get(&set.id).filter(|_| !keys.is_empty());
+  let stateful = change_key.is_some();
+  let (shown, pass) = if stateful { ("shown.", " onNavigate={change}") } else { ("", "") };
   let mut body = String::new();
+  if stateful {
+    let picked: Vec<String> = types.iter().take(keys.len()).cloned().collect();
+    let idents: Vec<String> = keys.iter().map(|k| prop_ident(k)).collect();
+    let prefix = format!("change:{}:", change_key.map(String::as_str).unwrap_or_default());
+    body.push_str(&format!(
+      "  const [picked, setPicked] = useState<{{ {} }} | null>(null);\n",
+      picked.join("; ")
+    ));
+    body.push_str(&format!(
+      "  useEffect(() => setPicked(null), [{}]);\n  const shown = {{ {}, ...picked }};\n",
+      idents.join(", "),
+      idents.join(", ")
+    ));
+    body.push_str(&format!(
+      "  const change: {NAVIGATE} = (screen, overlay) =>\n    screen.startsWith({}) ? setPicked(JSON.parse(screen.slice({}))) : onNavigate?.(screen, overlay);\n",
+      q(&prefix),
+      prefix.len()
+    ));
+  }
   for v in vs.iter().skip(1) {
     let Some(fname) = ctx.components.get(&v.id) else { continue };
     let cond: Vec<String> = v
       .variant_props()
       .iter()
-      .map(|(k, val)| format!("{} === {}", prop_ident(k), q(val)))
+      .map(|(k, val)| format!("{shown}{} === {}", prop_ident(k), q(val)))
       .collect();
     if !cond.is_empty() {
-      body.push_str(&format!("  if ({}) return <{fname} {{...rest}} />;\n", cond.join(" && ")));
+      body.push_str(&format!("  if ({}) return <{fname} {{...rest}}{pass} />;\n", cond.join(" && ")));
     }
   }
   let default_fn = ctx.components.get(&first.id).cloned().unwrap_or_default();
-  body.push_str(&format!("  return <{default_fn} {{...rest}} />;\n"));
+  body.push_str(&format!("  return <{default_fn} {{...rest}}{pass} />;\n"));
   // The set's description, or its first variant's.
   let described = std::iter::once(set).chain(vs.iter());
   let doc_text = described
     .filter_map(|n| n.component.as_ref())
     .map(|c| c.description.as_str())
     .find(|d| !d.trim().is_empty());
+  let mut params = params;
+  if stateful {
+    params.push("onNavigate".into());
+  }
+  params.push("...rest".into());
+  types.extend([
+    "className?: string".into(),
+    "onClick?: () => void".into(),
+    format!("onNavigate?: {NAVIGATE}"),
+  ]);
   format!(
-    "{}export function {name}({{ {}, ...rest }}: {{ {}; className?: string; onClick?: () => void; onNavigate?: {NAVIGATE} }}) {{\n{body}}}\n\n",
+    "{}export function {name}({{ {} }}: {{ {} }}) {{\n{body}}}\n\n",
     jsdoc(doc_text),
     params.join(", "),
     types.join("; ")
@@ -3024,7 +3247,7 @@ const FOCUS_CSS: &str = ":focus-visible { outline: 2px solid #2563eb !important;
 /// What the prototype and the export don't carry over, and the top-level layers left out.
 fn readme_limits(doc: &Document) -> String {
   let mut out = String::from(
-    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- Hover and Change to states, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert).\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n- Strokes are CSS `outline`s (they take no layout space, like Figma's), so `src/index.css` ends with a `:focus-visible` rule that keeps a keyboard focus ring; restyle it to taste.\n- Accessible names (`aria-label`) generated for icon-only controls are in English (\"Go to Detail\", \"Back\"); translate them for other languages.\n",
+    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- While hovering / While pressing Change to, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert).\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n- Strokes are CSS `outline`s (they take no layout space, like Figma's), so `src/index.css` ends with a `:focus-visible` rule that keeps a keyboard focus ring; restyle it to taste.\n- Accessible names (`aria-label`) generated for icon-only controls are in English (\"Go to Detail\", \"Back\"); translate them for other languages.\n",
   );
   let left_out: Vec<&str> = doc
     .pages
@@ -3087,7 +3310,10 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   let comp_names: Vec<String> = ctx.components.values().chain(ctx.sets.values()).cloned().collect();
   files.push(ProjectFile {
     path: "src/components.tsx".into(),
-    content: format!("// Reusable components generated from Designotron main components.\n\n{comps}"),
+    content: format!(
+      "// Reusable components generated from Designotron main components.\n\n{}{comps}",
+      react_import(&comps)
+    ),
   });
   for (name, src) in &screen_src {
     let used: Vec<&String> = comp_names.iter().filter(|c| src.contains(&format!("<{c} "))).collect();
@@ -3218,7 +3444,7 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   files.push(ProjectFile {
     path: "CLAUDE.md".into(),
     content: format!(
-      "# {title}\n\nThis project was generated from a Designotron design. `design.dtron.json` is the design source.\n\n- Screens live in `src/screens/`, one per top-level frame. Reusable components are in `src/components.tsx`.\n- Layout is generated from auto layout (flexbox) and absolute positioning; refactor toward responsive layouts where it makes sense.\n- Prototype links became `onNavigate(\"Screen\")` calls handled in `src/App.tsx`; overlays (`\"overlay:Screen\"`, `\"swap-overlay:Screen\"`, `\"close-overlay\"`) open on top of the current screen, and Escape closes the topmost.\n- If the Designotron bridge is running, its MCP server (`designotron`) can read the live design: use `get_document`, `get_nodes` and `get_screenshot` to check details.\n"
+      "# {title}\n\nThis project was generated from a Designotron design. `design.dtron.json` is the design source.\n\n- Screens live in `src/screens/`, one per top-level frame. Reusable components are in `src/components.tsx`.\n- Layout is generated from auto layout (flexbox) and absolute positioning; refactor toward responsive layouts where it makes sense.\n- Prototype links became `onNavigate(\"Screen\")` calls handled in `src/App.tsx`; Scroll to becomes `onNavigate(\"scroll:<id>\")` (it scrolls the target's scrollers, not the page) and a click Change to inside a component set switches the variant its function shows (`useState` in `src/components.tsx`); overlays (`\"overlay:Screen\"`, `\"swap-overlay:Screen\"`, `\"close-overlay\"`) open on top of the current screen, and Escape closes the topmost.\n- If the Designotron bridge is running, its MCP server (`designotron`) can read the live design: use `get_document`, `get_nodes` and `get_screenshot` to check details.\n"
     ),
   });
   let credits = credits_md(doc);
@@ -4999,5 +5225,337 @@ mod r10_tests {
     add(&mut d, NodeType::Frame, "a", "Home", None);
     let html = export_html(&d, "a", &HeuristicMeasurer);
     assert!(html.contains("<main>") && html.contains(":focus-visible"), "{html}");
+  }
+}
+
+#[cfg(test)]
+mod r11_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::model::{Action, Interaction, Overflow, Trigger};
+  use crate::text::HeuristicMeasurer;
+
+  fn base() -> Document {
+    let mut gen = IdGen::new(31);
+    new_document(&mut gen, "R11")
+  }
+
+  fn add(doc: &mut Document, kind: NodeType, id: &str, name: &str, parent: Option<&str>) {
+    let page = doc.pages[0].id.clone();
+    let n = crate::ops::default_node(kind, id.into(), name.into());
+    doc.insert(n, parent, &page, None);
+  }
+
+  fn project(doc: &Document, path: &str) -> String {
+    export_project(doc, &HeuristicMeasurer)
+      .into_iter()
+      .find(|f| f.path == path)
+      .map(|f| f.content)
+      .unwrap_or_default()
+  }
+
+  /// A stepper set "Stepper" with variants Qty=1..3; the first two have a "Plus" layer whose
+  /// trigger changes to the next variant. An instance sits on the screen "Cart".
+  fn stepper(trigger: Trigger) -> (Document, Vec<String>) {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "screen", "Cart", None);
+    let mut gen = IdGen::new(900);
+    let mut comps = vec![];
+    for q in 1..=3 {
+      let id = format!("q{q}");
+      add(&mut doc, NodeType::Frame, &id, &format!("Qty={q}"), None);
+      doc.get_mut(&id).unwrap().layout = Some(crate::model::AutoLayout::default());
+      let plus = format!("plus{q}");
+      add(&mut doc, NodeType::Frame, &plus, "Plus", Some(&id));
+      doc.get_mut(&plus).unwrap().layout = Some(crate::model::AutoLayout::default());
+      let t = format!("t{q}");
+      add(&mut doc, NodeType::Text, &t, "Sign", Some(&plus));
+      doc.get_mut(&t).unwrap().text.as_mut().unwrap().characters = "+".into();
+      comps.push(crate::components::create_component(&mut doc, &[id], &mut gen).unwrap());
+    }
+    let set = crate::components::combine_as_variants(&mut doc, &comps, &mut gen).unwrap();
+    doc.get_mut(&set).unwrap().name = "Stepper".into();
+    for (q, dest) in comps.iter().enumerate().skip(1) {
+      doc.get_mut(&format!("plus{q}")).unwrap().interactions.push(Interaction {
+        trigger,
+        action: Action::ChangeTo,
+        destination: Some(dest.clone()),
+        ..Default::default()
+      });
+    }
+    let page = doc.pages[0].id.clone();
+    crate::components::create_instance(&mut doc, &comps[0], Some("screen"), &page, 0.0, 0.0, &mut gen).unwrap();
+    (doc, comps)
+  }
+
+  #[test]
+  fn scrollers_do_not_chain_their_wheel_to_the_page() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "list", "List", None);
+    doc.get_mut("list").unwrap().overflow = Overflow::Vertical;
+    add(&mut doc, NodeType::Frame, "row", "Row", None);
+    doc.get_mut("row").unwrap().overflow = Overflow::Horizontal;
+    add(&mut doc, NodeType::Frame, "pad", "Pad", None);
+    doc.get_mut("pad").unwrap().overflow = Overflow::Both;
+    let list = export_react(&doc, "list", &HeuristicMeasurer);
+    assert!(list.contains("overflow-y-auto") && list.contains("overscroll-y-contain"), "{list}");
+    let row = export_react(&doc, "row", &HeuristicMeasurer);
+    assert!(row.contains("overscroll-x-contain") && !row.contains("overscroll-y"), "{row}");
+    let pad = export_react(&doc, "pad", &HeuristicMeasurer);
+    assert!(pad.contains("overflow-auto") && pad.contains("overscroll-contain"), "{pad}");
+  }
+
+  #[test]
+  fn a_screen_with_fixed_layers_keeps_overscroll_on_its_inner_scroller() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "feed", "Feed", None);
+    doc.get_mut("feed").unwrap().overflow = Overflow::Vertical;
+    add(&mut doc, NodeType::Frame, "bar", "Tab bar", Some("feed"));
+    doc.get_mut("bar").unwrap().scroll_behavior = crate::model::ScrollBehavior::Fixed;
+    let src = export_react(&doc, "feed", &HeuristicMeasurer);
+    let scroller = src.lines().find(|l| l.contains("overflow-y-auto")).expect("scroller");
+    assert!(scroller.contains("overscroll-y-contain"), "{src}");
+    assert_eq!(src.matches("overscroll-y-contain").count(), 1, "{src}");
+  }
+
+  #[test]
+  fn scroll_to_scrolls_its_target_into_view() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Settings", None);
+    add(&mut doc, NodeType::Frame, "jump", "Jump", Some("s"));
+    doc.get_mut("jump").unwrap().height = 40.0;
+    add(&mut doc, NodeType::Text, "jt", "Label", Some("jump"));
+    doc.get_mut("jt").unwrap().text.as_mut().unwrap().characters = "Security".into();
+    add(&mut doc, NodeType::Frame, "sec", "Security", Some("s"));
+    doc.get_mut("jump").unwrap().interactions.push(Interaction {
+      action: Action::ScrollTo,
+      destination: Some("sec".into()),
+      ..Default::default()
+    });
+    let src = project(&doc, "src/screens/Settings.tsx");
+    assert!(src.contains(r#"onNavigate?.("scroll:sec")"#), "{src}");
+    assert!(src.contains(r#"data-scroll-target="sec""#), "{src}");
+    assert!(src.contains("<button"), "{src}");
+    let app = project(&doc, "src/App.tsx");
+    assert!(
+      app.contains("s.startsWith(\"scroll:\")") && app.contains("el.scrollTo(") && !app.contains("scrollIntoView"),
+      "{app}"
+    );
+    let readme = project(&doc, "README.md");
+    let limits = &readme[readme.find("What isn't exported").unwrap()..];
+    assert!(
+      !limits.contains("Scroll to") && project(&doc, "CLAUDE.md").contains("scroll:<id>"),
+      "{limits}"
+    );
+  }
+
+  #[test]
+  fn a_layer_whose_only_action_cannot_be_exported_is_not_a_button() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Settings", None);
+    add(&mut doc, NodeType::Frame, "jump", "Jump", Some("s"));
+    doc.get_mut("jump").unwrap().height = 40.0;
+    add(&mut doc, NodeType::Text, "jt", "Label", Some("jump"));
+    // Scroll to without a destination.
+    doc.get_mut("jump").unwrap().interactions.push(Interaction {
+      action: Action::ScrollTo,
+      ..Default::default()
+    });
+    let src = project(&doc, "src/screens/Settings.tsx");
+    assert!(
+      !src.contains("<button") && !src.contains("tabIndex") && !src.contains("cursor-pointer"),
+      "{src}"
+    );
+    // With a destination it is a button.
+    add(&mut doc, NodeType::Frame, "sec", "Security", Some("s"));
+    doc.get_mut("jump").unwrap().interactions[0].destination = Some("sec".into());
+    assert!(project(&doc, "src/screens/Settings.tsx").contains("<button"));
+  }
+
+  #[test]
+  fn click_change_to_keeps_the_picked_variant_in_the_set_function() {
+    let (doc, _) = stepper(Trigger::OnClick);
+    let comps = project(&doc, "src/components.tsx");
+    assert!(
+      comps.starts_with(
+        "// Reusable components generated from Designotron main components.\n\nimport { useEffect, useState } from \"react\";"
+      ),
+      "{comps}"
+    );
+    assert!(
+      comps.contains("export function Stepper({ qty = \"1\", onNavigate, ...rest }"),
+      "{comps}"
+    );
+    assert!(
+      comps.contains("const [picked, setPicked] = useState<{ qty?: \"1\" | \"2\" | \"3\" } | null>(null);"),
+      "{comps}"
+    );
+    assert!(comps.contains("useEffect(() => setPicked(null), [qty]);"), "{comps}");
+    assert!(
+      comps.contains("screen.startsWith(\"change:Stepper:\") ? setPicked(JSON.parse(screen.slice(15)))"),
+      "{comps}"
+    );
+    assert!(
+      comps.contains("if (shown.qty === \"2\") return <StepperVariant2 {...rest} onNavigate={change} />;"),
+      "{comps}"
+    );
+    // Variant 1's plus changes to qty 2; variant 3 has no action.
+    let v1 = &comps[comps.find("function StepperVariant1(").unwrap()..comps.find("function StepperVariant2(").unwrap()];
+    assert!(v1.contains(r#"onNavigate?.("change:Stepper:{\"qty\":\"2\"}")"#), "{v1}");
+    let v3 = &comps[comps.find("function StepperVariant3(").unwrap()..comps.find("export function Stepper(").unwrap()];
+    assert!(!v3.contains("change:") && !v3.contains("<button"), "{v3}");
+    // The screen hands its navigator to the set.
+    let cart = project(&doc, "src/screens/Cart.tsx");
+    assert!(cart.contains("<Stepper ") && cart.contains("onNavigate={onNavigate}"), "{cart}");
+    // The single-file export imports the hooks too.
+    let one = export_react(&doc, "screen", &HeuristicMeasurer);
+    assert!(one.contains("import { useEffect, useState } from \"react\";"), "{one}");
+  }
+
+  #[test]
+  fn hover_change_to_stays_unexported_and_is_not_a_button() {
+    let (doc, _) = stepper(Trigger::OnHover);
+    let comps = project(&doc, "src/components.tsx");
+    assert!(
+      !comps.contains("useState") && !comps.contains("change:") && !comps.contains("<button"),
+      "{comps}"
+    );
+    let readme = project(&doc, "README.md");
+    assert!(readme.contains("While hovering / While pressing Change to"), "{readme}");
+  }
+
+  #[test]
+  fn a_nested_set_passes_a_foreign_change_up() {
+    let (mut doc, comps) = stepper(Trigger::OnClick);
+    // An outer set "Row" with two variants, each holding an instance of the stepper.
+    let mut gen = IdGen::new(1900);
+    let page = doc.pages[0].id.clone();
+    let mut rows = vec![];
+    for r in 1..=2 {
+      let id = format!("r{r}");
+      add(&mut doc, NodeType::Frame, &id, &format!("Mode={r}"), None);
+      doc.get_mut(&id).unwrap().layout = Some(crate::model::AutoLayout::default());
+      rows.push(crate::components::create_component(&mut doc, &[id], &mut gen).unwrap());
+    }
+    for row in &rows {
+      crate::components::create_instance(&mut doc, &comps[0], Some(row), &page, 0.0, 0.0, &mut gen).unwrap();
+    }
+    let set = crate::components::combine_as_variants(&mut doc, &rows, &mut gen).unwrap();
+    doc.get_mut(&set).unwrap().name = "Row".into();
+    // Plus 3 (inside the stepper) changes the row to mode 2: the row set owns that change.
+    doc.get_mut("plus3").unwrap().interactions.push(Interaction {
+      trigger: Trigger::OnClick,
+      action: Action::ChangeTo,
+      destination: Some(rows[1].clone()),
+      ..Default::default()
+    });
+    let src = project(&doc, "src/components.tsx");
+    let set_fn = |name: &str| {
+      let at = src.find(&format!("export function {name}(")).unwrap();
+      let end = src[at + 1..].find("\nexport function ").map_or(src.len(), |e| at + 1 + e);
+      src[at..end].to_string()
+    };
+    assert!(set_fn("Row").contains("useState<{ mode?:"), "{src}");
+    assert!(set_fn("Stepper").contains("onNavigate?.(screen, overlay)"), "{src}");
+    let v3 = &src[src.find("function StepperVariant3(").unwrap()..src.find("function StepperVariant3(").unwrap() + 1500];
+    assert!(v3.contains("change:Row:"), "{v3}");
+    // The row's variants hand their navigator on to the stepper they hold.
+    assert!(src.contains("<Stepper ") && src.contains("onNavigate={onNavigate}"), "{src}");
+  }
+
+  #[test]
+  fn a_change_to_on_an_instance_inside_a_variant_is_exported_and_other_sets_get_no_state() {
+    let (mut doc, comps) = stepper(Trigger::OnHover);
+    // Variants hold a button instance (a design-system stepper's +).
+    let mut gen = IdGen::new(2900);
+    let page = doc.pages[0].id.clone();
+    add(&mut doc, NodeType::Frame, "btn", "Btn", None);
+    doc.get_mut("btn").unwrap().layout = Some(crate::model::AutoLayout::default());
+    add(&mut doc, NodeType::Text, "btn_t", "Sign", Some("btn"));
+    let btn = crate::components::create_component(&mut doc, &["btn".to_string()], &mut gen).unwrap();
+    let inst = crate::components::create_instance(&mut doc, &btn, Some(&comps[0]), &page, 0.0, 0.0, &mut gen).unwrap();
+    doc.get_mut(&inst).unwrap().interactions.push(Interaction {
+      trigger: Trigger::OnClick,
+      action: Action::ChangeTo,
+      destination: Some(comps[1].clone()),
+      ..Default::default()
+    });
+    let src = project(&doc, "src/components.tsx");
+    assert!(src.contains("useState<"), "{src}");
+    assert!(
+      src.contains(r#"onClick={() => onNavigate?.("change:Stepper:{\"qty\":\"2\"}")}"#),
+      "{src}"
+    );
+    // A click Change to on a screen layer can't reach a set: no state, no dead hooks.
+    let (mut doc, comps) = stepper(Trigger::OnHover);
+    doc.get_mut("screen").unwrap().interactions.push(Interaction {
+      trigger: Trigger::OnClick,
+      action: Action::ChangeTo,
+      destination: Some(comps[1].clone()),
+      ..Default::default()
+    });
+    let src = project(&doc, "src/components.tsx");
+    assert!(!src.contains("useState") && !src.contains("useEffect"), "{src}");
+  }
+
+  #[test]
+  fn sets_with_the_same_name_get_their_own_change_key() {
+    let (mut doc, _) = stepper(Trigger::OnClick);
+    let mut gen = IdGen::new(3900);
+    let mut second = vec![];
+    for q in 1..=2 {
+      let id = format!("b{q}");
+      add(&mut doc, NodeType::Frame, &id, &format!("Qty={q}"), None);
+      doc.get_mut(&id).unwrap().layout = Some(crate::model::AutoLayout::default());
+      let plus = format!("bplus{q}");
+      add(&mut doc, NodeType::Frame, &plus, "Plus", Some(&id));
+      second.push(crate::components::create_component(&mut doc, &[id], &mut gen).unwrap());
+    }
+    let set = crate::components::combine_as_variants(&mut doc, &second, &mut gen).unwrap();
+    doc.get_mut(&set).unwrap().name = "stepper".into();
+    doc.get_mut("bplus1").unwrap().interactions.push(Interaction {
+      trigger: Trigger::OnClick,
+      action: Action::ChangeTo,
+      destination: Some(second[1].clone()),
+      ..Default::default()
+    });
+    let page = doc.pages[0].id.clone();
+    crate::components::create_instance(&mut doc, &second[0], Some("screen"), &page, 0.0, 0.0, &mut gen).unwrap();
+    let src = project(&doc, "src/components.tsx");
+    let keys: BTreeSet<&str> = src
+      .match_indices("\"change:")
+      .map(|(i, _)| src[i + 8..].split(':').next().unwrap())
+      .collect();
+    assert!(keys.contains("Stepper") && keys.contains("Stepper2"), "{keys:?}\n{src}");
+  }
+
+  #[test]
+  fn key_and_delay_scroll_to_have_a_target() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Settings", None);
+    add(&mut doc, NodeType::Frame, "sec", "Security", Some("s"));
+    doc.get_mut("s").unwrap().interactions.push(Interaction {
+      trigger: Trigger::Key,
+      key: Some("S".into()),
+      action: Action::ScrollTo,
+      destination: Some("sec".into()),
+      ..Default::default()
+    });
+    let src = project(&doc, "src/screens/Settings.tsx");
+    assert!(src.contains(r#"data-scroll-target="sec""#), "{src}");
+    let app = project(&doc, "src/App.tsx");
+    assert!(app.contains(r#""to":"scroll:sec""#), "{app}");
+  }
+
+  #[test]
+  fn a_set_without_variant_properties_is_valid_tsx() {
+    let (mut doc, comps) = stepper(Trigger::OnClick);
+    for c in &comps {
+      doc.get_mut(c).unwrap().component.as_mut().unwrap().variant_props.clear();
+    }
+    let src = project(&doc, "src/components.tsx");
+    assert!(!src.contains("{ ,") && !src.contains("{ ;") && !src.contains(", ,"), "{src}");
+    // Nothing to switch to: no state, and the +/- layers aren't dead buttons.
+    assert!(!src.contains("useState") && !src.contains("change:"), "{src}");
   }
 }

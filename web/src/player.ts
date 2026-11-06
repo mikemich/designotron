@@ -187,8 +187,6 @@ export function reverseMotion(m: Motion): Motion {
       return { ...m, kind: "moveIn", dir: OPPOSITE[m.dir] };
     case "push":
       return { ...m, dir: OPPOSITE[m.dir] };
-    case "smart":
-      return { ...m, kind: "dissolve" };
     default:
       return m;
   }

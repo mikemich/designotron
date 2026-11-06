@@ -12,6 +12,7 @@
 //   [photo=QUERY]  search_photos for QUERY, then place_photo with the first id (into [node=ID] if given)
 //   [node=ID]      the layer place_photo fills
 //   [fail]         end with an error result
+// `--resume missing-session` fails like the CLI does for a session it no longer has.
 // It says the secret its MCP config carries ("conn=<token>") in its reply.
 
 import fs from "node:fs";
@@ -22,7 +23,18 @@ if (argv.includes("--version")) {
   process.exit(0);
 }
 
-const prompt = argv[argv.indexOf("-p") + 1] ?? "";
+// Like the CLI, resuming a session it doesn't have fails at once: one error result on stdout (no
+// `result` text, the message in `errors`), the same message on stderr, exit code 1.
+if (argv.includes("--resume=missing-session") || (argv.includes("--resume") && argv[argv.indexOf("--resume") + 1] === "missing-session")) {
+  const message = "No conversation found with session ID: missing-session";
+  console.log(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, session_id: "missing-session", errors: [message] }));
+  console.error(message);
+  process.exit(1);
+}
+
+// The bridge passes the prompt after `--` (older callers: right after -p).
+const dashes = argv.indexOf("--");
+const prompt = (dashes >= 0 ? argv[dashes + 1] : argv[argv.indexOf("-p") + 1]) ?? "";
 const opt = (name, fallback) => prompt.match(new RegExp(`\\[${name}=([^\\]]*)\\]`))?.[1] ?? fallback;
 const tag = opt("tag", "L");
 const calls = Number(opt("calls", 3));

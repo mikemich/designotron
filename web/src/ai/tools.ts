@@ -2,7 +2,9 @@
 // engine (one undo step each), browser-only tools are handled here.
 
 import { aiDispatch, getDoc, pointerDrag, query, selection, useStore, zoomToSelection } from "../store";
-import { getScreenshot, importHtml, importUrl } from "./browserTools";
+import { LEFT_FILE, getScreenshot, importHtml, importUrl } from "./browserTools";
+
+export { LEFT_FILE };
 
 export interface ToolOutcome {
   ok: boolean;
@@ -81,15 +83,31 @@ export async function whenCanvasIdle(timeoutMs = 45000): Promise<boolean> {
   return true;
 }
 
-/** `opts.group`: undo group of the chat turn the call belongs to (see `aiDispatch`). */
-export async function executeTool(name: string, input: any, opts: { group?: string } = {}): Promise<ToolOutcome> {
+/** The file the editor has open (set by the chat state as files open and close). */
+let openFile: string | null = null;
+/** Counts file changes: a call that waited (network, fonts, a screenshot) writes only if no file
+ *  was opened or closed meanwhile. */
+let fileEpoch = 0;
+export function setToolFile(id: string | null) {
+  openFile = id;
+  fileEpoch++;
+}
+
+/** `opts.group`: undo group of the chat turn the call belongs to (see `aiDispatch`).
+ *  `opts.fileId`: the file the calling chat turn belongs to; the call is refused when that
+ *  isn't the open file (the turn is over, and its calls would land in an unrelated file). */
+export async function executeTool(name: string, input: any, opts: { group?: string; fileId?: string | null } = {}): Promise<ToolOutcome> {
+  if (opts.fileId !== undefined && opts.fileId !== openFile) return { ok: false, result: LEFT_FILE };
+  const epoch = fileEpoch;
+  const stillOpen = () => fileEpoch === epoch;
   try {
     if (name === "get_screenshot") {
       const shot = await getScreenshot(input?.id, input?.scale);
+      if (!stillOpen()) throw new Error(LEFT_FILE);
       return { ok: true, result: { nodeId: shot.id, width: shot.width, height: shot.height }, image: { data: shot.data, mediaType: "image/png" } };
     }
     if (name === "import_html") {
-      return { ok: true, result: await importHtml({ ...(input ?? {}), group: opts.group }) };
+      return { ok: true, result: await importHtml({ ...(input ?? {}), group: opts.group, stillOpen }) };
     }
     if (name === "save_plugin") {
       const { savePlugin } = await import("../plugins");
@@ -98,9 +116,9 @@ export async function executeTool(name: string, input: any, opts: { group?: stri
       return { ok: true, result: { id, saved: true, note: "The user can run it from the main menu > Plugins." } };
     }
     if (name === "import_url") {
-      return { ok: true, result: await importUrl({ ...(input ?? {}), group: opts.group }) };
+      return { ok: true, result: await importUrl({ ...(input ?? {}), group: opts.group, stillOpen }) };
     }
-    if (name === "search_photos" || name === "place_photo") return await (await import("../photos/tool")).run(name, input, opts.group);
+    if (name === "search_photos" || name === "place_photo") return await (await import("../photos/tool")).run(name, input, opts.group, stillOpen);
     // The engine has no clock; stamp Claude's comment replies here.
     if (name === "reply_comment") input = { ...input, time: Date.now() };
     const result = aiDispatch(name, input ?? {}, opts.group);
