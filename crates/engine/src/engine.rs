@@ -1979,7 +1979,14 @@ impl Engine {
         n.x = x;
         n.y = y;
         n.text.as_mut().unwrap().characters = characters;
+        let empty = n.text.as_ref().is_some_and(|t| t.characters.is_empty());
         let id = self.insert_abs(n, parent.as_deref());
+        // New text (tool click, Enter) starts white on a dark backdrop; typed text and paste keep black.
+        if empty && crate::lint::dark_backdrop(&self.doc, &id, &self.page) {
+          if let Some(n) = self.doc.get_mut(&id) {
+            n.fills = vec![Paint::solid("#FFFFFF")];
+          }
+        }
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
       }
@@ -2064,7 +2071,8 @@ impl Engine {
         name,
         parent,
       } => {
-        let parent = self.auto_parent(parent, x, y);
+        // The frame under the image's centre takes it, like a drop.
+        let parent = self.auto_parent(parent, x + width / 2.0, y + height / 2.0);
         let mut n = ops::default_node(NodeType::Rectangle, self.gen.next("n_"), name.unwrap_or_else(|| "Image".into()));
         n.x = x;
         n.y = y;
@@ -5198,6 +5206,73 @@ mod tests {
     );
     assert_eq!(e.doc.get(&r).unwrap().parent.as_deref(), Some(f.as_str()));
     assert_eq!(e.doc.get(&r).unwrap().x, 50.0);
+  }
+
+  fn frame_with_fill(e: &mut Engine, fill: &str) -> String {
+    let f = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 100.0,
+        y: 100.0,
+        width: 200.0,
+        height: 200.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.doc.get_mut(&f).unwrap().fills = vec![Paint::solid(fill)];
+    f
+  }
+
+  #[test]
+  fn image_takes_the_frame_under_its_centre() {
+    let mut e = engine();
+    let f = frame_with_fill(&mut e, "#FFFFFF");
+    let mk = |e: &mut Engine, x: f64| {
+      id_of(
+        &e.dispatch(Command::CreateImage {
+          src: "asset:a".into(),
+          x,
+          y: 150.0,
+          width: 300.0,
+          height: 100.0,
+          name: None,
+          parent: None,
+        })
+        .unwrap(),
+      )
+    };
+    // Top-left inside the frame, centre outside: stays top-level.
+    let out = mk(&mut e, 250.0);
+    assert_eq!(e.doc.get(&out).unwrap().parent, None);
+    // Top-left outside, centre inside: joins the frame.
+    let inside = mk(&mut e, -20.0);
+    assert_eq!(e.doc.get(&inside).unwrap().parent.as_deref(), Some(f.as_str()));
+  }
+
+  #[test]
+  fn new_text_is_white_on_a_dark_backdrop_only() {
+    let mut e = engine();
+    let dark = frame_with_fill(&mut e, "#000000");
+    let text = |e: &mut Engine, chars: &str| {
+      id_of(
+        &e.dispatch(Command::CreateText {
+          x: 120.0,
+          y: 120.0,
+          characters: chars.into(),
+          parent: None,
+        })
+        .unwrap(),
+      )
+    };
+    let t = text(&mut e, "");
+    assert_eq!(e.doc.get(&t).unwrap().parent.as_deref(), Some(dark.as_str()));
+    assert_eq!(e.doc.get(&t).unwrap().fills, vec![Paint::solid("#FFFFFF")]);
+    let typed = text(&mut e, "Pasted");
+    assert_eq!(e.doc.get(&typed).unwrap().fills, vec![Paint::solid("#000000")]);
+    e.doc.get_mut(&dark).unwrap().fills = vec![Paint::solid("#FFFFFF")];
+    let t2 = text(&mut e, "");
+    assert_eq!(e.doc.get(&t2).unwrap().fills, vec![Paint::solid("#000000")]);
   }
 
   #[test]

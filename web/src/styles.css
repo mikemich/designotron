@@ -3287,6 +3287,14 @@ body:has(.phone-note) .toast {
     border: 1px solid ButtonText;
   }
   .logo {
-    border: 1px solid CanvasText;
+    outline: 1px solid CanvasText;
+    outline-offset: -1px;
+  }
+  [aria-pressed="true"],
+  .tbtn.active {
+    forced-color-adjust: none;
+    background: Highlight;
+    color: HighlightText;
+    border-color: Highlight;
   }
 }

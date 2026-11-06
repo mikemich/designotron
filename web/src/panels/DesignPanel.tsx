@@ -579,6 +579,8 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
 function HexInput({ color, onCommit }: { color: string; onCommit: (color: string) => void }) {
   const ref = useRef<HTMLInputElement>(null);
   const shown = color.replace("#", "").slice(0, 6);
+  const shownRef = useRef(shown);
+  shownRef.current = shown;
   /** Typed in since the last commit: only then does leaving the field write the colour. */
   const edited = useRef(false);
   useEffect(() => {
@@ -594,7 +596,14 @@ function HexInput({ color, onCommit }: { color: string; onCommit: (color: string
     }
     const next = "#" + (v.length === 3 ? v.split("").map((c) => c + c).join("") : v).toUpperCase();
     el.value = next.slice(1);
-    if (next !== color.toUpperCase().slice(0, 7)) onCommit(next);
+    if (next !== color.toUpperCase().slice(0, 7)) {
+      onCommit(next);
+      // A refused edit (view-only tab) leaves `shown` unchanged, so the resync effect never runs:
+      // settle on whatever the paint shows once the engine has answered.
+      requestAnimationFrame(() => {
+        if (document.activeElement !== el || !edited.current) el.value = shownRef.current;
+      });
+    }
   };
   return (
     <input
