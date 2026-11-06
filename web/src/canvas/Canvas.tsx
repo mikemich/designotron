@@ -3,6 +3,7 @@ import type { Handle, Mat, Node, Rect, VectorPoint } from "../types";
 import {
   describeSelection,
   dispatch,
+  emptyPromptKey,
   getDoc,
   pointerDrag,
   noteZooming,
@@ -705,7 +706,9 @@ export function Canvas() {
         // Shift locks the move to the dominant axis; the engine snaps only along the free one.
         const axis = e.shiftKey ? (Math.abs(dx) >= Math.abs(dy) ? "x" : "y") : undefined;
         const r = dispatch<{ guides: any[]; gaps: any[] }>({ op: "translate", ids: d.ids, dx, dy, snap: !e.ctrlKey, zoom: zoom(), axis }, { quiet: true });
-        const target = query<string | null>({ q: "frameAt", x: p.x, y: p.y, exclude: d.ids });
+        // With the axis locked the layers sit at the locked delta, so the drop target is looked up there.
+        const tp = axis === "x" ? { x: p.x, y: d.start.y } : axis === "y" ? { x: d.start.x, y: p.y } : p;
+        const target = query<string | null>({ q: "frameAt", x: tp.x, y: tp.y, exclude: d.ids });
         useStore.setState({ guides: r?.guides ?? [], gaps: r?.gaps ?? [], dropTarget: target });
         break;
       }
@@ -1102,7 +1105,7 @@ export function Canvas() {
 
   const cursor = panning ? "grabbing" : keys.space || tool === "hand" ? "grab" : tool === "move" ? (vHover ? "crosshair" : "default") : tool === "text" ? "text" : "crosshair";
   const emptyPromptClosed = useStore((s) => s.emptyPromptClosed);
-  const empty = !pageObj?.children.length && !emptyPromptClosed.includes(pageObj?.id ?? "");
+  const empty = !pageObj?.children.length && !emptyPromptClosed.includes(emptyPromptKey(pageObj?.id ?? ""));
 
   return (
     <div

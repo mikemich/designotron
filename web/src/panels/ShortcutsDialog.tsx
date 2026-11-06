@@ -90,7 +90,6 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Layers: move and select", "↑ ↓ Home End"],
       ["Layers: expand / collapse", "→ / ←"],
       ["Rename the selected layer", "F2"],
-      ["Layers: rename", "F2"],
       ["Layers: select the row / delete", "Space / Delete"],
       ["Layers: reorder", `${ALT}${SHIFT}↑ / ${ALT}${SHIFT}↓`],
       ["Layers: focus the canvas", "Enter"],

@@ -553,5 +553,9 @@ export const saveHook: { flush: (() => Promise<void>) | null } = { flush: null }
 
 /** Closes the empty-page prompt for a page until the editor is reloaded. */
 export function closeEmptyPrompt(page: string) {
-  useStore.setState((s) => (s.emptyPromptClosed.includes(page) ? s : { emptyPromptClosed: [...s.emptyPromptClosed, page] }));
+  const key = emptyPromptKey(page);
+  useStore.setState((s) => (s.emptyPromptClosed.includes(key) ? s : { emptyPromptClosed: [...s.emptyPromptClosed, key] }));
 }
+
+/** Page ids repeat between files, so the closed prompts are keyed by file too. */
+export const emptyPromptKey = (page: string) => `${useStore.getState().fileId ?? ""}:${page}`;

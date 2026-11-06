@@ -1439,21 +1439,6 @@ impl Engine {
       if changed.is_empty() {
         break;
       }
-      // Instances copy their main's size, so the mains settle (text re-measured, hug applied)
-      // before any sync, not after: otherwise instances land one edit behind.
-      let mut roots: Vec<NodeId> = Vec::new();
-      for c in &changed {
-        let root = self.doc.path(c).into_iter().next();
-        if let Some(r) = root.filter(|r| !roots.contains(r)) {
-          roots.push(r);
-        }
-      }
-      for r in &roots {
-        layout::layout_node(&mut self.doc, r, self.measurer.as_ref());
-      }
-      for c in &changed {
-        self.fingerprints.insert(c.clone(), components::fingerprint(&self.doc, c));
-      }
       let instances: Vec<NodeId> = self
         .doc
         .nodes
@@ -1535,6 +1520,17 @@ impl Engine {
           _ => {}
         }
       }
+    }
+    // Instances copy their main's size, so the mains settle (text re-measured, hug applied)
+    // before they are fingerprinted and synced, not after: otherwise instances land one edit behind.
+    let mut roots: Vec<NodeId> = Vec::new();
+    for c in &comps {
+      if let Some(r) = self.doc.path(c).into_iter().next().filter(|r| !roots.contains(r)) {
+        roots.push(r);
+      }
+    }
+    for r in &roots {
+      layout::layout_node(&mut self.doc, r, self.measurer.as_ref());
     }
     let mut changed = Vec::new();
     for c in comps {

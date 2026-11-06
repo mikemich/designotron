@@ -184,6 +184,17 @@ try {
   check("Ctrl+Shift+[ sends to back", (await order())[0] === a);
   await page.keyboard.press("Control+BracketRight");
   check("Ctrl+] still brings forward one step", (await order()).indexOf(a) === 1);
+  // On DE/ES/IT layouts the "]" key types "+": Ctrl+"+" must zoom, not reorder.
+  await run({ op: "select", ids: [c] });
+  const orderBefore = JSON.stringify(await order());
+  const z0 = (await dt(() => window.__dt.viewport())).zoom;
+  await page.evaluate(() => {
+    const ev = new KeyboardEvent("keydown", { key: "+", code: "BracketRight", ctrlKey: true, bubbles: true, cancelable: true });
+    document.getElementById("dt-canvas").dispatchEvent(ev);
+  });
+  const z1 = (await dt(() => window.__dt.viewport())).zoom;
+  check('Ctrl with key "+" on the BracketRight position zooms and does not reorder', z1 > z0 && JSON.stringify(await order()) === orderBefore, `zoom ${z0} -> ${z1}`);
+  await dt(() => window.__dt.setViewport({ zoom: 1, x: 100, y: 100 }));
   await page.click("#dt-canvas", { button: "right", position: { x: 300, y: 300 } }).catch(() => {});
   await run({ op: "select", ids: [b] });
   const bp = await at(130, 30);

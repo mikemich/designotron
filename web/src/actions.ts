@@ -17,6 +17,7 @@ import {
   toast,
   useStore,
 } from "./store";
+import { useCollab } from "./collab";
 import { ALT_MOD } from "./ui/controls";
 import { openTextGesture } from "./canvas/TextEditor";
 import type { DeviceFrame, Rect, Tool } from "./types";
@@ -379,18 +380,17 @@ export async function placeImage() {
 /** F2 on the canvas: renames the first selected layer in the Layers tree. */
 export function renameSelection() {
   const id = selection().find((s) => getDoc().nodes[s]);
-  if (!id || useStore.getState().es.readOnly) return;
+  if (!id || useStore.getState().es.readOnly || useCollab.getState().viewer) return;
   useStore.setState({ leftTab: "layers", renameRequest: id });
 }
 
 /** Ctrl+S: writes the open file to this browser now (autosave does it a moment after every edit). */
 export async function saveLocally() {
-  try {
-    await saveHook.flush?.();
-    toast("Saved locally");
-  } catch {
-    toast("Couldn't save in this browser", "error");
-  }
+  // The flush swallows its own errors (failed write, private mode, a stale tab), so ask what is left.
+  await saveHook.flush?.().catch(() => {});
+  const s = useStore.getState();
+  if (!saveHook.flush || s.dirty || s.saveFailed) toast("Couldn't save in this browser (see the bar at the top)", "error");
+  else toast("Saved locally");
 }
 
 /** Downloads the file as .dtron (Ctrl+Shift+S, File menu). */

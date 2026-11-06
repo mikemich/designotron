@@ -386,7 +386,7 @@ function Layers() {
   useEffect(() => {
     if (!renameRequest) return;
     useStore.setState({ renameRequest: null });
-    setTimeout(() => requestAnimationFrame(() => setRenaming(renameRequest)), 0);
+    setTimeout(() => requestAnimationFrame(() => doc.nodes[renameRequest] && setRenaming(renameRequest)), 0);
   }, [renameRequest]);
 
   // Reveal selected layers.

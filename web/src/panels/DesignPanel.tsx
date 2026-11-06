@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 import type { Effect, ExportSetting, LayoutGrid, Node, Paint, VarKind } from "../types";
 import { dispatch, FONTS, getDoc, styleTextSelection, useDoc, useSelection, useStore } from "../store";
-import { ALT, common, IconButton, MIXED, MOD, NumberField, Section, Seg, SelectField, SHIFT, type Maybe, ALT_MOD } from "../ui/controls";
+import { ALT, common, IconButton, MIXED, MOD, NumberField, Section, Seg, SelectField, SHIFT, type Maybe, ALT_MOD, SHIFT_MOD } from "../ui/controls";
 import { paintLabel, PaintSwatch, cssColor, ColorPicker } from "../ui/color";
 import { DEFAULT_EXPORT, exportLayers, rowSuffix } from "../exporter";
 import * as A from "../actions";
@@ -1219,7 +1219,7 @@ function GridSection({ node }: { node: Node }) {
           </div>
         );
       })}
-      {list.length > 0 && !useStore.getState().showGrids && <div className="muted small">Layout grids are hidden (⇧⌘4 to show).</div>}
+      {list.length > 0 && !useStore.getState().showGrids && <div className="muted small">Layout grids are hidden ({SHIFT_MOD}4 to show).</div>}
     </Section>
   );
 }

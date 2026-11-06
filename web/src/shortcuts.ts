@@ -2,7 +2,7 @@ import * as A from "./actions";
 import { copySelection, pasteHere, pasteOverSelection, pasteReplace } from "./canvas/contextMenu";
 import { closeEmptyPrompt, dispatch, getDoc, pointerDrag, selectSibling, selection, setTool, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
 import { useShortcuts } from "./panels/ShortcutsDialog";
-import { focusedByPointer } from "./ui/controls";
+import { focusedByPointer, isMac } from "./ui/controls";
 import { canOpenCursorChat, openCursorChat } from "./follow";
 
 function isTyping(e: KeyboardEvent): boolean {
@@ -103,15 +103,20 @@ export function installShortcuts(): () => void {
       if (k === "b" && e.altKey) return run(A.detachInstance);
       if (k === "h" && e.shiftKey) return run(() => A.toggleVisibility());
       if (k === "l" && e.shiftKey) return run(() => A.toggleLock());
-      // Front/back: Alt (⌥⌘] on a Mac) or Shift (Ctrl+Shift+] elsewhere, Figma's Windows chord). Shift turns
-      // "]" into "}" on most layouts, so these go by the physical key.
-      const toEnd = e.altKey || e.shiftKey;
-      if (e.code === "BracketRight" || k === "]") return run(() => A.reorder(toEnd ? "front" : "forward"));
-      if (e.code === "BracketLeft" || k === "[") return run(() => A.reorder(toEnd ? "back" : "backward"));
       if (e.key === "Enter" && !e.shiftKey && !e.altKey && onCanvas(e) && A.canInsertWithKeyboard()) return run(() => A.insertDefaultLayer(true));
+      // Zoom first: on some layouts (DE, ES, IT) the "]" key types "+".
       if (k === "=" || k === "+") return run(() => zoomBy(1.25));
       if (k === "-") return run(() => zoomBy(0.8));
       if (k === "0") return run(() => zoomBy(1 / st.viewport.zoom));
+      // Front/back: Alt (⌥⌘] on a Mac) or Shift (Ctrl+Shift+] elsewhere, Figma's Windows chord). Shift turns
+      // "]" into "}" on most layouts, so off a Mac that chord goes by the physical key. On a Mac ⌘⇧] is the
+      // browser's next tab: left alone.
+      const viaCode = e.shiftKey && !isMac;
+      const right = k === "]" || (viaCode && e.code === "BracketRight");
+      const left = k === "[" || (viaCode && e.code === "BracketLeft");
+      const toEnd = e.altKey || viaCode;
+      if (right && !(isMac && e.shiftKey && !e.altKey)) return run(() => A.reorder(toEnd ? "front" : "forward"));
+      if (left && !(isMac && e.shiftKey && !e.altKey)) return run(() => A.reorder(toEnd ? "back" : "backward"));
       return;
     }
 
@@ -172,6 +177,8 @@ export function installShortcuts(): () => void {
         if (st.editingVector) return run(() => useStore.setState({ editingVector: null }));
         // The canvas finishes the pen path on Escape (switching tools here would discard it).
         if (st.tool === "pen") return;
+        // A drag in progress is not interrupted.
+        if (pointerDrag.active) return;
         if (st.tool !== "move") return run(() => setTool("move"));
         // Esc clears the selection (as in Figma); \ and Shift+Enter select the parent.
         if (has) return run(() => dispatch({ op: "select", ids: [] }));
@@ -180,7 +187,7 @@ export function installShortcuts(): () => void {
           if (!getDoc().pages.find((p) => p.id === page)?.children.length) closeEmptyPrompt(page);
         });
       case "\\":
-        return has && !e.altKey && run(A.selectParent);
+        return has && run(A.selectParent);
       case "Tab":
         // Sibling selection on the canvas; with nothing selected Tab moves on (no keyboard trap).
         return has && onCanvas(e) && !e.altKey && !st.editingVector && run(() => selectSibling(e.shiftKey ? -1 : 1));
