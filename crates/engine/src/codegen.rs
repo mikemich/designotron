@@ -34,6 +34,35 @@ const widths: Record<string, number> = { __WIDTHS__ };
 // Phone-sized screens are shown centred on a backdrop; wider ones fill the window.
 const phoneScreens = new Set<string>([__PHONES__]);
 
+// What a key or delay trigger of the design does: go to a screen (or open or close an overlay),
+// or open a link.
+type Step = { to?: string; url?: string; opts?: Record<string, unknown> };
+// Each screen's "Key" and "After delay" triggers.
+const keys: Record<string, (Step & { key: string })[]> = __KEYS__;
+const delays: Record<string, (Step & { ms: number })[]> = __DELAYS__;
+
+// The name of a key press as the design writes it: "Enter", "Space", "Ctrl+Shift+K". Letters and
+// digits follow the physical key when a modifier changes what the key reports (Shift+1 is "!").
+function keyName(e: KeyboardEvent): string | null {
+  if (e.repeat || e.isComposing) return null;
+  if (["Control", "Alt", "Shift", "Meta", "Dead", "Unidentified", "Process"].includes(e.key)) return null;
+  const mod = e.ctrlKey || e.altKey || e.shiftKey || e.metaKey;
+  const physical = mod && !/^[\p{L}\p{N}]$/u.test(e.key) ? /^(?:Key([A-Z])|Digit(\d))$/.exec(e.code) : null;
+  const k = physical ? (physical[1] ?? physical[2]) : e.key === " " ? "Space" : e.key.length === 1 ? e.key.toUpperCase() : e.key;
+  return [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Meta", k].filter(Boolean).join("+");
+}
+
+// Each page's flow starts at its start screen; /#Screen opens a screen directly (another flow).
+function startScreen(): string {
+  let hash = window.location.hash.slice(1);
+  try {
+    hash = decodeURIComponent(hash);
+  } catch {
+    /* keep the raw hash */
+  }
+  return Object.prototype.hasOwnProperty.call(screens, hash) ? hash : __START__;
+}
+
 // Where an overlay sits on the screen underneath it.
 const placement: Record<string, CSSProperties> = {
   center: { alignItems: "center", justifyContent: "center" },
@@ -46,7 +75,7 @@ const placement: Record<string, CSSProperties> = {
 };
 
 export default function App() {
-  const [history, setHistory] = useState<string[]>([__START__]);
+  const [history, setHistory] = useState<string[]>(() => [startScreen()]);
   // Open overlays (modals, menus, sheets), topmost last.
   const [overlays, setOverlays] = useState<Overlay[]>([]);
   const current = history[history.length - 1];
@@ -71,13 +100,63 @@ export default function App() {
     setOverlays([]);
     setHistory((h) => (s === "back" ? (h.length > 1 ? h.slice(0, -1) : h) : [...h, s]));
   };
+  const live = useRef({ overlays, current, onNavigate });
+  live.current = { overlays, current, onNavigate };
+  const run = (step: Step) => {
+    if (step.to) live.current.onNavigate(step.to, step.opts);
+    else if (step.url) window.open(step.url, "_blank", "noopener,noreferrer");
+  };
   useEffect(() => {
+    // Enter and Space belong to a focused control, unless a click (not Tab) put the focus there.
+    let byPointer = false;
+    const onPointer = () => (byPointer = true);
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeTop();
+      // A control that already handled this key (its own onKeyDown) has run its action.
+      if (e.defaultPrevented) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable)) return;
+      const space = e.key === "Enter" || e.key === " ";
+      if (!space && !["Shift", "Control", "Alt", "Meta"].includes(e.key)) byPointer = false;
+      if (space && !byPointer && t?.closest("button, a[href], [role=button]")) return;
+      const name = keyName(e);
+      const { overlays, current } = live.current;
+      const top = overlays[overlays.length - 1];
+      const find = (screen?: string) => (name && screen ? keys[screen]?.find((k) => k.key === name) : undefined);
+      let hit = find(top?.screen);
+      if (!hit && top && e.key === "Escape") return closeTop();
+      hit = hit ?? find(current);
+      if (hit) {
+        e.preventDefault();
+        run(hit);
+      } else if (e.key === "Escape") closeTop();
     };
+    const onHash = () => {
+      setOverlays([]);
+      setHistory([startScreen()]);
+    };
+    window.addEventListener("pointerdown", onPointer, true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("hashchange", onHash);
+    return () => {
+      window.removeEventListener("pointerdown", onPointer, true);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("hashchange", onHash);
+    };
   }, []);
+  // After delay: runs once per visit to a screen, and once when an overlay opens.
+  useEffect(() => {
+    const timers = (delays[current] ?? []).map((d) => setTimeout(() => run(d), d.ms));
+    return () => timers.forEach(clearTimeout);
+  }, [history.length, current]);
+  // An overlay's delay starts once, when that overlay opens (a swap keeps the count, not the overlay).
+  const started = useRef(new WeakSet<Overlay>());
+  const top = overlays[overlays.length - 1];
+  useEffect(() => {
+    if (!top || started.current.has(top)) return;
+    started.current.add(top);
+    const timers = (delays[top.screen] ?? []).map((d) => setTimeout(() => run(d), d.ms));
+    return () => timers.forEach(clearTimeout);
+  }, [top]);
   const phone = phoneScreens.has(current);
   return (
     <div className={phone ? "min-h-screen flex items-start justify-center bg-neutral-100 py-10" : "min-h-screen flex justify-center"}>
@@ -165,6 +244,13 @@ struct El {
   classes: Vec<String>,
   /// Inside a button or link: the click handler stops there, so only the innermost action runs.
   stop_click: bool,
+  /// A clickable element that isn't a button or link: it gets `role="button"`, `tabIndex` and an
+  /// Enter/Space handler so the keyboard reaches it.
+  focusable: bool,
+  /// The element's subtree holds a button, link or other control (or this is a component that renders one).
+  holds_control: bool,
+  /// A component reference whose component renders a button or link.
+  renders_control: bool,
 }
 
 impl El {
@@ -190,6 +276,9 @@ impl El {
       slot: None,
       classes: vec![],
       stop_click: false,
+      focusable: false,
+      holds_control: false,
+      renders_control: false,
     }
   }
 
@@ -231,6 +320,11 @@ struct Ctx<'a> {
   interactive_depth: usize,
   /// Main component id → whether it renders a button or link.
   interactive_cache: BTreeMap<String, bool>,
+  /// The screen being built (none for component functions): key and delay triggers go to it.
+  screen: Option<String>,
+  /// Screen name → its key triggers (`{ key, to | url, opts? }`) and delays (`{ ms, to | url, opts? }`).
+  keys: BTreeMap<String, Vec<serde_json::Value>>,
+  delays: BTreeMap<String, Vec<serde_json::Value>>,
 }
 
 /// Props an instance sets on its component: string attributes and expression attributes.
@@ -278,6 +372,9 @@ impl<'a> Ctx<'a> {
       names: StyleNames::default(),
       interactive_depth: 0,
       interactive_cache: BTreeMap::new(),
+      screen: None,
+      keys: BTreeMap::new(),
+      delays: BTreeMap::new(),
     };
     for p in &doc.pages {
       for id in &p.children {
@@ -418,8 +515,20 @@ impl<'a> Ctx<'a> {
     }
     // A component function that renders a button or link would put it inside this button or link:
     // write that instance inline. Slots of an instance swap property stay slots.
-    let inline =
-      self.interactive_depth > 0 && bound.swap.is_none() && n.instance.as_ref().is_some_and(|i| self.renders_interactive(&i.component_id));
+    let clicks = n.interactions.iter().any(|i| {
+      use crate::model::Trigger;
+      matches!(
+        i.trigger,
+        Trigger::OnClick | Trigger::OnPress | Trigger::MouseDown | Trigger::MouseUp
+      )
+    });
+    // (An instance with a click of its own would make its root a control inside the button.)
+    let inline = self.interactive_depth > 0
+      && bound.swap.is_none()
+      && n
+        .instance
+        .as_ref()
+        .is_some_and(|i| clicks || self.renders_interactive(&i.component_id));
     if self.reuse_components && !inline && n.kind == NodeType::Instance && place != Place::Root {
       if let Some(info) = n.instance.as_ref() {
         // Property values and swapped icons become props; any other override inlines the instance.
@@ -444,6 +553,7 @@ impl<'a> Ctx<'a> {
           el.expr_attrs.extend(exprs);
           el.show_if = bound.visible.clone();
           el.slot = bound.swap.clone();
+          el.renders_control = self.renders_interactive(&info.component_id);
           self.interactions(&mut el, &n);
           return Some(el);
         }
@@ -603,7 +713,7 @@ impl<'a> Ctx<'a> {
     }
     self.interactions(&mut el, &n);
     if matches!(place, Place::Root | Place::ComponentRoot) {
-      fix_interactive(&mut el, false);
+      fix_interactive(&mut el, place == Place::ComponentRoot);
     }
     Some(el)
   }
@@ -739,29 +849,96 @@ impl<'a> Ctx<'a> {
     }
   }
 
-  fn interactions(&self, el: &mut El, n: &Node) {
+  /// What an interaction does in the project: an `onNavigate` target with its overlay placement,
+  /// or a URL to open. None for actions the export has no equivalent of (scroll to, change to).
+  fn action_of(&self, n: &Node, i: &crate::model::Interaction) -> Option<(Option<String>, Option<serde_json::Value>, Option<String>)> {
+    match i.action {
+      Action::Navigate => {
+        let name = i.destination.as_ref().and_then(|d| self.screen_names.get(d))?;
+        Some((Some(name.clone()), None, None))
+      }
+      Action::Back => Some((Some("back".into()), None, None)),
+      Action::OpenOverlay | Action::SwapOverlay => {
+        let name = i.destination.as_ref().and_then(|d| self.screen_names.get(d))?;
+        let kind = if i.action == Action::OpenOverlay {
+          "overlay"
+        } else {
+          "swap-overlay"
+        };
+        Some((Some(format!("{kind}:{name}")), Some(self.overlay_opts(n, &i.overlay)), None))
+      }
+      Action::CloseOverlay => Some((Some("close-overlay".into()), None, None)),
+      Action::OpenUrl => i.url.as_deref().and_then(crate::model::safe_link).map(|u| (None, None, Some(u))),
+      Action::ScrollTo | Action::ChangeTo => None,
+    }
+  }
+
+  /// Clicks and presses become the element's `onNavigate`; keys and delays go into the screen's
+  /// tables in `App.tsx`. Hover, mouse enter/leave and Change to have no equivalent here.
+  fn interactions(&mut self, el: &mut El, n: &Node) {
+    use crate::model::Trigger;
+    let mut best: Option<u8> = None;
+    let mut delayed = false;
     for i in &n.interactions {
-      match i.action {
-        Action::Navigate => {
-          if let Some(name) = i.destination.as_ref().and_then(|d| self.screen_names.get(d)) {
-            el.navigate = Some(name.clone());
+      match i.trigger {
+        Trigger::OnClick | Trigger::OnPress | Trigger::MouseDown | Trigger::MouseUp => {
+          // One handler per element: On click wins over Mouse up, Mouse down and While pressing.
+          let rank = match i.trigger {
+            Trigger::OnClick => 0,
+            Trigger::MouseUp => 1,
+            Trigger::MouseDown => 2,
+            _ => 3,
+          };
+          if rank >= best.unwrap_or(u8::MAX) {
+            continue;
+          }
+          if let Some((nav, overlay, url)) = self.action_of(n, i) {
+            best = Some(rank);
+            el.navigate = nav;
+            el.overlay = overlay;
+            el.url = url;
           }
         }
-        Action::Back => el.navigate = Some("back".into()),
-        Action::OpenOverlay | Action::SwapOverlay => {
-          if let Some(name) = i.destination.as_ref().and_then(|d| self.screen_names.get(d)) {
-            let kind = if i.action == Action::OpenOverlay {
-              "overlay"
-            } else {
-              "swap-overlay"
+        Trigger::Key | Trigger::AfterDelay => {
+          // Component functions have no screen of their own.
+          let Some(screen) = self.screen.clone() else { continue };
+          // Like the player: only a screen's own first After delay.
+          if i.trigger == Trigger::AfterDelay && (delayed || !self.screen_names.contains_key(&n.id)) {
+            continue;
+          }
+          let Some((nav, overlay, url)) = self.action_of(n, i) else {
+            continue;
+          };
+          let mut v = serde_json::Map::new();
+          if i.trigger == Trigger::Key {
+            let Some(key) = i.key.clone().filter(|k| !k.is_empty()) else {
+              continue;
             };
-            el.navigate = Some(format!("{kind}:{name}"));
-            el.overlay = Some(self.overlay_opts(n, &i.overlay));
+            v.insert("key".into(), json!(key));
+          } else {
+            delayed = true;
+            v.insert("ms".into(), json!(if i.delay_ms > 0.0 { i.delay_ms } else { 800.0 }));
           }
+          match (nav, url) {
+            (Some(to), _) => {
+              v.insert("to".into(), json!(to));
+              if let Some(o) = overlay {
+                v.insert("opts".into(), o);
+              }
+            }
+            (None, Some(u)) => {
+              v.insert("url".into(), json!(u));
+            }
+            _ => continue,
+          }
+          let table = if i.trigger == Trigger::Key {
+            &mut self.keys
+          } else {
+            &mut self.delays
+          };
+          table.entry(screen).or_default().push(serde_json::Value::Object(v));
         }
-        Action::CloseOverlay => el.navigate = Some("close-overlay".into()),
-        Action::OpenUrl => el.url = i.url.as_deref().and_then(crate::model::safe_link),
-        Action::ScrollTo | Action::ChangeTo => {}
+        Trigger::OnHover | Trigger::MouseEnter | Trigger::MouseLeave => {}
       }
     }
     if el.navigate.is_some() || el.url.is_some() {
@@ -1260,8 +1437,22 @@ impl<'a> Ctx<'a> {
 /// same classes; text inside a button or link is a `span`, never a paragraph or heading; links
 /// inside their text become spans. A clickable layer inside a button stops the click there, so
 /// only the innermost action runs, as in the prototype player.
-fn fix_interactive(el: &mut El, inside: bool) {
+fn fix_interactive(el: &mut El, in_component: bool) {
+  fix_nested(el, false, in_component);
+}
+
+/// Whether anything below `el` is a button, a link, an element with an action, or a component
+/// that renders a control: such an element can't be a control itself (nested interactive).
+fn holds_control(el: &El) -> bool {
+  el.children
+    .iter()
+    .any(|c| c.tag == "button" || c.tag == "a" || c.navigate.is_some() || c.url.is_some() || c.renders_control || holds_control(c))
+}
+
+fn fix_nested(el: &mut El, inside: bool, acting: bool) {
   let interactive = el.tag == "button" || el.tag == "a";
+  // A component reference passes its handler on as `onClick`; the component is the control.
+  let has_action = (el.navigate.is_some() || el.url.is_some()) && el.component_ref.is_none();
   if inside {
     if interactive {
       el.tag = "div";
@@ -1273,11 +1464,15 @@ fn fix_interactive(el: &mut El, inside: bool) {
     for sp in &mut el.spans {
       sp.link = None;
     }
-    el.stop_click = el.navigate.is_some() || el.url.is_some();
   }
+  // Only the innermost action runs, as in the prototype player.
+  el.stop_click = (inside || acting) && has_action;
+  el.holds_control = holds_control(el);
+  el.focusable = !inside && !interactive && has_action && !el.holds_control;
   let inner = inside || interactive;
+  let acting = acting || has_action;
   for c in &mut el.children {
-    fix_interactive(c, inner);
+    fix_nested(c, inner, acting);
   }
 }
 
@@ -1978,10 +2173,32 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
       .as_ref()
       .map(|url| format!("window.open({}, \"_blank\")", serde_json::to_string(url).unwrap_or_default()))
   };
+  let key_handler = |call: &str| {
+    format!(" onKeyDown={{(e) => {{ if (e.target === e.currentTarget && (e.key === \"Enter\" || e.key === \" \")) {{ e.preventDefault(); {call}; }} }}}}")
+  };
   let handler = match action {
-    Some(a) if el.stop_click => format!(" onClick={{(e) => {{ e.stopPropagation(); {a}; }}}}"),
-    Some(a) => format!(" onClick={{() => {a}}}"),
-    None if el.is_component_root => " onClick={onClick}".to_string(),
+    Some(a) => {
+      let mut h = if el.stop_click {
+        format!(" onClick={{(e) => {{ e.stopPropagation(); {a}; }}}}")
+      } else {
+        format!(" onClick={{() => {a}}}")
+      };
+      if el.focusable {
+        h.push_str(" role=\"button\" tabIndex={0}");
+        h.push_str(&key_handler(&a));
+      }
+      h
+    }
+    None if el.is_component_root => {
+      // The caller's click handler; the click stops here so an outer action doesn't also run. A
+      // component without controls inside is a control for the keyboard too.
+      let mut h = " onClick={onClick ? (e) => { e.stopPropagation(); onClick(); } : undefined}".to_string();
+      if el.tag != "button" && el.tag != "a" && !el.holds_control {
+        h.push_str(" role={onClick ? \"button\" : undefined} tabIndex={onClick ? 0 : undefined}");
+        h.push_str(" onKeyDown={onClick ? (e) => { if (e.target === e.currentTarget && (e.key === \"Enter\" || e.key === \" \")) { e.preventDefault(); onClick(); } } : undefined}");
+      }
+      h
+    }
     None => String::new(),
   };
   let handler = format!(
@@ -2534,6 +2751,52 @@ fn tokens_ts(themed: &[(String, Vec<String>)]) -> String {
   )
 }
 
+/// Where each page's flow starts: the project opens the first one, `/#Screen` any other.
+fn readme_flows(doc: &Document, ctx: &Ctx) -> String {
+  let flows: Vec<String> = doc
+    .pages
+    .iter()
+    .filter_map(|p| {
+      let name = p.flow_start.as_ref().and_then(|s| ctx.screen_names.get(s))?;
+      Some(format!("- {}: `/#{name}`\n", md_text(&p.name)))
+    })
+    .collect();
+  if flows.is_empty() {
+    return String::new();
+  }
+  format!(
+    "\n## Flows\n\nThe project opens at the first flow start that names a screen. Open another flow, or any screen, with its name after `#`:\n\n{}",
+    flows.concat()
+  )
+}
+
+/// What the prototype and the export don't carry over, and the top-level layers left out.
+fn readme_limits(doc: &Document) -> String {
+  let mut out = String::from(
+    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- Hover and Change to states, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert).\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n",
+  );
+  let left_out: Vec<&str> = doc
+    .pages
+    .iter()
+    .flat_map(|p| p.children.iter())
+    .filter_map(|id| doc.get(id))
+    .filter(|n| !matches!(n.kind, NodeType::Frame | NodeType::Component | NodeType::ComponentSet))
+    .map(|n| n.name.as_str())
+    .collect();
+  if !left_out.is_empty() {
+    let shown: Vec<String> = left_out.iter().take(8).map(|n| md_text(n)).collect();
+    let more = left_out.len().saturating_sub(shown.len());
+    out.push_str(&format!(
+      "- Not exported: {} layer{} outside frames: {}{}. Put them in a frame to export them.\n",
+      left_out.len(),
+      if left_out.len() == 1 { "" } else { "s" },
+      shown.join(", "),
+      if more > 0 { format!(" and {more} more") } else { String::new() }
+    ));
+  }
+  out
+}
+
 fn readme_themes(themed: &[(String, Vec<String>)]) -> String {
   if themed.is_empty() {
     return String::new();
@@ -2563,10 +2826,12 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   let screens: Vec<(String, String)> = ctx.screen_order.clone();
   let mut screen_src = Vec::new();
   for (id, name) in &screens {
+    ctx.screen = Some(name.clone());
     if let Some(el) = ctx.build(id, Place::Root) {
       screen_src.push((name.clone(), screen_fn(name, &el, true)));
     }
   }
+  ctx.screen = None;
   let comps = component_fns(&mut ctx);
   let comp_names: Vec<String> = ctx.components.values().chain(ctx.sets.values()).cloned().collect();
   files.push(ProjectFile {
@@ -2615,6 +2880,8 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
       .replace("__MAP__", &map)
       .replace("__WIDTHS__", &widths.join(", "))
       .replace("__PHONES__", &phones.join(", "))
+      .replace("__KEYS__", &serde_json::to_string(&ctx.keys).unwrap_or_else(|_| "{}".into()))
+      .replace("__DELAYS__", &serde_json::to_string(&ctx.delays).unwrap_or_else(|_| "{}".into()))
       .replace("__START__", &format!("{start:?}")),
   });
   let fonts = google_fonts_link(doc);
@@ -2695,7 +2962,9 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   files.push(ProjectFile {
     path: "README.md".into(),
     content: format!(
-      "# {title}\n\nGenerated with [Designotron](https://github.com/mikemich/designotron).\n\n```bash\nnpm install\nnpm run dev\n```\n{}",
+      "# {title}\n\nGenerated with [Designotron](https://github.com/mikemich/designotron).\n\n```bash\nnpm install\nnpm run dev\n```\n{}{}{}",
+      readme_flows(doc, &ctx),
+      readme_limits(doc),
       readme_themes(&themed)
     ),
   });
@@ -2773,7 +3042,7 @@ mod tests {
     assert!(paths.contains(&"src/screens/ProductDetail.tsx"));
     assert!(paths.contains(&"package.json"));
     let app = &files.iter().find(|f| f.path == "src/App.tsx").unwrap().content;
-    assert!(app.contains("useState<string[]>([\"Home\"])"));
+    assert!(app.contains("hash : \"Home\";"));
     assert!(
       app.contains("const widths: Record<string, number> = { Home: 390, ProductDetail: 100 };"),
       "{app}"
@@ -2789,17 +3058,14 @@ mod tests {
       let files = export_project(doc, &HeuristicMeasurer);
       files.iter().find(|f| f.path == "src/App.tsx").unwrap().content.clone()
     };
-    assert!(
-      start(&doc).contains("useState<string[]>([\"Home\"])"),
-      "falls back to the first screen"
-    );
+    assert!(start(&doc).contains("hash : \"Home\";"), "falls back to the first screen");
     // A later page's valid start wins over an earlier page's missing one.
     let mut other = doc.pages[0].clone();
     other.id = "p2".into();
     other.children.clear();
     other.flow_start = Some("detail".into());
     doc.pages.push(other);
-    assert!(start(&doc).contains("useState<string[]>([\"ProductDetail\"])"));
+    assert!(start(&doc).contains("hash : \"ProductDetail\";"));
   }
 
   #[test]
@@ -3376,7 +3642,7 @@ mod tests {
     let src = export_react(&doc, "home", &HeuristicMeasurer);
     assert_eq!(src.matches("<button ").count(), 1, "{src}");
     assert_eq!(
-      src.matches("onNavigate?.(").count(),
+      src.matches("onClick=").count(),
       3,
       "the sample button, the outer button and the inner one: {src}"
     );
@@ -3881,5 +4147,232 @@ mod w3a_tests {
       src.contains("h-full") || src.contains("height: 100%") || src.contains("100%"),
       "{src}"
     );
+  }
+}
+
+#[cfg(test)]
+mod r8_tests {
+  use super::*;
+  use crate::model::{GradientStop, Interaction, Trigger};
+  use crate::text::HeuristicMeasurer;
+
+  const GRADIENT_A: &str = "#000000";
+  const GRADIENT_B: &str = "#FFFFFF";
+
+  #[test]
+  fn key_triggers_go_to_the_screen_table_not_to_onclick() {
+    let mut doc = sample();
+    let btn = doc.get_mut("btn").unwrap();
+    btn.interactions[0].trigger = Trigger::Key;
+    btn.interactions[0].key = Some("Enter".into());
+    let home = project(&doc, "src/screens/Home.tsx");
+    assert!(!home.contains("onClick"), "{home}");
+    let app = project(&doc, "src/App.tsx");
+    assert!(
+      app.contains(r#"const keys: Record<string, (Step & { key: string })[]> = {"Home":[{"key":"Enter","to":"ProductDetail"}]};"#),
+      "{app}"
+    );
+    assert!(
+      app.contains("const delays: Record<string, (Step & { ms: number })[]> = {};"),
+      "{app}"
+    );
+  }
+
+  #[test]
+  fn delays_are_the_screens_first_one_and_hover_is_skipped() {
+    let mut doc = sample();
+    let mut delay = Interaction {
+      trigger: Trigger::AfterDelay,
+      delay_ms: 1500.0,
+      destination: Some("detail".into()),
+      ..Default::default()
+    };
+    let mut second = delay.clone();
+    second.delay_ms = 99.0;
+    // A layer's delay is not exported (the player runs a screen's own), nor a screen's second.
+    let btn = doc.get_mut("btn").unwrap();
+    btn.interactions[0].trigger = Trigger::OnHover;
+    btn.interactions.push(delay.clone());
+    delay.destination = Some("detail".into());
+    let home = doc.get_mut("home").unwrap();
+    home.interactions.push(delay);
+    home.interactions.push(second);
+    let src = project(&doc, "src/screens/Home.tsx");
+    assert!(!src.contains("onClick"), "{src}");
+    let app = project(&doc, "src/App.tsx");
+    assert!(app.contains(r#"= {"Home":[{"ms":1500.0,"to":"ProductDetail"}]};"#), "{app}");
+  }
+
+  #[test]
+  fn one_enter_runs_one_action() {
+    let app = project(&sample(), "src/App.tsx");
+    assert!(app.contains("if (e.defaultPrevented) return;"), "{app}");
+    let src = export_react(&sample(), "home", &HeuristicMeasurer);
+    assert!(src.contains("e.preventDefault();"), "{src}");
+  }
+
+  #[test]
+  fn a_card_holding_a_button_is_not_itself_a_control() {
+    let mut doc = sample();
+    let page = doc.pages[0].id.clone();
+    let mut card = crate::ops::default_node(NodeType::Frame, "card".into(), "Card".into());
+    card.height = 150.0;
+    card.interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    doc.insert(card, Some("home"), &page, None);
+    let mut b = crate::ops::default_node(NodeType::Frame, "del".into(), "Delete button".into());
+    b.height = 40.0;
+    b.interactions.push(Interaction {
+      action: Action::CloseOverlay,
+      ..Default::default()
+    });
+    doc.insert(b, Some("card"), &page, None);
+    let mut t = crate::ops::default_node(NodeType::Text, "dt".into(), "T".into());
+    t.text.as_mut().unwrap().characters = "Delete".into();
+    doc.insert(t, Some("del"), &page, None);
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    // The card keeps its click (and the button stops it); only the childless "Buy" layer is a control.
+    assert_eq!(src.matches("role=\"button\"").count(), 1, "{src}");
+    assert!(src.contains("<button "), "{src}");
+    assert!(src.contains("e.stopPropagation()"), "{src}");
+  }
+
+  #[test]
+  fn component_clicks_stop_there() {
+    let mut doc = sample();
+    let mut gen = crate::doc::IdGen::new(900);
+    let page = doc.pages[0].id.clone();
+    let mut f = crate::ops::default_node(NodeType::Frame, "cmp".into(), "Row".into());
+    f.x = 900.0;
+    f.height = 60.0;
+    doc.insert(f, None, &page, None);
+    let mut r = crate::ops::default_node(NodeType::Rectangle, "cmp_in".into(), "Inner".into());
+    r.interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    doc.insert(r, Some("cmp"), &page, None);
+    let comp = crate::components::create_component(&mut doc, &["cmp".to_string()], &mut gen).unwrap();
+    crate::components::create_instance(&mut doc, &comp, Some("home"), &page, 0.0, 0.0, &mut gen).unwrap();
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let comps = &files.iter().find(|f| f.path == "src/components.tsx").unwrap().content;
+    assert!(
+      comps.contains("onClick={onClick ? (e) => { e.stopPropagation(); onClick(); } : undefined}"),
+      "{comps}"
+    );
+    assert!(comps.contains("e.stopPropagation(); onNavigate?.("), "{comps}");
+  }
+
+  #[test]
+  fn on_click_beats_while_pressing_and_the_hash_cannot_hit_the_prototype_chain() {
+    let mut doc = sample();
+    let btn = doc.get_mut("btn").unwrap();
+    let mut press = btn.interactions[0].clone();
+    press.trigger = Trigger::OnPress;
+    press.action = Action::CloseOverlay;
+    // Pressing listed after the click, then a pressing listed before it: the click wins both ways.
+    btn.interactions.push(press.clone());
+    btn.interactions.insert(0, press);
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(
+      src.contains("onNavigate?.(\"ProductDetail\")") && !src.contains("close-overlay"),
+      "{src}"
+    );
+    let app = project(&doc, "src/App.tsx");
+    assert!(app.contains("Object.prototype.hasOwnProperty.call(screens, hash)"), "{app}");
+    assert!(!app.contains("hash in screens"), "{app}");
+  }
+
+  #[test]
+  fn clickable_layers_are_keyboard_controls() {
+    let doc = sample();
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(src.contains("role=\"button\" tabIndex={0}"), "{src}");
+    assert!(src.contains("onKeyDown="), "{src}");
+    // The HTML export has no handlers, so it claims no role either.
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(!html.contains("role=") && !html.contains("tabindex"), "{html}");
+  }
+
+  #[test]
+  fn start_screen_comes_from_the_hash_and_the_readme_lists_flows_and_limits() {
+    let mut doc = sample();
+    let page = doc.pages[0].id.clone();
+    doc.pages[0].flow_start = Some("detail".into());
+    let hero = crate::ops::default_node(NodeType::Rectangle, "hero".into(), "hero.jpg".into());
+    doc.insert(hero, None, &page, None);
+    let app = project(&doc, "src/App.tsx");
+    assert!(
+      app.contains("window.location.hash") && app.contains("hasOwnProperty.call(screens, hash) ? hash : \"ProductDetail\";"),
+      "{app}"
+    );
+    let readme = project(&doc, "README.md");
+    assert!(readme.contains("`/#ProductDetail`"), "{readme}");
+    assert!(
+      readme.contains("transitions") && readme.contains("While pressing becomes a click"),
+      "{readme}"
+    );
+    assert!(readme.contains("Not exported: 1 layer outside frames: hero.jpg"), "{readme}");
+  }
+
+  #[test]
+  fn vectors_inlined_in_one_screen_have_distinct_def_ids() {
+    let mut doc = sample();
+    let page = doc.pages[0].id.clone();
+    for id in ["v1", "v2"] {
+      let mut v = crate::ops::default_node(NodeType::Polygon, id.into(), id.into());
+      v.width = 40.0;
+      v.height = 40.0;
+      v.fills = vec![Paint::LinearGradient {
+        stops: vec![
+          GradientStop {
+            color: GRADIENT_A.into(),
+            position: 0.0,
+          },
+          GradientStop {
+            color: GRADIENT_B.into(),
+            position: 1.0,
+          },
+        ],
+        angle: 90.0,
+        opacity: 1.0,
+        visible: true,
+        handles: None,
+      }];
+      doc.insert(v, Some("home"), &page, None);
+    }
+    let home = project(&doc, "src/screens/Home.tsx").replace("\\\"", "\"");
+    let ids: Vec<&str> = home.split("id=\"").skip(1).filter_map(|r| r.split('"').next()).collect();
+    let unique: BTreeSet<&&str> = ids.iter().collect();
+    assert!(ids.len() >= 2 && unique.len() == ids.len(), "{ids:?}");
+  }
+
+  fn sample() -> Document {
+    let mut gen = crate::doc::IdGen::new(1);
+    let mut doc = crate::doc::new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    for (id, name, x) in [("home", "Home", 0.0), ("detail", "Product detail", 500.0)] {
+      let mut f = crate::ops::default_node(NodeType::Frame, id.into(), name.into());
+      f.x = x;
+      doc.insert(f, None, &page, None);
+    }
+    let mut btn = crate::ops::default_node(NodeType::Rectangle, "btn".into(), "Buy".into());
+    btn.height = 120.0;
+    btn.interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    doc.insert(btn, Some("home"), &page, None);
+    doc
+  }
+
+  fn project(doc: &Document, path: &str) -> String {
+    export_project(doc, &HeuristicMeasurer)
+      .into_iter()
+      .find(|f| f.path == path)
+      .map(|f| f.content)
+      .unwrap_or_default()
   }
 }
