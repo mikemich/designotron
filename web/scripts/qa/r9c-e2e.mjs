@@ -474,7 +474,7 @@ await newFile();
       const r = b.getBoundingClientRect();
       if (r.width < 4) continue;
       const w = parseFloat(cs.borderTopWidth);
-      out.push({ t: (b.textContent || b.title || b.className).trim().slice(0, 24), ok: w >= 1 && cs.borderTopStyle !== "none" && cs.borderTopColor !== "rgba(0, 0, 0, 0)" });
+      out.push({ t: (b.textContent || b.title || b.className).trim().slice(0, 24), ok: (w >= 1 && cs.borderTopStyle !== "none" && cs.borderTopColor !== "rgba(0, 0, 0, 0)") || (b.classList.contains("logo") && parseFloat(cs.outlineWidth) >= 1 && cs.outlineStyle !== "none") });
     }
     return out;
   });

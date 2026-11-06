@@ -423,6 +423,13 @@ fn background_of(doc: &Document, n: &Node, page_bg: &str) -> Option<(Rgba, Optio
   }
 }
 
+/// True when the backdrop behind a layer has under 4.5:1 contrast with black.
+pub fn dark_backdrop(doc: &Document, id: &str, page: &str) -> bool {
+  let page_bg = doc.page(page).map(|p| p.background.clone()).unwrap_or_else(|| "#FFFFFF".into());
+  let Some(n) = doc.get(id) else { return false };
+  background_of(doc, n, &page_bg).is_some_and(|(bg, _)| contrast(Rgba { r: 0, g: 0, b: 0, a: 1.0 }, bg) < 4.5)
+}
+
 fn luminance(c: Rgba) -> f64 {
   let ch = |v: u8| {
     let s = v as f64 / 255.0;
