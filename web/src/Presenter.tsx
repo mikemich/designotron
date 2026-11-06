@@ -1,4 +1,3 @@
-import { focusedByPointer } from "./ui/controls";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { toast, useStore } from "./store";
@@ -6,6 +5,7 @@ import type { Interaction, OverlaySettings, Rect } from "./types";
 import { REPO_URL } from "./panels/GuestBar";
 import { DEFAULT_OVERLAY, overlayDim, overlayOrigin } from "./prototype";
 import { inlineAssets } from "./assets";
+import { focusedByPointer } from "./ui/controls";
 import {
   buildScene,
   changeTarget,
@@ -744,7 +744,9 @@ function SceneView({ scene, flash, interactive, scrolls, scrollEls, onAct, onHov
           const p = o?.interactions.find(is("onPress"));
           if (o && p) {
             const c = o.interactions.find(is("onClick"));
-            const box = e.currentTarget.getBoundingClientRect();
+            // The press owner's own rect (it may be an ancestor of the layer under the pointer).
+            const own = e.currentTarget.closest(".presenter")?.querySelector<HTMLElement>(`[data-hotspot="${CSS.escape(owner)}"]`);
+            const box = (own ?? e.currentTarget).getBoundingClientRect();
             return onPress?.(o, p, e.pointerId, c ? { act: () => onAct?.(o, c), box, x: e.clientX, y: e.clientY } : undefined);
           }
           if (o?.interactions.some(is("onClick"))) return;

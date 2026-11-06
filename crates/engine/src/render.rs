@@ -1570,6 +1570,88 @@ mod w3a_tests {
     assert!(full.svg.to_lowercase().contains("ff0000") && full.svg.contains("clip-path"));
   }
 
+  fn def_ids(svg: &str) -> Vec<String> {
+    svg
+      .split("id=\"")
+      .skip(1)
+      .filter_map(|r| r.split('"').next())
+      .map(String::from)
+      .collect()
+  }
+
+  #[test]
+  fn clipped_siblings_exported_separately_share_no_def_ids() {
+    let mut doc = scroller();
+    let page = doc.pages[0].id.clone();
+    let mut g = crate::ops::default_node(NodeType::Frame, "g".into(), "G".into());
+    g.width = 80.0;
+    g.height = 80.0;
+    g.clip_content = true;
+    doc.insert(g, None, &page, None);
+    let mut kid = crate::ops::default_node(NodeType::Rectangle, "g_kid".into(), "Kid".into());
+    kid.width = 200.0;
+    kid.height = 200.0;
+    doc.insert(kid, Some("g"), &page, None);
+    let a = export_svg_parts(&doc, "f", &HeuristicMeasurer, &[], false).svg;
+    let b = export_svg_parts(&doc, "g", &HeuristicMeasurer, &[], false).svg;
+    let c = export_svg_parts(&doc, "f", &HeuristicMeasurer, &["nav".to_string()], false).svg;
+    let (ia, ib, ic) = (def_ids(&a), def_ids(&b), def_ids(&c));
+    assert!(!ia.is_empty() && !ib.is_empty() && !ic.is_empty(), "{a} {b} {c}");
+    for (x, y) in [(&ia, &ib), (&ia, &ic), (&ib, &ic)] {
+      assert!(x.iter().all(|i| !y.contains(i)), "{x:?} vs {y:?}");
+    }
+  }
+
+  #[test]
+  fn scopes_differ_per_node_children_only_and_hidden_set() {
+    let a = export_scope("f", false, &[]);
+    let b = export_scope("f", false, &["nav".to_string()]);
+    let c = export_scope("f", true, &[]);
+    let d = export_scope("g", false, &[]);
+    let e = export_scope("f", false, &["nav".to_string(), "x".to_string()]);
+    let all = [&a, &b, &c, &d, &e];
+    for (i, x) in all.iter().enumerate() {
+      assert!(
+        x.starts_with('x') && x.ends_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_'),
+        "{x}"
+      );
+      assert!(all.iter().skip(i + 1).all(|y| x != y), "{all:?}");
+    }
+    assert_eq!(a, export_scope("f", false, &[]), "deterministic");
+  }
+
+  #[test]
+  fn a_screen_and_an_overlay_in_one_page_each_resolve_their_own_references() {
+    let mut doc = scroller();
+    let page = doc.pages[0].id.clone();
+    let mut o = crate::ops::default_node(NodeType::Frame, "dlg".into(), "Dialog".into());
+    o.width = 60.0;
+    o.height = 60.0;
+    o.clip_content = true;
+    o.corner_radius = 8.0;
+    doc.insert(o, None, &page, None);
+    let mut kid = crate::ops::default_node(NodeType::Rectangle, "dlg_kid".into(), "Kid".into());
+    kid.width = 200.0;
+    kid.height = 200.0;
+    doc.insert(kid, Some("dlg"), &page, None);
+    let screen = export_svg_parts(&doc, "f", &HeuristicMeasurer, &[], false).svg;
+    let overlay = export_svg_parts(&doc, "dlg", &HeuristicMeasurer, &[], false).svg;
+    let page_html = format!("{screen}{overlay}");
+    for svg in [&screen, &overlay] {
+      let ids = def_ids(svg);
+      assert!(!ids.is_empty(), "{svg}");
+      for r in svg.split("url(#").skip(1) {
+        let r = r.split(')').next().unwrap();
+        assert!(ids.iter().any(|i| i == r), "{r} not in its own svg: {svg}");
+        assert_eq!(
+          page_html.matches(&format!("id=\"{r}\"")).count(),
+          1,
+          "{r} defined twice on the page"
+        );
+      }
+    }
+  }
+
   #[test]
   fn hidden_layers_are_left_out_of_the_svg() {
     let doc = scroller();

@@ -14,9 +14,9 @@ use crate::engine::{Command, Engine};
 use crate::geom::Point;
 use crate::model::{
   Action, Align, AutoLayout, ColorStyle, Document, Effect, EffectStyle, EffectType, GradientHandles, GradientStop, GridStyle, Interaction,
-  LayoutDirection, LayoutGrid, Node, NodeId, NodeType, OverlayBackground, OverlayPosition, OverlaySettings, Paint, RawPath, ScaleMode,
-  Sizing, StrokeAlign, StrokeJoin, SubPath, TextAlignH, TextAlignV, TextAutoResize, TextCase, TextDecoration, TextStyle, Transition,
-  Trigger, VectorData, VectorPoint,
+  LayoutDirection, LayoutGrid, Node, NodeId, NodeType, Overflow, OverlayBackground, OverlayPosition, OverlaySettings, Paint, RawPath,
+  ScaleMode, ScrollBehavior, Sizing, StrokeAlign, StrokeJoin, SubPath, TextAlignH, TextAlignV, TextAutoResize, TextCase, TextDecoration,
+  TextStyle, Transition, Trigger, VectorData, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render;
@@ -2165,10 +2165,10 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
       "overflow",
       v,
       &[
-        (&["none"], crate::model::Overflow::None),
-        (&["horizontal"], crate::model::Overflow::Horizontal),
-        (&["vertical"], crate::model::Overflow::Vertical),
-        (&["both"], crate::model::Overflow::Both),
+        (&["none"], Overflow::None),
+        (&["horizontal"], Overflow::Horizontal),
+        (&["vertical"], Overflow::Vertical),
+        (&["both"], Overflow::Both),
       ],
       &parse::no_hint,
     )?;
@@ -2183,10 +2183,7 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
         cx,
         "scrollBehavior",
         v,
-        &[
-          (&["scroll"], crate::model::ScrollBehavior::Scroll),
-          (&["fixed"], crate::model::ScrollBehavior::Fixed),
-        ],
+        &[(&["scroll"], ScrollBehavior::Scroll), (&["fixed"], ScrollBehavior::Fixed)],
         &parse::no_hint,
       )?;
     }

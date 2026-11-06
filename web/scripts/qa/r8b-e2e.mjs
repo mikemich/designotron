@@ -235,11 +235,12 @@ try {
           children: [
             { type: "text", text: "Welcome back", fontSize: 28 },
             { type: "frame", name: "Continue", width: 160, height: 44, fill: "#2563EB", children: [{ type: "text", name: "Continue label", text: "Continue", x: 40, y: 12, fontSize: 16, color: "#FFFFFF" }] },
-            { type: "frame", name: "Row", width: "fill", height: 50, fill: "#E2E8F0", children: [{ type: "rectangle", name: "Dot", x: 10, y: 15, width: 20, height: 20, fill: "#475569" }] },
+            { type: "frame", name: "Row", width: "fill", height: 50, fill: "#E2E8F0", children: [{ type: "rectangle", name: "Dot", x: 10, y: 15, width: 20, height: 20, fill: "#475569" }, { type: "frame", name: "Delete", x: 300, y: 5, width: 80, height: 40, fill: "#DC2626", children: [{ type: "text", name: "Delete label", text: "Delete", x: 12, y: 10, fontSize: 14, color: "#FFFFFF" }] }] },
             { type: "frame", name: "Plan card", width: "fill", height: 150, fill: "#F1F5F9", cornerRadius: 12, layout: { direction: "vertical", gap: 8, padding: 16 }, children: [{ type: "text", text: "Pro plan", fontSize: 20 }, { type: "text", text: "Everything included", fontSize: 14 }] },
           ],
         },
         { type: "frame", name: "Dashboard", x: 600, y: 0, width: 500, height: 520, fill: "#DCFCE7", children: [{ type: "text", text: "Dashboard screen", x: 24, y: 24, fontSize: 24 }] },
+        { type: "frame", name: "Confirm", x: 1800, y: 0, width: 500, height: 520, fill: "#FEE2E2", children: [{ type: "text", text: "Confirm screen", x: 24, y: 24, fontSize: 24 }] },
         { type: "frame", name: "Settings", x: 1200, y: 0, width: 500, height: 520, fill: "#FEF3C7", children: [{ type: "text", text: "Settings screen", x: 24, y: 24, fontSize: 24 }] },
       ],
     });
@@ -248,7 +249,9 @@ try {
     await tool(page, "set_prototype", { nodeId: await node("Continue"), action: "navigate", destinationId: m.Dashboard });
     await tool(page, "set_prototype", { nodeId: await node("Row"), action: "navigate", destinationId: m.Settings });
     await tool(page, "set_prototype", { nodeId: await node("Plan card"), action: "navigate", destinationId: m.Dashboard });
-    await tool(page, "set_prototype", { nodeId: m.Login, action: "navigate", destinationId: m.Dashboard, trigger: "key", key: "Enter" });
+    await tool(page, "set_prototype", { nodeId: await node("Delete"), action: "navigate", destinationId: m.Confirm });
+    // Enter goes to Settings, the card to the Dashboard: both running would end on Settings.
+    await tool(page, "set_prototype", { nodeId: m.Login, action: "navigate", destinationId: m.Settings, trigger: "key", key: "Enter" });
     await setStart(page, m.Login);
     await tool(page, "pages", { action: "add", name: "Mobile" });
     const mobilePage = await page.evaluate(() => Object.values(window.__dt.doc().pages).find((p) => p.name === "Mobile").id);
@@ -265,7 +268,7 @@ try {
     const get = (p) => built.files.find((f) => f.path === p)?.content ?? "";
     const app = get("src/App.tsx");
     const login = get("src/screens/Login.tsx");
-    check("the Enter key trigger is a keys entry, not a click on the root", /"Login":\[\{"key":"Enter","to":"Dashboard"\}\]/.test(app) && !/^\s*<div className="relative[^\n]*onClick/m.test(login), app.match(/const keys[^\n]*/)?.[0]);
+    check("the Enter key trigger is a keys entry, not a click on the root", /"Login":\[\{"key":"Enter","to":"Settings"\}\]/.test(app) && !/^\s*<div className="relative[^\n]*onClick/m.test(login), app.match(/const keys[^\n]*/)?.[0]);
     check("the README lists both flows", /`\/#Login`/.test(get("README.md")) && /`\/#MOnboarding`/.test(get("README.md")), get("README.md").slice(-700));
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r8b-project-"));
@@ -311,21 +314,46 @@ try {
         check("clicking empty space on Login stays on Login", await seen("Welcome back"));
         await p.keyboard.press("Enter");
         await p.waitForTimeout(400);
-        check("Enter on Login goes to the Dashboard", await seen("Dashboard screen"));
+        check("Enter on Login goes to Settings", await seen("Settings screen"));
 
         await p.goto(base + "?again");
         await p.waitForSelector("text=Welcome back");
         const stops = [];
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < 3; i++) {
           await p.keyboard.press("Tab");
           stops.push(await p.evaluate(() => `${document.activeElement?.tagName}:${document.activeElement?.getAttribute("role") ?? ""}:${(document.activeElement?.textContent ?? "").trim().slice(0, 12)}`));
         }
-        check("Tab reaches the button, the row and the card", stops.some((s) => s.startsWith("BUTTON:")) && stops.filter((s) => s.includes(":button:")).length >= 2 && stops.some((s) => s.includes("Pro plan")), stops.join(" | "));
+        check(
+          "Tab reaches the buttons and the card; the row holding a button is no control itself",
+          stops[0].startsWith("BUTTON:") && stops[1].startsWith("BUTTON::Delete") && stops[2].includes(":button:Pro plan") && !stops.some((s) => s === "DIV:button:"),
+          stops.join(" | "),
+        );
         await shot(p, "export-tab-focus");
-        // Focus is on the card (last of the stops): Enter runs its action.
+        // Focus is on the card (reached with Tab): Enter runs its action once.
         await p.keyboard.press("Enter");
         await p.waitForTimeout(400);
-        check("Enter on the focused card navigates", await seen("Dashboard screen"));
+        check("Enter on the focused card navigates (and the key trigger doesn't also run)", (await seen("Dashboard screen")) && !(await seen("Settings screen")));
+
+        // A card focused by a click: Enter runs the card's action, once, not the screen's key trigger too.
+        await p.goto(base + "?click");
+        await p.waitForSelector("text=Welcome back");
+        const cardBox = await p.locator("text=Pro plan").boundingBox();
+        await p.mouse.move(cardBox.x + 40, cardBox.y + 30);
+        await p.mouse.down();
+        await p.mouse.move(cardBox.x + 700, cardBox.y + 30, { steps: 4 });
+        await p.mouse.up();
+        await p.waitForTimeout(200);
+        const focused = await p.evaluate(() => document.activeElement?.getAttribute("role"));
+        await p.keyboard.press("Enter");
+        await p.waitForTimeout(400);
+        check("Enter on a click-focused card runs one action", focused === "button" && (await seen("Dashboard screen")) && !(await seen("Settings screen")), `focused role ${focused}`);
+
+        // A button inside a row: its click doesn't also run the row's.
+        await p.goto(base + "?nested");
+        await p.waitForSelector("text=Welcome back");
+        await p.getByText("Delete", { exact: true }).click();
+        await p.waitForTimeout(400);
+        check("clicking Delete inside the row opens Confirm, not Settings", (await seen("Confirm screen")) && !(await seen("Settings screen")));
 
         await p.goto(base + "#MOnboarding");
         await p.waitForSelector("text=Mobile onboarding");
