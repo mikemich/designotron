@@ -1973,3 +1973,164 @@ fn prototype_screens() -> (Engine, Vec<String>) {
   let btn = r["names"]["Go"].as_str().unwrap().to_string();
   (e, vec![created(&r)[0].clone(), created(&r)[1].clone(), btn])
 }
+
+mod r10_p2 {
+  use super::*;
+
+  fn pinned_frame(e: &mut Engine) -> String {
+    run(
+      e,
+      "define_variables",
+      json!({ "collection": "Theme", "modes": ["Light", "Dark"], "variables": [
+        { "name": "Surface/Page", "type": "color", "values": { "Light": "#FFFFFF", "Dark": "#0B0F19" } }] }),
+    );
+    one(
+      e,
+      json!({ "type": "frame", "name": "F1", "width": 200, "height": 200, "bind": { "fill": "Surface/Page" },
+        "variableModes": { "Theme": "Light" } }),
+    )
+  }
+
+  fn fill(e: &Engine, id: &str) -> String {
+    match &e.doc.get(id).unwrap().fills[0] {
+      crate::model::Paint::Solid { color, .. } => color.clone(),
+      _ => String::new(),
+    }
+  }
+
+  #[test]
+  fn a_pinned_frame_switches_mode_by_name() {
+    let mut e = engine();
+    let id = pinned_frame(&mut e);
+    assert_eq!(fill(&e, &id), "#FFFFFF");
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "variableModes": { "Theme": "Dark" } }] }),
+    );
+    assert_eq!(fill(&e, &id), "#0B0F19");
+    assert_eq!(e.doc.get(&id).unwrap().variable_modes.len(), 1);
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "patch": { "variableModes": { "Theme": "Light" } } }] }),
+    );
+    assert_eq!(fill(&e, &id), "#FFFFFF");
+    assert_eq!(e.doc.get(&id).unwrap().variable_modes.len(), 1);
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "patch": { "variableModes": { "Theme": "Dark" } } }] }),
+    );
+    assert_eq!(fill(&e, &id), "#0B0F19");
+    // null clears the pin.
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "variableModes": { "Theme": null } }] }),
+    );
+    assert!(e.doc.get(&id).unwrap().variable_modes.is_empty());
+    assert_eq!(fill(&e, &id), "#FFFFFF");
+  }
+
+  /// Two components named `a` and `b`, combined into a set; returns the set id.
+  fn set_of(e: &mut Engine, a: &str, b: &str, x: f64) -> String {
+    let r = run(
+      e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "rectangle", "name": a, "x": x, "y": 3000, "width": 10, "height": 10 },
+        { "type": "rectangle", "name": b, "x": x + 50.0, "y": 3000, "width": 10, "height": 10 }] }),
+    );
+    let ids = created(&r);
+    let made = run(e, "arrange", json!({ "action": "create_component", "ids": ids }));
+    let comps: Vec<String> = made["ids"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|v| v.as_str().unwrap().to_string())
+      .collect();
+    run(e, "arrange", json!({ "action": "combine_variants", "ids": comps }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string()
+  }
+
+  #[test]
+  fn sets_are_named_from_a_shared_prefix_and_default_names_differ() {
+    let mut e = engine();
+    let set = set_of(&mut e, "Button/Size=Small", "Button/Size=Large", 0.0);
+    assert_eq!(e.doc.get(&set).unwrap().name, "Button");
+    let kids: Vec<String> = e
+      .doc
+      .get(&set)
+      .unwrap()
+      .children
+      .iter()
+      .map(|c| e.doc.get(c).unwrap().name.clone())
+      .collect();
+    assert_eq!(kids, ["Size=Small", "Size=Large"]);
+    let first = set_of(&mut e, "State=A", "State=B", 300.0);
+    let second = set_of(&mut e, "State=C", "State=D", 600.0);
+    let (a, b) = (e.doc.get(&first).unwrap().name.clone(), e.doc.get(&second).unwrap().name.clone());
+    assert!(
+      a.starts_with("Component Set") && b.starts_with("Component Set") && a != b,
+      "{a} / {b}"
+    );
+  }
+
+  #[test]
+  fn set_component_props_takes_the_set_id_and_property_names() {
+    let mut e = engine();
+    let set = set_of(&mut e, "State=A", "State=B", 0.0);
+    run(
+      &mut e,
+      "set_component_props",
+      json!({ "ops": [{ "op": "add", "component": set, "name": "Disabled", "kind": "boolean", "default": false }] }),
+    );
+    run(
+      &mut e,
+      "set_component_props",
+      json!({ "ops": [{ "op": "update", "component": set, "prop": "Disabled", "name": "Off" }] }),
+    );
+    let defs = crate::props::props_of(&e.doc, &set);
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].name, "Off");
+  }
+
+  #[test]
+  fn create_component_on_a_main_component_changes_nothing() {
+    let mut e = engine();
+    let rect = one(&mut e, json!({ "type": "rectangle", "name": "Chip", "width": 20, "height": 20 }));
+    let comp = run(&mut e, "arrange", json!({ "action": "create_component", "ids": [rect] }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let count = e.doc.nodes.len();
+    let again = run(&mut e, "arrange", json!({ "action": "create_component", "ids": [comp] }));
+    assert_eq!(again["id"], json!(comp));
+    assert!(
+      again["warnings"][0].as_str().unwrap().contains("already a main component"),
+      "{again}"
+    );
+    assert_eq!(e.doc.nodes.len(), count);
+    assert!(e.doc.get(&comp).unwrap().parent.is_none());
+    // Mixed with a plain layer: the plain one becomes a component, the main stays out of the wrapper.
+    let other = one(
+      &mut e,
+      json!({ "type": "rectangle", "name": "Other", "x": 100, "width": 20, "height": 20 }),
+    );
+    let r = run(&mut e, "arrange", json!({ "action": "create_component", "ids": [comp, other] }));
+    assert!(r["warnings"].is_array());
+    assert!(e.doc.get(&comp).unwrap().parent.is_none());
+    assert_eq!(
+      e.doc.nodes.values().filter(|n| n.kind == crate::model::NodeType::Component).count(),
+      2
+    );
+    // The same through the raw commands.
+    let id = e.dispatch(Command::CreateComponent { ids: vec![comp.clone()] }).unwrap();
+    assert_eq!(id["id"], json!(comp));
+    let r = e.dispatch(Command::CreateComponents { ids: vec![comp.clone()] });
+    assert!(r.is_err());
+  }
+}

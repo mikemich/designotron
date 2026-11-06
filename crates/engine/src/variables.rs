@@ -135,9 +135,47 @@ pub fn bindable<'a>(doc: &'a Document, prop: &str) -> Vec<(&'a Collection, &'a V
 /// How many aliases `resolve` follows; `validate` refuses longer chains.
 pub const MAX_ALIAS_DEPTH: usize = 8;
 
+/// A value that fits a variable of `kind`, normalised (colours to `#RRGGBB[AA]`, numeric strings
+/// to numbers); aliases pass. The error reads "expected a number, got a string" and leaves the
+/// variable and mode for the caller to name.
+pub fn check_value(kind: VarKind, v: &Value) -> Result<Value, String> {
+  if v.get("alias").is_some() {
+    return Ok(v.clone());
+  }
+  let got = match v {
+    Value::Null => "null",
+    Value::Bool(_) => "a boolean",
+    Value::Number(_) => "a number",
+    Value::String(_) => "a string",
+    Value::Array(_) => "an array",
+    Value::Object(_) => "an object",
+  };
+  let bad = |want: &str| format!("expected {want}, got {got}");
+  match kind {
+    VarKind::Color => {
+      let c = v.as_str().ok_or_else(|| bad("a colour like '#7C5CFF'"))?;
+      if crate::color::parse(c).is_none() {
+        return Err(format!("unrecognised colour '{c}'; use hex like '#7C5CFF' or rgb()/rgba()"));
+      }
+      Ok(Value::String(crate::color::normalize(c)))
+    }
+    VarKind::Number => match v {
+      Value::Number(n) if n.as_f64().is_some_and(f64::is_finite) => Ok(v.clone()),
+      Value::String(s) => match s.trim().parse::<f64>() {
+        Ok(n) if n.is_finite() => Ok(json!(n)),
+        _ => Err(bad("a number")),
+      },
+      _ => Err(bad("a number")),
+    },
+    VarKind::Boolean => v.is_boolean().then(|| v.clone()).ok_or_else(|| bad("true or false")),
+    VarKind::String => v.is_string().then(|| v.clone()).ok_or_else(|| bad("a string")),
+  }
+}
+
 /// Rejects unknown scope names, and alias cycles and chains longer than `resolve` follows. Only
 /// variables this change touched (new, or with other values than in `previous`) are checked, so a
-/// cycle two peers made at once can't block every later edit of unrelated variables.
+/// cycle two peers made at once can't block every later edit of unrelated variables. A touched
+/// variable also needs values of its type and a name no other variable of its collection has.
 pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(), String> {
   let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
   let mut names: BTreeMap<&str, &str> = BTreeMap::new();
@@ -154,8 +192,33 @@ pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(
     names.insert(&v.id, &v.name);
     let out = edges.entry(&v.id).or_default();
     out.extend(v.values.values().filter_map(|x| x.get("alias").and_then(|a| a.as_str())));
-    if old.get(v.id.as_str()).is_none_or(|o| o.values != v.values) {
+    let before = old.get(v.id.as_str());
+    if before.is_none_or(|o| o.values != v.values) {
       changed.push(&v.id);
+    }
+    if before.is_none_or(|o| o.values != v.values || o.kind != v.kind) {
+      for (mode, val) in &v.values {
+        let shown = collections
+          .iter()
+          .flat_map(|c| &c.modes)
+          .find(|m| m.id == *mode)
+          .map_or(mode.as_str(), |m| m.name.as_str());
+        // Stored numbers are real numbers: "12" would be accepted by `check_value` but never applied.
+        let loose_number = v.kind == VarKind::Number && val.is_string();
+        match check_value(v.kind, val) {
+          Ok(_) if !loose_number => {}
+          Ok(_) => return Err(format!("{} ({shown}): expected a number, got a string", v.name)),
+          Err(msg) => return Err(format!("{} ({shown}): {msg}", v.name)),
+        }
+      }
+    }
+  }
+  for c in collections {
+    for (i, v) in c.variables.iter().enumerate() {
+      let renamed = old.get(v.id.as_str()).is_none_or(|o| o.name != v.name);
+      if renamed && c.variables.iter().enumerate().any(|(j, w)| j != i && w.name == v.name) {
+        return Err(format!("{} already exists in {}", v.name, c.name));
+      }
     }
   }
   /// Longest alias chain from `node`, or the variable that closes a loop.
@@ -245,15 +308,24 @@ pub fn resolve(doc: &Document, node: &str, var: &str) -> Option<Value> {
   None
 }
 
-/// Rewrites bindings and mode overrides given by name (from AI specs) to ids.
+/// Rewrites bindings and mode overrides given by name (from AI specs) to ids. Only layers that
+/// hold a name are written: `get_mut` path-copies a layer's tree branch, and every bound layer
+/// of a token-heavy file would be copied by every edit. A pin given by name wins over an
+/// id-keyed pin of the same collection (it is the newer one).
 pub fn normalize(doc: &mut Document) {
   if doc.variables.is_empty() {
     return;
   }
+  let var_ids: std::collections::HashSet<&str> = doc
+    .variables
+    .iter()
+    .flat_map(|c| c.variables.iter().map(|v| v.id.as_str()))
+    .collect();
+  let mode_ok = |c: &str, m: &str| doc.variables.iter().any(|x| x.id == c && x.modes.iter().any(|y| y.id == m));
   let ids: Vec<NodeId> = doc
     .nodes
     .values()
-    .filter(|n| !n.bindings.is_empty() || !n.variable_modes.is_empty())
+    .filter(|n| n.bindings.values().any(|v| !var_ids.contains(v.as_str())) || n.variable_modes.iter().any(|(c, m)| !mode_ok(c, m)))
     .map(|n| n.id.clone())
     .collect();
   for id in ids {
@@ -261,28 +333,36 @@ pub fn normalize(doc: &mut Document) {
       let n = doc.get(&id).unwrap();
       (n.bindings.clone(), n.variable_modes.clone())
     };
-    let bindings = bindings
+    let bindings: BTreeMap<String, String> = bindings
       .into_iter()
       .map(|(p, v)| (p, find(doc, &v).map(|(_, var)| var.id.clone()).unwrap_or(v)))
       .collect();
-    let modes = modes
-      .into_iter()
-      .map(|(c, m)| match doc.variables.iter().find(|x| x.id == c || x.name == c) {
-        Some(coll) => (
-          coll.id.clone(),
-          coll
-            .modes
-            .iter()
-            .find(|x| x.id == m || x.name == m)
-            .map(|x| x.id.clone())
-            .unwrap_or(m),
-        ),
-        None => (c, m),
-      })
-      .collect();
-    let n = doc.get_mut(&id).unwrap();
-    n.bindings = bindings;
-    n.variable_modes = modes;
+    let resolve_pin = |c: &String, m: &String| match doc.variables.iter().find(|x| x.id == *c || x.name == *c) {
+      Some(coll) => (
+        coll.id.clone(),
+        coll
+          .modes
+          .iter()
+          .find(|x| x.id == *m || x.name == *m)
+          .map(|x| x.id.clone())
+          .unwrap_or_else(|| m.clone()),
+      ),
+      None => (c.clone(), m.clone()),
+    };
+    let mut resolved: BTreeMap<String, String> = BTreeMap::new();
+    // Id-keyed pins first, then name-keyed ones, which replace them.
+    for (c, m) in modes.iter().filter(|(c, _)| doc.variables.iter().any(|x| x.id == **c)) {
+      let (c, m) = resolve_pin(c, m);
+      resolved.insert(c, m);
+    }
+    for (c, m) in modes.iter().filter(|(c, _)| !doc.variables.iter().any(|x| x.id == **c)) {
+      let (c, m) = resolve_pin(c, m);
+      resolved.insert(c, m);
+    }
+    doc.modify(&id, |n| {
+      n.bindings = bindings;
+      n.variable_modes = resolved;
+    });
   }
 }
 
@@ -847,5 +927,164 @@ mod tests {
       .unwrap(),
     );
     assert_eq!(resolve(&e.doc, &f, &format!("v{n}")), Some(json!(1)));
+  }
+
+  #[test]
+  fn duplicate_names_and_wrong_typed_values_are_refused_but_old_ones_dont_block() {
+    let mut e = engine();
+    let named = |id: &str, name: &str, kind: VarKind, v: Value| Variable {
+      name: name.into(),
+      ..var(id, kind, v)
+    };
+    let set = |e: &mut Engine, vars: Vec<Variable>| {
+      e.dispatch(Command::SetVariables {
+        collections: vec![coll(vars)],
+      })
+    };
+    set(
+      &mut e,
+      vec![
+        named("a", "Gray/0", VarKind::Color, json!("#FFFFFF")),
+        named("b", "Gray/1", VarKind::Color, json!("#EEEEEE")),
+      ],
+    )
+    .unwrap();
+    // Renaming onto another variable's name.
+    let err = set(
+      &mut e,
+      vec![
+        named("a", "Gray/0", VarKind::Color, json!("#FFFFFF")),
+        named("b", "Gray/0", VarKind::Color, json!("#EEEEEE")),
+      ],
+    )
+    .unwrap_err();
+    assert_eq!(err, "Gray/0 already exists in C");
+    // A new variable with a taken name.
+    assert!(set(
+      &mut e,
+      vec![
+        named("a", "Gray/0", VarKind::Color, json!("#FFFFFF")),
+        named("b", "Gray/1", VarKind::Color, json!("#EEEEEE")),
+        named("c", "Gray/1", VarKind::Color, json!("#000000"))
+      ]
+    )
+    .is_err());
+    // Values must fit the type.
+    let err = set(
+      &mut e,
+      vec![
+        named("a", "Gray/0", VarKind::Color, json!("banana")),
+        named("b", "Gray/1", VarKind::Color, json!("#EEEEEE")),
+      ],
+    )
+    .unwrap_err();
+    assert!(err.contains("Gray/0") && err.contains("banana"), "{err}");
+    assert!(set(
+      &mut e,
+      vec![
+        named("a", "Gray/0", VarKind::Color, json!(12)),
+        named("b", "Gray/1", VarKind::Color, json!("#EEEEEE"))
+      ]
+    )
+    .is_err());
+    assert!(set(&mut e, vec![named("n", "N", VarKind::Number, json!("12"))]).is_err());
+    // Old invalid state (duplicate names, wrong types) doesn't block edits of other variables.
+    let bad = vec![
+      named("a", "Dup", VarKind::Color, json!("banana")),
+      named("b", "Dup", VarKind::Number, json!(1)),
+      named("c", "Fine", VarKind::Number, json!(1)),
+    ];
+    let old = vec![coll(bad.clone())];
+    assert!(validate(&old, &[]).is_err());
+    let mut edited = bad;
+    edited[2].values.insert("m".into(), json!(2));
+    assert!(validate(&[coll(edited)], &old).is_ok());
+    // The type check is the one the AI tool uses.
+    assert_eq!(check_value(VarKind::Color, &json!("#fff")).unwrap(), json!("#FFFFFF"));
+    assert!(check_value(VarKind::Boolean, &json!("yes"))
+      .unwrap_err()
+      .starts_with("expected true or false"));
+  }
+
+  #[test]
+  fn values_of_removed_modes_are_dropped() {
+    let mut e = engine();
+    let mut v = var("v", VarKind::Number, json!(1));
+    v.values.insert("gone".into(), json!(2));
+    e.dispatch(Command::SetVariables {
+      collections: vec![coll(vec![v])],
+    })
+    .unwrap();
+    let values = &e.doc.variables[0].variables[0].values;
+    assert_eq!(values.keys().collect::<Vec<_>>(), ["m"]);
+  }
+
+  #[test]
+  fn normalize_leaves_id_only_documents_shared() {
+    let mut e = engine();
+    e.dispatch(Command::SetVariables {
+      collections: vec![coll(vec![var("v", VarKind::Color, json!("#112233"))])],
+    })
+    .unwrap();
+    let r = e
+      .dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+        parent: None,
+      })
+      .unwrap();
+    let id = id_of(r);
+    e.dispatch(Command::BindVariable {
+      ids: vec![id.clone()],
+      property: "fill".into(),
+      variable: Some("v".into()),
+    })
+    .unwrap();
+    e.dispatch(Command::SetVariableMode {
+      ids: vec![id.clone()],
+      collection: "c".into(),
+      mode: Some("m".into()),
+    })
+    .unwrap();
+    let before = e.doc.nodes.clone();
+    let mut doc = e.doc.clone();
+    normalize(&mut doc);
+    assert!(doc.nodes.ptr_eq(&before), "an id-only document must not be rewritten");
+    // A name is written, and only on that layer.
+    e.doc.get_mut(&id).unwrap().bindings.insert("fill".into(), "C/v".into());
+    let mut doc = e.doc.clone();
+    normalize(&mut doc);
+    assert_eq!(doc.get(&id).unwrap().bindings["fill"], "v");
+  }
+
+  #[test]
+  fn error_messages_keep_the_case_of_names() {
+    let mut e = engine();
+    e.dispatch(Command::SetVariables {
+      collections: vec![coll(vec![var("v", VarKind::Number, json!(1))])],
+    })
+    .unwrap();
+    let id = id_of(
+      e.dispatch(Command::CreateShape {
+        kind: NodeType::Rectangle,
+        x: 0.0,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let err = e
+      .dispatch(Command::BindVariable {
+        ids: vec![id],
+        property: "fill".into(),
+        variable: Some("v".into()),
+      })
+      .unwrap_err();
+    assert!(err.contains("needs a color variable") && err.contains(", v is number"), "{err}");
   }
 }

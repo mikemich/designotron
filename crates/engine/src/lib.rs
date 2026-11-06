@@ -7,6 +7,7 @@ pub mod ai;
 pub mod arrange;
 #[cfg(test)]
 mod arrange_tests;
+pub mod clipboard;
 pub mod codegen;
 pub mod collab;
 #[cfg(test)]

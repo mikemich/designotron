@@ -1363,6 +1363,7 @@ mod tests {
     let var = |id: &str, v: f64| Variable {
       id: id.into(),
       name: id.into(),
+      kind: crate::variables::VarKind::Number,
       values: [("m".to_string(), json!(v))].into_iter().collect(),
       ..Default::default()
     };
@@ -1490,6 +1491,7 @@ mod tests {
     Variable {
       id: id.into(),
       name: id.into(),
+      kind: crate::variables::VarKind::Number,
       values: values.iter().map(|(m, v)| (m.to_string(), json!(v))).collect(),
       ..Default::default()
     }

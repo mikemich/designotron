@@ -91,6 +91,20 @@ fn strip_position(n: &Node, is_root: bool) -> Node {
 /// Turns the given nodes into a main component. Returns the component id.
 pub fn create_component(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) -> Option<NodeId> {
   let single = if ids.len() == 1 { doc.get(&ids[0]).cloned() } else { None };
+  // Already a main component or a set: nothing to make (wrapping would nest main components).
+  if let Some(n) = single
+    .as_ref()
+    .filter(|n| matches!(n.kind, NodeType::Component | NodeType::ComponentSet))
+  {
+    return Some(n.id.clone());
+  }
+  if ids.iter().any(|i| {
+    doc
+      .get(i)
+      .is_some_and(|n| matches!(n.kind, NodeType::Component | NodeType::ComponentSet))
+  }) {
+    return None;
+  }
   let target = match &single {
     Some(n) if matches!(n.kind, NodeType::Frame | NodeType::Group) => ids[0].clone(),
     _ => {
@@ -1252,6 +1266,8 @@ impl Reuse {
 }
 
 /// Groups components into a component set and derives variant properties from names.
+const DEFAULT_SET: &str = "Component Set";
+
 pub fn combine_as_variants(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) -> Option<NodeId> {
   let comps: Vec<NodeId> = ids
     .iter()
@@ -1263,7 +1279,16 @@ pub fn combine_as_variants(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) 
   }
   // Properties come from the original names, before they are rewritten as "Prop=Value".
   let names: Vec<String> = comps.iter().filter_map(|c| doc.get(c)).map(|c| c.name.clone()).collect();
-  let (set_name, props) = variants_from_names(&names);
+  let (mut set_name, props) = variants_from_names(&names);
+  if set_name == DEFAULT_SET {
+    // Instances take their set's name: sets without a name of their own differ by number.
+    let numbered = doc.next_name(DEFAULT_SET);
+    set_name = if numbered == format!("{DEFAULT_SET} 1") {
+      DEFAULT_SET.into()
+    } else {
+      numbered
+    };
+  }
   let set_id = crate::ops::wrap_in_frame(doc, &comps, gen, NodeType::ComponentSet)?;
   let pad = 20.0;
   for (cid, props) in comps.iter().zip(props) {
@@ -1293,9 +1318,21 @@ pub fn combine_as_variants(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) 
 /// Secondary; "Size=Large" names are used as they are; anything else falls back to the
 /// distinct names (or "Variant 1", "Variant 2" …) under "Property 1".
 fn variants_from_names(names: &[String]) -> (String, Vec<BTreeMap<String, String>>) {
-  const DEFAULT_SET: &str = "Component Set";
   if let Some(parsed) = names.iter().map(|n| parse_variant_name(n)).collect::<Option<Vec<_>>>() {
-    return (DEFAULT_SET.into(), parsed);
+    // "Button/Size=Small": a path shared by every name before the pairs names the set.
+    let prefix = |n: &str| {
+      n.rsplit_once('/')
+        .filter(|(_, pairs)| pairs.contains('='))
+        .map(|(p, _)| p.trim().to_string())
+    };
+    let shared = prefix(&names[0]).filter(|p| !p.is_empty() && names.iter().all(|n| prefix(n).as_deref() == Some(p.as_str())));
+    return match shared {
+      Some(base) => (
+        base,
+        names.iter().filter_map(|n| parse_variant_name(n.rsplit_once('/')?.1)).collect(),
+      ),
+      None => (DEFAULT_SET.into(), parsed),
+    };
   }
   let slash = names.iter().all(|n| n.contains('/'));
   let parts: Vec<Vec<&str>> = names
