@@ -280,6 +280,9 @@ struct El {
   label: Option<String>,
   /// What the click does, as an accessible name ("Go to Detail", "Back").
   action_label: Option<String>,
+  /// The text drawn over a control by sibling layers ("Open settings" on a rectangle): it names
+  /// the control in place of the layer name.
+  overlaid_label: Option<String>,
   /// A component reference whose component (or a layer nested in it) runs actions: it gets the
   /// screen's `onNavigate`.
   pass_navigate: bool,
@@ -303,6 +306,7 @@ impl El {
       is_component_root: false,
       attrs: vec![],
       expr_attrs: vec![],
+      overlaid_label: None,
       show_if: None,
       text_prop: None,
       slot: None,
@@ -723,6 +727,12 @@ impl<'a> Ctx<'a> {
         if matches!(e.tag, "h1" | "h2" | "h3") && !e.styles.iter().any(|(k, _)| k == "font-weight") {
           e.s("font-weight", "400");
         }
+        // Text drawn over a control names it (see `label_texts`): hidden from screen readers so it
+        // isn't read twice, and click-through so the visible label triggers the control.
+        if self.is_label_text(&n) {
+          e.attrs.push(("aria-hidden".into(), "true".into()));
+          e.s("pointer-events", "none");
+        }
         e
       }
       NodeType::Vector | NodeType::Polygon | NodeType::Star => {
@@ -937,10 +947,98 @@ impl<'a> Ctx<'a> {
       self.interactive_depth -= usize::from(interactive);
     }
     self.interactions(&mut el, &n);
+    if el.navigate.is_some() || el.url.is_some() {
+      el.overlaid_label = self.overlaid_label(&n);
+    }
     if matches!(place, Place::Root | Place::ComponentRoot) {
       fix_interactive(&mut el, place == Place::ComponentRoot);
     }
     Some(el)
+  }
+
+  /// The characters of the text layers drawn over a control, in reading order.
+  fn overlaid_label(&self, control: &Node) -> Option<String> {
+    let mut texts: Vec<&Node> = self.label_texts(control).iter().filter_map(|t| self.doc.get(t)).collect();
+    if texts.is_empty() {
+      return None;
+    }
+    // Rows from the top; within a row from the left.
+    texts.sort_by(|a, b| a.y.total_cmp(&b.y));
+    let mut rows: Vec<Vec<&Node>> = Vec::new();
+    for t in texts {
+      match rows.last_mut() {
+        Some(row) if t.y - row[0].y < row[0].height / 2.0 => row.push(t),
+        _ => rows.push(vec![t]),
+      }
+    }
+    let words: Vec<String> = rows
+      .into_iter()
+      .flat_map(|mut row| {
+        row.sort_by(|a, b| a.x.total_cmp(&b.x));
+        row
+      })
+      .filter_map(|t| t.text.as_ref())
+      .map(|t| t.characters.split_whitespace().collect::<Vec<_>>().join(" "))
+      .collect();
+    Some(words.join(" ")).filter(|l| !l.trim().is_empty())
+  }
+
+  /// Whether a text layer is drawn over a clickable sibling that it names.
+  fn is_label_text(&self, text: &Node) -> bool {
+    if !text.interactions.is_empty() {
+      return false;
+    }
+    let sibs = self.doc.siblings_of(&text.id);
+    let Some(at) = sibs.iter().position(|s| *s == text.id) else {
+      return false;
+    };
+    sibs[..at]
+      .iter()
+      .filter_map(|s| self.doc.get(s))
+      .any(|c| !c.interactions.is_empty() && self.label_texts(c).contains(&text.id))
+  }
+
+  /// The visible text layers that name a clickable layer with no text of its own: siblings painted
+  /// above it, with no click of their own and at least 80% inside its box. They are the label a
+  /// designer drew on a rectangle, so the control's accessible name is their text.
+  fn label_texts(&self, control: &Node) -> Vec<NodeId> {
+    use crate::model::Trigger;
+    let clickable = control.interactions.iter().any(|i| {
+      matches!(
+        i.trigger,
+        Trigger::OnClick | Trigger::OnPress | Trigger::MouseDown | Trigger::MouseUp
+      ) && self.action_of(control, i).is_some()
+    });
+    if !clickable || !control.visible || matches!(control.kind, NodeType::Text | NodeType::Instance) {
+      return Vec::new();
+    }
+    // A control with text of its own is named by it already.
+    let has_text = |id: &NodeId| {
+      self
+        .doc
+        .get(id)
+        .is_some_and(|n| n.visible && n.kind == NodeType::Text && n.text.as_ref().is_some_and(|t| !t.characters.trim().is_empty()))
+    };
+    if self.doc.subtree(&control.id).iter().skip(1).any(has_text) {
+      return Vec::new();
+    }
+    let sibs = self.doc.siblings_of(&control.id);
+    let Some(at) = sibs.iter().position(|s| *s == control.id) else {
+      return Vec::new();
+    };
+    sibs[at + 1..]
+      .iter()
+      .filter(|id| {
+        let Some(t) = self.doc.get(id) else { return false };
+        if t.kind != NodeType::Text || !t.visible || !t.interactions.is_empty() || !has_text(id) || t.width <= 0.0 || t.height <= 0.0 {
+          return false;
+        }
+        let w = (t.x + t.width).min(control.x + control.width) - t.x.max(control.x);
+        let h = (t.y + t.height).min(control.y + control.height) - t.y.max(control.y);
+        w > 0.0 && h > 0.0 && w * h >= 0.8 * t.width * t.height
+      })
+      .cloned()
+      .collect()
   }
 
   /// The prop names of the component properties `n` is bound to, when it is a layer of the
@@ -1918,7 +2016,11 @@ fn name_control(el: &mut El, interactive: bool, has_action: bool) {
   let label = if el.is_component_root {
     el.label.clone()
   } else {
-    el.label.clone().or_else(|| has_action.then(|| el.action_label.clone()).flatten())
+    // Text drawn on the control wins: the name must contain what is visible (WCAG 2.5.3).
+    el.overlaid_label
+      .clone()
+      .or_else(|| el.label.clone())
+      .or_else(|| has_action.then(|| el.action_label.clone()).flatten())
   };
   let Some(label) = label.filter(|l| !l.trim().is_empty()) else {
     return;
@@ -2543,6 +2645,7 @@ fn tw_class_raw(k: &str, v: &str) -> String {
     ("overscroll-behavior-y", "contain") => "overscroll-y-contain".into(),
     ("margin", "0") => "m-0".into(),
     ("cursor", "pointer") => "cursor-pointer".into(),
+    ("pointer-events", "none") => "pointer-events-none".into(),
     ("white-space", "pre") => "whitespace-pre".into(),
     ("white-space", "pre-wrap") => "whitespace-pre-wrap".into(),
     ("text-align", "center") => "text-center".into(),
@@ -5419,7 +5522,7 @@ mod r10_tests {
     let img = src.find("bg-[#D9D9D9]").expect("cover");
     let last = src.find("[inset:0]").expect("overlay");
     assert!(
-      last > img && src[last..src.rfind("aria-hidden").unwrap()].contains("[pointer-events:none]"),
+      last > img && src[last..src.rfind("aria-hidden").unwrap()].contains("pointer-events-none"),
       "{src}"
     );
     assert!(
@@ -5854,5 +5957,138 @@ mod r11_tests {
     assert!(!src.contains("{ ,") && !src.contains("{ ;") && !src.contains(", ,"), "{src}");
     // Nothing to switch to: no state, and the +/- layers aren't dead buttons.
     assert!(!src.contains("useState") && !src.contains("change:"), "{src}");
+  }
+}
+
+#[cfg(test)]
+mod r13_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::model::Interaction;
+  use crate::text::HeuristicMeasurer;
+
+  /// A screen with a rectangle "Cta" that goes to "Detail" and a text "Open settings" over it.
+  fn cta(text_x: f64, text_w: f64) -> Document {
+    let mut gen = IdGen::new(41);
+    let mut doc = new_document(&mut gen, "R13");
+    let page = doc.pages[0].id.clone();
+    for (id, name, x) in [("home", "Home", 0.0), ("detail", "Detail", 500.0)] {
+      let mut f = crate::ops::default_node(NodeType::Frame, id.into(), name.into());
+      f.x = x;
+      f.width = 390.0;
+      f.height = 844.0;
+      doc.insert(f, None, &page, None);
+    }
+    let mut r = crate::ops::default_node(NodeType::Rectangle, "cta".into(), "Cta".into());
+    (r.x, r.y, r.width, r.height) = (20.0, 100.0, 200.0, 48.0);
+    r.interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    doc.insert(r, Some("home"), &page, None);
+    let mut t = crate::ops::default_node(NodeType::Text, "lbl".into(), "Label".into());
+    (t.x, t.y, t.width, t.height) = (text_x, 112.0, text_w, 24.0);
+    t.text.as_mut().unwrap().characters = "Open settings".into();
+    doc.insert(t, Some("home"), &page, None);
+    doc
+  }
+
+  fn exports(doc: &Document) -> [String; 2] {
+    [
+      export_html(doc, "home", &HeuristicMeasurer),
+      export_react(doc, "home", &HeuristicMeasurer),
+    ]
+  }
+
+  #[test]
+  fn a_control_is_named_by_the_text_drawn_over_it() {
+    let doc = cta(40.0, 120.0);
+    for src in exports(&doc) {
+      assert!(src.contains("aria-label=\"Open settings\""), "{src}");
+      assert!(!src.contains("aria-label=\"Cta\""), "{src}");
+      // The label is hidden from screen readers and lets clicks through to the control.
+      let line = src
+        .lines()
+        .find(|l| l.contains("aria-hidden=\"true\""))
+        .unwrap_or_else(|| panic!("{src}"));
+      assert!(line.contains("Open settings"), "{line}");
+      assert!(
+        line.contains("pointer-events: none") || line.contains("pointer-events-none"),
+        "{line}"
+      );
+    }
+    assert!(exports(&doc)[1].contains("pointer-events-none"));
+    assert!(exports(&doc)[0].contains("pointer-events: none"));
+  }
+
+  #[test]
+  fn text_mostly_outside_the_control_is_not_its_label() {
+    // Half of it is outside the 20..220 box.
+    let doc = cta(160.0, 120.0);
+    for src in exports(&doc) {
+      assert!(src.contains("aria-label=\"Cta\""), "{src}");
+      assert!(!src.contains("aria-hidden=\"true\""), "{src}");
+      assert!(!src.contains("pointer-events"), "{src}");
+    }
+  }
+
+  #[test]
+  fn text_below_the_control_or_with_its_own_click_is_not_a_label() {
+    // Painted below the control: it comes first among the siblings.
+    let mut doc = cta(40.0, 120.0);
+    let page = doc.pages[0].id.clone();
+    doc.get_mut("home").unwrap().children.reverse();
+    let _ = page;
+    for src in exports(&doc) {
+      assert!(src.contains("aria-label=\"Cta\""), "{src}");
+      assert!(!src.contains("aria-hidden=\"true\""), "{src}");
+    }
+    let mut doc = cta(40.0, 120.0);
+    doc.get_mut("lbl").unwrap().interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    for src in exports(&doc) {
+      assert!(!src.contains("aria-label=\"Open settings\""), "{src}");
+    }
+  }
+
+  #[test]
+  fn several_texts_are_joined_in_reading_order() {
+    let mut doc = cta(40.0, 120.0);
+    let page = doc.pages[0].id.clone();
+    // Added last, so it is above; it sits on the first row to the right of "Open settings"? No:
+    // on the row above, so it reads first.
+    let mut t = crate::ops::default_node(NodeType::Text, "pre".into(), "Pre".into());
+    (t.x, t.y, t.width, t.height) = (40.0, 104.0, 60.0, 8.0);
+    t.text.as_mut().unwrap().characters = "New".into();
+    doc.insert(t, Some("home"), &page, None);
+    for src in exports(&doc) {
+      assert!(src.contains("aria-label=\"New Open settings\""), "{src}");
+    }
+  }
+
+  #[test]
+  fn a_control_with_text_inside_keeps_its_markup() {
+    let mut doc = cta(40.0, 120.0);
+    let page = doc.pages[0].id.clone();
+    doc.get_mut("cta").unwrap().kind = NodeType::Frame;
+    let mut t = crate::ops::default_node(NodeType::Text, "inner".into(), "Inner".into());
+    t.text.as_mut().unwrap().characters = "Inside".into();
+    doc.insert(t, Some("cta"), &page, None);
+    for src in exports(&doc) {
+      assert!(!src.contains("aria-label=\"Open settings\""), "{src}");
+      assert!(!src.contains("aria-hidden=\"true\""), "{src}");
+    }
+  }
+
+  #[test]
+  fn a_screen_without_overlaid_text_has_no_extra_markup() {
+    let mut doc = cta(300.0, 60.0);
+    doc.get_mut("lbl").unwrap().y = 600.0;
+    for src in exports(&doc) {
+      assert!(!src.contains("aria-hidden") && !src.contains("pointer-events"), "{src}");
+      assert!(src.contains("aria-label=\"Cta\""), "{src}");
+    }
   }
 }
