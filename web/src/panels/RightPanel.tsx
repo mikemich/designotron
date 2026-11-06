@@ -7,7 +7,7 @@ import { ReviewPanel } from "./ReviewPanel";
 import { AppPanel } from "./AppPanel";
 import { focusedByPointer, IconButton, NumberField, Section, SelectField } from "../ui/controls";
 import type { Direction, Easing, Interaction, Node, Overflow, OverlaySettings } from "../types";
-import { DEFAULT_OVERLAY, enclosingSets, isMissingDestination, newInteraction, overlayDim, SCREEN_TYPES, scrollTargets, startFrame, TRIGGER_LABELS } from "../prototype";
+import { DEFAULT_OVERLAY, enclosingSets, isMissingDestination, newInteraction, overlayDim, rememberMotion, SCREEN_TYPES, scrollTargets, startFrame, TRIGGER_LABELS } from "../prototype";
 import { keyName } from "../player";
 import { PanelClose } from "./PanelChrome";
 
@@ -244,7 +244,11 @@ function KeyField({ value, onChange }: { value: string; onChange: (k: string) =>
 function InteractionEditor({ node, index, frames }: { node: Node; index: number; frames: Node[] }) {
   const doc = useDoc();
   const it = node.interactions[index];
-  const set = (patch: Partial<Interaction>) => dispatch({ op: "setInteractions", id: node.id, interactions: node.interactions.map((x, i) => (i === index ? { ...x, ...patch } : x)) });
+  const set = (patch: Partial<Interaction>) => {
+    // Navigate and overlay animations are what the next new interaction starts with.
+    if (!("action" in patch) && (it.action === "navigate" || it.action === "openOverlay" || it.action === "swapOverlay")) rememberMotion(patch);
+    dispatch({ op: "setInteractions", id: node.id, interactions: node.interactions.map((x, i) => (i === index ? { ...x, ...patch } : x)) });
+  };
   const overlay = it.action === "openOverlay" || it.action === "swapOverlay";
   const sets = useMemo(() => enclosingSets(doc, node.id), [doc, node.id]);
   const variants = sets.flatMap((s) => s.children.map((c) => doc.nodes[c]).filter(Boolean).map((v) => ({ value: v.id, label: sets.length > 1 ? `${s.name} / ${v.name}` : v.name })));

@@ -3099,6 +3099,30 @@ body:has(.phone-note) .toast {
 .dash {
   display: flex;
   height: 100%;
+  position: relative;
+}
+.export-actions .btn.block {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dash-drop {
+  position: absolute;
+  inset: 8px;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  backdrop-filter: blur(1px);
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+  pointer-events: none;
 }
 .dash-side {
   width: 232px;

@@ -26,10 +26,27 @@ pub struct Import<'a> {
   figma_id: HashMap<NodeId, String>,
   /// (our instance id, Figma componentId).
   instances: Vec<(NodeId, String)>,
-  /// (our node id, Figma destination id) for prototype links.
-  links: Vec<(NodeId, String, String)>,
+  /// Prototype links read from the file, waiting for every layer to exist.
+  links: Vec<(NodeId, PendingInteraction)>,
+  /// Figma frame id → its overlay fields (position, background, close on click outside).
+  overlays: HashMap<String, Map<String, Value>>,
+  /// Prototype things left out or approximated: what happened → how many times.
+  proto_notes: BTreeMap<String, usize>,
   warnings: Vec<String>,
   count: usize,
+  slices: usize,
+  /// Top-level instances turned into frames because their main component isn't in the file.
+  library_instances: usize,
+}
+
+/// An interaction as Figma wrote it, mapped to ours except for the destination, which is a
+/// Figma id until every layer has been converted.
+struct PendingInteraction {
+  /// Our interaction as JSON, without `destination` and `overlay`.
+  json: Map<String, Value>,
+  destination: Option<String>,
+  /// `overlayRelativePosition` of a manual overlay.
+  manual: Option<(f64, f64)>,
 }
 
 /// Imports every page (canvas) of a Figma file, or the nodes of a `/nodes` response.
@@ -42,8 +59,12 @@ pub fn import(doc: &mut Document, gen: &mut IdGen, file: &Value, images: &BTreeM
     figma_id: HashMap::new(),
     instances: Vec::new(),
     links: Vec::new(),
+    overlays: HashMap::new(),
+    proto_notes: BTreeMap::new(),
     warnings: Vec::new(),
     count: 0,
+    slices: 0,
+    library_instances: 0,
   };
   // (name, top-level layers, background, flow starting points)
   type PageSrc = (String, Vec<Value>, Option<String>, Vec<Value>);
@@ -88,6 +109,7 @@ pub fn import(doc: &mut Document, gen: &mut IdGen, file: &Value, images: &BTreeM
   }
   imp.link_instances();
   imp.link_prototypes();
+  imp.report();
   Ok(json!({ "pages": page_ids, "layers": imp.count, "warnings": imp.warnings }))
 }
 
@@ -285,7 +307,10 @@ impl Import<'_> {
       "LINE" => "line",
       "TEXT" => "text",
       "ELLIPSE" | "VECTOR" | "BOOLEAN_OPERATION" | "STAR" | "REGULAR_POLYGON" => "vector",
-      "SLICE" => return None,
+      "SLICE" => {
+        self.slices += 1;
+        return None;
+      }
       other => {
         self.warnings.push(format!("{other} layers are imported as frames"));
         "frame"
@@ -520,9 +545,8 @@ impl Import<'_> {
         .instances
         .push((id.clone(), str_of(f, "componentId").unwrap_or("").to_string()));
     }
-    if let Some(dest) = str_of(f, "transitionNodeID") {
-      self.links.push((id.clone(), dest.to_string(), "dissolve".to_string()));
-    }
+    self.read_interactions(&id, f);
+    self.read_overlay(&fid_of(f), f);
     // Children are positioned relative to this node's bounding box when there is no relativeTransform.
     let my_box = f
       .get("absoluteBoundingBox")
@@ -699,6 +723,7 @@ impl Import<'_> {
         continue;
       }
       let Some(comp) = comp else {
+        self.library_instances += 1;
         self.detach(&inst);
         continue;
       };
@@ -786,18 +811,405 @@ impl Import<'_> {
     }
   }
 
+  /// Reads a layer's prototype links: `interactions` (REST, times in ms), else `reactions`
+  /// (Plugin API, times in seconds), else the legacy `transitionNodeID`.
+  fn read_interactions(&mut self, id: &str, f: &Value) {
+    let list = |k: &str| f.get(k).and_then(|v| v.as_array()).filter(|a| !a.is_empty());
+    let legacy = str_of(f, "transitionNodeID").map(str::to_string);
+    let (source, unit) = match (list("interactions"), list("reactions")) {
+      (Some(a), _) => (a.clone(), 1.0),
+      (None, Some(a)) => (a.clone(), 1000.0),
+      (None, None) => {
+        // Only the legacy fields: a click that navigates.
+        if let Some(dest) = legacy {
+          let mut t = json!({ "type": "DISSOLVE", "easing": { "type": str_of(f, "transitionEasing").unwrap_or("EASE_OUT") } });
+          if let (Some(ms), Some(o)) = (num(f, "transitionDuration"), t.as_object_mut()) {
+            o.insert("duration".into(), json!(ms));
+          }
+          let it = json!({ "trigger": { "type": "ON_CLICK" }, "actions": [{ "type": "NODE", "destinationId": dest, "navigation": "NAVIGATE", "transition": t }] });
+          if let Some(p) = self.interaction(&it, 1.0, None) {
+            self.links.push((id.to_string(), p));
+          }
+        }
+        return;
+      }
+    };
+    for r in &source {
+      if let Some(p) = self.interaction(r, unit, legacy.as_deref()) {
+        self.links.push((id.to_string(), p));
+      }
+    }
+  }
+
+  /// One Figma interaction (`trigger` plus `actions`, or the plugin's single `action`) as ours.
+  /// `unit` turns Figma's times into milliseconds; `legacy` is the layer's `transitionNodeID`.
+  fn interaction(&mut self, r: &Value, unit: f64, legacy: Option<&str>) -> Option<PendingInteraction> {
+    let trigger = r.get("trigger").unwrap_or(&Value::Null);
+    let ttype = str_of(trigger, "type").unwrap_or("ON_CLICK");
+    let mut it = Map::new();
+    match ttype {
+      "ON_CLICK" | "ON_HOVER" | "ON_PRESS" | "MOUSE_ENTER" | "MOUSE_LEAVE" | "MOUSE_DOWN" | "MOUSE_UP" => {
+        it.insert("trigger".into(), json!(camel(ttype)));
+      }
+      "AFTER_TIMEOUT" => {
+        it.insert("trigger".into(), json!("afterDelay"));
+        it.insert(
+          "delayMs".into(),
+          json!(num(trigger, "timeout").map(|v| to_ms(v, unit)).unwrap_or(800.0)),
+        );
+      }
+      "ON_KEY_DOWN" => match key_name(trigger) {
+        Some(k) => {
+          it.insert("trigger".into(), json!("key"));
+          it.insert("key".into(), json!(k));
+        }
+        None => {
+          self.note("Key triggers Designotron can't use were skipped");
+          return None;
+        }
+      },
+      other => {
+        self.note(&format!(
+          "The {other} trigger isn't supported, so interactions using it were skipped"
+        ));
+        return None;
+      }
+    }
+    // The plugin's older shape has one `action`; the REST and current plugin shape an `actions` list.
+    let actions: Vec<Value> = match r.get("actions").and_then(|a| a.as_array()) {
+      Some(a) => a.clone(),
+      None => r.get("action").cloned().into_iter().collect(),
+    };
+    let mut kept: Option<PendingInteraction> = None;
+    let mut extra = false;
+    for a in &actions {
+      let atype = str_of(a, "type").unwrap_or("");
+      let mut pending = PendingInteraction {
+        json: it.clone(),
+        destination: None,
+        manual: None,
+      };
+      let ok = match atype {
+        "NODE" => {
+          let action = match str_of(a, "navigation").unwrap_or("NAVIGATE") {
+            "NAVIGATE" => "navigate",
+            "OVERLAY" => "openOverlay",
+            "SWAP" => "swapOverlay",
+            "SCROLL_TO" => "scrollTo",
+            "CHANGE_TO" => "changeTo",
+            other => {
+              self.note(&format!(
+                "The {other} navigation isn't supported, so those interactions were skipped"
+              ));
+              continue;
+            }
+          };
+          pending.json.insert("action".into(), json!(action));
+          // A NODE action can arrive without its destination; the layer's own field has it.
+          pending.destination = str_of(a, "destinationId").or(legacy).map(str::to_string);
+          if let Some(o) = a.get("overlayRelativePosition") {
+            pending.manual = Some((num(o, "x").unwrap_or(0.0), num(o, "y").unwrap_or(0.0)));
+          }
+          true
+        }
+        "BACK" => {
+          pending.json.insert("action".into(), json!("back"));
+          true
+        }
+        "CLOSE" => {
+          pending.json.insert("action".into(), json!("closeOverlay"));
+          true
+        }
+        "URL" => {
+          pending.json.insert("action".into(), json!("openUrl"));
+          let url = str_of(a, "url").unwrap_or("");
+          match crate::model::safe_link(url) {
+            Some(u) => {
+              pending.json.insert("url".into(), json!(u));
+              true
+            }
+            None => {
+              self.note("Links that aren't http, https, mailto or tel were skipped");
+              false
+            }
+          }
+        }
+        other => {
+          self.note(&format!("The {other} action isn't supported and was skipped"));
+          false
+        }
+      };
+      if !ok {
+        continue;
+      }
+      if kept.is_some() {
+        extra = true;
+        continue;
+      }
+      self.motion(a.get("transition"), unit, &mut pending.json);
+      kept = Some(pending);
+    }
+    if extra {
+      self.note("Interactions with several actions keep only the first one");
+    }
+    kept
+  }
+
+  /// The transition of an action: type, direction, duration and easing.
+  fn motion(&mut self, t: Option<&Value>, unit: f64, out: &mut Map<String, Value>) {
+    let t = t.filter(|t| !t.is_null());
+    let ttype = t.and_then(|t| str_of(t, "type")).unwrap_or("");
+    let dir = t
+      .and_then(|t| str_of(t, "direction"))
+      .map(|d| match d {
+        "RIGHT" => "right",
+        "TOP" => "up",
+        "BOTTOM" => "down",
+        _ => "left",
+      })
+      .unwrap_or("left");
+    let kind = match ttype {
+      "DISSOLVE" => "dissolve",
+      "SMART_ANIMATE" => "smartAnimate",
+      "MOVE_IN" => "moveIn",
+      "MOVE_OUT" => "moveOut",
+      "PUSH" => "push",
+      "SLIDE_IN" | "SLIDE_OUT" => {
+        self.note("Slide in/out transitions were approximated as Move in/out");
+        if ttype == "SLIDE_IN" {
+          "moveIn"
+        } else {
+          "moveOut"
+        }
+      }
+      _ => "instant",
+    };
+    out.insert("transition".into(), json!(kind));
+    if matches!(kind, "moveIn" | "moveOut" | "push") {
+      out.insert("direction".into(), json!(dir));
+    }
+    if kind != "instant" {
+      // A transition without a duration plays for 300 ms, like Figma's default.
+      let d = t.and_then(|t| num(t, "duration")).map(|d| to_ms(d, unit)).unwrap_or(300.0);
+      out.insert("durationMs".into(), json!(d));
+      let easing = match t.and_then(|t| t.get("easing")).and_then(|e| str_of(e, "type")) {
+        None | Some("EASE_OUT") => None,
+        Some("EASE_IN") => Some("easeIn"),
+        Some("EASE_IN_AND_OUT") => Some("easeInOut"),
+        Some("LINEAR") => Some("linear"),
+        Some("EASE_IN_BACK") => Some("easeInBack"),
+        Some("EASE_OUT_BACK") => Some("easeOutBack"),
+        Some("EASE_IN_AND_OUT_BACK") => Some("easeInOutBack"),
+        Some(_) => {
+          self.note("Springs, custom curves and named easings play as Ease out");
+          None
+        }
+      };
+      if let Some(e) = easing {
+        out.insert("easing".into(), json!(e));
+      }
+    }
+  }
+
+  /// Remembers a frame's overlay settings; they belong to the frame, not to the links that open it.
+  fn read_overlay(&mut self, fid: &str, f: &Value) {
+    let mut m = Map::new();
+    for k in ["overlayPositionType", "overlayBackground", "overlayBackgroundInteraction"] {
+      if let Some(v) = f.get(k) {
+        m.insert(k.to_string(), v.clone());
+      }
+    }
+    if !m.is_empty() {
+      self.overlays.insert(fid.to_string(), m);
+    }
+  }
+
+  /// Overlay settings for a link, from the overlay frame's fields (Figma's defaults when it has none).
+  fn overlay_settings(&self, dest: &str, manual: Option<(f64, f64)>) -> Value {
+    let o = self.overlays.get(dest);
+    let get = |k: &str| o.and_then(|o| o.get(k));
+    let position = match get("overlayPositionType").and_then(|v| v.as_str()) {
+      Some("TOP_LEFT") => "topLeft",
+      Some("TOP_CENTER") => "topCenter",
+      Some("TOP_RIGHT") => "topRight",
+      Some("BOTTOM_LEFT") => "bottomLeft",
+      Some("BOTTOM_CENTER") => "bottomCenter",
+      Some("BOTTOM_RIGHT") => "bottomRight",
+      Some("MANUAL") => "manual",
+      _ if manual.is_some() => "manual",
+      _ => "center",
+    };
+    let background = match get("overlayBackground") {
+      Some(b) if str_of(b, "type") == Some("SOLID_COLOR") => {
+        let c = b.get("color").unwrap_or(&Value::Null);
+        let rgb = format!(
+          "#{}{}{}",
+          hex2(num(c, "r").unwrap_or(0.0)),
+          hex2(num(c, "g").unwrap_or(0.0)),
+          hex2(num(c, "b").unwrap_or(0.0))
+        );
+        json!({ "color": rgb, "opacity": num(c, "a").unwrap_or(1.0) })
+      }
+      _ => Value::Null,
+    };
+    let (dx, dy) = if position == "manual" {
+      manual.unwrap_or((0.0, 0.0))
+    } else {
+      (0.0, 0.0)
+    };
+    json!({
+      "position": position,
+      "offsetX": dx,
+      "offsetY": dy,
+      "closeOnClickOutside": get("overlayBackgroundInteraction").and_then(|v| v.as_str()) == Some("CLOSE_ON_CLICK_OUTSIDE"),
+      "background": background,
+    })
+  }
+
   fn link_prototypes(&mut self) {
-    for (from, dest, transition) in std::mem::take(&mut self.links) {
-      let Some(to) = self.map.get(&dest).cloned() else { continue };
+    for (from, p) in std::mem::take(&mut self.links) {
+      let mut json = p.json;
+      let action = json.get("action").and_then(|a| a.as_str()).unwrap_or("navigate").to_string();
+      let needs_destination = matches!(
+        action.as_str(),
+        "navigate" | "openOverlay" | "swapOverlay" | "scrollTo" | "changeTo"
+      );
+      if needs_destination {
+        let Some(fig_dest) = p.destination else {
+          self.note("Interactions without a destination were skipped");
+          continue;
+        };
+        let Some(to) = self.map.get(&fig_dest).cloned() else {
+          self.note("Interactions whose destination isn't in this import were skipped");
+          continue;
+        };
+        if action == "changeTo" {
+          let is_variant = self.doc.get(&to).is_some_and(|d| {
+            d.kind == NodeType::Component
+              && d
+                .parent
+                .as_ref()
+                .and_then(|p| self.doc.get(p))
+                .is_some_and(|p| p.kind == NodeType::ComponentSet)
+          });
+          if !is_variant {
+            self.note("Change to interactions whose destination isn't a variant were skipped");
+            continue;
+          }
+        }
+        if matches!(action.as_str(), "openOverlay" | "swapOverlay") {
+          json.insert("overlay".into(), self.overlay_settings(&fig_dest, p.manual));
+        }
+        json.insert("destination".into(), json!(to));
+      }
       if let Some(n) = self.doc.get_mut(&from) {
-        if let Ok(i) =
-          serde_json::from_value(json!({ "trigger": "onClick", "action": "navigate", "destination": to, "transition": transition }))
-        {
+        if let Ok(i) = serde_json::from_value(Value::Object(json)) {
           n.interactions.push(i);
         }
       }
     }
   }
+
+  fn note(&mut self, template: &str) {
+    *self.proto_notes.entry(template.to_string()).or_insert(0) += 1;
+  }
+
+  /// Adds what the import left out or changed to the warnings, one line each with its count.
+  fn report(&mut self) {
+    if self.slices > 0 {
+      let n = self.slices;
+      self.warnings.push(if n == 1 {
+        "1 slice was skipped (Designotron has no slices)".to_string()
+      } else {
+        format!("{n} slices were skipped (Designotron has no slices)")
+      });
+    }
+    if self.library_instances > 0 {
+      let n = self.library_instances;
+      self.warnings.push(if n == 1 {
+        "1 instance of a library component became a frame (its main component isn't in this file)".to_string()
+      } else {
+        format!("{n} instances of library components became frames (their main components aren't in this file)")
+      });
+    }
+    for (reason, n) in std::mem::take(&mut self.proto_notes) {
+      self.warnings.push(if n == 1 { reason } else { format!("{reason} (×{n})") });
+    }
+  }
+}
+
+/// A Figma time as milliseconds, kept within 0 to 10 s. The plugin API counts seconds (`unit`
+/// 1000); REST counts ms, but a value under 20 there can only be seconds (a 20 ms transition
+/// isn't one anyone draws).
+fn to_ms(v: f64, unit: f64) -> f64 {
+  // REST values are whole milliseconds; a small fractional one (0.3) was written in seconds.
+  // "After delay 1 ms" is a common auto-advance trick, so a whole 1 stays 1 ms.
+  let ms = if unit == 1.0 && v > 0.0 && v < 20.0 && v.fract() != 0.0 { v * 1000.0 } else { v * unit };
+  if ms.is_finite() {
+    ms.clamp(0.0, 10_000.0).round()
+  } else {
+    0.0
+  }
+}
+
+fn fid_of(f: &Value) -> String {
+  str_of(f, "id").unwrap_or("").to_string()
+}
+
+/// A key trigger's `keyCodes` (modifier codes and one key) as the key name the player uses ("Shift+K").
+fn key_name(trigger: &Value) -> Option<String> {
+  let (mut ctrl, mut alt, mut shift, mut meta) = (false, false, false, false);
+  let mut key: Option<String> = None;
+  for c in trigger.get("keyCodes")?.as_array()? {
+    let code = c.as_u64()?;
+    let k = match code {
+      16 => {
+        shift = true;
+        continue;
+      }
+      17 => {
+        ctrl = true;
+        continue;
+      }
+      18 => {
+        alt = true;
+        continue;
+      }
+      91 | 93 | 224 => {
+        meta = true;
+        continue;
+      }
+      8 => "Backspace".to_string(),
+      9 => "Tab".to_string(),
+      13 => "Enter".to_string(),
+      27 => "Escape".to_string(),
+      32 => "Space".to_string(),
+      33 => "PageUp".to_string(),
+      34 => "PageDown".to_string(),
+      35 => "End".to_string(),
+      36 => "Home".to_string(),
+      37 => "ArrowLeft".to_string(),
+      38 => "ArrowUp".to_string(),
+      39 => "ArrowRight".to_string(),
+      40 => "ArrowDown".to_string(),
+      46 => "Delete".to_string(),
+      48..=57 | 65..=90 => char::from_u32(code as u32)?.to_string(),
+      _ => return None,
+    };
+    if key.replace(k).is_some() {
+      return None;
+    }
+  }
+  let key = key?;
+  let mut out = String::new();
+  for (on, m) in [(ctrl, "Ctrl"), (alt, "Alt"), (shift, "Shift"), (meta, "Meta")] {
+    if on {
+      out.push_str(m);
+      out.push('+');
+    }
+  }
+  out.push_str(&key);
+  Some(out)
 }
 
 fn strokes_empty(n: &Map<String, Value>) -> bool {
@@ -1009,5 +1421,464 @@ mod tests {
     assert_eq!((c["x"].as_f64(), c["w"].as_f64()), (Some(-0.5), Some(2.0)));
     assert!((c["y"].as_f64().unwrap() + 0.2).abs() < 1e-9);
     assert!(crop_rect(&json!({ "imageTransform": [[0, 1, 0], [1, 0, 0]] })).is_none());
+  }
+
+  // ---------- prototype interactions ----------
+
+  fn rect(id: &str, name: &str, extra: Value) -> Value {
+    let mut v = json!({
+      "id": id, "type": "RECTANGLE", "name": name,
+      "absoluteBoundingBox": { "x": 0, "y": 0, "width": 50, "height": 20 }, "size": { "x": 50, "y": 20 },
+      "relativeTransform": [[1, 0, 0], [0, 1, 0]]
+    });
+    v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    v
+  }
+
+  fn frame(id: &str, name: &str, extra: Value, kids: Vec<Value>) -> Value {
+    let mut v = json!({
+      "id": id, "type": "FRAME", "name": name,
+      "absoluteBoundingBox": { "x": 0, "y": 0, "width": 300, "height": 400 }, "size": { "x": 300, "y": 400 },
+      "relativeTransform": [[1, 0, 0], [0, 1, 0]], "children": kids
+    });
+    v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    v
+  }
+
+  fn proto_file(kids: Vec<Value>) -> Value {
+    json!({ "name": "P", "document": { "id": "0:0", "type": "DOCUMENT", "children": [{ "id": "0:1", "type": "CANVAS", "name": "C", "children": kids }] } })
+  }
+
+  fn run(file: &Value) -> (Document, Value) {
+    let mut gen = IdGen::new(7);
+    let mut doc = new_document(&mut gen, "x");
+    let r = import(&mut doc, &mut gen, file, &BTreeMap::new()).unwrap();
+    (doc, r)
+  }
+
+  fn named(doc: &Document, name: &str) -> Node {
+    // `copy_of` takes a `&Node` or a `&Arc<Node>` alike.
+    fn copy_of(n: &Node) -> Node {
+      n.clone()
+    }
+    copy_of(
+      doc
+        .nodes
+        .values()
+        .find(|n| n.name == name)
+        .unwrap_or_else(|| panic!("no layer {name}")),
+    )
+  }
+
+  fn warnings(r: &Value) -> Vec<String> {
+    r["warnings"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|w| w.as_str().unwrap().to_string())
+      .collect()
+  }
+
+  fn click(actions: Value) -> Value {
+    json!({ "interactions": [{ "trigger": { "type": "ON_CLICK" }, "actions": actions }] })
+  }
+
+  fn go(id: &str) -> Value {
+    json!([{ "type": "NODE", "destinationId": id, "navigation": "NAVIGATE" }])
+  }
+
+  #[test]
+  fn imports_rest_interactions_field_by_field() {
+    use crate::model::{Action, Direction, Easing, OverlayPosition, Transition, Trigger};
+    let file = proto_file(vec![
+      frame(
+        "1:1",
+        "Home",
+        json!({}),
+        vec![
+          rect(
+            "1:2",
+            "Open",
+            click(json!([{
+              "type": "NODE", "destinationId": "5:1", "navigation": "OVERLAY",
+              "overlayRelativePosition": { "x": 10, "y": 20 },
+              "transition": { "type": "MOVE_IN", "direction": "BOTTOM", "duration": 250, "easing": { "type": "EASE_IN_AND_OUT" } }
+            }])),
+          ),
+          rect(
+            "1:3",
+            "Hover",
+            json!({ "interactions": [{ "trigger": { "type": "ON_HOVER" }, "actions": [{
+          "type": "NODE", "destinationId": "2:1", "navigation": "NAVIGATE",
+          "transition": { "type": "SMART_ANIMATE", "duration": 300, "easing": { "type": "EASE_IN_AND_OUT" } }
+        }] }] }),
+          ),
+          rect(
+            "1:4",
+            "Wait",
+            json!({ "interactions": [{ "trigger": { "type": "AFTER_TIMEOUT", "timeout": 1500 }, "actions": go("2:1") }] }),
+          ),
+          rect(
+            "1:5",
+            "Key",
+            json!({ "interactions": [{ "trigger": { "type": "ON_KEY_DOWN", "device": "KEYBOARD", "keyCodes": [16, 75] }, "actions": go("2:1") }] }),
+          ),
+          rect("1:6", "Back", click(json!([{ "type": "BACK" }]))),
+          rect("1:7", "Link", click(json!([{ "type": "URL", "url": "https://example.com/x" }]))),
+          rect(
+            "1:8",
+            "Variant",
+            click(
+              json!([{ "type": "NODE", "destinationId": "7:2", "navigation": "CHANGE_TO", "transition": { "type": "DISSOLVE", "duration": 200 } }]),
+            ),
+          ),
+          rect("1:9", "Close", click(json!([{ "type": "CLOSE" }]))),
+          rect(
+            "1:10",
+            "Swap",
+            click(json!([{ "type": "NODE", "destinationId": "5:1", "navigation": "SWAP" }])),
+          ),
+          rect(
+            "1:11",
+            "Scroll",
+            click(
+              json!([{ "type": "NODE", "destinationId": "1:2", "navigation": "SCROLL_TO", "transition": { "type": "SCROLL_ANIMATE" } }]),
+            ),
+          ),
+        ],
+      ),
+      frame("2:1", "Next", json!({}), vec![]),
+      frame(
+        "5:1",
+        "Dialog",
+        json!({
+          "overlayPositionType": "MANUAL",
+          "overlayBackground": { "type": "SOLID_COLOR", "color": { "r": 0, "g": 0, "b": 1, "a": 0.5 } },
+          "overlayBackgroundInteraction": "CLOSE_ON_CLICK_OUTSIDE"
+        }),
+        vec![],
+      ),
+      json!({ "id": "7:0", "type": "COMPONENT_SET", "name": "Toggle", "absoluteBoundingBox": { "x": 0, "y": 0, "width": 100, "height": 40 }, "children": [
+        { "id": "7:1", "type": "COMPONENT", "name": "State=Off", "absoluteBoundingBox": { "x": 0, "y": 0, "width": 40, "height": 40 }, "children": [] },
+        { "id": "7:2", "type": "COMPONENT", "name": "State=On", "absoluteBoundingBox": { "x": 50, "y": 0, "width": 40, "height": 40 }, "children": [] }
+      ] }),
+    ]);
+    let (doc, r) = run(&file);
+    assert!(warnings(&r).is_empty(), "{:?}", warnings(&r));
+    let only = |name: &str| {
+      let n = named(&doc, name);
+      assert_eq!(n.interactions.len(), 1, "{name}");
+      n.interactions[0].clone()
+    };
+    let id_of = |name: &str| named(&doc, name).id;
+
+    let open = only("Open");
+    assert_eq!((open.trigger, open.action), (Trigger::OnClick, Action::OpenOverlay));
+    assert_eq!(open.destination, Some(id_of("Dialog")));
+    assert_eq!(
+      (open.transition, open.direction, open.duration_ms, open.easing),
+      (Transition::MoveIn, Direction::Down, 250.0, Easing::EaseInOut)
+    );
+    assert_eq!(open.overlay.position, OverlayPosition::Manual);
+    assert_eq!((open.overlay.offset_x, open.overlay.offset_y), (10.0, 20.0));
+    assert!(open.overlay.close_on_click_outside);
+    let bg = open.overlay.background.clone().unwrap();
+    assert_eq!((bg.color.as_str(), bg.opacity), ("#0000FF", 0.5));
+
+    let hover = only("Hover");
+    assert_eq!(
+      (hover.trigger, hover.action, hover.destination.clone()),
+      (Trigger::OnHover, Action::Navigate, Some(id_of("Next")))
+    );
+    assert_eq!(
+      (hover.transition, hover.duration_ms, hover.easing),
+      (Transition::SmartAnimate, 300.0, Easing::EaseInOut)
+    );
+
+    let wait = only("Wait");
+    assert_eq!(
+      (wait.trigger, wait.delay_ms, wait.transition),
+      (Trigger::AfterDelay, 1500.0, Transition::Instant)
+    );
+
+    let key = only("Key");
+    assert_eq!((key.trigger, key.key.as_deref()), (Trigger::Key, Some("Shift+K")));
+
+    assert_eq!(only("Back").action, Action::Back);
+    let link = only("Link");
+    assert_eq!((link.action, link.url.as_deref()), (Action::OpenUrl, Some("https://example.com/x")));
+    let variant = only("Variant");
+    assert_eq!(
+      (variant.action, variant.destination.clone(), variant.transition, variant.duration_ms),
+      (Action::ChangeTo, Some(id_of("State=On")), Transition::Dissolve, 200.0)
+    );
+    assert_eq!(only("Close").action, Action::CloseOverlay);
+    let swap = only("Swap");
+    assert_eq!((swap.action, swap.overlay.position), (Action::SwapOverlay, OverlayPosition::Manual));
+    let scroll = only("Scroll");
+    assert_eq!((scroll.action, scroll.transition), (Action::ScrollTo, Transition::Instant));
+  }
+
+  #[test]
+  fn plugin_reactions_use_seconds_and_a_single_action() {
+    use crate::model::{Action, Easing, Transition};
+    // The shape the QA round's figma-rich.json uses: `reactions`, one `action`, seconds.
+    let file = proto_file(vec![
+      frame(
+        "1:1",
+        "Home",
+        json!({}),
+        vec![rect(
+          "1:2",
+          "Go",
+          json!({ "reactions": [{
+        "trigger": { "type": "ON_CLICK" },
+        "action": { "type": "NODE", "destinationId": "2:1", "navigation": "NAVIGATE", "transition": { "type": "DISSOLVE", "duration": 0.3, "easing": { "type": "EASE_OUT" } } }
+      }, {
+        "trigger": { "type": "AFTER_TIMEOUT", "timeout": 2 },
+        "actions": [{ "type": "NODE", "destinationId": "2:1", "navigation": "NAVIGATE", "transition": { "type": "PUSH", "direction": "RIGHT", "duration": 0.5, "easing": { "type": "LINEAR" } } }]
+      }] }),
+        )],
+      ),
+      frame("2:1", "Next", json!({}), vec![]),
+    ]);
+    let (doc, r) = run(&file);
+    assert!(warnings(&r).is_empty());
+    let go = named(&doc, "Go");
+    assert_eq!(go.interactions.len(), 2);
+    let a = &go.interactions[0];
+    assert_eq!(
+      (a.action, a.transition, a.duration_ms, a.easing),
+      (Action::Navigate, Transition::Dissolve, 300.0, Easing::EaseOut)
+    );
+    let b = &go.interactions[1];
+    assert_eq!(
+      (b.delay_ms, b.transition, b.duration_ms, b.easing),
+      (2000.0, Transition::Push, 500.0, Easing::Linear)
+    );
+    assert_eq!(b.direction, crate::model::Direction::Right);
+  }
+
+  #[test]
+  fn transition_node_id_alone_still_links_and_fills_in_a_null_destination() {
+    use crate::model::{Action, Transition};
+    let mut null = rect(
+      "1:3",
+      "Null",
+      click(json!([{ "type": "NODE", "destinationId": null, "navigation": "NAVIGATE" }])),
+    );
+    null.as_object_mut().unwrap().insert("transitionNodeID".into(), json!("2:1"));
+    let file = proto_file(vec![
+      frame(
+        "1:1",
+        "Home",
+        json!({}),
+        vec![
+          rect(
+            "1:2",
+            "Legacy",
+            json!({ "transitionNodeID": "2:1", "transitionDuration": 400, "transitionEasing": "EASE_IN" }),
+          ),
+          null,
+          // Real interactions win over the legacy field.
+          rect(
+            "1:4",
+            "Both",
+            json!({ "transitionNodeID": "1:1", "interactions": [{ "trigger": { "type": "ON_PRESS" }, "actions": go("2:1") }] }),
+          ),
+        ],
+      ),
+      frame("2:1", "Next", json!({}), vec![]),
+    ]);
+    let (doc, r) = run(&file);
+    assert!(warnings(&r).is_empty(), "{:?}", warnings(&r));
+    let next = named(&doc, "Next").id;
+    let legacy = &named(&doc, "Legacy").interactions;
+    assert_eq!(legacy.len(), 1);
+    assert_eq!(
+      (
+        legacy[0].action,
+        legacy[0].destination.clone(),
+        legacy[0].transition,
+        legacy[0].duration_ms
+      ),
+      (Action::Navigate, Some(next.clone()), Transition::Dissolve, 400.0)
+    );
+    assert_eq!(legacy[0].easing, crate::model::Easing::EaseIn);
+    let null = &named(&doc, "Null").interactions;
+    assert_eq!((null.len(), null[0].destination.clone()), (1, Some(next.clone())));
+    let both = &named(&doc, "Both").interactions;
+    assert_eq!(
+      (both.len(), both[0].trigger, both[0].destination.clone()),
+      (1, crate::model::Trigger::OnPress, Some(next))
+    );
+  }
+
+  #[test]
+  fn unsupported_triggers_actions_and_destinations_warn_with_counts() {
+    let drag = |id: &str, name: &str| {
+      rect(
+        id,
+        name,
+        json!({ "interactions": [{ "trigger": { "type": "ON_DRAG" }, "actions": go("1:1") }] }),
+      )
+    };
+    let nav = |t: Value| click(json!([{ "type": "NODE", "destinationId": "1:1", "navigation": "NAVIGATE", "transition": t }]));
+    let file = proto_file(vec![frame(
+      "1:1",
+      "Home",
+      json!({}),
+      vec![
+        drag("1:2", "Drag"),
+        drag("1:3", "Drag2"),
+        rect("1:4", "Var", click(json!([{ "type": "SET_VARIABLE", "variableId": "v" }]))),
+        rect(
+          "1:5",
+          "Mixed",
+          click(
+            json!([{ "type": "SET_VARIABLE" }, { "type": "NODE", "destinationId": "1:1", "navigation": "NAVIGATE" }, { "type": "BACK" }]),
+          ),
+        ),
+        rect("1:6", "Gone", click(go("9:9"))),
+        rect(
+          "1:7",
+          "NotVariant",
+          click(json!([{ "type": "NODE", "destinationId": "1:1", "navigation": "CHANGE_TO" }])),
+        ),
+        rect("1:8", "Spring", nav(json!({ "type": "DISSOLVE", "easing": { "type": "GENTLE" } }))),
+        rect("1:9", "Slide", nav(json!({ "type": "SLIDE_IN", "direction": "TOP" }))),
+        rect(
+          "1:10",
+          "Keys",
+          json!({ "interactions": [{ "trigger": { "type": "ON_KEY_DOWN", "keyCodes": [112] }, "actions": go("1:1") }] }),
+        ),
+      ],
+    )]);
+    let (doc, r) = run(&file);
+    let w = warnings(&r);
+    let has = |s: &str| w.iter().any(|x| x.contains(s));
+    assert!(w.iter().any(|x| x.contains("ON_DRAG") && x.ends_with("(×2)")), "{w:?}");
+    assert!(has("SET_VARIABLE action isn't supported"), "{w:?}");
+    assert!(has("several actions keep only the first"), "{w:?}");
+    assert!(has("destination isn't in this import"), "{w:?}");
+    assert!(has("isn't a variant"), "{w:?}");
+    assert!(has("named easings"), "{w:?}");
+    assert!(has("Slide in/out"), "{w:?}");
+    assert!(has("Key triggers"), "{w:?}");
+    // What can be kept is kept.
+    assert_eq!(named(&doc, "Drag").interactions.len(), 0);
+    assert_eq!(named(&doc, "Var").interactions.len(), 0);
+    let mixed = named(&doc, "Mixed").interactions;
+    assert_eq!((mixed.len(), mixed[0].action), (1, crate::model::Action::Navigate));
+    let slide = &named(&doc, "Slide").interactions[0];
+    assert_eq!(
+      (slide.transition, slide.direction),
+      (crate::model::Transition::MoveIn, crate::model::Direction::Up)
+    );
+  }
+
+  #[test]
+  fn overlay_frames_without_settings_use_figmas_defaults() {
+    let file = proto_file(vec![
+      frame(
+        "1:1",
+        "Home",
+        json!({}),
+        vec![rect(
+          "1:2",
+          "Open",
+          click(json!([{ "type": "NODE", "destinationId": "5:1", "navigation": "OVERLAY" }])),
+        )],
+      ),
+      frame("5:1", "Plain", json!({}), vec![]),
+    ]);
+    let (doc, _) = run(&file);
+    let o = &named(&doc, "Open").interactions[0].overlay;
+    assert_eq!(o.position, crate::model::OverlayPosition::Center);
+    assert!(o.background.is_none() && !o.close_on_click_outside);
+  }
+
+  #[test]
+  fn warns_about_slices_and_library_instances_with_counts() {
+    let lib = |id: &str| {
+      json!({
+        "id": id, "type": "INSTANCE", "name": "Lib", "componentId": "99:1",
+        "absoluteBoundingBox": { "x": 0, "y": 0, "width": 24, "height": 24 }, "size": { "x": 24, "y": 24 }, "children": []
+      })
+    };
+    let slice = |id: &str| json!({ "id": id, "type": "SLICE", "name": "Slice", "absoluteBoundingBox": { "x": 0, "y": 0, "width": 24, "height": 24 } });
+    let (_, r) = run(&proto_file(vec![frame(
+      "1:1",
+      "Home",
+      json!({}),
+      vec![lib("1:2"), lib("1:3"), lib("1:4"), slice("1:5"), slice("1:6")],
+    )]));
+    let w = warnings(&r);
+    assert!(
+      w.contains(&"3 instances of library components became frames (their main components aren't in this file)".to_string()),
+      "{w:?}"
+    );
+    assert!(
+      w.contains(&"2 slices were skipped (Designotron has no slices)".to_string()),
+      "{w:?}"
+    );
+    let (_, r) = run(&proto_file(vec![frame("1:1", "Home", json!({}), vec![lib("1:2"), slice("1:5")])]));
+    let w = warnings(&r);
+    assert!(w.iter().any(|x| x.starts_with("1 instance of a library component")), "{w:?}");
+    assert!(w.iter().any(|x| x.starts_with("1 slice was skipped")), "{w:?}");
+    // The sample file has one library instance and nothing else to report.
+    let (_, r) = run(&file());
+    assert_eq!(warnings(&r).len(), 1, "{:?}", warnings(&r));
+  }
+
+  #[test]
+  fn key_codes_become_key_names() {
+    let k = |codes: Value| key_name(&json!({ "keyCodes": codes }));
+    assert_eq!(k(json!([13])).as_deref(), Some("Enter"));
+    assert_eq!(k(json!([27])).as_deref(), Some("Escape"));
+    assert_eq!(k(json!([32])).as_deref(), Some("Space"));
+    assert_eq!(k(json!([8])).as_deref(), Some("Backspace"));
+    assert_eq!(k(json!([9])).as_deref(), Some("Tab"));
+    assert_eq!(k(json!([37])).as_deref(), Some("ArrowLeft"));
+    assert_eq!(k(json!([40])).as_deref(), Some("ArrowDown"));
+    assert_eq!(k(json!([48])).as_deref(), Some("0"));
+    assert_eq!(k(json!([65])).as_deref(), Some("A"));
+    assert_eq!(k(json!([17, 18, 16, 91, 75])).as_deref(), Some("Ctrl+Alt+Shift+Meta+K"));
+    assert_eq!(k(json!([75, 16])).as_deref(), Some("Shift+K"));
+    assert_eq!(k(json!([112])), None);
+    assert_eq!(k(json!([16])), None, "a modifier alone");
+    assert_eq!(k(json!([65, 66])), None, "two keys");
+    assert_eq!(key_name(&json!({})), None);
+  }
+
+  #[test]
+  fn times_are_clamped_and_rest_seconds_are_recognised() {
+    assert_eq!(to_ms(0.3, 1000.0), 300.0);
+    assert_eq!(to_ms(300.0, 1.0), 300.0);
+    assert_eq!(to_ms(0.3, 1.0), 300.0, "a fractional REST value under 20 is seconds");
+    assert_eq!(to_ms(1.0, 1.0), 1.0, "After delay 1 ms stays 1 ms");
+    assert_eq!(to_ms(16.0, 1.0), 16.0);
+    assert_eq!(to_ms(1e9, 1.0), 10_000.0);
+    assert_eq!(to_ms(-5.0, 1.0), 0.0);
+    assert_eq!(to_ms(f64::NAN, 1.0), 0.0);
+    let file = proto_file(vec![frame(
+      "1:1",
+      "Home",
+      json!({}),
+      vec![
+        rect(
+          "1:2",
+          "A",
+          click(json!([{ "type": "NODE", "destinationId": "1:1", "navigation": "NAVIGATE", "transition": { "type": "DISSOLVE" } }])),
+        ),
+        rect("1:3", "B", click(json!([{ "type": "URL", "url": "javascript:alert(1)" }]))),
+        rect("1:4", "C", click(json!([{ "type": "URL", "url": "https://example.com" }]))),
+      ],
+    )]);
+    let (doc, r) = run(&file);
+    assert_eq!(named(&doc, "A").interactions[0].duration_ms, 300.0, "a missing duration is 300 ms");
+    assert_eq!(named(&doc, "B").interactions.len(), 0);
+    assert!(warnings(&r).iter().any(|w| w.contains("aren't http")), "{:?}", warnings(&r));
+    assert_eq!(named(&doc, "C").interactions[0].url.as_deref(), Some("https://example.com"));
   }
 }

@@ -49,9 +49,12 @@ const toasts = () => page.locator(".toast").allInnerTexts();
 /** Exports the selection from the panel and returns the file name and its bytes. */
 async function exportSelected(format, scale) {
   const sec = exportSection();
-  if (scale !== undefined) await sec.locator("select").first().selectOption({ label: `${scale}x` });
+  if (scale !== undefined) {
+    await sec.getByLabel("Export scale").fill(`${scale}x`);
+    await sec.getByLabel("Export scale").press("Enter");
+  }
   await sec.locator("select").last().selectOption({ label: format });
-  const [dl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), sec.locator("button.btn").click()]);
+  const [dl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), sec.locator(".export-actions button").first().click()]);
   const path = await dl.path();
   return { name: dl.suggestedFilename(), bytes: fs.readFileSync(path) };
 }
@@ -87,10 +90,10 @@ try {
   // 2. SVG export: no scale picker, and the SVG has the padded size.
   await select("Outside");
   r = await exportSelected("SVG");
-  check("SVG export hides the scale picker", (await exportSection().locator("select").count()) === 1);
+  check("SVG export hides the scale picker", (await exportSection().getByLabel("Export scale").count()) === 0);
   check("SVG export is cropped to the stroke", /width="120" height="80"/.test(r.bytes.toString()) && r.name === "Outside.svg", r.name);
   await exportSection().locator("select").last().selectOption({ label: "PNG" });
-  check("scale picker returns for PNG", (await exportSection().locator("select").count()) === 2);
+  check("scale picker returns for PNG", (await exportSection().getByLabel("Export scale").count()) === 1);
 
   // 3. A raster wider than the browser limit is scaled down, with a toast, not dropped.
   await select("Wide");

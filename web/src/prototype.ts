@@ -9,6 +9,27 @@ export const DEFAULT_OVERLAY: OverlaySettings = {
   background: { color: "#000000", opacity: 0.3 },
 };
 
+/** The animation fields of an interaction. */
+export type Motion = Pick<Interaction, "transition" | "durationMs" | "easing" | "direction">;
+
+/** What a new connection animates with until the user picks something else: Figma's Instant. The duration stays for when it is switched. */
+const FIRST_MOTION: Motion = { transition: "instant", durationMs: 300 };
+
+/** The last animation chosen in the interaction editor, kept for the session like Figma does. */
+let lastMotion: Motion = FIRST_MOTION;
+
+/** Remembers the animation a user just chose, so the next new interaction starts with it. */
+export function rememberMotion(patch: Partial<Interaction>) {
+  const keys = ["transition", "durationMs", "easing", "direction"] as const;
+  if (!keys.some((k) => k in patch)) return;
+  lastMotion = { ...lastMotion, ...Object.fromEntries(keys.filter((k) => k in patch).map((k) => [k, patch[k]])) } as Motion;
+}
+
+/** Forgets the remembered animation (tests). */
+export function resetMotion() {
+  lastMotion = FIRST_MOTION;
+}
+
 export function newInteraction(destination: string | null): Interaction {
   return {
     trigger: "onClick",
@@ -16,8 +37,7 @@ export function newInteraction(destination: string | null): Interaction {
     action: "navigate",
     destination,
     url: null,
-    transition: "dissolve",
-    durationMs: 300,
+    ...lastMotion,
     overlay: { ...DEFAULT_OVERLAY },
   };
 }
