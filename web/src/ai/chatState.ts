@@ -349,6 +349,10 @@ function load(id: string, token: number, merge: boolean): Promise<void> {
         draft: merge ? joinText(rec.draft, now.draft) : rec.draft,
       });
       if (rec.items.length && !hasApiConversation(id)) apiLost.add(id);
+    } else if (!rec && !merge && !now.running) {
+      // A re-read that finds no record: another tab cleared this conversation (New conversation
+      // saves an empty record, which deletes it). Don't keep, and later save back, the old one.
+      useChat.setState({ items: [], sessionId: null, draft: "" });
     }
     loadedFor = id;
     // Whatever was added while reading is saved after the stored part.
