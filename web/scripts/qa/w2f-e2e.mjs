@@ -109,7 +109,9 @@ try {
   await menu("Rename");
   await p.fill('input[aria-label="File name"]', "Renamed file");
   await p.keyboard.press("Enter");
-  check("a failed rename shows an error", /Couldn't rename the file/.test(await toastText(p)), await toastText(p));
+  // The create error from just before may still be showing; wait for the rename's own message.
+  const renameToast = await waitFor(p, () => [...document.querySelectorAll(".toast.error")].some((t) => /Couldn't rename the file/.test(t.textContent ?? "")));
+  check("a failed rename shows an error", renameToast, await toastText(p));
   await sleep(5200);
   await menu("Duplicate");
   check("a failed duplicate shows an error", /Couldn't duplicate the file/.test(await toastText(p)), await toastText(p));
