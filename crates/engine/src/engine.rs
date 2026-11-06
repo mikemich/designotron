@@ -615,6 +615,16 @@ pub enum Query {
     width: f64,
     height: f64,
   },
+  /// Per-line geometry (char ranges, x positions) of a text layer, all lines, for the editor's
+  /// caret and selection.
+  TextLayout {
+    id: NodeId,
+    /// Only measure the lines touching these chars (and one line either side).
+    #[serde(default)]
+    from: Option<usize>,
+    #[serde(default)]
+    to: Option<usize>,
+  },
   Bounds {
     ids: Vec<NodeId>,
     /// Also give each item's `painted` bounds: everything it draws (shadows, outside strokes, blurs),
@@ -856,6 +866,7 @@ pub struct Engine {
 struct RenderCache {
   page: String,
   hidden: Vec<NodeId>,
+  editing: Option<NodeId>,
   doc: Option<Document>,
   roots: HashMap<NodeId, String>,
   /// Everything each root paints, in page coordinates (what the canvas culls against).
@@ -1058,14 +1069,14 @@ impl Engine {
   /// w, h]}, texts: {id: count}}` (`bounds` is what a root paints in page coordinates and `texts`
   /// its number of text layers, for the roots that changed or moved), or `{full: svg}` when the
   /// page uses top-level masks (which span roots).
-  pub fn render_incremental(&mut self, page: &str, hidden: &[NodeId]) -> Value {
+  pub fn render_incremental(&mut self, page: &str, hidden: &[NodeId], editing: Option<&str>) -> Value {
     let roots = self.doc.page(page).map(|p| p.children.clone()).unwrap_or_default();
     if roots
       .iter()
       .any(|r| self.doc.get(r).map(|n| n.is_mask && n.visible).unwrap_or(false))
     {
       self.render_cache = RenderCache::default();
-      return json!({ "full": self.render(page, hidden) });
+      return json!({ "full": self.render(page, hidden, editing) });
     }
     let mut cache = std::mem::take(&mut self.render_cache);
     let mut dirty: Vec<NodeId> = Vec::new();
@@ -1079,7 +1090,10 @@ impl Engine {
           let only_moved = self.only_moved(prev, &root, &ids);
           if only_moved
             && cache.roots.contains_key(&root)
-            && !hidden.iter().any(|h| self.doc.ancestors(h).last() == Some(&root) || *h == root)
+            && !hidden
+              .iter()
+              .chain(editing.map(|e| e.to_string()).iter())
+              .any(|h| self.doc.ancestors(h).last() == Some(&root) || *h == root)
           {
             if let (Some(n), Some(old)) = (self.doc.get(&root), prev.get(&root)) {
               moved.insert(root.clone(), json!(self.doc.local_matrix(n).svg()));
@@ -1101,6 +1115,16 @@ impl Engine {
             dirty.push(root);
           }
         }
+        // Starting, ending or switching the text being edited repaints its root(s).
+        if cache.editing.as_deref() != editing {
+          for h in cache.editing.iter().map(|s| s.as_str()).chain(editing) {
+            if self.doc.get(h).is_some() {
+              let root = self.doc.ancestors(h).last().cloned().unwrap_or_else(|| h.to_string());
+              moved.remove(&root);
+              dirty.push(root);
+            }
+          }
+        }
       }
       _ => {
         cache.roots.clear();
@@ -1117,6 +1141,7 @@ impl Engine {
           RenderOptions {
             mode: Mode::Canvas,
             hidden,
+            editing,
           },
         );
         texts.insert(r.clone(), json!(svg.matches("<text").count()));
@@ -1133,11 +1158,12 @@ impl Engine {
     cache.doc = Some(self.doc.clone());
     cache.page = page.to_string();
     cache.hidden = hidden.to_vec();
+    cache.editing = editing.map(|s| s.to_string());
     self.render_cache = cache;
     json!({ "order": roots, "changed": changed, "moved": moved, "bounds": bounds, "texts": texts })
   }
 
-  pub fn render(&self, page: &str, hidden: &[NodeId]) -> String {
+  pub fn render(&self, page: &str, hidden: &[NodeId], editing: Option<&str>) -> String {
     render::render_page(
       &self.doc,
       page,
@@ -1145,6 +1171,7 @@ impl Engine {
       RenderOptions {
         mode: Mode::Canvas,
         hidden,
+        editing,
       },
     )
   }
@@ -2226,6 +2253,9 @@ impl Engine {
         Ok(json!({}))
       }
       Command::SetText { id, characters } => {
+        // A textarea reads line breaks as "\n": keep the stored text in the same form so the
+        // editor's indices and the engine's agree.
+        let characters = characters.replace("\r\n", "\n").replace('\r', "\n");
         let (old, runs) = self
           .doc
           .get(&id)
@@ -2237,9 +2267,10 @@ impl Engine {
         let n = self.doc.get_mut(&id).ok_or("no such node")?;
         patch::apply(n, &p)?;
         // The name follows the text until the user renames the layer.
-        let auto_name: String = old.chars().take(40).collect();
-        if n.name.is_empty() || n.name == "Text" || n.name == auto_name {
-          n.name = characters.chars().take(40).collect();
+        let auto_name = |s: &str| -> String { s.trim_start().chars().take(40).collect() };
+        let old_name: String = old.chars().take(40).collect();
+        if n.name.is_empty() || n.name == "Text" || n.name == old_name || n.name == auto_name(&old) {
+          n.name = auto_name(&characters);
         }
         components::record_override(&mut self.doc, &id, &p);
         Ok(json!({}))
@@ -3640,6 +3671,13 @@ impl Engine {
           zoom
         ))
       }
+      Query::TextLayout { id, from, to } => match self.doc.get(&id).and_then(|n| n.text.as_ref().map(|t| (n, t))) {
+        Some((n, t)) => {
+          let range = from.map(|a| (a, to.unwrap_or(a)));
+          json!(crate::text::caret_geometry(n, t, self.measurer.as_ref(), true, range))
+        }
+        None => Value::Null,
+      },
       Query::OverrideCount { id } => json!({ "count": components::override_count(&self.doc, &id) }),
       Query::ComponentProps { id } => crate::props::describe(&self.doc, &id),
       Query::FrameAt { x, y, exclude } => json!(ops::frame_at(&self.doc, &self.page, Point::new(x, y), &exclude, true)),
@@ -4209,17 +4247,17 @@ mod tests {
     let mut e = engine();
     let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
     let p1 = e.page.clone();
-    e.render_incremental(&p1, &[]);
+    e.render_incremental(&p1, &[], None);
     ai(&mut e, "update_nodes", json!({ "updates": [{ "id": a, "x": 300 }] }));
-    e.render_incremental(&p1, &[]);
+    e.render_incremental(&p1, &[], None);
     e.dispatch(Command::Delete { ids: vec![a.clone()] }).unwrap();
-    e.render_incremental(&p1, &[]);
+    e.render_incremental(&p1, &[], None);
     e.dispatch(Command::AddPage { name: None }).unwrap();
     let p2 = e.page.clone();
-    e.render_incremental(&p2, &[]);
+    e.render_incremental(&p2, &[], None);
     e.dispatch(Command::Undo).unwrap();
     e.dispatch(Command::Undo).unwrap();
-    let inc = e.render_incremental(&p1, &[]);
+    let inc = e.render_incremental(&p1, &[], None);
     let fresh = render::render_root(
       &e.doc,
       &a,
@@ -4227,6 +4265,7 @@ mod tests {
       RenderOptions {
         mode: Mode::Canvas,
         hidden: &[],
+        editing: None,
       },
     );
     assert_eq!(inc["changed"][&a].as_str().unwrap(), fresh, "markup carries the move");
@@ -4345,7 +4384,7 @@ mod tests {
       .as_str()
       .unwrap()
       .to_string();
-    let first = e.render_incremental(&page, &[]);
+    let first = e.render_incremental(&page, &[], None);
     assert_eq!(bounds(&first, &a), vec![100.0, 50.0, 40.0, 20.0]);
     assert_eq!(bounds(&first, &b), vec![300.0, 50.0, 40.0, 20.0]);
     assert_eq!(
@@ -4359,7 +4398,7 @@ mod tests {
       patch: json!({ "effects": [{ "type": "dropShadow", "x": 0, "y": 10, "blur": 10, "spread": 0, "color": "#000000", "visible": true }] }),
     })
     .unwrap();
-    let second = e.render_incremental(&page, &[]);
+    let second = e.render_incremental(&page, &[], None);
     assert!(second["changed"].get(&a).is_some() && second["changed"].get(&b).is_none());
     assert!(second["bounds"].get(&b).is_none(), "untouched roots keep the bounds the editor has");
     let shadowed = bounds(&second, &a);
@@ -4370,7 +4409,7 @@ mod tests {
       patch: json!({ "x": 130.0, "y": 80.0 }),
     })
     .unwrap();
-    let third = e.render_incremental(&page, &[]);
+    let third = e.render_incremental(&page, &[], None);
     assert!(third["moved"].get(&a).is_some());
     let moved = bounds(&third, &a);
     assert_eq!(
@@ -4724,7 +4763,7 @@ mod tests {
     assert!(e.doc.get(&m).unwrap().is_mask);
     assert_eq!(e.doc.get(&g).unwrap().children[0], m);
     let page = e.page.clone();
-    let svg = e.render(&page, &[]);
+    let svg = e.render(&page, &[], None);
     assert!(svg.contains("<mask id=") && svg.contains("mask=\"url(#"), "{svg}");
   }
 
@@ -5892,7 +5931,7 @@ mod tests {
     let t = e.doc.get(&id).unwrap().text.clone().unwrap();
     assert_eq!(t.font_weight, 300);
     assert!(t.runs.iter().all(|r| r.font_weight.is_none()));
-    let svg = e.render(&e.page.clone(), &[]);
+    let svg = e.render(&e.page.clone(), &[], None);
     assert!(svg.contains("fill=\"#FF0000\""));
   }
 
@@ -6287,12 +6326,143 @@ mod tests {
     let n = e.doc.get(&id).unwrap();
     assert_eq!(n.height, (2.0_f64 * 16.0 * 1.2).ceil(), "two lines tall");
     assert!(n.height < tall);
-    let svg = e.render(&e.page.clone(), &[]);
+    let svg = e.render(&e.page.clone(), &[], None);
     assert!(svg.contains('\u{2026}'), "{svg}");
     // Clearing the limit brings the text back.
     update_ids(&mut e, vec![id.clone()], json!({ "text": { "maxLines": null } }));
     assert_eq!(e.doc.get(&id).unwrap().height, tall);
-    assert!(!e.render(&e.page.clone(), &[]).contains('\u{2026}'));
+    assert!(!e.render(&e.page.clone(), &[], None).contains('\u{2026}'));
+  }
+
+  #[test]
+  fn editing_text_renders_every_line_without_an_ellipsis() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "one two three four five six seven eight nine ten eleven twelve".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    update_ids(
+      &mut e,
+      vec![id.clone()],
+      json!({ "width": 100, "text": { "autoResize": "height", "maxLines": 1 } }),
+    );
+    let page = e.page.clone();
+    let cut = e.render(&page, &[], None);
+    assert!(cut.contains('\u{2026}'));
+    let live = e.render(&page, &[], Some(&id));
+    assert!(!live.contains('\u{2026}'), "{live}");
+    assert!(!live.contains("visibility=\"hidden\""), "editing text stays visible");
+    assert!(live.contains("twelve"));
+  }
+
+  #[test]
+  fn render_incremental_repaints_the_root_when_editing_changes() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "one two three four five six seven eight".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    update_ids(
+      &mut e,
+      vec![id.clone()],
+      json!({ "width": 60, "text": { "autoResize": "height", "maxLines": 1 } }),
+    );
+    let page = e.page.clone();
+    let first = e.render_incremental(&page, &[], None);
+    assert!(first["changed"][&id].as_str().unwrap().contains('\u{2026}'));
+    let quiet = e.render_incremental(&page, &[], None);
+    assert!(quiet["changed"].as_object().unwrap().is_empty());
+    let start = e.render_incremental(&page, &[], Some(&id));
+    assert!(!start["changed"][&id].as_str().unwrap().contains('\u{2026}'), "{start}");
+    let same = e.render_incremental(&page, &[], Some(&id));
+    assert!(same["changed"].as_object().unwrap().is_empty());
+    let end = e.render_incremental(&page, &[], None);
+    assert!(end["changed"][&id].as_str().unwrap().contains('\u{2026}'));
+  }
+
+  #[test]
+  fn text_layout_query_has_the_caret_geometry_shape() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "ab\ncd".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let v = e
+      .query(Query::TextLayout {
+        id: id.clone(),
+        from: None,
+        to: None,
+      })
+      .unwrap();
+    let lines = v["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 2, "{v}");
+    assert_eq!((lines[0]["start"].as_u64(), lines[0]["end"].as_u64()), (Some(0), Some(2)));
+    assert_eq!((lines[1]["start"].as_u64(), lines[1]["end"].as_u64()), (Some(3), Some(5)));
+    assert_eq!(lines[0]["xs"].as_array().unwrap().len(), 3);
+    assert!(lines[1]["top"].as_f64().unwrap() > 0.0 && v["height"].as_f64().unwrap() > 0.0);
+    assert!(e
+      .query(Query::TextLayout {
+        id: "nope".into(),
+        from: None,
+        to: None
+      })
+      .unwrap()
+      .is_null());
+  }
+
+  #[test]
+  fn set_text_stores_line_breaks_as_newlines() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::SetText {
+      id: id.clone(),
+      characters: "ab\r\ncd\ref".into(),
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&id).unwrap().text.as_ref().unwrap().characters, "ab\ncd\nef");
+  }
+
+  #[test]
+  fn set_text_names_the_layer_from_the_trimmed_text() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::SetText {
+      id: id.clone(),
+      characters: " plus".into(),
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&id).unwrap().name, "plus");
   }
 
   #[test]

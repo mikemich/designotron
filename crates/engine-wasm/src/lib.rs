@@ -126,9 +126,9 @@ impl WasmEngine {
   }
 
   /// SVG markup for a page; `hidden` is a JSON array of node ids to paint invisibly.
-  pub fn render(&self, page: &str, hidden: &str) -> String {
+  pub fn render(&self, page: &str, hidden: &str, editing: &str) -> String {
     let hidden: Vec<String> = serde_json::from_str(hidden).unwrap_or_default();
-    self.inner.render(page, &hidden)
+    self.inner.render(page, &hidden, Some(editing).filter(|e| !e.is_empty()))
   }
 
   /// Local changes since the last call, for collaborators (`{full}` the first time).
@@ -174,12 +174,15 @@ impl WasmEngine {
 
   /// JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
   #[wasm_bindgen(js_name = renderIncremental)]
-  pub fn render_incremental(&mut self, page: &str, hidden: &str, reset: bool) -> String {
+  pub fn render_incremental(&mut self, page: &str, hidden: &str, reset: bool, editing: &str) -> String {
     let hidden: Vec<String> = serde_json::from_str(hidden).unwrap_or_default();
     if reset {
       self.inner.reset_render_cache();
     }
-    self.inner.render_incremental(page, &hidden).to_string()
+    self
+      .inner
+      .render_incremental(page, &hidden, Some(editing).filter(|e| !e.is_empty()))
+      .to_string()
   }
 
   /// What to write to storage so it matches the document: JSON

@@ -413,8 +413,8 @@ export function currentPage(): string {
 }
 
 /** Engine SVG for a page with asset references resolved to object URLs. */
-export function renderPage(page: string, hidden: string[]): string {
-  return resolveAssets(getEngine().render(page, JSON.stringify(hidden)));
+export function renderPage(page: string, hidden: string[], editing = ""): string {
+  return resolveAssets(getEngine().render(page, JSON.stringify(hidden), editing));
 }
 
 export type RenderUpdate =
@@ -430,8 +430,8 @@ export type RenderUpdate =
     };
 
 /** Incremental canvas render: only top-level layers changed since the last call come back. */
-export function renderPageIncremental(page: string, hidden: string[], reset: boolean): RenderUpdate {
-  const r = JSON.parse(getEngine().renderIncremental(page, JSON.stringify(hidden), reset));
+export function renderPageIncremental(page: string, hidden: string[], reset: boolean, editing = ""): RenderUpdate {
+  const r = JSON.parse(getEngine().renderIncremental(page, JSON.stringify(hidden), reset, editing));
   if ("full" in r) return { full: resolveAssets(r.full) };
   for (const k in r.changed) r.changed[k] = resolveAssets(r.changed[k]);
   return r;

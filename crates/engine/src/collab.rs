@@ -1097,7 +1097,7 @@ mod tests {
     assert_eq!(tops, 1, "exactly one side of the cycle is cut");
     e.dispatch(Command::SelectAll).ok();
     let page = e.doc.pages[0].id.clone();
-    e.render(&page, &[]);
+    e.render(&page, &[], None);
   }
 
   #[test]
