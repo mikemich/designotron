@@ -333,11 +333,9 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           }
         />
         <span className="small save-state" role="status">
-          {saveFailed
-            ? "Not saved, retrying"
-            : !persistentStorage()
-              ? "Not saved (browser storage unavailable)"
-              : dirty
+          {saveFailed || !persistentStorage()
+            ? "Not saved: browser storage is full or blocked"
+            : dirty
                 ? "Saving…"
                 : "Saved locally"}
         </span>
