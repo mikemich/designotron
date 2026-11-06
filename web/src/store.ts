@@ -141,6 +141,9 @@ interface Store {
   savedDocRev: number;
   /** The last save attempt failed. */
   saveFailed: boolean;
+  /** This tab only shows the file (another tab edits it): the engine still allows comments, undo
+   * and replacing the document in read-only mode, which here would be lost, so `dispatch` refuses them. */
+  tabView: boolean;
   toast: { text: string; kind: "info" | "error" } | null;
   dropTarget: string | null;
   /** Character range selected in the text being edited (code points). */
@@ -201,6 +204,7 @@ export const useStore = create<Store>(() => ({
   dirty: false,
   savedDocRev: -1,
   saveFailed: false,
+  tabView: false,
   toast: null,
   dropTarget: null,
   textSel: null,
@@ -356,7 +360,10 @@ export function toast(text: string, kind: "info" | "error" = "info") {
 }
 
 /** Runs an engine command. Errors surface as a toast and return null. */
+const TAB_VIEW_REFUSED = new Set(["addComment", "replyComment", "resolveComment", "undo", "redo", "replaceDocument"]);
+
 export function dispatch<T = any>(cmd: Record<string, unknown>, opts: { quiet?: boolean } = {}): T | null {
+  if (useStore.getState().tabView && TAB_VIEW_REFUSED.has(cmd.op as string)) return null;
   try {
     const r = JSON.parse(getEngine().dispatch(JSON.stringify(cmd)));
     sync();
@@ -444,6 +451,7 @@ export function noteZooming() {
 }
 
 export function setTool(tool: Tool) {
+  if (tool === "comment" && useStore.getState().tabView) return;
   useStore.setState({ tool, editingVector: null });
 }
 

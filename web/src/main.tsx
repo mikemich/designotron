@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import "./styles.css";
 import { bootEngine } from "./store";
-import { Editor } from "./Editor";
+import { Editor, leaveGuard } from "./Editor";
 import { Dashboard } from "./Dashboard";
 import { bridge } from "./ai/bridgeClient";
 import { ensureGuestFile, joinFromUrl } from "./collab";
@@ -41,7 +41,15 @@ function App() {
   const [view, setView] = useState(viewData());
   useEffect(() => {
     if (isCopyLink()) openCopy();
+    let at = location.hash;
     const on = () => {
+      // An editor holding changes that are kept only on screen asks first: put the address back.
+      const next = location.hash;
+      if (next !== at && leaveGuard.ask?.(() => (location.hash = next))) {
+        history.replaceState(null, "", location.pathname + location.search + at);
+        return;
+      }
+      at = next;
       setView(viewData());
       if (isCopyLink()) openCopy();
       else setFileId(route());

@@ -31,6 +31,7 @@ export function HistoryPanel() {
   if (!fileId) return null;
 
   const save = async () => {
+    if (useStore.getState().tabView) return toast("This tab only shows the file. Edit it in the other tab to save a version.", "error");
     const saved = await attempt("save the version", () =>
       saveVersion(fileId, name.trim() || `Version ${versions.filter((v) => !v.auto).length + 1}`, getEngine().save()),
     );
@@ -38,6 +39,7 @@ export function HistoryPanel() {
     refresh();
   };
   const restore = async (v: Version) => {
+    if (useStore.getState().tabView) return toast("This tab only shows the file. Restore in the tab that edits it.", "error");
     await attempt("restore the version", async () => {
       const json = await loadVersion(fileId, v.id);
       if (!json) return toast("That version could not be read", "error");

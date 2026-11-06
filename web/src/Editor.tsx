@@ -18,11 +18,18 @@ import { PhoneNote } from "./panels/PhoneNote";
 import { DemoOverlay, stopDemo } from "./Demo";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
-import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, saveHook, useStore, zoomToFit, dispatch } from "./store";
+import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, saveHook, toast as showToast, useStore, zoomToFit, dispatch } from "./store";
 import { focusCanvas } from "./ui/controls";
 import {
+  askPersist,
   canSaveDelta,
   claimFile,
+  onStorageBack,
+  stealFileLock,
+  tabLocksSupported,
+  tryFileLock,
+  waitFileLock,
+  type FileLock,
   clearRecovery,
   listVersions,
   loadFile,
@@ -35,6 +42,8 @@ import {
   getFileMeta,
   onIndexChange,
   FileDeletedError,
+  LockLostError,
+  fenceFile,
   StaleStorageError,
   storedSize,
   saveThumbnail,
@@ -47,6 +56,7 @@ import { nodeSvg, svgToPngBlob } from "./exporter";
 import { readFileAsDataUrl } from "./assets";
 import { failureText, reportFailure } from "./errors";
 import { resolveFolder } from "./folders";
+import { saveDtron } from "./actions";
 
 /** Largest document (in characters) copied to localStorage when closing: the quota is about
  * 5 MB, and a bigger copy only fails after a slow synchronous write. */
@@ -64,6 +74,39 @@ let editorCount = 0;
 const closing = new Map<string, Promise<void>>();
 /** Longest an editor waits for the closing editor's last write. */
 const CLOSING_WAIT_MS = 15000;
+
+/** Files whose editing lock is about to be given up (after the closing editor's last write): the
+ * same tab opening the file again waits for that, or it would find the file locked by itself. */
+const releasing = new Map<string, Promise<void>>();
+
+/** Lets the router ask the open editor before leaving it: true when it wants to ask first (and
+ * then calls `go` if the person leaves anyway). */
+export const leaveGuard: { ask: ((go: () => void) => boolean) | null } = { ask: null };
+
+/** Names this page load on the channel the tabs tell each other about saves on. */
+const TAB_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+/** This tab's part in "one editing tab per file". `view`: the tab only shows the file (another
+ * tab holds `dt:file:<id>`), and neither saves nor edits. */
+interface TabState {
+  supported: boolean;
+  view: boolean;
+  /** Lost the lock with changes that aren't stored: they stay on screen until dealt with. */
+  conflict: boolean;
+  lock: FileLock | null;
+}
+
+/** Turns the engine's read-only mode on or off and shows it. (The command doesn't move the
+ * revision, so the store would not pick it up on its own.) */
+function setViewOnly(on: boolean) {
+  useStore.setState({ tabView: on });
+  dispatch({ op: "setReadOnly", on }, { quiet: true });
+  try {
+    useStore.setState({ es: JSON.parse(getEngine().state()) });
+  } catch {
+    /* engine not ready */
+  }
+}
 
 /** A prompt for Claude to send once the next file has opened (from the start screen). */
 let askOnOpen: string | null = null;
@@ -104,6 +147,17 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const [finishing, setFinishing] = useState(false);
   /** This editor's number, taken when it starts opening the file (see `claimFile`). */
   const editorIdRef = useRef(0);
+  const tabRef = useRef<TabState>({ supported: false, view: false, conflict: false, lock: null });
+  /** What the bar about the other tab says (null: none). */
+  const [tabBar, setTabBar] = useState<null | "other" | "asking" | "stuck" | "moved" | "conflict" | "session" | "unsaved">(null);
+  const tabActions = useRef<{ handoff: () => void; steal: () => void; discard: () => void }>({ handoff: () => {}, steal: () => {}, discard: () => {} });
+  /** Marks the open document stale (another tab saved while this one has unsaved edits). */
+  const staleRef = useRef<(() => void) | null>(null);
+  const tabView = useStore((s) => s.tabView);
+  /** Leaving was asked for while unsaved changes are only on screen; the function leaves. */
+  const [leaveAsk, setLeaveAsk] = useState<(() => void) | null>(null);
+  /** Saving keeps failing (disk full, storage blocked): the bar offers a copy to download. */
+  const [storageBar, setStorageBar] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -125,6 +179,28 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       // From here no older editor's save may land over what this one reads and then writes.
       editorIdRef.current = ++editorCount;
       claimFile(fileId, editorIdRef.current);
+      // One editing tab per file: without the lock this tab opens the file read-only. (Not for a
+      // link into a live session: the room keeps tabs in step, as before.)
+      const tab = tabRef.current;
+      tab.view = false;
+      tab.conflict = false;
+      useStore.setState({ tabView: false });
+      fenceFile(fileId, false);
+      tab.lock = null;
+      tab.supported = tabLocksSupported() && !/[?&](room|collab|view)=/.test(location.search);
+      if (tab.supported) {
+        // (The earlier editor's last write may be slow: wait for it, but not forever.)
+        const rel = releasing.get(fileId);
+        if (rel) await Promise.race([rel, new Promise((r) => setTimeout(r, CLOSING_WAIT_MS))]);
+        if (cancelled) return;
+        const held = await tryFileLock(fileId);
+        if (cancelled) {
+          held?.release();
+          return;
+        }
+        tab.lock = held;
+        tab.view = !held;
+      }
       // loadFile also loads the file's images. A copy kept while the page was closing is
       // newer than the last IndexedDB save.
       let stored: string | null = null;
@@ -134,7 +210,9 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       } catch (err) {
         readFailed = err ?? new Error("storage failed");
       }
-      const recovered = readRecovery(fileId);
+      // (A tab that isn't the editing one never takes over a recovery copy: the editing tab's
+      // newer work isn't in the file yet.)
+      const recovered = tabRef.current.view ? null : readRecovery(fileId);
       const json = recovered ?? stored;
       if (cancelled) return;
       // Storage failed and there is no recovery copy: the file may well be here, so don't
@@ -160,6 +238,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         }
       }
       dispatch({ op: "relayout" });
+      if (tabRef.current.view) setViewOnly(true);
       useStore.setState({ fileId, editingText: null, editingVector: null, presenting: null });
       // A recovered copy isn't in IndexedDB yet: leave it dirty so the first autosave stores it.
       markSaved(recovered === null ? useStore.getState().es.docRev : -1);
@@ -175,6 +254,19 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     })();
     return () => {
       cancelled = true;
+      // The lock goes once the closing editor's last write has finished (its cleanup runs next).
+      const lock = tabRef.current.lock;
+      tabRef.current.lock = null;
+      if (lock) {
+        const done = Promise.resolve().then(() => closing.get(fileId)).then(
+          () => lock.release(),
+          () => lock.release(),
+        );
+        const tracked = done.finally(() => {
+          if (releasing.get(fileId) === tracked) releasing.delete(fileId);
+        });
+        releasing.set(fileId, tracked);
+      }
       // Leaving the file stops what was running in it (a plugin would otherwise go on
       // editing whichever file opens next), and leaves its shared session.
       stopPlugin();
@@ -261,10 +353,17 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         // In a live session both tabs stay in sync through the room, so they're not stale.
         if (e.data?.fileId === fileId && !useCollab.getState().role) {
           if (e.data.deleted) return markDeleted(e.data.folder);
+          // A tab that only shows the file, or has nothing unsaved, reloads instead (see the tab
+          // lock effect).
+          if (tabRef.current.view || (tabRef.current.supported && tabRef.current.lock && !useStore.getState().dirty)) return;
           stale = true;
           setStale(true);
         }
       };
+    staleRef.current = () => {
+      stale = true;
+      setStale(true);
+    };
     keepRef.current = async () => {
       try {
         const place = resolveFolder(await listFolders(), goneFolder);
@@ -279,6 +378,21 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         reportFailure("keep the file", err);
       }
     };
+    // Saves in a row that didn't reach storage (failed, or kept in memory only).
+    let failures = 0;
+    const failedSave = () => {
+      if (++failures >= 2 && !closed) setStorageBar(true);
+    };
+    // IndexedDB works again (a probe write landed): save the whole file now.
+    const offBack = onStorageBack(() => {
+      failures = 0;
+      setStorageBar(false);
+      if (closed) return;
+      useStore.setState({ saveFailed: false });
+      startedRev = -1;
+      lastSnap = null;
+      schedule();
+    });
     let closed = false;
     let running = false;
     // A snapshot taken eagerly (the page is closing, or the editor is about to be replaced).
@@ -399,7 +513,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     const runFlush = async () => {
       try {
         // A write already started for this revision (closing while one ran) is not repeated.
-        while (!stale && (final || (!closed && docRev() !== useStore.getState().savedDocRev && startedRev < docRev()))) {
+        while (!stale && !tabRef.current.view && (final || (!closed && docRev() !== useStore.getState().savedDocRev && startedRev < docRev()))) {
           // The engine was replaced under this editor: its revisions mean nothing here.
           if (!final && getEngine() !== engine) break;
           let snap = final ?? (await snapshotInSlices());
@@ -421,10 +535,14 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
               markDeleted();
               break;
             }
+            // Another tab took the file over: nothing more is written here (the tab lock effect
+            // keeps the unsaved changes on screen).
+            if (err instanceof LockLostError) break;
             // Not stored (quota, disk): stay dirty, keep what the recovery copy can hold, try again.
             console.error(err);
             keepRecovery();
             startedRev = -1;
+            failedSave();
             if (!closed) {
               useStore.setState({ saveFailed: true });
               retry ??= setTimeout(() => {
@@ -435,10 +553,15 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
             break;
           }
           dropRecovery(snap);
+          if (persistentStorage()) {
+            failures = 0;
+            if (!closed) setStorageBar(false);
+            askPersist();
+          } else failedSave();
           if (lastSnap === snap) lastSnap = null;
           // Closed: the editor has moved on, so there is nothing to report and the channel is shut.
           if (closed) continue;
-          tabs?.postMessage({ fileId });
+          tabs?.postMessage({ fileId, src: TAB_ID });
           // Without working storage nothing is saved: stay dirty (and ask before closing).
           if (persistentStorage() && getEngine() === engine && snap.rev > useStore.getState().savedDocRev) markSaved(snap.rev);
           if (Date.now() - lastVersion > AUTO_VERSION_MS) {
@@ -540,7 +663,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     // Closing or reloading: IndexedDB writes can be cut off, so keep a synchronous copy in
     // localStorage too (picked up the next time the file opens). False when it couldn't be kept.
     const leave = (): boolean => {
-      if (!useStore.getState().dirty || stale) return true;
+      if (!useStore.getState().dirty || stale || tabRef.current.view) return true;
       const snap = snapshot();
       const kept = keepRecovery();
       cancelTimers();
@@ -560,6 +683,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           },
           (err) => {
             if (err instanceof FileDeletedError) return markDeleted();
+            if (err instanceof LockLostError) return;
             console.error(err);
             startedRev = -1;
             if (!closed) {
@@ -577,7 +701,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     // Unsaved work (waiting, or being written right now) or a recovery copy that couldn't be
     // kept: ask before the page goes.
     const beforeUnload = (e: BeforeUnloadEvent) => {
-      if (stale || !useStore.getState().dirty) return;
+      // (A tab that lost the lock with unsaved changes asks too: closing it loses them.)
+      if (stale || (tabRef.current.view && !tabRef.current.conflict) || !useStore.getState().dirty) return;
       leave();
       e.preventDefault();
       e.returnValue = "";
@@ -590,6 +715,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     return () => {
       off();
       offFolder();
+      offBack();
       clearTimeout(openThumb);
       cancelTimers();
       if (retry) clearTimeout(retry);
@@ -597,7 +723,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       window.removeEventListener("pagehide", pagehide);
       document.removeEventListener("visibilitychange", hidden);
       // Leaving the file: write what's unsaved now, before the engine is replaced.
-      if (!stale && useStore.getState().dirty && startedRev < docRev()) {
+      if (!stale && !tabRef.current.view && useStore.getState().dirty && startedRev < docRev()) {
         final = snapshot();
         startedRev = final.rev;
         flush();
@@ -611,6 +737,277 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       closed = true;
       if (saveHook.flush === flush) saveHook.flush = null;
       tabs?.close();
+    };
+  }, [ready, fileId]);
+
+  // One editing tab per file. The tab holding the Web Lock edits; any other shows the file
+  // read-only, reloads it when the editing tab saves, and can take over: "Edit here instead" asks
+  // the editing tab to save, go read-only and let go (the lock is only released after its last
+  // write landed, so no edit is lost); if it doesn't within 5 s, "Edit here anyway" takes the lock.
+  // A tab that loses the lock by force with unsaved changes keeps them on screen (and offers a
+  // copy to download) instead of showing the file as stored.
+  useEffect(() => {
+    if (!ready) return;
+    const tab = tabRef.current;
+    if (!tab.supported) return;
+    const lockCh = new BroadcastChannel("dt-lock");
+    const filesCh = new BroadcastChannel("dt-files");
+    let gone = false;
+    let waiter: AbortController | null = null;
+    let askTimer: ReturnType<typeof setTimeout> | null = null;
+    let handing = false;
+    // Taking over: reading the file. A save in another tab that lands meanwhile makes it read again.
+    let taking = false;
+    let savedMeanwhile = false;
+    // A reload wanted while the tab is hidden waits until it is shown.
+    let pendingHidden = false;
+    // Reloads run one at a time, in the order asked.
+    let chain: Promise<boolean> = Promise.resolve(false);
+    let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+
+    /** Reads the file from storage into the open editor (same page, selection and view kept where the
+     * layers still exist). With `recovery`, a copy kept while another tab was closing counts too.
+     * With `onlyClean`, nothing is replaced if this tab has unsaved edits by the time it has read.
+     * False if the document wasn't replaced. */
+    const reload = (recovery: boolean, onlyClean = false): Promise<boolean> =>
+      (chain = chain.then(async () => {
+        if (gone) return false;
+        let stored: string | null;
+        try {
+          stored = await loadFile(fileId);
+        } catch (err) {
+          console.error(err);
+          return false;
+        }
+        const recovered = recovery ? readRecovery(fileId) : null;
+        const json = recovered ?? stored;
+        if (json === null || gone) return false;
+        // (No await from here to the load: nothing can be edited in between.)
+        if (onlyClean && useStore.getState().dirty) {
+          staleRef.current?.();
+          return false;
+        }
+        const engine = getEngine();
+        const { page, selection } = useStore.getState().es;
+        try {
+          engine.load(json);
+          if (recovered === null && canSaveDelta(fileId)) engine.persistAdopt();
+        } catch (err) {
+          console.error(err);
+          return false;
+        }
+        dispatch({ op: "relayout" });
+        const doc = getDoc();
+        if (doc.pages.some((p) => p.id === page)) dispatch({ op: "setPage", id: page });
+        const keep = selection.filter((id) => doc.nodes[id]);
+        if (keep.length) dispatch({ op: "select", ids: keep });
+        markSaved(recovered === null ? useStore.getState().es.docRev : -1);
+        return true;
+      }));
+
+    const becomeEditor = async (lock: FileLock) => {
+      // (Not twice: a granted waiting request and a take-over can both arrive.)
+      if (gone || tab.conflict || (tab.lock && tab.lock !== lock) || taking) return lock.release();
+      if (askTimer) clearTimeout(askTimer);
+      askTimer = null;
+      tab.lock = lock;
+      taking = true;
+      savedMeanwhile = false;
+      let ok = await reload(true);
+      // The old holder's last write can land after the first read: read again until quiet.
+      for (let i = 0; ok && savedMeanwhile && i < 5; i++) {
+        savedMeanwhile = false;
+        ok = await reload(true);
+      }
+      taking = false;
+      if (gone) return;
+      if (!ok) {
+        // Can't tell what is stored: don't edit on a guess.
+        showToast("Couldn't read the file to take over editing", "error");
+        if (tab.lock === lock) tab.lock = null;
+        lock.release();
+        setTabBar("other");
+        return queueWait();
+      }
+      // Taken from this tab again while it was reading.
+      if (tab.lock !== lock) return;
+      fenceFile(fileId, false);
+      tab.view = false;
+      setViewOnly(false);
+      setTabBar(null);
+      showToast("You can edit here now");
+      // A recovered copy isn't stored yet.
+      if (useStore.getState().dirty) void saveHook.flush?.();
+      void lock.lost.then(() => onLost(lock));
+    };
+    const queueWait = () => {
+      waiter?.abort();
+      const ac = new AbortController();
+      waiter = ac;
+      void waitFileLock(fileId, ac.signal).then((lock) => {
+        if (lock) void becomeEditor(lock);
+      });
+    };
+    // The lock was taken from this tab by force. Its pending writes must not land; what isn't
+    // saved stays on screen until the person has copied it or let it go.
+    const onLost = (lock: FileLock) => {
+      if (gone || tab.lock !== lock) return;
+      tab.lock = null;
+      // A live session keeps this tab editing, as it always did.
+      if (useCollab.getState().role) return;
+      fenceFile(fileId, true);
+      tab.view = true;
+      setViewOnly(true);
+      if (useStore.getState().dirty) {
+        tab.conflict = true;
+        setTabBar("conflict");
+      } else {
+        setTabBar("moved");
+        queueWait();
+      }
+    };
+
+    // The editing tab: asked to let go.
+    const refuse = (reason: "session" | "unsaved") => lockCh.postMessage({ kind: "handoff-refused", fileId, reason });
+    const giveUp = async () => {
+      if (handing || tab.view || !tab.lock) return;
+      if (useCollab.getState().role) return refuse("session");
+      handing = true;
+      const lock = tab.lock;
+      try {
+        // An open text edit is part of the document already (every keystroke is); closing it
+        // ends its undo step.
+        if (useStore.getState().editingText) {
+          useStore.setState({ editingText: null });
+          await new Promise((r) => setTimeout(r, 60));
+        }
+        // Freeze first, so nothing is edited while the last save runs.
+        setViewOnly(true);
+        await saveHook.flush?.();
+        if (gone || tab.lock !== lock) return;
+        const st = useStore.getState();
+        // Not stored (storage failing, or kept in memory only): keep editing, keep the lock.
+        if (st.dirty || st.saveFailed || !persistentStorage()) {
+          setViewOnly(false);
+          return refuse("unsaved");
+        }
+        tab.lock = null;
+        tab.view = true;
+        setTabBar("moved");
+        lock.release();
+        queueWait();
+        // Shows what is stored (this tab's last edit included) and drops the undo steps, which
+        // no longer apply here.
+        void reload(false);
+      } finally {
+        handing = false;
+      }
+    };
+    lockCh.onmessage = (e) => {
+      const d = e.data;
+      if (d?.fileId !== fileId) return;
+      if (d.kind === "handoff") void giveUp();
+      else if (d.kind === "handoff-refused" && tab.view && !tab.lock) {
+        if (askTimer) clearTimeout(askTimer);
+        askTimer = null;
+        setTabBar((b) => (b === "asking" || b === "stuck" ? (d.reason === "session" ? "session" : "unsaved") : b));
+      }
+    };
+
+    // Another tab saved: a tab that only shows the file, or one that has nothing unsaved, reads it again.
+    const reloadNow = () => {
+      if (gone || tab.conflict || taking) return;
+      if (tab.view && !tab.lock) void reload(false);
+      else if (!tab.view && tab.lock && !useStore.getState().dirty && !handing) void reload(false, true);
+    };
+    const wantReload = () => {
+      if (document.hidden) {
+        pendingHidden = true;
+        return;
+      }
+      if (reloadTimer) clearTimeout(reloadTimer);
+      reloadTimer = setTimeout(() => {
+        reloadTimer = null;
+        reloadNow();
+      }, 150);
+    };
+    filesCh.onmessage = (e) => {
+      const d = e.data;
+      if (d?.fileId !== fileId || d.deleted || d.src === TAB_ID) return;
+      if (taking) savedMeanwhile = true;
+      // A third writer saved while this tab is handing over: what it holds may not be the newest.
+      else if (handing && useStore.getState().dirty) staleRef.current?.();
+      else wantReload();
+    };
+    const shown = () => {
+      if (!document.hidden && pendingHidden) {
+        pendingHidden = false;
+        wantReload();
+      }
+    };
+    document.addEventListener("visibilitychange", shown);
+
+    tabActions.current = {
+      handoff: () => {
+        lockCh.postMessage({ kind: "handoff", fileId });
+        setTabBar("asking");
+        if (askTimer) clearTimeout(askTimer);
+        askTimer = setTimeout(() => setTabBar((b) => (b === "asking" ? "stuck" : b)), 5000);
+      },
+      steal: async () => {
+        if (tab.lock || taking) return;
+        waiter?.abort();
+        const lock = await stealFileLock(fileId);
+        if (lock) void becomeEditor(lock);
+        else queueWait();
+      },
+      discard: async () => {
+        // The unsaved changes are let go: show the file as stored and wait for the lock again.
+        tab.conflict = false;
+        await reload(false);
+        setTabBar("moved");
+        queueWait();
+      },
+    };
+
+    // Leaving the file inside the app (Home, another file, Back) with changes that are kept only
+    // on screen asks first.
+    leaveGuard.ask = (go) => {
+      if (!tab.conflict || !useStore.getState().dirty) return false;
+      setLeaveAsk(() => go);
+      return true;
+    };
+
+    // A live session started or joined here: the room keeps the tabs in step, so nothing is held back.
+    const offRole = useCollab.subscribe((c) => {
+      if (!c.role || c.viewer || !tab.view || tab.conflict) return;
+      waiter?.abort();
+      tab.view = false;
+      setViewOnly(false);
+      setTabBar(null);
+    });
+
+    if (tab.view) {
+      setTabBar("other");
+      queueWait();
+    } else if (tab.lock) {
+      const held = tab.lock;
+      void held.lost.then(() => onLost(held));
+    }
+    return () => {
+      gone = true;
+      offRole();
+      waiter?.abort();
+      if (askTimer) clearTimeout(askTimer);
+      if (reloadTimer) clearTimeout(reloadTimer);
+      document.removeEventListener("visibilitychange", shown);
+      lockCh.close();
+      filesCh.close();
+      leaveGuard.ask = null;
+      setTabBar(null);
+      setLeaveAsk(null);
+      // (The next file starts editable; a read-only mode belongs to this file.)
+      useStore.setState({ tabView: false });
     };
   }, [ready, fileId]);
 
@@ -659,9 +1056,11 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       {gone && (
         <div className="stale-bar" role="alert">
           This file was deleted in another tab. Edits here are no longer saved.
-          <button className="btn primary small" onClick={() => keepRef.current?.()}>
-            Keep it
-          </button>
+          {!tabView && (
+            <button className="btn primary small" onClick={() => keepRef.current?.()}>
+              Keep it
+            </button>
+          )}
           <button className="btn small" onClick={onHome}>
             Back to files
           </button>
@@ -672,6 +1071,77 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           This file was changed in another tab. Edits here are no longer saved.
           <button className="btn primary small" onClick={() => location.reload()}>
             Reload
+          </button>
+        </div>
+      )}
+      {tabBar && (
+        <div className="stale-bar" role="status">
+          {tabBar === "other" && "This file is open for editing in another tab."}
+          {tabBar === "asking" && "Asking the other tab to let go of this file…"}
+          {tabBar === "stuck" && "The other tab hasn't let go of this file. Taking over now may lose its newest edits."}
+          {tabBar === "moved" && "Editing moved to another tab."}
+          {tabBar === "session" && "The other tab is in a live session, so editing can't move here."}
+          {tabBar === "unsaved" && "The other tab can't save right now, so it can't hand over yet."}
+          {tabBar === "conflict" && "Another tab took over before these changes were saved."}
+          {tabBar === "conflict" && (
+            <>
+              <button className="btn primary small" onClick={() => saveDtron()}>
+                Download a .dtron copy
+              </button>
+              <button className="btn small" onClick={() => tabActions.current.discard()}>
+                Discard and view
+              </button>
+            </>
+          )}
+          {tabBar === "unsaved" && (
+            <button className="btn primary small" onClick={() => tabActions.current.handoff()}>
+              Try again
+            </button>
+          )}
+          {tabBar === "other" && (
+            <button className="btn primary small" onClick={() => tabActions.current.handoff()}>
+              Edit here instead
+            </button>
+          )}
+          {tabBar === "moved" && (
+            <button className="btn primary small" onClick={() => tabActions.current.handoff()}>
+              Edit here
+            </button>
+          )}
+          {tabBar === "stuck" && (
+            <button className="btn primary small" onClick={() => tabActions.current.steal()}>
+              Edit here anyway
+            </button>
+          )}
+        </div>
+      )}
+      {leaveAsk && (
+        <div className="stale-bar second" role="alertdialog" aria-label="Leave without saving?">
+          These changes aren't saved anywhere yet. Leaving loses them.
+          <button className="btn primary small" onClick={() => saveDtron()}>
+            Download a .dtron copy
+          </button>
+          <button
+            className="btn small"
+            onClick={() => {
+              const go = leaveAsk;
+              tabRef.current.conflict = false;
+              setLeaveAsk(null);
+              go();
+            }}
+          >
+            Leave anyway
+          </button>
+          <button className="btn small" onClick={() => setLeaveAsk(null)}>
+            Stay
+          </button>
+        </div>
+      )}
+      {storageBar && (
+        <div className={"stale-bar" + (tabBar || gone || stale ? " second" : "")} role="alert">
+          This browser can't store the file (storage is full or blocked), so your changes aren't saved.
+          <button className="btn primary small" onClick={() => saveDtron()}>
+            Download a .dtron copy
           </button>
         </div>
       )}

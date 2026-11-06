@@ -624,7 +624,7 @@ try {
     await sleep(2500);
     const ok = (await R.pg.locator(".empty-hint").count()) === 0 && (await R.byName("B"))?.name === "B";
     check("writes that always fail fall back to memory instead of breaking the editor", ok);
-    check("and the label says the browser storage is unavailable", (await R.label()).includes("storage unavailable"), await R.label());
+    check("and the label says the browser storage is unavailable", (await R.label()).includes("storage is full or blocked"), await R.label());
     check("the file stays unsaved, so closing still asks", await R.pg.evaluate(() => window.__dt.dirty()));
     await R.c.close();
   }
@@ -706,7 +706,7 @@ try {
     await R.dispatch({ op: "update", ids: [(await R.byName("A")).id], patch: { y: 11 } });
     await sleep(2500);
     const failed = await R.label();
-    check("a failed first write shows as not saved, with a retry", failed.includes("Not saved, retrying"), failed);
+    check("a failed first write shows as not saved, with a retry", failed.includes("Not saved: browser storage is full or blocked"), failed);
     await sleep(6500);
     await R.settle();
     check("the retry saves it to IndexedDB", (await R.label()).includes("Saved locally") && (await R.stored(id)) === (await R.canon()), await R.label());

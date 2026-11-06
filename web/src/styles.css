@@ -2112,6 +2112,11 @@ body:has(.modal-bg) .hint-card {
 .stale-bar .btn.small {
   height: 24px;
   padding: 0 10px;
+  white-space: nowrap;
+  flex: none;
+}
+.stale-bar.second {
+  top: 90px;
 }
 
 @media (max-width: 1000px) {
