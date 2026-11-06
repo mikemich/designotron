@@ -79,9 +79,9 @@ export function GuestBar() {
     setAsking(false);
   };
   return (
-    <>
-    {/* Lives inside the canvas: presses here must not reach the canvas's own handlers. */}
-    <div className="guest-bar" onPointerDown={(e) => e.stopPropagation()} onContextMenu={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+    // Lives inside the canvas: presses on the bar or the notice must not reach its handlers.
+    <div className="guest-bar-root" onPointerDown={(e) => e.stopPropagation()} onContextMenu={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+    <div className="guest-bar">
       <span className="live-dot" data-live={status === "live" && !ownerGone && !viewError} />
       <span>{message}</span>
       {asking && status === "live" && !ownerGone ? (
@@ -128,6 +128,6 @@ export function GuestBar() {
       </button>
     </div>
     <RelayNotice className="floating" />
-    </>
+    </div>
   );
 }

@@ -43,8 +43,17 @@ function LocalBubble() {
   useEffect(() => {
     if (chat.open) input.current?.focus({ preventScroll: true });
   }, [chat.open]);
-  if (!chat.open || !live) return null;
+  if (!live) return null;
+  // After Enter the input is empty again; the sender still sees what everyone else sees.
+  const sent = chat.shown && !chat.text && (
+    <div className="chat-bubble mine sent" style={{ left: at.x + 16, top: at.y + (chat.open ? -14 : 18), background: myColor }}>
+      {chat.shown}
+    </div>
+  );
+  if (!chat.open) return sent || null;
   return (
+    <>
+    {sent}
     <div className="chat-bubble mine" style={{ left: at.x + 16, top: at.y + 18, background: myColor }}>
       <input
         ref={input}
@@ -70,6 +79,7 @@ function LocalBubble() {
         onBlur={() => useFollow.setState((s) => ({ chat: { ...s.chat, open: false } }))}
       />
     </div>
+    </>
   );
 }
 

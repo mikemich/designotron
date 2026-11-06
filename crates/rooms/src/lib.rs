@@ -146,6 +146,10 @@ pub struct TokenBucket {
 pub struct Rooms {
   rooms: Mutex<HashMap<String, Arc<Mutex<Room>>>>,
   next_id: AtomicU64,
+  /// Numbers temp files, so two writers never share one.
+  save_seq: AtomicU64,
+  /// Set at shutdown: edits are no longer applied (so none is acknowledged and then lost).
+  closing: std::sync::atomic::AtomicBool,
   limits: Limits,
   data_dir: Option<PathBuf>,
   /// Sum of every room's `bytes()`.
@@ -506,6 +510,8 @@ impl Rooms {
     Arc::new(Rooms {
       rooms: Mutex::new(HashMap::new()),
       next_id: AtomicU64::new(0),
+      save_seq: AtomicU64::new(0),
+      closing: std::sync::atomic::AtomicBool::new(false),
       limits,
       data_dir,
       room_bytes: AtomicUsize::new(0),
@@ -575,6 +581,17 @@ impl Rooms {
     self.save_rooms(false).await;
   }
 
+  /// Stops applying edits (call first when shutting down; follow with `save_all`). The check
+  /// happens under each room's lock, as does saving, so whatever was applied is saved.
+  pub fn close(&self) {
+    self.closing.store(true, Ordering::SeqCst);
+  }
+
+  /// Writes every changed room now, whatever its size.
+  pub async fn save_all(&self) {
+    self.save_rooms(true).await;
+  }
+
   async fn save_rooms(&self, force: bool) {
     let entries: Vec<(String, Arc<Mutex<Room>>)> = self.rooms.lock().await.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     for (id, room) in entries {
@@ -595,9 +612,16 @@ impl Rooms {
       if let (Some(path), Some(doc)) = (self.file(&id), r.doc.as_ref()) {
         let body = serde_json::to_vec(&Saved { doc, assets: &r.assets }).unwrap_or_default();
         let doc_bytes = body.len().saturating_sub(r.asset_bytes);
-        let tmp = path.with_extension("json.tmp");
-        if tokio::fs::write(&tmp, body).await.is_ok() {
-          let _ = tokio::fs::rename(&tmp, &path).await;
+        let tmp = path.with_extension(format!("json.{}.tmp", self.save_seq.fetch_add(1, Ordering::Relaxed)));
+        let saved = match tokio::fs::write(&tmp, body).await {
+          Ok(()) => tokio::fs::rename(&tmp, &path).await,
+          Err(e) => Err(e),
+        };
+        if let Err(e) = saved {
+          // Stays dirty: the next tick tries again.
+          log::warn!("cannot save room {id}: {e}");
+          let _ = tokio::fs::remove_file(&tmp).await;
+          continue;
         }
         self.measured(&mut r, doc_bytes);
       }
@@ -606,10 +630,10 @@ impl Rooms {
     }
   }
 
-  /// Saves every changed room, drops idle ones and unloads idle rooms while over the memory
-  /// budget. Call periodically (and once more on shutdown).
+  /// Saves changed rooms that are due (see `save_dirty`), drops idle ones and unloads idle
+  /// rooms while over the memory budget. Call periodically.
   pub async fn maintain(&self) {
-    self.save_rooms(true).await;
+    self.save_rooms(false).await;
     let entries: Vec<(String, Arc<Mutex<Room>>)> = self.rooms.lock().await.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     for (_, room) in entries {
       let mut r = room.lock().await;
@@ -782,6 +806,9 @@ impl Rooms {
           out.send(PONG.to_string());
           Step::Go
         }
+        // Shutting down: not applied and not acknowledged, so the editor keeps the change
+        // and sends it again to the next relay.
+        "delta" if joined && self.closing.load(Ordering::SeqCst) => Step::Go,
         "delta" if joined => self.delta(&mut r, id, role, &m, size),
         "name" if joined => {
           let name = m.name.as_deref().unwrap_or("").trim().chars().take(40).collect::<String>();

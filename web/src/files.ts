@@ -717,6 +717,20 @@ export async function renameFile(id: string, name: string) {
   await saveFile(id, name, JSON.stringify(doc));
 }
 
+/** Whether a file exists and has no layers, read without registering it anywhere. Big
+ *  (layered) files and unreadable ones count as not empty. */
+export async function isEmptyFile(id: string): Promise<boolean> {
+  if (!(await getFileMeta(id))) return false;
+  const f = (await get(fileKey(id))) as StoredFile | Manifest | undefined;
+  if (!f || isManifest(f) || typeof f.doc !== "string") return false;
+  try {
+    const doc = JSON.parse(f.doc) as { pages?: { children?: unknown[] }[] };
+    return (doc.pages ?? []).every((p) => !p.children?.length);
+  } catch {
+    return false;
+  }
+}
+
 export async function duplicateFile(id: string): Promise<string | null> {
   const json = await loadFile(id);
   if (!json) return null;

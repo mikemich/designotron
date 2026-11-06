@@ -152,6 +152,18 @@ try {
   const canvasBox = await V.page.locator("#dt-canvas").boundingBox();
   check("guest bar sits inside the canvas column", bar.x >= canvasBox.x && bar.x + bar.width <= canvasBox.x + canvasBox.width + 0.5, `${bar.x}..${bar.x + bar.width} in ${canvasBox.x}..${canvasBox.x + canvasBox.width}`);
   check("'View only' appears once (toolbar), not in the banner", (await V.page.getByText("View only", { exact: true }).count()) === 1 && (await V.page.locator(".guest-bar .view-badge").count()) === 0);
+  // The relay notice also lives in the canvas: pressing it must not change the selection.
+  await V.page.getByText("CTA", { exact: true }).first().click();
+  const selBefore = JSON.stringify((await V.page.evaluate(() => window.__dt.state())).selection);
+  await V.page.evaluate(() => window.__dt.collabSet({ relayOld: true }));
+  await V.page.locator(".relay-notice").waitFor();
+  const nb2 = await V.page.locator(".relay-notice").boundingBox();
+  await V.page.mouse.click(nb2.x + nb2.width / 2, nb2.y + nb2.height / 2);
+  await V.page.mouse.click(nb2.x + nb2.width / 2, nb2.y + nb2.height / 2, { button: "right" });
+  await sleep(200);
+  check("pressing the relay notice leaves the selection alone", selBefore !== "[]" && JSON.stringify((await V.page.evaluate(() => window.__dt.state())).selection) === selBefore, selBefore);
+  await V.page.keyboard.press("Escape");
+  await V.page.evaluate(() => window.__dt.collabSet({ relayOld: false }));
   check("no stray text on the canvas", !(await V.page.locator("#dt-canvas").innerText()).includes("Lives inside"));
   await V.page.screenshot({ path: `${OUT}/viewer-guestbar.png` });
   const narrow = await person(browser, "Nia", { width: 700, height: 800 });

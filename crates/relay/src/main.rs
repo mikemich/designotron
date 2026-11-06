@@ -391,10 +391,15 @@ async fn run(
   shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) {
   let (maintain, sweep) = (rooms.clone(), clients.clone());
+  let (stop_ticker, mut ticker_stopped) = tokio::sync::oneshot::channel::<()>();
   let ticker = tokio::spawn(async move {
     let mut tick = 0u32;
     loop {
-      tokio::time::sleep(Duration::from_secs(1)).await;
+      // Stops between rounds, never in the middle of a write.
+      tokio::select! {
+        _ = &mut ticker_stopped => break,
+        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+      }
       maintain.save_dirty().await;
       tick = (tick + 1) % 60;
       if tick.is_multiple_of(3) {
@@ -436,11 +441,20 @@ async fn run(
   });
   let mut serving = tokio::spawn(std::future::IntoFuture::into_future(server));
   tokio::select! {
-    ended = &mut serving => log::error!("server stopped: {ended:?}"),
+    ended = &mut serving => {
+      log::error!("server stopped: {ended:?}");
+      let _ = stop_ticker.send(());
+      let _ = ticker.await;
+    }
     _ = shutdown => {
       log::info!("shutting down: saving rooms");
-      // Save before anything else: the drain may be cut short by the host's kill timeout.
-      rooms.maintain().await;
+      // Stop applying edits first (an edit that isn't applied isn't acknowledged, so its
+      // editor re-sends it to the next relay), then save: the drain may be cut short by the
+      // host's kill timeout, and sockets outlive the server future.
+      rooms.close();
+      let _ = stop_ticker.send(());
+      let _ = ticker.await;
+      rooms.save_all().await;
       let _ = drain.send(());
       if tokio::time::timeout(Duration::from_secs(5), &mut serving).await.is_err() {
         log::warn!("connections didn't drain in 5 s; closing them");
@@ -448,9 +462,8 @@ async fn run(
       }
     }
   }
-  ticker.abort();
-  // Save again for edits that arrived while draining.
-  rooms.maintain().await;
+  // Nothing changes after `close`, except a file that was shared meanwhile.
+  rooms.save_all().await;
 }
 
 #[cfg(test)]
@@ -1083,6 +1096,40 @@ mod tests {
       tokio::time::timeout(Duration::from_secs(8), handle).await.unwrap().unwrap();
       let saved = std::fs::read_to_string(dir.join(format!("{room}.json"))).unwrap();
       assert!(saved.contains("Just edited"), "the edit reached the disk: {saved}");
+    }
+
+    #[tokio::test]
+    async fn an_edit_sent_after_shutdown_started_is_saved_or_never_acknowledged() {
+      let dir = temp_dir("late-edit");
+      let (addr, stop, handle) = start_run(dir.clone()).await;
+      let room = designotron_rooms::random_token();
+      let (mut a, _b) = share_and_rename(addr, &room, "Early").await;
+      // The sender's own ack for "Early" is still on its way.
+      while next_json(&mut a).await["type"] != "ack" {}
+      stop.send(()).unwrap();
+      for i in 0..20 {
+        let _ = a.send(Message::Text(rename(&format!("Late {i}")))).await;
+      }
+      let mut acked = 0;
+      let _ = tokio::time::timeout(Duration::from_millis(1500), async {
+        while let Some(Ok(m)) = a.next().await {
+          if let Message::Text(t) = m {
+            if serde_json::from_str::<serde_json::Value>(&t).is_ok_and(|v| v["type"] == "ack" && v.get("rejected").is_none()) {
+              acked += 1;
+            }
+          }
+        }
+      })
+      .await;
+      tokio::time::timeout(Duration::from_secs(8), handle).await.unwrap().unwrap();
+      let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{room}.json"))).unwrap()).unwrap();
+      let name = saved["doc"]["name"].as_str().unwrap().to_string();
+      // The last acknowledged edit is the last one that was applied; none acknowledged is lost.
+      if acked > 0 {
+        assert_eq!(name, format!("Late {}", acked - 1), "acked {acked}, saved {name}");
+      } else {
+        assert!(name == "Early" || name.starts_with("Late"), "{name}");
+      }
     }
 
     #[tokio::test]

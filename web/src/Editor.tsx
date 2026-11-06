@@ -459,7 +459,6 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     const maybeThumbnail = () => {
       if (closed || thumbBusy || Date.now() - lastThumb < 15000) return;
       thumbBusy = true;
-      lastThumb = Date.now();
       const run = () => {
         if (closed) {
           thumbBusy = false;
@@ -467,9 +466,13 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         }
         thumbnail()
           .then(async (t) => {
-            if (t && !closed) await saveThumbnail(fileId, t);
+            // An empty file makes none: don't hold back the first real one.
+            if (t && !closed) {
+              await saveThumbnail(fileId, t);
+              lastThumb = Date.now();
+            }
           })
-          .catch(() => {})
+          .catch(() => (lastThumb = Date.now()))
           .finally(() => (thumbBusy = false));
       };
       if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 3000 });
@@ -480,7 +483,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     // for the first edit.
     const openThumb = setTimeout(() => {
       getFileMeta(fileId).then((m) => {
-        if (m && !m.thumbnail) maybeThumbnail();
+        // (Rendering one runs on the main thread: not for very big files.)
+        if (m && !m.thumbnail && Object.keys(getDoc().nodes).length <= 5000) maybeThumbnail();
       }, () => {});
     }, 2000);
 

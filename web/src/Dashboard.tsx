@@ -25,7 +25,7 @@ import {
 import { ancestors, canMoveFolder, childrenOf, compareNames, contents, deleteSummary, normalizeName, pathLabel, resolveFolder } from "./folders";
 import { bootEngine, getEngine, newEngine, dispatch, toast, useBoot, useStore } from "./store";
 import { TEMPLATES, type Template } from "./templates";
-import { loadFile, persistentStorage } from "./files";
+import { isEmptyFile, persistentStorage } from "./files";
 import { Menu, useDialog, type MenuItem } from "./ui/controls";
 import { attempt, reportFailure } from "./errors";
 import { ProjectTree, NameInput, dragState } from "./dashboard/ProjectTree";
@@ -907,10 +907,7 @@ async function emptyClaudeDraft(): Promise<string | null> {
   try {
     const id = sessionStorage.getItem(CLAUDE_DRAFT);
     if (!id) return null;
-    const json = await loadFile(id);
-    if (!json) return null;
-    const doc = JSON.parse(json) as { pages?: { children?: unknown[] }[] };
-    return (doc.pages ?? []).every((p) => !p.children?.length) ? id : null;
+    return (await isEmptyFile(id)) ? id : null;
   } catch {
     return null;
   }

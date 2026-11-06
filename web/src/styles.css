@@ -1861,6 +1861,13 @@ body:has(.modal-bg) .hint-card {
 }
 
 /* ---------- Guest bar (people who opened a shared link) ---------- */
+.guest-bar-root {
+  display: contents;
+}
+.guest-bar,
+.relay-notice.floating {
+  cursor: default;
+}
 .guest-bar {
   /* Inside the canvas column, so it never covers the panel tabs. */
   position: absolute;
@@ -2829,6 +2836,10 @@ body:has(.phone-note) .toast {
 .chat-bubble.mine {
   pointer-events: auto;
   padding: 2px 6px;
+}
+.chat-bubble.mine.sent {
+  pointer-events: none;
+  padding: 4px 10px;
 }
 .chat-bubble input {
   background: transparent;
