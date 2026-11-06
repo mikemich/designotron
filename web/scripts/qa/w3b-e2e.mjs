@@ -280,7 +280,8 @@ if (ONLY.includes("A")) try {
   check("A5 typing didn't trigger shortcuts", (await owner.evaluate(() => window.__dt.state().page)) === room.page1 && (await owner.evaluate(() => window.__dt.doc().pages.length)) === 2);
   await owner.keyboard.press("Enter");
   await sleep(300);
-  check("A5 Enter starts a new message (the old one clears)", (await owner.inputValue(".chat-bubble.mine input")) === "" && (await count(guest, ".chat-bubble")) === 0);
+  // Enter sends: the input clears for a new message while the sent one stays up for the others.
+  check("A5 Enter starts a new message and the sent one stays visible", (await owner.inputValue(".chat-bubble.mine input")) === "" && (await count(guest, ".chat-bubble")) === 1);
   await owner.keyboard.type("bye");
   await sleep(6200);
   check("A5 6 s after typing stops the bubble is gone", (await count(guest, ".chat-bubble")) === 0 && (await count(owner, ".chat-bubble")) === 0);
