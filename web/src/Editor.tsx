@@ -20,6 +20,7 @@ import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
 import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, saveHook, toast as showToast, useStore, zoomToFit, dispatch } from "./store";
 import { focusCanvas } from "./ui/controls";
+import { closePanel } from "./panels/PanelChrome";
 import {
   askPersist,
   canSaveDelta,
@@ -124,6 +125,8 @@ interface Snapshot {
 
 export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void }) {
   const chatOpen = useStore((s) => s.chatOpen);
+  const panels = useStore((s) => s.panels);
+  const compact = useStore((s) => s.compact);
   /** A view-only link: no Claude, no plugins, no drawing tools (the engine refuses edits anyway). */
   const engineReadOnly = useStore((s) => !!s.es.readOnly);
   const viewing = useCollab((s) => s.viewer);
@@ -132,6 +135,9 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const toast = useStore((s) => s.toast);
   const variablesOpen = useStore((s) => s.variablesOpen);
   const figmaOpen = useStore((s) => s.figmaOpen);
+  // The Figma import dialog belongs to this file: leaving the file closes it (it stays open to
+  // show import warnings, and must not reappear over the next file).
+  useEffect(() => () => useStore.setState({ figmaOpen: false }), []);
   const pluginsOpen = usePlugins((s) => s.dialogOpen);
   const shareOpen = useCollab((s) => s.dialogOpen);
   const [ready, setReady] = useState(false);
@@ -1046,7 +1052,18 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   return (
     <div className={"app" + (readOnly ? " view-only" : "")}>
       <Toolbar onHome={onHome} />
-      <main className={"main" + (chatOpen && !readOnly ? " with-chat" : "")}>
+      <main
+        className={"main" + (chatOpen && !readOnly ? " with-chat" : "") + (panels.left ? "" : " no-left") + (panels.right ? "" : " no-right") + (compact ? " compact" : "")}
+        onKeyDown={(e) => {
+          // An overlay panel closes with Escape (and hands focus back to its toolbar button).
+          if (e.key !== "Escape" || !compact || e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+          const panel = (e.target as Element).closest(".main > .panel");
+          if (!panel) return;
+          e.preventDefault();
+          e.stopPropagation();
+          closePanel(panel.classList.contains("right") ? "right" : "left");
+        }}
+      >
         <LeftPanel />
         <Canvas />
         <RightPanel />

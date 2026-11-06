@@ -1,7 +1,7 @@
 // User-level actions shared by menus, keyboard shortcuts and context menus.
 
 import { addAsset, imageSize, readFileAsDataUrl } from "./assets";
-import { exportProjectZip } from "./exporter";
+import { exportPdf, exportProjectZip, fileSafe, pdfFrames } from "./exporter";
 import { download, getFileMeta, importDtron, pickFile, toDtron } from "./files";
 import {
   canvasSize,
@@ -16,10 +16,11 @@ import {
   saveHook,
   screenToPage,
   toast,
+  zoomToSelection,
   useStore,
 } from "./store";
 import { useCollab } from "./collab";
-import { ALT_MOD } from "./ui/controls";
+import { ALT_MOD, MOD } from "./ui/controls";
 import { openTextGesture } from "./canvas/TextEditor";
 import type { DeviceFrame, Rect, Tool } from "./types";
 import { hasDeviceUi, type DevicePreset } from "./panels/presetList";
@@ -52,7 +53,55 @@ export function pasteData(args: { data: string; parent?: string | null; x?: numb
 
 export const undo = () => dispatch({ op: "undo" });
 export const redo = () => dispatch({ op: "redo" });
-export const deleteSelection = () => dispatch({ op: "delete", ids: selection() });
+/** Main components inside the subtrees of `ids` and how many instances outside them lose their main. */
+function orphanedInstances(ids: string[]): { mains: string[]; instances: number } {
+  const doc = getDoc();
+  const gone = new Set<string>();
+  const walk = (id: string) => {
+    if (gone.has(id)) return;
+    gone.add(id);
+    for (const c of doc.nodes[id]?.children ?? []) walk(c);
+  };
+  ids.forEach(walk);
+  const mains = [...gone].filter((id) => doc.nodes[id]?.type === "component");
+  let instances = 0;
+  for (const m of mains) {
+    for (const i of query<string[]>({ q: "instances", component: m, allPages: true })) {
+      if (gone.has(i)) continue;
+      // Copies inside other instances follow their outer instance; they aren't separate instances to the person.
+      let outer = doc.nodes[i]?.parent ? doc.nodes[doc.nodes[i]!.parent!] : null;
+      while (outer && outer.type !== "instance") outer = outer.parent ? doc.nodes[outer.parent] : null;
+      if (!outer) instances++;
+    }
+  }
+  return { mains, instances };
+}
+
+/** Deletes the selection; deleting main components says how many instances lose their main (no dialog: undo brings it back). */
+export function deleteSelection() {
+  const ids = selection();
+  const doc = getDoc();
+  const { mains, instances } = orphanedInstances(ids);
+  const names = mains.map((m) => doc.nodes[m]?.name ?? "component");
+  if (dispatch({ op: "delete", ids }) === null || !instances) return;
+  const keep = instances === 1 ? "1 instance keeps its look" : `${instances} instances keep their look`;
+  toast(
+    mains.length === 1
+      ? `Deleted main component “${names[0]}”. ${keep}; select one to restore it (${MOD}Z undoes).`
+      : `Deleted ${mains.length} main components; ${keep}; select one to restore each (${MOD}Z undoes).`,
+  );
+}
+
+/** Resets property groups of the layers (all groups when `groups` is empty) to what their main components say. */
+export const resetOverrideGroups = (ids: string[], groups: string[] = []) => dispatch({ op: "resetOverrideGroups", ids, groups });
+
+/** Rebuilds a deleted main component from an instance of it and selects the result. */
+export function restoreComponent(id: string) {
+  const r = dispatch<{ id: string }>({ op: "restoreComponent", id });
+  if (!r) return;
+  zoomToSelection();
+  toast(`Restored “${getDoc().nodes[r.id]?.name ?? "component"}” from an instance. Component properties and variant sets can't be restored.`);
+}
 export const duplicate = () => dispatch({ op: "duplicate", ids: selection() });
 export const group = () => selection().length && dispatch({ op: "group", ids: selection() });
 export const ungroup = () => dispatch({ op: "ungroup", ids: selection() });
@@ -504,7 +553,13 @@ export async function saveLocally() {
 /** Downloads the file as .dtron (Ctrl+Shift+S, File menu). */
 export function saveDtron() {
   const doc = getDoc();
-  download(`${doc.name || "Untitled"}.dtron`, toDtron(getEngine().save()), "application/json");
+  download(`${fileSafe(doc.name || "Untitled")}.dtron`, toDtron(getEngine().save()), "application/json");
+}
+
+/** File > Export frames to PDF: the selection, else every visible top-level frame of the page. */
+export function exportFramesPdf() {
+  const sel = useStore.getState().es.selection;
+  void exportPdf(sel.length ? sel : pdfFrames());
 }
 
 /** Opens a .dtron file as a new file next to this one (the open file is left as it is). */

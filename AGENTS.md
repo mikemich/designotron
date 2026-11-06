@@ -78,7 +78,7 @@ must never be committed.
 - When `model.rs` changes, update `web/src/types.ts` in the same change.
 - The bridge binds to 127.0.0.1 and checks `Origin` / `Host` (`security.rs`). Keep it that
   way; the bridge can run Claude Code with write access.
-- Performance model: `Document::nodes` is a persistent `imbl::OrdMap`, so clones are O(1) and
+- Performance model: `Document::nodes` is a persistent `imbl::OrdMap<NodeId, Arc<Node>>` (read through `doc.get`, edit through `doc.get_mut`/`update_where`/`modify`, which `Arc::make_mut`; direct inserts wrap `Arc::new`), so clones are O(1) and
   `prev.nodes.diff(&doc.nodes)` costs only what changed. Layout, component fingerprints, the
   canvas render cache (`render_incremental`) and the JS document copy (`doc_delta`) all work
   from that diff. Only `get_mut` nodes you actually change (use `Document::update_where`), and

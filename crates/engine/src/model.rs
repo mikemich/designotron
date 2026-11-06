@@ -17,8 +17,10 @@ pub struct Document {
   #[serde(default = "schema_version")]
   pub schema: u32,
   pub pages: Vec<Page>,
-  /// Persistent map: clones share structure, so undo snapshots and diffs are cheap.
-  pub nodes: imbl::OrdMap<NodeId, Node>,
+  /// Persistent map: clones share structure, so undo snapshots and diffs are cheap. Nodes sit
+  /// behind an `Arc` so a copied B-tree leaf shares them instead of cloning ~1.4 KB each; edit
+  /// through `get_mut` / `update_where` (`Arc::make_mut`). Serde writes an `Arc<Node>` as the node.
+  pub nodes: imbl::OrdMap<NodeId, std::sync::Arc<Node>>,
   #[serde(default)]
   pub styles: Styles,
   /// Variable collections (tokens with modes).

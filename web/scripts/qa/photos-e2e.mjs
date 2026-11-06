@@ -430,6 +430,10 @@ try {
 
   // ---- 17. A narrower window keeps the panel inside its column ----
   await p.setViewportSize({ width: 1000, height: 800 });
+  // At this width the side panels are overlays that start closed: open the Layers panel first.
+  await p.waitForSelector(".main.compact");
+  if (!(await p.locator("#left-tab-assets").isVisible())) await p.click("#panel-toggle-left");
+  await p.waitForSelector("#left-tab-assets", { state: "visible" });
   await p.click("#left-tab-assets");
   await search("sneakers");
   await waitTiles(6);

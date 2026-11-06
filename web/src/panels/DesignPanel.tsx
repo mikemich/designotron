@@ -33,10 +33,10 @@ import type { Effect, ExportSetting, LayoutGrid, Node, Paint, TextProps, VarKind
 import { dispatch, FONTS, getDoc, styleTextSelection, useDoc, useSelection, useStore } from "../store";
 import { ALT, common, IconButton, MIXED, MOD, NumberField, Section, Seg, SelectField, SHIFT, type Maybe, ALT_MOD, SHIFT_MOD } from "../ui/controls";
 import { paintLabel, PaintSwatch, cssColor, ColorPicker } from "../ui/color";
-import { DEFAULT_EXPORT, exportLayers, rowSuffix } from "../exporter";
+import { DEFAULT_EXPORT, exportLayers, exportPdf, formatExportSize, parseExportSize, rowSuffix } from "../exporter";
 import * as A from "../actions";
 import { Popover } from "../ui/controls";
-import { ComponentSetSection, InstanceSection, MainComponentSection } from "./ComponentControls";
+import { ComponentSetSection, InstanceSection, MainComponentSection, OverridesRow } from "./ComponentControls";
 import { LayerPropsSection } from "./PropertyControls";
 import { DeviceSection, isDeviceTarget, resizeToPreset } from "./DeviceSection";
 import { PresetPicker } from "./PresetPicker";
@@ -69,6 +69,7 @@ export function DesignPanel() {
   return (
     <div className="scroll">
       {framing && <FramePresets />}
+      {nodes.length === 1 && <OverridesRow n={nodes[0]} />}
       <ComponentSection nodes={nodes} />
       <AlignSection />
       <FrameSection nodes={nodes} ids={ids} />
@@ -1549,17 +1550,8 @@ function VariablesSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   );
 }
 
-const EXPORT_SIZES = [
-  { value: "0.5", label: "0.5x" },
-  { value: "0.75", label: "0.75x" },
-  { value: "1", label: "1x" },
-  { value: "1.5", label: "1.5x" },
-  { value: "2", label: "2x" },
-  { value: "3", label: "3x" },
-  { value: "4", label: "4x" },
-  { value: "w", label: "Width" },
-  { value: "h", label: "Height" },
-];
+/** Sizes offered in the scale field's list (any other can be typed: 2.5x, 512w, 300h). */
+const EXPORT_SCALES = ["0.5x", "0.75x", "1x", "1.5x", "2x", "3x", "4x"];
 
 /** Figma's Export section: any number of rows per layer, saved on the layer. */
 function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
@@ -1580,13 +1572,15 @@ function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         return { ...rest, ...(width ? { width } : {}), ...(height ? { height } : {}) };
       }),
     );
-  const sizeOf = (r: ExportSetting) => (r.width ? "w" : r.height ? "h" : String(r.scale));
-  const setSize = (i: number, v: string) => {
-    if (v === "w") setRow(i, { width: Math.max(1, Math.round(first.width)), height: undefined });
-    else if (v === "h") setRow(i, { height: Math.max(1, Math.round(first.height)), width: undefined });
-    else setRow(i, { scale: Number(v), width: undefined, height: undefined });
+  /** Applies what was typed in a row's size field; anything that isn't a size puts the old value back. */
+  const setSize = (i: number, text: string): boolean => {
+    const size = parseExportSize(text);
+    if (!size) return false;
+    if ("width" in size) setRow(i, { width: size.width, height: undefined });
+    else if ("height" in size) setRow(i, { height: size.height, width: undefined });
+    else setRow(i, { scale: size.scale, width: undefined, height: undefined });
+    return true;
   };
-  const sizeOptions = (r: ExportSetting) => (EXPORT_SIZES.some((o) => o.value === sizeOf(r)) ? EXPORT_SIZES : [...EXPORT_SIZES, { value: sizeOf(r), label: `${r.scale}x` }]);
   const add = () => {
     if (mixed) return set([DEFAULT_EXPORT]);
     const last = rows[rows.length - 1];
@@ -1614,7 +1608,47 @@ function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         return (
           <div key={i} className="export-row" style={{ marginBottom: 8 }}>
             <div className="grid2" style={svg ? { gridTemplateColumns: "minmax(0, 1fr)" } : undefined}>
-              {!svg && <SelectField ariaLabel="Export scale" value={sizeOf(r)} options={sizeOptions(r)} onChange={(v) => setSize(i, v)} />}
+              {!svg && (
+                <>
+                  <input
+                    key={`${first.id}:${i}:${formatExportSize(r)}`}
+                    className="textinput"
+                    list={`export-sizes-${i}`}
+                    aria-label="Export scale"
+                    title="Scale (2x, 2.5x) or a fixed size (512w, 300h)"
+                    defaultValue={formatExportSize(r)}
+                    spellCheck={false}
+                    autoComplete="off"
+                    onFocus={(e) => e.currentTarget.select()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter") e.currentTarget.blur();
+                      if (e.key === "Escape") {
+                        e.currentTarget.value = formatExportSize(r);
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    onInput={(e) => {
+                      // Picking from the list replaces the text in one go; typing goes on until Enter or blur.
+                      const t = e.nativeEvent as InputEvent;
+                      if (t.inputType === "insertReplacementText" || (t.inputType === undefined && !t.data)) {
+                        if (setSize(i, e.currentTarget.value)) e.currentTarget.blur();
+                      }
+                    }}
+                    onBlur={(e) => {
+                      if (e.currentTarget.value === formatExportSize(r)) return;
+                      if (!setSize(i, e.currentTarget.value)) e.currentTarget.value = formatExportSize(r);
+                    }}
+                  />
+                  <datalist id={`export-sizes-${i}`}>
+                    {EXPORT_SCALES.map((o) => (
+                      <option key={o} value={o} />
+                    ))}
+                    <option value={`${Math.max(1, Math.round(first.width))}w`}>Width</option>
+                    <option value={`${Math.max(1, Math.round(first.height))}h`}>Height</option>
+                  </datalist>
+                </>
+              )}
               <SelectField
                 ariaLabel="Export format"
                 value={r.format}
@@ -1658,9 +1692,14 @@ function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           </div>
         );
       })}
-      <button className="btn block" onClick={() => exportLayers(ids)}>
-        Export {nodes.length === 1 ? nodes[0].name : `${nodes.length} layers`}
-      </button>
+      <div className="row export-actions">
+        <button className="btn block" onClick={() => exportLayers(ids)}>
+          Export {nodes.length === 1 ? nodes[0].name : `${nodes.length} layers`}
+        </button>
+        <button className="btn" title="One PDF with a page per selected layer (pages are 2x images, text is not selectable)" onClick={() => void exportPdf(ids)}>
+          PDF
+        </button>
+      </div>
     </Section>
   );
 }

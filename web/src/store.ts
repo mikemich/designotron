@@ -6,6 +6,7 @@ import init, { clearMeasureCache, WasmEngine } from "./wasm/pkg/designotron_engi
 import wasmUrl from "./wasm/pkg/designotron_engine_wasm_bg.wasm?url";
 import type { Doc, EngineState, Gap, Guide, Node, Rect, Tool } from "./types";
 import { assetUrl } from "./assets";
+import { COMPACT_QUERY, TIGHT_QUERY, panelShown, readPanels, setPanel, toggleUi as toggleUiPanels, writePanels, type Panels } from "./panelState";
 
 export const FONTS = [
   "Inter",
@@ -133,6 +134,14 @@ interface Store {
   rightTab: RightTab;
   leftTab: LeftTab;
   chatOpen: boolean;
+  /** The Layers (left) and Design (right) panels: open or closed. Below 1100 px they overlay the canvas. */
+  panels: Panels;
+  /** What Ctrl+\ hid, to bring back. */
+  panelsStash: Panels | null;
+  /** Tablet width (up to 1100 px): panels are overlays and start closed. */
+  compact: boolean;
+  /** Up to 1280 px: Claude's chat takes the Design panel's place. */
+  tight: boolean;
   presenting: string | null;
   fileId: string | null;
   /** The document has changes that aren't in storage yet (engine docRev !== savedDocRev). */
@@ -183,6 +192,16 @@ export function toggleView(key: "showRulers" | "showGrids") {
   }
 }
 
+const media = (q: string) => typeof window !== "undefined" && !!window.matchMedia?.(q).matches;
+const storage = (): Storage | null => {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+};
+const startCompact = media(COMPACT_QUERY);
+
 export const useStore = create<Store>(() => ({
   rev: 0,
   es: { rev: 0, docRev: 0, page: "", selection: [], canUndo: false, canRedo: false, inGesture: false },
@@ -201,6 +220,10 @@ export const useStore = create<Store>(() => ({
   rightTab: "design",
   leftTab: "layers",
   chatOpen: false,
+  panels: readPanels(startCompact, storage()),
+  panelsStash: null,
+  compact: startCompact,
+  tight: media(TIGHT_QUERY),
   presenting: null,
   fileId: null,
   dirty: false,
@@ -219,6 +242,54 @@ export const useStore = create<Store>(() => ({
   draftComment: null,
   paintEdit: null,
 }));
+
+/** Opens, closes or (without `open`) toggles a side panel. Remembered per mode (desktop, tablet). */
+export function togglePanel(side: keyof Panels, open?: boolean) {
+  const st = useStore.getState();
+  const now = st.panels[side] && !(side === "right" && st.chatOpen && st.tight);
+  const r = setPanel(st.panels, side, open ?? !now, st.chatOpen, st.tight);
+  const keep = keepCentre(st, r.panels, r.chatOpen);
+  useStore.setState({ panels: r.panels, chatOpen: r.chatOpen, panelsStash: null, ...keep });
+  writePanels(st.compact, r.panels, storage());
+}
+
+/** Ctrl+\: hides the panels, or brings back the ones that were open. */
+export function toggleUi() {
+  const st = useStore.getState();
+  const r = toggleUiPanels(st.panels, st.panelsStash, st.compact);
+  // Claude stays as it was: where it covers the Design panel, that panel just isn't shown.
+  const chatOpen = st.chatOpen;
+  const keep = keepCentre(st, r.panels, chatOpen);
+  useStore.setState({ panels: r.panels, panelsStash: r.stash, chatOpen, ...keep });
+  writePanels(st.compact, r.panels, storage());
+}
+
+/** Column widths of the panels (px), as in the stylesheet. */
+const PANEL_W = { left: 248, right: 272 };
+
+/** On a desktop a panel opening or closing changes the canvas width: the viewport moves by half
+ * of that so the page point at the canvas centre stays at its centre. (Tablet overlays don't
+ * resize the canvas.) */
+function keepCentre(st: Store, next: Panels, chatOpen: boolean): Partial<Store> {
+  if (st.compact) return {};
+  let dw = 0;
+  for (const side of ["left", "right"] as const) {
+    const was = panelShown(st.panels, side, st.chatOpen, st.tight);
+    const now = panelShown(next, side, chatOpen, st.tight);
+    if (was !== now) dw += was ? PANEL_W[side] : -PANEL_W[side];
+  }
+  return dw ? { viewport: { ...st.viewport, x: st.viewport.x + dw / 2 } } : {};
+}
+
+// Crossing the tablet breakpoint swaps in that mode's own remembered panels.
+if (typeof window !== "undefined" && window.matchMedia) {
+  const compact = window.matchMedia(COMPACT_QUERY);
+  const tight = window.matchMedia(TIGHT_QUERY);
+  compact.addEventListener?.("change", () => {
+    useStore.setState({ compact: compact.matches, panels: readPanels(compact.matches, storage()), panelsStash: null });
+  });
+  tight.addEventListener?.("change", () => useStore.setState({ tight: tight.matches }));
+}
 
 /** Applies a style to the selected characters of the text being edited; false if none. */
 export function styleTextSelection(style: Record<string, unknown>, clear: string[] = []): boolean {

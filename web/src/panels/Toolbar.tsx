@@ -2,8 +2,11 @@ import { useState } from "react";
 import {
   ArrowUpRight,
   ChevronDown,
+  Code2,
   Combine,
   MessageCircle,
+  PanelLeft,
+  PanelRight,
   Users,
   Circle,
   Hand,
@@ -29,6 +32,7 @@ import {
   dispatch,
   setTool,
   toast,
+  togglePanel,
   toggleView,
   useDoc,
   useStore,
@@ -45,10 +49,15 @@ import { userName } from "../canvas/Comments";
 import { persistentStorage } from "../files";
 import { claudeReady, useChat } from "../ai/chatState";
 import { FileLocation } from "./FileLocation";
+import { focusPanel } from "./PanelChrome";
+import { panelShown } from "../panelState";
 import { useShortcuts } from "./ShortcutsDialog";
 import { useImport } from "./ImportDialog";
 import { startFrame } from "../prototype";
 import { pasteOverSelection, SAME_PROPS, TIDY_KBD } from "../canvas/contextMenu";
+
+/** Below this width the top bar drops the rarer tool buttons (they move into the Shape tools menu). */
+const NARROW_QUERY = "(max-width: 1000px)";
 
 const SHAPES: { tool: Tool; label: string; key: string; icon: JSX.Element }[] =
   [
@@ -83,6 +92,8 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
   const dirty = useStore((s) => s.dirty);
   const saveFailed = useStore((s) => s.saveFailed);
   const chatOpen = useStore((s) => s.chatOpen);
+  const panels = useStore((s) => s.panels);
+  const tight = useStore((s) => s.tight);
   const claudeOn = useChat((s) => claudeReady(s));
   const doc = useDoc();
   const viewing = useCollab((s) => s.viewer);
@@ -118,6 +129,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     },
     { label: "Import website or HTML…", onClick: () => useImport.setState({ open: true }) },
     { label: "Place image…", kbd: `${SHIFT_MOD}K`, onClick: A.placeImage },
+    { label: "Export frames to PDF…", onClick: A.exportFramesPdf },
     { label: "Export React project (.zip)", onClick: A.exportProject },
     { sep: true },
     { heading: "Edit" },
@@ -206,6 +218,28 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     </button>
   );
 
+  /** The button that shows or hides a side panel (on a tablet the panel is an overlay). */
+  const panelToggle = (side: "left" | "right") => {
+    const on = panelShown(panels, side, chatOpen, tight);
+    const label = side === "left" ? "Layers panel" : "Design panel";
+    return (
+      <button
+        className={"tbtn desk-only panel-toggle" + (on ? " active" : "")}
+        id={`panel-toggle-${side}`}
+        title={`${on ? "Hide" : "Show"} ${label.toLowerCase()} (${MOD}\\ for both)`}
+        aria-label={label}
+        aria-expanded={on}
+        aria-controls={`panel-${side}`}
+        onClick={() => {
+          togglePanel(side);
+          if (!on) focusPanel(side);
+        }}
+      >
+        {side === "left" ? <PanelLeft size={16} /> : <PanelRight size={16} />}
+      </button>
+    );
+  };
+
   return (
     <header className="topbar">
       <h1 className="sr-only">Designotron editor</h1>
@@ -219,6 +253,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           <div className="logo">D</div>
           <ChevronDown size={12} data-phone="hide" />
         </button>
+        {panelToggle("left")}
         {toolBtn("move", "Move (V)", <MousePointer2 size={16} />)}
         {/* Drawing tools are hidden on phones (view, comment, present and Claude only). */}
         <span className="draw-tools">
@@ -249,6 +284,14 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
                   },
                 })),
                 { sep: true },
+                // The buttons for these give way on narrow tablets.
+                ...(window.matchMedia?.(NARROW_QUERY).matches
+                  ? [
+                      { label: "Pencil", kbd: "⇧P", onClick: () => setTool("pencil") },
+                      { label: "Scale", kbd: "K", onClick: () => setTool("scale") },
+                      { label: "Eyedropper", kbd: "I", onClick: () => setTool("eyedropper") },
+                    ]
+                  : []),
                 {
                   label: "Image…",
                   kbd: `${SHIFT_MOD}K`,
@@ -260,17 +303,17 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
             <ChevronDown size={12} />
           </button>
           {toolBtn("pen", "Pen (P)", <PenTool size={16} />)}
-          {toolBtn("pencil", "Pencil (⇧P)", <Pencil size={16} />)}
+          <span className="tool-extra">{toolBtn("pencil", "Pencil (⇧P)", <Pencil size={16} />)}</span>
           {toolBtn("text", "Text (T)", <Type size={16} />)}
           <button
-            className="tbtn"
+            className="tbtn tool-extra"
             title={`Place image (${SHIFT_MOD}K)`}
             onClick={A.placeImage}
           >
             <ImageIcon size={16} />
           </button>
-          {toolBtn("scale", "Scale (K)", <Scaling size={16} />)}
-          {toolBtn("eyedropper", "Eyedropper (I)", <Pipette size={16} />)}
+          <span className="tool-extra">{toolBtn("scale", "Scale (K)", <Scaling size={16} />)}</span>
+          <span className="tool-extra">{toolBtn("eyedropper", "Eyedropper (I)", <Pipette size={16} />)}</span>
         </span>
         {toolBtn("hand", "Hand (H)", <Hand size={16} />)}
         {toolBtn("comment", "Comment (C)", <MessageCircle size={16} />)}
@@ -419,12 +462,15 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         </button>
         <ShareButton />
         <button
-          className="tbtn primary desk-only"
+          className="tbtn primary desk-only export-code"
+          aria-label="Export code"
           onClick={A.exportProject}
           title="Export the design as a React + Tailwind project"
         >
-          Export code
+          <Code2 size={16} className="export-icon" />
+          <span className="export-label">Export code</span>
         </button>
+        {panelToggle("right")}
       </div>
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </header>

@@ -119,7 +119,7 @@ try {
   // 1. Three export rows on one layer: +, +, then per-row settings (size, format, suffix).
   await select("Card");
   let sec = exportSection();
-  check("a layer with no rows shows one default row", (await sec.locator("select").count()) === 2);
+  check("a layer with no rows shows one default row", (await sec.getByLabel("Export scale").count()) === 1 && (await sec.locator("select").count()) === 1);
   await sec.locator("button[title='Add export setting']").click();
   await sec.locator("button[title='Add export setting']").click();
   await page.waitForTimeout(200);
@@ -129,13 +129,12 @@ try {
   const rows = sec.locator(".export-row");
   check("three rows are listed", (await rows.count()) === 3);
   // Row 1: PNG, fixed width 512. Row 2: JPG 2x with a suffix.
-  await rows.nth(1).locator("select").first().selectOption({ label: "Width" });
-  await page.waitForTimeout(150);
-  await rows.nth(1).locator("input").first().fill("512");
-  await rows.nth(1).locator("input").first().press("Enter");
+  await rows.nth(1).getByLabel("Export scale").fill("512w");
+  await rows.nth(1).getByLabel("Export scale").press("Enter");
   await page.waitForTimeout(150);
   await rows.nth(2).locator("select").last().selectOption({ label: "JPG" });
-  await rows.nth(2).locator("select").first().selectOption({ label: "2x" });
+  await rows.nth(2).getByLabel("Export scale").fill("2x");
+  await rows.nth(2).getByLabel("Export scale").press("Enter");
   await rows.nth(2).locator("input[title='File name suffix']").fill("-big");
   await rows.nth(2).locator("input[title='File name suffix']").press("Enter");
   await page.waitForTimeout(250);
@@ -148,7 +147,7 @@ try {
   );
 
   // 2. "Export Card" writes all three files (zipped), with the right suffixes and sizes.
-  const [dl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), exportSection().locator("button.btn").click()]);
+  const [dl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), exportSection().locator(".export-actions button").first().click()]);
   const zip = await JSZip.loadAsync(fs.readFileSync(await dl.path()));
   const names = Object.keys(zip.files).sort();
   check("one click exports every row as a zip", dl.suggestedFilename() === "Card.zip" && names.length === 3, `${dl.suggestedFilename()} ${names.join(", ")}`);
@@ -170,10 +169,8 @@ try {
   check("2x JPG is 400x200", jw === 400 && jh === 200, `${jw}x${jh}`);
 
   // A fixed height row, and one row alone downloads a plain file.
-  await rows.nth(1).locator("select").first().selectOption({ label: "Height" });
-  await page.waitForTimeout(150);
-  await rows.nth(1).locator("input").first().fill("300");
-  await rows.nth(1).locator("input").first().press("Enter");
+  await rows.nth(1).getByLabel("Export scale").fill("300h");
+  await rows.nth(1).getByLabel("Export scale").press("Enter");
   await page.waitForTimeout(200);
   card = await byName("Card");
   check("a row can switch to a fixed height", card.exportSettings[1].height === 300 && !card.exportSettings[1].width, JSON.stringify(card.exportSettings[1]));
@@ -182,7 +179,7 @@ try {
   await page.waitForTimeout(200);
   card = await byName("Card");
   check("- removes a row", card.exportSettings.length === 1, JSON.stringify(card.exportSettings));
-  const [one] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), exportSection().locator("button.btn").click()]);
+  const [one] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), exportSection().locator(".export-actions button").first().click()]);
   check("a single file downloads without a zip", one.suggestedFilename() === "Card.png", one.suggestedFilename());
   // Re-add two rows for the persistence check.
   await exportSection().locator("button[title='Add export setting']").click();
@@ -276,7 +273,7 @@ try {
   const glow = await byName("Glow");
   await page.evaluate((id) => window.__dt.dispatch({ op: "update", ids: [id], patch: { exportSettings: [{ format: "png", scale: 1, suffix: "", width: 512 }] } }), glow.id);
   await select("Glow");
-  const [gdl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), exportSection().locator("button.btn").click()]);
+  const [gdl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), exportSection().locator(".export-actions button").first().click()]);
   const gsz = pngSize(fs.readFileSync(await gdl.path()));
   const gsvg = await page.evaluate((id) => window.__dt.query({ q: "exportSvg", id }), glow.id);
   const svgW = Number(gsvg.match(/width="([\d.]+)"/)[1]);
@@ -290,7 +287,7 @@ try {
     dup.id,
   );
   await select("Fold/Dup");
-  const [ddl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), exportSection().locator("button.btn").click()]);
+  const [ddl] = await Promise.all([page.waitForEvent("download", { timeout: 20000 }), exportSection().locator(".export-actions button").first().click()]);
   const dzip = await JSZip.loadAsync(fs.readFileSync(await ddl.path()));
   const dnames = Object.keys(dzip.files).filter((n) => !dzip.files[n].dir).sort();
   check("zip keeps '/' as a folder and numbers duplicates past a real -2", dnames.join(",") === "Fold/Dup-2.png,Fold/Dup-3.png,Fold/Dup.png", dnames.join(","));

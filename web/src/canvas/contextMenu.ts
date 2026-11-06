@@ -283,9 +283,21 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
     items.push({ label: "Swap instance…", onClick: () => openSwapPicker(sel, at.x, at.y) });
   }
   if (one?.type === "instance") {
-    items.push({ label: "Go to main component", onClick: () => one.instance && dispatch({ op: "select", ids: [one.instance.componentId] }) && zoomToSelection() });
-    items.push({ label: "Reset all overrides", onClick: () => dispatch({ op: "resetInstance", ids: [one.id] }) });
+    if (one.instance && !doc.nodes[one.instance.componentId]) {
+      items.push({ label: "Restore main component", onClick: () => A.restoreComponent(one.id) });
+    } else {
+      items.push({ label: "Go to main component", onClick: () => one.instance && dispatch({ op: "select", ids: [one.instance.componentId] }) && zoomToSelection() });
+      items.push({ label: "Reset all overrides", onClick: () => dispatch({ op: "resetInstance", ids: [one.id] }) });
+    }
     items.push({ label: "Detach instance", kbd: `${ALT_MOD}B`, onClick: A.detachInstance });
+  }
+  if (one && (one.masterId || one.type === "instance")) {
+    // Figma's per-property reset: this layer's own changes, then the first few property groups.
+    const groups = query<{ groups: { key: string; label: string }[] }>({ q: "overrideGroups", id: one.id }).groups;
+    if (groups.length) {
+      items.push({ label: "Reset changes on this layer", onClick: () => A.resetOverrideGroups([one.id]) });
+      for (const g of groups.slice(0, 4)) items.push({ label: `Reset ${g.label.toLowerCase()}`, onClick: () => A.resetOverrideGroups([one.id], [g.key]) });
+    }
   }
   items.push({ sep: true });
   items.push({ label: "Show/Hide", kbd: `${SHIFT_MOD}H`, onClick: () => A.toggleVisibility() });

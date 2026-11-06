@@ -3,10 +3,10 @@
 
 import { useMemo, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { Check, ChevronDown, Component, CornerUpLeft, Link2, Plus, Scan } from "lucide-react";
+import { Check, ChevronDown, Component, CornerUpLeft, Link2, Plus, RotateCcw, Scan } from "lucide-react";
 import { dispatch, query, useDoc, useStore, zoomToSelection } from "../store";
 import type { Node } from "../types";
-import { IconButton, Popover, Section, SelectField } from "../ui/controls";
+import { IconButton, Menu, Popover, Section, SelectField, type MenuItem } from "../ui/controls";
 import * as A from "../actions";
 import {
   addVariant,
@@ -134,12 +134,66 @@ function ComponentSetBody({ n, props, count }: { n: Node; props: { name: string;
   );
 }
 
+type OverrideGroup = { key: string; label: string };
+
+/** The property groups a layer inside an instance overrides (see the engine's `OVERRIDE_GROUPS`). */
+export function useOverrideGroups(id: string): OverrideGroup[] {
+  const doc = useDoc();
+  return useMemo(() => query<{ groups: OverrideGroup[] }>({ q: "overrideGroups", id }).groups, [doc, id]);
+}
+
+/** Menu items for resetting a layer: everything, then one item per overridden property group. */
+export function resetItems(ids: string[], groups: OverrideGroup[], all: string, resetAll: () => void = () => A.resetOverrideGroups(ids)): MenuItem[] {
+  const items: MenuItem[] = [{ label: all, onClick: resetAll }];
+  if (groups.length) items.push({ sep: true });
+  for (const g of groups) items.push({ label: `Reset ${g.label.toLowerCase()}`, onClick: () => A.resetOverrideGroups(ids, [g.key]) });
+  return items;
+}
+
+/** A button that opens the reset menu under itself. */
+function ResetButton({ title, items, testId }: { title: string; items: MenuItem[]; testId?: string }) {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  return (
+    <>
+      <button
+        className="ibtn"
+        title={title}
+        aria-label={title}
+        aria-haspopup="menu"
+        aria-expanded={!!at}
+        data-testid={testId}
+        onClick={(e) => {
+          const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          setAt({ x: Math.max(8, r.right - 190), y: r.bottom + 2 });
+        }}
+      >
+        <CornerUpLeft size={13} />
+      </button>
+      {at && <Menu x={at.x} y={at.y} items={items} onClose={() => setAt(null)} label={title} />}
+    </>
+  );
+}
+
+/** "Changed from main: Fill, Text" for a layer inside an instance, with Figma-style per-property reset. */
+export function OverridesRow({ n }: { n: Node }) {
+  const groups = useOverrideGroups(n.id);
+  // An instance (nested ones too) shows its changes in its own section.
+  if (n.type === "instance" || !n.masterId || !groups.length) return null;
+  return (
+    <div className="wf-overrides" data-testid="overrides-row">
+      <span className="muted small wf-overrides-text">Changed from main: {groups.map((g) => g.label).join(", ")}</span>
+      <ResetButton title="Reset changes on this layer" testId="overrides-reset" items={resetItems([n.id], groups, "Reset all changes on this layer")} />
+    </div>
+  );
+}
+
 /** A selected instance: swap, variant pickers, overrides. */
 export function InstanceSection({ n }: { n: Node }) {
   const doc = useDoc();
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
   // Layers that differ from the main component, including ones changed through an outer instance.
   const overrides = useMemo(() => query<{ count: number }>({ q: "overrideCount", id: n.id }).count, [doc, n.id]);
+  const groups = useOverrideGroups(n.id);
   if (!n.instance) return null;
   const comp = doc.nodes[n.instance.componentId];
   const set = comp ? variantSet(doc, comp) : null;
@@ -153,31 +207,48 @@ export function InstanceSection({ n }: { n: Node }) {
     <Section
       title={
         <span style={{ color: PURPLE }}>
-          <Component size={12} style={{ verticalAlign: -2 }} /> {comp?.name ?? "Missing component"}
+          <Component size={12} style={{ verticalAlign: -2 }} /> {comp ? comp.name : "Main component deleted"}
         </span>
       }
       actions={
         <>
-          <IconButton title="Go to main component" onClick={() => comp && (dispatch({ op: "select", ids: [comp.id] }), zoomToSelection())}>
-            <Link2 size={13} />
-          </IconButton>
-          <IconButton title="Reset overrides" onClick={() => dispatch({ op: "resetInstance", ids: [n.id] })}>
-            <CornerUpLeft size={13} />
-          </IconButton>
+          {comp && (
+            <IconButton title="Go to main component" onClick={() => (dispatch({ op: "select", ids: [comp.id] }), zoomToSelection())}>
+              <Link2 size={13} />
+            </IconButton>
+          )}
+          {comp && (
+            <ResetButton
+              title="Reset overrides"
+              testId="instance-reset"
+              items={resetItems([n.id], groups, "Reset all changes", () => dispatch({ op: "resetInstance", ids: [n.id] }))}
+            />
+          )}
           <IconButton title="Detach instance" onClick={A.detachInstance}>
             <Scan size={13} />
           </IconButton>
         </>
       }
     >
-      <div className="row">
-        <button className="field wf-swap" title="Swap instance" onClick={(e) => setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect())}>
-          <Component size={12} className="wf-purple" />
-          <span className="wf-swap-name">{set?.name ?? comp?.name ?? "Missing component"}</span>
-          <ChevronDown size={12} className="muted" />
-        </button>
-      </div>
-      {anchor && <SwapPicker ids={[n.id]} anchor={anchor} onClose={() => setAnchor(null)} />}
+      {!comp && (
+        <>
+          <div className="muted small">This instance keeps its look, but its main component was deleted.</div>
+          <button className="btn block wf-gap" data-testid="restore-main" onClick={() => A.restoreComponent(n.id)} title="Rebuild the main component from the instances that remain">
+            <RotateCcw size={13} /> Restore main component
+          </button>
+          <div className="muted small wf-gap">Rebuilt from the instance with the fewest changes. Component properties and variant sets can't be restored.</div>
+        </>
+      )}
+      {comp && (
+        <div className="row">
+          <button className="field wf-swap" title="Swap instance" onClick={(e) => setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect())}>
+            <Component size={12} className="wf-purple" />
+            <span className="wf-swap-name">{set?.name ?? comp.name}</span>
+            <ChevronDown size={12} className="muted" />
+          </button>
+        </div>
+      )}
+      {comp && anchor && <SwapPicker ids={[n.id]} anchor={anchor} onClose={() => setAnchor(null)} />}
       {Object.entries(variantProps).map(([k, values]) => (
         <div className="row" key={k}>
           <span className="muted wf-prop-label" title={k}>

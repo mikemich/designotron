@@ -3,6 +3,7 @@
 //! [`Query`]. The WASM wrapper and the bridge both drive this type.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -460,6 +461,17 @@ pub enum Command {
   ResetInstance {
     ids: Vec<NodeId>,
   },
+  /// Puts property groups (see `components::OVERRIDE_GROUPS`; all when empty) of layers inside
+  /// instances back to what their main components say.
+  ResetOverrideGroups {
+    ids: Vec<NodeId>,
+    #[serde(default)]
+    groups: Vec<String>,
+  },
+  /// Rebuilds the deleted main component of an instance from the instances that remain.
+  RestoreComponent {
+    id: NodeId,
+  },
   SwapComponent {
     id: NodeId,
     component_id: NodeId,
@@ -584,6 +596,10 @@ pub enum Command {
 pub enum Query {
   /// How many layers of an instance differ from its main component.
   OverrideCount {
+    id: NodeId,
+  },
+  /// The property groups a layer inside an instance overrides (`{ groups: [{ key, label }] }`).
+  OverrideGroups {
     id: NodeId,
   },
   /// Component properties for the design panel: of a main component or set, the controls of
@@ -947,7 +963,11 @@ impl Engine {
   }
 
   pub fn to_json(&self) -> String {
-    serde_json::to_string(&self.doc).unwrap_or_default()
+    let mut buf: Vec<u8> = Vec::with_capacity(self.doc.nodes.len() * 1000 + 4096);
+    if serde_json::to_writer(&mut buf, &self.doc).is_err() {
+      return String::new();
+    }
+    String::from_utf8(buf).unwrap_or_default()
   }
 
   pub fn state(&self) -> Value {
@@ -974,25 +994,34 @@ impl Engine {
   /// `doc_delta` as JSON text, written node by node: building a `Value` tree first costs more
   /// than the serialising on a large change (the undo of a big delete).
   pub fn doc_delta_json(&mut self, full: bool) -> String {
+    use std::io::Write;
     let out = match (&self.synced, full) {
       (Some(prev), false) if *prev == self.doc => return "{\"same\":true}".into(),
       (Some(prev), false) => {
-        let mut nodes = String::from("{");
+        let mut buf: Vec<u8> = Vec::with_capacity(1024);
+        buf.extend_from_slice(b"{\"nodes\":{");
+        let mut first = true;
         let mut removed = Vec::new();
         for item in prev.nodes.diff(&self.doc.nodes) {
           match item {
             imbl::ordmap::DiffItem::Add(k, v) | imbl::ordmap::DiffItem::Update { new: (k, v), .. } => {
-              if nodes.len() > 1 {
-                nodes.push(',');
+              if !first {
+                buf.push(b',');
               }
-              nodes.push_str(&serde_json::to_string(k).unwrap_or_default());
-              nodes.push(':');
-              nodes.push_str(&serde_json::to_string(v).unwrap_or_else(|_| "null".into()));
+              first = false;
+              let _ = serde_json::to_writer(&mut buf, k);
+              buf.push(b':');
+              let at = buf.len();
+              if serde_json::to_writer(&mut buf, v).is_err() {
+                buf.truncate(at);
+                buf.extend_from_slice(b"null");
+              }
             }
             imbl::ordmap::DiffItem::Remove(k, _) => removed.push(k.clone()),
           }
         }
-        nodes.push('}');
+        buf.extend_from_slice(b"},\"removed\":");
+        let _ = serde_json::to_writer(&mut buf, &removed);
         // Every document-level field except the node table (cheap: the node map clone is O(1)).
         let mut shell = self.doc.clone();
         shell.nodes = imbl::OrdMap::new();
@@ -1000,15 +1029,25 @@ impl Engine {
         if let Some(m) = meta.as_object_mut() {
           m.remove("nodes");
         }
-        format!("{{\"nodes\":{nodes},\"removed\":{},\"meta\":{meta}}}", json!(removed))
+        let _ = write!(buf, ",\"meta\":{meta}}}");
+        buf
       }
-      _ => format!(
-        "{{\"full\":{}}}",
-        serde_json::to_string(&self.doc).unwrap_or_else(|_| "null".into())
-      ),
+      _ => {
+        // One buffer, sized for the document: a growing String plus a `format!` copy of it
+        // peaked at about five times the JSON on a 20k-layer file.
+        let mut buf: Vec<u8> = Vec::with_capacity(self.doc.nodes.len() * 1000 + 4096);
+        buf.extend_from_slice(b"{\"full\":");
+        let at = buf.len();
+        if serde_json::to_writer(&mut buf, &self.doc).is_err() {
+          buf.truncate(at);
+          buf.extend_from_slice(b"null");
+        }
+        buf.push(b'}');
+        buf
+      }
     };
     self.synced = Some(self.doc.clone());
-    out
+    String::from_utf8(out).unwrap_or_default()
   }
 
   /// Local changes since the last call, for collaborators (`collab::delta` format).
@@ -2733,6 +2772,18 @@ impl Engine {
         }
         Ok(json!({}))
       }
+      Command::ResetOverrideGroups { ids, groups } => {
+        let mut changed = false;
+        for id in ids {
+          changed |= components::reset_override_groups(&mut self.doc, &id, &groups, &mut self.gen);
+        }
+        Ok(json!({ "changed": changed }))
+      }
+      Command::RestoreComponent { id } => {
+        let comp = components::restore_component(&mut self.doc, &id, &mut self.gen)?;
+        self.selection = vec![comp.clone()];
+        Ok(json!({ "id": comp }))
+      }
       Command::SwapComponent { id, component_id } => {
         components::swap_component(&mut self.doc, &id, &component_id, &mut self.gen);
         Ok(json!({}))
@@ -3489,7 +3540,7 @@ impl Engine {
     let id = self.insert_abs(root, parent.as_deref());
     for mut n in nodes {
       n.page = page.clone();
-      self.doc.nodes.insert(n.id.clone(), n);
+      self.doc.nodes.insert(n.id.clone(), Arc::new(n));
     }
     self.selection = vec![id.clone()];
     Ok(json!({ "id": id, "warnings": imported.warnings }))
@@ -3559,7 +3610,7 @@ impl Engine {
         created.push(id);
       } else {
         c.parent = n.parent.as_ref().and_then(|p| map.get(p).cloned());
-        self.doc.nodes.insert(c.id.clone(), c);
+        self.doc.nodes.insert(c.id.clone(), Arc::new(c));
       }
     }
     // Instances whose main component isn't in this file: bring it from the clipboard, or
@@ -3625,7 +3676,7 @@ impl Engine {
         side.replace(Point::new(at.x, at.y + c.height + 40.0));
         self.doc.insert(c, None, &page, None);
       } else {
-        self.doc.nodes.insert(c.id.clone(), c);
+        self.doc.nodes.insert(c.id.clone(), Arc::new(c));
       }
     }
     // Instances inside the component need their own mains too.
@@ -3678,6 +3729,13 @@ impl Engine {
         }
         None => Value::Null,
       },
+      Query::OverrideGroups { id } => {
+        let groups: Vec<Value> = components::override_groups(&self.doc, &id)
+          .into_iter()
+          .map(|(key, label)| json!({ "key": key, "label": label }))
+          .collect();
+        json!({ "groups": groups })
+      }
       Query::OverrideCount { id } => json!({ "count": components::override_count(&self.doc, &id) }),
       Query::ComponentProps { id } => crate::props::describe(&self.doc, &id),
       Query::FrameAt { x, y, exclude } => json!(ops::frame_at(&self.doc, &self.page, Point::new(x, y), &exclude, true)),

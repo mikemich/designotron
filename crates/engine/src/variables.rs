@@ -3,6 +3,7 @@
 //! every change, so rendering, export and lint keep reading plain properties.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -508,7 +509,7 @@ pub fn apply(doc: &mut Document) -> bool {
       }
     }
     if n != before {
-      doc.nodes.insert(id.clone(), n);
+      doc.nodes.insert(id.clone(), Arc::new(n));
       changed = true;
     }
   }

@@ -5,6 +5,7 @@
 //! whole screens in one call; they are converted into real nodes here.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 
 use serde_json::{json, Map, Value};
 
@@ -2241,7 +2242,7 @@ fn build_svg(e: &mut Engine, cx: &mut Ctx, spec: &Value, markup: &str, parent: O
   e.doc.insert(root, parent, page, index);
   for mut n in nodes {
     n.page = page.to_string();
-    e.doc.nodes.insert(n.id.clone(), n);
+    e.doc.nodes.insert(n.id.clone(), Arc::new(n));
   }
   Ok(id)
 }
