@@ -77,6 +77,10 @@ interface SegmentHit {
 
 let labelCtx: CanvasRenderingContext2D | null | undefined;
 const labelWidths = new Map<string, number>();
+// Widths measured before the web font loaded are wrong; measure again once it has.
+if (typeof document !== "undefined" && document.fonts) {
+  document.fonts.addEventListener("loadingdone", () => labelWidths.clear());
+}
 /** `text` cut with an ellipsis to fit `maxW` pixels at the frame label's size; null under 24 px. */
 function fitLabel(text: string, maxW: number): string | null {
   if (maxW < 24) return null;
