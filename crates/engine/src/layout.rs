@@ -48,16 +48,17 @@ fn size_text(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
   let lay = layout_of_node(n, &props, m);
   let min_w = bounds(n, true).0;
   let (min_h, max_h) = bounds(n, false);
-  let n = doc.get_mut(id).unwrap();
-  match props.auto_resize {
-    TextAutoResize::Width => {
-      n.width = clamp_to(lay.width.ceil(), (min_w, f64::INFINITY)).max(1.0);
-      n.height = clamp_to(lay.height.ceil(), (min_h, max_h)).max(1.0);
+  doc.modify(id, |n| {
+    match props.auto_resize {
+      TextAutoResize::Width => {
+        n.width = clamp_to(lay.width.ceil(), (min_w, f64::INFINITY)).max(1.0);
+        n.height = clamp_to(lay.height.ceil(), (min_h, max_h)).max(1.0);
+      }
+      TextAutoResize::Height => n.height = clamp_to(lay.height.ceil(), (min_h, max_h)).max(1.0),
+      TextAutoResize::None => {}
     }
-    TextAutoResize::Height => n.height = clamp_to(lay.height.ceil(), (min_h, max_h)).max(1.0),
-    TextAutoResize::None => {}
-  }
-  n.text = Some(props);
+    n.text = Some(props);
+  });
 }
 
 /// The (min, max) size limits of a layer along one axis.
@@ -97,18 +98,19 @@ pub fn normalize_group(doc: &mut Document, id: &str) {
   let Some(b) = bounds else { return };
   if b.x != 0.0 || b.y != 0.0 {
     for c in &children {
-      if let Some(cn) = doc.get_mut(c) {
+      doc.modify(c, |cn| {
         cn.x -= b.x;
         cn.y -= b.y;
-      }
+      });
     }
   }
-  let g = doc.get_mut(id).unwrap();
-  g.x += b.x;
-  g.y += b.y;
-  g.width = b.width.max(0.01);
-  g.height = b.height.max(0.01);
-  g.rotation = 0.0;
+  doc.modify(id, |g| {
+    g.x += b.x;
+    g.y += b.y;
+    g.width = b.width.max(0.01);
+    g.height = b.height.max(0.01);
+    g.rotation = 0.0;
+  });
 }
 
 struct Item {
@@ -195,7 +197,7 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
 
   if wrap {
     if main_sizing == Sizing::Hug {
-      doc.get_mut(id).unwrap().width = main_size.max(1.0);
+      doc.modify(id, |f| f.width = main_size.max(1.0));
     }
     arrange_wrapped(doc, id, &items, main_size, cross_sizing == Sizing::Hug);
     return;
@@ -226,7 +228,7 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
       Align::Baseline if baseline => pad_cross_start + offsets[i],
       _ => pad_cross_start,
     };
-    if let Some(c) = doc.get_mut(&it.id) {
+    doc.modify(&it.id, |c| {
       c.rotation = 0.0;
       if horizontal {
         c.x = cursor;
@@ -235,18 +237,19 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
         c.y = cursor;
         c.x = cross;
       }
-    }
+    });
     cursor += it.main + gap;
   }
 
-  let f = doc.get_mut(id).unwrap();
-  if horizontal {
-    f.width = main_size.max(1.0);
-    f.height = cross_size.max(1.0);
-  } else {
-    f.height = main_size.max(1.0);
-    f.width = cross_size.max(1.0);
-  }
+  doc.modify(id, |f| {
+    if horizontal {
+      f.width = main_size.max(1.0);
+      f.height = cross_size.max(1.0);
+    } else {
+      f.height = main_size.max(1.0);
+      f.width = cross_size.max(1.0);
+    }
+  });
 }
 
 fn item_of(doc: &Document, cid: &str, horizontal: bool) -> Item {
@@ -456,13 +459,13 @@ fn hug_size(doc: &mut Document, id: &str, horizontal: bool, m: &dyn TextMeasurer
     (k, _) if k.is_frame_like() && n.layout.is_some() => {
       // Lay it out as hug on that axis, read the size, then put its sizing back.
       let set = |doc: &mut Document, s: Sizing| {
-        if let Some(c) = doc.get_mut(id) {
+        doc.modify(id, |c| {
           if horizontal {
             c.sizing_h = s;
           } else {
             c.sizing_v = s;
           }
-        }
+        });
       };
       set(doc, Sizing::Hug);
       layout_node(doc, id, m);
@@ -509,24 +512,25 @@ fn arrange_wrapped(doc: &mut Document, id: &str, items: &[Item], width: f64, hug
         Align::End => y + row_h - it.counter,
         _ => y,
       };
-      if let Some(c) = doc.get_mut(&it.id) {
+      doc.modify(&it.id, |c| {
         c.x = x;
         c.y = cy;
         c.rotation = 0.0;
-      }
+      });
       x += it.main + al.gap;
     }
     y += row_h + al.counter_gap;
   }
   if hug_cross {
     let h = y - al.counter_gap + al.padding_bottom;
-    let f = doc.get_mut(id).unwrap();
-    f.height = clamp_to(h, (f.min_height.unwrap_or(0.0), f.max_height.unwrap_or(f64::INFINITY))).max(1.0);
+    doc.modify(id, |f| {
+      f.height = clamp_to(h, (f.min_height.unwrap_or(0.0), f.max_height.unwrap_or(f64::INFINITY))).max(1.0)
+    });
   }
 }
 
 fn set_size(doc: &mut Document, id: &str, horizontal: bool, main: Option<f64>, cross: Option<f64>) {
-  if let Some(c) = doc.get_mut(id) {
+  doc.modify(id, |c| {
     let (w, h) = if horizontal { (main, cross) } else { (cross, main) };
     if let Some(w) = w {
       c.width = w;
@@ -534,7 +538,7 @@ fn set_size(doc: &mut Document, id: &str, horizontal: bool, main: Option<f64>, c
     if let Some(h) = h {
       c.height = h;
     }
-  }
+  });
 }
 
 /// Applies child constraints after a frame changes size. In an auto layout frame only the
