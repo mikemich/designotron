@@ -457,7 +457,9 @@ try {
     check("an old single-record file opens", (await names()).includes("B box") && (await names()).includes("A label"));
     await spyPuts();
     await sleep(2500);
-    check("opening it writes nothing", (await puts()).length === 0);
+    // Opening may store a missing thumbnail in the index (the file list's preview), never the document.
+    const docWrites = (await puts()).filter((k) => k !== "dt:index");
+    check("opening it doesn't rewrite the document", docWrites.length === 0, docWrites.join(","));
     const b = await byName("B box");
     await dispatch({ op: "update", ids: [b.id], patch: { x: 5 } });
     await settle();
