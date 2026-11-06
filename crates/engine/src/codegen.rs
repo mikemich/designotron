@@ -1444,9 +1444,15 @@ fn fix_interactive(el: &mut El, in_component: bool) {
 /// Whether anything below `el` is a button, a link, an element with an action, or a component
 /// that renders a control: such an element can't be a control itself (nested interactive).
 fn holds_control(el: &El) -> bool {
-  el.children
-    .iter()
-    .any(|c| c.tag == "button" || c.tag == "a" || c.navigate.is_some() || c.url.is_some() || c.renders_control || holds_control(c))
+  el.children.iter().any(|c| {
+    c.tag == "button"
+      || c.tag == "a"
+      || c.navigate.is_some()
+      || c.url.is_some()
+      || c.renders_control
+      || c.spans.iter().any(|s| s.link.is_some())
+      || holds_control(c)
+  })
 }
 
 fn fix_nested(el: &mut El, inside: bool, acting: bool) {
