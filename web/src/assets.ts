@@ -4,7 +4,7 @@
 const dataUrls = new Map<string, string>();
 const objectUrls = new Map<string, string>();
 
-function hash(s: string): string {
+export function hash(s: string): string {
   let h1 = 0x811c9dc5;
   let h2 = 0x01000193;
   // Every character: sampling let two images that differ in a few places share an id.
@@ -135,5 +135,48 @@ export function imageSize(url: string): Promise<{ width: number; height: number 
     img.onload = () => resolve({ width: img.naturalWidth || 200, height: img.naturalHeight || 200 });
     img.onerror = () => resolve({ width: 200, height: 200 });
     img.src = url;
+  });
+}
+
+/** File extension of an asset's image type. */
+export function assetExt(data: string): string {
+  return data.match(/data:image\/(\w+)/)?.[1]?.replace("jpeg", "jpg").replace("svg+xml", "svg") ?? "png";
+}
+
+/** An inline image in generated code: data URLs end at a quote, bracket, space or backslash. */
+const INLINE_IMAGE = /data:image\/(?:png|jpe?g|gif|webp|svg\+xml)[^'")\s`\\]*/g;
+/** Smaller inline images stay where they are (icons, 1px fills). */
+const MIN_INLINE_BYTES = 1024;
+
+/** The same URL with base64 data, so a zip entry can hold it whatever the original encoding; null
+ *  when it can't be decoded (it then stays inline rather than breaking the export). */
+function base64DataUrl(url: string): string | null {
+  const comma = url.indexOf(",");
+  if (comma < 0) return null;
+  if (url.slice(0, comma).includes(";base64")) return /^[A-Za-z0-9+/]*={0,2}$/.test(url.slice(comma + 1)) ? url : null;
+  try {
+    const text = decodeURIComponent(url.slice(comma + 1));
+    return url.slice(0, comma).replace(/;.*$/, "") + ";base64," + btoa(unescape(encodeURIComponent(text)));
+  } catch {
+    return null;
+  }
+}
+
+/** Moves inline images of 1 KB or more out of generated code into `public/assets`. */
+export function externalizeDataUrls(
+  text: string,
+  binaries: { path: string; dataUrl: string }[],
+  seen: Set<string>,
+): string {
+  return text.replace(INLINE_IMAGE, (url) => {
+    if (url.length < MIN_INLINE_BYTES) return url;
+    const full = base64DataUrl(url);
+    if (!full) return url;
+    const path = `assets/${hash(url)}.${assetExt(full)}`;
+    if (!seen.has(path)) {
+      seen.add(path);
+      binaries.push({ path: `public/${path}`, dataUrl: full });
+    }
+    return `/${path}`;
   });
 }

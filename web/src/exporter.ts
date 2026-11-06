@@ -1,7 +1,7 @@
 // Raster/vector export and the generated-project zip.
 
 import JSZip from "jszip";
-import { assetDataUrl, inlineAssets, referencedAssets } from "./assets";
+import { assetDataUrl, assetExt, externalizeDataUrls, inlineAssets, referencedAssets } from "./assets";
 import { download } from "./files";
 import { getDoc, query, toast } from "./store";
 import type { ExportSetting, Node, Rect } from "./types";
@@ -267,11 +267,6 @@ export interface ProjectFile {
   content: string;
 }
 
-/** File extension of an asset's image type. */
-function assetExt(data: string): string {
-  return data.match(/data:image\/(\w+)/)?.[1]?.replace("jpeg", "jpg").replace("svg+xml", "svg") ?? "png";
-}
-
 /** Where an exported project keeps an asset (`/assets/<id>.png`, served from `public/assets`). */
 export function assetPath(id: string): string | undefined {
   const data = assetDataUrl(id);
@@ -292,12 +287,13 @@ export function projectFiles(): { files: ProjectFile[]; binaries: { path: string
     if (f.path === "design.dtron.json") return f;
     for (const id of referencedAssets(f.content)) {
       const data = assetDataUrl(id);
-      if (data && !seen.has(id)) {
-        seen.add(id);
-        binaries.push({ path: `public/assets/${id}.${assetExt(data)}`, dataUrl: data });
+      const path = data ? `assets/${id}.${assetExt(data)}` : "";
+      if (data && !seen.has(path)) {
+        seen.add(path);
+        binaries.push({ path: `public/${path}`, dataUrl: data });
       }
     }
-    return { ...f, content: withAssetPaths(f.content) };
+    return { ...f, content: externalizeDataUrls(withAssetPaths(f.content), binaries, seen) };
   });
   return { files: out, binaries };
 }
