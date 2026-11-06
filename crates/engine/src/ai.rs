@@ -2762,7 +2762,8 @@ fn apply_text(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creating: b
     let spans = spans
       .as_array()
       .ok_or_else(|| cx.err("spans", format!("must be an array of {{text, ...}}, got {}", parse::kind_of(spans))))?;
-    let (characters, runs) = spans_to_runs(cx, spans)?;
+    let layer_size = parse::opt_number(cx, s, "fontSize")?.unwrap_or_else(|| n.text.as_ref().map_or(16.0, |t| t.font_size));
+    let (characters, runs) = spans_to_runs(cx, spans, layer_size)?;
     if creating && s.get("name").is_none() {
       n.name = characters.chars().take(40).collect();
     }
@@ -3027,7 +3028,7 @@ fn find_text_style<'a>(cx: &Ctx, doc: &'a Document, key: &str, name: &str) -> Re
 }
 
 /// `[{text, fontWeight, ...}]` to characters plus style runs.
-fn spans_to_runs(cx: &mut Ctx, spans: &[Value]) -> Result<(String, Vec<crate::model::TextRun>), String> {
+fn spans_to_runs(cx: &mut Ctx, spans: &[Value], layer_size: f64) -> Result<(String, Vec<crate::model::TextRun>), String> {
   let mut text = String::new();
   let mut runs = Vec::new();
   for (i, sp) in spans.iter().enumerate() {
@@ -3046,11 +3047,16 @@ fn spans_to_runs(cx: &mut Ctx, spans: &[Value]) -> Result<(String, Vec<crate::mo
       Some(d) => Some(parse_decoration(cx, "decoration", d)?),
       None => None,
     };
+    let font_size = parse::opt_number(cx, sp, "fontSize")?;
+    let letter_spacing = match sp.get("letterSpacing").filter(|v| !v.is_null()) {
+      Some(l) => Some(parse::letter_spacing(cx, "letterSpacing", l, font_size.unwrap_or(layer_size))?),
+      None => None,
+    };
     runs.push(crate::model::TextRun {
       start,
       end,
       font_family: sp.get("fontFamily").and_then(|v| v.as_str()).map(String::from),
-      font_size: parse::opt_number(cx, sp, "fontSize")?,
+      font_size,
       font_weight: match sp.get("fontWeight").filter(|v| !v.is_null()) {
         Some(w) => Some(parse::font_weight(cx, "fontWeight", w)?),
         None => None,
@@ -3061,7 +3067,7 @@ fn spans_to_runs(cx: &mut Ctx, spans: &[Value]) -> Result<(String, Vec<crate::mo
         None => None,
       },
       decoration,
-      letter_spacing: parse::opt_number(cx, sp, "letterSpacing")?,
+      letter_spacing,
       link: match sp.get("link").and_then(|v| v.as_str()) {
         Some(url) => {
           Some(crate::model::safe_link(url).ok_or_else(|| cx.err("link", "a span link must be an http(s), mailto: or tel: link"))?)

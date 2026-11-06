@@ -42,7 +42,7 @@ import { DeviceSection, isDeviceTarget, resizeToPreset } from "./DeviceSection";
 import { PresetPicker } from "./PresetPicker";
 import { ApplyStyleButton, BoundChip, CreateStyleButton, StyleChip } from "./StyleControls";
 import { inScope } from "./variableScopes";
-import { groupOffset } from "./groupOffset";
+import { framePosition, ownCoordinate } from "./groupOffset";
 import { rangeValue } from "./textRange";
 import { parseLetterSpacing, parseLineHeight } from "./textUnits";
 
@@ -312,7 +312,7 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
     { value: "fill" as const, label: "Fill" },
   ];
   // X/Y of a layer inside groups are measured from its frame (or the page), like Figma.
-  const off = (n: Node) => groupOffset(doc.nodes, n);
+  const framePos = (n: Node) => framePosition(doc.nodes, n);
   const scrubbing = useRef(false);
   const scrubStart = () => {
     scrubbing.current = true;
@@ -325,15 +325,20 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const setPos = (axis: "x" | "y", value: number) => {
     const wrap = nodes.length > 1 && !scrubbing.current;
     if (wrap) begin();
-    for (const n of nodes) update([n.id], { [axis]: value - off(n)[axis] });
+    for (const n of nodes) {
+      // Read the layers fresh: an earlier update in this loop can move a group a later one sits in.
+      const all = getDoc().nodes;
+      const cur = all[n.id];
+      if (cur) update([n.id], { [axis]: ownCoordinate(cur, axis, framePosition(all, cur), value) });
+    }
     if (wrap) end();
   };
   return (
     <Section title="Position & size">
       {tool === "scale" && <ScaleField ids={ids} />}
       <div className="grid2">
-        <NumberField label="X" ariaLabel="X position" value={common(nodes, (n) => n.x + off(n).x)} onChange={(x) => setPos("x", x)} onScrubStart={scrubStart} onScrubEnd={scrubEnd} />
-        <NumberField label="Y" ariaLabel="Y position" value={common(nodes, (n) => n.y + off(n).y)} onChange={(y) => setPos("y", y)} onScrubStart={scrubStart} onScrubEnd={scrubEnd} />
+        <NumberField label="X" ariaLabel="X position" value={common(nodes, (n) => framePos(n).x)} onChange={(x) => setPos("x", x)} onScrubStart={scrubStart} onScrubEnd={scrubEnd} />
+        <NumberField label="Y" ariaLabel="Y position" value={common(nodes, (n) => framePos(n).y)} onChange={(y) => setPos("y", y)} onScrubStart={scrubStart} onScrubEnd={scrubEnd} />
         <NumberField
           label="W"
           ariaLabel="Width"
@@ -451,7 +456,6 @@ const LIMITS = [
   { key: "maxHeight", label: "Max H", title: "Maximum height (0 or empty for none)" },
 ] as const;
 
-/** Min and max width/height: hug and fill stop at them, auto-width text wraps at the max. */
 type Sizing = "fixed" | "hug" | "fill";
 
 /** What a text layer's W or H sizing shows: its resize mode decides the size unless it fills the auto layout. */
@@ -479,6 +483,7 @@ function updateEach(nodes: Node[], patch: (n: Node) => Record<string, unknown>) 
   if (nodes.length > 1) end();
 }
 
+/** Min and max width/height: hug and fill stop at them, auto-width text wraps at the max. */
 function MinMaxFields({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const anySet = nodes.some((n) => LIMITS.some((l) => n[l.key] != null));
   const [shown, setShown] = useState(false);
@@ -771,17 +776,47 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
     const ranged = nodes.some((n) => (n.text!.runs ?? []).some((run) => run[key] !== undefined && (run[key] as unknown) !== v));
     return ranged ? MIXED : v;
   };
-  /** The size that % and em in the line height and letter spacing fields are relative to. */
-  const unitSize = () => {
-    const fs = r("fontSize");
-    return fs === MIXED ? nodes[0].text!.fontSize : (fs as number);
+  // % and em are relative to a font size: line height applies to the whole layer, so its base size;
+  // letter spacing of a selected range, that range's size. Each layer of a multi-selection uses its own.
+  const lineHeightSize = (n: Node) => n.text!.fontSize;
+  const spacingSize = (n: Node) => {
+    const fs = partial ? r("fontSize") : MIXED;
+    return typeof fs === "number" ? fs : n.text!.fontSize;
   };
+  /** The raw text of the last committed unit entry, so a multi-selection can read it again per layer. */
+  const typed = useRef<string | null>(null);
+  const unitField = (read: (raw: string, size: number) => number | null | undefined, sizeOf: (n: Node) => number, key: "lineHeight" | "letterSpacing") => ({
+    parse: (raw: string) => {
+      const out = read(raw, sizeOf(nodes[0]));
+      typed.current = typeof out === "number" ? raw : null;
+      return out;
+    },
+    onChange: (v: number) => {
+      const raw = typed.current;
+      typed.current = null;
+      if (raw === null || nodes.length < 2) return set({ [key]: key === "lineHeight" ? v || null : v });
+      updateEach(nodes, (n) => {
+        const own = read(raw, sizeOf(n));
+        return own === undefined ? {} : { text: { [key]: own } };
+      });
+    },
+  });
+  const lineHeightField = unitField(parseLineHeight, lineHeightSize, "lineHeight");
+  const spacingField = unitField(parseLetterSpacing, spacingSize, "letterSpacing");
   const RUN_KEYS = ["fontFamily", "fontSize", "fontWeight", "italic", "letterSpacing", "decoration"];
   const set = (patch: Record<string, unknown>) => {
     // While editing with characters selected, style just those characters.
     const runPatch = Object.fromEntries(Object.entries(patch).filter(([k]) => RUN_KEYS.includes(k)));
     if (Object.keys(runPatch).length === Object.keys(patch).length && styleTextSelection(runPatch)) return;
     update(ids, { text: patch });
+  };
+  /** B/I/U/S: style the selected characters, or with none selected the whole layer, folding the value into
+   *  the base and clearing it from every run, so a layer with one differently styled word still toggles. */
+  const toggle = (patch: Record<string, unknown>) => {
+    if (styleTextSelection(patch)) return;
+    if (nodes.length > 1) begin();
+    for (const n of nodes) dispatch({ op: "styleText", id: n.id, start: 0, end: Array.from(n.text!.characters).length, style: patch, clear: [] });
+    if (nodes.length > 1) end();
   };
   // B/I/U/S show and flip what the selected characters have; a click sets the opposite for all of them.
   const weight = r("fontWeight");
@@ -804,18 +839,32 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           label="↨"
           title="Line height (px, 150% or 1.5×; empty for auto)"
           value={t((n) => n.text!.lineHeight ?? null) as Maybe<number> | null}
-          parse={(raw) => parseLineHeight(raw, unitSize())}
-          onAuto={() => set({ lineHeight: null })}
+          ariaLabel="Line height"
+          parse={lineHeightField.parse}
+          onAuto={() => {
+            typed.current = null;
+            set({ lineHeight: null });
+          }}
           autoValue={(() => {
             const fs = r("fontSize");
             return fs === MIXED ? undefined : Math.round((fs as number) * 1.2);
           })()}
           min={0}
-          onChange={(lh) => set({ lineHeight: lh || null })}
+          onChange={lineHeightField.onChange}
           onScrubStart={begin}
           onScrubEnd={end}
         />
-        <NumberField label="|A|" title="Letter spacing (px or %)" value={r("letterSpacing") as Maybe<number>} step={0.1} parse={(raw) => parseLetterSpacing(raw, unitSize())} onChange={(letterSpacing) => set({ letterSpacing })} onScrubStart={begin} onScrubEnd={end} />
+        <NumberField
+          label="|A|"
+          title="Letter spacing (px or %)"
+          ariaLabel="Letter spacing"
+          value={r("letterSpacing") as Maybe<number>}
+          step={0.1}
+          parse={spacingField.parse}
+          onChange={spacingField.onChange}
+          onScrubStart={begin}
+          onScrubEnd={end}
+        />
       </div>
       <div className="grid2">
         <NumberField
@@ -892,16 +941,16 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
       {editing && sel && sel.id === editing && <LinkRow nodes={nodes} sel={sel} />}
       <LinkList nodes={nodes} />
       <div className="row">
-        <IconButton title="Bold" on={isBold} onClick={() => set({ fontWeight: isBold ? 400 : 700 })}>
+        <IconButton title="Bold" on={isBold} onClick={() => toggle({ fontWeight: isBold ? 400 : 700 })}>
           <Bold size={13} />
         </IconButton>
-        <IconButton title="Italic" on={isItalic} onClick={() => set({ italic: !isItalic })}>
+        <IconButton title="Italic" on={isItalic} onClick={() => toggle({ italic: !isItalic })}>
           <Italic size={13} />
         </IconButton>
-        <IconButton title="Underline" on={isDecorated("underline")} onClick={() => set({ decoration: isDecorated("underline") ? "none" : "underline" })}>
+        <IconButton title="Underline" on={isDecorated("underline")} onClick={() => toggle({ decoration: isDecorated("underline") ? "none" : "underline" })}>
           <Underline size={13} />
         </IconButton>
-        <IconButton title="Strikethrough" on={isDecorated("strikethrough")} onClick={() => set({ decoration: isDecorated("strikethrough") ? "none" : "strikethrough" })}>
+        <IconButton title="Strikethrough" on={isDecorated("strikethrough")} onClick={() => toggle({ decoration: isDecorated("strikethrough") ? "none" : "strikethrough" })}>
           <Strikethrough size={13} />
         </IconButton>
         <SelectField
@@ -1033,16 +1082,25 @@ function defaultJoin(n: Node): "miter" | "round" {
 
 function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: Node[]; ids: string[]; keyName: "fills" | "strokes" }) {
   const paints = common(nodes, (n) => n[keyName]);
-  let list: Paint[] = paints === MIXED ? [] : paints;
-  // While characters of the text being edited are selected, the fill shows their colour.
+  const list: Paint[] = paints === MIXED ? [] : paints;
+  // While characters of the text being edited are selected, the first visible solid fill row shows
+  // their colour and a colour edit there styles just the range. The real fills are never replaced.
+  let rangeTop = -1;
+  let rangeColor: string | undefined;
   const sel = useStore((s) => s.textSel);
   const editingText = useStore((s) => s.editingText);
   let mixedColors = false;
   if (keyName === "fills" && sel && sel.id === editingText && sel.end > sel.start && nodes.length === 1 && nodes[0].id === sel.id && nodes[0].type === "text") {
-    const base = list.find((p) => p.visible);
-    const c = rangeValue(nodes[0].text!, sel.start, sel.end, "color", base?.type === "solid" ? base.color : undefined);
-    if (c === MIXED) mixedColors = true;
-    else if (typeof c === "string") list = [{ ...(base?.type === "solid" ? base : { opacity: 1, visible: true }), type: "solid", color: c }];
+    const top = list.findIndex((p) => p.visible);
+    const base = list[top];
+    if (base?.type === "solid") {
+      const c = rangeValue(nodes[0].text!, sel.start, sel.end, "color", base.color);
+      if (c === MIXED) mixedColors = true;
+      else if (typeof c === "string") {
+        rangeTop = top;
+        rangeColor = c;
+      }
+    }
   }
   const set = (next: Paint[]) => update(ids, { [keyName]: next, ...(keyName === "fills" ? { fillStyle: null } : {}) });
   const isLineish = nodes.every((n) => n.type === "line" || n.type === "vector");
@@ -1076,12 +1134,16 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
       <BoundChip nodes={nodes} ids={ids} prop={keyName === "fills" ? "fill" : "stroke"} label={keyName === "fills" ? "Fill" : "Stroke"} />
       {paints === MIXED && <div className="muted small">Mixed — click + to replace for all</div>}
       {mixedColors && <div className="muted small">Mixed colours in the selection</div>}
-      {[...list].reverse().map((p, ri) => {
+      {[...list].reverse().map((real, ri) => {
         const i = list.length - 1 - ri;
+        const ranged = i === rangeTop && real.type === "solid" && rangeColor !== undefined;
+        const p: Paint = ranged ? { ...real, color: rangeColor! } : real;
         const setP = (np: Paint) => {
-          // Colouring selected characters of the text being edited.
-          if (keyName === "fills" && np.type === "solid" && nodes.length === 1 && nodes[0].type === "text" && styleTextSelection({ color: np.color })) return;
-          set(list.map((x, j) => (j === i ? np : x)));
+          // A new colour on the row that shows the selected characters' colour styles those characters.
+          if (ranged && np.type === "solid" && np.color !== (p as typeof np).color && styleTextSelection({ color: np.color })) return;
+          // Anything else changes the real fill (the shown colour is the range's, not the fill's).
+          const next = ranged && np.type === "solid" ? { ...np, color: (real as typeof np).color } : np;
+          set(list.map((x, j) => (j === i ? next : x)));
         };
         return (
           <div className="row" key={i}>

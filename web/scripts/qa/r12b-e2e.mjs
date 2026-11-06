@@ -308,6 +308,154 @@ try {
     check("a top-level frame shows its own X (50)", (await x.inputValue()) === "50");
     await p.context().close();
   }
+
+  // 6. B/I/U/S with no range on a layer that has a differently styled word.
+  {
+    const p = await fresh();
+    await tool(p, "create_nodes", { nodes: [{ type: "text", name: "Head", x: 40, y: 40, text: "Big bold heading", fontSize: 24, fontWeight: 700, width: 400 }] });
+    const id = (await named(p, "Head")).id;
+    await p.evaluate((id) => window.__dt.dispatch({ op: "styleText", id, start: 4, end: 8, style: { fontWeight: 400 }, clear: [] }), id);
+    await select(p, [id]);
+    await sleep(300);
+    const boldBtn = p.locator('button[title="Bold"]').first();
+    let n = await named(p, "Head");
+    check("setup: base bold with one regular word", n.text.fontWeight === 700 && (n.text.runs ?? []).some((r) => r.fontWeight === 400), JSON.stringify(n.text.runs));
+    await boldBtn.click();
+    await sleep(300);
+    n = await named(p, "Head");
+    check("B with no range makes the whole layer bold (no run keeps 400)", n.text.fontWeight === 700 && !(n.text.runs ?? []).some((r) => r.fontWeight !== undefined && r.fontWeight < 700), JSON.stringify(n.text.runs));
+    check("B is on now", (await boldBtn.getAttribute("aria-pressed")) === "true");
+    await boldBtn.click();
+    await sleep(300);
+    n = await named(p, "Head");
+    check("B again makes the layer regular", n.text.fontWeight === 400);
+    await p.keyboard.press("Control+z");
+    await sleep(200);
+    check("one Ctrl+Z undoes the toggle", (await named(p, "Head")).text.fontWeight === 700);
+    await p.context().close();
+  }
+
+  // 7. A range selected: the Fill list keeps the real paints.
+  {
+    const p = await fresh();
+    await tool(p, "create_nodes", { nodes: [{ type: "text", name: "Two fills", x: 40, y: 40, text: "Hello world", fontSize: 24, width: 300 }] });
+    const id = (await named(p, "Two fills")).id;
+    await p.evaluate(
+      (id) =>
+        window.__dt.dispatch({
+          op: "update",
+          ids: [id],
+          patch: { fills: [{ type: "solid", color: "#112233", opacity: 1, visible: true }, { type: "solid", color: "#445566", opacity: 1, visible: true }] },
+        }),
+      id,
+    );
+    await select(p, [id]);
+    await p.evaluate(() => window.__dt.zoomToFit?.());
+    await p.keyboard.press("Enter");
+    await sleep(400);
+    const ta = p.locator("textarea.text-editor");
+    await ta.focus();
+    await p.keyboard.press("Control+Home");
+    for (let i = 0; i < 5; i++) await p.keyboard.press("Shift+ArrowRight");
+    await sleep(250);
+    const fills = async () => (await named(p, "Two fills")).fills.map((f) => f.color.toUpperCase() + (f.opacity === 1 ? "" : `@${f.opacity}`));
+    await p.locator('button[title="Add fill"]').first().click();
+    await sleep(250);
+    check("+ adds to the real fills (3, none replaced)", (await fills()).length === 3 && (await fills())[0] === "#112233" && (await fills())[1] === "#445566", (await fills()).join(","));
+    await p.locator('.panel.right button[title="Remove"]').first().click();
+    await sleep(250);
+    check("Remove drops one real fill, not all", (await fills()).length === 2, (await fills()).join(","));
+    // Range colour edit styles only the range.
+    await ta.focus();
+    await p.keyboard.press("Control+Home");
+    for (let i = 0; i < 5; i++) await p.keyboard.press("Shift+ArrowRight");
+    await sleep(250);
+    const at = await p.locator(".panel.right input").evaluateAll((els) => els.findIndex((e) => e.value === "112233"));
+    check("the top fill row shows the range colour (112233)", at >= 0);
+    const input = p.locator(".panel.right input").nth(at);
+    await input.click({ clickCount: 3 });
+    await input.fill("FF0000");
+    await input.press("Enter");
+    await sleep(300);
+    const n = await named(p, "Two fills");
+    check("a colour typed on the range row styles only the range", (n.text.runs ?? []).some((r) => r.color && r.color.toUpperCase() === "#FF0000" && r.start === 0 && r.end === 5), JSON.stringify(n.text.runs));
+    check("and the real fills stay", n.fills[0].color.toUpperCase() === "#112233" && n.fills.length === 2, (await fills()).join(","));
+    await shot(p, "07-range-fills");
+    await p.context().close();
+  }
+
+  // 8. Flipped group: X/Y are the box's position in the frame.
+  {
+    const p = await fresh();
+    await tool(p, "create_nodes", {
+      nodes: [
+        {
+          type: "frame", name: "Frame", x: 0, y: 0, width: 600, height: 400,
+          children: [
+            { type: "rectangle", name: "Left", x: 100, y: 100, width: 40, height: 40 },
+            { type: "rectangle", name: "Right", x: 300, y: 100, width: 40, height: 40 },
+          ],
+        },
+      ],
+    });
+    const left = await named(p, "Left");
+    const right = await named(p, "Right");
+    await p.evaluate((ids) => window.__dt.dispatch({ op: "group", ids }), [left.id, right.id]);
+    const gid = (await named(p, "Left")).parent;
+    await p.evaluate((ids) => window.__dt.dispatch({ op: "flip", ids, horizontal: true }), [gid]);
+    await sleep(300);
+    const box = async (name) => {
+      const d = await doc(p);
+      const nd = Object.values(d.nodes).find((x) => x.name === name);
+      const m = (await p.evaluate((id) => window.__dt.query({ q: "bounds", ids: [id] }), nd.id)).items[0].matrix;
+      const x0 = m.e;
+      const x1 = m.e + m.a * nd.width;
+      return Math.min(x0, x1);
+    };
+    await select(p, [left.id]);
+    await sleep(300);
+    const x = fieldByAria(p, "X position");
+    const shown = Number(await x.inputValue());
+    const real = await box("Left");
+    check("flipped group: the shown X is the box's page x (frame at 0)", Math.abs(shown - real) < 0.01, `shown ${shown}, real ${real}`);
+    await type(x, "50");
+    const after = await box("Left");
+    check("typing 50 puts the box at page x 50", Math.abs(after - 50) < 0.01, String(after));
+    await p.keyboard.press("Control+z");
+    await sleep(200);
+    check("Ctrl+Z restores it", Math.abs((await box("Left")) - real) < 0.01);
+    await p.context().close();
+  }
+
+  // 9. Multi-selection reads % per layer, and Enter on an untouched field changes nothing.
+  {
+    const p = await fresh();
+    await tool(p, "create_nodes", {
+      nodes: [
+        { type: "text", name: "Small", x: 20, y: 20, text: "small", fontSize: 16 },
+        { type: "text", name: "Large", x: 20, y: 80, text: "large", fontSize: 40 },
+      ],
+    });
+    const a = await named(p, "Small");
+    const b = await named(p, "Large");
+    await select(p, [a.id, b.id]);
+    await sleep(300);
+    await type(field(p, LH), "150%");
+    const lhs = [(await named(p, "Small")).text.lineHeight, (await named(p, "Large")).text.lineHeight];
+    check("150% on two layers: each uses its own size (24 and 60)", lhs[0] === 24 && lhs[1] === 60, lhs.join(","));
+    await type(field(p, LS), "10%");
+    const lss = [(await named(p, "Small")).text.letterSpacing, (await named(p, "Large")).text.letterSpacing];
+    check("10% letter spacing: 1.6 and 4", lss[0] === 1.6 && lss[1] === 4, lss.join(","));
+    await select(p, [a.id]);
+    await tool(p, "update_nodes", { updates: [{ id: a.id, lineHeight: "3px" }] });
+    await sleep(300);
+    const lh = field(p, LH);
+    await lh.click();
+    await lh.press("Enter");
+    await sleep(250);
+    check("Enter on an unedited field keeps a 3 px line height", (await named(p, "Small")).text.lineHeight === 3, String((await named(p, "Small")).text.lineHeight));
+    await p.context().close();
+  }
 } catch (e) {
   check("script ran to the end", false, String(e?.stack ?? e));
 }

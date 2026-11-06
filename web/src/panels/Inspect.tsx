@@ -7,6 +7,7 @@ import { getDoc, query, toast, useStore } from "../store";
 import { assetUrl } from "../assets";
 import { downloadImageAsset, downloadLayerAsset } from "../exporter";
 import { Seg } from "../ui/controls";
+import { framePosition } from "./groupOffset";
 import { formatColor, parseColor, toHex, type ColorFormat } from "../ui/color";
 import type { Doc, Effect, ImageCredit, Node, Paint, TextRun } from "../types";
 
@@ -54,6 +55,8 @@ export function Inspect({ node }: { node: Node }) {
   const L = node.layout;
   // The safe area a device frame added to its padding is not content padding (code writes it as env()).
   const applied = node.device?.applied ?? [0, 0, 0, 0];
+  // Same X/Y as the design panel: measured from the frame, not from a group.
+  const framePos = framePosition(doc.nodes, node);
   return (
     <div className="section insp" data-testid="inspect">
       <div className="section-head">
@@ -67,7 +70,7 @@ export function Inspect({ node }: { node: Node }) {
           {val(`${r(node.width)}`, "Width")} <span className="muted">x</span> {val(`${r(node.height)}`, "Height")}
         </Row>
         <Row k="Position">
-          {val(`${r(node.x)}`, "X")} <span className="muted">,</span> {val(`${r(node.y)}`, "Y")}
+          {val(`${r(framePos.x)}`, "X")} <span className="muted">,</span> {val(`${r(framePos.y)}`, "Y")}
         </Row>
         {node.rotation !== 0 && <Row k="Rotation">{val(`${r(node.rotation)}deg`)}</Row>}
         <Row k="Sizing">

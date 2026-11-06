@@ -105,8 +105,9 @@ pub fn normalize_group(doc: &mut Document, id: &str) {
     }
   }
   doc.modify(id, |g| {
-    g.x += b.x;
-    g.y += b.y;
+    // A flipped group mirrors its children about its centre, so the edge that stays put is the far one.
+    g.x += if g.flip_x { g.width - b.x - b.width } else { b.x };
+    g.y += if g.flip_y { g.height - b.y - b.height } else { b.y };
     g.width = b.width.max(0.01);
     g.height = b.height.max(0.01);
     g.rotation = 0.0;

@@ -3846,6 +3846,33 @@ mod tests {
   }
 
   #[test]
+  fn moving_a_child_of_a_flipped_group_keeps_the_others_on_the_page() {
+    let mut e = engine();
+    let a = rect(&mut e, 100.0, 100.0, 40.0, 40.0, None);
+    let b = rect(&mut e, 300.0, 100.0, 40.0, 40.0, None);
+    let g = id_of(
+      &e.dispatch(Command::Group {
+        ids: vec![a.clone(), b.clone()],
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::Flip {
+      ids: vec![g],
+      horizontal: true,
+    })
+    .unwrap();
+    let page_x = |e: &Engine, id: &str| e.doc.abs_bounds(id).x;
+    assert_eq!((page_x(&e, &a), page_x(&e, &b)), (300.0, 100.0));
+    // Own x 250 mirrors to page x 50: the sibling must not move when the group refits.
+    e.dispatch(Command::Update {
+      ids: vec![a.clone()],
+      patch: json!({ "x": 250 }),
+    })
+    .unwrap();
+    assert_eq!((page_x(&e, &a), page_x(&e, &b)), (50.0, 100.0));
+  }
+
+  #[test]
   fn read_only_refuses_edits_but_allows_looking_and_comments() {
     let mut e = engine();
     let id = rect(&mut e, 0.0, 0.0, 5.0, 5.0, None);

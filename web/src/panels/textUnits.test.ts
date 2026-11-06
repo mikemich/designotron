@@ -22,12 +22,23 @@ describe("parseLineHeight", () => {
     expect(parseLineHeight("24+8", 16)).toBe(32);
     expect(parseLineHeight("100/4", 16)).toBe(25);
   });
+  it("reads a trailing x or × as a multiple", () => {
+    expect(parseLineHeight("1.5x", 16)).toBe(24);
+    expect(parseLineHeight("1.5×", 16)).toBe(24);
+    expect(parseLineHeight("2 x", 10)).toBe(20);
+  });
+  it("reads plain numbers the way parseFloat did", () => {
+    expect(parseLineHeight("016", 16)).toBe(16);
+    expect(parseLineHeight("08", 16)).toBe(8);
+    expect(parseLineHeight("1e1", 16)).toBe(10);
+    expect(parseLineHeight(".5", 20)).toBe(10);
+  });
   it("rounds to 0.01", () => {
     expect(parseLineHeight("133%", 15)).toBe(19.95);
     expect(parseLineHeight("1.333", 16)).toBe(21.33);
   });
   it("rejects what isn't a value", () => {
-    for (const raw of ["abc", "12abc", "-10", "%", "1.5 x"]) expect(parseLineHeight(raw, 16)).toBeUndefined();
+    for (const raw of ["abc", "12abc", "-10", "%", "1.5 y"]) expect(parseLineHeight(raw, 16)).toBeUndefined();
   });
 });
 
@@ -42,6 +53,8 @@ describe("parseLetterSpacing", () => {
   });
   it("rounds to 0.01 and rejects text", () => {
     expect(parseLetterSpacing("3%", 15)).toBe(0.45);
+    expect(parseLetterSpacing("-0.125", 16)).toBe(-0.13);
+    expect(parseLetterSpacing("0.125", 16)).toBe(0.13);
     expect(parseLetterSpacing("", 16)).toBeUndefined();
     expect(parseLetterSpacing("wide", 16)).toBeUndefined();
   });

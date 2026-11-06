@@ -27,18 +27,24 @@ export function parseLetterSpacing(raw: string, size: number): number | undefine
   return measure(t, size, (n) => n);
 }
 
-/** Number with an optional unit. `bare` turns a unitless number into px. */
+/** Number with an optional unit. `bare` turns a unitless number into px; "x" and "×" are a multiple of the size. */
 function measure(t: string, size: number, bare: (n: number) => number): number | undefined {
-  const m = /^(.*?)\s*(%|px|em)?$/.exec(t);
+  const m = /^(.*?)\s*(%|px|em|x|×)?$/.exec(t);
   const n = m ? arithmetic(m[1]) : undefined;
   if (n === undefined) return undefined;
   const unit = m![2];
-  const v = unit === "%" ? (n / 100) * size : unit === "em" ? n * size : unit === "px" ? n : bare(n);
-  return Math.round(v * 100) / 100;
+  const v = unit === "%" ? (n / 100) * size : unit === "em" || unit === "x" || unit === "×" ? n * size : unit === "px" ? n : bare(n);
+  return round2(v);
 }
 
-/** A number, or simple arithmetic on numbers ("24+8", "100/2"). */
+/** Half away from zero, to 0.01 (the same in `ai/parse.rs`). */
+function round2(v: number): number {
+  return (Math.sign(v) * Math.round(Math.abs(v) * 100)) / 100;
+}
+
+/** A plain number ("016", "1e1", ".5"), or simple arithmetic on numbers ("24+8", "100/2"). */
 function arithmetic(s: string): number | undefined {
+  if (/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(s)) return Number(s);
   if (!s || !/^[\d\s+\-*/().]+$/.test(s)) return undefined;
   try {
     const v = Function(`"use strict";return (${s})`)();

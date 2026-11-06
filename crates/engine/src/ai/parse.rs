@@ -542,27 +542,23 @@ pub fn letter_spacing(cx: &Ctx, key: &str, v: &Value, font_size: f64) -> Result<
 
 /// A number with an optional `%`, `px` or `em` unit; `bare` turns a unitless number into px.
 fn measure(t: &str, size: f64, bare: impl Fn(f64) -> f64) -> Option<f64> {
-  let (num, unit) = match t.strip_suffix('%') {
-    Some(n) => (n, "%"),
-    None => match t.strip_suffix("px") {
-      Some(n) => (n, "px"),
-      None => match t.strip_suffix("em") {
-        Some(n) => (n, "em"),
-        None => (t, ""),
-      },
-    },
-  };
+  let units = [("%", "%"), ("px", "px"), ("em", "x"), ("x", "x"), ("×", "x")];
+  let (num, unit) = units
+    .iter()
+    .find_map(|(suffix, unit)| t.strip_suffix(suffix).map(|n| (n, *unit)))
+    .unwrap_or((t, ""));
   let n: f64 = num.trim().parse().ok().filter(|n: &f64| n.is_finite())?;
   Some(round2(match unit {
     "%" => n / 100.0 * size,
-    "em" => n * size,
+    "x" => n * size,
     "px" => n,
     _ => bare(n),
   }))
 }
 
+/// Half away from zero, to 0.01 (the same in `web/src/panels/textUnits.ts`).
 fn round2(v: f64) -> f64 {
-  (v * 100.0).round() / 100.0
+  (v.abs() * 100.0).round() / 100.0 * v.signum()
 }
 
 /// An enum spelled one of several ways (case-insensitive, `_` and spaces as `-`). The first
@@ -854,6 +850,10 @@ mod tests {
       assert_eq!(lh(json!(4), 16.0), Some(4.0));
       assert_eq!(lh(json!(24), 16.0), Some(24.0));
       assert_eq!(lh(json!("133%"), 15.0), Some(19.95));
+      assert_eq!(lh(json!("1.5x"), 16.0), Some(24.0));
+      assert_eq!(lh(json!("1.5×"), 16.0), Some(24.0));
+      assert_eq!(lh(json!("016"), 16.0), Some(16.0));
+      assert_eq!(lh(json!("1e1"), 16.0), Some(10.0));
     }
 
     #[test]
@@ -877,6 +877,9 @@ mod tests {
       assert_eq!(ls(json!(2), 16.0), 2.0);
       assert_eq!(ls(json!("-5%"), 20.0), -1.0);
       assert_eq!(ls(json!("3%"), 15.0), 0.45);
+      // Halves round away from zero on both sides.
+      assert_eq!(ls(json!("-0.125"), 16.0), -0.13);
+      assert_eq!(ls(json!("0.125"), 16.0), 0.13);
       assert!(letter_spacing(&cx, "letterSpacing", &json!("wide"), 16.0).is_err());
     }
   }

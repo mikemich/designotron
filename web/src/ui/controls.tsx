@@ -51,9 +51,13 @@ export function NumberField(props: {
   const clamp = (v: number) => Math.min(max, Math.max(min, v));
   /** Applies the typed text; returns the value it was clamped to, or null when there was none. */
   const commit = (): number | null => {
+    const wasEdited = edited.current;
     edited.current = false;
     const raw = text.replace(suffix ?? "", "").trim();
     if (raw === "Mixed" || raw === (props.autoText ?? "Auto")) return null;
+    // Enter on a field nobody typed in: the shown value is the document's, not new text to read again
+    // (a stored 3 px line height would otherwise be read as 3 x size).
+    if (props.parse && !wasEdited) return null;
     if (props.parse || props.onAuto) {
       const parsed = !raw ? null : props.parse?.(raw);
       if (parsed === null && props.onAuto) {
