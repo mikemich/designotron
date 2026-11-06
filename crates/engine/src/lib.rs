@@ -12,6 +12,8 @@ pub mod codegen;
 pub mod collab;
 #[cfg(test)]
 mod collab_sim;
+#[cfg(test)]
+mod json_golden_tests;
 pub mod color;
 pub mod comments;
 pub mod components;
