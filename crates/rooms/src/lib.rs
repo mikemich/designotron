@@ -1835,7 +1835,18 @@ fn replay(doc: &mut Document, assets: &mut Map<String, Value>, snapshot_seq: u64
 fn sync_dir(file: &std::path::Path) -> std::io::Result<()> {
   #[cfg(unix)]
   if let Some(dir) = file.parent() {
-    return std::fs::File::open(dir)?.sync_all();
+    let dir = if dir.as_os_str().is_empty() {
+      std::path::Path::new(".")
+    } else {
+      dir
+    };
+    return match std::fs::File::open(dir)?.sync_all() {
+      // Some filesystems (FUSE, 9p, virtiofs) refuse fsync on a directory. Like PostgreSQL,
+      // treat that as "not supported here" rather than failing every write.
+      // EINVAL and EBADF are 22 and 9 on Linux and macOS.
+      Err(e) if matches!(e.raw_os_error(), Some(22 | 9)) => Ok(()),
+      other => other,
+    };
   }
   let _ = file;
   Ok(())
@@ -2484,5 +2495,7 @@ mod tests {
   fn sync_dir_reports_failures() {
     assert!(sync_dir(std::path::Path::new("/nonexistent-dir-for-test/file")).is_err() || cfg!(not(unix)));
     assert!(sync_dir(&std::env::temp_dir().join("x")).is_ok());
+    // A bare file name (an empty parent) syncs the current directory.
+    assert!(sync_dir(std::path::Path::new("x")).is_ok());
   }
 }
