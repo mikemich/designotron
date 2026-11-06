@@ -52,7 +52,7 @@ export async function copySelection() {
 
 export async function pasteHere(x?: number, y?: number) {
   const text = await clipboardLayers();
-  if (text) dispatch({ op: "paste", data: text, parent: null, x: x ?? null, y: y ?? null });
+  if (text) A.pasteData({ data: text, parent: null, x: x ?? null, y: y ?? null });
 }
 
 /**
@@ -67,7 +67,7 @@ export async function pasteOverSelection() {
   }
   const targets = selection();
   if (!targets.length) {
-    dispatch({ op: "paste", data: text, parent: A.pasteTarget(), x: null, y: null });
+    A.pasteData({ data: text, parent: A.pasteTarget(), x: null, y: null });
     return;
   }
   const created: string[] = [];
@@ -80,7 +80,7 @@ export async function pasteOverSelection() {
       if (!n || !box || insideInstance(n)) continue;
       const siblings = n.parent ? doc.nodes[n.parent]?.children : doc.pages.find((p) => p.id === n.page)?.children;
       const index = siblings?.indexOf(id) ?? -1;
-      const r = dispatch<{ created: string[] }>({ op: "paste", data: text, parent: n.parent, x: box.x, y: box.y });
+      const r = A.pasteData({ data: text, parent: n.parent, x: box.x, y: box.y });
       if (!r?.created?.length) continue;
       dispatch({ op: "moveToParent", ids: r.created, parent: n.parent, index: index >= 0 ? index + 1 : null });
       created.push(...r.created);
@@ -122,7 +122,7 @@ export async function pasteReplace() {
       }
       const siblings = n.parent ? doc.nodes[n.parent]?.children : doc.pages.find((p) => p.id === n.page)?.children;
       const index = siblings?.indexOf(id) ?? -1;
-      const r = dispatch<{ created: string[] }>({ op: "paste", data: text, parent: n.parent, x: box.x, y: box.y });
+      const r = A.pasteData({ data: text, parent: n.parent, x: box.x, y: box.y });
       if (!r?.created?.length) continue;
       dispatch({ op: "moveToParent", ids: r.created, parent: n.parent, index: index >= 0 ? index : null });
       dispatch({ op: "delete", ids: [id] });

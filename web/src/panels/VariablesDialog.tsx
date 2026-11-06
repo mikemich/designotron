@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Hash, Link2, Palette, Plus, SlidersHorizontal, ToggleLeft, Trash2, Type as TypeIcon, Unlink, X } from "lucide-react";
 import { dispatch, toast, useDoc, useStore } from "../store";
 import type { VarKind, Variable, VariableCollection } from "../types";
 import { Menu, type MenuItem, Popover, useDialog } from "../ui/controls";
+import { ConfirmDialog } from "../dashboard/ConfirmDialog";
 import { cssColor } from "../ui/color";
 import { useFolderState } from "./FolderTree";
 import { folderSize, groupBySlash, type Folder } from "./groupBySlash";
@@ -23,9 +24,14 @@ function save(collections: VariableCollection[]) {
   dispatch({ op: "setVariables", collections });
 }
 
-/** Text input that commits on blur or Enter (one undo step per edit). */
+/** A colour the engine accepts: hex (#RGB to #RRGGBBAA) or rgb()/rgba(). */
+export const isColorText = (x: string) => /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(x) || /^rgba?\(.+\)$/i.test(x);
+
+/** Text input that commits on blur or Enter (one undo step per edit). A refused edit goes back to the stored text. */
 function Commit({ value, onCommit, className, type = "text" }: { value: string; onCommit: (v: string) => void; className?: string; type?: string }) {
   const [v, setV] = useState(value);
+  const latest = useRef(value);
+  latest.current = value;
   useEffect(() => setV(value), [value]);
   return (
     <input
@@ -38,7 +44,12 @@ function Commit({ value, onCommit, className, type = "text" }: { value: string; 
         if (e.key === "Enter") (e.target as HTMLInputElement).blur();
         if (e.key === "Escape") setV(value);
       }}
-      onBlur={() => v !== value && onCommit(v)}
+      onBlur={() => {
+        if (v === value) return;
+        onCommit(v);
+        // Changed values re-sync through `value`; when the edit was refused nothing changes, so put the stored text back.
+        requestAnimationFrame(() => setV(latest.current));
+      }}
     />
   );
 }
@@ -115,7 +126,18 @@ function ValueCell({
             <i style={{ background: cssColor(c) }} />
             <input type="color" value={c.slice(0, 7)} onChange={(e) => onChange(e.target.value.toUpperCase())} style={{ position: "absolute", opacity: 0, width: 0, height: 0 }} />
           </label>
-          <Commit value={c} onCommit={(x) => onChange(x.trim())} className="textinput mono" />
+          <Commit
+            value={c}
+            onCommit={(x) => {
+              const t = x.trim();
+              if (!isColorText(t)) {
+                toast(`"${t}" isn't a colour. Use hex like #7C5CFF, or rgb(...).`, "error");
+                return;
+              }
+              onChange(t);
+            }}
+            className="textinput mono"
+          />
         </div>
       );
       break;
@@ -143,6 +165,7 @@ export function VariablesDialog() {
   const collections = doc.variables ?? [];
   const [active, setActive] = useState<string | null>(collections[0]?.id ?? null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [modeDelete, setModeDelete] = useState<{ id: string; message: string } | null>(null);
   const [scopeFor, setScopeFor] = useState<{ id: string; anchor: DOMRect } | null>(null);
   const coll = collections.find((c) => c.id === active) ?? collections[0];
   const close = () => useStore.setState({ variablesOpen: false });
@@ -159,7 +182,13 @@ export function VariablesDialog() {
             value={label}
             onCommit={(name) => {
               const t = name.trim();
-              if (t) update((c) => ({ ...c, variables: c.variables.map((x) => (x.id === v.id ? { ...x, name: folder ? `${folder}/${t}` : t } : x)) }));
+              if (!t) return;
+              const full = folder ? `${folder}/${t}` : t;
+              if (coll!.variables.some((x) => x.id !== v.id && x.name === full)) {
+                toast(`${full} already exists in ${coll!.name}`, "error");
+                return;
+              }
+              update((c) => ({ ...c, variables: c.variables.map((x) => (x.id === v.id ? { ...x, name: full } : x)) }));
             }}
           />
           {SCOPES_FOR_KIND[v.type].length > 0 && (
@@ -215,10 +244,29 @@ export function VariablesDialog() {
   };
   const addVariable = (type: VarKind) =>
     update((c) => {
-      const n = c.variables.filter((v) => v.type === type).length + 1;
+      // The first free "color 3": counting alone collides after a delete or rename.
+      let n = c.variables.filter((v) => v.type === type).length + 1;
+      while (c.variables.some((v) => v.name === `${type} ${n}`)) n++;
       const values = Object.fromEntries(c.modes.map((m) => [m.id, DEFAULTS[type]]));
       return { ...c, variables: [...c.variables, { id: uid("v_"), name: `${type} ${n}`, type, values, description: "" }] };
     });
+  /** Removes a mode and its values; layers pinned to it follow the engine's prune (back to the default mode). */
+  const deleteMode = (id: string) =>
+    update((c) => ({
+      ...c,
+      modes: c.modes.filter((x) => x.id !== id),
+      variables: c.variables.map((v) => ({ ...v, values: Object.fromEntries(Object.entries(v.values).filter(([m]) => m !== id)) })),
+    }));
+  const askDeleteMode = (id: string) => {
+    if (!coll) return;
+    const at = coll.modes.findIndex((m) => m.id === id);
+    const next = coll.modes.find((m) => m.id !== id);
+    const pinned = Object.values(doc.nodes).filter((n) => n.variableModes?.[coll.id] === id).length;
+    const parts = [`"${coll.modes[at].name}" and its values are removed from ${coll.variables.length} variable${coll.variables.length === 1 ? "" : "s"}.`];
+    if (pinned) parts.push(`${pinned} layer${pinned === 1 ? " is" : "s are"} pinned to it and will follow the default mode instead.`);
+    if (at === 0 && next) parts.push(`${next.name} becomes the default (Auto).`);
+    setModeDelete({ id, message: parts.join(" ") });
+  };
   const addMode = () =>
     update((c) => {
       const id = uid("vm_");
@@ -294,7 +342,7 @@ export function VariablesDialog() {
                         <div className="row" style={{ gap: 2 }}>
                           <Commit value={m.name} className="textinput head" onCommit={(name) => name.trim() && update((c) => ({ ...c, modes: c.modes.map((x) => (x.id === m.id ? { ...x, name: name.trim() } : x)) }))} />
                           {coll.modes.length > 1 && (
-                            <button className="ibtn" title="Delete mode" onClick={() => update((c) => ({ ...c, modes: c.modes.filter((x) => x.id !== m.id) }))}>
+                            <button className="ibtn" title="Delete mode" aria-label={`Delete mode ${m.name}`} onClick={() => askDeleteMode(m.id)}>
                               <X size={11} />
                             </button>
                           )}
@@ -339,6 +387,18 @@ export function VariablesDialog() {
           )}
         </div>
       </div>
+      {modeDelete && (
+        <ConfirmDialog
+          title="Delete mode?"
+          message={modeDelete.message}
+          confirmLabel="Delete mode"
+          onCancel={() => setModeDelete(null)}
+          onConfirm={() => {
+            deleteMode(modeDelete.id);
+            setModeDelete(null);
+          }}
+        />
+      )}
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
       {scopeFor && coll && (
         <ScopePopover

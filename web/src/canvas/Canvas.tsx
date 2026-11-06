@@ -29,7 +29,7 @@ import { FollowFrame } from "./FollowFrame";
 import { CursorChat } from "./CursorChat";
 import { GuestBar } from "../panels/GuestBar";
 import { reportCursor } from "../collab";
-import { insertImageFile, openDtronFile, toggleVectorPointSmooth, vectorPoints } from "../actions";
+import { insertImageFile, openDtronFile, pasteData, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu, insideInstance } from "./contextMenu";
 import { pickColorAt } from "./eyedropper";
 import { useDemo } from "../Demo";
@@ -765,7 +765,7 @@ export function Canvas() {
             const data = query<string>({ q: "copy", ids: d.ids });
             const parent = doc.nodes[d.ids[0]]?.parent ?? null;
             const b = query<{ union: Rect | null }>({ q: "bounds", ids: d.ids }).union;
-            const r = dispatch<{ created: string[] }>({ op: "paste", data, parent, x: b?.x ?? null, y: b?.y ?? null });
+            const r = pasteData({ data, parent, x: b?.x ?? null, y: b?.y ?? null });
             if (r) d.ids = r.created;
             dispatch({ op: "rebaseGesture" });
           }
