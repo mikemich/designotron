@@ -1,10 +1,12 @@
 // Plugins: user JavaScript run in a sandboxed iframe (opaque origin: no access to the
 // editor's DOM, storage or API key). They call the same tool layer Claude uses through
-// a small promise API over postMessage. A quick run is one undo step (see runPlugin).
+// a small promise API over postMessage. A run is one undo step (see runPlugin). They have no
+// network: a CSP in the frame, web addresses and fetching tools refused.
 
 import { create } from "zustand";
-import { dispatch, selection, toast, useStore } from "./store";
-import { executeTool } from "./ai/tools";
+import { selection, toast, useStore } from "./store";
+import { DRAG_BUSY, executeTool, whenCanvasIdle } from "./ai/tools";
+import { sandboxDocument } from "./pluginSandbox";
 
 export interface Plugin {
   id: string;
@@ -113,50 +115,14 @@ export const usePlugins = create<{ list: Plugin[]; running: Running | null; dial
   dialogOpen: false,
 }));
 
-/** Bootstrap inside the sandbox: defines `dt`, then runs the plugin body as an async function. */
-function bootstrap(code: string): string {
-  const body = JSON.stringify(code);
-  return `<!doctype html><html><head><meta charset="utf-8"></head><body><script>
-(() => {
-  let seq = 0;
-  const pending = new Map();
-  const listeners = { selectionchange: [] };
-  const call = (method, args) => new Promise((resolve, reject) => {
-    const id = ++seq;
-    pending.set(id, { resolve, reject });
-    parent.postMessage({ dtPlugin: true, id, method, args }, "*");
-  });
-  window.addEventListener("message", (e) => {
-    const m = e.data;
-    if (!m || !m.dtHost) return;
-    if (m.ping) return parent.postMessage({ dtPlugin: true, pong: true }, "*");
-    if (m.event) return (listeners[m.event] || []).forEach((fn) => fn(m.data));
-    const p = pending.get(m.id);
-    if (!p) return;
-    pending.delete(m.id);
-    m.error ? p.reject(new Error(m.error)) : p.resolve(m.result);
-  });
-  window.dt = {
-    tool: (name, input) => call("tool", [name, input || {}]),
-    selection: () => call("selection", []),
-    getDocument: (depth) => call("tool", ["get_document", { depth: depth || 2 }]),
-    getNodes: (ids) => call("tool", ["get_nodes", { ids }]),
-    notify: (text) => call("notify", [String(text)]),
-    close: () => call("close", []),
-    on: (event, fn) => (listeners[event] || (listeners[event] = [])).push(fn),
-    ui: { show: (html, size) => { document.body.innerHTML = html; return call("showUi", [size || {}]); } },
-  };
-  // Compiled inside the chain so a syntax error is reported like any other plugin error.
-  Promise.resolve()
-    .then(() => new Function("dt", "return (async () => {\\n" + ${body} + "\\n})()")(window.dt))
-    .then(() => call("done", []), (err) => call("error", [String(err && err.stack || err)]));
-})();
-<\/script></body></html>`;
-}
+/** Tools a plugin may not call: they reach the network, render remote content or install code. */
+const PLUGIN_REFUSED_TOOLS = new Set(["import_url", "import_html", "save_plugin", "search_photos", "place_photo"]);
 
-/** Runs a plugin; it stays alive while it shows UI. Its edits form one undo step until it
- *  shows UI or has run for 3 seconds; after that each change is its own step, so the
- *  person's edits made meanwhile stay separate. */
+let runSeq = 0;
+
+/** Runs a plugin; it stays alive while it shows UI. The whole run is one undo step: its tool
+ *  calls share an undo group (`dt.commitUndo()` starts a new one, as in Figma). While a UI is
+ *  showing, a pause of a second between calls also starts a new one, so each click is a step. */
 export function runPlugin(plugin: Plugin) {
   stopPlugin();
   const frame = document.createElement("iframe");
@@ -165,12 +131,9 @@ export function runPlugin(plugin: Plugin) {
   frame.title = plugin.name;
   const running: Running = { plugin, frame, ui: null };
   usePlugins.setState({ running });
-  dispatch({ op: "beginGesture" });
-  let gestureOpen = true;
-  const endGesture = () => {
-    if (gestureOpen) dispatch({ op: "endGesture" });
-    gestureOpen = false;
-  };
+  const runId = ++runSeq;
+  let step = 0;
+  let lastCall = 0;
   const reply = (id: number, result?: unknown, error?: string) =>
     frame.contentWindow?.postMessage({ dtHost: true, id, result: result ?? null, error: error ?? null }, "*");
   const onMessage = async (e: MessageEvent) => {
@@ -186,7 +149,14 @@ export function runPlugin(plugin: Plugin) {
       switch (m.method) {
         case "tool": {
           const [name, input] = m.args;
-          const out = await executeTool(String(name), input);
+          if (PLUGIN_REFUSED_TOOLS.has(String(name))) throw new Error(`plugins can't use ${name}`);
+          if (/https?:\/\//i.test(JSON.stringify(input ?? null))) throw new Error("plugins can't use web addresses yet");
+          // The pause is measured from the previous call, before waiting for the canvas.
+          if (running.ui && lastCall && Date.now() - lastCall > 1000) step++;
+          if (!(await whenCanvasIdle())) throw new Error(DRAG_BUSY);
+          if (usePlugins.getState().running?.frame !== frame) throw new Error("plugin stopped");
+          const out = await executeTool(String(name), input, { group: `plugin:${runId}:${step}` });
+          lastCall = Date.now();
           if (!out.ok) throw new Error(String(out.result));
           return reply(m.id, out.result);
         }
@@ -204,13 +174,13 @@ export function runPlugin(plugin: Plugin) {
           frame.className = "plugin-frame";
           frame.style.width = `${running.ui.width}px`;
           frame.style.height = `${running.ui.height}px`;
-          // From here on each change is its own undo step (the person works alongside the UI).
-          endGesture();
           usePlugins.setState({ running: { ...running } });
+          return reply(m.id);
+        case "commitUndo":
+          step++;
           return reply(m.id);
         case "done":
           if (!running.ui) stopPlugin();
-          else endGesture();
           return reply(m.id);
         case "error":
           toast(`Plugin “${plugin.name}” failed: ${String(m.args[0]).split("\n")[0]}`, "error");
@@ -232,18 +202,25 @@ export function runPlugin(plugin: Plugin) {
     frame.contentWindow?.postMessage({ dtHost: true, ping: true }, "*");
     const cur = usePlugins.getState().running;
     if (cur?.frame === frame && !cur.stuck && Date.now() - lastPong > 6000) {
-      endGesture();
       usePlugins.setState({ running: { ...cur, stuck: true } });
     }
   }, 2000);
-  // A plugin still busy after a few seconds: close its undo step so the person's own edits
-  // don't merge into it, and show that it's running (with Stop).
+  // A plugin still busy after a few seconds shows that it is running (with Stop).
   const slow = setTimeout(() => {
-    if (!running.ui) {
-      endGesture();
-      usePlugins.setState({ running: { ...running, slow: true } });
-    }
+    if (!running.ui) usePlugins.setState({ running: { ...running, slow: true } });
   }, 3000);
+  // The frame loads once. A second load means the plugin navigated it (location, meta refresh):
+  // that would escape the policy above, so the run stops.
+  let loads = 0;
+  frame.addEventListener("load", () => {
+    if (loads++ === 0) {
+      // The page is constant (see pluginSandbox.ts); the code is sent in once it is ready.
+      frame.contentWindow?.postMessage({ dtHost: true, code: plugin.code }, "*");
+    } else {
+      toast(`Plugin “${plugin.name}” was stopped: it tried to navigate its frame`, "error");
+      stopPlugin();
+    }
+  });
   const unsub = useStore.subscribe((s, prev) => {
     if (s.es.selection !== prev.es.selection) frame.contentWindow?.postMessage({ dtHost: true, event: "selectionchange", data: s.es.selection }, "*");
   });
@@ -252,11 +229,10 @@ export function runPlugin(plugin: Plugin) {
     clearInterval(watchdog);
     window.removeEventListener("message", onMessage);
     unsub();
-    endGesture();
     frame.remove();
   };
+  frame.srcdoc = sandboxDocument();
   document.body.appendChild(frame);
-  frame.srcdoc = bootstrap(plugin.code);
 }
 
 let cleanup: (() => void) | null = null;

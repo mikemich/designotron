@@ -9,6 +9,33 @@ use crate::geom::fmt;
 use crate::model::{GradientHandles, GradientStop, ImageCrop, StrokeAlign};
 use crate::render::stops_svg;
 
+/// Whether an image source may be written into the SVG `href` (and so fetched by the editor):
+/// `asset:` ids, `data:image/` URLs and absolute `http(s)://` URLs. Protocol-relative
+/// (`//host`), scheme-without-slashes (`https:host`) and anything with whitespace or control
+/// characters (browsers strip tabs and newlines inside a URL, so `ht<TAB>tps://` works) are out.
+pub fn safe_image_src(src: &str) -> bool {
+  let lower = src.to_ascii_lowercase();
+  if src.chars().any(|c| c.is_control()) {
+    return false;
+  }
+  if lower.starts_with("data:image/") {
+    return true;
+  }
+  if src.chars().any(char::is_whitespace) {
+    return false;
+  }
+  lower.starts_with("asset:") || lower.starts_with("https://") || lower.starts_with("http://")
+}
+
+/// `src` for an `href`, or empty when it isn't a safe image source.
+pub fn image_href(src: &str) -> &str {
+  if safe_image_src(src) {
+    src
+  } else {
+    ""
+  }
+}
+
 /// Wedges in an angular gradient, by the larger side of the layer: a wedge is one solid colour,
 /// so bigger layers need finer steps to stay smooth. (A linear gradient across each wedge was
 /// tried to save nodes: it bands near the centre, because the stripes are parallel, not rays.)
@@ -255,7 +282,7 @@ pub fn crop_pattern(id: &str, src: &str, opacity: f64, crop: &ImageCrop, w: f64,
     "<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"{}\" height=\"{}\"><image href=\"{}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" opacity=\"{}\"/></pattern>",
     fmt(w.max(1.0)),
     fmt(h.max(1.0)),
-    crate::render::esc(src),
+    crate::render::esc(image_href(src)),
     fmt(crop.x * w),
     fmt(crop.y * h),
     fmt(crop.w * w),

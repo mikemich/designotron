@@ -34,6 +34,7 @@ export const ungroup = () => dispatch({ op: "ungroup", ids: selection() });
 export const frameSelection = () => selection().length && dispatch({ op: "frameSelection", ids: selection() });
 export const addAutoLayout = () => selection().length && dispatch({ op: "addAutoLayout", ids: selection() });
 export const createComponent = () => selection().length && dispatch({ op: "createComponent", ids: selection() });
+export const createComponents = () => selection().length > 1 && dispatch({ op: "createComponents", ids: selection() });
 export const combineVariants = () => dispatch({ op: "combineVariants", ids: selection() });
 export const detachInstance = () => dispatch({ op: "detachInstance", ids: selection() });
 export const selectAll = () => dispatch({ op: "selectAll" });

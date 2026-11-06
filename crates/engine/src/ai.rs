@@ -273,7 +273,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "arrange",
-      "description": "Structural actions on layers: group, ungroup, frame, duplicate, create_component (turns each layer into a main component; use it for anything that repeats, then place instances), combine_variants (merges components that are states of one control into one component set; name them 'State=Default', 'State=Error' or 'Input/Default', 'Input/Error' first, then rename the resulting set), detach_instance, add_auto_layout, remove_auto_layout, bring_to_front, send_to_back, align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal, distribute_vertical, union, subtract (bottom layer minus the rest), intersect, exclude, flatten, outline_stroke, mask (bottom layer masks the others).",
+      "description": "Structural actions on layers: group, ungroup, frame, duplicate, create_component (turns each selected layer into its own main component, so several ids make several components; to make ONE component from several layers, `frame` them first, then create_component the frame; use it for anything that repeats, then place instances), combine_variants (merges components that are states of one control into one component set; name them 'State=Default', 'State=Error' or 'Input/Default', 'Input/Error' first, then rename the resulting set), detach_instance, add_auto_layout, remove_auto_layout, bring_to_front, send_to_back, align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal, distribute_vertical, union, subtract (bottom layer minus the rest), intersect, exclude, flatten, outline_stroke, mask (bottom layer masks the others).",
       "input_schema": { "type": "object", "properties": { "action": { "type": "string", "enum": ARRANGE_ACTIONS }, "ids": { "type": "array", "items": { "type": "string" } } }, "required": ["action", "ids"] }
     },
     {
@@ -468,18 +468,37 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
       }
       var.scopes = list;
     }
-    let norm = |v: &Value| -> Value {
+    // A value must fit the variable's type; the error names the variable and the mode.
+    let norm = |v: &Value, mode: &str| -> Result<Value, String> {
       if v.get("alias").is_some() {
-        return v.clone();
+        return Ok(v.clone());
       }
-      match (kind, v.as_str()) {
-        (VarKind::Color, Some(c)) => json!(crate::color::normalize(c)),
-        _ => v.clone(),
+      let bad = |want: &str| format!("{vname} ({mode}): expected {want}, got {}", parse::kind_of(v));
+      match kind {
+        VarKind::Color => {
+          let c = v.as_str().ok_or_else(|| bad("a colour like '#7C5CFF'"))?;
+          if crate::color::parse(c).is_none() {
+            return Err(format!(
+              "{vname} ({mode}): unrecognised colour '{c}'; use hex like '#7C5CFF' or rgb()/rgba()"
+            ));
+          }
+          Ok(json!(crate::color::normalize(c)))
+        }
+        VarKind::Number => match v {
+          Value::Number(n) if n.as_f64().is_some_and(f64::is_finite) => Ok(v.clone()),
+          Value::String(s) => match s.trim().parse::<f64>() {
+            Ok(n) if n.is_finite() => Ok(json!(n)),
+            _ => Err(bad("a number")),
+          },
+          _ => Err(bad("a number")),
+        },
+        VarKind::Boolean => v.is_boolean().then(|| v.clone()).ok_or_else(|| bad("true or false")),
+        VarKind::String => v.is_string().then(|| v.clone()).ok_or_else(|| bad("a string")),
       }
     };
     if let Some(v) = spec.get("value") {
       for m in &modes {
-        var.values.insert(m.id.clone(), norm(v));
+        var.values.insert(m.id.clone(), norm(v, &m.name)?);
       }
     }
     if let Some(obj) = spec.get("values").and_then(|v| v.as_object()) {
@@ -488,7 +507,7 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
           .iter()
           .find(|m| &m.name == mk || &m.id == mk)
           .ok_or_else(|| format!("{vname}: no mode {mk}"))?;
-        var.values.insert(mode.id.clone(), norm(v));
+        var.values.insert(mode.id.clone(), norm(v, &mode.name)?);
       }
     }
   }
@@ -633,10 +652,13 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
     "set_component_props" => {
       let ops = input.get("ops").and_then(|v| v.as_array()).ok_or("ops must be an array")?;
       let mut results = Vec::new();
-      for op in ops {
+      for (i, op) in ops.iter().enumerate() {
         let op = resolve_prop_names(e, op);
-        let edit: crate::props::PropsOp = serde_json::from_value(op).map_err(|er| format!("invalid op: {er}"))?;
-        results.push(e.dispatch_inner(Command::ComponentProps { edit })?);
+        let edit: crate::props::PropsOp = serde_json::from_value(op).map_err(|er| format!("ops[{i}]: invalid op: {er}"))?;
+        results.push(
+          e.dispatch_inner(Command::ComponentProps { edit })
+            .map_err(|er| format!("ops[{i}]: {er}"))?,
+        );
       }
       Ok(json!({ "results": results }))
     }
@@ -729,6 +751,9 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
     }
     "fix_issues" => {
       let kinds = str_list(input.get("kinds"));
+      if let Some(bad) = kinds.iter().find(|k| !crate::lint::KINDS.contains(&k.as_str())) {
+        return Err(format!("unknown issue kind '{bad}'. Kinds: {}", crate::lint::KINDS.join(", ")));
+      }
       let page = e.page.clone();
       let mut fixed = 0;
       // Fixes can surface follow-ups; repeat a few passes with fresh layout.
@@ -785,7 +810,14 @@ fn resolve_prop_names(e: &Engine, op: &Value) -> Value {
 fn arrange(e: &mut Engine, input: &Value) -> Result<Value, String> {
   let ids = str_list(input.get("ids"));
   let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
+  let (ids, missing) = split_known(e, &ids);
+  if !missing.is_empty() && ids.is_empty() {
+    return Err(not_found(&missing, action));
+  }
+  let multi = ids.len() > 1;
   let cmd = match action {
+    // Several layers: one component each (use `frame` first to make them one component).
+    "create_component" if multi => Command::CreateComponents { ids },
     "group" => Command::Group { ids },
     "ungroup" => Command::Ungroup { ids },
     "frame" => Command::FrameSelection { ids },
@@ -838,6 +870,9 @@ fn arrange(e: &mut Engine, input: &Value) -> Result<Value, String> {
   let mut r = e.dispatch_inner(cmd)?;
   if let Value::Object(m) = &mut r {
     m.insert("selection".into(), json!(e.selection));
+    if !missing.is_empty() {
+      m.insert("notFound".into(), json!(missing));
+    }
   }
   Ok(r)
 }
@@ -886,6 +921,8 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
     apply_spec(&mut cx, &e.doc, &mut after, &spec, false)?;
     if let Some(p) = u.get("patch") {
       crate::patch::apply(&mut after, p).map_err(|er| cx.err("patch", er))?;
+      check_paint_sources(&after.fills).map_err(|er| cx.err("patch.fills", er))?;
+      check_paint_sources(&after.strokes).map_err(|er| cx.err("patch.strokes", er))?;
     }
     let diff = diff_patch(&before, &after);
     if !diff.as_object().map(|m| m.is_empty()).unwrap_or(true) {
@@ -976,6 +1013,13 @@ fn move_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
     }
     Some(other) => return Err(format!("parentId must be a layer id or null, got {}", parse::kind_of(other))),
   };
+  if let Some(p) = &parent {
+    let chain: Vec<String> = std::iter::once(p.clone()).chain(e.doc.ancestors(p)).collect();
+    if let Some(id) = found.iter().find(|id| chain.contains(id)) {
+      let what = if id == p { "itself" } else { "one of its own descendants" };
+      return Err(format!("can't move {id} into {what} ({p}); nothing was moved"));
+    }
+  }
   let reparent = input.get("parentId").is_some() || input.get("index").is_some();
   let mut cx = Ctx::new();
   let mut moved = found.clone();
@@ -2996,6 +3040,18 @@ fn apply_dimension(n: &mut Node, d: Option<Dim>, horizontal: bool) {
   }
 }
 
+/// Image paints may only use sources `paint::safe_image_src` accepts: the editor fetches them.
+fn check_paint_sources(paints: &[Paint]) -> Result<(), String> {
+  for p in paints {
+    if let Paint::Image { src, .. } = p {
+      if !crate::paint::safe_image_src(src) {
+        return Err("image src must be an absolute http(s):// URL (no spaces), a data:image/ URL or an asset: id".into());
+      }
+    }
+  }
+  Ok(())
+}
+
 /// Parses `fill` values: hex, CSS gradients, paint objects, arrays, or "none".
 pub fn parse_fills(v: &Value) -> Result<Vec<Paint>, String> {
   match v {
@@ -3008,9 +3064,11 @@ pub fn parse_fills(v: &Value) -> Result<Vec<Paint>, String> {
       }
       Ok(out)
     }
-    Value::Object(_) => serde_json::from_value::<Paint>(v.clone())
-      .map(|p| vec![p])
-      .map_err(|e| format!("invalid paint: {e}")),
+    Value::Object(_) => {
+      let p = serde_json::from_value::<Paint>(v.clone()).map_err(|e| format!("invalid paint: {e}"))?;
+      check_paint_sources(std::slice::from_ref(&p))?;
+      Ok(vec![p])
+    }
     _ => Err("invalid fill".into()),
   }
 }

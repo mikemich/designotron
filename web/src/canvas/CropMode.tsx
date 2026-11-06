@@ -3,6 +3,7 @@
 
 import { useEffect } from "react";
 import { assetUrl } from "../assets";
+import { safeImageSrc } from "../imageSrc";
 import type { Viewport } from "../store";
 import type { ImageCrop, Paint } from "../types";
 import { cropRectFor } from "../ui/color";
@@ -27,7 +28,7 @@ export function CropMode({ v }: { v: Viewport }) {
 
 function Crop({ v, t, paint }: { v: Viewport; t: PaintTarget; paint: ImagePaint }) {
   const { width: w, height: h, matrix: m } = t;
-  const src = paint.src.startsWith("asset:") ? assetUrl(paint.src.slice(6)) ?? "" : paint.src;
+  const src = !safeImageSrc(paint.src) ? "" : paint.src.startsWith("asset:") ? assetUrl(paint.src.slice(6)) ?? "" : paint.src;
 
   // A Crop paint without a rectangle (AI, import) starts from what Fill shows.
   useEffect(() => {

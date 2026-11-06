@@ -97,7 +97,7 @@ export function PluginsDialog() {
               </button>
             </div>
             <div className="muted small" style={{ marginTop: 10, lineHeight: 1.6 }}>
-              Plugins run in a sandbox with no access to your files or keys, and call the same tools Claude uses. A run that finishes within a few seconds is one undo step; after that, or from a plugin's panel, each change is its own step, so your own edits never get mixed into a plugin's.
+              Plugins run in a sandbox with no access to your files or keys, and call the same tools Claude uses. They can't load anything from the web (web addresses are refused), but a malicious plugin could still send data out by navigating its frame, so only run plugins you trust. A run is one undo step, however long it takes; a plugin can start a new step with dt.commitUndo(), and from a plugin's panel each click is its own step. Inline on*= attributes in a plugin's panel HTML don't run; set .onclick from the plugin's code.
             </div>
           </div>
         )}

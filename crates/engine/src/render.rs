@@ -793,7 +793,7 @@ impl<'a> Renderer<'a> {
           "<pattern id=\"{pid}\" patternUnits=\"userSpaceOnUse\" width=\"{pw}\" height=\"{ph}\"><image href=\"{src}\" width=\"{pw}\" height=\"{ph}\" preserveAspectRatio=\"{par}\" opacity=\"{op}\"/></pattern>",
           pw = fmt(pw.max(1.0)),
           ph = fmt(ph.max(1.0)),
-          src = esc(src),
+          src = esc(crate::paint::image_href(src)),
           op = fmt(*opacity),
         ));
         format!("url(#{pid})")
