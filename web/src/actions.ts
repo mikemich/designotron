@@ -360,11 +360,6 @@ export async function placeSvg(text: string, x: number, y: number, name = "SVG")
   try {
     const r = dispatchOrThrow<{ warnings?: string[] }>({ op: "importSvg", svg: text, x, y, parent: null, name });
     const warnings = r?.warnings ?? [];
-    if (warnings.length) {
-      const more = warnings.length > 1 ? ` (and ${warnings.length - 1} more)` : "";
-      toast(`SVG placed as editable vectors, with changes: ${warnings[0]}${more}`);
-      return;
-    }
     // Pasting changed from "an image" to "vectors": say once how to get the old behaviour.
     let seen = true;
     try {
@@ -373,10 +368,21 @@ export async function placeSvg(text: string, x: number, y: number, name = "SVG")
     } catch {
       /* private window: no hint */
     }
-    if (!seen) toast(`SVG placed as editable vectors. ${PASTE_IMAGE_KBD} pastes it as an image instead.`);
+    const hint = seen ? "" : ` ${PASTE_IMAGE_KBD} pastes it as an image instead.`;
+    if (warnings.length) {
+      const more = warnings.length > 1 ? ` (and ${warnings.length - 1} more)` : "";
+      toast(`SVG placed as editable vectors, with changes: ${warnings[0]}${more}.${hint}`);
+    } else if (hint) {
+      toast(`SVG placed as editable vectors.${hint}`);
+    }
     return;
   } catch (err) {
     reason = String(err).replace(/^Error:\s*/, "");
+  }
+  // Nothing drawable (empty, or only collapsed shapes): an image of it would be blank too.
+  if (reason === "nothing it can draw") {
+    toast("Nothing to import: the SVG has only empty or out-of-range shapes", "error");
+    return;
   }
   toast(`Placed as an image: this SVG uses ${reason}.`);
   await placeSvgAsImage(text, x, y, name);

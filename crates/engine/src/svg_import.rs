@@ -34,6 +34,11 @@ const MAX_DECLS: usize = 64;
 const MAX_STOPS: usize = 256;
 const MAX_ATTRS: usize = 500;
 const MAX_DASH: usize = 64;
+/// Class names read from an element, and class names a selector may name.
+const MAX_CLASSES: usize = 256;
+const MAX_SEL_CLASSES: usize = 8;
+/// What `import` says when nothing in the markup could be drawn.
+pub const NOTHING_TO_DRAW: &str = "nothing it can draw";
 /// Units of work (bytes parsed, rules matched, declarations applied) the whole import may spend.
 const MAX_WORK: usize = 8 * MAX_BYTES;
 /// Evenodd rewinding compares every subpath with every point: skipped past this many comparisons.
@@ -126,7 +131,7 @@ pub fn import(svg: &str, ids: &mut IdGen, opts: &Options) -> Result<Imported, St
     cx.walk(k, &m, &st, &mut kids)?;
   }
   if kids.is_empty() {
-    return Err("nothing it can draw".into());
+    return Err(NOTHING_TO_DRAW.into());
   }
   // No size anywhere: the frame is as big as the drawing.
   let (w, h) = size.unwrap_or_else(|| {
@@ -535,7 +540,7 @@ fn parse_selector(s: &str) -> Option<Sel> {
     }
   }
   commit(kind, &mut cur, &mut sel);
-  Some(sel)
+  (sel.classes.len() <= MAX_SEL_CLASSES).then_some(sel)
 }
 
 // ------------------------------------------------------------------ style
@@ -627,6 +632,8 @@ struct Cx<'a> {
   depth: usize,
   /// Work spent so far (see `MAX_WORK`); a cell so reading helpers can charge it.
   work: Cell<usize>,
+  /// Class names named by all the rules together: what matching one element costs besides the rules.
+  class_work: usize,
   geom_cache: HashMap<usize, Rc<Vec<SubPath>>>,
   tf_cache: HashMap<usize, Option<Mat>>,
   stops_cache: HashMap<(usize, String), Rc<Vec<GradientStop>>>,
@@ -647,6 +654,7 @@ impl<'a> Cx<'a> {
       points: 0,
       depth: 0,
       work: Cell::new(0),
+      class_work: 0,
       geom_cache: HashMap::new(),
       tf_cache: HashMap::new(),
       stops_cache: HashMap::new(),
@@ -672,6 +680,7 @@ impl<'a> Cx<'a> {
         }
       }
     }
+    self.class_work = self.rules.iter().map(|r| r.sel.classes.len()).sum();
     if notes.0 {
       self.warn("some <style> selectors are not supported and were ignored");
     }
@@ -694,7 +703,7 @@ impl<'a> Cx<'a> {
   fn declared(&self, el: usize) -> HashMap<String, String> {
     let e = &self.xml.els[el];
     let mut out: HashMap<String, String> = HashMap::new();
-    self.spend(e.attrs.iter().map(|(k, v)| k.len() + v.len() + 24).sum::<usize>() + self.rules.len() / 4);
+    self.spend(e.attrs.iter().map(|(k, v)| k.len() + v.len() + 24).sum::<usize>() + self.rules.len() / 4 + self.class_work);
     for (k, v) in &e.attrs {
       if PROPS.contains(&k.as_str()) {
         out.insert(k.clone(), v.trim().to_string());
@@ -702,14 +711,18 @@ impl<'a> Cx<'a> {
     }
     if !self.rules.is_empty() {
       let id = self.attr(el, "id");
-      let classes: Vec<&str> = self.attr(el, "class").map(|c| c.split_whitespace().collect()).unwrap_or_default();
+      // The element's classes once, so a rule costs what its own selector names.
+      let classes: HashSet<&str> = self
+        .attr(el, "class")
+        .map(|c| c.split_whitespace().take(MAX_CLASSES).collect())
+        .unwrap_or_default();
       let mut hits: Vec<&Rule> = self
         .rules
         .iter()
         .filter(|r| {
           r.sel.tag.as_deref().is_none_or(|t| t == e.name)
             && r.sel.id.as_deref().is_none_or(|i| Some(i) == id)
-            && r.sel.classes.iter().all(|c| classes.contains(&c.as_str()))
+            && r.sel.classes.iter().all(|c| classes.contains(c.as_str()))
         })
         .collect();
       hits.sort_by_key(|r| (r.spec, r.order));
@@ -928,7 +941,8 @@ impl<'a> Cx<'a> {
       }
     };
     if !mat_ok(&m2) {
-      // Collapsed to a line or a point: nothing is drawn.
+      // Collapsed to a line or a point, or beyond what a layer can hold: nothing is drawn.
+      self.warn("a shape with a collapsed or out-of-range transform was left out");
       return Ok(());
     }
     let clip = self.clip_of(&decl, &m2)?;
@@ -1243,6 +1257,9 @@ impl<'a> Cx<'a> {
     // (kind, user-space bbox, built node)
     let (mut node, bbox, subs): (Node, (f64, f64, f64, f64), Vec<SubPath>) = match geom {
       Geom::Rect { x, y, w, h, rx, ry } => {
+        if !finite(&[x, y, w, h, rx, ry]) {
+          self.warn("a shape with out-of-range coordinates was left out");
+        }
         if w <= 0.0 || h <= 0.0 || !finite(&[x, y, w, h, rx, ry]) {
           return Ok(None);
         }
@@ -1261,6 +1278,9 @@ impl<'a> Cx<'a> {
         }
       }
       Geom::Ellipse { cx, cy, rx, ry } => {
+        if !finite(&[cx, cy, rx, ry]) {
+          self.warn("a shape with out-of-range coordinates was left out");
+        }
         if rx <= 0.0 || ry <= 0.0 || !finite(&[cx, cy, rx, ry]) {
           return Ok(None);
         }
@@ -2523,6 +2543,47 @@ mod tests {
       );
       let i = ok(&many);
       assert!(i.warnings.iter().any(|w| w.contains("2,000")));
+    }
+
+    #[test]
+    fn class_lists_cost_what_they_name() {
+      // 150k class names on an element against 2,000 rules of eight classes, reached by nested uses.
+      let classes = "a ".repeat(150_000);
+      let rules = ".a.a.a.a.a.a.a.a{fill:red}".repeat(2_000);
+      let mut s = format!("<svg width='9' height='9'><style>{rules}</style><defs><rect id='l0' class='{classes}' width='1' height='1'/>");
+      for n in 1..=4 {
+        s.push_str(&format!("<g id='l{n}'>{}</g>", format!("<use href='#l{}'/>", n - 1).repeat(8)));
+      }
+      s.push_str("</defs><use href='#l4'/></svg>");
+      let (r, t) = timed(&s);
+      assert!(t < LIMIT, "took {t:?}");
+      let _ = r;
+      // Distinct names against distinct rules.
+      let names: String = (0..200_000).map(|n| format!("c{n} ")).collect();
+      let rules: String = (0..2_000).map(|n| format!(".b{n}{{fill:red}}")).collect();
+      let mut s = format!("<svg width='9' height='9'><style>{rules}</style><defs><rect id='l0' class='{names}' width='1' height='1'/>");
+      for n in 1..=4 {
+        s.push_str(&format!("<g id='l{n}'>{}</g>", format!("<use href='#l{}'/>", n - 1).repeat(8)));
+      }
+      s.push_str("</defs><use href='#l4'/></svg>");
+      let (r, t) = timed(&s);
+      assert!(t < LIMIT, "took {t:?}");
+      let _ = r;
+      // A selector naming too many classes is not read.
+      let i = ok(&format!(
+        "<svg width='9' height='9'><style>{}{{fill:red}}</style><rect class='a' width='1' height='1'/></svg>",
+        ".a".repeat(MAX_SEL_CLASSES + 1)
+      ));
+      assert!(i.warnings.iter().any(|w| w.contains("selectors")));
+    }
+
+    #[test]
+    fn dropped_shapes_are_reported() {
+      let i = ok(
+        r#"<svg width="9" height="9"><rect width="3" height="3"/><rect width="3" height="3" transform="scale(0)"/><circle r="2" cx="1e300"/></svg>"#,
+      );
+      assert!(i.warnings.iter().any(|w| w.contains("collapsed")));
+      assert!(i.warnings.iter().any(|w| w.contains("out-of-range")));
     }
 
     #[test]

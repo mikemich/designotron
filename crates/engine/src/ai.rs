@@ -2198,9 +2198,14 @@ fn build_svg(e: &mut Engine, cx: &mut Ctx, spec: &Value, markup: &str, parent: O
     height: size("height"),
   };
   let imported = crate::svg_import::import(markup, &mut e.gen, &opts).map_err(|reason| {
+    let why = if reason == crate::svg_import::NOTHING_TO_DRAW {
+      "this SVG has no shapes the importer can draw".to_string()
+    } else {
+      format!("this SVG uses {reason}")
+    };
     cx.err(
       "svg",
-      format!("can't be imported as vectors: this SVG uses {reason}. Use svgPath for path data, or build the layers directly"),
+      format!("can't be imported as vectors: {why}. Use svgPath for path data, or build the layers directly"),
     )
   })?;
   for w in &imported.warnings {
