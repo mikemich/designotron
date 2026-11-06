@@ -11,7 +11,7 @@
 //! peers send and understand the whole lists (`pages`, `styles`, `variables`); `apply`
 //! takes either form and `legacy` turns a granular delta into the old one.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -610,11 +610,25 @@ fn revert_inner(doc: &Document, from: &Document, to: &Document) -> Document {
   merge_list(&mut out.styles.grids, &from.styles.grids, &to.styles.grids, |s| &s.id);
   merge_collections(&mut out.variables, &from.variables, &to.variables);
   for id in from.comments.keys().chain(to.comments.keys()).collect::<BTreeSet<_>>() {
-    if from.comments.get(id) != to.comments.get(id) {
-      match to.comments.get(id) {
-        Some(c) => out.comments.insert(id.clone(), c.clone()),
-        None => out.comments.remove(id),
-      };
+    let (f, t) = (from.comments.get(id), to.comments.get(id));
+    if f == t {
+      continue;
+    }
+    match (f, t, out.comments.get(id)) {
+      // The step changed where a comment sits (a restore re-homing it): a peer's newer
+      // messages or resolve stay, and a comment a peer deleted meanwhile stays deleted.
+      (Some(f), Some(t), Some(cur)) => {
+        if let Some(m) = merge_fields(cur, f, t, false) {
+          out.comments.insert(id.clone(), m);
+        }
+      }
+      (Some(_), Some(_), None) => {}
+      (_, Some(t), _) => {
+        out.comments.insert(id.clone(), t.clone());
+      }
+      (_, None, _) => {
+        out.comments.remove(id);
+      }
     }
   }
   keep_tokens_in_use(&mut out, doc);
@@ -623,12 +637,9 @@ fn revert_inner(doc: &Document, from: &Document, to: &Document) -> Document {
   out
 }
 
-/// A revert may drop a style, variable or collection that `doc` has, because the undone step
-/// created it. When a layer still refers to one (a peer's layer, which per-person undo never
-/// touches), it is put back: an unused token is harmless and can be deleted on purpose,
-/// while unbinding would silently change someone else's work. The layers are scanned only
-/// when something was dropped, so ordinary undo costs nothing extra.
-fn keep_tokens_in_use(out: &mut Document, doc: &Document) {
+/// True when `out` lacks a style, variable or collection that `doc` has: the only case in which
+/// the layers need scanning for references.
+fn drops_tokens(out: &Document, doc: &Document) -> bool {
   let ids = |d: &Document| -> BTreeSet<String> {
     let s = &d.styles;
     let mut v: BTreeSet<String> = s.colors.iter().map(|x| x.id.clone()).collect();
@@ -638,19 +649,24 @@ fn keep_tokens_in_use(out: &mut Document, doc: &Document) {
     v.extend(d.variables.iter().flat_map(|c| c.variables.iter().map(|x| x.id.clone())));
     v
   };
-  let kept = ids(out);
-  let dropped_tokens = ids(doc).difference(&kept).next().is_some();
-  let dropped_colls = doc.variables.iter().any(|c| !out.variables.iter().any(|o| o.id == c.id));
-  if !dropped_tokens && !dropped_colls {
+  ids(doc).difference(&ids(out)).next().is_some() || doc.variables.iter().any(|c| !out.variables.iter().any(|o| o.id == c.id))
+}
+
+/// A revert may drop a style, variable or collection that `doc` has, because the undone step
+/// created it. When a layer still refers to one (a peer's layer, which per-person undo never
+/// touches), it is put back: an unused token is harmless and can be deleted on purpose,
+/// while unbinding would silently change someone else's work. The layers are scanned only
+/// when something was dropped, so ordinary undo costs nothing extra.
+fn keep_tokens_in_use(out: &mut Document, doc: &Document) {
+  if !drops_tokens(out, doc) {
     return;
   }
   let used = clipboard::references(out.nodes.values());
-  // Styles.
   macro_rules! restore_styles {
     ($list:ident) => {
-      for s in &doc.styles.$list {
+      for (at, s) in doc.styles.$list.iter().enumerate() {
         if used.styles.contains(&s.id) && !out.styles.$list.iter().any(|o| o.id == s.id) {
-          out.styles.$list.push(s.clone());
+          out.styles.$list.insert(at.min(out.styles.$list.len()), s.clone());
         }
       }
     };
@@ -659,42 +675,63 @@ fn keep_tokens_in_use(out: &mut Document, doc: &Document) {
   restore_styles!(texts);
   restore_styles!(effects);
   restore_styles!(grids);
-  // Variables: those layers use, and what the variables that stay alias, to a fixed point.
-  let mut need: BTreeSet<String> = used.vars.iter().cloned().collect();
-  let mut queue: Vec<String> = need.iter().cloned().collect();
-  queue.extend(out.variables.iter().flat_map(|c| c.variables.iter().map(|v| v.id.clone())));
-  let mut seen: BTreeSet<String> = BTreeSet::new();
-  while let Some(id) = queue.pop() {
-    if !seen.insert(id.clone()) {
-      continue;
+
+  // Variables: those layers use, what the variables that stay alias, and everything in a
+  // collection that comes back whole, to a fixed point.
+  let in_out: HashSet<String> = out
+    .variables
+    .iter()
+    .flat_map(|c| c.variables.iter().map(|v| v.id.clone()))
+    .collect();
+  let live_colls: HashSet<String> = out.variables.iter().map(|c| c.id.clone()).collect();
+  let (need, whole) = {
+    let mut by_id: HashMap<&str, &Variable> = HashMap::new();
+    for v in out.variables.iter().chain(doc.variables.iter()).flat_map(|c| c.variables.iter()) {
+      by_id.entry(v.id.as_str()).or_insert(v);
     }
-    let found = out
-      .variables
-      .iter()
-      .chain(doc.variables.iter())
-      .flat_map(|c| c.variables.iter())
-      .find(|v| v.id == id);
-    let Some(v) = found else { continue };
-    for target in v.values.values().filter_map(|x| x.get("alias").and_then(|a| a.as_str())) {
-      if need.insert(target.to_string()) {
-        queue.push(target.to_string());
+    let mut need: HashSet<String> = used.vars.clone();
+    let mut queue: Vec<&str> = used.vars.iter().map(|s| s.as_str()).collect();
+    queue.extend(in_out.iter().map(|s| s.as_str()));
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut whole: HashSet<String> = HashSet::new();
+    loop {
+      while let Some(id) = queue.pop() {
+        if !seen.insert(id) {
+          continue;
+        }
+        let Some(v) = by_id.get(id) else { continue };
+        for target in v.values.values().filter_map(|x| x.get("alias").and_then(|a| a.as_str())) {
+          if need.insert(target.to_string()) {
+            queue.push(target);
+          }
+        }
+      }
+      // A dropped collection that is pinned, or holds a needed variable, returns whole.
+      let back: Vec<&Collection> = doc
+        .variables
+        .iter()
+        .filter(|c| !live_colls.contains(&c.id) && !whole.contains(&c.id))
+        .filter(|c| used.colls.contains(&c.id) || c.variables.iter().any(|v| need.contains(&v.id)))
+        .collect();
+      if back.is_empty() {
+        break;
+      }
+      for c in back {
+        whole.insert(c.id.clone());
+        queue.extend(c.variables.iter().map(|v| v.id.as_str()));
       }
     }
-  }
-  for c in &doc.variables {
-    let pinned = used.colls.contains(&c.id);
-    let missing: Vec<&Variable> = c
-      .variables
-      .iter()
-      .filter(|v| need.contains(&v.id) && !out.variables.iter().any(|o| o.variables.iter().any(|x| x.id == v.id)))
-      .collect();
-    match out.variables.iter_mut().find(|o| o.id == c.id) {
-      Some(o) => o.variables.extend(missing.into_iter().cloned()),
-      None if pinned || !missing.is_empty() => out.variables.push(Collection {
-        variables: missing.into_iter().cloned().collect(),
-        ..c.clone()
-      }),
-      None => {}
+    (need, whole)
+  };
+  for (at, c) in doc.variables.iter().enumerate() {
+    if whole.contains(&c.id) {
+      out.variables.insert(at.min(out.variables.len()), c.clone());
+    } else if let Some(o) = out.variables.iter_mut().find(|o| o.id == c.id) {
+      for (vat, v) in c.variables.iter().enumerate() {
+        if need.contains(&v.id) && !in_out.contains(&v.id) {
+          o.variables.insert(vat.min(o.variables.len()), v.clone());
+        }
+      }
     }
   }
 }
@@ -2159,8 +2196,7 @@ mod tests {
   }
 
   #[test]
-  fn the_reference_scan_runs_only_when_a_revert_drops_a_token() {
-    // No dropped token: nothing to put back and the same document comes out.
+  fn only_a_revert_that_drops_a_token_needs_the_reference_scan() {
     let mut a = engine(1);
     let id = rect(&mut a, 0.0, None);
     let before = a.doc.clone();
@@ -2170,8 +2206,182 @@ mod tests {
     })
     .unwrap();
     let after = a.doc.clone();
-    let reverted = revert(&after, &after, &before);
-    assert_eq!(reverted.variables, after.variables);
-    assert_eq!(reverted.styles, after.styles);
+    assert!(!drops_tokens(&revert(&after, &after, &before), &after), "a move drops nothing");
+    ai(
+      &mut a,
+      "define_variables",
+      json!({ "collection": "Theme", "variables": [{ "name": "Surface", "type": "color", "value": "#111111" }] }),
+    );
+    let with_token = a.doc.clone();
+    let mut undone = revert_inner(&with_token, &with_token, &after);
+    assert!(drops_tokens(&undone, &with_token), "undoing a definition drops the token");
+    keep_tokens_in_use(&mut undone, &with_token);
+    assert!(undone.variables.is_empty(), "nothing uses it, so it goes");
+  }
+
+  #[test]
+  fn redo_keeps_every_variable_of_a_partly_restored_collection() {
+    let (mut room, _) = Room::new(2);
+    ai(
+      &mut room.editors[0],
+      "define_variables",
+      json!({ "collection": "Theme", "variables": [
+        { "name": "Surface", "type": "color", "value": "#111111" },
+        { "name": "Text", "type": "color", "value": "#EEEEEE" }] }),
+    );
+    sync(&mut room, 0);
+    let surface = var_id(&room.editors[1], "Theme", "Surface");
+    ai(
+      &mut room.editors[1],
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle", "name": "Mine", "width": 20, "height": 20, "bind": { "fill": "Theme/Surface" } }] }),
+    );
+    sync(&mut room, 1);
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    sync(&mut room, 0);
+    for e in &room.editors {
+      assert_eq!(var_id(e, "Theme", "Surface"), surface);
+    }
+    room.editors[0].dispatch(Command::Redo).unwrap();
+    sync(&mut room, 0);
+    for e in &room.editors {
+      assert_eq!(tokens(e).0, 2, "Surface and Text on both editors");
+      var_id(e, "Theme", "Text");
+    }
+  }
+
+  #[test]
+  fn a_collection_alias_into_another_dropped_collection_comes_back_whole() {
+    let (mut room, _) = Room::new(2);
+    let (_, surface) = shared_tokens(&mut room);
+    ai(
+      &mut room.editors[0],
+      "define_variables",
+      json!({ "collection": "Theme", "variables": [{ "name": "Text", "type": "color", "value": { "alias": "Primitives/Gray" } }] }),
+    );
+    sync(&mut room, 0);
+    for _ in 0..4 {
+      room.editors[0].dispatch(Command::Undo).unwrap();
+    }
+    sync(&mut room, 0);
+    for e in &room.editors {
+      assert_eq!(var_id(e, "Theme", "Surface"), surface);
+      var_id(e, "Primitives", "Gray");
+    }
+  }
+
+  #[test]
+  fn undo_keeps_a_style_used_only_through_an_instance_override() {
+    let (mut room, _) = Room::new(2);
+    ai(
+      &mut room.editors[0],
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand", "color": "#6D4AFF" }] }),
+    );
+    sync(&mut room, 0);
+    let style = room.editors[1].doc.styles.colors[0].id.clone();
+    let id = rect(&mut room.editors[1], 300.0, None);
+    // Set directly: no command writes an override with a style link.
+    room.editors[1].doc.get_mut(&id).unwrap().instance = Some(crate::model::InstanceInfo {
+      component_id: "main".into(),
+      overrides: [("inner".to_string(), json!({ "fillStyle": style }))].into(),
+      ..Default::default()
+    });
+    assert!(room.editors[1].doc.get(&id).unwrap().instance.is_some(), "the override was set");
+    sync(&mut room, 1);
+    assert!(
+      room.editors[0].doc.get(&id).unwrap().instance.is_some(),
+      "and reached the other editor"
+    );
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    sync(&mut room, 0);
+    for e in &room.editors {
+      assert_eq!(e.doc.styles.colors.len(), 1, "the override still points at it");
+    }
+  }
+
+  #[test]
+  fn undoing_a_restore_keeps_a_peers_reply_and_resolve() {
+    let (mut room, _) = Room::new(2);
+    let snapshot: Value = serde_json::from_str(&room.editors[0].to_json()).unwrap();
+    let late = rect(&mut room.editors[0], 400.0, None);
+    room.editors[0]
+      .dispatch(Command::AddComment {
+        page: None,
+        x: 405.0,
+        y: 5.0,
+        node: Some(late.clone()),
+        text: "on late".into(),
+        author: "A".into(),
+        time: 1.0,
+      })
+      .unwrap();
+    sync(&mut room, 0);
+    let cid = room.editors[1].doc.comments.keys().next().unwrap().clone();
+    room.editors[0]
+      .dispatch(Command::ReplaceDocument {
+        doc: snapshot,
+        keep_comments: true,
+      })
+      .unwrap();
+    sync(&mut room, 0);
+    assert_eq!(room.editors[1].doc.comments[&cid].node, None, "re-homed as a page comment");
+    room.editors[1]
+      .dispatch(Command::ReplyComment {
+        id: cid.clone(),
+        text: "reply".into(),
+        author: "B".into(),
+        time: 2.0,
+      })
+      .unwrap();
+    room.editors[1]
+      .dispatch(Command::ResolveComment {
+        id: cid.clone(),
+        resolved: true,
+      })
+      .unwrap();
+    sync(&mut room, 1);
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    sync(&mut room, 0);
+    for e in &room.editors {
+      let c = &e.doc.comments[&cid];
+      assert_eq!(c.messages.len(), 2, "the peer's reply survives");
+      assert!(c.resolved, "and so does their resolve");
+      assert_eq!(c.node.as_deref(), Some(late.as_str()), "attached to its layer again");
+    }
+  }
+
+  #[test]
+  fn undoing_a_restore_leaves_a_comment_a_peer_deleted_deleted() {
+    let (mut room, _) = Room::new(2);
+    let snapshot: Value = serde_json::from_str(&room.editors[0].to_json()).unwrap();
+    let late = rect(&mut room.editors[0], 400.0, None);
+    room.editors[0]
+      .dispatch(Command::AddComment {
+        page: None,
+        x: 405.0,
+        y: 5.0,
+        node: Some(late),
+        text: "on late".into(),
+        author: "A".into(),
+        time: 1.0,
+      })
+      .unwrap();
+    sync(&mut room, 0);
+    let cid = room.editors[1].doc.comments.keys().next().unwrap().clone();
+    room.editors[0]
+      .dispatch(Command::ReplaceDocument {
+        doc: snapshot,
+        keep_comments: true,
+      })
+      .unwrap();
+    sync(&mut room, 0);
+    room.editors[1].dispatch(Command::DeleteComment { id: cid }).unwrap();
+    sync(&mut room, 1);
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    sync(&mut room, 0);
+    for e in &room.editors {
+      assert!(e.doc.comments.is_empty());
+    }
   }
 }

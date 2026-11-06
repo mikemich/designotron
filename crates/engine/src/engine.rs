@@ -777,8 +777,10 @@ fn carry_comments(current: &Document, restored: &Document) -> std::collections::
         c.node = None;
       }
     }
-    if restored.page(&c.page).is_none() {
-      c.page = restored.pages[0].id.clone();
+    match c.node.as_ref().and_then(|id| restored.get(id)) {
+      Some(n) => c.page = n.page.clone(),
+      None if restored.page(&c.page).is_none() => c.page = restored.pages[0].id.clone(),
+      None => {}
     }
   }
   out

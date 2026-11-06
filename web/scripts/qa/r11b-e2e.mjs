@@ -77,17 +77,19 @@ const newFile = async (p) => {
 await waitUntil(() => fetch(`${BASE}/health`).then((r) => r.ok, () => false), 10000, 100);
 const browser = await chromium.launch(launch);
 try {
-  const O = await person(browser, "Olga"), G = await person(browser, "Gina"), L = await person(browser, "Solo");
+  const O = await person(browser, "Olga"), G = await person(browser, "Gina"), V = await person(browser, "Vik"), L = await person(browser, "Solo");
   await newFile(O);
   await ai(O, "create_nodes", { nodes: [{ type: "frame", name: "Hero", x: 0, y: 0, width: 480, height: 320, fill: "#FFFFFF" }] });
   await O.page.click(".tbtn[title='Share for live editing']");
   await O.page.click("button:has-text('Share online')");
   await O.page.waitForFunction(() => window.__dt.collab().status === "live");
-  const link = await O.page.evaluate(() => window.__dt.collab().link);
+  const { link, viewId } = await O.page.evaluate(() => ({ link: window.__dt.collab().link, viewId: window.__dt.collab().viewId }));
   await O.page.keyboard.press("Escape");
   await O.page.locator(".modal-bg").waitFor({ state: "detached" }).catch(() => {});
   await G.page.goto(link);
   await waitUntil(() => G.page.evaluate(() => window.__dt.collab().status === "live"), 20000);
+  await V.page.goto(`${BASE}/?view=${viewId}`);
+  await waitUntil(() => V.page.evaluate(() => window.__dt.collab().status === "live"), 20000);
   await sleep(1000);
 
   // ---------------- B2: restore keeps comments ----------------
@@ -124,7 +126,7 @@ try {
   await waitUntil(async () => !(await named(O, "Late")), 8000);
   await sleep(1500);
   check("restore: the late layer is gone (version restored)", !(await named(O, "Late")));
-  for (const p of [O, G]) {
+  for (const p of [O, G, V]) {
     check(`restore: ${p.name} still sees all three comments`, JSON.stringify(await commentTexts(p)) === JSON.stringify(all), JSON.stringify(await commentTexts(p)));
   }
   const cs = Object.values((await doc(G)).comments);
@@ -133,9 +135,20 @@ try {
   check("restore: a resolved comment stays resolved", cs.find((c) => c.messages[0].text === "Gina on the page")?.resolved === true);
   check("restore: a comment on a surviving layer stays attached", cs.find((c) => c.messages[0].text === "On Hero")?.node === heroId);
   await O.page.screenshot({ path: `${OUT}/after-restore.png` });
-  await undo(O);
+  // Gina replies to and resolves the re-homed comment before Olga undoes the restore.
+  const orphanId = orphan.id;
+  await G.page.evaluate((id) => {
+    window.__dt.dispatch({ op: "replyComment", id, text: "Gina reply", author: "Gina", time: Date.now() });
+    window.__dt.dispatch({ op: "resolveComment", id, resolved: true });
+  }, orphanId);
   await sleep(1200);
+  await undo(O);
+  await sleep(1500);
   check("undo of the restore brings the layer back and keeps the comments", !!(await named(O, "Late")) && (await commentTexts(O)).length === 3);
+  for (const p of [O, G, V]) {
+    const c = (await doc(p)).comments[orphanId];
+    check(`undo of the restore: ${p.name} keeps Gina's reply and resolve, and the comment is back on its layer`, c && c.messages.length === 2 && c.resolved && c.node === lateId, c && JSON.stringify({ n: c.messages.length, r: c.resolved, node: c.node }));
+  }
 
   // ---------------- B3: undo keeps tokens a peer uses ----------------
   await ai(O, "define_variables", { collection: "Primitives", variables: [{ name: "Gray", type: "color", value: "#222222" }] });
@@ -210,7 +223,7 @@ try {
   await sleep(300);
   check("single user: redo brings them back", (await varNames(S)).includes("Kit/Ink"));
 
-  for (const p of [O, G, L, S]) check(`${p.name}: no page errors`, p.errors.length === 0, p.errors.join(" | "));
+  for (const p of [O, G, V, L, S]) check(`${p.name}: no page errors`, p.errors.length === 0, p.errors.join(" | "));
 } catch (e) {
   failed++;
   console.log("FAIL  script error: " + (e?.stack ?? e));
