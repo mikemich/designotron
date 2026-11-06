@@ -86,6 +86,7 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Add to / remove from the selection", `${SHIFT}click`],
       ["Move along one axis", `${SHIFT}drag`],
       ["Move between panels and canvas", `F6 / ${SHIFT}F6`],
+      ["Leave the canvas (Tab selects layers there)", `F6, or Esc then Tab`],
       ["Next / previous page", `${ALT}Page Down / ${ALT}Page Up`],
       ["Layers: move and select", "↑ ↓ Home End"],
       ["Layers: expand / collapse", "→ / ←"],

@@ -112,6 +112,9 @@ pub struct TextLine {
   /// Top of the line inside the layout, including paragraph spacing above it.
   pub top: f64,
   pub segments: Vec<Segment>,
+  /// The line ends because the paragraph wrapped, not at a hard break or the end: justified
+  /// text stretches only these.
+  pub soft_wrap: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -233,12 +236,14 @@ pub fn layout_limited(props: &TextProps, max_width: Option<f64>, limit: Option<u
   // Stack the lines, adding paragraph spacing before every paragraph but the first.
   let mut top = 0.0;
   let mut next_para = 1;
+  let count = lines.len();
   for (i, line) in lines.iter_mut().enumerate() {
     if para_starts.get(next_para) == Some(&i) {
       top += props.paragraph_spacing;
       next_para += 1;
     }
     line.top = top;
+    line.soft_wrap = i + 1 < count && para_starts.get(next_para) != Some(&(i + 1));
     top += line.height;
   }
   let width = lines.iter().map(|l| l.width).fold(0.0, f64::max);
@@ -369,6 +374,7 @@ fn make_line(pieces: Vec<Piece>, styles: &[SpanStyle], m: &dyn TextMeasurer, lh_
     height: height.max(base_lh),
     top: 0.0,
     segments,
+    soft_wrap: false,
   }
 }
 

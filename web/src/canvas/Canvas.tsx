@@ -75,6 +75,46 @@ interface SegmentHit {
   y: number;
 }
 
+let labelCtx: CanvasRenderingContext2D | null | undefined;
+const labelWidths = new Map<string, number>();
+/** `text` cut with an ellipsis to fit `maxW` pixels at the frame label's size; null under 24 px. */
+function fitLabel(text: string, maxW: number): string | null {
+  if (maxW < 24) return null;
+  if (labelCtx === undefined) {
+    labelCtx = document.createElement("canvas").getContext("2d");
+    // The label's real font: the page's family at the label's size.
+    if (labelCtx) labelCtx.font = `11px ${getComputedStyle(document.body).fontFamily || "sans-serif"}`;
+  }
+  // Every frame's label is measured on every render: widths are cached by string.
+  const w = (t: string) => {
+    let v = labelWidths.get(t);
+    if (v === undefined) {
+      if (labelWidths.size > 5000) labelWidths.clear();
+      v = labelCtx ? labelCtx.measureText(t).width : t.length * 6;
+      labelWidths.set(t, v);
+    }
+    return v;
+  };
+  if (w(text) <= maxW) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (w(text.slice(0, mid) + "…") <= maxW) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo > 0 ? text.slice(0, lo).trimEnd() + "…" : "…";
+}
+
+/** A vector projected onto the nearest 45 degree direction. */
+function snap45(v: Pt, on: boolean): Pt {
+  if (!on) return v;
+  const a = Math.round(Math.atan2(v.y, v.x) / (Math.PI / 4)) * (Math.PI / 4);
+  const d = { x: Math.cos(a), y: Math.sin(a) };
+  const len = v.x * d.x + v.y * d.y;
+  return { x: d.x * len, y: d.y * len };
+}
+
 /** The open path end the pen tool continues from, with its outgoing handle (page space). */
 interface PenFrom {
   id: string;
@@ -168,6 +208,7 @@ export function Canvas() {
   const [draw, setDraw] = useState<{ start: Pt; cur: Pt } | null>(null);
   const [pen, setPen] = useState<VectorPoint[]>([]);
   const [penCursor, setPenCursor] = useState<Pt | null>(null);
+  const penLast = useRef<Pt | null>(null);
   // Pen continuing an open path from one of its ends.
   const [penFrom, setPenFrom] = useState<PenFrom | null>(null);
   // Vector edit mode: the point on the path under the pointer (where a click adds an anchor).
@@ -407,8 +448,18 @@ export function Canvas() {
         finishPen(false);
       }
     };
+    // The preview follows Shift going down or up without the pointer moving.
+    const onShift = (e: KeyboardEvent) => {
+      if (e.key === "Shift" && penLast.current) setPenCursor(penSnap(penLast.current, e.type === "keydown"));
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onShift);
+    window.addEventListener("keyup", onShift);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", onShift);
+      window.removeEventListener("keyup", onShift);
+    };
   }, [tool, pen, penFrom]);
 
   useEffect(() => {
@@ -468,6 +519,14 @@ export function Canvas() {
     const m = query<{ items: BoundsItem[] }>({ q: "bounds", ids: [id] }).items[0];
     const pts = part === "anchor" ? vectorPoints() : [];
     drag.current = { kind: "vector", id, sub, idx, part, pts, startLocal: apply(invert(m.matrix), p), start: n, moved: false };
+  }
+
+  /** A new pen point: with Shift, on a 45 degree step from the previous anchor. */
+  function penSnap(p: Pt, shift: boolean): Pt {
+    const prev = pen.length ? pen[pen.length - 1] : penFrom?.anchor;
+    if (!shift || !prev) return p;
+    const v = snap45({ x: p.x - prev.x, y: p.y - prev.y }, true);
+    return { x: prev.x + v.x, y: prev.y + v.y };
   }
 
   /** An open end of a selected (or edited) path that `near` accepts, for the pen to continue. */
@@ -638,7 +697,8 @@ export function Canvas() {
             return;
           }
         }
-        setPen([...pen, { x: p.x, y: p.y, inX: 0, inY: 0, outX: 0, outY: 0 }]);
+        const np = penSnap(p, e.shiftKey);
+        setPen([...pen, { x: np.x, y: np.y, inX: 0, inY: 0, outX: 0, outY: 0 }]);
         drag.current = { kind: "penHandle", index: pen.length };
         break;
       }
@@ -675,7 +735,10 @@ export function Canvas() {
         const id = query<string | null>({ q: "pick", x: p.x, y: p.y, zoom: zoom(), deep: e.metaKey || e.ctrlKey });
         if (id !== useStore.getState().hover) useStore.setState({ hover: id });
       }
-      if (tool === "pen") setPenCursor(p);
+      if (tool === "pen") {
+        penLast.current = p;
+        setPenCursor(penSnap(p, e.shiftKey));
+      }
       return;
     }
     switch (d.kind) {
@@ -750,7 +813,7 @@ export function Canvas() {
         setPen((pts) => {
           const a = pts[d.index];
           if (!a) return pts;
-          const out = { x: p.x - a.x, y: p.y - a.y };
+          const out = snap45({ x: p.x - a.x, y: p.y - a.y }, e.shiftKey);
           if (Math.hypot(out.x, out.y) * zoom() < 3) return pts;
           return pts.map((pt, i) => (i === d.index ? { ...pt, outX: out.x, outY: out.y, inX: -out.x, inY: -out.y } : pt));
         });
@@ -1117,7 +1180,7 @@ export function Canvas() {
       role="application"
       aria-roledescription="design canvas"
       aria-label={`Canvas, ${pageObj?.name ?? "page"}`}
-      aria-description="Tab selects layers, F6 moves to panels"
+      aria-description="Tab selects the next layer. F6, or Esc then Tab, leaves the canvas for the panels"
       style={{ background: pageObj?.background ?? "#1a1a1a", cursor }}
       onPointerDown={(e) => {
         onPointerDown(e);
@@ -1154,6 +1217,9 @@ export function Canvas() {
           const n = doc.nodes[f.id];
           const p = toScreen(v, apply(f.matrix, { x: 0, y: 0 }));
           const isComp = n.type === "component" || n.type === "componentSet";
+          // The label never runs past its frame's screen width, and goes when the frame is tiny.
+          const label = fitLabel((isComp ? "❖ " : "") + n.name, Math.hypot(f.matrix.a, f.matrix.b) * n.width * v.zoom);
+          if (label === null) return null;
           return (
             <text
               key={f.id}
@@ -1162,8 +1228,7 @@ export function Canvas() {
               y={p.y - 6}
               className={"frame-label" + (sel.includes(f.id) ? " selected" : "") + (isComp ? " component" : "")}
             >
-              {isComp ? "❖ " : ""}
-              {n.name}
+              {label}
             </text>
           );
         })}

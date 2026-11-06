@@ -23,6 +23,9 @@ export function TextEditor({ id }: { id: string }) {
     // and typing are one undo step.
     if (textGestureOpen) textGestureOpen = false;
     else dispatch({ op: "beginGesture" });
+    // Where focus was when editing began: it goes back there when editing ends.
+    const from = document.activeElement as HTMLElement | null;
+    const rowId = from?.closest<HTMLElement>("[data-layer]")?.dataset.layer;
     const el = ref.current;
     if (el) {
       el.focus();
@@ -44,6 +47,12 @@ export function TextEditor({ id }: { id: string }) {
       const n = getDoc().nodes[id];
       if (n && n.type === "text" && !n.text?.characters.trim()) dispatch({ op: "delete", ids: [id] });
       dispatch({ op: "endGesture" });
+      // The textarea is gone: unless focus went somewhere on purpose, hand it back so it never falls to the page.
+      const active = document.activeElement;
+      if (!active || active === document.body) {
+        const row = rowId ? Array.from(document.querySelectorAll<HTMLElement>("[data-layer]")).find((r) => r.dataset.layer === rowId) : null;
+        (row ?? document.getElementById("dt-canvas"))?.focus({ preventScroll: true });
+      }
     };
   }, [id]);
 
@@ -93,7 +102,7 @@ export function TextEditor({ id }: { id: string }) {
         font: `${t.italic ? "italic " : ""}${t.fontWeight} ${t.fontSize}px/${lh}px "${t.fontFamily}", sans-serif`,
         letterSpacing: t.letterSpacing,
         color,
-        textAlign: t.alignH === "justify" ? "left" : t.alignH,
+        textAlign: t.alignH,
         textTransform: t.case === "upper" ? "uppercase" : t.case === "lower" ? "lowercase" : t.case === "title" ? "capitalize" : "none",
         whiteSpace: t.autoResize === "width" && !wrapsAtMax ? "pre" : "pre-wrap",
         overflowWrap: "anywhere",

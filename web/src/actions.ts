@@ -302,7 +302,7 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
     // as it was (DOCTYPE entities, comments) so the image renders as the author made it.
     const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text.replace(/^\uFEFF/, "").trim());
     const { width, height } = await imageSize(url);
-    dispatch({ op: "createImage", src: "asset:" + addAsset(url), x: c.x - width / 2, y: c.y - height / 2, width, height, name: "SVG", parent: null });
+    dispatch({ op: "createImage", src: "asset:" + addAsset(url), x: c.x - width / 2, y: c.y - height / 2, width, height, name: "SVG", parent: query<string | null>({ q: "frameAt", x: c.x, y: c.y, exclude: [] }) });
     return;
   }
   const c = viewportCenter();
@@ -366,7 +366,9 @@ export async function insertImageFile(file: File, x: number, y: number) {
     width = Math.round(width * k);
     height = Math.round(height * k);
   }
-  dispatch({ op: "createImage", src: "asset:" + id, x: x - width / 2, y: y - height / 2, width, height, name: file.name.replace(/\.\w+$/, ""), parent: null });
+  // The frame under the drop point takes the image (the engine reads x and y as page coordinates).
+  const parent = query<string | null>({ q: "frameAt", x, y, exclude: [] });
+  dispatch({ op: "createImage", src: "asset:" + id, x: x - width / 2, y: y - height / 2, width, height, name: file.name.replace(/\.\w+$/, ""), parent });
 }
 
 export async function placeImage() {

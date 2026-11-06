@@ -201,7 +201,10 @@ fn local_render_bounds<'a>(doc: &'a Document, m: &dyn TextMeasurer, memo: &mut H
   }
   let [sl, st, sr, sb] = stroke_margins(n);
   let own = match n.kind {
-    NodeType::Text => text_box(n, m),
+    NodeType::Text => {
+      let b = text_box(n, m);
+      Rect::new(b.x - sl, b.y - st, b.width + sl + sr, b.height + st + sb)
+    }
     _ => Rect::new(-sl, -st, n.width + sl + sr, n.height + st + sb),
   };
   // A group paints only its children; every other node paints its own box too.
@@ -308,8 +311,18 @@ fn per_side_weights(n: &Node) -> Option<[f64; 4]> {
 /// How far the visible strokes reach beyond the node's box.
 fn stroke_margin(n: &Node) -> f64 {
   let sw = n.stroke_weight;
-  if sw <= 0.0 || matches!(n.kind, NodeType::Text | NodeType::Group) || !n.strokes.iter().any(|p| p.visible()) {
+  if sw <= 0.0 || n.kind == NodeType::Group || !n.strokes.iter().any(|p| p.visible()) {
     return 0.0;
+  }
+  if n.kind == NodeType::Text {
+    // Outside strokes are drawn at twice the weight, half of it under the glyphs; miters can't
+    // spike because the joins are round.
+    return match n.stroke_align {
+      StrokeAlign::Inside => 0.0,
+      StrokeAlign::Center => sw / 2.0,
+      StrokeAlign::Outside => sw,
+    }
+    .ceil();
   }
   let mut m = match n.kind {
     NodeType::Line => sw / 2.0,
@@ -892,52 +905,108 @@ impl<'a> Renderer<'a> {
     };
     let lod_size = self.lod_size(t, &lay);
     let lod = lod_size.map(|s| format!(" class=\"s{s}\"")).unwrap_or_default();
-    let mut out = format!(
-      "<text{lod} fill=\"{fill}\" font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\"{}{} text-anchor=\"{anchor}\" dominant-baseline=\"central\"{deco} style=\"white-space:pre\">",
-      esc(&font_stack(&t.font_family)),
-      fmt(t.font_size),
-      t.font_weight,
-      if t.italic { " font-style=\"italic\"" } else { "" },
-      if t.letter_spacing != 0.0 { format!(" letter-spacing=\"{}\"", fmt(t.letter_spacing)) } else { String::new() },
-    );
+    let stroke = self.text_stroke(n);
+    let head = |fill: &str, extra: &str| {
+      format!(
+        "<text{lod} fill=\"{fill}\" font-family=\"{}\" font-size=\"{}\" font-weight=\"{}\"{}{} text-anchor=\"{anchor}\" dominant-baseline=\"central\"{deco}{extra} style=\"white-space:pre\">",
+        esc(&font_stack(&t.font_family)),
+        fmt(t.font_size),
+        t.font_weight,
+        if t.italic { " font-style=\"italic\"" } else { "" },
+        if t.letter_spacing != 0.0 { format!(" letter-spacing=\"{}\"", fmt(t.letter_spacing)) } else { String::new() },
+      )
+    };
+    let on_text = match stroke.as_ref().map(|s| (s.align, s.attrs.as_str())) {
+      Some((StrokeAlign::Center, a)) => a.to_string(),
+      Some((StrokeAlign::Outside, a)) => format!(" paint-order=\"stroke\"{a}"),
+      _ => String::new(),
+    };
+    let mut out = head(&fill, &on_text);
     let _ = lh;
     let base = SpanStyle::base(t);
     let mut bars = String::new();
+    let mut body = String::new();
     for line in &lay.lines {
       let top = offset + line.top;
       if self.opts.mode == Mode::Canvas {
         bars.push_str(&greek_bar(line, base.size, top, n.width, t.align_h));
       }
+      // Justify stretches the gaps of wrapped lines to the box's width.
+      let spacing = (t.align_h == TextAlignH::Justify && line.soft_wrap && t.auto_resize != crate::model::TextAutoResize::Width)
+        .then(|| {
+          let spaces = line.text.chars().filter(|c| matches!(*c, ' ' | '\u{a0}')).count();
+          let extra = n.width - line.width;
+          (spaces > 0 && extra > 0.01).then(|| format!(" word-spacing=\"{}\"", fmt(extra / spaces as f64)))
+        })
+        .flatten()
+        .unwrap_or_default();
       let mixed_size = line.segments.iter().any(|sg| sg.style.size != base.size);
       if mixed_size {
         // Mixed sizes share an alphabetic baseline (central would centre each span).
         let max = line.segments.iter().map(|sg| sg.style.size).fold(0.0, f64::max);
         let y = top + line.height / 2.0 + 0.35 * max;
-        out.push_str(&format!(
-          "<tspan x=\"{}\" y=\"{}\" dominant-baseline=\"alphabetic\">",
+        body.push_str(&format!(
+          "<tspan x=\"{}\" y=\"{}\" dominant-baseline=\"alphabetic\"{spacing}>",
           fmt(x),
           fmt(y)
         ));
       } else {
-        out.push_str(&format!("<tspan x=\"{}\" y=\"{}\">", fmt(x), fmt(top + line.height / 2.0)));
+        body.push_str(&format!("<tspan x=\"{}\" y=\"{}\"{spacing}>", fmt(x), fmt(top + line.height / 2.0)));
       }
       for sg in &line.segments {
         let attrs = span_attrs(&sg.style, &base, |c| color::css_with_opacity(c, 1.0));
         if attrs.is_empty() {
-          out.push_str(&esc(&sg.text));
+          body.push_str(&esc(&sg.text));
         } else {
-          out.push_str(&format!("<tspan{attrs}>{}</tspan>", esc(&sg.text)));
+          body.push_str(&format!("<tspan{attrs}>{}</tspan>", esc(&sg.text)));
         }
       }
-      out.push_str("</tspan>");
+      body.push_str("</tspan>");
     }
+    out.push_str(&body);
     out.push_str("</text>");
+    if let Some(st) = stroke.as_ref().filter(|s| s.align == StrokeAlign::Inside) {
+      // Inside: a double-width stroke clipped to the glyphs, drawn over the fill.
+      let cid = self.id("tclip");
+      self
+        .defs
+        .push_str(&format!("<clipPath id=\"{cid}\">{}{body}</text></clipPath>", head("#000", "")));
+      out.push_str(&head("none", &format!(" clip-path=\"url(#{cid})\"{}", st.attrs)));
+      out.push_str(&body);
+      out.push_str("</text>");
+    }
     if let (Some(size), false) = (lod_size, bars.is_empty() || fill == "none") {
       out.push_str(&format!(
         "<path class=\"gk g{size}\" d=\"{bars}\" fill=\"{fill}\" fill-opacity=\"0.5\"/>"
       ));
     }
     out
+  }
+
+  /// The first visible stroke of a text layer as SVG attributes. Centre strokes use the weight;
+  /// inside and outside strokes use twice it, of which the glyphs hide or clip half.
+  fn text_stroke(&mut self, n: &Node) -> Option<TextStroke> {
+    let sw = n.stroke_weight;
+    let p = n.strokes.iter().find(|p| p.visible())?;
+    if sw <= 0.0 {
+      return None;
+    }
+    let paint = self.paint(p, n.width, n.height, 0.0);
+    let w = if n.stroke_align == StrokeAlign::Center { sw } else { sw * 2.0 };
+    // Always round: a miter on a glyph corner spikes past the stroke margin and the export crop.
+    let join = join_name(StrokeJoin::Round);
+    let dash = if n.stroke_dash.is_empty() {
+      String::new()
+    } else {
+      format!(
+        " stroke-dasharray=\"{}\"",
+        n.stroke_dash.iter().map(|v| fmt(*v)).collect::<Vec<_>>().join(" ")
+      )
+    };
+    Some(TextStroke {
+      align: n.stroke_align,
+      attrs: format!(" stroke=\"{paint}\" stroke-width=\"{}\" stroke-linejoin=\"{join}\"{dash}", fmt(w)),
+    })
   }
 
   /// Canvas only: the text's size class (see `TEXT_SIZE_STEPS`), so the editor can hide text too
@@ -1031,6 +1100,11 @@ fn is_closed(n: &Node) -> bool {
     .as_ref()
     .map(|v| v.raw.is_some() || v.subpaths.iter().all(|s| s.closed))
     .unwrap_or(false)
+}
+
+struct TextStroke {
+  align: StrokeAlign,
+  attrs: String,
 }
 
 fn join_name(j: StrokeJoin) -> &'static str {
@@ -1161,6 +1235,89 @@ mod tests {
     let out = export_svg(&doc, "f", &HeuristicMeasurer);
     assert!(out.starts_with("<svg"));
     assert!(!out.contains("data-id"));
+  }
+
+  fn text_doc(chars: &str, width: f64, f: impl FnOnce(&mut Node)) -> Document {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Text, "t".into(), "T".into());
+    t.text.as_mut().unwrap().characters = chars.into();
+    t.text.as_mut().unwrap().auto_resize = crate::model::TextAutoResize::Height;
+    t.width = width;
+    f(&mut t);
+    doc.insert(t, None, &page, None);
+    doc
+  }
+
+  #[test]
+  fn justified_text_stretches_wrapped_lines_only() {
+    let doc = text_doc("alpha beta gamma delta epsilon zeta eta theta\nlast", 150.0, |t| {
+      t.text.as_mut().unwrap().align_h = TextAlignH::Justify;
+    });
+    let svg = export_svg(&doc, "t", &HeuristicMeasurer);
+    let lines: Vec<&str> = svg.split("<tspan x=").skip(1).collect();
+    assert!(lines.len() >= 3, "{svg}");
+    assert!(lines[0].split('>').next().unwrap().contains("word-spacing"), "{svg}");
+    // The last line of a wrapped paragraph and a hard-broken one stay ragged.
+    let last = lines.last().unwrap().split('>').next().unwrap();
+    assert!(!last.contains("word-spacing"), "{last}");
+    let before_break = lines[lines.len() - 2].split('>').next().unwrap();
+    assert!(!before_break.contains("word-spacing"), "{before_break}");
+    // Left-aligned text is untouched.
+    let doc = text_doc("alpha beta gamma delta epsilon zeta eta theta", 150.0, |_| {});
+    assert!(!export_svg(&doc, "t", &HeuristicMeasurer).contains("word-spacing"));
+  }
+
+  #[test]
+  fn justified_mixed_size_lines_get_one_spacing() {
+    let doc = text_doc("alpha beta gamma delta epsilon zeta eta theta iota", 160.0, |t| {
+      let p = t.text.as_mut().unwrap();
+      p.align_h = TextAlignH::Justify;
+      p.runs = vec![crate::model::TextRun {
+        start: 6,
+        end: 16,
+        font_size: Some(30.0),
+        ..Default::default()
+      }];
+    });
+    let svg = export_svg(&doc, "t", &HeuristicMeasurer);
+    let first = svg.split("<tspan x=").nth(1).unwrap().split('>').next().unwrap();
+    assert!(first.contains("alphabetic") && first.contains("word-spacing"), "{first}");
+  }
+
+  #[test]
+  fn text_strokes_follow_their_alignment() {
+    let mk = |align: StrokeAlign| {
+      text_doc("Hi", 100.0, |t| {
+        t.strokes = vec![Paint::solid("#ff0000")];
+        t.stroke_weight = 3.0;
+        t.stroke_align = align;
+      })
+    };
+    let centre = export_svg(&mk(StrokeAlign::Center), "t", &HeuristicMeasurer);
+    assert!(
+      centre.contains("stroke=\"#FF0000\"") && centre.contains("stroke-width=\"3\"") && centre.contains("stroke-linejoin=\"round\""),
+      "{centre}"
+    );
+    assert!(!centre.contains("paint-order"));
+    let outside = export_svg(&mk(StrokeAlign::Outside), "t", &HeuristicMeasurer);
+    assert!(
+      outside.contains("paint-order=\"stroke\"") && outside.contains("stroke-width=\"6\""),
+      "{outside}"
+    );
+    let inside = export_svg(&mk(StrokeAlign::Inside), "t", &HeuristicMeasurer);
+    assert!(
+      inside.contains("<clipPath") && inside.contains("clip-path=\"url(#") && inside.contains("stroke-width=\"6\""),
+      "{inside}"
+    );
+    // The bounds include the stroke's reach, except inside.
+    let b = |a| render_bounds(&mk(a), "t", &HeuristicMeasurer);
+    assert!(b(StrokeAlign::Outside).width >= b(StrokeAlign::Inside).width + 6.0);
+    assert!(b(StrokeAlign::Center).width > b(StrokeAlign::Inside).width);
+    // No stroke, no attributes.
+    let doc = text_doc("Hi", 100.0, |_| {});
+    assert!(!export_svg(&doc, "t", &HeuristicMeasurer).contains("stroke"));
   }
 
   #[test]
