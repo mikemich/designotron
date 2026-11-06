@@ -75,6 +75,34 @@ await dt.tool("update_nodes", { updates: [{ id: "${secret}", name: JSON.stringif
   const netResult = JSON.parse((await doc()).nodes[secret].name);
   check("a plugin's fetch, beacon, image, WebSocket and import_url reach no host", stubHits.length === 0 && netResult.fetch === "blocked" && netResult.import_url === "refused", JSON.stringify({ netResult, hits: stubHits }));
 
+  // ---- image paints and nested frames (the editor has no CSP; the sandbox frame can't run a child's script)
+  const paintId = await dt(
+    async (secret) =>
+      (
+        await window.__dt.tool("save_plugin", {
+          name: "Paints",
+          code: `const out = {};
+for (const [k, src] of [["rel", "//stub-exfil.test/pr.png"], ["noslash", "https:stub-exfil.test/nos.png"], ["tab", "ht\\ttps://stub-exfil.test/tab.png"]]) {
+  try { await dt.tool("update_nodes", { updates: [{ id: "${secret}", fills: [{ type: "image", src }] }] }); out[k] = "ran"; } catch (e) { out[k] = "refused"; }
+}
+let arrived = 0;
+window.addEventListener("message", (e) => { if (e.data && e.data.child) arrived++; });
+const f = document.createElement("iframe");
+f.srcdoc = "<script>parent.postMessage({ child: typeof RTCPeerConnection }, '*')<\\/script>";
+document.body.appendChild(f);
+await new Promise((r) => setTimeout(r, 1200));
+out.arrived = arrived;
+await dt.tool("update_nodes", { updates: [{ id: "${secret}", name: JSON.stringify(out) }] });`,
+        })
+      ).result.id,
+    secret,
+  );
+  await dt((id) => window.__dt.runPlugin(id), paintId);
+  await page.waitForFunction(() => window.__dt.plugin() === null, null, { timeout: 8000 });
+  await page.waitForTimeout(500);
+  const paintResult = JSON.parse((await doc()).nodes[secret].name);
+  check("image paints with //host, https:host or tab-split addresses are refused and a nested frame's script never runs", paintResult.rel === "refused" && paintResult.noslash === "refused" && paintResult.tab === "refused" && paintResult.arrived === 0 && stubHits.length === 0, JSON.stringify({ paintResult, hits: stubHits }));
+
   // ---- a long run, stopped, undoes in one step (g4_plugins)
   const before = Object.keys((await doc()).nodes).length;
   const loopId = await dt(

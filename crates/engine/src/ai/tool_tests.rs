@@ -375,6 +375,41 @@ mod values {
         .dispatch(ai("create_nodes", json!({ "nodes": [{ "type": "rectangle", "imageUrl": ok }] })))
         .is_ok());
     }
+    // Sources the editor would fetch from somewhere unexpected are refused in every spelling,
+    // through every route that makes a paint.
+    for bad in [
+      "//stub-exfil.test/a.png",
+      "https:stub-exfil.test/a.png",
+      "ht\ttps://stub-exfil.test/a.png",
+      " https://stub-exfil.test/a.png",
+      "https://stub-exfil.test/a b.png",
+      "https://stub-exfil.test/\n.png",
+    ] {
+      for input in [
+        json!({ "nodes": [{ "type": "rectangle", "fills": [{ "type": "image", "src": bad }] }] }),
+        json!({ "nodes": [{ "type": "rectangle", "fill": { "type": "image", "src": bad } }] }),
+        json!({ "nodes": [{ "type": "rectangle", "stroke": { "type": "image", "src": bad } }] }),
+        json!({ "nodes": [{ "type": "rectangle", "imageUrl": bad }] }),
+      ] {
+        assert!(e.dispatch(ai("create_nodes", input.clone())).is_err(), "{bad}: {input}");
+      }
+      let id = created(&run(&mut e, "create_nodes", json!({ "nodes": [{ "type": "rectangle" }] })))[0].clone();
+      for upd in [
+        json!({ "id": id, "fills": [{ "type": "image", "src": bad }] }),
+        json!({ "id": id, "patch": { "fills": [{ "type": "image", "src": bad }] } }),
+        json!({ "id": id, "patch": { "strokes": [{ "type": "image", "src": bad }] } }),
+      ] {
+        assert!(
+          e.dispatch(ai("update_nodes", json!({ "updates": [upd.clone()] }))).is_err(),
+          "{bad}: {upd}"
+        );
+      }
+    }
+    // The renderer is a backstop for documents that already hold one.
+    assert!(!crate::paint::safe_image_src("//host/a.png"));
+    assert!(!crate::paint::safe_image_src("https:host/a.png"));
+    assert!(crate::paint::safe_image_src("HTTPS://host/a.png"));
+    assert_eq!(crate::paint::image_href("//host/a.png"), "");
     let err = e
       .dispatch(ai(
         "create_nodes",

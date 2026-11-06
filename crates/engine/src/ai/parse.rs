@@ -605,11 +605,13 @@ pub fn color(cx: &Ctx, key: &str, v: &Value) -> Result<String, String> {
 
 /// Image sources a layer may use.
 pub fn image_url(cx: &Ctx, key: &str, url: &str) -> Result<(), String> {
-  let l = url.trim().to_lowercase();
-  if l.starts_with("http://") || l.starts_with("https://") || l.starts_with("data:image/") || l.starts_with("asset:") {
+  if crate::paint::safe_image_src(url) {
     Ok(())
   } else {
-    Err(cx.err(key, "only http(s) URLs, data:image/ URLs and asset: ids are allowed"))
+    Err(cx.err(
+      key,
+      "only absolute http(s):// URLs (no spaces), data:image/ URLs and asset: ids are allowed",
+    ))
   }
 }
 

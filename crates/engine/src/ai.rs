@@ -921,6 +921,8 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
     apply_spec(&mut cx, &e.doc, &mut after, &spec, false)?;
     if let Some(p) = u.get("patch") {
       crate::patch::apply(&mut after, p).map_err(|er| cx.err("patch", er))?;
+      check_paint_sources(&after.fills).map_err(|er| cx.err("patch.fills", er))?;
+      check_paint_sources(&after.strokes).map_err(|er| cx.err("patch.strokes", er))?;
     }
     let diff = diff_patch(&before, &after);
     if !diff.as_object().map(|m| m.is_empty()).unwrap_or(true) {
@@ -3038,6 +3040,18 @@ fn apply_dimension(n: &mut Node, d: Option<Dim>, horizontal: bool) {
   }
 }
 
+/// Image paints may only use sources `paint::safe_image_src` accepts: the editor fetches them.
+fn check_paint_sources(paints: &[Paint]) -> Result<(), String> {
+  for p in paints {
+    if let Paint::Image { src, .. } = p {
+      if !crate::paint::safe_image_src(src) {
+        return Err("image src must be an absolute http(s):// URL (no spaces), a data:image/ URL or an asset: id".into());
+      }
+    }
+  }
+  Ok(())
+}
+
 /// Parses `fill` values: hex, CSS gradients, paint objects, arrays, or "none".
 pub fn parse_fills(v: &Value) -> Result<Vec<Paint>, String> {
   match v {
@@ -3050,9 +3064,11 @@ pub fn parse_fills(v: &Value) -> Result<Vec<Paint>, String> {
       }
       Ok(out)
     }
-    Value::Object(_) => serde_json::from_value::<Paint>(v.clone())
-      .map(|p| vec![p])
-      .map_err(|e| format!("invalid paint: {e}")),
+    Value::Object(_) => {
+      let p = serde_json::from_value::<Paint>(v.clone()).map_err(|e| format!("invalid paint: {e}"))?;
+      check_paint_sources(std::slice::from_ref(&p))?;
+      Ok(vec![p])
+    }
     _ => Err("invalid fill".into()),
   }
 }

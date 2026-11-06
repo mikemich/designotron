@@ -114,9 +114,18 @@ export const usePlugins = create<{ list: Plugin[]; running: Running | null; dial
   dialogOpen: false,
 }));
 
-/** Frame policy: nothing loads or connects; images only from data: and blob:. */
-const SANDBOX_CSP =
-  "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; form-action 'none'; base-uri 'none'";
+/** Frame policy: nothing loads or connects; images only from data: and blob:. Scripts run only
+ *  with this run's random nonce (the bootstrap) or through eval (the plugin body), so a frame the
+ *  plugin creates inside itself inherits the policy but can run no script of its own: no
+ *  inline script, `javascript:` URL or `on*=` attribute (which also means plugin UI HTML can't
+ *  use inline handlers; set `.onclick` from the plugin code). */
+const sandboxCsp = (nonce: string) =>
+  `default-src 'none'; script-src 'nonce-${nonce}' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; form-action 'none'; base-uri 'none'`;
+
+const randomNonce = () => {
+  const b = crypto.getRandomValues(new Uint8Array(18));
+  return btoa(String.fromCharCode(...b));
+};
 
 /** Tools a plugin may not call: they reach the network, render remote content or install code. */
 const PLUGIN_REFUSED_TOOLS = new Set(["import_url", "import_html", "save_plugin", "search_photos", "place_photo"]);
@@ -125,13 +134,20 @@ let runSeq = 0;
 
 /** Bootstrap inside the sandbox: defines `dt`, then runs the plugin body as an async function. */
 function bootstrap(code: string): string {
-  const body = JSON.stringify(code);
+  // `<` is escaped so the code can't close the script element.
+  const body = JSON.stringify(code).replace(/</g, "\\u003c");
+  const nonce = randomNonce();
   return `<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="${SANDBOX_CSP}">
+<meta id="dt-csp" http-equiv="Content-Security-Policy" content="${sandboxCsp(nonce)}">
 <meta http-equiv="x-dns-prefetch-control" content="off">
-</head><body><script>
+</head><body><script nonce="${nonce}">
 (() => {
-  // WebRTC isn't covered by the CSP, so it is removed before the plugin runs.
+  // The plugin must not be able to read the nonce: drop this script and the policy's element
+  // (the policy itself stays in force).
+  try { document.currentScript.remove(); } catch (e) {}
+  try { document.getElementById("dt-csp").remove(); } catch (e) {}
+  // WebRTC isn't covered by the CSP, so it is removed before the plugin runs (a frame the plugin
+  // creates can't run script, so it can't get a fresh one).
   for (const k of ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel"]) {
     try { delete window[k]; } catch (e) {}
     try { Object.defineProperty(window, k, { value: undefined, configurable: false }); } catch (e) {}
@@ -204,9 +220,10 @@ export function runPlugin(plugin: Plugin) {
           const [name, input] = m.args;
           if (PLUGIN_REFUSED_TOOLS.has(String(name))) throw new Error(`plugins can't use ${name}`);
           if (/https?:\/\//i.test(JSON.stringify(input ?? null))) throw new Error("plugins can't use web addresses yet");
+          // The pause is measured from the previous call, before waiting for the canvas.
+          if (running.ui && lastCall && Date.now() - lastCall > 1000) step++;
           if (!(await whenCanvasIdle())) throw new Error(DRAG_BUSY);
           if (usePlugins.getState().running?.frame !== frame) throw new Error("plugin stopped");
-          if (running.ui && lastCall && Date.now() - lastCall > 1000) step++;
           const out = await executeTool(String(name), input, { group: `plugin:${runId}:${step}` });
           lastCall = Date.now();
           if (!out.ok) throw new Error(String(out.result));

@@ -69,7 +69,7 @@ export const DRAG_BUSY = "The person is dragging on the canvas; try again in a m
 /** Resolves true once the person isn't dragging on the canvas, false if they still are after
  *  `timeoutMs` (the caller must then not run the tool). A tool call that landed mid-drag would be
  *  undone by the drag's next step, which starts again from the gesture's base document. Only a
- *  pointer drag does that: other open gestures (editing text in place, a running plugin) don't
+ *  pointer drag does that: other open gestures (editing text in place) don't
  *  rebase, so they don't wait. Chat calls wait here before `executeTool`; the cap stays under
  *  the bridge's 180 s call timeout. */
 export async function whenCanvasIdle(timeoutMs = 45000): Promise<boolean> {

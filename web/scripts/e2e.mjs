@@ -25,7 +25,7 @@ const browser = await chromium.launch(launch);
 const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, ignoreHTTPSErrors: true });
 // A stubbed host that nothing may reach: plugin network checks assert it saw no request.
 const stubHits = [];
-await context.route("https://stub-exfil.test/**", (route) => {
+await context.route(/stub-exfil\.test/, (route) => {
   stubHits.push(route.request().url());
   return route.fulfill({ status: 200, contentType: "text/plain", body: "x" });
 });
@@ -602,6 +602,35 @@ try {
     "plugin has no network: fetch, XHR, images, WebRTC, import_url/import_html/save_plugin/search_photos and web addresses all fail",
     net.fetch === "blocked" && net.img === "blocked" && net.xhr === "blocked" && net.rtc === "undefined/undefined" && net.url.includes("plugins can't") && net.html.includes("plugins can't") && net.save.includes("plugins can't") && net.photo.includes("plugins can't") && net.addr.includes("web addresses") && stubHits.length === 0,
     JSON.stringify({ ...net, stubHits: stubHits.length }),
+  );
+
+  // Image paints can't smuggle an address past the refusal (the editor itself would fetch it),
+  // and a frame the plugin creates inside itself runs no script, so it can't get a fresh WebRTC.
+  await runCode(`
+    const out = {};
+    for (const [k, src] of [["rel", "//stub-exfil.test/pr.png"], ["noslash", "https:stub-exfil.test/nos.png"], ["tab", "ht\\ttps://stub-exfil.test/tab.png"], ["lead", " https://stub-exfil.test/lead.png"]]) {
+      for (const f of ["fills", "stroke"]) {
+        try { await dt.tool("update_nodes", { updates: [{ id: "${target}", [f]: [{ type: "image", src }] }] }); out[k + f] = "ran"; } catch (e) { out[k + f] = "refused"; }
+      }
+      try { await dt.tool("update_nodes", { updates: [{ id: "${target}", patch: { fills: [{ type: "image", src }] } }] }); out[k + "patch"] = "ran"; } catch (e) { out[k + "patch"] = "refused"; }
+    }
+    let arrived = 0;
+    window.addEventListener("message", (e) => { if (e.data && e.data.child) arrived++; });
+    const f1 = document.createElement("iframe");
+    f1.srcdoc = "<script>parent.postMessage({ child: typeof RTCPeerConnection }, '*')<\\/script><img src=x onerror=\\"parent.postMessage({ child: 'handler' }, '*')\\">";
+    document.body.appendChild(f1);
+    const f2 = document.createElement("iframe");
+    f2.src = "javascript:parent.postMessage({ child: 'js-url' }, '*')";
+    document.body.appendChild(f2);
+    await new Promise((r) => setTimeout(r, 1500));
+    out.arrived = arrived;
+    await dt.tool("update_nodes", { updates: [{ id: "${target}", name: JSON.stringify(out) }] });`);
+  await waitStopped();
+  const paints = JSON.parse(await nodeName(target));
+  check(
+    "image paints with //host, https:host, tab-split and padded addresses are refused; a nested frame runs no script; the stub host saw nothing",
+    Object.entries(paints).every(([k, v]) => k === "arrived" || v === "refused") && paints.arrived === 0 && stubHits.length === 0,
+    JSON.stringify({ ...paints, stubHits: stubHits.length }),
   );
 
   // A plugin that navigates its own frame is stopped.

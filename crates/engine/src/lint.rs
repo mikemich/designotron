@@ -527,12 +527,33 @@ mod tests {
     };
     assert!(contrast(c, white) >= 4.5, "{hex}");
     assert!(c.r == c.g && c.g == c.b, "still a grey: {hex}");
-    // Nearest: one step lighter fails.
-    let lighter = mix_toward(crate::color::parse("#AAAAAA").unwrap(), true, 0.0);
-    assert!(contrast(lighter, white) < 4.5);
+    // Nearest: the step before the chosen one fails.
+    let orig = crate::color::parse("#AAAAAA").unwrap();
+    let k = (1..=50)
+      .map(|s| s as f64 * 0.02)
+      .find(|k| mix_toward(orig, false, *k).hex6() == c.hex6())
+      .expect("the fix is a darker mix of the original");
+    assert!(contrast(mix_toward(orig, false, k - 0.02), white) < 4.5);
     let cmd: Command = serde_json::from_value(i.fix.clone().unwrap()).unwrap();
     e.dispatch(cmd).unwrap();
     assert!(!has(&lint_page(&e.doc, &page, &HeuristicMeasurer), "lowContrast"));
+  }
+
+  #[test]
+  fn kinds_list_matches_the_kinds_emitted() {
+    let src = include_str!("lint.rs");
+    let body = &src[..src.find("#[cfg(test)]").unwrap()];
+    let mut emitted = std::collections::BTreeSet::new();
+    for (at, _) in body.match_indices("issue(") {
+      let rest = &body[at..];
+      let head = &rest[..rest.find("Severity").unwrap_or(0)];
+      let quoted: Vec<&str> = head.split('"').collect();
+      if quoted.len() >= 3 {
+        emitted.insert(quoted[quoted.len() - 2].to_string());
+      }
+    }
+    let listed: std::collections::BTreeSet<String> = KINDS.iter().map(|k| k.to_string()).collect();
+    assert_eq!(emitted, listed);
   }
 
   #[test]
