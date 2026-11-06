@@ -431,9 +431,11 @@ export function Canvas() {
         if (d.kind === "draw") setDraw(null);
         if (d.kind === "pencil") setPencil(null);
         if (d.kind === "link") setLink(null);
+        if (d.kind === "penHandle") setPen((p) => p.slice(0, d.index));
         if (d.kind === "pan") setPanning(false);
       }
       useStore.setState({ guides: [], gaps: [], dropTarget: null, dropLine: null });
+      if (restoreSelection && useStore.getState().draftComment) useStore.setState({ draftComment: null });
       if (first) {
         if (restoreSelection) {
           const cur = useStore.getState().es.selection;

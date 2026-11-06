@@ -545,7 +545,7 @@ export function TextEditor({ id }: { id: string }) {
           setFocused(false);
           // Keep editing while the user styles the selection in the side panel or a popover.
           const next = e.relatedTarget as HTMLElement | null;
-          if (next && next.closest(".panel.right, .popover, .panel-toggle")) return;
+          if (next && next.closest(".panel.right, .popover, #panel-toggle-right")) return;
           finish();
         }}
         onPointerDown={(e) => {

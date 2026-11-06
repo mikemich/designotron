@@ -1323,13 +1323,14 @@ a.btn {
     box-shadow: 0 0 24px rgba(0, 0, 0, 0.35);
     max-width: 100%;
   }
+  /* Overlays cost the canvas no width, so they are wide enough for their whole tab row. */
   .main > .panel:not(.right) {
     left: 0;
-    width: 248px;
+    width: 300px;
   }
   .main > .panel.right {
     right: 0;
-    width: 272px;
+    width: 300px;
   }
   .main > .chat {
     right: 0;
@@ -2296,10 +2297,6 @@ body:has(.modal-bg) .hint-card {
 
 .tbtn.export-code .export-icon {
   display: none;
-}
-/* The Layers toggle sits first on the bar; it follows the main menu in the DOM (tab order, scripts). */
-#panel-toggle-left {
-  order: -1;
 }
 @media (max-width: 1000px) {
   .topbar .save-state,

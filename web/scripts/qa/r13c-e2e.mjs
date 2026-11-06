@@ -449,7 +449,9 @@ for (const [w, h] of [[834, 1194], [1024, 768]]) {
     const bad = await dt(page, (s) => {
       const panel = document.querySelector(s === "left" ? ".main > .panel:not(.right)" : ".main > .panel.right");
       const out = [];
+      const tabsRight = panel.querySelector(".tabs").getBoundingClientRect().right;
       for (const tab of panel.querySelectorAll("[role=tab]")) {
+        if (tab.getBoundingClientRect().right > tabsRight + 0.5) out.push(`${tab.textContent} runs past the tab row`);
         tab.scrollIntoView({ inline: "nearest" });
         const r = tab.getBoundingClientRect();
         const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
