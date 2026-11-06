@@ -350,6 +350,8 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
             <button className="btn" aria-expanded={finding} onClick={() => setFinding(!finding)}>
               Find a photo…
             </button>
+          </div>
+          <div className="row scale-mode-row">
             <SelectField
               ariaLabel="Image scale mode"
               value={p.scaleMode}

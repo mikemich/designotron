@@ -52,7 +52,7 @@ export class WasmEngine {
   /**
    * JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
    */
-  renderIncremental(page: string, hidden: string, reset: boolean): string;
+  renderIncremental(page: string, hidden: string, reset: boolean, editing: string): string;
   constructor(seed: number);
   rev(): number;
   /**
@@ -66,7 +66,7 @@ export class WasmEngine {
   /**
    * SVG markup for a page; `hidden` is a JSON array of node ids to paint invisibly.
    */
-  render(page: string, hidden: string): string;
+  render(page: string, hidden: string, editing: string): string;
   /**
    * Executes a JSON command; returns the JSON result or throws the error message.
    */
@@ -98,8 +98,8 @@ export interface InitOutput {
   readonly wasmengine_persistCommit: (a: number, b: number) => void;
   readonly wasmengine_persistPlan: (a: number, b: number) => [number, number];
   readonly wasmengine_query: (a: number, b: number, c: number) => [number, number, number, number];
-  readonly wasmengine_render: (a: number, b: number, c: number, d: number, e: number) => [number, number];
-  readonly wasmengine_renderIncremental: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
+  readonly wasmengine_render: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+  readonly wasmengine_renderIncremental: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
   readonly wasmengine_rev: (a: number) => number;
   readonly wasmengine_save: (a: number) => [number, number];
   readonly wasmengine_state: (a: number) => [number, number];

@@ -241,22 +241,25 @@ export class WasmEngine {
      * @param {string} page
      * @param {string} hidden
      * @param {boolean} reset
+     * @param {string} editing
      * @returns {string}
      */
-    renderIncremental(page, hidden, reset) {
-        let deferred3_0;
-        let deferred3_1;
+    renderIncremental(page, hidden, reset, editing) {
+        let deferred4_0;
+        let deferred4_1;
         try {
             const ptr0 = passStringToWasm0(page, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len0 = WASM_VECTOR_LEN;
             const ptr1 = passStringToWasm0(hidden, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.wasmengine_renderIncremental(this.__wbg_ptr, ptr0, len0, ptr1, len1, reset);
-            deferred3_0 = ret[0];
-            deferred3_1 = ret[1];
+            const ptr2 = passStringToWasm0(editing, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len2 = WASM_VECTOR_LEN;
+            const ret = wasm.wasmengine_renderIncremental(this.__wbg_ptr, ptr0, len0, ptr1, len1, reset, ptr2, len2);
+            deferred4_0 = ret[0];
+            deferred4_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);
         } finally {
-            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
         }
     }
     /**
@@ -352,22 +355,25 @@ export class WasmEngine {
      * SVG markup for a page; `hidden` is a JSON array of node ids to paint invisibly.
      * @param {string} page
      * @param {string} hidden
+     * @param {string} editing
      * @returns {string}
      */
-    render(page, hidden) {
-        let deferred3_0;
-        let deferred3_1;
+    render(page, hidden, editing) {
+        let deferred4_0;
+        let deferred4_1;
         try {
             const ptr0 = passStringToWasm0(page, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len0 = WASM_VECTOR_LEN;
             const ptr1 = passStringToWasm0(hidden, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len1 = WASM_VECTOR_LEN;
-            const ret = wasm.wasmengine_render(this.__wbg_ptr, ptr0, len0, ptr1, len1);
-            deferred3_0 = ret[0];
-            deferred3_1 = ret[1];
+            const ptr2 = passStringToWasm0(editing, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len2 = WASM_VECTOR_LEN;
+            const ret = wasm.wasmengine_render(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            deferred4_0 = ret[0];
+            deferred4_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);
         } finally {
-            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
         }
     }
     /**

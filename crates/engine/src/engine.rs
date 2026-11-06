@@ -20,7 +20,7 @@ use crate::model::{
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render::{self, Mode, RenderOptions};
 use crate::text::TextMeasurer;
-use crate::{ai, arrange, codegen, patch, vector_edit};
+use crate::{ai, arrange, codegen, patch, svg_import, vector_edit};
 
 const MAX_HISTORY: usize = 300;
 pub const CLIPBOARD_TAG: &str = "designotron/nodes";
@@ -289,6 +289,18 @@ pub enum Command {
     height: f64,
     name: Option<String>,
     parent: Option<NodeId>,
+  },
+  /// Reads SVG markup into editable layers (see `svg_import`): a frame centred on `x`, `y`
+  /// (inside the frame under that point, or `parent`). Refused markup leaves the file untouched
+  /// and the error says why, so the caller can place the SVG as an image instead.
+  ImportSvg {
+    svg: String,
+    x: f64,
+    y: f64,
+    #[serde(default)]
+    parent: Option<NodeId>,
+    #[serde(default)]
+    name: Option<String>,
   },
   InsertSpecs {
     specs: Vec<Value>,
@@ -603,6 +615,16 @@ pub enum Query {
     width: f64,
     height: f64,
   },
+  /// Per-line geometry (char ranges, x positions) of a text layer, all lines, for the editor's
+  /// caret and selection.
+  TextLayout {
+    id: NodeId,
+    /// Only measure the lines touching these chars (and one line either side).
+    #[serde(default)]
+    from: Option<usize>,
+    #[serde(default)]
+    to: Option<usize>,
+  },
   Bounds {
     ids: Vec<NodeId>,
     /// Also give each item's `painted` bounds: everything it draws (shadows, outside strokes, blurs),
@@ -615,6 +637,13 @@ pub enum Query {
     y: f64,
     #[serde(default)]
     exclude: Vec<NodeId>,
+  },
+  /// Where dropping `ids` at the page point (x, y) would insert them when the frame there is an
+  /// auto layout one they would enter: `{frame, index, line: [x1, y1, x2, y2]}` (page space), else null.
+  DropSlot {
+    ids: Vec<NodeId>,
+    x: f64,
+    y: f64,
   },
   SnapPoint {
     x: f64,
@@ -786,6 +815,15 @@ fn carry_comments(current: &Document, restored: &Document) -> std::collections::
   out
 }
 
+/// Where a layer dropped into an auto layout frame goes: its index among the frame's children and
+/// the insertion line `[x1, y1, x2, y2]` in page space.
+struct FlowSlot {
+  index: usize,
+  /// The flow child the layers go in front of; `None` puts them at the end.
+  anchor: Option<NodeId>,
+  line: [f64; 4],
+}
+
 pub struct Engine {
   pub doc: Document,
   pub selection: Vec<NodeId>,
@@ -828,6 +866,7 @@ pub struct Engine {
 struct RenderCache {
   page: String,
   hidden: Vec<NodeId>,
+  editing: Option<NodeId>,
   doc: Option<Document>,
   roots: HashMap<NodeId, String>,
   /// Everything each root paints, in page coordinates (what the canvas culls against).
@@ -1030,14 +1069,14 @@ impl Engine {
   /// w, h]}, texts: {id: count}}` (`bounds` is what a root paints in page coordinates and `texts`
   /// its number of text layers, for the roots that changed or moved), or `{full: svg}` when the
   /// page uses top-level masks (which span roots).
-  pub fn render_incremental(&mut self, page: &str, hidden: &[NodeId]) -> Value {
+  pub fn render_incremental(&mut self, page: &str, hidden: &[NodeId], editing: Option<&str>) -> Value {
     let roots = self.doc.page(page).map(|p| p.children.clone()).unwrap_or_default();
     if roots
       .iter()
       .any(|r| self.doc.get(r).map(|n| n.is_mask && n.visible).unwrap_or(false))
     {
       self.render_cache = RenderCache::default();
-      return json!({ "full": self.render(page, hidden) });
+      return json!({ "full": self.render(page, hidden, editing) });
     }
     let mut cache = std::mem::take(&mut self.render_cache);
     let mut dirty: Vec<NodeId> = Vec::new();
@@ -1051,7 +1090,10 @@ impl Engine {
           let only_moved = self.only_moved(prev, &root, &ids);
           if only_moved
             && cache.roots.contains_key(&root)
-            && !hidden.iter().any(|h| self.doc.ancestors(h).last() == Some(&root) || *h == root)
+            && !hidden
+              .iter()
+              .chain(editing.map(|e| e.to_string()).iter())
+              .any(|h| self.doc.ancestors(h).last() == Some(&root) || *h == root)
           {
             if let (Some(n), Some(old)) = (self.doc.get(&root), prev.get(&root)) {
               moved.insert(root.clone(), json!(self.doc.local_matrix(n).svg()));
@@ -1073,6 +1115,16 @@ impl Engine {
             dirty.push(root);
           }
         }
+        // Starting, ending or switching the text being edited repaints its root(s).
+        if cache.editing.as_deref() != editing {
+          for h in cache.editing.iter().map(|s| s.as_str()).chain(editing) {
+            if self.doc.get(h).is_some() {
+              let root = self.doc.ancestors(h).last().cloned().unwrap_or_else(|| h.to_string());
+              moved.remove(&root);
+              dirty.push(root);
+            }
+          }
+        }
       }
       _ => {
         cache.roots.clear();
@@ -1089,6 +1141,7 @@ impl Engine {
           RenderOptions {
             mode: Mode::Canvas,
             hidden,
+            editing,
           },
         );
         texts.insert(r.clone(), json!(svg.matches("<text").count()));
@@ -1105,11 +1158,12 @@ impl Engine {
     cache.doc = Some(self.doc.clone());
     cache.page = page.to_string();
     cache.hidden = hidden.to_vec();
+    cache.editing = editing.map(|s| s.to_string());
     self.render_cache = cache;
     json!({ "order": roots, "changed": changed, "moved": moved, "bounds": bounds, "texts": texts })
   }
 
-  pub fn render(&self, page: &str, hidden: &[NodeId]) -> String {
+  pub fn render(&self, page: &str, hidden: &[NodeId], editing: Option<&str>) -> String {
     render::render_page(
       &self.doc,
       page,
@@ -1117,6 +1171,7 @@ impl Engine {
       RenderOptions {
         mode: Mode::Canvas,
         hidden,
+        editing,
       },
     )
   }
@@ -2134,6 +2189,7 @@ impl Engine {
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
       }
+      Command::ImportSvg { svg, x, y, parent, name } => self.import_svg(&svg, x, y, parent, name),
       Command::InsertSpecs { specs, parent } => {
         let created = ai::insert_specs(self, &specs, parent.as_deref())?;
         self.selection = created
@@ -2166,6 +2222,7 @@ impl Engine {
             }
           }
           drop_unsafe_links(self.doc.get_mut(id).unwrap());
+          self.scale_group_to_patch(id, &before);
           let after = self.doc.get(id).unwrap().clone();
           if after.kind.is_frame_like() && (after.width != before.width || after.height != before.height) {
             layout::apply_constraints(&mut self.doc, id, before.width, before.height);
@@ -2196,6 +2253,9 @@ impl Engine {
         Ok(json!({}))
       }
       Command::SetText { id, characters } => {
+        // A textarea reads line breaks as "\n": keep the stored text in the same form so the
+        // editor's indices and the engine's agree.
+        let characters = characters.replace("\r\n", "\n").replace('\r', "\n");
         let (old, runs) = self
           .doc
           .get(&id)
@@ -2207,9 +2267,10 @@ impl Engine {
         let n = self.doc.get_mut(&id).ok_or("no such node")?;
         patch::apply(n, &p)?;
         // The name follows the text until the user renames the layer.
-        let auto_name: String = old.chars().take(40).collect();
-        if n.name.is_empty() || n.name == "Text" || n.name == auto_name {
-          n.name = characters.chars().take(40).collect();
+        let auto_name = |s: &str| -> String { s.trim_start().chars().take(40).collect() };
+        let old_name: String = old.chars().take(40).collect();
+        if n.name.is_empty() || n.name == "Text" || n.name == old_name || n.name == auto_name(&old) {
+          n.name = auto_name(&characters);
         }
         components::record_override(&mut self.doc, &id, &p);
         Ok(json!({}))
@@ -2291,45 +2352,28 @@ impl Engine {
         Ok(json!({}))
       }
       Command::DropInto { ids, x, y } => {
-        let ids = ops::top_most(&self.doc, &ids);
+        // Layer order, not selection order, so a bottom-up shift-selection lands as it was stacked.
+        let ids = ops::paint_order(&self.doc, &ops::top_most(&self.doc, &ids));
         let pt = Point::new(x, y);
         let target = ops::frame_at(&self.doc, &self.page, pt, &ids, true);
+        // One place for the whole drop, so several layers keep their order.
+        let anchor = target.as_ref().and_then(|t| self.flow_slot(t, &ids, pt)).map(|s| s.anchor);
         for id in &ids {
-          let cur = self.doc.get(id).and_then(|n| n.parent.clone());
-          if self.doc.instance_ancestor(id).is_some()
-            || devices::in_part(&self.doc, id)
-            || components::would_nest_under(&self.doc, std::slice::from_ref(id), target.as_deref())
-          {
+          let Some(leaves_flow) = self.drop_move(id, target.as_deref(), pt) else {
             continue;
-          }
-          let in_flow = cur
-            .as_ref()
-            .and_then(|p| self.doc.get(p))
-            .map(|p| p.layout.is_some())
-            .unwrap_or(false)
-            && !self.doc.get(id).unwrap().absolute_position;
-          // Inside its auto layout parent a drag reorders; dropped outside, the layer leaves.
-          let leaves_flow = in_flow && cur.as_deref().map(|p| !self.contains_point(p, pt)).unwrap_or(false);
+          };
           if leaves_flow {
             self.place_dragged(id);
           }
-          if cur != target
-            && (!in_flow || leaves_flow)
-            && cur
-              .as_ref()
-              .map(|c| self.doc.get(c).map(|n| n.kind != NodeType::Group).unwrap_or(true))
-              .unwrap_or(true)
-          {
-            // Dropping into auto layout inserts at the pointer position.
-            let index = target.as_ref().and_then(|t| self.flow_index(t, Point::new(x, y)));
-            self.doc.reparent(id, target.as_deref(), index, true);
-            // Fill only means something in auto layout; outside it the layer keeps its size.
-            if leaves_flow && index.is_none() {
-              if let Some(n) = self.doc.get_mut(id) {
-                for s in [&mut n.sizing_h, &mut n.sizing_v] {
-                  if *s == Sizing::Fill {
-                    *s = Sizing::Fixed;
-                  }
+          // Dropping into auto layout inserts at the pointer position.
+          let index = target.as_ref().zip(anchor.as_ref()).map(|(t, a)| self.anchor_index(t, id, a));
+          self.doc.reparent(id, target.as_deref(), index, true);
+          // Fill only means something in auto layout; outside it the layer keeps its size.
+          if leaves_flow && index.is_none() {
+            if let Some(n) = self.doc.get_mut(id) {
+              for s in [&mut n.sizing_h, &mut n.sizing_v] {
+                if *s == Sizing::Fill {
+                  *s = Sizing::Fixed;
                 }
               }
             }
@@ -3070,26 +3114,176 @@ impl Engine {
     Ok(json!({ "dx": fdx, "dy": fdy, "guides": guides, "gaps": gaps }))
   }
 
+  /// A group's size is its children's bounds, so typing a new W or H scales the children like
+  /// the resize handles do (`before` is the group as it was ahead of the patch). Inside an
+  /// instance each scaled child is recorded as an override, so a main component sync keeps it.
+  fn scale_group_to_patch(&mut self, id: &str, before: &Node) {
+    let Some(now) = self.doc.get(id) else { return };
+    if before.kind != NodeType::Group || (now.width == before.width && now.height == before.height) {
+      return;
+    }
+    let (cw, ch) = (now.width != before.width, now.height != before.height);
+    let w = if cw { now.width.max(1.0) } else { before.width };
+    let h = if ch { now.height.max(1.0) } else { before.height };
+    let (x, y) = (now.x, now.y);
+    interact::set_geometry(&mut self.doc, before, x, y, w, h, cw, ch);
+    if self.doc.instance_ancestor(id).is_none() {
+      return;
+    }
+    for d in self.doc.subtree(id).into_iter().skip(1) {
+      let Some(n) = self.doc.get(&d) else { continue };
+      let p = json!({ "x": n.x, "y": n.y, "width": n.width, "height": n.height });
+      components::record_override(&mut self.doc, &d, &p);
+    }
+  }
+
   /// Whether `id` is positioned by its parent's auto layout (not absolutely placed).
   fn in_auto_layout_flow(&self, id: &str) -> bool {
     let Some(n) = self.doc.get(id) else { return false };
     !n.absolute_position && n.parent.as_ref().and_then(|p| self.doc.get(p)).is_some_and(|p| p.layout.is_some())
   }
 
-  /// Insertion index in an auto layout frame for a page-space point.
-  fn flow_index(&self, frame: &str, p: Point) -> Option<usize> {
+  /// Insertion slot in an auto layout frame for a page-space point, ignoring the layers in
+  /// `exclude` (the ones being placed): the index among the frame's children and the line to show.
+  /// A wrapping frame picks the row under the pointer first, then the place inside the row.
+  fn flow_slot(&self, frame: &str, exclude: &[NodeId], p: Point) -> Option<FlowSlot> {
     let f = self.doc.get(frame)?;
-    let horizontal = f.layout.as_ref()?.direction == LayoutDirection::Horizontal;
-    let pos = if horizontal { p.x } else { p.y };
-    Some(
-      f.children
+    let layout = f.layout.as_ref()?;
+    let horizontal = layout.direction == LayoutDirection::Horizontal;
+    let kids: Vec<&NodeId> = f.children.iter().filter(|c| !exclude.contains(c)).collect();
+    let flow: Vec<(usize, Rect)> = kids
+      .iter()
+      .enumerate()
+      .filter(|(_, c)| self.doc.get(c).is_some_and(|n| n.visible && !n.absolute_position))
+      .map(|(i, c)| (i, self.doc.abs_bounds(c)))
+      .collect();
+    let frame_box = self.doc.abs_bounds(frame);
+    let inner = Rect::new(
+      frame_box.x + layout.padding_left,
+      frame_box.y + layout.padding_top,
+      (frame_box.width - layout.padding_left - layout.padding_right).max(0.0),
+      (frame_box.height - layout.padding_top - layout.padding_bottom).max(0.0),
+    );
+    // Rows as indices into `flow`. Only a wrapping frame has more than one: a row starts when a
+    // layer is not to the right of the one before it, or is below the row so far. Any other
+    // layout is a single run (along x for a row, along y for a column).
+    let wraps = layout.wrap && horizontal;
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut row_bottom = f64::NEG_INFINITY;
+    for k in 0..flow.len() {
+      let r = &flow[k].1;
+      let new_row = wraps && k > 0 && (r.x <= flow[k - 1].1.x || r.y >= row_bottom - 0.01);
+      if rows.is_empty() || new_row {
+        rows.push(Vec::new());
+        row_bottom = f64::NEG_INFINITY;
+      }
+      rows.last_mut().unwrap().push(k);
+      row_bottom = row_bottom.max(r.y + r.height);
+    }
+    let main_of = |r: &Rect| if horizontal { (r.x, r.x + r.width) } else { (r.y, r.y + r.height) };
+    let span_of = |row: &[usize]| {
+      let top = row.iter().map(|&k| flow[k].1.y).fold(f64::INFINITY, f64::min);
+      let bottom = row
         .iter()
-        .filter(|c| {
-          let cc = self.doc.abs_bounds(c).center();
-          (if horizontal { cc.x } else { cc.y }) < pos
-        })
-        .count(),
-    )
+        .map(|&k| flow[k].1.y + flow[k].1.height)
+        .fold(f64::NEG_INFINITY, f64::max);
+      (top, bottom)
+    };
+    // The nearest row by y, then the place in it by x.
+    let row = if rows.len() > 1 {
+      let dist = |r: &[usize]| {
+        let (t, b) = span_of(r);
+        (t - p.y).max(p.y - b).max(0.0)
+      };
+      (0..rows.len())
+        .min_by(|&a, &b| dist(&rows[a]).total_cmp(&dist(&rows[b])))
+        .unwrap_or(0)
+    } else {
+      0
+    };
+    let pos = if horizontal { p.x } else { p.y };
+    let members: &[usize] = rows.get(row).map(|r| r.as_slice()).unwrap_or(&[]);
+    let in_row = members
+      .iter()
+      .filter(|&&k| {
+        let (a, b) = main_of(&flow[k].1);
+        (a + b) / 2.0 < pos
+      })
+      .count();
+    let slot = rows.iter().take(row).map(|r| r.len()).sum::<usize>() + in_row;
+    // Index among the children: in front of the flow child that follows, else behind the last.
+    let index = match flow.get(slot) {
+      Some((i, _)) => *i,
+      None => flow.last().map(|(i, _)| i + 1).unwrap_or(kids.len()),
+    };
+    let anchor = flow.get(slot).map(|(i, _)| kids[*i].clone());
+    // The line sits halfway between the neighbours inside the row, or half a gap outside them.
+    let half_gap = layout.gap / 2.0;
+    let prev = (in_row > 0).then(|| main_of(&flow[members[in_row - 1]].1).1);
+    let next = members.get(in_row).map(|&k| main_of(&flow[k].1).0);
+    let at = match (prev, next) {
+      (Some(a), Some(b)) => (a + b) / 2.0,
+      (None, Some(b)) => b - half_gap,
+      (Some(a), None) => a + half_gap,
+      (None, None) if horizontal => inner.x,
+      (None, None) => inner.y,
+    };
+    let (lo, hi) = if horizontal && !members.is_empty() {
+      span_of(members)
+    } else if horizontal {
+      (inner.y, inner.y + inner.height)
+    } else {
+      (inner.x, inner.x + inner.width)
+    };
+    let line = if horizontal { [at, lo, at, hi] } else { [lo, at, hi, at] };
+    Some(FlowSlot { index, anchor, line })
+  }
+
+  /// The auto layout frame a drop of `ids` at `p` would insert them into, with the slot.
+  fn drop_slot(&self, ids: &[NodeId], p: Point) -> Option<Value> {
+    let ids = ops::top_most(&self.doc, ids);
+    let target = ops::frame_at(&self.doc, &self.page, p, &ids, true)?;
+    // Layers placed absolutely don't take a place in the flow.
+    let enters = ids
+      .iter()
+      .any(|id| self.doc.get(id).is_some_and(|n| !n.absolute_position) && self.drop_move(id, Some(&target), p).is_some());
+    if !enters {
+      return None;
+    }
+    let slot = self.flow_slot(&target, &ids, p)?;
+    Some(json!({ "frame": target, "index": slot.index, "line": slot.line }))
+  }
+
+  /// What `DropInto` does with `id` for a drop at `p` on `target`: `None` leaves it where it is,
+  /// `Some(leaves_flow)` moves it into `target` (`leaves_flow`: out of its auto layout parent).
+  fn drop_move(&self, id: &str, target: Option<&str>, p: Point) -> Option<bool> {
+    let n = self.doc.get(id)?;
+    if self.doc.instance_ancestor(id).is_some()
+      || devices::in_part(&self.doc, id)
+      || components::would_nest_under(&self.doc, std::slice::from_ref(&id.to_string()), target)
+    {
+      return None;
+    }
+    let cur = n.parent.as_deref();
+    let cur_node = cur.and_then(|c| self.doc.get(c));
+    let in_flow = cur_node.is_some_and(|c| c.layout.is_some()) && !n.absolute_position;
+    // Inside its auto layout parent a drag reorders; dropped outside, the layer leaves.
+    let leaves_flow = in_flow && cur.is_some_and(|c| !self.contains_point(c, p));
+    let moves = cur != target && (!in_flow || leaves_flow) && cur_node.is_none_or(|c| c.kind != NodeType::Group);
+    moves.then_some(leaves_flow)
+  }
+
+  /// Child index in `frame` (once `id` is out of it) for a layer going in front of `anchor`.
+  fn anchor_index(&self, frame: &str, id: &str, anchor: &Option<NodeId>) -> usize {
+    let kids: Vec<&NodeId> = self
+      .doc
+      .get(frame)
+      .map(|f| f.children.iter().filter(|c| *c != id).collect())
+      .unwrap_or_default();
+    match anchor {
+      Some(a) => kids.iter().position(|c| *c == a).unwrap_or(kids.len()),
+      None => kids.len(),
+    }
   }
 
   /// True when a page-space point lies inside a node's (possibly rotated) box.
@@ -3114,25 +3308,13 @@ impl Engine {
   }
 
   fn reorder_in_flow(&mut self, id: &str, dx: f64, dy: f64) {
-    let Some(n) = self.doc.get(id).cloned() else { return };
+    let Some(n) = self.doc.get(id) else { return };
     let Some(parent) = n.parent.clone() else { return };
-    let horizontal = self
-      .doc
-      .get(&parent)
-      .and_then(|p| p.layout.as_ref())
-      .map(|l| l.direction == LayoutDirection::Horizontal)
-      .unwrap_or(false);
-    let b = self.doc.abs_bounds(id);
-    let c = b.center();
-    let pos = if horizontal { c.x + dx } else { c.y + dy };
-    let siblings: Vec<NodeId> = self.doc.siblings_of(id).into_iter().filter(|s| s != id).collect();
-    let mut index = 0;
-    for s in &siblings {
-      let sc = self.doc.abs_bounds(s).center();
-      if (if horizontal { sc.x } else { sc.y }) < pos {
-        index += 1;
-      }
-    }
+    let c = self.doc.abs_bounds(id).center();
+    let Some(slot) = self.flow_slot(&parent, &[id.to_string()], Point::new(c.x + dx, c.y + dy)) else {
+      return;
+    };
+    let index = self.anchor_index(&parent, id, &slot.anchor);
     self.doc.reparent(id, Some(&parent), Some(index), false);
   }
 
@@ -3285,6 +3467,32 @@ impl Engine {
     };
     arrange::scale_nodes(&mut self.doc, &ids, k, anchor);
     Ok(json!({ "guides": [], "gaps": [], "scale": k }))
+  }
+
+  fn import_svg(&mut self, svg: &str, x: f64, y: f64, parent: Option<NodeId>, name: Option<String>) -> Result<Value, String> {
+    let opts = svg_import::Options {
+      name,
+      ..Default::default()
+    };
+    let imported = svg_import::import(svg, &mut self.gen, &opts)?;
+    let parent = self.auto_parent(parent, x, y).filter(|p| {
+      self
+        .doc
+        .get(p)
+        .is_some_and(|n| n.kind.is_frame_like() && n.kind != NodeType::Instance)
+    });
+    let page = self.page.clone();
+    let mut nodes = imported.nodes.into_iter();
+    let mut root = nodes.next().ok_or("nothing to import")?;
+    root.x = x - root.width / 2.0;
+    root.y = y - root.height / 2.0;
+    let id = self.insert_abs(root, parent.as_deref());
+    for mut n in nodes {
+      n.page = page.clone();
+      self.doc.nodes.insert(n.id.clone(), n);
+    }
+    self.selection = vec![id.clone()];
+    Ok(json!({ "id": id, "warnings": imported.warnings }))
   }
 
   fn paste(&mut self, data: &str, parent: Option<NodeId>, x: Option<f64>, y: Option<f64>) -> Result<Value, String> {
@@ -3463,9 +3671,17 @@ impl Engine {
           zoom
         ))
       }
+      Query::TextLayout { id, from, to } => match self.doc.get(&id).and_then(|n| n.text.as_ref().map(|t| (n, t))) {
+        Some((n, t)) => {
+          let range = from.map(|a| (a, to.unwrap_or(a)));
+          json!(crate::text::caret_geometry(n, t, self.measurer.as_ref(), true, range))
+        }
+        None => Value::Null,
+      },
       Query::OverrideCount { id } => json!({ "count": components::override_count(&self.doc, &id) }),
       Query::ComponentProps { id } => crate::props::describe(&self.doc, &id),
       Query::FrameAt { x, y, exclude } => json!(ops::frame_at(&self.doc, &self.page, Point::new(x, y), &exclude, true)),
+      Query::DropSlot { ids, x, y } => json!(self.drop_slot(&ids, Point::new(x, y))),
       Query::SnapPoint { x, y, zoom, exclude } => {
         let (r, guides, _) = interact::snap_rect(
           &self.doc,
@@ -3819,6 +4035,10 @@ mod tests {
     assert_eq!(e.doc.get(&c).unwrap().parent.as_deref(), Some(card.as_str()));
   }
 
+  fn slot_at(e: &Engine, ids: Vec<NodeId>, x: f64, y: f64) -> Value {
+    e.query(Query::DropSlot { ids, x, y }).unwrap()
+  }
+
   fn id_of(v: &Value) -> String {
     v["id"].as_str().unwrap().to_string()
   }
@@ -3843,6 +4063,33 @@ mod tests {
 
   fn ai(e: &mut Engine, tool: &str, input: Value) -> Value {
     e.dispatch(Command::Ai { tool: tool.into(), input }).unwrap()
+  }
+
+  #[test]
+  fn moving_a_child_of_a_flipped_group_keeps_the_others_on_the_page() {
+    let mut e = engine();
+    let a = rect(&mut e, 100.0, 100.0, 40.0, 40.0, None);
+    let b = rect(&mut e, 300.0, 100.0, 40.0, 40.0, None);
+    let g = id_of(
+      &e.dispatch(Command::Group {
+        ids: vec![a.clone(), b.clone()],
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::Flip {
+      ids: vec![g],
+      horizontal: true,
+    })
+    .unwrap();
+    let page_x = |e: &Engine, id: &str| e.doc.abs_bounds(id).x;
+    assert_eq!((page_x(&e, &a), page_x(&e, &b)), (300.0, 100.0));
+    // Own x 250 mirrors to page x 50: the sibling must not move when the group refits.
+    e.dispatch(Command::Update {
+      ids: vec![a.clone()],
+      patch: json!({ "x": 250 }),
+    })
+    .unwrap();
+    assert_eq!((page_x(&e, &a), page_x(&e, &b)), (50.0, 100.0));
   }
 
   #[test]
@@ -4000,17 +4247,17 @@ mod tests {
     let mut e = engine();
     let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
     let p1 = e.page.clone();
-    e.render_incremental(&p1, &[]);
+    e.render_incremental(&p1, &[], None);
     ai(&mut e, "update_nodes", json!({ "updates": [{ "id": a, "x": 300 }] }));
-    e.render_incremental(&p1, &[]);
+    e.render_incremental(&p1, &[], None);
     e.dispatch(Command::Delete { ids: vec![a.clone()] }).unwrap();
-    e.render_incremental(&p1, &[]);
+    e.render_incremental(&p1, &[], None);
     e.dispatch(Command::AddPage { name: None }).unwrap();
     let p2 = e.page.clone();
-    e.render_incremental(&p2, &[]);
+    e.render_incremental(&p2, &[], None);
     e.dispatch(Command::Undo).unwrap();
     e.dispatch(Command::Undo).unwrap();
-    let inc = e.render_incremental(&p1, &[]);
+    let inc = e.render_incremental(&p1, &[], None);
     let fresh = render::render_root(
       &e.doc,
       &a,
@@ -4018,6 +4265,7 @@ mod tests {
       RenderOptions {
         mode: Mode::Canvas,
         hidden: &[],
+        editing: None,
       },
     );
     assert_eq!(inc["changed"][&a].as_str().unwrap(), fresh, "markup carries the move");
@@ -4136,7 +4384,7 @@ mod tests {
       .as_str()
       .unwrap()
       .to_string();
-    let first = e.render_incremental(&page, &[]);
+    let first = e.render_incremental(&page, &[], None);
     assert_eq!(bounds(&first, &a), vec![100.0, 50.0, 40.0, 20.0]);
     assert_eq!(bounds(&first, &b), vec![300.0, 50.0, 40.0, 20.0]);
     assert_eq!(
@@ -4150,7 +4398,7 @@ mod tests {
       patch: json!({ "effects": [{ "type": "dropShadow", "x": 0, "y": 10, "blur": 10, "spread": 0, "color": "#000000", "visible": true }] }),
     })
     .unwrap();
-    let second = e.render_incremental(&page, &[]);
+    let second = e.render_incremental(&page, &[], None);
     assert!(second["changed"].get(&a).is_some() && second["changed"].get(&b).is_none());
     assert!(second["bounds"].get(&b).is_none(), "untouched roots keep the bounds the editor has");
     let shadowed = bounds(&second, &a);
@@ -4161,7 +4409,7 @@ mod tests {
       patch: json!({ "x": 130.0, "y": 80.0 }),
     })
     .unwrap();
-    let third = e.render_incremental(&page, &[]);
+    let third = e.render_incremental(&page, &[], None);
     assert!(third["moved"].get(&a).is_some());
     let moved = bounds(&third, &a);
     assert_eq!(
@@ -4515,7 +4763,7 @@ mod tests {
     assert!(e.doc.get(&m).unwrap().is_mask);
     assert_eq!(e.doc.get(&g).unwrap().children[0], m);
     let page = e.page.clone();
-    let svg = e.render(&page, &[]);
+    let svg = e.render(&page, &[], None);
     assert!(svg.contains("<mask id=") && svg.contains("mask=\"url(#"), "{svg}");
   }
 
@@ -5379,6 +5627,77 @@ mod tests {
   }
 
   #[test]
+  fn importing_an_svg_is_one_undo_step_and_a_refusal_changes_nothing() {
+    let mut e = engine();
+    let svg = r##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000"><path d="M2 2L22 22"/><circle cx="12" cy="12" r="5"/></svg>"##;
+    let before = e.doc.clone();
+    let r = e
+      .dispatch(Command::ImportSvg {
+        svg: svg.into(),
+        x: 100.0,
+        y: 100.0,
+        parent: None,
+        name: Some("icon".into()),
+      })
+      .unwrap();
+    let id = id_of(&r);
+    let frame = e.doc.get(&id).unwrap();
+    assert_eq!(
+      (frame.name.as_str(), frame.x, frame.y, frame.children.len()),
+      ("icon", 88.0, 88.0, 2)
+    );
+    assert_eq!(e.selection, vec![id.clone()]);
+    let kids = e.doc.subtree(&id);
+    assert_eq!(kids.len(), 3);
+    assert!(kids.iter().all(|k| e.doc.get(k).unwrap().page == e.page));
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc, before, "one undo removes the frame and its layers");
+    e.dispatch(Command::Redo).unwrap();
+    assert!(e.doc.get(&id).is_some());
+    // Refused markup: an error naming why, and the document is untouched.
+    let doc = e.doc.clone();
+    let err = e
+      .dispatch(Command::ImportSvg {
+        svg: "<svg width='9' height='9'><text>hi</text></svg>".into(),
+        x: 0.0,
+        y: 0.0,
+        parent: None,
+        name: None,
+      })
+      .unwrap_err();
+    assert_eq!(err, "text");
+    assert_eq!(e.doc, doc);
+  }
+
+  #[test]
+  fn an_imported_svg_lands_inside_the_frame_under_its_centre() {
+    let mut e = engine();
+    let f = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 0.0,
+        y: 0.0,
+        width: 400.0,
+        height: 400.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let id = id_of(
+      &e.dispatch(Command::ImportSvg {
+        svg: r#"<svg width="20" height="20"><rect width="20" height="20"/></svg>"#.into(),
+        x: 50.0,
+        y: 60.0,
+        parent: None,
+        name: None,
+      })
+      .unwrap(),
+    );
+    let n = e.doc.get(&id).unwrap();
+    assert_eq!((n.parent.as_deref(), n.x, n.y), (Some(f.as_str()), 40.0, 50.0));
+  }
+
+  #[test]
   fn new_text_is_white_on_a_dark_backdrop_only() {
     let mut e = engine();
     let dark = frame_with_fill(&mut e, "#000000");
@@ -5612,7 +5931,7 @@ mod tests {
     let t = e.doc.get(&id).unwrap().text.clone().unwrap();
     assert_eq!(t.font_weight, 300);
     assert!(t.runs.iter().all(|r| r.font_weight.is_none()));
-    let svg = e.render(&e.page.clone(), &[]);
+    let svg = e.render(&e.page.clone(), &[], None);
     assert!(svg.contains("fill=\"#FF0000\""));
   }
 
@@ -6007,12 +6326,143 @@ mod tests {
     let n = e.doc.get(&id).unwrap();
     assert_eq!(n.height, (2.0_f64 * 16.0 * 1.2).ceil(), "two lines tall");
     assert!(n.height < tall);
-    let svg = e.render(&e.page.clone(), &[]);
+    let svg = e.render(&e.page.clone(), &[], None);
     assert!(svg.contains('\u{2026}'), "{svg}");
     // Clearing the limit brings the text back.
     update_ids(&mut e, vec![id.clone()], json!({ "text": { "maxLines": null } }));
     assert_eq!(e.doc.get(&id).unwrap().height, tall);
-    assert!(!e.render(&e.page.clone(), &[]).contains('\u{2026}'));
+    assert!(!e.render(&e.page.clone(), &[], None).contains('\u{2026}'));
+  }
+
+  #[test]
+  fn editing_text_renders_every_line_without_an_ellipsis() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "one two three four five six seven eight nine ten eleven twelve".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    update_ids(
+      &mut e,
+      vec![id.clone()],
+      json!({ "width": 100, "text": { "autoResize": "height", "maxLines": 1 } }),
+    );
+    let page = e.page.clone();
+    let cut = e.render(&page, &[], None);
+    assert!(cut.contains('\u{2026}'));
+    let live = e.render(&page, &[], Some(&id));
+    assert!(!live.contains('\u{2026}'), "{live}");
+    assert!(!live.contains("visibility=\"hidden\""), "editing text stays visible");
+    assert!(live.contains("twelve"));
+  }
+
+  #[test]
+  fn render_incremental_repaints_the_root_when_editing_changes() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "one two three four five six seven eight".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    update_ids(
+      &mut e,
+      vec![id.clone()],
+      json!({ "width": 60, "text": { "autoResize": "height", "maxLines": 1 } }),
+    );
+    let page = e.page.clone();
+    let first = e.render_incremental(&page, &[], None);
+    assert!(first["changed"][&id].as_str().unwrap().contains('\u{2026}'));
+    let quiet = e.render_incremental(&page, &[], None);
+    assert!(quiet["changed"].as_object().unwrap().is_empty());
+    let start = e.render_incremental(&page, &[], Some(&id));
+    assert!(!start["changed"][&id].as_str().unwrap().contains('\u{2026}'), "{start}");
+    let same = e.render_incremental(&page, &[], Some(&id));
+    assert!(same["changed"].as_object().unwrap().is_empty());
+    let end = e.render_incremental(&page, &[], None);
+    assert!(end["changed"][&id].as_str().unwrap().contains('\u{2026}'));
+  }
+
+  #[test]
+  fn text_layout_query_has_the_caret_geometry_shape() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "ab\ncd".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let v = e
+      .query(Query::TextLayout {
+        id: id.clone(),
+        from: None,
+        to: None,
+      })
+      .unwrap();
+    let lines = v["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 2, "{v}");
+    assert_eq!((lines[0]["start"].as_u64(), lines[0]["end"].as_u64()), (Some(0), Some(2)));
+    assert_eq!((lines[1]["start"].as_u64(), lines[1]["end"].as_u64()), (Some(3), Some(5)));
+    assert_eq!(lines[0]["xs"].as_array().unwrap().len(), 3);
+    assert!(lines[1]["top"].as_f64().unwrap() > 0.0 && v["height"].as_f64().unwrap() > 0.0);
+    assert!(e
+      .query(Query::TextLayout {
+        id: "nope".into(),
+        from: None,
+        to: None
+      })
+      .unwrap()
+      .is_null());
+  }
+
+  #[test]
+  fn set_text_stores_line_breaks_as_newlines() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::SetText {
+      id: id.clone(),
+      characters: "ab\r\ncd\ref".into(),
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&id).unwrap().text.as_ref().unwrap().characters, "ab\ncd\nef");
+  }
+
+  #[test]
+  fn set_text_names_the_layer_from_the_trimmed_text() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::SetText {
+      id: id.clone(),
+      characters: " plus".into(),
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&id).unwrap().name, "plus");
   }
 
   #[test]
@@ -6062,6 +6512,303 @@ mod tests {
     .unwrap();
     e.dispatch(Command::EndGesture).unwrap();
     assert_eq!(e.doc.get(&f).unwrap().children, vec![b, a]);
+  }
+
+  /// Q's fixture: a 300 px wrap frame (gap 10, padding 10) with six 60x40 tiles, four to a row.
+  fn wrap_fixture() -> (Engine, String, Vec<String>) {
+    let mut e = engine();
+    let tiles: Vec<String> = (0..6)
+      .map(|i| rect(&mut e, 20.0 + i as f64 * 70.0, 20.0, 60.0, 40.0, None))
+      .collect();
+    let f = id_of(&e.dispatch(Command::AddAutoLayout { ids: tiles.clone() }).unwrap());
+    update_ids(
+      &mut e,
+      vec![f.clone()],
+      json!({ "width": 300, "sizingH": "fixed", "layout": { "wrap": true, "gap": 10, "counterGap": 10,
+        "paddingLeft": 10, "paddingRight": 10, "paddingTop": 10, "paddingBottom": 10 } }),
+    );
+    (e, f, tiles)
+  }
+
+  fn drag_onto(e: &mut Engine, id: &str, target: &str) {
+    let (from, to) = (e.doc.abs_bounds(id).center(), e.doc.abs_bounds(target).center());
+    e.dispatch(Command::BeginGesture).unwrap();
+    e.dispatch(Command::Translate {
+      ids: vec![id.to_string()],
+      dx: to.x - from.x,
+      dy: to.y - from.y,
+      snap: false,
+      zoom: 1.0,
+      axis: None,
+    })
+    .unwrap();
+    e.dispatch(Command::DropInto {
+      ids: vec![id.to_string()],
+      x: to.x,
+      y: to.y,
+    })
+    .unwrap();
+    e.dispatch(Command::EndGesture).unwrap();
+  }
+
+  #[test]
+  fn wrap_reorder_follows_the_row_under_the_pointer() {
+    let (mut e, f, t) = wrap_fixture();
+    assert_eq!(e.doc.get(&t[4]).unwrap().y, 60.0, "T5 starts the second row");
+    drag_onto(&mut e, &t[0], &t[5]);
+    let order = |e: &Engine| e.doc.get(&f).unwrap().children.clone();
+    assert_eq!(
+      order(&e),
+      vec![t[1].clone(), t[2].clone(), t[3].clone(), t[4].clone(), t[0].clone(), t[5].clone()]
+    );
+    // Onto T5 (first of row two) it goes in front of it.
+    let (mut e, f, t) = wrap_fixture();
+    drag_onto(&mut e, &t[0], &t[4]);
+    assert_eq!(
+      e.doc.get(&f).unwrap().children,
+      vec![t[1].clone(), t[2].clone(), t[3].clone(), t[0].clone(), t[4].clone(), t[5].clone()]
+    );
+    // Dragging up to the first row moves back.
+    drag_onto(&mut e, &t[5], &t[1]);
+    assert_eq!(e.doc.get(&f).unwrap().children[0], t[5]);
+  }
+
+  #[test]
+  fn drop_into_a_wrap_frame_inserts_at_the_row_and_column() {
+    let (mut e, f, t) = wrap_fixture();
+    let free = rect(&mut e, 600.0, 0.0, 30.0, 30.0, None);
+    let p = e.doc.abs_bounds(&t[4]).center();
+    e.dispatch(Command::DropInto {
+      ids: vec![free.clone()],
+      x: p.x,
+      y: p.y,
+    })
+    .unwrap();
+    let kids = e.doc.get(&f).unwrap().children.clone();
+    assert_eq!(kids.iter().position(|k| *k == free), Some(4), "in front of T5: {kids:?}");
+  }
+
+  #[test]
+  fn drop_slot_gives_the_index_and_a_line_for_layers_entering() {
+    let (mut e, f, t) = wrap_fixture();
+    let free = rect(&mut e, 600.0, 0.0, 30.0, 30.0, None);
+    // Between T4 (end of row one) and T5 (start of row two): in front of T5, at the row's left.
+    let t5 = e.doc.abs_bounds(&t[4]);
+    let r = slot_at(&e, vec![free.clone()], t5.x + 5.0, t5.y + 20.0);
+    assert_eq!(r["frame"], json!(f));
+    assert_eq!(r["index"], 4);
+    let l: Vec<f64> = r["line"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    assert_eq!(l[0], l[2], "vertical line");
+    assert!(l[0] < t5.x && l[1] <= t5.y && l[3] >= t5.bottom() - 0.01, "{l:?}");
+    // Between T2 and T3 the line sits in the gap and spans the row.
+    let (a, b) = (e.doc.abs_bounds(&t[1]), e.doc.abs_bounds(&t[2]));
+    let r = slot_at(&e, vec![free.clone()], b.x + 1.0, b.y + 5.0);
+    assert_eq!(r["index"], 2);
+    assert!((r["line"][0].as_f64().unwrap() - (a.right() + b.x) / 2.0).abs() < 1e-6);
+    // Layers already in the frame reorder with the live reflow instead, and a plain frame has no slot.
+    let q = slot_at(&e, vec![t[0].clone()], b.x, b.y);
+    assert!(q.is_null());
+    let plain = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 800.0,
+        y: 0.0,
+        width: 200.0,
+        height: 200.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let _ = plain;
+    assert!(slot_at(&e, vec![free], 850.0, 50.0).is_null());
+  }
+
+  #[test]
+  fn column_and_single_row_reorders_are_unchanged() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    let b = rect(&mut e, 0.0, 100.0, 50.0, 50.0, None);
+    let c = rect(&mut e, 0.0, 200.0, 50.0, 50.0, None);
+    let list = id_of(
+      &e.dispatch(Command::AddAutoLayout {
+        ids: vec![a.clone(), b.clone(), c.clone()],
+      })
+      .unwrap(),
+    );
+    update_ids(&mut e, vec![list.clone()], json!({ "layout": { "direction": "vertical" } }));
+    drag_onto(&mut e, &a, &c);
+    assert_eq!(e.doc.get(&list).unwrap().children, vec![b, a, c]);
+  }
+
+  #[test]
+  fn typing_a_group_size_scales_its_children() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 100.0, 40.0, None);
+    let b = rect(&mut e, 140.0, 0.0, 100.0, 40.0, None);
+    let g = id_of(
+      &e.dispatch(Command::Group {
+        ids: vec![a.clone(), b.clone()],
+      })
+      .unwrap(),
+    );
+    assert_eq!(e.doc.get(&g).unwrap().width, 240.0);
+    update_ids(&mut e, vec![g.clone()], json!({ "width": 400 }));
+    assert_eq!(e.doc.get(&g).unwrap().width, 400.0);
+    let (na, nb) = (e.doc.get(&a).unwrap(), e.doc.get(&b).unwrap());
+    assert!((na.width - 100.0 * 400.0 / 240.0).abs() < 1e-6);
+    assert!((nb.x - 140.0 * 400.0 / 240.0).abs() < 1e-6);
+    update_ids(&mut e, vec![g.clone()], json!({ "height": 80 }));
+    assert_eq!((e.doc.get(&g).unwrap().height, e.doc.get(&a).unwrap().height), (80.0, 80.0));
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.get(&g).unwrap().height, 40.0);
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!((e.doc.get(&g).unwrap().width, e.doc.get(&a).unwrap().width), (240.0, 100.0));
+  }
+
+  #[test]
+  fn a_non_wrapping_row_reorders_by_x_whatever_the_heights() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 40.0, 100.0, None);
+    let b = rect(&mut e, 50.0, 0.0, 40.0, 30.0, None);
+    let c = rect(&mut e, 100.0, 0.0, 40.0, 30.0, None);
+    let f = id_of(
+      &e.dispatch(Command::AddAutoLayout {
+        ids: vec![a.clone(), b.clone(), c.clone()],
+      })
+      .unwrap(),
+    );
+    let gap_x = {
+      let (bb, cb) = (e.doc.abs_bounds(&b), e.doc.abs_bounds(&c));
+      (bb.right() + cb.x) / 2.0
+    };
+    let dx = gap_x - e.doc.abs_bounds(&a).center().x;
+    e.dispatch(Command::BeginGesture).unwrap();
+    // Straight along the row: the pointer is below the short layers' row, but it is still one row.
+    e.dispatch(Command::Translate {
+      ids: vec![a.clone()],
+      dx,
+      dy: 0.0,
+      snap: false,
+      zoom: 1.0,
+      axis: None,
+    })
+    .unwrap();
+    e.dispatch(Command::EndGesture).unwrap();
+    assert_eq!(e.doc.get(&f).unwrap().children, vec![b.clone(), a.clone(), c.clone()]);
+    // A free layer dropped in the frame's top padding goes by x too.
+    let free = rect(&mut e, 600.0, 0.0, 10.0, 10.0, None);
+    let top = e.doc.abs_bounds(&f).y;
+    let x = e.doc.abs_bounds(&b).center().x - 1.0;
+    e.dispatch(Command::DropInto {
+      ids: vec![free.clone()],
+      x,
+      y: top + 1.0,
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&f).unwrap().children, vec![free, b, a, c]);
+  }
+
+  #[test]
+  fn full_width_wrap_rows_are_separate_rows() {
+    let mut e = engine();
+    let tiles: Vec<String> = (0..3)
+      .map(|i| rect(&mut e, 10.0, 10.0 + i as f64 * 50.0, 280.0, 40.0, None))
+      .collect();
+    let f = id_of(&e.dispatch(Command::AddAutoLayout { ids: tiles.clone() }).unwrap());
+    update_ids(
+      &mut e,
+      vec![f.clone()],
+      json!({ "width": 300, "sizingH": "fixed", "layout": { "direction": "horizontal", "wrap": true, "gap": 10, "counterGap": 10,
+        "paddingLeft": 10, "paddingRight": 10, "paddingTop": 10, "paddingBottom": 10 } }),
+    );
+    assert_eq!(e.doc.get(&tiles[2]).unwrap().y, 110.0);
+    let free = rect(&mut e, 600.0, 0.0, 20.0, 20.0, None);
+    let mid = e.doc.abs_bounds(&tiles[1]);
+    for (x, want) in [(mid.x + 5.0, 1), (mid.right() - 5.0, 2)] {
+      let r = slot_at(&e, vec![free.clone()], x, mid.y + 20.0);
+      assert_eq!(r["index"], want, "x = {x}");
+    }
+  }
+
+  #[test]
+  fn dropping_several_layers_keeps_their_order() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 40.0, None);
+    let b = rect(&mut e, 0.0, 50.0, 50.0, 40.0, None);
+    let c = rect(&mut e, 0.0, 100.0, 50.0, 40.0, None);
+    let list = id_of(
+      &e.dispatch(Command::AddAutoLayout {
+        ids: vec![a.clone(), b.clone(), c.clone()],
+      })
+      .unwrap(),
+    );
+    update_ids(
+      &mut e,
+      vec![list.clone()],
+      json!({ "layout": { "direction": "vertical", "gap": 10 } }),
+    );
+    let (x1, x2) = (
+      rect(&mut e, 400.0, 0.0, 20.0, 20.0, None),
+      rect(&mut e, 430.0, 0.0, 20.0, 20.0, None),
+    );
+    let (ab, bb) = (e.doc.abs_bounds(&a), e.doc.abs_bounds(&b));
+    let y = (ab.bottom() + bb.y) / 2.0;
+    e.dispatch(Command::DropInto {
+      ids: vec![x1.clone(), x2.clone()],
+      x: ab.x + 10.0,
+      y,
+    })
+    .unwrap();
+    assert_eq!(
+      e.doc.get(&list).unwrap().children,
+      vec![a.clone(), x1.clone(), x2.clone(), b.clone(), c.clone()]
+    );
+    // One of the dragged layers already lives in the target: it stays, the other goes in front of C.
+    let x3 = rect(&mut e, 500.0, 0.0, 20.0, 20.0, None);
+    let cb = e.doc.abs_bounds(&c);
+    let bb = e.doc.abs_bounds(&b);
+    e.dispatch(Command::DropInto {
+      ids: vec![b.clone(), x3.clone()],
+      x: cb.x + 10.0,
+      y: (bb.bottom() + cb.y) / 2.0,
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&list).unwrap().children, vec![a, x1, x2, b, x3, c]);
+  }
+
+  #[test]
+  fn typing_a_height_for_a_flat_group_keeps_its_zero_height() {
+    let mut e = engine();
+    let l1 = e
+      .dispatch(Command::CreateShape {
+        kind: NodeType::Line,
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 0.0,
+        parent: None,
+      })
+      .unwrap();
+    let l2 = e
+      .dispatch(Command::CreateShape {
+        kind: NodeType::Line,
+        x: 0.0,
+        y: 0.0,
+        width: 60.0,
+        height: 0.0,
+        parent: None,
+      })
+      .unwrap();
+    let g = id_of(
+      &e.dispatch(Command::Group {
+        ids: vec![id_of(&l1), id_of(&l2)],
+      })
+      .unwrap(),
+    );
+    let flat = e.doc.get(&g).unwrap().height;
+    assert!(flat < 1.0, "{flat}");
+    update_ids(&mut e, vec![g.clone()], json!({ "width": 200 }));
+    assert_eq!((e.doc.get(&g).unwrap().width, e.doc.get(&g).unwrap().height), (200.0, flat));
   }
 
   #[test]

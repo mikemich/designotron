@@ -62,6 +62,17 @@ export async function pasteHere(x?: number, y?: number) {
 export async function pasteOverSelection() {
   const text = await clipboardLayers();
   if (!text) {
+    // Pasting SVG markup makes vectors; this shortcut is the way to get it as an image instead.
+    const svg = await clipboardSvg();
+    if (svg) {
+      const c = A.viewportCenter();
+      await A.placeSvgAsImage(svg, c.x, c.y);
+      return;
+    }
+    if (svg === null && !internalClipboard) {
+      toast("The browser blocked clipboard access. Allow it for this site to paste an SVG as an image with this shortcut.", "error");
+      return;
+    }
     toast("Copy some layers first, then paste over the selection", "error");
     return;
   }
@@ -154,6 +165,16 @@ async function clipboardLayers(): Promise<string> {
     return t.includes("designotron/nodes") ? t : "";
   } catch {
     return internalClipboard;
+  }
+}
+
+/** SVG markup on the system clipboard, if that is what it holds ("" if not, null when it can't be read). */
+async function clipboardSvg(): Promise<string | null> {
+  try {
+    const t = await navigator.clipboard.readText();
+    return A.isSvgText(t) ? t : "";
+  } catch {
+    return null;
   }
 }
 

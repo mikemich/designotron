@@ -146,6 +146,8 @@ interface Store {
   tabView: boolean;
   toast: { text: string; kind: "info" | "error" } | null;
   dropTarget: string | null;
+  /** Insertion line `[x1, y1, x2, y2]` (page space) for a layer about to enter an auto layout frame. */
+  dropLine: [number, number, number, number] | null;
   /** Character range selected in the text being edited (code points). */
   textSel: { id: string; start: number; end: number } | null;
   showRulers: boolean;
@@ -207,6 +209,7 @@ export const useStore = create<Store>(() => ({
   tabView: false,
   toast: null,
   dropTarget: null,
+  dropLine: null,
   textSel: null,
   showRulers: pref("dt:showRulers", false),
   showGrids: pref("dt:showGrids", true),
@@ -410,8 +413,8 @@ export function currentPage(): string {
 }
 
 /** Engine SVG for a page with asset references resolved to object URLs. */
-export function renderPage(page: string, hidden: string[]): string {
-  return resolveAssets(getEngine().render(page, JSON.stringify(hidden)));
+export function renderPage(page: string, hidden: string[], editing = ""): string {
+  return resolveAssets(getEngine().render(page, JSON.stringify(hidden), editing));
 }
 
 export type RenderUpdate =
@@ -427,8 +430,8 @@ export type RenderUpdate =
     };
 
 /** Incremental canvas render: only top-level layers changed since the last call come back. */
-export function renderPageIncremental(page: string, hidden: string[], reset: boolean): RenderUpdate {
-  const r = JSON.parse(getEngine().renderIncremental(page, JSON.stringify(hidden), reset));
+export function renderPageIncremental(page: string, hidden: string[], reset: boolean, editing = ""): RenderUpdate {
+  const r = JSON.parse(getEngine().renderIncremental(page, JSON.stringify(hidden), reset, editing));
   if ("full" in r) return { full: resolveAssets(r.full) };
   for (const k in r.changed) r.changed[k] = resolveAssets(r.changed[k]);
   return r;

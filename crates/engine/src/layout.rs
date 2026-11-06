@@ -105,8 +105,9 @@ pub fn normalize_group(doc: &mut Document, id: &str) {
     }
   }
   doc.modify(id, |g| {
-    g.x += b.x;
-    g.y += b.y;
+    // A flipped group mirrors its children about its centre, so the edge that stays put is the far one.
+    g.x += if g.flip_x { g.width - b.x - b.width } else { b.x };
+    g.y += if g.flip_y { g.height - b.y - b.height } else { b.y };
     g.width = b.width.max(0.01);
     g.height = b.height.max(0.01);
     g.rotation = 0.0;
@@ -497,6 +498,14 @@ fn arrange_wrapped(doc: &mut Document, id: &str, items: &[Item], width: f64, hug
     }
   }
   let mut y = al.padding_top;
+  if !hug_cross {
+    // Rows sit in the frame as one block, placed by the counter axis alignment (Figma's
+    // counterAxisAlignContent AUTO, CSS align-content). Overflowing rows stay at the top.
+    let rows_h: f64 =
+      rows.iter().map(|r| r.iter().map(|i| i.counter).fold(0.0, f64::max)).sum::<f64>() + al.counter_gap * (rows.len() as f64 - 1.0);
+    let inner_h = doc.get(id).unwrap().height - al.padding_top - al.padding_bottom;
+    y += wrap_block_offset(al.counter_align, inner_h, rows_h);
+  }
   for row in &rows {
     let row_h = row.iter().map(|i| i.counter).fold(0.0, f64::max);
     let used: f64 = row.iter().map(|i| i.main).sum::<f64>() + al.gap * (row.len().max(1) as f64 - 1.0);
@@ -526,6 +535,17 @@ fn arrange_wrapped(doc: &mut Document, id: &str, items: &[Item], width: f64, hug
     doc.modify(id, |f| {
       f.height = clamp_to(h, (f.min_height.unwrap_or(0.0), f.max_height.unwrap_or(f64::INFINITY))).max(1.0)
     });
+  }
+}
+
+/// Offset of a wrap frame's block of rows from the inner top: start and baseline pack at the
+/// top, center and end share out the free space. Never negative.
+fn wrap_block_offset(align: Align, inner_h: f64, rows_h: f64) -> f64 {
+  let free = (inner_h - rows_h).max(0.0);
+  match align {
+    Align::Center => free / 2.0,
+    Align::End => free,
+    _ => 0.0,
   }
 }
 
@@ -1002,6 +1022,40 @@ mod tests {
     let f = doc.get("f").unwrap();
     assert_eq!((f.width, f.height), (300.0, 20.0));
     assert_eq!(doc.get("c4").unwrap().x, 240.0);
+  }
+
+  #[test]
+  fn wrapped_rows_align_as_a_block_in_a_fixed_height_frame() {
+    // Three rows of 30 px with 10 px between them: 110 px of rows in a 200 px frame.
+    let rows_y = |align: Align, sizing_v: Sizing| {
+      let (mut doc, page) = setup();
+      let mut r = row("f", 0.0, Sizing::Fixed);
+      r.width = 100.0;
+      r.height = 200.0;
+      r.sizing_v = sizing_v;
+      let l = r.layout.as_mut().unwrap();
+      l.wrap = true;
+      l.gap = 0.0;
+      l.counter_gap = 10.0;
+      l.counter_align = align;
+      doc.insert(r, None, &page, None);
+      for i in 0..3 {
+        let n = Node {
+          id: format!("c{i}"),
+          width: 100.0,
+          height: 30.0,
+          ..Default::default()
+        };
+        doc.insert(n, Some("f"), &page, None);
+      }
+      relayout_all(&mut doc, &HeuristicMeasurer);
+      (0..3).map(|i| doc.get(&format!("c{i}")).unwrap().y).collect::<Vec<_>>()
+    };
+    assert_eq!(rows_y(Align::Start, Sizing::Fixed), vec![0.0, 40.0, 80.0]);
+    assert_eq!(rows_y(Align::Center, Sizing::Fixed), vec![45.0, 85.0, 125.0]);
+    assert_eq!(rows_y(Align::End, Sizing::Fixed), vec![90.0, 130.0, 170.0]);
+    // Hugging, the rows are the frame: nothing to share out.
+    assert_eq!(rows_y(Align::Center, Sizing::Hug), vec![0.0, 40.0, 80.0]);
   }
 
   #[test]

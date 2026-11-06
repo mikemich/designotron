@@ -596,6 +596,13 @@ textarea.textinput {
   outline: 2px solid var(--select);
   outline-offset: -2px;
 }
+/* Canvas: where a layer dropped into an auto layout frame will be inserted. */
+.flow-drop-line {
+  stroke: var(--select);
+  stroke-width: 2px;
+  stroke-linecap: round;
+  pointer-events: none;
+}
 
 /* ---------- Canvas ---------- */
 .canvas {
@@ -663,6 +670,59 @@ textarea.textinput {
   white-space: pre-wrap;
   transform-origin: 0 0;
   caret-color: var(--select);
+}
+/* While the canvas draws the text live, the textarea is only the input: its glyphs, caret and
+   selection are invisible and the editor draws the caret and selection (`.text-caret`). */
+.text-editor[data-live] {
+  color: transparent;
+  caret-color: transparent;
+}
+.text-editor[data-live]::selection {
+  background: transparent;
+  color: transparent;
+}
+.text-caret {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+  transform-origin: 0 0;
+}
+.text-caret .text-sel {
+  fill: var(--select, #0d99ff);
+  fill-opacity: 0.3;
+}
+.text-caret .text-caret-bar {
+  fill: var(--select, #0d99ff);
+  animation: text-caret-blink 1.06s steps(1) infinite;
+}
+@keyframes text-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+/* Forced colours override the transparent text, caret and selection: keep the textarea invisible
+   (the canvas draws the text) and draw the caret and selection in the system highlight colour. */
+@media (forced-colors: active) {
+  .text-editor[data-live] {
+    forced-color-adjust: none;
+  }
+  .text-caret {
+    forced-color-adjust: none;
+  }
+  .text-caret .text-sel {
+    fill: Highlight;
+    fill-opacity: 0.45;
+  }
+  .text-caret .text-caret-bar {
+    fill: Highlight;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .text-caret .text-caret-bar {
+    animation: none;
+  }
 }
 .zoom-indicator {
   position: absolute;
@@ -2518,6 +2578,11 @@ body:has(.phone-note) .toast {
 }
 .scale-row .field {
   flex: 1;
+}
+/* The image scale mode select has a row of its own: next to the two buttons it was squeezed to "Cr". */
+.scale-mode-row .field {
+  flex: 1;
+  min-width: 7em;
 }
 /* W3-F inspect */
 .insp-live {

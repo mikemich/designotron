@@ -17,7 +17,7 @@ import {
   zoomBy,
 } from "../store";
 import { apply, corners, invert, mid, polyPoints, rectCorners, simplify, toScreen, type Pt } from "./geometry";
-import { openTextGesture, TextEditor } from "./TextEditor";
+import { editTextAt, openTextGesture, TextEditor } from "./TextEditor";
 import { EmptyPrompt } from "./EmptyPrompt";
 import { GridOverlay, PageGuides, Rulers } from "./Rulers";
 import { CommentLayer } from "./Comments";
@@ -29,7 +29,7 @@ import { FollowFrame } from "./FollowFrame";
 import { CursorChat } from "./CursorChat";
 import { GuestBar } from "../panels/GuestBar";
 import { reportCursor, useCollab } from "../collab";
-import { insertImageFile, openDtronFile, pasteData, toggleVectorPointSmooth, vectorPoints } from "../actions";
+import { insertImageFile, insertSvgFile, openDtronFile, pasteData, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu, insideInstance } from "./contextMenu";
 import { pickColorAt } from "./eyedropper";
 import { useDemo } from "../Demo";
@@ -40,6 +40,10 @@ import { isOverlayLink, newInteraction } from "../prototype";
  *  neighbour (never below the minimum) so the middle of a short segment can still take a point. */
 const ANCHOR_HIT = 4;
 const ANCHOR_HIT_MIN = 1;
+/** Radius (screen px) of a drawn vector anchor: a circle, so it can't pass for a selection handle (a square). */
+const ANCHOR_R = 4;
+/** Radius (screen px) of a control handle's hit area; the drawn circle is smaller. */
+const HANDLE_HIT = 5;
 /** Below this screen distance to a neighbouring anchor, control handles show only for selected anchors. */
 const CROWDED_ANCHOR_GAP = 12;
 /** Segments shorter than this (screen px) are duplicate anchors, not neighbours. */
@@ -55,7 +59,7 @@ interface BoundsItem {
 
 type Drag =
   | { kind: "pan"; sx: number; sy: number; vx: number; vy: number }
-  | { kind: "move"; start: Pt; ids: string[]; started: boolean; alt: boolean; clickSelect: string | null; shiftToggle: string | null }
+  | { kind: "move"; start: Pt; ids: string[]; started: boolean; alt: boolean; clickSelect: string | null; shiftToggle: string | null; dropAt?: Pt }
   | { kind: "resize"; handle: Handle; start: Pt; ids: string[]; scale: boolean }
   | { kind: "rotate"; pivot: Pt; startAngle: number; ids: string[] }
   | { kind: "marquee"; start: Pt; base: string[] }
@@ -193,6 +197,7 @@ export function Canvas() {
   const marquee = useStore((s) => s.marquee);
   const rightTab = useStore((s) => s.rightTab);
   const dropTarget = useStore((s) => s.dropTarget);
+  const dropLine = useStore((s) => s.dropLine);
   const showRulers = useStore((s) => s.showRulers);
   const showGrids = useStore((s) => s.showGrids);
   const docRev = useStore((s) => s.es.docRev);
@@ -268,7 +273,8 @@ export function Canvas() {
     const host = contentRef.current;
     if (!host) return;
     const fresh = rootEls.current.size === 0;
-    const r = renderPageIncremental(page, editingText ? [...demoHidden, editingText] : demoHidden, fresh);
+    // The text being edited is drawn live (all its lines, mixed styles); its textarea is only the input.
+    const r = renderPageIncremental(page, demoHidden, fresh, editingText ?? "");
     if ("full" in r) {
       rootEls.current.clear();
       rootInfo.current.clear();
@@ -776,8 +782,11 @@ export function Canvas() {
         const r = dispatch<{ guides: any[]; gaps: any[] }>({ op: "translate", ids: d.ids, dx, dy, snap: !e.ctrlKey, zoom: zoom(), axis }, { quiet: true });
         // With the axis locked the layers sit at the locked delta, so the drop target is looked up there.
         const tp = axis === "x" ? { x: p.x, y: d.start.y } : axis === "y" ? { x: d.start.x, y: p.y } : p;
+        d.dropAt = tp;
         const target = query<string | null>({ q: "frameAt", x: tp.x, y: tp.y, exclude: d.ids });
-        useStore.setState({ guides: r?.guides ?? [], gaps: r?.gaps ?? [], dropTarget: target });
+        // A layer about to enter an auto layout frame shows where it will land.
+        const slot = target ? query<{ line: [number, number, number, number] } | null>({ q: "dropSlot", ids: d.ids, x: tp.x, y: tp.y }) : null;
+        useStore.setState({ guides: r?.guides ?? [], gaps: r?.gaps ?? [], dropTarget: target, dropLine: slot?.line ?? null });
         break;
       }
       case "resize": {
@@ -900,14 +909,14 @@ export function Canvas() {
     switch (d.kind) {
       case "move":
         if (d.started) {
-          dispatch({ op: "dropInto", ids: d.ids, x: p.x, y: p.y }, { quiet: true });
+          dispatch({ op: "dropInto", ids: d.ids, x: d.dropAt?.x ?? p.x, y: d.dropAt?.y ?? p.y }, { quiet: true });
           dispatch({ op: "endGesture" });
         } else if (d.clickSelect) {
           dispatch({ op: "select", ids: [d.clickSelect] });
         } else if (d.shiftToggle) {
           dispatch({ op: "select", ids: [d.shiftToggle], mode: "toggle" });
         }
-        useStore.setState({ guides: [], gaps: [], dropTarget: null });
+        useStore.setState({ guides: [], gaps: [], dropTarget: null, dropLine: null });
         break;
       case "resize":
       case "rotate":
@@ -980,6 +989,17 @@ export function Canvas() {
     const z = zoom();
     const clicked = Math.hypot(end.x - start.x, end.y - start.y) * z < 3;
     if (tool === "text") {
+      if (clicked) {
+        // A click on an existing text edits it, with the caret where you clicked.
+        const hit = query<string | null>({ q: "pick", x: start.x, y: start.y, zoom: z, deep: true });
+        const hn = hit ? getDoc().nodes[hit] : null;
+        if (hn && hn.type === "text" && hn.visible && !hn.locked) {
+          dispatch({ op: "select", ids: [hn.id] });
+          editTextAt(hn.id, start);
+          setTool("move");
+          return;
+        }
+      }
       openTextGesture();
       const r = dispatch<{ id: string }>({ op: "createText", x: start.x, y: start.y, characters: "", parent: null });
       if (!r) dispatch({ op: "endGesture" });
@@ -1093,7 +1113,8 @@ export function Canvas() {
     e.preventDefault();
     const p = pagePt(e);
     for (const f of [...e.dataTransfer.files]) {
-      if (f.type.startsWith("image/")) await insertImageFile(f, p.x, p.y);
+      if (f.type === "image/svg+xml" || /\.svg$/i.test(f.name)) await insertSvgFile(f, p.x, p.y);
+      else if (f.type.startsWith("image/")) await insertImageFile(f, p.x, p.y);
       else if (f.name.endsWith(".dtron") || f.name.endsWith(".json")) await openDtronFile(f);
     }
     const comp = e.dataTransfer.getData("application/x-designotron-component");
@@ -1201,6 +1222,7 @@ export function Canvas() {
       }}
       onPointerCancel={() => {
         pointerDrag.active = false;
+        useStore.setState({ dropTarget: null, dropLine: null });
       }}
       onPointerLeave={() => {
         reportCursor(null);
@@ -1241,6 +1263,7 @@ export function Canvas() {
           );
         })}
         {dropTarget && <DropOutline id={dropTarget} v={v} />}
+        {dropLine && <DropLine line={dropLine} v={v} />}
         {hoverItem && !measuring && <polygon points={polyPoints(corners(v, hoverItem.matrix, hoverItem.width, hoverItem.height))} fill="none" stroke="#0d99ff" strokeWidth={1.5} />}
         {/* Vector edit mode draws the path itself instead of the layer's box. */}
         {!editingVector && selItems.items.map((it) => (
@@ -1359,6 +1382,13 @@ function DropOutline({ id, v }: { id: string; v: { x: number; y: number; zoom: n
   return <polygon points={polyPoints(corners(v, it.matrix, it.width, it.height))} fill="none" stroke="#0d99ff" strokeWidth={2} strokeDasharray="5 3" />;
 }
 
+/** Where a layer dropped into an auto layout frame will be inserted. */
+function DropLine({ line, v }: { line: [number, number, number, number]; v: { x: number; y: number; zoom: number } }) {
+  const a = toScreen(v, { x: line[0], y: line[1] });
+  const b = toScreen(v, { x: line[2], y: line[3] });
+  return <line className="flow-drop-line" x1={a.x} y1={a.y} x2={b.x} y2={b.y} />;
+}
+
 function DrawPreview({ tool, start, cur, v }: { tool: string; start: Pt; cur: Pt; v: { x: number; y: number; zoom: number } }) {
   const a = toScreen(v, start);
   const b = toScreen(v, cur);
@@ -1469,26 +1499,26 @@ function VectorPoints({
         if (hasOut) {
           const o = toScreen(v, apply(m, { x: p.x + p.outX, y: p.y + p.outY }));
           handles.push(<line key={`lo${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
-          handles.push(<circle key={`o${si}-${pi}`} data-vpt={`${si}:${pi}:out`} className="handle" cx={o.x} cy={o.y} r={3.5} fill="white" stroke="#0d99ff" />);
+          handles.push(<circle key={`o${si}-${pi}`} className="vector-handle" cx={o.x} cy={o.y} r={2.5} fill="white" stroke="#0d99ff" pointerEvents="none" />);
+          handles.push(<circle key={`oh${si}-${pi}`} data-vpt={`${si}:${pi}:out`} className="handle" cx={o.x} cy={o.y} r={HANDLE_HIT} fill="transparent" />);
         }
         if (hasIn) {
           const o = toScreen(v, apply(m, { x: p.x + p.inX, y: p.y + p.inY }));
           handles.push(<line key={`li${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
-          handles.push(<circle key={`i${si}-${pi}`} data-vpt={`${si}:${pi}:in`} className="handle" cx={o.x} cy={o.y} r={3.5} fill="white" stroke="#0d99ff" />);
+          handles.push(<circle key={`i${si}-${pi}`} className="vector-handle" cx={o.x} cy={o.y} r={2.5} fill="white" stroke="#0d99ff" pointerEvents="none" />);
+          handles.push(<circle key={`ih${si}-${pi}`} data-vpt={`${si}:${pi}:in`} className="handle" cx={o.x} cy={o.y} r={HANDLE_HIT} fill="transparent" />);
         }
         const hit = Math.max(ANCHOR_HIT_MIN, Math.min(ANCHOR_HIT, gap / 4));
         anchors.push(
           <g key={`a${si}-${pi}`}>
-            <rect
+            <circle
               className={"vector-anchor" + (on ? " selected" : "")}
-              x={a.x - 4}
-              y={a.y - 4}
-              width={8}
-              height={8}
-              rx={on ? 1 : 0}
+              cx={a.x}
+              cy={a.y}
+              r={ANCHOR_R}
               fill={on ? "#0d99ff" : "white"}
-              stroke={on ? "white" : "#0d99ff"}
-              strokeWidth={on ? 1.5 : 1}
+              stroke="#0d99ff"
+              strokeWidth={1.5}
               pointerEvents="none"
             />
             <rect data-vpt={`${si}:${pi}:anchor`} className="handle" x={a.x - hit} y={a.y - hit} width={hit * 2} height={hit * 2} fill="transparent" />

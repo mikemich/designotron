@@ -91,9 +91,10 @@ fn spec_schema() -> Value {
     "type": "object",
     "description": "A layer. Unknown keys are reported in the result's `warnings` and ignored; wrong values are errors that name the field.",
     "properties": {
-      "type": { "type": "string", "enum": ["frame", "rectangle", "ellipse", "text", "line", "polygon", "star", "vector", "group", "image", "instance", "component"], "description": "Default frame (with a warning when missing). Also accepted: div, container, screen (frame), rect, circle, triangle, icon, path" },
+      "type": { "type": "string", "enum": ["frame", "rectangle", "ellipse", "text", "line", "polygon", "star", "vector", "group", "image", "instance", "component", "svg"], "description": "svg: a full SVG document as editable layers (give `svg`). Default frame (with a warning when missing). Also accepted: div, container, screen (frame), rect, circle, triangle, icon, path" },
       "name": { "type": "string" },
-      "x": { "type": "number" }, "y": { "type": "number" },
+      "x": { "type": "number", "description": "Relative to the parent layer (for a layer inside a group too; the editor's X field measures from the frame instead)" },
+      "y": { "type": "number", "description": "Relative to the parent layer, like x" },
       "width": { "description": "number (px), or 'fill' / 'hug' inside auto layout. Percentages other than '100%' are not supported", "type": ["number", "string"] },
       "height": { "description": "number (px), or 'fill' / 'hug'", "type": ["number", "string"] },
       "fill": { "description": "Hex colour like '#7C5CFF' (rgb()/rgba() also work), a CSS linear-gradient(...), radial-gradient(...) or conic-gradient(from 90deg at 50% 50%, ...) string, a paint object (type solid, linearGradient, radialGradient, angularGradient, diamondGradient with stops [{color, position}] and optional handles {start, end, width} in 0..1 box units), or 'none'", "type": ["string", "object"] },
@@ -137,8 +138,8 @@ fn spec_schema() -> Value {
       "fontSize": { "type": "number" },
       "fontWeight": { "description": "100-900, or thin, light, regular, medium, semibold, bold, extrabold, black", "type": ["number", "string"] },
       "fontFamily": { "type": "string", "description": "Inter, Roboto, Poppins, Montserrat, Playfair Display, DM Sans, Space Grotesk, JetBrains Mono, Lato, Open Sans" },
-      "lineHeight": { "description": "px (24); a number below 4 is a multiple of fontSize (1.5); \"150%\" and \"24px\" also work", "type": ["number", "string"] },
-      "letterSpacing": { "type": "number", "description": "px" },
+      "lineHeight": { "description": "px (24); a number below 4 is a multiple of fontSize (1.5); \"150%\", \"1.5em\" and \"24px\" also work; \"auto\" or 0 is automatic", "type": ["number", "string"] },
+      "letterSpacing": { "type": ["number", "string"], "description": "px (2), or \"10%\" / \"0.05em\" of fontSize" },
       "textAlign": { "type": "string", "enum": ["left", "center", "right", "justify"] },
       "color": { "type": "string", "description": "Text colour" },
       "italic": { "type": "boolean" },
@@ -149,6 +150,7 @@ fn spec_schema() -> Value {
       "effectStyle": { "type": ["string", "null"], "description": "Effect style name or id (from define_styles effects): sets the layer's effects and links it; null unlinks" },
       "gridStyle": { "type": ["string", "null"], "description": "Grid style name or id (from define_styles grids): sets a frame's layout grids and links it; null unlinks" },
       "textStyle": { "type": ["string", "null"], "description": "Text style name or id (from define_styles): sets font, size, weight, line height and letter spacing and links the layer to it; null unlinks" },
+      "svg": { "type": "string", "description": "Full SVG markup for an editable icon or illustration (type svg): paths, shapes and groups become vector layers with their fills, strokes and gradients; width/height scale it. Text, images, filters and masks are refused" },
       "svgPath": { "type": "string", "description": "SVG path data for an icon (type vector)" },
       "viewBox": { "type": "array", "description": "[minX, minY, width, height] for svgPath, default [0,0,24,24]" },
       "componentId": { "type": "string", "description": "For type instance" },
@@ -253,7 +255,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "create_nodes",
-      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). Returns ids for the created layers.",
+      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), svg (whole SVG markup as editable layers), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). Returns ids for the created layers.",
       "input_schema": { "type": "object", "properties": { "parentId": { "type": "string" }, "nodes": { "type": "array", "items": spec } }, "required": ["nodes"] }
     },
     {
@@ -350,7 +352,7 @@ pub fn tool_defs() -> Value {
       "description": "Create shared colour, text, effect and grid styles (design tokens), e.g. a type scale like Heading/H1, Body/Regular, or Shadow/Card. Link layers to them by name with textStyle / fillStyle / strokeStyle (colour styles only), effectStyle and gridStyle in create_nodes/update_nodes, or in bulk with fix_issues (kinds: [\"unlinkedStyle\"]). A name with slashes shows as a folder in the Assets panel. Variables are bound with bind, not styles.",
       "input_schema": { "type": "object", "properties": {
         "colors": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "color": { "type": "string", "description": "Hex colour; anything unreadable is an error" } }, "required": ["name", "color"] } },
-        "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": "number" } }, "required": ["name", "fontSize"] } },
+        "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": ["number", "string"], "description": "px, or \"10%\" / \"0.05em\" of fontSize" } }, "required": ["name", "fontSize"] } },
         "effects": { "type": "array", "description": "Effect styles: {name, description, shadow: {x, y, blur, spread, color, inset} or an array of them, blur (layer blur px), backgroundBlur (px)}", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "shadow": { "type": ["object", "array", "string"] }, "blur": { "type": "number" }, "backgroundBlur": { "type": "number" } }, "required": ["name"] } },
         "grids": { "type": "array", "description": "Grid styles: {name, description, grids: [{pattern:'columns'|'rows'|'grid', count, gutter, margin, size}]}", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "grids": { "type": "array", "items": { "type": "object" } } }, "required": ["name", "grids"] } }
       } }
@@ -2105,7 +2107,10 @@ fn build(e: &mut Engine, cx: &mut Ctx, spec: &Value, parent: Option<&str>, page:
     Some(Value::String(t)) => t.trim().to_lowercase(),
     Some(other) => return Err(cx.err("type", format!("must be a string, got {}", parse::kind_of(other)))),
   };
-  let id = if kind_str == "instance" {
+  let svg_markup = spec.get("svg").and_then(|v| v.as_str());
+  let id = if let Some(markup) = svg_markup {
+    build_svg(e, cx, spec, markup, parent, page)?
+  } else if kind_str == "instance" {
     let comp = spec
       .get("componentId")
       .and_then(|v| v.as_str())
@@ -2181,6 +2186,62 @@ fn build(e: &mut Engine, cx: &mut Ctx, spec: &Value, parent: Option<&str>, page:
     if let Some(name) = spec.get("name").and_then(|v| v.as_str()) {
       cx.names.push((name.to_string(), id.clone()));
     }
+  }
+  Ok(id)
+}
+
+/// `svg` on a layer spec: SVG markup read into a frame of editable layers (see `svg_import`).
+fn build_svg(e: &mut Engine, cx: &mut Ctx, spec: &Value, markup: &str, parent: Option<&str>, page: &str) -> Result<NodeId, String> {
+  let size = |k: &str| spec.get(k).and_then(|v| v.as_f64()).filter(|v| *v > 0.0);
+  let opts = crate::svg_import::Options {
+    name: spec.get("name").and_then(|v| v.as_str()).map(String::from),
+    width: size("width"),
+    height: size("height"),
+  };
+  let imported = crate::svg_import::import(markup, &mut e.gen, &opts).map_err(|reason| {
+    let why = if reason == crate::svg_import::NOTHING_TO_DRAW {
+      "this SVG has no shapes the importer can draw".to_string()
+    } else {
+      format!("this SVG uses {reason}")
+    };
+    cx.err(
+      "svg",
+      format!("can't be imported as vectors: {why}. Use svgPath for path data, or build the layers directly"),
+    )
+  })?;
+  for w in &imported.warnings {
+    cx.warn(format!("svg: {w}"));
+  }
+  const USED: [&str; 9] = ["type", "svg", "name", "x", "y", "width", "height", "opacity", "rotation"];
+  let ignored: Vec<&str> = spec
+    .as_object()
+    .map(|o| o.keys().map(String::as_str).filter(|k| !USED.contains(k)).collect())
+    .unwrap_or_default();
+  if !ignored.is_empty() {
+    cx.warn(format!(
+      "svg: {} ignored on an svg layer; style the layers inside it with update_nodes",
+      ignored.join(", ")
+    ));
+  }
+  let mut nodes = imported.nodes.into_iter();
+  let mut root = nodes.next().ok_or_else(|| cx.err("svg", "nothing to import"))?;
+  root.x = parse::opt_number(cx, spec, "x")?.unwrap_or(0.0);
+  root.y = parse::opt_number(cx, spec, "y")?.unwrap_or(0.0);
+  if let Some(o) = parse::opt_number(cx, spec, "opacity")? {
+    root.opacity = o.clamp(0.0, 1.0);
+  }
+  if let Some(r) = parse::opt_number(cx, spec, "rotation")? {
+    root.rotation = r;
+  }
+  if opts.name.is_none() {
+    root.name = e.doc.next_name("SVG");
+  }
+  let id = root.id.clone();
+  let index = parent.and_then(|p| crate::devices::before_chrome(&e.doc, p));
+  e.doc.insert(root, parent, page, index);
+  for mut n in nodes {
+    n.page = page.to_string();
+    e.doc.nodes.insert(n.id.clone(), n);
   }
   Ok(id)
 }
@@ -2761,7 +2822,8 @@ fn apply_text(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creating: b
     let spans = spans
       .as_array()
       .ok_or_else(|| cx.err("spans", format!("must be an array of {{text, ...}}, got {}", parse::kind_of(spans))))?;
-    let (characters, runs) = spans_to_runs(cx, spans)?;
+    let layer_size = parse::opt_number(cx, s, "fontSize")?.unwrap_or_else(|| n.text.as_ref().map_or(16.0, |t| t.font_size));
+    let (characters, runs) = spans_to_runs(cx, spans, layer_size)?;
     if creating && s.get("name").is_none() {
       n.name = characters.chars().take(40).collect();
     }
@@ -3026,7 +3088,7 @@ fn find_text_style<'a>(cx: &Ctx, doc: &'a Document, key: &str, name: &str) -> Re
 }
 
 /// `[{text, fontWeight, ...}]` to characters plus style runs.
-fn spans_to_runs(cx: &mut Ctx, spans: &[Value]) -> Result<(String, Vec<crate::model::TextRun>), String> {
+fn spans_to_runs(cx: &mut Ctx, spans: &[Value], layer_size: f64) -> Result<(String, Vec<crate::model::TextRun>), String> {
   let mut text = String::new();
   let mut runs = Vec::new();
   for (i, sp) in spans.iter().enumerate() {
@@ -3045,11 +3107,16 @@ fn spans_to_runs(cx: &mut Ctx, spans: &[Value]) -> Result<(String, Vec<crate::mo
       Some(d) => Some(parse_decoration(cx, "decoration", d)?),
       None => None,
     };
+    let font_size = parse::opt_number(cx, sp, "fontSize")?;
+    let letter_spacing = match sp.get("letterSpacing").filter(|v| !v.is_null()) {
+      Some(l) => Some(parse::letter_spacing(cx, "letterSpacing", l, font_size.unwrap_or(layer_size))?),
+      None => None,
+    };
     runs.push(crate::model::TextRun {
       start,
       end,
       font_family: sp.get("fontFamily").and_then(|v| v.as_str()).map(String::from),
-      font_size: parse::opt_number(cx, sp, "fontSize")?,
+      font_size,
       font_weight: match sp.get("fontWeight").filter(|v| !v.is_null()) {
         Some(w) => Some(parse::font_weight(cx, "fontWeight", w)?),
         None => None,
@@ -3060,7 +3127,7 @@ fn spans_to_runs(cx: &mut Ctx, spans: &[Value]) -> Result<(String, Vec<crate::mo
         None => None,
       },
       decoration,
-      letter_spacing: parse::opt_number(cx, sp, "letterSpacing")?,
+      letter_spacing,
       link: match sp.get("link").and_then(|v| v.as_str()) {
         Some(url) => {
           Some(crate::model::safe_link(url).ok_or_else(|| cx.err("link", "a span link must be an http(s), mailto: or tel: link"))?)

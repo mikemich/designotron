@@ -414,10 +414,17 @@ try {
 
   // 6. Images are stored once, and found again.
   {
-    await page.evaluate(() => {
-      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30"><rect width="40" height="30" fill="#0a0"/></svg>';
+    // A pasted PNG file (pasted SVG markup now imports as editable vectors, not an image).
+    await page.evaluate(async () => {
+      const c = document.createElement("canvas");
+      c.width = 40;
+      c.height = 30;
+      const g = c.getContext("2d");
+      g.fillStyle = "#0a0";
+      g.fillRect(0, 0, 40, 30);
+      const blob = await new Promise((r) => c.toBlob(r, "image/png"));
       const dt = new DataTransfer();
-      dt.setData("text/plain", svg);
+      dt.items.add(new File([blob], "green.png", { type: "image/png" }));
       document.body.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
     });
     await sleep(500);

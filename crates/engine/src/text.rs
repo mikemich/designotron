@@ -115,6 +115,10 @@ pub struct TextLine {
   /// The line ends because the paragraph wrapped, not at a hard break or the end: justified
   /// text stretches only these.
   pub soft_wrap: bool,
+  /// Char range of the display text this line consumed: trailing spaces trimmed at a soft wrap
+  /// belong to it, the `\n` after it does not.
+  pub start: usize,
+  pub end: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,6 +134,8 @@ pub struct TextLayout {
 struct Piece {
   text: String,
   style: usize,
+  /// Char index of the piece's first character in the display text.
+  start: usize,
 }
 
 /// Breaks text into lines. `max_width` of `None` disables wrapping. Does not truncate.
@@ -165,7 +171,8 @@ pub fn layout_limited(props: &TextProps, max_width: Option<f64>, limit: Option<u
   for para in text.split('\n') {
     para_starts.push(lines.len());
     let n = para.chars().count();
-    let words = split_words(&chars[offset..offset + n], &char_style[offset..offset + n]);
+    let para_start = offset;
+    let words = split_words(&chars[offset..offset + n], &char_style[offset..offset + n], offset);
     offset += n + 1;
     let mut cur: Vec<Piece> = Vec::new();
     let mut cur_w = 0.0;
@@ -198,20 +205,21 @@ pub fn layout_limited(props: &TextProps, max_width: Option<f64>, limit: Option<u
         continue;
       }
       if !cur.is_empty() {
-        lines.push(make_line(std::mem::take(&mut cur), &styles, m, lh_of, base_lh));
+        lines.push(make_line(std::mem::take(&mut cur), para_start, &styles, m, lh_of, base_lh));
       }
       cur_w = 0.0;
       if word_fit_w > mw + 0.01 {
         // Overlong words break by character.
         for piece in word {
-          for c in piece.text.chars() {
+          for (char_i, c) in piece.text.chars().enumerate() {
             let p = Piece {
               text: c.to_string(),
               style: piece.style,
+              start: piece.start + char_i,
             };
             let w = measure(&p);
             if !cur.is_empty() && cur_w + w > mw && c != ' ' {
-              lines.push(make_line(std::mem::take(&mut cur), &styles, m, lh_of, base_lh));
+              lines.push(make_line(std::mem::take(&mut cur), para_start, &styles, m, lh_of, base_lh));
               cur_w = 0.0;
             }
             cur_w += w;
@@ -223,7 +231,7 @@ pub fn layout_limited(props: &TextProps, max_width: Option<f64>, limit: Option<u
         cur = word;
       }
     }
-    lines.push(make_line(cur, &styles, m, lh_of, base_lh));
+    lines.push(make_line(cur, para_start, &styles, m, lh_of, base_lh));
   }
   if let Some(limit) = limit.filter(|l| *l < lines.len()) {
     // Blank lines after the limit are no content: nothing is cut then.
@@ -325,7 +333,7 @@ fn resolve_styles(props: &TextProps, len: usize) -> (Vec<SpanStyle>, Vec<usize>)
 }
 
 /// Words (with trailing spaces) as style pieces.
-fn split_words(chars: &[char], styles: &[usize]) -> Vec<Vec<Piece>> {
+fn split_words(chars: &[char], styles: &[usize], base: usize) -> Vec<Vec<Piece>> {
   let mut words: Vec<Vec<Piece>> = Vec::new();
   let mut cur: Vec<Piece> = Vec::new();
   let mut prev_space = false;
@@ -338,6 +346,7 @@ fn split_words(chars: &[char], styles: &[usize]) -> Vec<Vec<Piece>> {
       Piece {
         text: c.to_string(),
         style: styles[i],
+        start: base + i,
       },
     );
     prev_space = *c == ' ';
@@ -355,9 +364,18 @@ fn push_piece(pieces: &mut Vec<Piece>, p: Piece) {
   }
 }
 
-fn make_line(pieces: Vec<Piece>, styles: &[SpanStyle], m: &dyn TextMeasurer, lh_of: impl Fn(&SpanStyle) -> f64, base_lh: f64) -> TextLine {
+fn make_line(
+  pieces: Vec<Piece>,
+  para_start: usize,
+  styles: &[SpanStyle],
+  m: &dyn TextMeasurer,
+  lh_of: impl Fn(&SpanStyle) -> f64,
+  base_lh: f64,
+) -> TextLine {
   let mut segments: Vec<Segment> = Vec::new();
   let count = pieces.len();
+  let start = pieces.first().map_or(para_start, |p| p.start);
+  let end = pieces.last().map_or(para_start, |p| p.start + p.text.chars().count());
   for (i, p) in pieces.into_iter().enumerate() {
     let text = if i + 1 == count { p.text.trim_end().to_string() } else { p.text };
     if text.is_empty() {
@@ -375,13 +393,27 @@ fn make_line(pieces: Vec<Piece>, styles: &[SpanStyle], m: &dyn TextMeasurer, lh_
     top: 0.0,
     segments,
     soft_wrap: false,
+    start,
+    end,
   }
 }
 
 /// Lays out a text for its box: auto-resize, line limit and, for auto-width text, the wrap
 /// width its layer's `max_width` imposes.
 pub fn layout_for_box(props: &TextProps, width: f64, height: Option<f64>, max_width: Option<f64>, m: &dyn TextMeasurer) -> TextLayout {
-  let limit = line_limit(props, height);
+  layout_for_box_with(props, width, height, max_width, false, m)
+}
+
+/// `layout_for_box`, optionally ignoring the line limit: text being edited shows all its lines.
+pub fn layout_for_box_with(
+  props: &TextProps,
+  width: f64,
+  height: Option<f64>,
+  max_width: Option<f64>,
+  full: bool,
+  m: &dyn TextMeasurer,
+) -> TextLayout {
+  let limit = if full { None } else { line_limit(props, height) };
   match props.auto_resize {
     TextAutoResize::Width => {
       let lay = layout_limited(props, None, limit, m);
@@ -397,6 +429,159 @@ pub fn layout_for_box(props: &TextProps, width: f64, height: Option<f64>, max_wi
 /// Layout of a text node in its current box.
 pub fn layout_of_node(n: &Node, props: &TextProps, m: &dyn TextMeasurer) -> TextLayout {
   layout_for_box(props, n.width, Some(n.height), n.max_width, m)
+}
+
+/// Longest run of chars measured as one prefix when placing the caret.
+const CARET_CHUNK: usize = 32;
+
+/// One line of a text for the editor's caret and selection.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CaretLine {
+  /// Top in layer px, vertical alignment included.
+  pub top: f64,
+  pub height: f64,
+  /// Char range in the layer's `characters` (not the case-converted display text).
+  pub start: usize,
+  pub end: usize,
+  /// `end - start + 1` x positions in layer px: the left edge of every char and the end. Empty
+  /// for lines outside the range asked for (see `caret_geometry`).
+  pub xs: Vec<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CaretGeometry {
+  pub lines: Vec<CaretLine>,
+  /// Height of all lines.
+  pub height: f64,
+}
+
+/// Where every character of a text node sits, as drawn by the renderer. With `full`, the line
+/// limit is ignored (editing shows all the text). Measuring every character of a long text on
+/// each keystroke is wasted work: with `range` (chars) only the lines it touches, and one line
+/// either side (for ArrowUp and ArrowDown), get their `xs`.
+pub fn caret_geometry(n: &Node, props: &TextProps, m: &dyn TextMeasurer, full: bool, range: Option<(usize, usize)>) -> CaretGeometry {
+  use crate::model::TextAlignH;
+  let lay = layout_for_box_with(props, n.width, Some(n.height), n.max_width, full, m);
+  let offset = match props.align_v {
+    crate::model::TextAlignV::Top => 0.0,
+    crate::model::TextAlignV::Middle => (n.height - lay.height) / 2.0,
+    crate::model::TextAlignV::Bottom => n.height - lay.height,
+  };
+  let shown = props.display_text().chars().count();
+  let real = props.characters.chars().count();
+  // A case change can alter the char count (ß becomes SS): scale indices back proportionally.
+  let back = |i: usize| -> usize {
+    if shown == real || shown == 0 {
+      i
+    } else {
+      ((i as f64) * real as f64 / shown as f64).round() as usize
+    }
+  };
+  let mut lines = Vec::with_capacity(lay.lines.len());
+  // Lines whose positions are wanted.
+  let wanted: Vec<bool> = match range {
+    None => vec![true; lay.lines.len()],
+    Some((a, b)) => {
+      let hit: Vec<usize> = lay
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| back(l.end) >= a && back(l.start) <= b)
+        .map(|(i, _)| i)
+        .collect();
+      let (lo, hi) = (
+        hit.first().copied().unwrap_or(0),
+        hit.last().copied().unwrap_or(lay.lines.len().saturating_sub(1)),
+      );
+      (0..lay.lines.len()).map(|i| i + 1 >= lo && i <= hi + 1).collect()
+    }
+  };
+  for (li, line) in lay.lines.iter().enumerate() {
+    if !wanted[li] {
+      lines.push(CaretLine {
+        top: offset + line.top,
+        height: line.height,
+        start: back(line.start),
+        end: back(line.end),
+        xs: Vec::new(),
+      });
+      continue;
+    }
+    let x0 = match props.align_h {
+      TextAlignH::Left | TextAlignH::Justify => 0.0,
+      TextAlignH::Center => (n.width - line.width) / 2.0,
+      TextAlignH::Right => n.width - line.width,
+    };
+    // Justify adds the same gap to every space of a wrapped line (as the renderer does).
+    let gap = if props.align_h == TextAlignH::Justify && line.soft_wrap && props.auto_resize != TextAutoResize::Width {
+      let spaces = line.text.chars().filter(|c| matches!(*c, ' ' | '\u{a0}')).count();
+      let extra = n.width - line.width;
+      if spaces > 0 && extra > 0.01 {
+        extra / spaces as f64
+      } else {
+        0.0
+      }
+    } else {
+      0.0
+    };
+    let count = line.end - line.start;
+    let mut xs = Vec::with_capacity(count + 1);
+    xs.push(x0);
+    let mut x = x0;
+    for sg in &line.segments {
+      // Measure growing prefixes so kerning and letter spacing are kept, but restart the prefix
+      // at every word and every `CHUNK` chars: the cost stays linear and the cache keys short.
+      let font = sg.style.font();
+      let chars: Vec<char> = sg.text.chars().collect();
+      let base_x = x;
+      let mut chunk_x = 0.0;
+      let mut gaps = 0.0;
+      let mut chunk = String::new();
+      let mut chunk_len = 0;
+      for (i, &c) in chars.iter().enumerate() {
+        chunk.push(c);
+        chunk_len += 1;
+        let w = m.measure(&chunk, &font);
+        if matches!(c, ' ' | '\u{a0}') {
+          gaps += gap;
+        }
+        xs.push(base_x + chunk_x + w + gaps);
+        let word_end = c == ' ' && chars.get(i + 1).is_some_and(|n| *n != ' ');
+        if word_end || chunk_len >= CARET_CHUNK {
+          chunk_x += w;
+          chunk.clear();
+          chunk_len = 0;
+        }
+      }
+      x = *xs.last().unwrap();
+    }
+    // Spaces the layout trimmed: at a soft wrap they are swallowed (pinned to the line end); on
+    // a hard line they are really there, so the caret advances over them as you type them.
+    if !line.soft_wrap && xs.len() < count + 1 {
+      let font = line
+        .segments
+        .last()
+        .map(|sg| sg.style.clone())
+        .unwrap_or_else(|| SpanStyle::base(props));
+      let w = m.measure(" ", &font.font());
+      let mut x = *xs.last().unwrap();
+      while xs.len() < count + 1 {
+        x += w;
+        xs.push(x);
+      }
+    }
+    let end_x = *xs.last().unwrap();
+    xs.resize(count + 1, end_x);
+    xs.truncate(count + 1);
+    lines.push(CaretLine {
+      top: offset + line.top,
+      height: line.height,
+      start: back(line.start),
+      end: back(line.end),
+      xs,
+    });
+  }
+  CaretGeometry { lines, height: lay.height }
 }
 
 /// Distance from the top of a text node to its first baseline (what baseline alignment lines
@@ -740,5 +925,187 @@ mod tests {
     let r = style_range(&r, 10, 0, 10, &TextRun::default(), &["fontWeight"]);
     assert_eq!(r.len(), 1);
     assert_eq!((r[0].start, r[0].end), (3, 6));
+  }
+  fn text_node(chars: &str, w: f64, h: f64, f: impl FnOnce(&mut Node, &mut TextProps)) -> (Node, TextProps) {
+    let mut n = crate::ops::default_node(crate::model::NodeType::Text, "t".into(), "T".into());
+    n.width = w;
+    n.height = h;
+    let mut t = TextProps {
+      characters: chars.into(),
+      ..Default::default()
+    };
+    f(&mut n, &mut t);
+    (n, t)
+  }
+
+  #[test]
+  fn lines_know_their_char_ranges() {
+    // Soft wrap: the first line owns the space it wrapped at.
+    let props = TextProps {
+      characters: "aaaa bbbb cccc".into(),
+      ..Default::default()
+    };
+    let l = layout_text(&props, Some(50.0), &HeuristicMeasurer);
+    let ranges: Vec<_> = l.lines.iter().map(|x| (x.start, x.end)).collect();
+    assert_eq!(
+      ranges,
+      vec![(0, 5), (5, 10), (10, 14)],
+      "{:?}",
+      l.lines.iter().map(|x| &x.text).collect::<Vec<_>>()
+    );
+    // Hard breaks and an empty paragraph: the \n belongs to no line.
+    let props = TextProps {
+      characters: "ab\n\ncd".into(),
+      ..Default::default()
+    };
+    let l = layout_text(&props, None, &HeuristicMeasurer);
+    let ranges: Vec<_> = l.lines.iter().map(|x| (x.start, x.end)).collect();
+    assert_eq!(ranges, vec![(0, 2), (3, 3), (4, 6)]);
+    // An overlong word breaks by character and keeps contiguous ranges.
+    let props = TextProps {
+      characters: "Supercalifragilisticexpialidocious and".into(),
+      ..Default::default()
+    };
+    let l = layout_text(&props, Some(120.0), &HeuristicMeasurer);
+    assert_eq!(l.lines[0].start, 0);
+    for w in l.lines.windows(2) {
+      assert_eq!(w[0].end, w[1].start);
+    }
+    assert_eq!(l.lines.last().unwrap().end, props.characters.chars().count());
+  }
+
+  #[test]
+  fn caret_xs_follow_alignment_spacing_and_sizes() {
+    let (n, t) = text_node("abc", 200.0, 20.0, |_, _| {});
+    let g = caret_geometry(&n, &t, &HeuristicMeasurer, true, None);
+    let xs = &g.lines[0].xs;
+    assert_eq!(xs.len(), 4);
+    assert_eq!(xs[0], 0.0);
+    assert!((xs[3] - HeuristicMeasurer.measure("abc", &SpanStyle::base(&t).font())).abs() < 1e-9);
+    // Centre and right shift the whole line.
+    let (n, t) = text_node("abc", 200.0, 20.0, |_, t| t.align_h = crate::model::TextAlignH::Center);
+    let g = caret_geometry(&n, &t, &HeuristicMeasurer, true, None);
+    let w = g.lines[0].xs[3] - g.lines[0].xs[0];
+    assert!((g.lines[0].xs[0] - (200.0 - w) / 2.0).abs() < 1e-9);
+    let (n, t) = text_node("abc", 200.0, 20.0, |_, t| t.align_h = crate::model::TextAlignH::Right);
+    let g = caret_geometry(&n, &t, &HeuristicMeasurer, true, None);
+    assert!((g.lines[0].xs[3] - 200.0).abs() < 1e-9);
+    // Letter spacing widens every char.
+    let (n, t) = text_node("abc", 200.0, 20.0, |_, t| t.letter_spacing = 2.0);
+    let g = caret_geometry(&n, &t, &HeuristicMeasurer, true, None);
+    let plain = text_node("abc", 200.0, 20.0, |_, _| {});
+    let gp = caret_geometry(&plain.0, &plain.1, &HeuristicMeasurer, true, None);
+    assert!((g.lines[0].xs[3] - gp.lines[0].xs[3] - 6.0).abs() < 1e-9);
+    // A larger run advances more than a base char.
+    let (n, t) = text_node("abc", 200.0, 40.0, |_, t| {
+      t.runs = vec![TextRun {
+        start: 1,
+        end: 2,
+        font_size: Some(32.0),
+        ..Default::default()
+      }]
+    });
+    let g = caret_geometry(&n, &t, &HeuristicMeasurer, true, None);
+    let xs = &g.lines[0].xs;
+    assert!(xs[2] - xs[1] > 1.5 * (xs[1] - xs[0]), "{xs:?}");
+  }
+
+  #[test]
+  fn caret_justify_widens_each_space_of_wrapped_lines() {
+    let (n, t) = text_node("aa bb cc dd", 60.0, 60.0, |_, t| {
+      t.align_h = crate::model::TextAlignH::Justify;
+      t.auto_resize = TextAutoResize::None;
+    });
+    let g = caret_geometry(&n, &t, &HeuristicMeasurer, true, None);
+    assert!(g.lines.len() > 1);
+    let first = &g.lines[0];
+    assert!((first.xs[first.xs.len() - 1] - 60.0).abs() < 0.5, "{:?}", first.xs);
+    // The last line is not stretched.
+    let last = g.lines.last().unwrap();
+    assert!(last.xs[last.xs.len() - 1] < 59.0);
+  }
+
+  #[test]
+  fn caret_top_includes_paragraph_spacing_and_vertical_alignment() {
+    let (n, t) = text_node("a\nb", 100.0, 100.0, |_, t| {
+      t.paragraph_spacing = 10.0;
+      t.align_v = crate::model::TextAlignV::Middle;
+    });
+    let g = caret_geometry(&n, &t, &HeuristicMeasurer, true, None);
+    let lh = g.lines[0].height;
+    assert!((g.height - (2.0 * lh + 10.0)).abs() < 1e-9);
+    assert!((g.lines[0].top - (100.0 - g.height) / 2.0).abs() < 1e-9);
+    assert!((g.lines[1].top - g.lines[0].top - lh - 10.0).abs() < 1e-9);
+    let (n, t) = text_node("a\nb", 100.0, 100.0, |_, t| t.align_v = crate::model::TextAlignV::Bottom);
+    let g = caret_geometry(&n, &t, &HeuristicMeasurer, true, None);
+    assert!((g.lines[1].top + g.lines[1].height - 100.0).abs() < 1e-9);
+  }
+
+  #[test]
+  fn caret_range_measures_only_nearby_lines() {
+    let (n, t) = text_node("aaa bbb ccc ddd eee fff ggg hhh", 40.0, 200.0, |_, t| {
+      t.auto_resize = TextAutoResize::None
+    });
+    let all = caret_geometry(&n, &t, &HeuristicMeasurer, true, None);
+    assert!(all.lines.len() >= 6, "{}", all.lines.len());
+    // A caret inside line 3 measures lines 2 to 4 and leaves the others without positions.
+    let at = all.lines[3].start + 1;
+    let g = caret_geometry(&n, &t, &HeuristicMeasurer, true, Some((at, at)));
+    for (i, l) in g.lines.iter().enumerate() {
+      assert_eq!(l.xs.is_empty(), !(2..=4).contains(&i), "line {i}");
+      assert_eq!((l.start, l.end, l.top), (all.lines[i].start, all.lines[i].end, all.lines[i].top));
+      if !l.xs.is_empty() {
+        assert_eq!(l.xs, all.lines[i].xs);
+      }
+    }
+  }
+
+  struct Counting {
+    calls: std::cell::Cell<usize>,
+    chars: std::cell::Cell<usize>,
+  }
+  impl TextMeasurer for Counting {
+    fn measure(&self, text: &str, font: &FontSpec) -> f64 {
+      self.calls.set(self.calls.get() + 1);
+      self.chars.set(self.chars.get() + text.chars().count());
+      HeuristicMeasurer.measure(text, font)
+    }
+  }
+
+  #[test]
+  fn caret_geometry_of_a_long_single_line_is_linear() {
+    let words = "lorem ipsum dolor sit amet consectetur adipiscing elit ".repeat(60);
+    let text: String = words.chars().take(3000).collect();
+    let (n, t) = text_node(&text, 100.0, 20.0, |_, _| {});
+    let m = Counting {
+      calls: Default::default(),
+      chars: Default::default(),
+    };
+    let g = caret_geometry(&n, &t, &m, true, None);
+    assert_eq!(g.lines.len(), 1);
+    assert_eq!(g.lines[0].xs.len(), 3001);
+    // About one measure per char, over short strings: the old prefix walk measured ~4.5M chars.
+    assert!(m.calls.get() < 4 * 3000, "{} calls", m.calls.get());
+    assert!(m.chars.get() < 3000 * 40, "{} chars measured", m.chars.get());
+    // Positions agree with the whole-prefix measure to within half a pixel.
+    let font = SpanStyle::base(&t);
+    let all: Vec<char> = text.chars().collect();
+    for i in [1usize, 40, 500, 1500, 2999, 3000] {
+      let prefix: String = all[..i].iter().collect();
+      let exact = HeuristicMeasurer.measure(&prefix, &font.font());
+      assert!((g.lines[0].xs[i] - exact).abs() < 0.5, "char {i}: {} vs {exact}", g.lines[0].xs[i]);
+    }
+  }
+
+  #[test]
+  fn caret_full_ignores_the_line_limit() {
+    let (n, t) = text_node("one two three four five six seven", 60.0, 40.0, |_, t| {
+      t.max_lines = Some(1);
+      t.auto_resize = TextAutoResize::None;
+    });
+    assert_eq!(caret_geometry(&n, &t, &HeuristicMeasurer, false, None).lines.len(), 1);
+    let g = caret_geometry(&n, &t, &HeuristicMeasurer, true, None);
+    assert!(g.lines.len() > 2);
+    assert_eq!(g.lines.last().unwrap().end, t.characters.chars().count());
   }
 }

@@ -61,10 +61,10 @@ fn main() {
   };
   let mut e2 = e;
   time("render page (full)", 5, &mut || {
-    let _ = e2.render(&page, &[]);
+    let _ = e2.render(&page, &[], None);
   });
   time("render page (incremental, nothing changed)", 5, &mut || {
-    let _ = e2.render_incremental(&page, &[]);
+    let _ = e2.render_incremental(&page, &[], None);
   });
   let ff = first_frame.clone();
   e2.dispatch(Command::BeginGesture).unwrap();
@@ -92,7 +92,7 @@ fn main() {
       axis: None,
     })
     .unwrap();
-    let _ = e2.render_incremental(&page, &[]);
+    let _ = e2.render_incremental(&page, &[], None);
   });
   e2.dispatch(Command::EndGesture).unwrap();
   time("update one fill (undo step)", 10, &mut || {

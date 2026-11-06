@@ -204,7 +204,7 @@ struct Targets {
   ys: Vec<(f64, f64, f64)>,
 }
 
-fn snap_targets(doc: &Document, page: &str, moving: &[NodeId]) -> Targets {
+fn snap_targets(doc: &Document, page: &str, moving: &[NodeId], near: &Rect) -> Targets {
   let excluded: HashSet<NodeId> = moving.iter().flat_map(|m| doc.subtree(m)).collect();
   let sibling_ids: Vec<NodeId> = moving.first().map(|first| doc.siblings_of(first)).unwrap_or_default();
   let mut ids: Vec<&NodeId> = sibling_ids.iter().collect();
@@ -263,7 +263,7 @@ fn snap_targets(doc: &Document, page: &str, moving: &[NodeId]) -> Targets {
     if n.visible && !n.layout_grids.is_empty() {
       let r = doc.abs_bounds(&a);
       for g in n.layout_grids.iter().filter(|g| g.visible) {
-        let (xs, ys) = crate::grids::lines(&r, g);
+        let (xs, ys) = crate::grids::lines(&r, g, Some(near));
         t.xs.extend(xs.into_iter().map(|x| (x, r.y, r.bottom())));
         t.ys.extend(ys.into_iter().map(|y| (y, r.x, r.right())));
       }
@@ -288,7 +288,7 @@ pub fn snap_move_on(doc: &Document, page: &str, ids: &[NodeId], dx: f64, dy: f64
     };
   };
   let moved = Rect::new(start.x + dx, start.y + dy, start.width, start.height);
-  let targets = snap_targets(doc, page, ids);
+  let targets = snap_targets(doc, page, ids, &moved);
   let thr = 6.0 / zoom.max(0.01);
   let (mut sx, mut sy) = best_snap(&moved, &targets, thr, [true, true, true, true]);
   // The locked axis never snaps: its delta (zero) stays exact.
@@ -341,7 +341,7 @@ pub fn snap_rect(
   zoom: f64,
   spacing: bool,
 ) -> (Rect, Vec<Guide>, Vec<Gap>) {
-  let targets = snap_targets(doc, page, exclude);
+  let targets = snap_targets(doc, page, exclude, &r);
   let thr = 6.0 / zoom.max(0.01);
   let (mut sx, mut sy) = best_snap(&r, &targets, thr, edges);
   // A zero-size rect is a point (drawing tools): no spacing there.
@@ -1061,6 +1061,44 @@ mod tests {
     assert_eq!(drill(&doc, &page, p, 1.0, "g").as_deref(), Some("r"));
     assert_eq!(pick(&doc, &page, p, 1.0, &["r".into()], false).as_deref(), Some("r"));
     assert_eq!(pick(&doc, &page, Point::new(200.0, 200.0), 1.0, &[], false).as_deref(), Some("f"));
+  }
+
+  #[test]
+  fn square_grids_snap_across_the_whole_frame() {
+    use crate::model::{GridPattern, LayoutGrid};
+    let snap_x = |frame_w: f64, step: f64, x: f64| {
+      let mut gen = IdGen::new(2);
+      let mut doc = new_document(&mut gen, "t");
+      let page = doc.pages[0].id.clone();
+      let grid = LayoutGrid {
+        pattern: GridPattern::Grid,
+        size: step,
+        ..Default::default()
+      };
+      let f = Node {
+        id: "f".into(),
+        kind: NodeType::Frame,
+        width: frame_w,
+        height: 100.0,
+        layout_grids: vec![grid],
+        ..Default::default()
+      };
+      doc.insert(f, None, &page, None);
+      let r = Node {
+        id: "r".into(),
+        x: x - 40.0,
+        y: 3.0,
+        width: 1.0,
+        height: 1.0,
+        ..Default::default()
+      };
+      doc.insert(r, Some("f"), &page, None);
+      // Dragged 40 px to the right, the 1 px rect lands at `x`.
+      let s = snap_move(&doc, &page, &["r".to_string()], 40.0, 0.0, 1.0);
+      (doc.abs_bounds("r").x + s.dx).round()
+    };
+    assert_eq!(snap_x(1440.0, 2.0, 900.3), 900.0);
+    assert_eq!(snap_x(2400.0, 4.0, 1901.0), 1900.0);
   }
 
   #[test]
