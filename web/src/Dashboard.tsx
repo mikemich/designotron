@@ -285,6 +285,51 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       toast(err instanceof Error ? err.message : String(err), "error");
     }
   };
+  // --- Dropping .dtron files from the computer ---
+  const [fileDrag, setFileDrag] = useState(false);
+  const carriesFiles = (e: React.DragEvent) => Array.from(e.dataTransfer.types).includes("Files");
+  const fileDragProps = {
+    onDragEnter: (e: React.DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      setFileDrag(true);
+    },
+    onDragOver: (e: React.DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+      setFileDrag(true);
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFileDrag(false);
+    },
+    onDrop: (e: React.DragEvent) => {
+      if (!carriesFiles(e)) return;
+      e.preventDefault();
+      setFileDrag(false);
+      void dropFiles(Array.from(e.dataTransfer.files));
+    },
+  };
+  const dropFiles = async (files: File[]) => {
+    const ours = files.filter((f) => /\.(dtron|json)$/i.test(f.name));
+    if (!ours.length) {
+      toast("Only .dtron files open here. Drop images onto a file's canvas.", "error");
+      return;
+    }
+    const ids: string[] = [];
+    for (const f of ours) {
+      try {
+        ids.push(await importDtron(await f.text(), f.name.replace(/\.(dtron|json)$/i, ""), currentFolder));
+      } catch (err) {
+        toast(`${f.name}: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    }
+    if (ids.length === 1 && ours.length === 1) onOpen(ids[0]);
+    else if (ids.length) {
+      toast(`Imported ${ids.length} file${ids.length === 1 ? "" : "s"}${ours.length < files.length ? ". Other file types were skipped" : ""}`);
+      await refresh();
+    }
+  };
   const importFigma = async () => {
     useStore.setState({ figmaOpen: "new" });
     if (!(await create(null))) useStore.setState({ figmaOpen: false });
@@ -621,7 +666,12 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   const locName = loc === "all" ? "All files" : loc === "drafts" ? "Drafts" : (current?.name ?? "Folder");
 
   return (
-    <div className="dash">
+    <div className="dash" {...fileDragProps}>
+      {fileDrag && (
+        <div className="dash-drop" role="status">
+          Drop .dtron files to open them
+        </div>
+      )}
       {!phone && (
         <nav className="dash-side" aria-label="Files">
           {sidebar}

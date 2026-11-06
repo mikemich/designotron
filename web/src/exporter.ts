@@ -3,7 +3,8 @@
 import JSZip from "jszip";
 import { assetDataUrl, assetExt, externalizeDataUrls, inlineAssets, referencedAssets } from "./assets";
 import { download } from "./files";
-import { getDoc, query, toast } from "./store";
+import { buildPdf, deflate, splitRgba, type PdfPage } from "./pdf";
+import { currentPage, getDoc, query, toast } from "./store";
 import type { ExportSetting, Node, Rect } from "./types";
 
 /** Largest canvas browsers will allocate: 16384 px per side and about 268 megapixels in all. */
@@ -70,7 +71,8 @@ export function fitScale(w: number, h: number, scale: number): number {
   return k < scale ? Math.floor(k * 1000) / 1000 : scale;
 }
 
-export async function svgToPngBlob(svg: string, scale: number, type = "image/png", background?: string): Promise<Blob> {
+/** Draws an exported SVG onto a canvas at `scale` (reduced to what a canvas can hold). */
+async function rasterise(svg: string, scale: number, background?: string, forceBackground = false): Promise<HTMLCanvasElement> {
   const withFonts = await embedFonts(svg);
   const { w, h } = svgSize(withFonts);
   scale = fitScale(w, h, scale);
@@ -88,19 +90,74 @@ export async function svgToPngBlob(svg: string, scale: number, type = "image/png
     canvas.height = Math.max(1, Math.min(MAX_SIDE, Math.round(h * scale)));
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("the browser could not allocate an image this large");
-    if (background || type === "image/jpeg") {
+    if (background || forceBackground) {
       ctx.fillStyle = background ?? "#FFFFFF";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    return await new Promise<Blob>((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error("toBlob failed"))), type, 0.92));
+    return canvas;
   } finally {
     URL.revokeObjectURL(url);
   }
 }
 
-function safeName(s: string): string {
-  return s.replace(/[^\w\- ]+/g, "").trim() || "export";
+export async function svgToPngBlob(svg: string, scale: number, type = "image/png", background?: string): Promise<Blob> {
+  const canvas = await rasterise(svg, scale, background, type === "image/jpeg");
+  return await new Promise<Blob>((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error("toBlob failed"))), type, 0.92));
+}
+
+const MAX_NAME = 120;
+
+/** Characters a file name can't hold or that make it lie: controls, bidi overrides and marks, zero-width characters, path separators and `<>:"|?*`. */
+// eslint-disable-next-line no-control-regex
+const UNSAFE_CHARS = /[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u2028-\u202E\u2060-\u2069\uFEFF<>:"/\\|?*]/g;
+const RESERVED_NAME = /^(con|prn|aux|nul|com[0-9\u00B9\u00B2\u00B3]|lpt[0-9\u00B9\u00B2\u00B3])(\..*)?$/i;
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/** Removes what a file name can't hold from a piece of text (a suffix), without trimming or renaming it. */
+export function stripUnsafe(s: string): string {
+  return s.normalize("NFC").replace(LONE_SURROGATE, "").replace(UNSAFE_CHARS, "").replace(/\s+/g, " ");
+}
+
+/**
+ * A file name made from text the user (or a file they opened) wrote. Keeps letters of any script,
+ * digits, dots and spaces; removes path separators, controls, bidi overrides and the characters
+ * Windows forbids, trims leading dots, dashes and spaces and trailing dots and spaces (no `..`,
+ * no hidden files, no option-looking names), prefixes Windows device names with `_` and caps the
+ * length. Never returns an empty name or one that is only dots.
+ */
+export function fileSafe(name: string): string {
+  const cut = (s: string) => Array.from(s).slice(0, MAX_NAME).join("");
+  let s = cut(stripUnsafe(name).replace(/^[\s.-]+/, "")).replace(/[\s.]+$/, "");
+  if (!s) return "export";
+  if (RESERVED_NAME.test(s)) s = `_${s}`;
+  return s;
+}
+
+/** A layer name as a path inside a zip: "/" makes folders, and every segment is made safe, so `..` can't climb out. */
+function zipPath(name: string): string {
+  return name.split("/").map(fileSafe).join("/");
+}
+
+/** What a typed export size means: a scale, or a fixed width or height in px. */
+export type ExportSize = { scale: number } | { width: number } | { height: number };
+
+/** Parses `2.5`, `2.5x`, `512w` or `300h` (any case); null when it isn't one. Scales are clamped to 0.01-32. */
+export function parseExportSize(text: string): ExportSize | null {
+  const m = text.trim().toLowerCase().match(/^(\d*\.?\d+)\s*([xwh])?$/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (m[2] === "w") return { width: Math.min(MAX_SIDE, Math.max(1, Math.round(n))) };
+  if (m[2] === "h") return { height: Math.min(MAX_SIDE, Math.max(1, Math.round(n))) };
+  return { scale: Math.min(32, Math.max(0.01, Math.round(n * 1000) / 1000)) };
+}
+
+/** How a row's size is shown in the field: `2x`, `512w` or `300h`. */
+export function formatExportSize(row: Pick<ExportSetting, "scale" | "width" | "height">): string {
+  if (row.width && row.width > 0) return `${Math.round(row.width)}w`;
+  if (row.height && row.height > 0) return `${Math.round(row.height)}h`;
+  return `${Math.round(row.scale * 1000) / 1000}x`;
 }
 
 /** What a layer exports when it has no rows of its own. */
@@ -124,7 +181,7 @@ export function rowScale(row: ExportSetting, w: number, h: number): number {
 
 /** File name suffix of a row: what the user typed, else `@2x`, `@512w` or `@1024h` (nothing at 1x). */
 export function rowSuffix(row: ExportSetting, scale = row.scale): string {
-  if (row.suffix) return row.suffix;
+  if (row.suffix) return stripUnsafe(row.suffix);
   if (row.format === "svg") return "";
   if (row.width && row.width > 0) return `@${Math.round(row.width)}w`;
   if (row.height && row.height > 0) return `@${Math.round(row.height)}h`;
@@ -143,7 +200,7 @@ export async function renderExport(id: string, row: ExportSetting): Promise<Expo
   if (!node) throw new Error("the layer no longer exists");
   const svg = nodeSvg(id);
   // A "/" in the layer name is a folder inside a zip, as in Figma.
-  const base = node.name.split("/").map(safeName).join("/");
+  const base = zipPath(node.name);
   if (row.format === "svg") {
     // Vector: no scale. Fonts embedded so text looks the same wherever the SVG is opened.
     return { name: `${base}${rowSuffix(row)}.svg`, data: await embedFonts(svg), mime: "image/svg+xml" };
@@ -168,6 +225,7 @@ export async function renderExport(id: string, row: ExportSetting): Promise<Expo
 export async function exportLayers(ids: string[]) {
   const doc = getDoc();
   const files: ExportFile[] = [];
+  warnHidden(ids);
   for (const id of ids) {
     const node = doc.nodes[id];
     if (!node) continue;
@@ -189,8 +247,17 @@ export async function exportLayers(ids: string[]) {
   const zip = new JSZip();
   for (const f of named) zip.file(f.name, f.data);
   const first = doc.nodes[ids[0]];
-  const label = ids.length === 1 && first ? safeName(first.name) : safeName(doc.name);
+  const label = fileSafe(ids.length === 1 && first ? first.name : doc.name);
   download(`${label}.zip`, await zip.generateAsync({ type: "blob" }), "application/zip");
+}
+
+/** Says so for each hidden layer: the engine draws nothing for it, so its export is empty. */
+function warnHidden(ids: string[]) {
+  const doc = getDoc();
+  for (const id of ids) {
+    const n = doc.nodes[id];
+    if (n && n.visible === false) toast(`${n.name} is hidden, so its export is empty`);
+  }
 }
 
 /** `a.png`, `a.png` -> `a.png`, `a-2.png` (numbering on until the name is free, even of a real `a-2.png`). */
@@ -210,6 +277,56 @@ function uniqueNames(files: ExportFile[]): ExportFile[] {
       }
     }
   });
+}
+
+// ---------- PDF ----------
+
+/** Pixels per point in a PDF page's image: 2x, so a screen stays sharp when zoomed. */
+const PDF_SCALE = 2;
+
+/** Layers File > Export frames to PDF takes: every visible top-level frame of the page, in layer order. */
+export function pdfFrames(): string[] {
+  const doc = getDoc();
+  const page = doc.pages.find((p) => p.id === currentPage());
+  return (page?.children ?? []).filter((id) => {
+    const n = doc.nodes[id];
+    return n && n.visible !== false && (n.type === "frame" || n.type === "component" || n.type === "componentSet");
+  });
+}
+
+/**
+ * Exports layers as one PDF with a page per layer, in the order given. Pages are 2x images of the
+ * layer (text is not selectable); a page is 1 pt per px of the layer's export box.
+ */
+export async function exportPdf(ids: string[]) {
+  const doc = getDoc();
+  const layers = ids.filter((id) => doc.nodes[id]);
+  if (!layers.length) {
+    toast("Select a layer, or add a frame, to export a PDF");
+    return;
+  }
+  warnHidden(layers);
+  if (layers.length > 10) toast(`Exporting ${layers.length} pages…`);
+  const pages: PdfPage[] = [];
+  for (const id of layers) {
+    try {
+      const svg = nodeSvg(id);
+      const { w, h } = svgSize(svg);
+      const canvas = await rasterise(svg, PDF_SCALE);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("the browser could not read the image back");
+      const { rgb, alpha } = splitRgba(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
+      // Only the compressed bytes stay, so a long document doesn't hold every page's pixels.
+      pages.push({ widthPt: w, heightPt: h, pxW: canvas.width, pxH: canvas.height, rgbZ: await deflate(rgb), alphaZ: alpha ? await deflate(alpha) : undefined });
+      canvas.width = canvas.height = 0;
+    } catch (err) {
+      toast(`Could not export ${doc.nodes[id].name}: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  }
+  if (!pages.length) return;
+  const first = doc.nodes[layers[0]];
+  const name = fileSafe(layers.length === 1 ? first.name : doc.name);
+  download(`${name}.pdf`, await buildPdf(pages), "application/pdf");
 }
 
 // ---------- Copy as ----------
@@ -318,7 +435,7 @@ export function downloadImageAsset(assetId: string, layerName: string) {
     return;
   }
   const blob = dataUrlBlob(data);
-  download(`${safeName(layerName).replace(/\//g, "-")}.${assetExt(data)}`, blob, blob.type);
+  download(`${fileSafe(layerName.replace(/\//g, "-"))}.${assetExt(data)}`, blob, blob.type);
 }
 
 /** Downloads a layer as its own export rows, else as SVG (vectors) or a 2x PNG. */
@@ -337,5 +454,5 @@ export async function exportProjectZip() {
   for (const f of files) zip.file(f.path, f.content);
   for (const b of binaries) zip.file(b.path, b.dataUrl.split(",")[1], { base64: true });
   const blob = await zip.generateAsync({ type: "blob" });
-  download(`${safeName(getDoc().name)}-react.zip`, blob, "application/zip");
+  download(`${fileSafe(getDoc().name)}-react.zip`, blob, "application/zip");
 }

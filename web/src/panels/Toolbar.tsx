@@ -118,6 +118,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     },
     { label: "Import website or HTML…", onClick: () => useImport.setState({ open: true }) },
     { label: "Place image…", kbd: `${SHIFT_MOD}K`, onClick: A.placeImage },
+    { label: "Export frames to PDF…", onClick: A.exportFramesPdf },
     { label: "Export React project (.zip)", onClick: A.exportProject },
     { sep: true },
     { heading: "Edit" },

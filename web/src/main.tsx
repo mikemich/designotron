@@ -62,6 +62,19 @@ function App() {
   return <Dashboard onOpen={(id) => (location.hash = `#/file/${id}`)} />;
 }
 
+// A file dropped outside the canvas and the dashboard would make the browser open or download it,
+// taking the visitor out of the app. The canvas and the dashboard handle their own drops first.
+const carriesFiles = (e: DragEvent) => !!e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files");
+for (const type of ["dragover", "drop"] as const) {
+  window.addEventListener(type, (e) => {
+    if (!e.defaultPrevented && carriesFiles(e)) {
+      e.preventDefault();
+      // Nothing here takes the file: show the pointer as such.
+      if (type === "dragover" && e.dataTransfer) e.dataTransfer.dropEffect = "none";
+    }
+  });
+}
+
 // Only for shared links, which can't show anything without the engine.
 const failed = (err: unknown) => {
   document.getElementById("root")!.innerHTML = `<div style="padding:32px;color:#e6e6e6;font:14px Inter,system-ui,sans-serif;line-height:1.6">The editor engine couldn't load (${String(err).replace(/[<&]/g, "")}).<br>Check your connection and try again.<br><button onclick="location.reload()" style="margin-top:12px;padding:6px 14px;border-radius:6px;border:0;background:#6d4aff;color:#fff;font:inherit">Retry</button></div>`;

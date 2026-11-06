@@ -1,7 +1,7 @@
 // User-level actions shared by menus, keyboard shortcuts and context menus.
 
 import { addAsset, imageSize, readFileAsDataUrl } from "./assets";
-import { exportProjectZip } from "./exporter";
+import { exportPdf, exportProjectZip, fileSafe, pdfFrames } from "./exporter";
 import { download, getFileMeta, importDtron, pickFile, toDtron } from "./files";
 import {
   canvasSize,
@@ -504,7 +504,13 @@ export async function saveLocally() {
 /** Downloads the file as .dtron (Ctrl+Shift+S, File menu). */
 export function saveDtron() {
   const doc = getDoc();
-  download(`${doc.name || "Untitled"}.dtron`, toDtron(getEngine().save()), "application/json");
+  download(`${fileSafe(doc.name || "Untitled")}.dtron`, toDtron(getEngine().save()), "application/json");
+}
+
+/** File > Export frames to PDF: the selection, else every visible top-level frame of the page. */
+export function exportFramesPdf() {
+  const sel = useStore.getState().es.selection;
+  void exportPdf(sel.length ? sel : pdfFrames());
 }
 
 /** Opens a .dtron file as a new file next to this one (the open file is left as it is). */
