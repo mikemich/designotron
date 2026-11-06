@@ -55,7 +55,7 @@ interface BoundsItem {
 
 type Drag =
   | { kind: "pan"; sx: number; sy: number; vx: number; vy: number }
-  | { kind: "move"; start: Pt; ids: string[]; started: boolean; alt: boolean; clickSelect: string | null; shiftToggle: string | null }
+  | { kind: "move"; start: Pt; ids: string[]; started: boolean; alt: boolean; clickSelect: string | null; shiftToggle: string | null; dropAt?: Pt }
   | { kind: "resize"; handle: Handle; start: Pt; ids: string[]; scale: boolean }
   | { kind: "rotate"; pivot: Pt; startAngle: number; ids: string[] }
   | { kind: "marquee"; start: Pt; base: string[] }
@@ -777,6 +777,7 @@ export function Canvas() {
         const r = dispatch<{ guides: any[]; gaps: any[] }>({ op: "translate", ids: d.ids, dx, dy, snap: !e.ctrlKey, zoom: zoom(), axis }, { quiet: true });
         // With the axis locked the layers sit at the locked delta, so the drop target is looked up there.
         const tp = axis === "x" ? { x: p.x, y: d.start.y } : axis === "y" ? { x: d.start.x, y: p.y } : p;
+        d.dropAt = tp;
         const target = query<string | null>({ q: "frameAt", x: tp.x, y: tp.y, exclude: d.ids });
         // A layer about to enter an auto layout frame shows where it will land.
         const slot = target ? query<{ line: [number, number, number, number] } | null>({ q: "dropSlot", ids: d.ids, x: tp.x, y: tp.y }) : null;
@@ -903,7 +904,7 @@ export function Canvas() {
     switch (d.kind) {
       case "move":
         if (d.started) {
-          dispatch({ op: "dropInto", ids: d.ids, x: p.x, y: p.y }, { quiet: true });
+          dispatch({ op: "dropInto", ids: d.ids, x: d.dropAt?.x ?? p.x, y: d.dropAt?.y ?? p.y }, { quiet: true });
           dispatch({ op: "endGesture" });
         } else if (d.clickSelect) {
           dispatch({ op: "select", ids: [d.clickSelect] });

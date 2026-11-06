@@ -1247,7 +1247,19 @@ impl<'a> Ctx<'a> {
           sized = self.pin(el, n);
         }
       }
-      Place::Flow { .. } => {}
+      Place::Flow { .. } => {
+        // Absolutely placed children (and constraint pins) resolve against the nearest positioned
+        // ancestor, which must be this box and not the list or screen around it.
+        let abs_kids = n.kind.is_container()
+          && n
+            .children
+            .iter()
+            .filter_map(|c| self.doc.get(c))
+            .any(|c| n.layout.is_none() || c.absolute_position);
+        if abs_kids {
+          el.s("position", "relative");
+        }
+      }
     }
     let (fill_w, fill_h) = match place {
       Place::Flow { horizontal } => {
@@ -1480,6 +1492,11 @@ impl<'a> Ctx<'a> {
         let class = self.names.texts.get(&style.id).cloned().unwrap_or_else(|| text_class(&style.name));
         const OWN: [&str; 5] = ["font-family", "font-size", "font-weight", "line-height", "letter-spacing"];
         let mut decls: Vec<(String, String)> = el.styles.iter().filter(|(k, _)| OWN.contains(&k.as_str())).cloned().collect();
+        // An automatic line height is a multiple, so one class fits every size that uses it.
+        if style.line_height.is_none() {
+          decls.retain(|(k, _)| k != "line-height");
+          decls.push(("line-height".into(), "1.2".into()));
+        }
         if !decls.iter().any(|(k, _)| k == "font-weight") {
           decls.push(("font-weight".into(), "400".into()));
         }
@@ -5282,6 +5299,66 @@ mod r10_tests {
     let react = export_react(&doc, "s", &HeuristicMeasurer);
     assert!(react.contains("right-[16px]") && react.contains("bottom-[0]"), "{react}");
     assert!(react.contains("left-[calc(50%_-_37.5px)]"), "{react}");
+  }
+
+  #[test]
+  fn a_flow_container_with_absolute_children_is_their_positioned_ancestor() {
+    use crate::model::ConstraintH;
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Screen", None);
+    doc.get_mut("s").unwrap().layout = Some(AutoLayout::default());
+    add(&mut doc, NodeType::Frame, "list", "List", Some("s"));
+    doc.get_mut("list").unwrap().layout = Some(AutoLayout::default());
+    add(&mut doc, NodeType::Frame, "card", "Card", Some("list"));
+    add(&mut doc, NodeType::Rectangle, "dot", "Dot", Some("card"));
+    {
+      let c = doc.get_mut("card").unwrap();
+      c.width = 200.0;
+      c.height = 100.0;
+    }
+    {
+      let d = doc.get_mut("dot").unwrap();
+      (d.x, d.y, d.width, d.height) = (176.0, 8.0, 16.0, 16.0);
+      d.constraints.horizontal = ConstraintH::Right;
+    }
+    let html = tight(export_html(&doc, "s", &HeuristicMeasurer));
+    let card = html
+      .lines()
+      .find(|l| l.contains("width:200px") && l.contains("height:100px"))
+      .unwrap();
+    assert!(card.contains("position:relative"), "{card}");
+    let dot = html.lines().find(|l| l.contains("right:8px")).unwrap();
+    assert!(dot.contains("position:absolute") && !dot.contains("left:"), "{dot}");
+    // The list holds only flowing layers: no positioned box needed.
+    let list = html.lines().filter(|l| l.contains("display:flex")).nth(1).unwrap();
+    assert!(!list.contains("position:relative"), "{list}");
+  }
+
+  #[test]
+  fn a_text_style_with_automatic_line_height_is_a_multiple() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Screen", None);
+    add(&mut doc, NodeType::Text, "t", "Body", Some("s"));
+    doc.styles.texts.push(crate::model::TextStyle {
+      id: "ts".into(),
+      name: "Body".into(),
+      font_family: "Inter".into(),
+      font_size: 16.0,
+      font_weight: 400,
+      line_height: None,
+      letter_spacing: 0.0,
+    });
+    {
+      let n = doc.get_mut("t").unwrap();
+      n.text_style = Some("ts".into());
+      let t = n.text.as_mut().unwrap();
+      t.font_family = "Inter".into();
+      t.font_size = 16.0;
+      t.characters = "Hi".into();
+    }
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let css = &files.iter().find(|f| f.path == "src/index.css").unwrap().content;
+    assert!(css.contains("16px/1.2"), "{css}");
   }
 
   #[test]

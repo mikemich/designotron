@@ -797,6 +797,8 @@ fn carry_comments(current: &Document, restored: &Document) -> std::collections::
 /// the insertion line `[x1, y1, x2, y2]` in page space.
 struct FlowSlot {
   index: usize,
+  /// The flow child the layers go in front of; `None` puts them at the end.
+  anchor: Option<NodeId>,
   line: [f64; 4],
 }
 
@@ -2309,42 +2311,24 @@ impl Engine {
         let ids = ops::top_most(&self.doc, &ids);
         let pt = Point::new(x, y);
         let target = ops::frame_at(&self.doc, &self.page, pt, &ids, true);
+        // One place for the whole drop, so several layers keep their order.
+        let anchor = target.as_ref().and_then(|t| self.flow_slot(t, &ids, pt)).map(|s| s.anchor);
         for id in &ids {
-          let cur = self.doc.get(id).and_then(|n| n.parent.clone());
-          if self.doc.instance_ancestor(id).is_some()
-            || devices::in_part(&self.doc, id)
-            || components::would_nest_under(&self.doc, std::slice::from_ref(id), target.as_deref())
-          {
+          let Some(leaves_flow) = self.drop_move(id, target.as_deref(), pt) else {
             continue;
-          }
-          let in_flow = cur
-            .as_ref()
-            .and_then(|p| self.doc.get(p))
-            .map(|p| p.layout.is_some())
-            .unwrap_or(false)
-            && !self.doc.get(id).unwrap().absolute_position;
-          // Inside its auto layout parent a drag reorders; dropped outside, the layer leaves.
-          let leaves_flow = in_flow && cur.as_deref().map(|p| !self.contains_point(p, pt)).unwrap_or(false);
+          };
           if leaves_flow {
             self.place_dragged(id);
           }
-          if cur != target
-            && (!in_flow || leaves_flow)
-            && cur
-              .as_ref()
-              .map(|c| self.doc.get(c).map(|n| n.kind != NodeType::Group).unwrap_or(true))
-              .unwrap_or(true)
-          {
-            // Dropping into auto layout inserts at the pointer position.
-            let index = target.as_ref().and_then(|t| self.flow_slot(t, &ids, pt)).map(|s| s.index);
-            self.doc.reparent(id, target.as_deref(), index, true);
-            // Fill only means something in auto layout; outside it the layer keeps its size.
-            if leaves_flow && index.is_none() {
-              if let Some(n) = self.doc.get_mut(id) {
-                for s in [&mut n.sizing_h, &mut n.sizing_v] {
-                  if *s == Sizing::Fill {
-                    *s = Sizing::Fixed;
-                  }
+          // Dropping into auto layout inserts at the pointer position.
+          let index = target.as_ref().zip(anchor.as_ref()).map(|(t, a)| self.anchor_index(t, id, a));
+          self.doc.reparent(id, target.as_deref(), index, true);
+          // Fill only means something in auto layout; outside it the layer keeps its size.
+          if leaves_flow && index.is_none() {
+            if let Some(n) = self.doc.get_mut(id) {
+              for s in [&mut n.sizing_h, &mut n.sizing_v] {
+                if *s == Sizing::Fill {
+                  *s = Sizing::Fixed;
                 }
               }
             }
@@ -3093,8 +3077,10 @@ impl Engine {
     if before.kind != NodeType::Group || (now.width == before.width && now.height == before.height) {
       return;
     }
-    let (x, y, w, h) = (now.x, now.y, now.width.max(1.0), now.height.max(1.0));
-    let (cw, ch) = (w != before.width, h != before.height);
+    let (cw, ch) = (now.width != before.width, now.height != before.height);
+    let w = if cw { now.width.max(1.0) } else { before.width };
+    let h = if ch { now.height.max(1.0) } else { before.height };
+    let (x, y) = (now.x, now.y);
     interact::set_geometry(&mut self.doc, before, x, y, w, h, cw, ch);
     if self.doc.instance_ancestor(id).is_none() {
       return;
@@ -3133,14 +3119,21 @@ impl Engine {
       (frame_box.width - layout.padding_left - layout.padding_right).max(0.0),
       (frame_box.height - layout.padding_top - layout.padding_bottom).max(0.0),
     );
-    // Rows as indices into `flow`; a column layout is a single run along y.
+    // Rows as indices into `flow`. Only a wrapping frame has more than one: a row starts when a
+    // layer is not to the right of the one before it, or is below the row so far. Any other
+    // layout is a single run (along x for a row, along y for a column).
+    let wraps = layout.wrap && horizontal;
     let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut row_bottom = f64::NEG_INFINITY;
     for k in 0..flow.len() {
-      let new_row = horizontal && k > 0 && flow[k].1.x < flow[k - 1].1.x;
+      let r = &flow[k].1;
+      let new_row = wraps && k > 0 && (r.x <= flow[k - 1].1.x || r.y >= row_bottom - 0.01);
       if rows.is_empty() || new_row {
         rows.push(Vec::new());
+        row_bottom = f64::NEG_INFINITY;
       }
       rows.last_mut().unwrap().push(k);
+      row_bottom = row_bottom.max(r.y + r.height);
     }
     let main_of = |r: &Rect| if horizontal { (r.x, r.x + r.width) } else { (r.y, r.y + r.height) };
     let span_of = |row: &[usize]| {
@@ -3151,25 +3144,19 @@ impl Engine {
         .fold(f64::NEG_INFINITY, f64::max);
       (top, bottom)
     };
-    let (pos, row) = if horizontal && !rows.is_empty() {
-      let (first, last) = (span_of(&rows[0]).0, span_of(&rows[rows.len() - 1]).1);
-      if p.y < first {
-        (f64::NEG_INFINITY, 0)
-      } else if p.y > last {
-        (f64::INFINITY, rows.len() - 1)
-      } else {
-        let dist = |r: &[usize]| {
-          let (t, b) = span_of(r);
-          (t - p.y).max(p.y - b).max(0.0)
-        };
-        let best = (0..rows.len())
-          .min_by(|&a, &b| dist(&rows[a]).total_cmp(&dist(&rows[b])))
-          .unwrap_or(0);
-        (p.x, best)
-      }
+    // The nearest row by y, then the place in it by x.
+    let row = if rows.len() > 1 {
+      let dist = |r: &[usize]| {
+        let (t, b) = span_of(r);
+        (t - p.y).max(p.y - b).max(0.0)
+      };
+      (0..rows.len())
+        .min_by(|&a, &b| dist(&rows[a]).total_cmp(&dist(&rows[b])))
+        .unwrap_or(0)
     } else {
-      (if horizontal { p.x } else { p.y }, 0)
+      0
     };
+    let pos = if horizontal { p.x } else { p.y };
     let members: &[usize] = rows.get(row).map(|r| r.as_slice()).unwrap_or(&[]);
     let in_row = members
       .iter()
@@ -3184,6 +3171,7 @@ impl Engine {
       Some((i, _)) => *i,
       None => flow.last().map(|(i, _)| i + 1).unwrap_or(kids.len()),
     };
+    let anchor = flow.get(slot).map(|(i, _)| kids[*i].clone());
     // The line sits halfway between the neighbours inside the row, or half a gap outside them.
     let half_gap = layout.gap / 2.0;
     let prev = (in_row > 0).then(|| main_of(&flow[members[in_row - 1]].1).1);
@@ -3203,34 +3191,54 @@ impl Engine {
       (inner.x, inner.x + inner.width)
     };
     let line = if horizontal { [at, lo, at, hi] } else { [lo, at, hi, at] };
-    Some(FlowSlot { index, line })
+    Some(FlowSlot { index, anchor, line })
   }
 
   /// The auto layout frame a drop of `ids` at `p` would insert them into, with the slot.
   fn drop_slot(&self, ids: &[NodeId], p: Point) -> Option<Value> {
     let ids = ops::top_most(&self.doc, ids);
     let target = ops::frame_at(&self.doc, &self.page, p, &ids, true)?;
-    let enters = ids.iter().any(|id| {
-      let Some(n) = self.doc.get(id) else { return false };
-      if self.doc.instance_ancestor(id).is_some()
-        || devices::in_part(&self.doc, id)
-        || components::would_nest_under(&self.doc, std::slice::from_ref(id), Some(&target))
-      {
-        return false;
-      }
-      let cur = n.parent.as_deref();
-      if cur == Some(target.as_str()) {
-        return false;
-      }
-      let in_flow = cur.and_then(|c| self.doc.get(c)).is_some_and(|c| c.layout.is_some()) && !n.absolute_position;
-      let leaves_flow = in_flow && cur.is_some_and(|c| !self.contains_point(c, p));
-      (!in_flow || leaves_flow) && cur.and_then(|c| self.doc.get(c)).is_none_or(|c| c.kind != NodeType::Group)
-    });
+    // Layers placed absolutely don't take a place in the flow.
+    let enters = ids
+      .iter()
+      .any(|id| self.doc.get(id).is_some_and(|n| !n.absolute_position) && self.drop_move(id, Some(&target), p).is_some());
     if !enters {
       return None;
     }
     let slot = self.flow_slot(&target, &ids, p)?;
     Some(json!({ "frame": target, "index": slot.index, "line": slot.line }))
+  }
+
+  /// What `DropInto` does with `id` for a drop at `p` on `target`: `None` leaves it where it is,
+  /// `Some(leaves_flow)` moves it into `target` (`leaves_flow`: out of its auto layout parent).
+  fn drop_move(&self, id: &str, target: Option<&str>, p: Point) -> Option<bool> {
+    let n = self.doc.get(id)?;
+    if self.doc.instance_ancestor(id).is_some()
+      || devices::in_part(&self.doc, id)
+      || components::would_nest_under(&self.doc, std::slice::from_ref(&id.to_string()), target)
+    {
+      return None;
+    }
+    let cur = n.parent.as_deref();
+    let cur_node = cur.and_then(|c| self.doc.get(c));
+    let in_flow = cur_node.is_some_and(|c| c.layout.is_some()) && !n.absolute_position;
+    // Inside its auto layout parent a drag reorders; dropped outside, the layer leaves.
+    let leaves_flow = in_flow && cur.is_some_and(|c| !self.contains_point(c, p));
+    let moves = cur != target && (!in_flow || leaves_flow) && cur_node.is_none_or(|c| c.kind != NodeType::Group);
+    moves.then_some(leaves_flow)
+  }
+
+  /// Child index in `frame` (once `id` is out of it) for a layer going in front of `anchor`.
+  fn anchor_index(&self, frame: &str, id: &str, anchor: &Option<NodeId>) -> usize {
+    let kids: Vec<&NodeId> = self
+      .doc
+      .get(frame)
+      .map(|f| f.children.iter().filter(|c| *c != id).collect())
+      .unwrap_or_default();
+    match anchor {
+      Some(a) => kids.iter().position(|c| *c == a).unwrap_or(kids.len()),
+      None => kids.len(),
+    }
   }
 
   /// True when a page-space point lies inside a node's (possibly rotated) box.
@@ -3261,7 +3269,7 @@ impl Engine {
     let Some(slot) = self.flow_slot(&parent, &[id.to_string()], Point::new(c.x + dx, c.y + dy)) else {
       return;
     };
-    let index = slot.index;
+    let index = self.anchor_index(&parent, id, &slot.anchor);
     self.doc.reparent(id, Some(&parent), Some(index), false);
   }
 
@@ -6347,6 +6355,152 @@ mod tests {
     assert_eq!(e.doc.get(&g).unwrap().height, 40.0);
     e.dispatch(Command::Undo).unwrap();
     assert_eq!((e.doc.get(&g).unwrap().width, e.doc.get(&a).unwrap().width), (240.0, 100.0));
+  }
+
+  #[test]
+  fn a_non_wrapping_row_reorders_by_x_whatever_the_heights() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 40.0, 100.0, None);
+    let b = rect(&mut e, 50.0, 0.0, 40.0, 30.0, None);
+    let c = rect(&mut e, 100.0, 0.0, 40.0, 30.0, None);
+    let f = id_of(
+      &e.dispatch(Command::AddAutoLayout {
+        ids: vec![a.clone(), b.clone(), c.clone()],
+      })
+      .unwrap(),
+    );
+    let gap_x = {
+      let (bb, cb) = (e.doc.abs_bounds(&b), e.doc.abs_bounds(&c));
+      (bb.right() + cb.x) / 2.0
+    };
+    let dx = gap_x - e.doc.abs_bounds(&a).center().x;
+    e.dispatch(Command::BeginGesture).unwrap();
+    // Straight along the row: the pointer is below the short layers' row, but it is still one row.
+    e.dispatch(Command::Translate {
+      ids: vec![a.clone()],
+      dx,
+      dy: 0.0,
+      snap: false,
+      zoom: 1.0,
+      axis: None,
+    })
+    .unwrap();
+    e.dispatch(Command::EndGesture).unwrap();
+    assert_eq!(e.doc.get(&f).unwrap().children, vec![b.clone(), a.clone(), c.clone()]);
+    // A free layer dropped in the frame's top padding goes by x too.
+    let free = rect(&mut e, 600.0, 0.0, 10.0, 10.0, None);
+    let top = e.doc.abs_bounds(&f).y;
+    let x = e.doc.abs_bounds(&b).center().x - 1.0;
+    e.dispatch(Command::DropInto {
+      ids: vec![free.clone()],
+      x,
+      y: top + 1.0,
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&f).unwrap().children, vec![free, b, a, c]);
+  }
+
+  #[test]
+  fn full_width_wrap_rows_are_separate_rows() {
+    let mut e = engine();
+    let tiles: Vec<String> = (0..3)
+      .map(|i| rect(&mut e, 10.0, 10.0 + i as f64 * 50.0, 280.0, 40.0, None))
+      .collect();
+    let f = id_of(&e.dispatch(Command::AddAutoLayout { ids: tiles.clone() }).unwrap());
+    update_ids(
+      &mut e,
+      vec![f.clone()],
+      json!({ "width": 300, "sizingH": "fixed", "layout": { "direction": "horizontal", "wrap": true, "gap": 10, "counterGap": 10,
+        "paddingLeft": 10, "paddingRight": 10, "paddingTop": 10, "paddingBottom": 10 } }),
+    );
+    assert_eq!(e.doc.get(&tiles[2]).unwrap().y, 110.0);
+    let free = rect(&mut e, 600.0, 0.0, 20.0, 20.0, None);
+    let mid = e.doc.abs_bounds(&tiles[1]);
+    for (x, want) in [(mid.x + 5.0, 1), (mid.right() - 5.0, 2)] {
+      let r = slot_at(&e, vec![free.clone()], x, mid.y + 20.0);
+      assert_eq!(r["index"], want, "x = {x}");
+    }
+  }
+
+  #[test]
+  fn dropping_several_layers_keeps_their_order() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 40.0, None);
+    let b = rect(&mut e, 0.0, 50.0, 50.0, 40.0, None);
+    let c = rect(&mut e, 0.0, 100.0, 50.0, 40.0, None);
+    let list = id_of(
+      &e.dispatch(Command::AddAutoLayout {
+        ids: vec![a.clone(), b.clone(), c.clone()],
+      })
+      .unwrap(),
+    );
+    update_ids(
+      &mut e,
+      vec![list.clone()],
+      json!({ "layout": { "direction": "vertical", "gap": 10 } }),
+    );
+    let (x1, x2) = (
+      rect(&mut e, 400.0, 0.0, 20.0, 20.0, None),
+      rect(&mut e, 430.0, 0.0, 20.0, 20.0, None),
+    );
+    let (ab, bb) = (e.doc.abs_bounds(&a), e.doc.abs_bounds(&b));
+    let y = (ab.bottom() + bb.y) / 2.0;
+    e.dispatch(Command::DropInto {
+      ids: vec![x1.clone(), x2.clone()],
+      x: ab.x + 10.0,
+      y,
+    })
+    .unwrap();
+    assert_eq!(
+      e.doc.get(&list).unwrap().children,
+      vec![a.clone(), x1.clone(), x2.clone(), b.clone(), c.clone()]
+    );
+    // One of the dragged layers already lives in the target: it stays, the other goes in front of C.
+    let x3 = rect(&mut e, 500.0, 0.0, 20.0, 20.0, None);
+    let cb = e.doc.abs_bounds(&c);
+    let bb = e.doc.abs_bounds(&b);
+    e.dispatch(Command::DropInto {
+      ids: vec![b.clone(), x3.clone()],
+      x: cb.x + 10.0,
+      y: (bb.bottom() + cb.y) / 2.0,
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&list).unwrap().children, vec![a, x1, x2, b, x3, c]);
+  }
+
+  #[test]
+  fn typing_a_height_for_a_flat_group_keeps_its_zero_height() {
+    let mut e = engine();
+    let l1 = e
+      .dispatch(Command::CreateShape {
+        kind: NodeType::Line,
+        x: 0.0,
+        y: 0.0,
+        width: 100.0,
+        height: 0.0,
+        parent: None,
+      })
+      .unwrap();
+    let l2 = e
+      .dispatch(Command::CreateShape {
+        kind: NodeType::Line,
+        x: 0.0,
+        y: 0.0,
+        width: 60.0,
+        height: 0.0,
+        parent: None,
+      })
+      .unwrap();
+    let g = id_of(
+      &e.dispatch(Command::Group {
+        ids: vec![id_of(&l1), id_of(&l2)],
+      })
+      .unwrap(),
+    );
+    let flat = e.doc.get(&g).unwrap().height;
+    assert!(flat < 1.0, "{flat}");
+    update_ids(&mut e, vec![g.clone()], json!({ "width": 200 }));
+    assert_eq!((e.doc.get(&g).unwrap().width, e.doc.get(&g).unwrap().height), (200.0, flat));
   }
 
   #[test]

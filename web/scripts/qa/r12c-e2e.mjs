@@ -191,6 +191,29 @@ try {
     await f.context.close();
   }
 
+  // ---- A non-wrapping row with mixed heights still reorders by x ----
+  {
+    const f = await fresh();
+    const row = await mk(f.page, null, {
+      kind: "frame", name: "Row", x: 100, y: 100, width: 200, height: 100, fills: fill("#FFFFFF"), sizingH: "hug", sizingV: "hug",
+      layout: HL({ gap: 10 }),
+      children: [["A", 100], ["B", 30], ["C", 30]].map(([n, h]) => ({ kind: "rectangle", name: n, width: 40, height: h, sizingH: "fixed", sizingV: "fixed", fills: fill() })),
+    });
+    await fit(f.page);
+    const [a, b, c] = await kids(f.page, row);
+    const [ba, bb, bc] = [await box(f.page, a), await box(f.page, b), await box(f.page, c)];
+    await f.page.mouse.move(ba.x + ba.width / 2, ba.y + ba.height / 2);
+    await f.page.mouse.down();
+    await f.page.mouse.move(ba.x + ba.width / 2 + 5, ba.y + ba.height / 2, { steps: 3 });
+    await f.page.mouse.move((bb.x + bb.width + bc.x) / 2, ba.y + ba.height / 2, { steps: 10 });
+    await f.page.mouse.up();
+    await f.page.waitForTimeout(250);
+    const d = await doc(f.page);
+    const got = d.nodes[row].children.map((i) => nameOf(d, i)).join(",");
+    check("a row with mixed heights reorders by x (A between B and C)", got === "B,A,C", got);
+    await f.context.close();
+  }
+
   // ---- Q-B4: square layout grid snapping far from the origin ----
   for (const [label, W, size, x] of [
     ["2px grid, 1440 frame, box near 900", 1440, 2, 900.3],
