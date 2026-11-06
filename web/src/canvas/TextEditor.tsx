@@ -102,7 +102,7 @@ export function TextEditor({ id }: { id: string }) {
         font: `${t.italic ? "italic " : ""}${t.fontWeight} ${t.fontSize}px/${lh}px "${t.fontFamily}", sans-serif`,
         letterSpacing: t.letterSpacing,
         color,
-        textAlign: t.alignH === "justify" ? "left" : t.alignH,
+        textAlign: t.alignH,
         textTransform: t.case === "upper" ? "uppercase" : t.case === "lower" ? "lowercase" : t.case === "title" ? "capitalize" : "none",
         whiteSpace: t.autoResize === "width" && !wrapsAtMax ? "pre" : "pre-wrap",
         overflowWrap: "anywhere",

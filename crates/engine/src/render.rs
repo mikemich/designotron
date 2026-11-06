@@ -934,7 +934,7 @@ impl<'a> Renderer<'a> {
       // Justify stretches the gaps of wrapped lines to the box's width.
       let spacing = (t.align_h == TextAlignH::Justify && line.soft_wrap && t.auto_resize != crate::model::TextAutoResize::Width)
         .then(|| {
-          let spaces = line.text.chars().filter(|c| *c == ' ').count();
+          let spaces = line.text.chars().filter(|c| matches!(*c, ' ' | '\u{a0}')).count();
           let extra = n.width - line.width;
           (spaces > 0 && extra > 0.01).then(|| format!(" word-spacing=\"{}\"", fmt(extra / spaces as f64)))
         })
@@ -993,7 +993,8 @@ impl<'a> Renderer<'a> {
     }
     let paint = self.paint(p, n.width, n.height, 0.0);
     let w = if n.stroke_align == StrokeAlign::Center { sw } else { sw * 2.0 };
-    let join = join_name(n.stroke_join.unwrap_or(StrokeJoin::Round));
+    // Always round: a miter on a glyph corner spikes past the stroke margin and the export crop.
+    let join = join_name(StrokeJoin::Round);
     let dash = if n.stroke_dash.is_empty() {
       String::new()
     } else {

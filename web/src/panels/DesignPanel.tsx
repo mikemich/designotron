@@ -579,11 +579,14 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
 function HexInput({ color, onCommit }: { color: string; onCommit: (color: string) => void }) {
   const ref = useRef<HTMLInputElement>(null);
   const shown = color.replace("#", "").slice(0, 6);
+  /** Typed in since the last commit: only then does leaving the field write the colour. */
+  const edited = useRef(false);
   useEffect(() => {
     const el = ref.current;
-    if (el && document.activeElement !== el) el.value = shown;
+    if (el && (document.activeElement !== el || !edited.current)) el.value = shown;
   }, [shown]);
   const commit = (el: HTMLInputElement) => {
+    edited.current = false;
     const v = el.value.replace("#", "").trim();
     if (!/^([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v)) {
       el.value = shown;
@@ -598,6 +601,7 @@ function HexInput({ color, onCommit }: { color: string; onCommit: (color: string
       ref={ref}
       aria-label="Hex colour"
       defaultValue={shown}
+      onInput={() => (edited.current = true)}
       onKeyDown={(e) => {
         e.stopPropagation();
         if (e.key === "Enter") {
@@ -605,7 +609,10 @@ function HexInput({ color, onCommit }: { color: string; onCommit: (color: string
           e.currentTarget.select();
         }
       }}
-      onBlur={(e) => commit(e.currentTarget)}
+      onBlur={(e) => {
+        if (edited.current) commit(e.currentTarget);
+        else e.currentTarget.value = shown;
+      }}
     />
   );
 }
@@ -618,10 +625,12 @@ function ShapeSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
       <div className="grid2">
         <NumberField
           label="Points"
-          value={common(nodes, (n) => n.shape?.pointCount ?? (n.type === "star" ? 5 : 3))}
+          value={common(nodes, (n) => n.shape?.pointCount ?? 5)}
           min={3}
           max={60}
           onChange={(v) => update(ids, { shape: { pointCount: Math.max(3, Math.min(60, Math.round(v))) } })}
+          onScrubStart={begin}
+          onScrubEnd={end}
           title="Points"
         />
         {stars && (

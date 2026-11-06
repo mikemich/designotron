@@ -1106,7 +1106,7 @@ impl<'a> Ctx<'a> {
           if let Some(Paint::Solid { color, opacity, .. }) = n.strokes.iter().find(|p| p.visible()) {
             let lit = color::css_with_opacity(color, *opacity);
             for (k, val) in el.styles.iter_mut() {
-              if k == "border" || k == "outline" || k == "border-top" || k == "border-color" {
+              if k == "border" || k == "outline" || k == "border-top" || k == "border-color" || k == "-webkit-text-stroke" {
                 *val = val.replace(&lit, &var);
               }
             }
@@ -1367,7 +1367,11 @@ impl<'a> Ctx<'a> {
       if outside {
         el.s("paint-order", "stroke fill");
       } else if n.stroke_align == StrokeAlign::Inside {
-        el.approx = Some("Inside text strokes have no CSS equivalent; drawn centred.".into());
+        let note = "Inside text strokes have no CSS equivalent; drawn centred.";
+        el.approx = Some(match el.approx.take() {
+          Some(prev) => format!("{prev} {note}"),
+          None => note.into(),
+        });
       }
     }
     if t.letter_spacing != 0.0 {

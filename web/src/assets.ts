@@ -94,6 +94,11 @@ export function svgSize(text: string): { width: number; height: number } | null 
   };
   const w = len(root.getAttribute("width"));
   const h = len(root.getAttribute("height"));
+  const ok = (v: { width: number; height: number } | null) => (v && Number.isFinite(v.width) && Number.isFinite(v.height) && v.width > 0 && v.height > 0 ? v : null);
+  return ok(measure(w, h, root));
+}
+
+function measure(w: number, h: number, root: Element): { width: number; height: number } | null {
   const vb = (root.getAttribute("viewBox") ?? "").trim().split(/[\s,]+/).map(Number);
   const [vw, vh] = vb.length === 4 && vb.every(Number.isFinite) ? [vb[2], vb[3]] : [0, 0];
   if (w && h) return { width: w, height: h };
@@ -123,7 +128,7 @@ export function imageSize(url: string): Promise<{ width: number; height: number 
   if (/^data:image\/svg\+xml/i.test(url)) {
     const text = dataUrlText(url);
     const size = text ? svgSize(text) : null;
-    if (size) return Promise.resolve({ width: Math.round(size.width), height: Math.round(size.height) });
+    if (size) return Promise.resolve({ width: Math.max(1, Math.round(size.width)), height: Math.max(1, Math.round(size.height)) });
   }
   return new Promise((resolve) => {
     const img = new Image();

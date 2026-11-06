@@ -76,14 +76,25 @@ interface SegmentHit {
 }
 
 let labelCtx: CanvasRenderingContext2D | null | undefined;
+const labelWidths = new Map<string, number>();
 /** `text` cut with an ellipsis to fit `maxW` pixels at the frame label's size; null under 24 px. */
 function fitLabel(text: string, maxW: number): string | null {
   if (maxW < 24) return null;
   if (labelCtx === undefined) {
     labelCtx = document.createElement("canvas").getContext("2d");
-    if (labelCtx) labelCtx.font = "11px system-ui, sans-serif";
+    // The label's real font: the page's family at the label's size.
+    if (labelCtx) labelCtx.font = `11px ${getComputedStyle(document.body).fontFamily || "sans-serif"}`;
   }
-  const w = (t: string) => (labelCtx ? labelCtx.measureText(t).width : t.length * 6);
+  // Every frame's label is measured on every render: widths are cached by string.
+  const w = (t: string) => {
+    let v = labelWidths.get(t);
+    if (v === undefined) {
+      if (labelWidths.size > 5000) labelWidths.clear();
+      v = labelCtx ? labelCtx.measureText(t).width : t.length * 6;
+      labelWidths.set(t, v);
+    }
+    return v;
+  };
   if (w(text) <= maxW) return text;
   let lo = 0;
   let hi = text.length;
@@ -197,6 +208,7 @@ export function Canvas() {
   const [draw, setDraw] = useState<{ start: Pt; cur: Pt } | null>(null);
   const [pen, setPen] = useState<VectorPoint[]>([]);
   const [penCursor, setPenCursor] = useState<Pt | null>(null);
+  const penLast = useRef<Pt | null>(null);
   // Pen continuing an open path from one of its ends.
   const [penFrom, setPenFrom] = useState<PenFrom | null>(null);
   // Vector edit mode: the point on the path under the pointer (where a click adds an anchor).
@@ -436,8 +448,18 @@ export function Canvas() {
         finishPen(false);
       }
     };
+    // The preview follows Shift going down or up without the pointer moving.
+    const onShift = (e: KeyboardEvent) => {
+      if (e.key === "Shift" && penLast.current) setPenCursor(penSnap(penLast.current, e.type === "keydown"));
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onShift);
+    window.addEventListener("keyup", onShift);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", onShift);
+      window.removeEventListener("keyup", onShift);
+    };
   }, [tool, pen, penFrom]);
 
   useEffect(() => {
@@ -713,7 +735,10 @@ export function Canvas() {
         const id = query<string | null>({ q: "pick", x: p.x, y: p.y, zoom: zoom(), deep: e.metaKey || e.ctrlKey });
         if (id !== useStore.getState().hover) useStore.setState({ hover: id });
       }
-      if (tool === "pen") setPenCursor(penSnap(p, e.shiftKey));
+      if (tool === "pen") {
+        penLast.current = p;
+        setPenCursor(penSnap(p, e.shiftKey));
+      }
       return;
     }
     switch (d.kind) {
