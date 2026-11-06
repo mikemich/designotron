@@ -79,6 +79,10 @@ const CLOSING_WAIT_MS = 15000;
  * same tab opening the file again waits for that, or it would find the file locked by itself. */
 const releasing = new Map<string, Promise<void>>();
 
+/** Lets the router ask the open editor before leaving it: true when it wants to ask first (and
+ * then calls `go` if the person leaves anyway). */
+export const leaveGuard: { ask: ((go: () => void) => boolean) | null } = { ask: null };
+
 /** Names this page load on the channel the tabs tell each other about saves on. */
 const TAB_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
 
@@ -150,6 +154,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   /** Marks the open document stale (another tab saved while this one has unsaved edits). */
   const staleRef = useRef<(() => void) | null>(null);
   const tabView = useStore((s) => s.tabView);
+  /** Leaving was asked for while unsaved changes are only on screen; the function leaves. */
+  const [leaveAsk, setLeaveAsk] = useState<(() => void) | null>(null);
   /** Saving keeps failing (disk full, storage blocked): the bar offers a copy to download. */
   const [storageBar, setStorageBar] = useState(false);
 
@@ -178,6 +184,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       const tab = tabRef.current;
       tab.view = false;
       tab.conflict = false;
+      useStore.setState({ tabView: false });
       fenceFile(fileId, false);
       tab.lock = null;
       tab.supported = tabLocksSupported() && !/[?&](room|collab|view)=/.test(location.search);
@@ -928,6 +935,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       const d = e.data;
       if (d?.fileId !== fileId || d.deleted || d.src === TAB_ID) return;
       if (taking) savedMeanwhile = true;
+      // A third writer saved while this tab is handing over: what it holds may not be the newest.
+      else if (handing && useStore.getState().dirty) staleRef.current?.();
       else wantReload();
     };
     const shown = () => {
@@ -961,6 +970,14 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       },
     };
 
+    // Leaving the file inside the app (Home, another file, Back) with changes that are kept only
+    // on screen asks first.
+    leaveGuard.ask = (go) => {
+      if (!tab.conflict || !useStore.getState().dirty) return false;
+      setLeaveAsk(() => go);
+      return true;
+    };
+
     // A live session started or joined here: the room keeps the tabs in step, so nothing is held back.
     const offRole = useCollab.subscribe((c) => {
       if (!c.role || c.viewer || !tab.view || tab.conflict) return;
@@ -986,7 +1003,11 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       document.removeEventListener("visibilitychange", shown);
       lockCh.close();
       filesCh.close();
+      leaveGuard.ask = null;
       setTabBar(null);
+      setLeaveAsk(null);
+      // (The next file starts editable; a read-only mode belongs to this file.)
+      useStore.setState({ tabView: false });
     };
   }, [ready, fileId]);
 
@@ -1092,6 +1113,28 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
               Edit here anyway
             </button>
           )}
+        </div>
+      )}
+      {leaveAsk && (
+        <div className="stale-bar second" role="alertdialog" aria-label="Leave without saving?">
+          These changes aren't saved anywhere yet. Leaving loses them.
+          <button className="btn primary small" onClick={() => saveDtron()}>
+            Download a .dtron copy
+          </button>
+          <button
+            className="btn small"
+            onClick={() => {
+              const go = leaveAsk;
+              tabRef.current.conflict = false;
+              setLeaveAsk(null);
+              go();
+            }}
+          >
+            Leave anyway
+          </button>
+          <button className="btn small" onClick={() => setLeaveAsk(null)}>
+            Stay
+          </button>
         </div>
       )}
       {storageBar && (

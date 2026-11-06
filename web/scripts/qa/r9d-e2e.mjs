@@ -390,6 +390,57 @@ if (process.env.E2E_RELAY) {
   await ctx.close();
 }
 
+// ---------- 7. Read-only is per file; leaving with changes only on screen asks ----------
+{
+  const ctx = await newContext();
+  const A = await openNew(ctx);
+  const id = await fileIdOf(A);
+  await addRect(A, "X-0");
+  await waitSaved(A);
+  const B = await openFile(ctx, id);
+  check("B is read-only on file X", await isReadOnly(B));
+  await B.evaluate(() => (location.hash = "#/"));
+  await B.click("button:has-text('New design file')");
+  await B.waitForSelector("#dt-canvas");
+  await sleep(700);
+  check("a new file Y opens editable in the tab that was read-only", !(await isReadOnly(B)) && (await bars(B)).length === 0);
+  await addRect(B, "Y-0");
+  await B.evaluate(() => window.__dt.dispatch({ op: "undo" }));
+  check("undo works in Y", !(await names(B)).includes("Y-0"));
+  await B.evaluate(() => window.__dt.dispatch({ op: "addComment", x: 5, y: 5, text: "hi", author: "me", time: 1 }));
+  check("a comment is accepted in Y", (await B.evaluate(() => Object.keys(window.__dt.doc().comments || {}).length)) === 1);
+  await ctx.close();
+}
+{
+  const ctx = await newContext();
+  const A = await openNew(ctx);
+  const id = await fileIdOf(A);
+  await addRect(A, "S-0");
+  await waitSaved(A);
+  const B = await openFile(ctx, id);
+  A.evaluate(() => {
+    window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [{ type: "rectangle", name: "U-1", x: 100, y: 0, width: 60, height: 60, fill: "#00AA00" }] } });
+    const t = Date.now();
+    while (Date.now() - t < 8000);
+  }).catch(() => {});
+  await sleep(300);
+  await B.getByRole("button", { name: "Edit here instead" }).click();
+  await waitFor(async () => (await B.getByRole("button", { name: "Edit here anyway" }).count()) === 1, 7500);
+  await B.getByRole("button", { name: "Edit here anyway" }).click();
+  await waitFor(async () => has(await bars(A), /took over before/), 14000);
+  const here = await A.evaluate(() => location.hash);
+  await A.evaluate(() => (location.hash = "#/"));
+  await sleep(500);
+  check("leaving with kept changes asks first and stays on the file", has(await bars(A), /Leaving loses them/) && (await A.evaluate(() => location.hash)) === here, (await bars(A)).join("|"));
+  await A.getByRole("button", { name: "Stay" }).click();
+  check("Stay keeps the changes", !has(await bars(A), /Leaving loses them/) && (await names(A)).includes("U-1"));
+  await A.evaluate(() => (location.hash = "#/"));
+  await sleep(500);
+  await A.getByRole("button", { name: "Leave anyway" }).click();
+  check("Leave anyway goes to the files", await waitFor(async () => (await A.locator("button:has-text('New design file')").count()) > 0, 4000));
+  await ctx.close();
+}
+
 await browser.close();
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
