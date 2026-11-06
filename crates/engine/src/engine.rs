@@ -2223,6 +2223,9 @@ impl Engine {
         Ok(json!({}))
       }
       Command::SetText { id, characters } => {
+        // A textarea reads line breaks as "\n": keep the stored text in the same form so the
+        // editor's indices and the engine's agree.
+        let characters = characters.replace("\r\n", "\n").replace('\r', "\n");
         let (old, runs) = self
           .doc
           .get(&id)
@@ -6140,6 +6143,26 @@ mod tests {
       })
       .unwrap()
       .is_null());
+  }
+
+  #[test]
+  fn set_text_stores_line_breaks_as_newlines() {
+    let mut e = engine();
+    let id = id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "".into(),
+        parent: None,
+      })
+      .unwrap(),
+    );
+    e.dispatch(Command::SetText {
+      id: id.clone(),
+      characters: "ab\r\ncd\ref".into(),
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&id).unwrap().text.as_ref().unwrap().characters, "ab\ncd\nef");
   }
 
   #[test]

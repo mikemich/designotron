@@ -231,19 +231,29 @@ export function toIndex(text: string, offset: number): number {
 
 let segmenter: Intl.Segmenter | null | undefined;
 
-/** Moves a code-point index out of the inside of a grapheme cluster (an emoji with a skin tone,
- * a letter with a combining accent) to the start of that cluster. */
-export function snapToGrapheme(text: string, index: number): number {
+const segmenterFor = () => {
   if (segmenter === undefined) {
     segmenter = typeof Intl !== "undefined" && "Segmenter" in Intl ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
   }
-  if (!segmenter) return index;
+  return segmenter;
+};
+
+/** When `index` (code points) is inside a grapheme cluster (an emoji with a skin tone or joiners,
+ * a letter with a combining accent), the code-point indices of that cluster's start and end. */
+export function clusterAround(text: string, index: number): [number, number] | null {
+  const seg = segmenterFor();
+  if (!seg) return null;
   const off = toOffset(text, index);
-  if (off <= 0 || off >= text.length) return index;
-  for (const s of segmenter.segment(text)) {
-    if (s.index === off) return index;
-    if (s.index < off && off < s.index + s.segment.length) return toIndex(text, s.index);
+  if (off <= 0 || off >= text.length) return null;
+  for (const s of seg.segment(text)) {
+    if (s.index === off) return null;
+    if (s.index < off && off < s.index + s.segment.length) return [toIndex(text, s.index), toIndex(text, s.index + s.segment.length)];
     if (s.index > off) break;
   }
-  return index;
+  return null;
+}
+
+/** Moves a code-point index out of the inside of a grapheme cluster to the start of that cluster. */
+export function snapToGrapheme(text: string, index: number): number {
+  return clusterAround(text, index)?.[0] ?? index;
 }

@@ -431,6 +431,9 @@ pub fn layout_of_node(n: &Node, props: &TextProps, m: &dyn TextMeasurer) -> Text
   layout_for_box(props, n.width, Some(n.height), n.max_width, m)
 }
 
+/// Longest run of chars measured as one prefix when placing the caret.
+const CARET_CHUNK: usize = 32;
+
 /// One line of a text for the editor's caret and selection.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct CaretLine {
@@ -526,17 +529,29 @@ pub fn caret_geometry(n: &Node, props: &TextProps, m: &dyn TextMeasurer, full: b
     xs.push(x0);
     let mut x = x0;
     for sg in &line.segments {
-      // Measure growing prefixes so kerning and letter spacing within the segment are kept.
+      // Measure growing prefixes so kerning and letter spacing are kept, but restart the prefix
+      // at every word and every `CHUNK` chars: the cost stays linear and the cache keys short.
       let font = sg.style.font();
-      let mut prefix = String::new();
-      let mut prev = 0.0;
-      for c in sg.text.chars() {
-        prefix.push(c);
-        let w = m.measure(&prefix, &font);
-        let extra = if matches!(c, ' ' | '\u{a0}') { gap } else { 0.0 };
-        x += w - prev + extra;
-        prev = w;
-        xs.push(x);
+      let chars: Vec<char> = sg.text.chars().collect();
+      let base_x = x;
+      let mut chunk_x = 0.0;
+      let mut gaps = 0.0;
+      let mut chunk = String::new();
+      let mut chunk_len = 0;
+      for (i, &c) in chars.iter().enumerate() {
+        chunk.push(c);
+        chunk_len += 1;
+        let w = m.measure(&chunk, &font);
+        if matches!(c, ' ' | '\u{a0}') {
+          gaps += gap;
+        }
+        xs.push(base_x + chunk_x + w + gaps);
+        let word_end = c == ' ' && chars.get(i + 1).is_some_and(|n| *n != ' ');
+        if word_end || chunk_len >= CARET_CHUNK {
+          chunk_x += w;
+          chunk.clear();
+          chunk_len = 0;
+        }
       }
       x = *xs.last().unwrap();
     }
@@ -1042,6 +1057,43 @@ mod tests {
       if !l.xs.is_empty() {
         assert_eq!(l.xs, all.lines[i].xs);
       }
+    }
+  }
+
+  struct Counting {
+    calls: std::cell::Cell<usize>,
+    chars: std::cell::Cell<usize>,
+  }
+  impl TextMeasurer for Counting {
+    fn measure(&self, text: &str, font: &FontSpec) -> f64 {
+      self.calls.set(self.calls.get() + 1);
+      self.chars.set(self.chars.get() + text.chars().count());
+      HeuristicMeasurer.measure(text, font)
+    }
+  }
+
+  #[test]
+  fn caret_geometry_of_a_long_single_line_is_linear() {
+    let words = "lorem ipsum dolor sit amet consectetur adipiscing elit ".repeat(60);
+    let text: String = words.chars().take(3000).collect();
+    let (n, t) = text_node(&text, 100.0, 20.0, |_, _| {});
+    let m = Counting {
+      calls: Default::default(),
+      chars: Default::default(),
+    };
+    let g = caret_geometry(&n, &t, &m, true, None);
+    assert_eq!(g.lines.len(), 1);
+    assert_eq!(g.lines[0].xs.len(), 3001);
+    // About one measure per char, over short strings: the old prefix walk measured ~4.5M chars.
+    assert!(m.calls.get() < 4 * 3000, "{} calls", m.calls.get());
+    assert!(m.chars.get() < 3000 * 40, "{} chars measured", m.chars.get());
+    // Positions agree with the whole-prefix measure to within half a pixel.
+    let font = SpanStyle::base(&t);
+    let all: Vec<char> = text.chars().collect();
+    for i in [1usize, 40, 500, 1500, 2999, 3000] {
+      let prefix: String = all[..i].iter().collect();
+      let exact = HeuristicMeasurer.measure(&prefix, &font.font());
+      assert!((g.lines[0].xs[i] - exact).abs() < 0.5, "char {i}: {} vs {exact}", g.lines[0].xs[i]);
     }
   }
 

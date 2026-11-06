@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { caretRect, indexAt, lineEdge, moveVertical, paragraphRange, selectionRects, snapToGrapheme, toIndex, toOffset, wordRange, type CaretGeometry } from "./textCaret";
+import { caretRect, clusterAround, indexAt, lineEdge, moveVertical, paragraphRange, selectionRects, snapToGrapheme, toIndex, toOffset, wordRange, type CaretGeometry } from "./textCaret";
 
 const line = (top: number, start: number, end: number, x0 = 0, w = 10, height = 20) => ({
   top,
@@ -116,5 +116,12 @@ describe("ranges", () => {
     expect(snapToGrapheme(t, 2)).toBe(1);
     expect(snapToGrapheme(t, 3)).toBe(3);
     expect(snapToGrapheme(t, 1)).toBe(1);
+  });
+  it("finds the cluster around a position inside an emoji with joiners", () => {
+    const t = "a\u{1F468}\u200D\u{1F469}\u200D\u{1F467}z";
+    expect(clusterAround(t, 3)).toEqual([1, 6]);
+    expect(clusterAround(t, 1)).toBeNull();
+    expect(clusterAround(t, 6)).toBeNull();
+    expect(snapToGrapheme(t, 4)).toBe(1);
   });
 });

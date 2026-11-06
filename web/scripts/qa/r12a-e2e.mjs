@@ -596,6 +596,156 @@ const a11y = await dt(() => {
 check("plain: the input stays a focused, readable textarea (screen readers)", a11y.tag === "TEXTAREA" && a11y.focused && !a11y.hidden && a11y.value.length > 0, JSON.stringify(a11y));
 await leave();
 
+// ---------- 8b. Review fixes ----------
+// Forced colours: the textarea stays invisible (the canvas draws the text) and the caret and
+// selection stay visible.
+await newFile(1);
+const fc = await mkText({ name: "Forced", x: 120, y: 160, text: "Forced colours check", fontSize: 24, fontFamily: "Inter", color: "#000000" });
+await page.emulateMedia({ forcedColors: "active" });
+await edit(fc);
+await page.keyboard.press("Control+a");
+await settle();
+const forced = await dt(() => {
+  const t = document.querySelector(".text-editor");
+  const cs = getComputedStyle(t);
+  const r = document.querySelector(".text-caret .text-sel");
+  return { color: cs.color, adjust: cs.forcedColorAdjust, rectFill: r && getComputedStyle(r).fill, rects: document.querySelectorAll(".text-caret .text-sel").length };
+});
+check("forced colours: the textarea text stays transparent", forced.color === "rgba(0, 0, 0, 0)" && forced.adjust === "none", JSON.stringify(forced));
+check("forced colours: the selection is drawn in a system colour", forced.rects === 1 && forced.rectFill && forced.rectFill !== "none", JSON.stringify(forced));
+await leave();
+await page.emulateMedia({ forcedColors: "none" });
+
+// A bottom-aligned 4-line text in a 200x40 box starts above the box: clicks there stay in the editor.
+await newFile(1);
+const ab = await mkText({ name: "Above", x: 200, y: 300, width: 200, text: "Line one\nLine two\nLine three\nLine four", fontSize: 16, fontFamily: "Inter", color: "#000000" });
+await run({ op: "update", ids: [ab], patch: { height: 40, text: { autoResize: "none", alignV: "bottom" } } });
+await settle();
+await edit(ab);
+const gab = await geo(ab);
+check("O5: bottom-aligned text starts above its box", gab.lines[0].top < -20, String(gab.lines[0].top));
+const firstLine = await toScreen(ab, 20, gab.lines[0].top + gab.lines[0].height / 2);
+await page.mouse.click(firstLine.x, firstLine.y);
+await settle(200);
+const above = await taState();
+check("O5: a click on a line above the box keeps editing and places the caret there", !!above && above.s <= 8, JSON.stringify(above));
+await leave();
+
+// A hidden text edits with the textarea's own glyphs (nothing is drawn on the canvas to follow).
+await newFile(1);
+const hid = await mkText({ name: "Hidden", x: 200, y: 200, text: "Hidden words", fontSize: 24, fontFamily: "Inter", color: "#000000" });
+await run({ op: "update", ids: [hid], patch: { visible: false } });
+await settle();
+await edit(hid);
+const hs = await dt(() => {
+  const t = document.querySelector(".text-editor");
+  return t ? { live: t.hasAttribute("data-live"), color: getComputedStyle(t).color } : null;
+});
+check("hidden text: the textarea keeps its visible glyphs", hs && !hs.live && hs.color !== "rgba(0, 0, 0, 0)", JSON.stringify(hs));
+await leave();
+
+// CRLF text: the textarea's indices and the layer's agree.
+await newFile(1);
+const crlf = await mkText({ name: "CRLF", x: 200, y: 200, text: "x", fontSize: 24, fontFamily: "Inter", color: "#000000" });
+await run({ op: "setText", id: crlf, characters: "ab\r\ncd\r\nef" });
+await edit(crlf);
+await page.keyboard.press("Control+End");
+await page.keyboard.type("!");
+await settle(200);
+check("CRLF: typing at the end lands after the last line", (await node(crlf)).text.characters === "ab\ncd\nef!", JSON.stringify((await node(crlf)).text.characters));
+// A change from elsewhere shows in the editor, and the next key doesn't overwrite it.
+await run({ op: "setText", id: crlf, characters: "peer wrote this" });
+await settle(200);
+check("a collaborator's edit shows in the textarea", (await taState()).v === "peer wrote this", JSON.stringify(await taState()));
+await page.keyboard.press("Control+End");
+await page.keyboard.type("?");
+await settle(200);
+check("typing after a remote edit keeps it", (await node(crlf)).text.characters === "peer wrote this?", JSON.stringify((await node(crlf)).text.characters));
+// Deleting the layer being edited ends editing.
+await run({ op: "delete", ids: [crlf] });
+await settle(250);
+check("deleting the edited layer ends editing", !(await taState()) && (await dt(() => window.__dt.state().selection.length)) === 0);
+
+// Emoji with joiners: a click picks the nearer edge of the cluster.
+await newFile(1);
+const zwj = await mkText({ name: "ZWJ", x: 200, y: 200, text: "a\u{1F468}\u200D\u{1F469}\u200D\u{1F467}z", fontSize: 48, fontFamily: "Inter", color: "#000000" });
+await edit(zwj);
+const gz = await geo(zwj);
+const xs = gz.lines[0].xs;
+const nearEnd = await toScreen(zwj, xs[6] - 1, gz.lines[0].top + gz.lines[0].height / 2);
+await page.mouse.click(nearEnd.x, nearEnd.y);
+const zs = await taState();
+check("emoji with joiners: a click near its right edge puts the caret after it", zs.s === 9, JSON.stringify(zs));
+const nearStart = await toScreen(zwj, xs[1] + 1, gz.lines[0].top + gz.lines[0].height / 2);
+await page.mouse.click(nearStart.x, nearStart.y);
+check("emoji with joiners: a click near its left edge puts the caret before it", (await taState()).s === 1);
+await leave();
+
+// Cmd+Left / Cmd+Right are Home / End.
+await newFile(1);
+const mc = await mkText({ name: "Meta", x: 200, y: 200, text: "first line\nsecond line", fontSize: 24, fontFamily: "Inter", color: "#000000" });
+await edit(mc);
+await page.keyboard.press("Control+End");
+await page.keyboard.press("Meta+ArrowLeft");
+check("Meta+ArrowLeft goes to the start of the line", (await taState()).s === 11, JSON.stringify(await taState()));
+await page.keyboard.press("Meta+ArrowRight");
+check("Meta+ArrowRight goes to the end of the line", (await taState()).s === 22);
+await leave();
+
+// Rich paste: malformed clipboard data inserts nothing; 300 runs paste in one update.
+await newFile(1);
+const big2 = await mkText({ name: "Runs", x: 100, y: 100, width: 700, text: "x", fontSize: 16, fontFamily: "Inter", color: "#000000" });
+const words300 = Array.from({ length: 300 }, (_, i) => `w${i} `).join("");
+await run({ op: "setText", id: big2, characters: words300 });
+await run({ op: "update", ids: [big2], patch: { text: { autoResize: "height", runs: Array.from({ length: 300 }, (_, i) => ({ start: i * ("w0 ".length), end: i * ("w0 ".length) + 2, fontWeight: 700 })).filter((r) => r.end <= words300.length) } } });
+const target2 = await mkText({ name: "Dest", x: 100, y: 500, text: "dest", fontSize: 16, fontFamily: "Inter", color: "#000000" });
+await settle();
+await edit(big2);
+await page.keyboard.press("Control+a");
+await page.keyboard.press("Control+c");
+await leave();
+await dt(() => window.__dt.dispatch({ op: "select", ids: [] }));
+await edit(target2);
+await page.keyboard.press("Control+a");
+const tp0 = Date.now();
+await page.keyboard.press("Control+v");
+await settle(100);
+const pasteMs = Date.now() - tp0 - 100;
+const rd = (await node(target2)).text;
+check("big rich paste: 300 runs arrive, as a bold-run set", rd.characters.length === words300.length && rd.runs.length >= 250 && rd.runs.every((r) => r.fontWeight === 700), `${rd.runs.length} runs, ${rd.characters.length} chars`);
+console.log(`INFO  300-run rich paste took ${pasteMs} ms`);
+check("big rich paste: well under a second", pasteMs < 400, `${pasteMs} ms`);
+await dt(() => {
+  const t = document.querySelector(".text-editor");
+  for (const bad of ["{not json", JSON.stringify({ text: 5, spans: "no" }), JSON.stringify({ text: "zz", spans: [{ start: 0, end: 99, style: { color: "javascript:alert(1)", link: "javascript:alert(1)" } }, { start: "a" }, null] })]) {
+    const dtf = new DataTransfer();
+    dtf.setData("text/plain", "zz");
+    dtf.setData("application/x-designotron-text", bad);
+    t.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dtf, bubbles: true, cancelable: true }));
+  }
+});
+await settle(200);
+check("malformed rich clipboard data changes nothing", (await node(target2)).text.characters.length === words300.length && !JSON.stringify((await node(target2)).text.runs).includes("javascript"));
+await leave();
+
+// 3,000 characters on one line (what a text tool click makes): typing stays fast.
+await newFile(1);
+const oneLine = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor ".repeat(40).slice(0, 3000);
+const single = await mkText({ name: "OneLine", x: 20, y: 100, text: oneLine, fontSize: 16, fontFamily: "Inter", color: "#000000" });
+await edit(single);
+await page.keyboard.press("Control+Home");
+const st1 = [];
+for (let i = 0; i < 12; i++) {
+  const t0 = Date.now();
+  await page.keyboard.press("x");
+  await dt(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  st1.push(Date.now() - t0);
+}
+st1.sort((a, b) => a - b);
+console.log(`INFO  3,000-char single line: median ${st1[6]} ms per key, max ${st1[11]} ms`);
+check("a 3,000-character single line types in under 250 ms per key", st1[6] < 250, `median ${st1[6]} ms`);
+await leave();
+
 // ---------- 9. Latency: typing in a 2,000-character paragraph ----------
 await newFile(1);
 const para = Array.from({ length: 40 }, (_, i) => `Sentence number ${i} of the long paragraph used to time typing.`).join(" ").slice(0, 2000);

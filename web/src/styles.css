@@ -695,6 +695,23 @@ textarea.textinput {
     opacity: 0;
   }
 }
+/* Forced colours override the transparent text, caret and selection: keep the textarea invisible
+   (the canvas draws the text) and draw the caret and selection in the system highlight colour. */
+@media (forced-colors: active) {
+  .text-editor[data-live] {
+    forced-color-adjust: none;
+  }
+  .text-caret {
+    forced-color-adjust: none;
+  }
+  .text-caret .text-sel {
+    fill: Highlight;
+    fill-opacity: 0.45;
+  }
+  .text-caret .text-caret-bar {
+    fill: Highlight;
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   .text-caret .text-caret-bar {
     animation: none;

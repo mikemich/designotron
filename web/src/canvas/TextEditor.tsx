@@ -9,6 +9,7 @@ import {
   moveVertical,
   paragraphRange,
   selectionRects,
+  clusterAround,
   snapToGrapheme,
   toIndex,
   toOffset,
@@ -41,14 +42,14 @@ export function editTextAt(id: string, page: Pt) {
 const CLIP_TYPE = "application/x-designotron-text";
 
 interface SpanStyle {
-  fontFamily: string;
-  fontSize: number;
-  fontWeight: number;
-  italic: boolean;
-  letterSpacing: number;
-  decoration: "none" | "underline" | "strikethrough";
-  color: string | null;
-  link: string | null;
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: number;
+  italic?: boolean;
+  letterSpacing?: number;
+  decoration?: "none" | "underline" | "strikethrough";
+  color?: string | null;
+  link?: string | null;
 }
 interface Span {
   start: number;
@@ -59,10 +60,10 @@ interface RichText {
   text: string;
   spans: Span[];
 }
-/** The last range copied from a text, for pastes whose clipboard dropped the custom type. */
-let lastCopied: RichText | null = null;
 
+const STYLE_KEYS = ["fontFamily", "fontSize", "fontWeight", "italic", "letterSpacing", "decoration"] as const;
 const sameStyle = (a: SpanStyle, b: SpanStyle) => (Object.keys(a) as (keyof SpanStyle)[]).every((k) => a[k] === b[k]);
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** The layer's solid fill colour: what text without its own colour is painted with. */
 function layerColor(id: string): string | null {
@@ -70,11 +71,16 @@ function layerColor(id: string): string | null {
   return f?.type === "solid" ? String(f.color).toLowerCase() : null;
 }
 
-/** Fully resolved styles of the characters `start..end` (code points), merged into spans. */
+/** Fully resolved styles of the characters `start..end` (code points), merged into spans.
+ * Linear in the text plus the runs it touches. */
 function resolveSpans(t: TextProps, color: string | null, start: number, end: number): Span[] {
+  const per: (TextProps["runs"][number] | undefined)[] = new Array(Math.max(end - start, 0));
+  for (const r of t.runs) {
+    for (let i = Math.max(r.start, start); i < Math.min(r.end, end); i++) per[i - start] = r;
+  }
   const spans: Span[] = [];
   for (let i = start; i < end; i++) {
-    const r = t.runs.find((x) => x.start <= i && i < x.end);
+    const r = per[i - start];
     const style: SpanStyle = {
       fontFamily: r?.fontFamily ?? t.fontFamily,
       fontSize: r?.fontSize ?? t.fontSize,
@@ -92,6 +98,50 @@ function resolveSpans(t: TextProps, color: string | null, start: number, end: nu
   return spans;
 }
 
+/** Clipboard JSON from anywhere is untrusted: keep only well-formed spans and valid style values. */
+function parseRich(raw: string): RichText | null {
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isObj(v) || typeof v.text !== "string" || !v.text || v.text.length > 2_000_000 || !Array.isArray(v.spans) || v.spans.length > 100_000) return null;
+  const len = Array.from(v.text).length;
+  const spans: Span[] = [];
+  for (const sp of v.spans) {
+    if (!isObj(sp) || !isObj(sp.style) || !Number.isInteger(sp.start) || !Number.isInteger(sp.end)) continue;
+    const start = sp.start as number;
+    const end = sp.end as number;
+    if (start < 0 || end > len || start >= end) continue;
+    const s = sp.style;
+    const style: SpanStyle = {};
+    if (typeof s.fontFamily === "string" && s.fontFamily && s.fontFamily.length <= 100) style.fontFamily = s.fontFamily;
+    if (typeof s.fontSize === "number" && s.fontSize >= 1 && s.fontSize <= 1000) style.fontSize = s.fontSize;
+    if (typeof s.fontWeight === "number" && Number.isInteger(s.fontWeight) && s.fontWeight >= 1 && s.fontWeight <= 1000) style.fontWeight = s.fontWeight;
+    if (typeof s.italic === "boolean") style.italic = s.italic;
+    if (typeof s.letterSpacing === "number" && Math.abs(s.letterSpacing) <= 1000) style.letterSpacing = s.letterSpacing;
+    if (s.decoration === "none" || s.decoration === "underline" || s.decoration === "strikethrough") style.decoration = s.decoration;
+    if (typeof s.color === "string" && /^#[0-9a-f]{3,8}$/i.test(s.color)) style.color = s.color.toLowerCase();
+    if (typeof s.link === "string" && /^(https?:\/\/|mailto:|tel:)/i.test(s.link) && s.link.length <= 2000) style.link = s.link;
+    spans.push({ start, end, style });
+  }
+  return spans.length ? { text: v.text, spans } : null;
+}
+
+/** `runs` with the range `a..b` removed (the pasted spans replace whatever was there). */
+function cutRuns(runs: TextProps["runs"], a: number, b: number): TextProps["runs"] {
+  const out: TextProps["runs"] = [];
+  for (const r of runs) {
+    if (r.end <= a || r.start >= b) out.push(r);
+    else {
+      if (r.start < a) out.push({ ...r, end: a });
+      if (r.end > b) out.push({ ...r, start: b });
+    }
+  }
+  return out;
+}
+
 export function TextEditor({ id }: { id: string }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const v = useStore((s) => s.viewport);
@@ -107,6 +157,9 @@ export function TextEditor({ id }: { id: string }) {
   const goalX = useRef<number | null>(null);
   const pointer = useRef("mouse");
   const plainPaste = useRef(0);
+  const composing = useRef(false);
+  /** The full line layout of the current document revision (clicks and drags reuse it). */
+  const fullLayout = useRef<{ rev: number; g: CaretGeometry | null } | null>(null);
 
   const readSel = () => {
     const ta = ref.current!;
@@ -119,8 +172,12 @@ export function TextEditor({ id }: { id: string }) {
   };
   /** Line geometry from the engine. `range` limits the measuring to the lines it touches (and
    * one either side): all a caret or selection needs, and cheap in a long text. */
-  const layout = (range?: [number, number]) =>
-    query<CaretGeometry | null>({ q: "textLayout", id, ...(range ? { from: range[0], to: range[1] } : {}) });
+  const layout = (range?: [number, number]) => {
+    if (range) return query<CaretGeometry | null>({ q: "textLayout", id, from: range[0], to: range[1] });
+    const r = useStore.getState().rev;
+    if (fullLayout.current?.rev !== r) fullLayout.current = { rev: r, g: query<CaretGeometry | null>({ q: "textLayout", id }) };
+    return fullLayout.current.g;
+  };
   // Geometry and matrix only change with the document or the selection, not with the view.
   const sel = ref.current ? readSel() : drawn.current;
   drawn.current = sel;
@@ -147,6 +204,9 @@ export function TextEditor({ id }: { id: string }) {
     const el = ref.current;
     if (el) {
       el.focus();
+      // A textarea reads line breaks as "\n": make the layer's text agree before indices are used.
+      const chars0 = getDoc().nodes[id]?.text?.characters;
+      if (chars0 !== undefined && chars0 !== el.value) dispatch({ op: "setText", id, characters: el.value }, { quiet: true });
       const at = caretAt?.id === id ? caretAt : null;
       caretAt = null;
       const g = layout();
@@ -192,8 +252,35 @@ export function TextEditor({ id }: { id: string }) {
     };
   }, [id]);
 
+  // The edited layer was deleted (a collaborator): end editing.
+  const gone = !node || !node.text;
+  useEffect(() => {
+    if (gone) useStore.setState({ editingText: null });
+  }, [gone]);
+  // A change to the text from elsewhere (a collaborator) shows in the textarea, so the next key
+  // doesn't write the old text back over it. The caret stays at the same offsets where possible.
+  useEffect(() => {
+    const ta = ref.current;
+    const c = getDoc().nodes[id]?.text?.characters;
+    if (!ta || c === undefined || composing.current || ta.value === c) return;
+    const { selectionStart: s0, selectionEnd: e0 } = ta;
+    ta.value = c;
+    ta.setSelectionRange(Math.min(s0, c.length), Math.min(e0, c.length));
+    sync();
+  }, [rev]);
+
   if (!node || !node.text || !m) return null;
   const t = node.text;
+  // Text the renderer skips (the layer or an ancestor is hidden) can't be drawn live: keep the
+  // textarea's own glyphs then.
+  let shown = true;
+  for (let n: typeof node | undefined = node; n; n = n.parent ? getDoc().nodes[n.parent] : undefined) {
+    if (!n.visible) {
+      shown = false;
+      break;
+    }
+  }
+  const live = !!geo && shown;
   const transform = `matrix(${m.a * v.zoom},${m.b * v.zoom},${m.c * v.zoom},${m.d * v.zoom},${m.e * v.zoom + v.x},${m.f * v.zoom + v.y})`;
   const lh = t.lineHeight ?? t.fontSize * 1.2;
   const wrapsAtMax = t.autoResize === "width" && !!node.maxWidth;
@@ -221,7 +308,15 @@ export function TextEditor({ id }: { id: string }) {
     const screen = { a: mat.a * vp.zoom, b: mat.b * vp.zoom, c: mat.c * vp.zoom, d: mat.d * vp.zoom, e: mat.e * vp.zoom + vp.x, f: mat.f * vp.zoom + vp.y };
     const p = apply(invert(screen), { x: clientX - r.left, y: clientY - r.top });
     const hit = indexAt(g, p.x, p.y);
-    return { index: snapToGrapheme(ta.value, hit.index), affinity: hit.affinity };
+    // Inside an emoji or accented letter: the nearer edge of the cluster.
+    const cl = clusterAround(ta.value, hit.index);
+    let index = hit.index;
+    if (cl) {
+      const a = caretRect(g, cl[0]);
+      const b = caretRect(g, cl[1]);
+      index = !a || !b || Math.abs(p.x - a.x) <= Math.abs(p.x - b.x) ? cl[0] : cl[1];
+    }
+    return { index, affinity: hit.affinity };
   };
   /** Selects `anchor..focus` (code points), the caret ending up at `focus`. */
   const select = (ta: HTMLTextAreaElement, anchor: number, focus: number, aff: Affinity = "after") => {
@@ -276,7 +371,9 @@ export function TextEditor({ id }: { id: string }) {
    * once sizes are mixed). Returns true when it handled the key. */
   const moveByLines = (e: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
     const ta = e.currentTarget;
-    if (!geo || e.nativeEvent.isComposing || e.metaKey || e.ctrlKey || e.altKey) return false;
+    // Cmd+Left/Right is Home/End on a Mac.
+    const lineCmd = e.metaKey && !e.ctrlKey && !e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight");
+    if (!geo || e.nativeEvent.isComposing || (!lineCmd && (e.metaKey || e.ctrlKey || e.altKey)) || (e.ctrlKey && lineCmd)) return false;
     const { anchor, focus } = anchorFocus(ta);
     const g = layout([focus, focus]);
     if (!g) return false;
@@ -287,8 +384,8 @@ export function TextEditor({ id }: { id: string }) {
       if (!r) return false;
       goalX.current = r.goalX;
       next = r;
-    } else if (e.key === "Home" || e.key === "End") {
-      next = lineEdge(g, pos, e.key === "Home" ? "home" : "end");
+    } else if (e.key === "Home" || e.key === "End" || lineCmd) {
+      next = lineEdge(g, pos, e.key === "Home" || e.key === "ArrowLeft" ? "home" : "end");
       goalX.current = null;
     }
     if (!next) return false;
@@ -305,7 +402,6 @@ export function TextEditor({ id }: { id: string }) {
     const en = toIndex(ta.value, ta.selectionEnd);
     const text = ta.value.slice(ta.selectionStart, ta.selectionEnd);
     const rich: RichText = { text, spans: resolveSpans(t, layerColor(id), s, en) };
-    lastCopied = rich;
     e.preventDefault();
     e.clipboardData.setData("text/plain", text);
     e.clipboardData.setData(CLIP_TYPE, JSON.stringify(rich));
@@ -316,16 +412,9 @@ export function TextEditor({ id }: { id: string }) {
     const ta = e.currentTarget;
     // Ctrl+Shift+V pastes the text only ("paste and match style").
     if (Date.now() - plainPaste.current < 1000) return;
-    const plain = e.clipboardData.getData("text/plain");
-    let rich: RichText | null = null;
-    try {
-      const raw = e.clipboardData.getData(CLIP_TYPE);
-      if (raw) rich = JSON.parse(raw);
-    } catch {
-      rich = null;
-    }
-    if (!rich && lastCopied && lastCopied.text === plain) rich = lastCopied;
-    if (!rich || !rich.text || !rich.spans?.length) return;
+    const raw = e.clipboardData.getData(CLIP_TYPE);
+    const rich = raw ? parseRich(raw) : null;
+    if (!rich) return;
     e.preventDefault();
     const at = toIndex(ta.value, ta.selectionStart);
     if (!document.execCommand("insertText", false, rich.text)) {
@@ -336,30 +425,34 @@ export function TextEditor({ id }: { id: string }) {
     const cur = getDoc().nodes[id]?.text;
     if (!cur) return;
     const color = layerColor(id);
-    const base: Partial<SpanStyle> = { ...cur, color: color ?? undefined };
-    const keys: (keyof SpanStyle)[] = ["fontFamily", "fontSize", "fontWeight", "italic", "letterSpacing", "decoration"];
+    const base: Record<string, unknown> = { ...cur };
+    // One update of the runs, however many spans: what was in the pasted range is replaced.
+    const pasted: TextProps["runs"] = [];
     for (const sp of rich.spans) {
-      const style: Record<string, unknown> = {};
-      const clear: string[] = [];
-      for (const k of keys) {
-        if (sp.style[k] !== base[k]) style[k] = sp.style[k];
-        else clear.push(k);
-      }
-      if (sp.style.color && sp.style.color !== color) style.color = sp.style.color;
-      else clear.push("color");
-      if (sp.style.link) style.link = sp.style.link;
-      else clear.push("link");
-      dispatch({ op: "styleText", id, start: at + sp.start, end: at + sp.end, style, clear }, { quiet: true });
+      const run: Record<string, unknown> = { start: at + sp.start, end: at + sp.end };
+      for (const k of STYLE_KEYS) if (sp.style[k] !== undefined && sp.style[k] !== base[k]) run[k] = sp.style[k];
+      if (sp.style.color && sp.style.color !== color) run.color = sp.style.color;
+      if (sp.style.link) run.link = sp.style.link;
+      if (Object.keys(run).length > 2) pasted.push(run as unknown as TextProps["runs"][number]);
     }
+    const len = Array.from(rich.text).length;
+    const runs = [...cutRuns(cur.runs ?? [], at, at + len), ...pasted].sort((x, y) => x.start - y.start);
+    dispatch({ op: "update", ids: [id], patch: { text: { runs } } }, { quiet: true });
     trackSelection(ta);
     sync();
   };
 
   // Overlay: selection rectangles and caret, in layer px (same transform as the textarea).
-  const rects = geo && sel.s !== sel.e ? selectionRects(geo, sel.s, sel.e) : [];
+  const rects = live && geo && sel.s !== sel.e ? selectionRects(geo, sel.s, sel.e) : [];
   const focusIdx = sel.back ? sel.s : sel.e;
-  const caret = geo && sel.s === sel.e && focused ? caretRect(geo, focusIdx, sel.aff) : null;
+  const caret = live && geo && sel.s === sel.e && focused ? caretRect(geo, focusIdx, sel.aff) : null;
   const barW = 1.25 / v.zoom;
+  // The box of the textarea covers every line: above the layer's box too (bottom or middle
+  // aligned text in a short fixed box starts above it) and below.
+  const first = geo?.lines[0];
+  const last = geo?.lines[geo.lines.length - 1];
+  const top0 = live && first ? Math.min(0, first.top) : 0;
+  const bottom = Math.max(node.height, lh, live && last ? last.top + last.height : 0);
 
   return (
     <>
@@ -372,17 +465,17 @@ export function TextEditor({ id }: { id: string }) {
       <textarea
         ref={ref}
         className="text-editor"
-        data-live={geo ? "" : undefined}
+        data-live={live ? "" : undefined}
         spellCheck={false}
         defaultValue={t.characters}
         style={{
           left: 0,
           top: 0,
-          transform,
+          transform: top0 ? `${transform} translate(0px, ${top0}px)` : transform,
           // Auto-width text with a max width wraps there, like the layer does.
           width: wrapsAtMax ? node.maxWidth! : Math.max(node.width, 4) + (t.autoResize === "width" ? t.fontSize : 0),
           // All lines, also the ones past a fixed box: pointer events must reach them.
-          height: Math.max(node.height, lh, geo?.height ?? 0),
+          height: bottom - top0,
           font: `${t.italic ? "italic " : ""}${t.fontWeight} ${t.fontSize}px/${lh}px "${t.fontFamily}", sans-serif`,
           letterSpacing: t.letterSpacing,
           textAlign: t.alignH,
@@ -409,6 +502,8 @@ export function TextEditor({ id }: { id: string }) {
           e.currentTarget.scrollTop = 0;
           e.currentTarget.scrollLeft = 0;
         }}
+        onCompositionStart={() => (composing.current = true)}
+        onCompositionEnd={() => (composing.current = false)}
         onFocus={() => setFocused(true)}
         onBlur={(e) => {
           setFocused(false);
