@@ -12,6 +12,7 @@
 //   [photo=QUERY]  search_photos for QUERY, then place_photo with the first id (into [node=ID] if given)
 //   [node=ID]      the layer place_photo fills
 //   [fail]         end with an error result
+// `--resume missing-session` fails like the CLI does for a session it no longer has.
 // It says the secret its MCP config carries ("conn=<token>") in its reply.
 
 import fs from "node:fs";
@@ -20,6 +21,12 @@ const argv = process.argv.slice(2);
 if (argv.includes("--version")) {
   console.log("2.1.999 (fake)");
   process.exit(0);
+}
+
+// Like the CLI, resuming a session it doesn't have fails at once with this message on stderr.
+if (argv.includes("--resume") && argv[argv.indexOf("--resume") + 1] === "missing-session") {
+  console.error("No conversation found with session ID: missing-session");
+  process.exit(1);
 }
 
 const prompt = argv[argv.indexOf("-p") + 1] ?? "";

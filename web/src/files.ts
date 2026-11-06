@@ -8,6 +8,7 @@ import {
   getMany as idbGetMany,
 } from "idb-keyval";
 import { allAssets, assetDataUrl, loadAssets, referencedAssets } from "./assets";
+import { dropConversation } from "./ai/conversations";
 import { documentLoads, toast } from "./store";
 
 import {
@@ -929,6 +930,8 @@ export async function deleteFile(id: string) {
   }
   for (const v of await listVersions(id)) await del(`dt:version:${id}:${v.id}`);
   await del("dt:versions:" + id);
+  // Its Claude conversation goes with it.
+  await dropConversation(id);
   layered.delete(id);
   let kept = false;
   await transact([fileKey(id), INDEX], ([stored, idx]) => {

@@ -4,7 +4,7 @@ import { LeftPanel } from "./panels/LeftPanel";
 import { RightPanel } from "./panels/RightPanel";
 import { Toolbar } from "./panels/Toolbar";
 import { ChatPanel } from "./ai/ChatPanel";
-import { askClaude } from "./ai/chatState";
+import { askClaude, enterFile, leaveFile } from "./ai/chatState";
 import { Presenter } from "./Presenter";
 import { Tour } from "./Tour";
 import { VariablesDialog } from "./panels/VariablesDialog";
@@ -246,6 +246,9 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       // Two frames: the canvas has its final size by then.
       requestAnimationFrame(() => requestAnimationFrame(zoomToFit));
       joinShared();
+      // This file's own conversation (after the first paint: it only reads storage).
+      await enterFile(fileId);
+      if (cancelled) return;
       if (askOnOpen) {
         const prompt = askOnOpen;
         askOnOpen = null;
@@ -271,6 +274,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       // editing whichever file opens next), and leaves its shared session.
       stopPlugin();
       stopDemo();
+      // A Claude turn working in this file stops with it (and its late calls are refused).
+      leaveFile();
       if (useCollab.getState().role) stopSharing();
     };
   }, [fileId, attempt]);

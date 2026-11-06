@@ -52,10 +52,19 @@ export function Avatar({ name, size = 22 }: { name: string; size?: number }) {
 
 /** Asks Claude to handle one thread (or all open ones). */
 export function askClaudeAboutComments(id?: string) {
+  let label: string | undefined;
+  if (id) {
+    // The thread's first words, not its internal id.
+    const pins = query<CommentPin[]>({ q: "comments", page: useStore.getState().es.page, includeResolved: true });
+    const text = pins.find((p) => p.id === id)?.messages[0]?.text.replace(/\s+/g, " ").trim();
+    label = text ? `Address comment: “${text.length > 60 ? text.slice(0, 60) + "…" : text}”` : "Address this comment";
+  } else label = "Address every open comment";
   askClaude(
     id
       ? `Address comment thread ${id}: call get_comments to read it (and look at the layer it is attached to with get_screenshot), make the change it asks for, then reply_comment saying what you changed and resolve_comment.`
       : "Address every open comment: call get_comments, then for each thread look at the attached layer (get_screenshot), make the requested change, reply_comment with what you changed, and resolve_comment. If a comment is unclear, reply with a question instead of resolving it.",
+    [],
+    { label },
   );
 }
 

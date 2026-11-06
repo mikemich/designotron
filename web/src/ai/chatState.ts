@@ -5,13 +5,23 @@
 //  - "api": direct Messages API calls from the browser with the user's key.
 
 import { create } from "zustand";
-import { getDoc, onDocChange, useStore, zoomToFit } from "../store";
+import { getDoc, onDocChange, toast, useStore, zoomToFit } from "../store";
+import { useCollab } from "../collab";
 import { bridge, type Attachment } from "./bridgeClient";
 import { runApiAgent, resetApiConversation, abortApiAgent } from "./apiAgent";
-import { contextLine } from "./tools";
+import { contextLine, setToolFile } from "./tools";
+import { loadConversation, saveConversation, serialize } from "./conversations";
 
 export type ChatItem =
-  | { id: number; kind: "user" | "assistant" | "error" | "system"; text: string; images?: string[]; title?: string }
+  | {
+      id: number;
+      kind: "user" | "assistant" | "error" | "system";
+      text: string;
+      images?: string[];
+      title?: string;
+      /** An error that a Retry button can send again (the prompt, as typed). */
+      retry?: string;
+    }
   | { id: number; kind: "tool"; name: string; ok: boolean | null; detail?: string }
   /** A screenshot Claude took to check its work, shown so you see what it saw. */
   | { id: number; kind: "shot"; url: string; label: string };
@@ -33,6 +43,10 @@ interface ChatStore {
   queued: string | null;
   /** The API key has worked at least once. */
   keyChecked: boolean;
+  /** The file this conversation belongs to (null while no file is open). */
+  chatFile: string | null;
+  /** Text Stop (or leaving the file) returned from the queue; the composer takes it. */
+  draft: string;
 }
 
 export interface PendingImage {
@@ -69,6 +83,8 @@ export const useChat = create<ChatStore>(() => ({
   pending: [],
   queued: null,
   keyChecked: ls("dt:keyChecked", "") === "1",
+  chatFile: null,
+  draft: "",
 }));
 
 const bridgeReady = (s: ChatStore) => s.bridgeStatus === "connected" && s.claude?.available !== false;
@@ -132,8 +148,12 @@ let nextImage = 1;
 
 /** Queues an image (data: URL) for the next message. */
 /** Shows a screenshot Claude took (get_screenshot) in the chat, during a chat turn. */
-export function showScreenshot(out: { result?: unknown; image?: { data: string; mediaType: string } | null }) {
+export function showScreenshot(out: { result?: unknown; image?: { data: string; mediaType: string } | null }, toolName = "get_screenshot") {
   if (!out.image || !useChat.getState().running) return;
+  if (toolName === "search_photos") {
+    push({ kind: "shot", url: `data:${out.image.mediaType};base64,${out.image.data}`, label: "Photo results Claude looked at" });
+    return;
+  }
   const id = (out.result as { nodeId?: string } | undefined)?.nodeId;
   let name = "";
   try {
@@ -210,16 +230,108 @@ export function setModel(model: string) {
   useChat.setState({ model });
 }
 
-export function newConversation() {
-  useChat.setState({ items: [], sessionId: null });
-  resetApiConversation();
+// ---- One conversation per file -------------------------------------------------------------
+
+/** Bumped when a file is entered or left, so a conversation still loading for an earlier file
+ *  is dropped instead of landing in the current one. */
+let enterToken = 0;
+/** The file whose saved conversation has been read (saving earlier would overwrite it). */
+let loadedFor: string | null = null;
+/** Resolves once the entered file's saved conversation is in place. */
+let entering: Promise<void> = Promise.resolve();
+/** Files whose conversation came from storage: API mode doesn't have its messages any more. */
+const apiLost = new Set<string>();
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+const joinText = (...parts: (string | null | undefined)[]) => parts.filter((p) => p && p.trim()).join("\n\n");
+
+function saveNow() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = null;
+  const s = useChat.getState();
+  if (s.chatFile && loadedFor === s.chatFile) void saveConversation(s.chatFile, serialize(s.items, s.sessionId, s.draft));
 }
 
-/** Opens the panel and sends a prompt, optionally with images (data: URLs). */
-export function askClaude(prompt: string, images: string[] = []) {
+// A conversation is kept shortly after it changes (and at once when its file closes).
+useChat.subscribe((s, prev) => {
+  if (!s.chatFile || s.chatFile !== prev.chatFile) return;
+  if (s.items === prev.items && s.sessionId === prev.sessionId && s.draft === prev.draft) return;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveNow, 500);
+});
+if (typeof window !== "undefined") window.addEventListener("pagehide", saveNow);
+
+/** The editor opened `id`: its conversation (transcript and Claude Code session) comes back from
+ *  storage, or starts empty. Resolves once that is in place. */
+export function enterFile(id: string): Promise<void> {
+  const token = ++enterToken;
+  loadedFor = null;
+  setToolFile(id);
+  useChat.setState({ chatFile: id, items: [], sessionId: null, pending: [], queued: null, running: false, draft: "" });
+  entering = loadConversation(id).then((rec) => {
+    if (token !== enterToken) return;
+    loadedFor = id;
+    // Something already happened in the new file (a turn started before this came back).
+    if (!rec || useChat.getState().items.length) return;
+    // Ids stay unique across files, so a late patch from an old run can't hit another item.
+    const base = nextId - 1;
+    nextId += rec.nextId - 1;
+    useChat.setState({ items: rec.items.map((i) => ({ ...i, id: i.id + base }) as ChatItem), sessionId: rec.sessionId, draft: rec.draft });
+    if (rec.items.length) apiLost.add(id);
+  });
+  return entering;
+}
+
+/** Ends the running turn without a note and makes the client forget it (its late events and
+ *  tool calls are dropped). */
+function dropTurn() {
+  const st = useChat.getState();
+  if (!st.running) return;
+  stoppedToken = turnToken;
+  if (st.mode === "bridge") bridge.cancel();
+  else abortApiAgent();
+  bridge.detach();
+  useChat.setState({ running: false });
+}
+
+/** The editor closed its file: a running turn stops (it was working on this file), a queued
+ *  message goes back to this file's draft, the conversation is saved, and the chat is empty
+ *  until the next file opens. */
+export function leaveFile() {
+  enterToken++;
+  const file = useChat.getState().chatFile;
+  setToolFile(null);
+  if (!file) return;
+  if (useChat.getState().running) {
+    dropTurn();
+    push({ kind: "system", text: "Stopped: you left this file." });
+  }
+  const st = useChat.getState();
+  useChat.setState({ draft: joinText(st.draft, st.queued), queued: null });
+  saveNow();
+  loadedFor = null;
+  useChat.setState({ chatFile: null, items: [], sessionId: null, pending: [], queued: null, running: false, draft: "" });
+}
+
+/** Starts a fresh conversation in this file: the running turn (if any) stops, the saved record
+ *  and Claude Code session are forgotten. */
+export function newConversation() {
+  const file = useChat.getState().chatFile;
+  dropTurn();
+  useChat.setState({ items: [], sessionId: null, queued: null, draft: "" });
+  resetApiConversation(file);
+  if (file) apiLost.delete(file);
+}
+
+/** The labels of prompts that were queued, so they show short when they finally go out. */
+const labels = new Map<string, string>();
+
+/** Opens the panel and sends a prompt, optionally with images (data: URLs). `label` is what the
+ *  conversation shows for the person's message (the full prompt still goes to Claude). */
+export function askClaude(prompt: string, images: string[] = [], opts: { label?: string } = {}) {
   useStore.setState({ chatOpen: true });
   for (const url of images) attachImage(url);
-  send(prompt);
+  send(prompt, opts);
 }
 
 /** Number of the latest turn that started, and the one the person last stopped. A turn that
@@ -227,9 +339,20 @@ export function askClaude(prompt: string, images: string[] = []) {
 let turnToken = 0;
 let stoppedToken = 0;
 
-export async function send(prompt: string) {
-  const st = useChat.getState();
+/** What the last bridge turn sent, to send again when its session turns out to be gone. */
+let lastBridgeTurn: { full: string; attachments: Attachment[]; session: string | null } | null = null;
+
+export async function send(prompt: string, opts: { label?: string } = {}) {
   if (!prompt.trim()) return;
+  // The file's saved conversation is read first, so this message lands after it.
+  await entering;
+  const st = useChat.getState();
+  if (opts.label) labels.set(prompt, opts.label);
+  // Claude can't change a file that is view-only here.
+  if (useStore.getState().es.readOnly || useCollab.getState().viewer) {
+    toast("You can view this file but not edit it, so Claude can't change it here.", "error");
+    return;
+  }
   // Claude is busy: the message goes out when this turn ends (no need to stop it to ask).
   if (st.running) {
     useChat.setState({ queued: st.queued ? `${st.queued}\n\n${prompt}` : prompt });
@@ -240,8 +363,15 @@ export async function send(prompt: string) {
     useChat.setState({ queued: prompt });
     return;
   }
+  const label = opts.label ?? labels.get(prompt);
+  labels.delete(prompt);
   const attachments = st.pending.map(toAttachment);
-  push({ kind: "user", text: prompt, images: st.pending.map((p) => p.url) });
+  push({
+    kind: "user",
+    text: label ?? prompt,
+    images: st.pending.map((p) => p.url),
+    ...(label ? { title: prompt.length > 600 ? prompt.slice(0, 600) + "…" : prompt } : {}),
+  });
   useChat.setState({ pending: [] });
   const full = `${contextLine()}\n\n${prompt}`;
   if (st.mode === "bridge") {
@@ -257,6 +387,8 @@ export async function send(prompt: string) {
       return;
     }
     useChat.setState({ running: true });
+    lastTurn = { prompt, images: attachments.length };
+    lastBridgeTurn = { full, attachments, session: st.sessionId };
     bridge.chat(full, st.sessionId, attachments);
     return;
   }
@@ -265,7 +397,13 @@ export async function send(prompt: string) {
     return;
   }
   const token = ++turnToken;
+  const file = st.chatFile;
+  lastTurn = { prompt, images: attachments.length };
   useChat.setState({ running: true });
+  // After a reload the transcript is back but the API messages are not.
+  if (file && apiLost.delete(file)) {
+    push({ kind: "system", text: "Claude doesn't have the messages above any more (API mode starts fresh after a reload)." });
+  }
   try {
     await runApiAgent(full, attachments);
     if (!st.keyChecked) {
@@ -277,13 +415,50 @@ export async function send(prompt: string) {
       }
     }
   } catch (err) {
+    // The person has moved to another file or conversation since: this run's errors aren't theirs.
+    const here = useChat.getState().chatFile === file;
     // Stopping aborts the request on purpose; it isn't an error to report.
-    if (stoppedToken !== token) push({ kind: "error", text: apiErrorText(err) });
+    if (stoppedToken !== token && here) push({ kind: "error", text: apiErrorText(err), ...(retryable(err) ? { retry: prompt } : {}) });
     // A rejected key: keep the prompt so it sends once a valid key is entered.
-    if ((err as { status?: number })?.status === 401) useChat.setState({ queued: prompt });
+    if ((err as { status?: number })?.status === 401 && here) useChat.setState({ queued: prompt });
   } finally {
     if (token === turnToken) useChat.setState({ running: false });
   }
+}
+
+/** What the last turn was, for the Retry button of an interrupted one. */
+let lastTurn: { prompt: string; images: number } | null = null;
+
+/** Errors that go away by themselves: a busy API, a rate limit, a dropped connection. */
+function retryable(err: unknown): boolean {
+  const status = (err as { status?: number })?.status;
+  if (status === 429 || status === 503 || status === 529) return true;
+  return !status && /APIConnection|network|fetch|connection/i.test(`${(err as Error)?.name ?? ""} ${(err as Error)?.message ?? ""}`);
+}
+
+const UNDO_KEYS = /Mac|iPhone|iPad/.test(globalThis.navigator?.platform ?? "") ? "⌘Z" : "Ctrl+Z";
+
+/** The bridge connection dropped while a turn was running. What the turn built is kept. */
+export function connectionLost() {
+  useChat.setState({ running: false });
+  const t = lastTurn;
+  push({
+    kind: "error",
+    text: `Lost the connection to the bridge, so Claude's turn stopped. What it built so far is kept (${UNDO_KEYS} removes it).${t?.images ? " Attached images aren't sent again." : ""}`,
+    ...(t ? { retry: t.prompt } : {}),
+  });
+}
+
+/** The CLI no longer has the session this conversation was resuming (cleaned up, or another
+ *  computer): the same message goes out once more in a new session. False when that isn't the case. */
+export function resumeFailed(): boolean {
+  const t = lastBridgeTurn;
+  if (!t?.session || !useChat.getState().running) return false;
+  lastBridgeTurn = { ...t, session: null };
+  useChat.setState({ sessionId: null });
+  push({ kind: "system", text: "Started a new Claude Code session (the earlier one is no longer on this computer)." });
+  bridge.chat(t.full, null, t.attachments);
+  return true;
 }
 
 /** Plain-language text for Anthropic API errors (the SDK's message is raw JSON). */
@@ -327,7 +502,9 @@ export function stop() {
   // Now, not after a lazy import: a queued message's request starts right after this, and a late
   // abort would hit it instead.
   else abortApiAgent();
-  useChat.setState({ running: false });
+  // A message queued behind this turn goes back to the box (the person stopped to say something
+  // else, not to send that).
+  useChat.setState({ running: false, queued: null, draft: joinText(st.draft, st.queued) });
 }
 
 // A turn that starts on an empty page shows Claude's work: the view fits it as soon as
@@ -361,4 +538,4 @@ export function stop() {
 }
 
 // Expose chat state on the automation handle (see store.ts).
-(globalThis as any).__dt = { ...(globalThis as any).__dt, chat: () => useChat.getState(), send: (p: string) => send(p) };
+(globalThis as any).__dt = { ...(globalThis as any).__dt, chat: () => useChat.getState(), chatSet: (p: Partial<ChatStore>) => useChat.setState(p), send: (p: string) => send(p) };

@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { AlertCircle, AlertTriangle, Info, Sparkles, Wand2 } from "lucide-react";
-import { dispatch, query, useStore, zoomToSelection } from "../store";
+import { dispatch, getDoc, query, useStore, zoomToSelection } from "../store";
 import { Section } from "../ui/controls";
 import { askClaude } from "../ai/chatState";
 
@@ -30,6 +30,8 @@ export function ReviewPanel() {
   const docRev = useStore((s) => s.es.docRev);
   const page = useStore((s) => s.es.page);
   const issues = useMemo(() => query<Issue[]>({ q: "lint", page }), [docRev, page]);
+  // Nothing to critique on an empty page (like the quick actions that need content).
+  const hasContent = useStore((s) => !!getDoc().pages.find((p) => p.id === s.es.page)?.children.length);
   const fixable = issues.filter((i) => i.fix);
   const fixAll = () => {
     dispatch({ op: "beginGesture" });
@@ -61,9 +63,13 @@ export function ReviewPanel() {
         )}
         <button
           className="btn block primary"
+          disabled={!hasContent}
+          title={hasContent ? undefined : "Nothing on this page to critique"}
           onClick={() =>
             askClaude(
               "Critique the design on this page like a senior product designer. Call lint_design and get_screenshot first. Cover visual hierarchy, spacing rhythm, typography, colour, contrast and consistency. Then fix the most important problems directly, and list what you changed.",
+              [],
+              { label: "Critique this page" },
             )
           }
         >

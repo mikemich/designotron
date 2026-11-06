@@ -6,14 +6,25 @@ import { useChat, push, appendText, patchItem, showScreenshot } from "./chatStat
 import { DRAG_BUSY, executeTool, systemPrompt, toolDefs, whenCanvasIdle, type ToolOutcome } from "./tools";
 import type { Attachment } from "./bridgeClient";
 
-let messages: Anthropic.Beta.BetaMessageParam[] = [];
+type Messages = Anthropic.Beta.BetaMessageParam[];
+/** The messages of each file's conversation (in memory: a reload starts them fresh). */
+const conversations = new Map<string, Messages>();
+const conversationOf = (file: string | null): Messages => {
+  const key = file ?? "";
+  let m = conversations.get(key);
+  if (!m) conversations.set(key, (m = []));
+  return m;
+};
+/** The messages of the run that is running now (what `abortApiAgent` answers for). */
+let messages: Messages = [];
 let controller: AbortController | null = null;
 let runCount = 0;
 /** The tool calls of the reply being answered: what finished, and the call running now. */
 let round: { done: Map<string, Anthropic.Beta.BetaToolResultBlockParam>; running: string | null } | null = null;
 
-export function resetApiConversation() {
-  messages = [];
+/** Forgets a file's messages (a new conversation). */
+export function resetApiConversation(file: string | null) {
+  conversations.delete(file ?? "");
 }
 
 /** Aborts the request that is running now (each run has its own controller, so a message sent
@@ -50,7 +61,10 @@ function aborted(): Error {
 const MAX_TURNS = 40;
 
 export async function runApiAgent(prompt: string, images: Attachment[] = []) {
-  const { apiKey, model } = useChat.getState();
+  const { apiKey, model, chatFile: file } = useChat.getState();
+  // This run's file and messages stay its own if the person opens another file meanwhile.
+  const messages = conversationOf(file);
+  setActive(messages);
   const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
   const tools = toolDefs().map((t) => ({ ...t, eager_input_streaming: true })) as Anthropic.Beta.BetaTool[];
   const system = systemPrompt();
@@ -77,7 +91,7 @@ export async function runApiAgent(prompt: string, images: Attachment[] = []) {
   const run = ++runCount;
   const group = `api-${run}`;
   try {
-    await runTurns(client, tools, system, model, mine.signal, group);
+    await runTurns(client, tools, system, model, mine.signal, group, file, messages);
   } catch (err) {
     // Nothing came back for this prompt: forget it, so retrying doesn't send it twice. Not when a
     // newer run has started since (a queued message after Stop): its prompt may sit in the
@@ -91,7 +105,20 @@ export async function runApiAgent(prompt: string, images: Attachment[] = []) {
   }
 }
 
-async function runTurns(client: Anthropic, tools: Anthropic.Beta.BetaTool[], system: string, model: string, signal: AbortSignal, group: string) {
+function setActive(m: Messages) {
+  messages = m;
+}
+
+async function runTurns(
+  client: Anthropic,
+  tools: Anthropic.Beta.BetaTool[],
+  system: string,
+  model: string,
+  signal: AbortSignal,
+  group: string,
+  file: string | null,
+  messages: Messages,
+) {
   let jsonRetries = 0;
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     let textItem: number | null = null;
@@ -110,6 +137,7 @@ async function runTurns(client: Anthropic, tools: Anthropic.Beta.BetaTool[], sys
       { signal },
     );
     stream.on("text", (delta) => {
+      if (signal.aborted) return;
       if (textItem === null) textItem = push({ kind: "assistant", text: "" });
       appendText(textItem, delta);
     });
@@ -140,6 +168,7 @@ async function runTurns(client: Anthropic, tools: Anthropic.Beta.BetaTool[], sys
     for (const use of uses) {
       // Stop pressed: no further tool runs (`abortApiAgent` already answered the calls).
       if (signal.aborted) throw aborted();
+      if (useChat.getState().chatFile !== file) throw aborted();
       const chip = push({ kind: "tool", name: use.name, ok: null });
       mine.running = use.id;
       const idle = await whenCanvasIdle();
@@ -147,9 +176,9 @@ async function runTurns(client: Anthropic, tools: Anthropic.Beta.BetaTool[], sys
         patchItem(chip, { ok: false, detail: "Stopped" });
         throw aborted();
       }
-      const out: ToolOutcome = idle ? await executeTool(use.name, use.input, { group }) : { ok: false, result: DRAG_BUSY };
+      const out: ToolOutcome = idle ? await executeTool(use.name, use.input, { group, fileId: file }) : { ok: false, result: DRAG_BUSY };
       patchItem(chip, { ok: out.ok, detail: out.ok ? undefined : String(out.result) });
-      showScreenshot(out);
+      showScreenshot(out, use.name);
       const text = typeof out.result === "string" ? out.result : JSON.stringify(out.result);
       const block: Anthropic.Beta.BetaToolResultBlockParam = {
         type: "tool_result",

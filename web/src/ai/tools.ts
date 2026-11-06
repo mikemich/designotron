@@ -81,8 +81,20 @@ export async function whenCanvasIdle(timeoutMs = 45000): Promise<boolean> {
   return true;
 }
 
-/** `opts.group`: undo group of the chat turn the call belongs to (see `aiDispatch`). */
-export async function executeTool(name: string, input: any, opts: { group?: string } = {}): Promise<ToolOutcome> {
+/** The file the editor has open (set by the chat state as files open and close). */
+let openFile: string | null = null;
+export function setToolFile(id: string | null) {
+  openFile = id;
+}
+
+/** What a chat call gets when the file it was working on has closed. */
+export const LEFT_FILE = "The person left the file this chat turn was working on, so the turn was stopped. Don't retry.";
+
+/** `opts.group`: undo group of the chat turn the call belongs to (see `aiDispatch`).
+ *  `opts.fileId`: the file the calling chat turn belongs to; the call is refused when that
+ *  isn't the open file (the turn is over, and its calls would land in an unrelated file). */
+export async function executeTool(name: string, input: any, opts: { group?: string; fileId?: string | null } = {}): Promise<ToolOutcome> {
+  if (opts.fileId !== undefined && opts.fileId !== openFile) return { ok: false, result: LEFT_FILE };
   try {
     if (name === "get_screenshot") {
       const shot = await getScreenshot(input?.id, input?.scale);

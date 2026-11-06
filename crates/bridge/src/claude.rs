@@ -115,6 +115,16 @@ pub fn mcp_config(port: u16, token: &str) -> Value {
   })
 }
 
+/// A Claude Code event for the editor. `turn` lets the editor drop events of a turn it has left
+/// behind (the person switched files or started a new conversation).
+fn chat_event_msg(turn: u64, event: Value) -> Value {
+  json!({ "type": "chat_event", "turn": turn, "event": event })
+}
+
+fn log_msg(turn: u64, message: &str) -> Value {
+  json!({ "type": "log", "turn": turn, "message": message })
+}
+
 /// Runs one chat turn and streams Claude Code's `stream-json` events to the editor tab `conn`
 /// that asked (and only to it). Images go to Claude Code as image blocks of a stream-json user
 /// message (so it sees them directly); otherwise the prompt is a plain argument.
@@ -235,7 +245,7 @@ async fn run_turn(
       }
       let done = event["type"] == "result";
       // The tab has gone: nobody is watching, so don't spend the rest of the turn.
-      if !state.editor.send_to(conn, json!({ "type": "chat_event", "event": event })) {
+      if !state.editor.send_to(conn, chat_event_msg(turn, event)) {
         state.chat.cancel(conn).await;
         break;
       }
@@ -279,7 +289,7 @@ async fn run_turn(
         .send_to(conn, json!({ "type": "chat_error", "turn": turn, "message": message }));
     }
     None => {
-      state.editor.send_to(conn, json!({ "type": "log", "message": "Stopped." }));
+      state.editor.send_to(conn, log_msg(turn, "Stopped."));
     }
     _ => {}
   }
@@ -300,6 +310,15 @@ mod tests {
     assert_eq!(s["url"], "http://127.0.0.1:5174/mcp");
     assert_eq!(s["alwaysLoad"], true);
     assert_eq!(s["headers"]["X-Designotron-Editor"], "s3cret");
+  }
+
+  #[test]
+  fn chat_events_and_log_lines_carry_their_turn() {
+    let e = chat_event_msg(7, json!({ "type": "result" }));
+    assert_eq!(e["turn"], 7);
+    assert_eq!(e["event"]["type"], "result");
+    let l = log_msg(7, "Stopped.");
+    assert_eq!((l["turn"].as_u64(), l["message"].as_str()), (Some(7), Some("Stopped.")));
   }
 
   fn sleeper() -> Child {
