@@ -84,6 +84,23 @@ const listed = new Set<string>();
  * from IndexedDB isn't in it. */
 const wasDeleted = (id: string, idx: unknown) => idbOk && listed.has(id) && !(Array.isArray(idx) && (idx as FileMeta[]).some((f) => f.id === id));
 
+/** This tab no longer holds the file's editing lock (another tab took it by force): its writes of
+ * the file must not land. Not retried. */
+export class LockLostError extends Error {
+  constructor() {
+    super("Another tab took over editing this file");
+  }
+}
+
+/** Files this tab must not write (see `LockLostError`); checked inside the write's own transaction. */
+const fenced = new Set<string>();
+
+/** Stops (or allows again) this tab writing the file's document. */
+export function fenceFile(id: string, on: boolean) {
+  if (on) fenced.add(id);
+  else fenced.delete(id);
+}
+
 /** The stored file isn't the one this tab last wrote (another tab or writer saved since), so a
  * save that only adds changes would build on the wrong thing: write the whole file instead. */
 export class StaleStorageError extends Error {
@@ -105,6 +122,8 @@ const FOLDERS = "dt:folders";
 
 // IndexedDB can be missing or throw (private windows, sandboxed previews); fall back to memory.
 const memory = new Map<string, unknown>();
+/** Counts writes to `memory`, so the copy back to IndexedDB can tell whether anything arrived meanwhile. */
+let memoryWrites = 0;
 let idbOk = true;
 // Set once IndexedDB has opened or served a read or write. After that a failing read or write
 // is a real failure (a transient error, quota, a full disk) that callers must see, not a sign
@@ -177,6 +196,7 @@ async function get(key: string): Promise<unknown> {
       // Reading nothing back would let a caller write back an empty index over the real one.
       if (idbWorked) throw err;
       idbOk = false;
+      startProbe();
     }
   }
   return memory.get(key);
@@ -186,6 +206,7 @@ async function get(key: string): Promise<unknown> {
 async function set(key: string, value: unknown): Promise<void> {
   await ensureOpen();
   memory.set(key, value);
+  memoryWrites++;
   if (idbOk) {
     try {
       await idbSet(key, value);
@@ -201,6 +222,7 @@ async function set(key: string, value: unknown): Promise<void> {
 async function del(key: string): Promise<void> {
   await ensureOpen();
   memory.delete(key);
+  memoryWrites++;
   if (idbOk) {
     try {
       await idbDel(key);
@@ -228,6 +250,7 @@ async function getMany(keys: string[]): Promise<unknown[]> {
     } catch (err) {
       if (idbWorked) throw err;
       idbOk = false;
+      startProbe();
     }
   }
   return keys.map((k) => memory.get(k));
@@ -303,6 +326,7 @@ async function transact(readKeys: string[], decide: (found: unknown[]) => Writes
   const w = decide(readKeys.map((k) => memory.get(k)));
   for (const [k, v] of w.put) memory.set(k, v);
   for (const k of w.del) memory.delete(k);
+  memoryWrites++;
 }
 
 /** False when files only live in memory for this session. */
@@ -329,34 +353,109 @@ function startProbe() {
   probeTimer = setInterval(() => void probeStorage(), PROBE_MS);
 }
 
-/** One probe now (also what the timer runs): true when IndexedDB took a write and is in use again. */
-export async function probeStorage(): Promise<boolean> {
-  if (idbOk) return true;
+/** What an earlier pass of the probe wrote, per key (to tell a record it wrote from one another tab did). */
+const probeWrote = new Map<string, unknown>();
+let probing = false;
+
+const sameJson = (a: unknown, b: unknown) => {
   try {
-    await idbSet(probeKey, 1);
-    await idbDel(probeKey);
-    // What the session kept in memory goes in first: the index merges with the stored one
-    // (the entries made here win), everything else is written as it is.
-    for (const [k, v] of Array.from(memory)) {
-      if (k === INDEX && Array.isArray(v)) {
-        const stored = ((await idbGet(INDEX)) as FileMeta[] | undefined) ?? [];
-        const here = new Set((v as FileMeta[]).map((f) => f.id));
-        await idbSet(INDEX, [...(v as FileMeta[]), ...stored.filter((f) => !here.has(f.id))]);
-      } else await idbSet(k, v);
-    }
-    memory.clear();
+    return JSON.stringify(a) === JSON.stringify(b);
   } catch {
     return false;
   }
-  idbOk = true;
-  idbWorked = true;
-  idbWrote = true;
-  if (probeTimer) clearInterval(probeTimer);
-  probeTimer = null;
-  // The stored files aren't what this tab last wrote: the next save writes the whole file.
-  layered.clear();
-  storageListeners.forEach((cb) => cb());
-  return true;
+};
+
+/** One pass of copying what memory mode kept into IndexedDB, in one transaction made from a
+ * synchronous snapshot of memory: a record is written only if nothing is stored under its key
+ * (or what is there is what an earlier pass wrote), the index and the folders are merged by id
+ * (what is stored stays, this session's entries are added). Never overwrites another tab's data. */
+async function copyBack(): Promise<void> {
+  const snap = Array.from(memory);
+  const keys = Array.from(new Set([INDEX, FOLDERS, ...snap.map(([k]) => k)]));
+  await keyval(
+    "readwrite",
+    (os) =>
+      new Promise<void>((resolve, reject) => {
+        const tx = os.transaction;
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error ?? new Error("transaction aborted"));
+        const found = new Map<string, unknown>();
+        let left = keys.length;
+        const apply = () => {
+          try {
+            const skipped = new Set<string>();
+            const wrote: [string, unknown][] = [];
+            for (const [k, v] of snap) {
+              if (k === INDEX || k === FOLDERS) continue;
+              const there = found.get(k);
+              if (there === undefined || (probeWrote.has(k) && sameJson(there, probeWrote.get(k)))) {
+                os.put(v, k);
+                wrote.push([k, v]);
+              } else skipped.add(k);
+            }
+            const mem = new Map(snap);
+            if (mem.has(INDEX)) {
+              const stored = Array.isArray(found.get(INDEX)) ? (found.get(INDEX) as FileMeta[]) : [];
+              const have = new Set(stored.map((f) => f.id));
+              const ours = Array.isArray(mem.get(INDEX)) ? (mem.get(INDEX) as FileMeta[]) : [];
+              // (A file whose record was skipped isn't listed from here.)
+              os.put([...stored, ...ours.filter((f) => !have.has(f.id) && !skipped.has(fileKey(f.id)))], INDEX);
+            }
+            if (mem.has(FOLDERS)) {
+              const stored = sanitizeFolders(found.get(FOLDERS));
+              const have = new Set(stored.map((f) => f.id));
+              os.put({ v: 1, folders: [...stored, ...sanitizeFolders(mem.get(FOLDERS)).filter((f) => !have.has(f.id))] } satisfies FolderRecord, FOLDERS);
+            }
+            for (const [k, v] of wrote) probeWrote.set(k, v);
+          } catch (err) {
+            reject(err);
+            tx.abort();
+          }
+        };
+        for (const k of keys) {
+          const req = os.get(k);
+          req.onsuccess = () => {
+            found.set(k, req.result);
+            if (--left === 0) apply();
+          };
+        }
+      }),
+  );
+}
+
+/** One probe now (also what the timer runs): true when IndexedDB took a write and is in use again. */
+export async function probeStorage(): Promise<boolean> {
+  if (idbOk) return true;
+  if (probing) return false;
+  probing = true;
+  try {
+    await idbSet(probeKey, 1);
+    await idbDel(probeKey);
+    // Copy until a pass finds nothing new in memory; then switch over in the same breath (no
+    // await between the check and the switch), so no write can reach memory and be wiped.
+    for (let pass = 0; pass < 8; pass++) {
+      const at = memoryWrites;
+      await copyBack();
+      if (memoryWrites !== at) continue;
+      idbOk = true;
+      idbWorked = true;
+      idbWrote = true;
+      memory.clear();
+      probeWrote.clear();
+      if (probeTimer) clearInterval(probeTimer);
+      probeTimer = null;
+      // The stored files aren't what this tab last wrote: the next save writes the whole file.
+      layered.clear();
+      storageListeners.forEach((cb) => cb());
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.debug("storage probe failed", err);
+    return false;
+  } finally {
+    probing = false;
+  }
 }
 
 /** Asks the browser, once, to keep this site's storage when space runs low (after the first save
@@ -616,6 +715,7 @@ export async function saveFile(id: string, name: string, docJson: string, opts?:
   knownName.delete(id);
   // Whatever layered records the file has now go in the same transaction as the new record.
   await transact([fileKey(id), INDEX], ([stored, idx]) => {
+    if (fenced.has(id)) throw new LockLostError();
     if (guard && wasDeleted(id, idx)) throw new FileDeletedError();
     return {
       put: [[fileKey(id), { doc: docJson, assets } satisfies StoredFile]],
@@ -644,6 +744,7 @@ export async function saveFile(id: string, name: string, docJson: string, opts?:
  */
 export async function saveDelta(id: string, name: string, plan: SavePlan): Promise<{ name: string } | null> {
   if (planIsOutdated(id, plan)) return null;
+  if (fenced.has(id)) throw new LockLostError();
   startedPlan.set(id, { engine: plan.engine, token: plan.token });
   const state = layered.get(id);
   if (!plan.full && !state) throw new StaleStorageError();
@@ -672,6 +773,7 @@ export async function saveDelta(id: string, name: string, plan: SavePlan): Promi
   layered.set(id, known);
   try {
     await transact([fileKey(id), INDEX], ([stored, idx]) => {
+      if (fenced.has(id)) throw new LockLostError();
       if (wasDeleted(id, idx)) throw new FileDeletedError();
       const m = isManifest(stored) ? stored : null;
       if (!plan.full && (!m || !expected || m.seq !== expected.seq || m.writer !== expected.writer)) throw new StaleStorageError();

@@ -275,6 +275,121 @@ const has = (list, re) => list.some((t) => re.test(t));
   await ctx.close();
 }
 
+// ---------- 4. Taking over while the other tab has a save in flight ----------
+{
+  const ctx = await newContext();
+  const A = await openNew(ctx);
+  const id = await fileIdOf(A);
+  await addRect(A, "S-0");
+  await waitSaved(A);
+  const B = await openFile(ctx, id);
+  A.evaluate(() => {
+    window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [{ type: "rectangle", name: "U-1", x: 100, y: 0, width: 60, height: 60, fill: "#00AA00" }] } });
+    const t = Date.now();
+    while (Date.now() - t < 8000);
+  }).catch(() => {});
+  await sleep(300);
+  await B.getByRole("button", { name: "Edit here instead" }).click();
+  await waitFor(async () => (await B.getByRole("button", { name: "Edit here anyway" }).count()) === 1, 7500);
+  await B.getByRole("button", { name: "Edit here anyway" }).click();
+  check("B takes over showing the stored file", (await waitFor(async () => !(await isReadOnly(B)), 4000)) && (await names(B)).includes("S-0"));
+  await sleep(9500);
+  check("A keeps its unsaved layer on screen", (await names(A)).includes("U-1"));
+  check("A says another tab took over before the changes were saved, with a download", has(await bars(A), /took over before these changes were saved/) && (await A.getByRole("button", { name: "Download a .dtron copy" }).count()) === 1, (await bars(A)).join("|"));
+  check("A is still marked unsaved (closing asks)", await A.evaluate(() => window.__dt.dirty()));
+  check("A did not write over B's file", !(await storedNames(B)).includes("U-1"), (await storedNames(B)).join(","));
+  check("B is not marked stale", !has(await bars(B), /changed in another tab/), (await bars(B)).join("|"));
+  await addRect(B, "B-1", 200);
+  check("B saves B-1", await waitSaved(B));
+  await sleep(800);
+  check("B's save does not replace A's unsaved document", (await names(A)).includes("U-1") && !(await names(A)).includes("B-1"));
+  const [dl] = await Promise.all([A.waitForEvent("download", { timeout: 5000 }).catch(() => null), A.getByRole("button", { name: "Download a .dtron copy" }).click()]);
+  check("A's copy holds U-1", !!dl && fs.readFileSync(await dl.path(), "utf8").includes("U-1"));
+  await A.getByRole("button", { name: "Discard and view" }).click();
+  check("discarding shows B's file in A", await waitFor(async () => (await names(A)).includes("B-1") && !(await names(A)).includes("U-1"), 4000));
+  check("A is clean and read-only after discarding", !(await A.evaluate(() => window.__dt.dirty())) && (await isReadOnly(A)));
+  await ctx.close();
+}
+
+// ---------- 5. A tab that only shows the file can't change it ----------
+{
+  const ctx = await newContext();
+  const A = await openNew(ctx);
+  const id = await fileIdOf(A);
+  await addRect(A, "R-0");
+  await waitSaved(A);
+  const B = await openFile(ctx, id);
+  const comments = () => B.evaluate(() => Object.keys(window.__dt.doc().comments || {}).length);
+  await B.evaluate(() => window.__dt.dispatch({ op: "addComment", x: 5, y: 5, text: "hello", author: "me", time: 1 }));
+  check("a comment is refused in the read-only tab", (await comments()) === 0);
+  await B.evaluate(() => window.__dt.dispatch({ op: "undo" }));
+  check("undo does nothing there", (await names(B)).includes("R-0") && !(await B.evaluate(() => window.__dt.dirty())));
+  await addRect(A, "R-1", 100);
+  await waitSaved(A);
+  check("it still follows the editing tab", await waitFor(async () => (await names(B)).includes("R-1"), 4000));
+  check("it is not dirty and not stale", !(await B.evaluate(() => window.__dt.dirty())) && !has(await bars(B), /changed in another tab/));
+  // Hidden: no reload until shown.
+  await B.evaluate(() => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await addRect(A, "R-2", 200);
+  await waitSaved(A);
+  await sleep(1500);
+  check("a hidden read-only tab doesn't reload", !(await names(B)).includes("R-2"));
+  await B.evaluate(() => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  check("it catches up when shown", await waitFor(async () => (await names(B)).includes("R-2"), 4000));
+  await ctx.close();
+}
+
+// ---------- 6. The editing tab can't hand over: it says why ----------
+{
+  const ctx = await newContext();
+  const A = await openNew(ctx);
+  const id = await fileIdOf(A);
+  await addRect(A, "H-0");
+  await waitSaved(A);
+  const B = await openFile(ctx, id);
+  await A.evaluate(() => (window.__failIDB = true));
+  await addRect(A, "H-1", 100);
+  await sleep(1200);
+  await B.getByRole("button", { name: "Edit here instead" }).click();
+  check("B is told the other tab can't save right now", await waitFor(async () => has(await bars(B), /can't save right now/), 4000), (await bars(B)).join("|"));
+  check("B offers Try again, not Edit here anyway", (await B.getByRole("button", { name: "Try again" }).count()) === 1 && (await B.getByRole("button", { name: "Edit here anyway" }).count()) === 0);
+  check("A keeps editing and the lock", !(await isReadOnly(A)) && (await isReadOnly(B)));
+  await A.evaluate(() => (window.__failIDB = false));
+  check("A saves when storage returns", await waitSaved(A, 14000));
+  await B.getByRole("button", { name: "Try again" }).click();
+  check("then the hand-off works", (await waitFor(async () => !(await isReadOnly(B)), 6000)) && (await names(B)).includes("H-1"));
+  await ctx.close();
+}
+if (process.env.E2E_RELAY) {
+  // A live session on the editing tab: refused with the reason, no take-over offered.
+  const RELAY = process.env.E2E_RELAY;
+  const ctx = await newContext();
+  const A = await openNew(ctx);
+  const id = await fileIdOf(A);
+  await addRect(A, "L-0");
+  await waitSaved(A);
+  await A.click(".tbtn[title='Share for live editing']");
+  await A.fill(".share-dialog input.textinput >> nth=0", "Olga");
+  if (!(await A.locator(".share-dialog input.mono").count())) await A.click("text=Use a different relay");
+  await A.fill(".share-dialog input.mono", RELAY);
+  await A.click("button:has-text('Share online')");
+  await A.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 10000 });
+  await A.keyboard.press("Escape");
+  const B = await openFile(ctx, id);
+  await B.getByRole("button", { name: "Edit here instead" }).click();
+  check("a live session is named as the reason", await waitFor(async () => has(await bars(B), /live session/), 4000), (await bars(B)).join("|"));
+  await sleep(6000);
+  check("no 'Edit here anyway' for a live session", (await B.getByRole("button", { name: "Edit here anyway" }).count()) === 0);
+  check("the host keeps editing", !(await isReadOnly(A)));
+  await ctx.close();
+}
+
 await browser.close();
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);
