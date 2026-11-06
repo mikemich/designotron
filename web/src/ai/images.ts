@@ -22,23 +22,47 @@ export async function rasterize(url: string, maxSide = MAX_SIDE): Promise<string
   return canvas.toDataURL("image/png");
 }
 
-/** Reads image files from a paste or drop event as data URLs. */
-export async function imagesFrom(items: DataTransferItemList | FileList | null): Promise<{ name: string; url: string }[]> {
-  if (!items) return [];
+/** The images that were read, and a message for each file that was not. */
+export interface ImagesRead {
+  images: { name: string; url: string }[];
+  errors: string[];
+}
+
+/** Reads every file with `read`; one that fails is reported and doesn't drop the others. */
+export async function settleImages<F extends { name: string }>(files: F[], read: (f: F) => Promise<string>): Promise<ImagesRead> {
+  const settled = await Promise.allSettled(files.map(read));
+  const out: ImagesRead = { images: [], errors: [] };
+  settled.forEach((r, i) => {
+    const name = files[i].name || "pasted image";
+    if (r.status === "fulfilled") out.images.push({ name, url: r.value });
+    else out.errors.push(`Couldn't read “${name}” as an image.`);
+  });
+  return out;
+}
+
+async function readImage(f: File): Promise<string> {
+  const raw = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(f);
+  });
+  return rasterize(raw);
+}
+
+/** Reads image files from a paste or drop event as data URLs. Files that aren't images, and
+ *  images that can't be read, come back as messages. */
+export async function imagesFrom(items: DataTransferItemList | FileList | null): Promise<ImagesRead> {
+  if (!items) return { images: [], errors: [] };
   const files: File[] = [];
+  const others: string[] = [];
   for (const it of Array.from(items as ArrayLike<DataTransferItem | File>)) {
     const f = it instanceof File ? it : it.kind === "file" ? it.getAsFile() : null;
-    if (f && f.type.startsWith("image/")) files.push(f);
+    if (!f) continue;
+    if (f.type.startsWith("image/")) files.push(f);
+    else others.push(f.name || "a file");
   }
-  return Promise.all(
-    files.map(async (f) => {
-      const raw = await new Promise<string>((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(String(r.result));
-        r.onerror = () => reject(r.error);
-        r.readAsDataURL(f);
-      });
-      return { name: f.name || "pasted image", url: await rasterize(raw) };
-    }),
-  );
+  const out = await settleImages(files, readImage);
+  if (others.length) out.errors.push(`Only images can be attached (${others.join(", ")}).`);
+  return out;
 }

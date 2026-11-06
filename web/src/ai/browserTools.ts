@@ -20,7 +20,12 @@ export async function getScreenshot(id?: string, scale = 1) {
   return { id: target, ...shot };
 }
 
+/** What a call gets when the file it was working on has closed (see `executeTool`). */
+export const LEFT_FILE = "The person left the file this chat turn was working on, so the turn was stopped. Don't retry.";
+
 interface ImportInput {
+  /** False once the file the call started in has closed: the import then writes nothing. */
+  stillOpen?: () => boolean;
   html: string;
   width?: number;
   x?: number;
@@ -40,7 +45,7 @@ type Spec = Record<string, any>;
 /** Fetches a live page through the local bridge (no CORS there) and imports it. `typed`:
  *  the person entered the address themselves, so pages on their own machine or network are
  *  allowed (Claude's imports reach only the public internet). */
-export async function importUrl(input: { url: string; width?: number; x?: number; y?: number; autoLayout?: boolean; group?: string }, typed = false) {
+export async function importUrl(input: { url: string; width?: number; x?: number; y?: number; autoLayout?: boolean; group?: string; stillOpen?: () => boolean }, typed = false) {
   if (typeof input?.url !== "string" || !input.url.trim()) throw new Error("url must be a string like https://example.com");
   const raw = input.url.trim();
   if (/\s/.test(raw)) throw new Error(`not a valid URL: ${raw}`);
@@ -67,7 +72,7 @@ export async function importUrl(input: { url: string; width?: number; x?: number
   const base = `<base href="${url.href.replace(/"/g, "&quot;")}">`;
   html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => m + base) : `<!doctype html><html><head>${base}</head><body>${html}</body></html>`;
   // The frame takes the page's <title>; the host name only names pages that have none.
-  return importHtml({ html, width: input.width ?? 1440, x: input.x, y: input.y, fallbackName: url.hostname, autoLayout: input.autoLayout, group: input.group });
+  return importHtml({ html, width: input.width ?? 1440, x: input.x, y: input.y, fallbackName: url.hostname, autoLayout: input.autoLayout, group: input.group, stillOpen: input.stillOpen });
 }
 
 /** Renders HTML in a hidden iframe and converts the box tree into layer specs. */
@@ -110,6 +115,8 @@ export async function importHtml(input: ImportInput) {
     const root = emitSpec(rootBox, rootBox.rect, { w: "fixed", h: rootBox.plan?.canHug.h ? "hug" : "fixed" });
     root.x = input.x ?? 0;
     root.y = input.y ?? 0;
+    // Last await is behind us: don't write into a file the person has left meanwhile.
+    if (input.stillOpen && !input.stillOpen()) throw new Error(LEFT_FILE);
     const r = aiDispatch("create_nodes", { parentId: input.parentId, nodes: [root] }, input.group);
     return r;
   } finally {

@@ -28,7 +28,7 @@ import { CropMode } from "./CropMode";
 import { FollowFrame } from "./FollowFrame";
 import { CursorChat } from "./CursorChat";
 import { GuestBar } from "../panels/GuestBar";
-import { reportCursor } from "../collab";
+import { reportCursor, useCollab } from "../collab";
 import { insertImageFile, openDtronFile, pasteData, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu, insideInstance } from "./contextMenu";
 import { pickColorAt } from "./eyedropper";
@@ -1173,7 +1173,11 @@ export function Canvas() {
 
   const cursor = panning ? "grabbing" : keys.space || tool === "hand" ? "grab" : tool === "move" ? (vHover ? "crosshair" : "default") : tool === "text" ? "text" : "crosshair";
   const emptyPromptClosed = useStore((s) => s.emptyPromptClosed);
-  const empty = !pageObj?.children.length && !emptyPromptClosed.includes(emptyPromptKey(pageObj?.id ?? ""));
+  // A view-only file offers no Claude: it couldn't change anything.
+  const engineReadOnly = useStore((s) => !!s.es.readOnly);
+  const viewer = useCollab((s) => s.viewer);
+  const viewOnly = engineReadOnly || viewer;
+  const empty = !viewOnly && !pageObj?.children.length && !emptyPromptClosed.includes(emptyPromptKey(pageObj?.id ?? ""));
 
   return (
     <div

@@ -3,8 +3,8 @@
 // streams Claude Code chat events back.
 
 import { getEngine, onDocChange } from "../store";
-import { DRAG_BUSY, executeTool, whenCanvasIdle, type ToolOutcome } from "./tools";
-import { appendText, patchItem, push, showScreenshot, useChat } from "./chatState";
+import { DRAG_BUSY, LEFT_FILE, executeTool, whenCanvasIdle, type ToolOutcome } from "./tools";
+import { appendText, connectionLost, patchItem, push, resumeFailed, showScreenshot, useChat } from "./chatState";
 import { onPreviewMessage } from "./preview";
 
 const isLocalPage = ["localhost", "127.0.0.1"].includes(location.hostname);
@@ -12,20 +12,39 @@ const isLocalPage = ["localhost", "127.0.0.1"].includes(location.hostname);
 let notBridgeHere = false;
 let checked: Promise<void> | null = null;
 
+/** What this page's server said to `/bridge/status`: it is a bridge ("bridge"), it is something
+ *  else that answered (a relay, a static server, the dev server's own page: "other"), or it
+ *  couldn't tell ("unknown": a dev server whose proxy found the bridge down answers 5xx, and a
+ *  network error is no answer either). Only the first two are final. */
+export function bridgeAnswer(status: number, contentType: string, json: unknown): "bridge" | "other" | "unknown" {
+  if (status >= 500) return "unknown";
+  if (status === 200 && contentType.includes("json") && (json as { name?: string } | null)?.name === "designotron-bridge") return "bridge";
+  return "other";
+}
+
 /** Asks this page's own server whether it is (or proxies) a bridge, once per page load.
- *  Anything else (a relay, a static server) means the bridge is at its default address. */
+ *  Anything else (a relay, a static server) means the bridge is at its default address. An
+ *  answer of "unknown" isn't kept: the page assumes its own server (the dev server proxies to
+ *  the bridge, wherever it runs) and asks again at the next connection attempt. */
 export function bridgeChecked(): Promise<void> {
   if (!isLocalPage) return Promise.resolve();
   checked ??= servedByRelay()
-    .then((relay) => {
-      if (relay) return null;
-      return fetch(`${location.origin}/bridge/status`).then((r) => (r.ok ? r.json() : null));
+    .then(async (relay): Promise<"bridge" | "other" | "unknown"> => {
+      if (relay) return "other";
+      try {
+        const r = await fetch(`${location.origin}/bridge/status`);
+        const type = r.headers.get("content-type") ?? "";
+        const json = r.status === 200 && type.includes("json") ? await r.json().catch(() => null) : null;
+        return bridgeAnswer(r.status, type, json);
+      } catch {
+        return "unknown";
+      }
     })
-    .then((j) => {
-      notBridgeHere = j?.name !== "designotron-bridge";
-    })
-    .catch(() => {
-      notBridgeHere = true;
+    .then((answer) => {
+      if (answer === "unknown") {
+        notBridgeHere = false;
+        checked = null;
+      } else notBridgeHere = answer === "other";
     });
   return checked;
 }
@@ -79,6 +98,11 @@ class BridgeClient {
   private turn = 0;
   /** Set once an error has been shown for the current turn, to avoid repeats. */
   private turnError = false;
+  /** The file the current turn was started in: its calls are refused once that file is closed. */
+  private turnFile: string | null = null;
+  /** The current turn was ended by the person leaving its file or starting a new conversation:
+   *  nothing it still sends is shown or run. */
+  private detached = false;
 
   /** Reconnect delay; grows while the bridge stays offline (fewer console errors). */
   private delay = 2000;
@@ -103,7 +127,8 @@ class BridgeClient {
    *  Claude Code) and the headless file follow it. It then sends its document, which the bridge
    *  only takes from the active tab. */
   private announceFocus() {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    // On the file list there is no document: another tab with a file open stays the active one.
+    if (this.ws?.readyState !== WebSocket.OPEN || !useChat.getState().chatFile) return;
     this.send({ type: "focus" });
     this.pushDoc();
   }
@@ -124,7 +149,7 @@ class BridgeClient {
       useChat.setState({ bridgeStatus: "connected" });
       ws.send(JSON.stringify({ type: "hello", client: "designotron-editor" }));
       // A tab opened in the background doesn't take over from the one in use.
-      if (document.hasFocus()) ws.send(JSON.stringify({ type: "focus" }));
+      if (document.hasFocus() && useChat.getState().chatFile) ws.send(JSON.stringify({ type: "focus" }));
       this.pushDoc();
     };
     ws.onclose = () => this.offline();
@@ -135,10 +160,15 @@ class BridgeClient {
   private offline() {
     this.ws = null;
     useChat.setState({ bridgeStatus: "offline" });
-    if (useChat.getState().running && useChat.getState().mode === "bridge") useChat.setState({ running: false });
+    if (useChat.getState().running && useChat.getState().mode === "bridge") connectionLost();
     if (this.retry) clearTimeout(this.retry);
     this.retry = setTimeout(() => this.connect(), this.delay);
     this.delay = Math.min(this.delay * 1.5, 30000);
+  }
+
+  /** A file just opened in this tab: it becomes the bridge's active tab (if the person is here). */
+  focusEditor() {
+    if (document.hasFocus()) this.announceFocus();
   }
 
   /** Sends a message to the bridge if connected. */
@@ -158,7 +188,7 @@ class BridgeClient {
   /** Mirrors the document to the bridge so headless tools and project export see it. */
   pushDoc() {
     // Serialising a big file costs far more than the send; skip it when nobody is listening.
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== WebSocket.OPEN || !useChat.getState().chatFile) return;
     try {
       this.send({ type: "doc", doc: getEngine().save() });
     } catch {
@@ -169,11 +199,26 @@ class BridgeClient {
   chat(prompt: string, sessionId: string | null, attachments: Attachment[] = []) {
     this.liveText = null;
     this.turnError = false;
+    this.detached = false;
+    this.turnFile = useChat.getState().chatFile;
     this.send({ type: "chat", prompt, sessionId, attachments, turn: ++this.turn });
   }
 
   cancel() {
     this.send({ type: "chat_cancel" });
+  }
+
+  /** Forgets the current turn (see `detached`). */
+  detach() {
+    this.detached = true;
+    this.liveText = null;
+    this.toolChips.clear();
+  }
+
+  /** Whether a message of turn `turn` (absent from an older bridge: the current one) is still
+   *  wanted. */
+  private wanted(turn: unknown): boolean {
+    return !this.detached && (typeof turn !== "number" || turn === this.turn);
   }
 
   private async onMessage(m: any) {
@@ -182,13 +227,25 @@ class BridgeClient {
         useChat.setState({ claude: { available: !!m.claude?.available, version: m.claude?.version, workspace: m.workspace } });
         break;
       case "tool_call": {
-        // Not in the middle of the person's drag: the drag's next step would undo this call.
-        // `group`: calls of one chat turn share it, so the turn is one undo step.
-        const out: ToolOutcome = (await whenCanvasIdle())
-          ? await executeTool(m.name, m.input, { group: typeof m.group === "string" ? m.group : undefined })
-          : { ok: false, result: DRAG_BUSY };
+        // `group`: calls of one chat turn share it (`chat-<tab>-<turn>`), so the turn is one undo step.
+        const group = typeof m.group === "string" ? m.group : undefined;
+        const chatTurn = group?.match(/^chat-\d+-(\d+)$/)?.[1];
+        // A call of a turn that has ended (its file closed, a new conversation, a newer turn) must
+        // not land in whatever is open now.
+        const ended = () => chatTurn !== undefined && (this.detached || Number(chatTurn) !== this.turn);
+        let out: ToolOutcome;
+        if (ended()) out = { ok: false, result: LEFT_FILE };
+        // A terminal's Claude Code has no chat turn: with the editor on the start screen there is
+        // no file to work on (the engine behind it is the last file's).
+        else if (chatTurn === undefined && !useChat.getState().chatFile) {
+          out = { ok: false, result: "No design file is open in the editor; ask the person to open one." };
+        } else if (!(await whenCanvasIdle())) {
+          // Not in the middle of the person's drag: the drag's next step would undo this call.
+          out = { ok: false, result: DRAG_BUSY };
+        } else if (ended()) out = { ok: false, result: LEFT_FILE };
+        else out = await executeTool(m.name, m.input, { group, ...(chatTurn !== undefined ? { fileId: this.turnFile } : {}) });
         this.send({ type: "tool_result", id: m.id, ok: out.ok, result: out.result, image: out.image ?? null });
-        showScreenshot(out);
+        if (chatTurn === undefined || !ended()) showScreenshot(out, m.name);
         break;
       }
       case "send_doc":
@@ -196,17 +253,20 @@ class BridgeClient {
         this.pushDoc();
         break;
       case "chat_event":
+        if (!this.wanted(m.turn)) break;
         this.onClaudeEvent(m.event);
         break;
       case "chat_done":
         // A late reply from an earlier turn (its process exiting after a newer turn began).
-        if (m.turn != null && m.turn !== this.turn) break;
+        if (!this.wanted(m.turn)) break;
         if (m.sessionId) useChat.setState({ sessionId: m.sessionId });
         useChat.setState({ running: false });
         this.liveText = null;
         break;
       case "chat_error":
-        if (m.turn != null && m.turn !== this.turn) break;
+        if (!this.wanted(m.turn)) break;
+        // The session this conversation was resuming is gone: once more, in a new one.
+        if (/No conversation found/i.test(String(m.message)) && resumeFailed()) break;
         // A non-zero exit after an error we already explained adds nothing.
         if (!this.turnError) this.reportError(String(m.message));
         useChat.setState({ running: false });
@@ -217,6 +277,7 @@ class BridgeClient {
         onPreviewMessage(m);
         break;
       case "log":
+        if (!this.wanted(m.turn)) break;
         push({ kind: "system", text: m.message });
         break;
     }
@@ -273,21 +334,33 @@ class BridgeClient {
       for (const block of e.message?.content ?? []) {
         if (block.type === "tool_result") {
           const chip = this.toolChips.get(block.tool_use_id);
-          if (chip) patchItem(chip, { ok: !block.is_error });
+          if (chip) patchItem(chip, block.is_error ? { ok: false, detail: toolText(block.content) } : { ok: true });
         }
       }
       return;
     }
     if (e.type === "result") {
+      // The CLI no longer has the session this conversation resumes: its whole answer is this one
+      // error result (no `result` text). The same message goes out again in a new session; the
+      // old turn's chat_error and chat_done are then dropped as an older turn.
+      const lost = e.is_error && /No conversation found/i.test(JSON.stringify(e.errors ?? e.result ?? ""));
+      if (lost && resumeFailed()) return;
       if (e.session_id) useChat.setState({ sessionId: e.session_id });
       if (e.is_error && e.result && !this.turnError) this.reportError(String(e.result));
       // The cost is what the turn would cost on the API; Pro/Max plans aren't billed for it.
       const title = typeof e.total_cost_usd === "number" ? `$${e.total_cost_usd.toFixed(3)} API-equivalent, not billed on Pro/Max` : undefined;
-      push({ kind: "system", text: `Done in ${((e.duration_ms ?? 0) / 1000).toFixed(1)}s`, title });
+      push({ kind: "system", text: `${e.is_error ? "Failed after" : "Done in"} ${((e.duration_ms ?? 0) / 1000).toFixed(1)}s`, title });
       // The turn is over at its result, even if the CLI process takes a moment to exit.
       useChat.setState({ running: false });
     }
   }
+}
+
+/** The text of a tool_result block's content (a string, or a list of text blocks), short. */
+function toolText(content: unknown): string | undefined {
+  const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((c: any) => (typeof c?.text === "string" ? c.text : "")).join(" ") : "";
+  const t = text.replace(/\s+/g, " ").trim();
+  return t ? t.slice(0, 300) : undefined;
 }
 
 function isApiError(text: string): boolean {

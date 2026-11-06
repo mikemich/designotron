@@ -16,6 +16,9 @@ import {
   MODELS,
   attachImage,
   newConversation,
+  patchItem,
+  push,
+  registerComposer,
   removeImage,
   discardQueued,
   send,
@@ -27,6 +30,7 @@ import {
   useChat,
   useQueueConfirm,
 } from "./chatState";
+import { bridgeHttpBase } from "./bridgeClient";
 import { getDoc, toast, useStore } from "../store";
 import { Menu, MOD, Seg, SelectField, type MenuItem } from "../ui/controls";
 import { imagesFrom } from "./images";
@@ -134,6 +138,8 @@ export function ChatPanel() {
   const hasSelection = useStore((s) => s.es.selection.length > 0);
   const hasContent = useStore((s) => !!getDoc().pages.find((p) => p.id === s.es.page)?.children.length);
   const [text, setText] = useState("");
+  const textRef = useRef("");
+  textRef.current = text;
   const [settings, setSettings] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -153,8 +159,27 @@ export function ChatPanel() {
     [],
   );
 
+  // Unsent text survives closing the panel and leaving the file (it goes to the file's draft).
+  useEffect(() => {
+    registerComposer(() => textRef.current);
+    return () => {
+      registerComposer(null);
+      const t = textRef.current;
+      if (t.trim() && useChat.getState().chatFile) useChat.setState((s) => ({ draft: s.draft ? `${s.draft}\n\n${t}` : t }));
+    };
+  }, []);
+  const lastUser = items.reduce((n, it, i) => (it.kind === "user" ? i : n), -1);
   const queued = useChat((s) => s.queued);
+  const draft = useChat((s) => s.draft);
   const staleQueue = useQueueConfirm((s) => s.stale);
+  // Text returned by Stop (a message that was queued) or kept from the last visit to this file
+  // goes in front of whatever is typed.
+  useEffect(() => {
+    if (!draft) return;
+    useChat.setState({ draft: "" });
+    setText((t) => (t.trim() ? `${draft}\n\n${t}` : draft));
+    inputRef.current?.focus();
+  }, [draft]);
   const submit = () => {
     if (!text.trim()) return;
     // A new message replaces a queued one that was waiting for confirmation.
@@ -170,7 +195,9 @@ export function ChatPanel() {
   const connectCard = !ready && !(mode === "bridge" && bridgeStatus === "connecting");
 
   const addImages = async (list: DataTransferItemList | FileList | null) => {
-    for (const img of await imagesFrom(list)) attachImage(img.url, img.name);
+    const { images, errors } = await imagesFrom(list);
+    for (const img of images) attachImage(img.url, img.name);
+    for (const text of errors) push({ kind: "error", text });
   };
 
   const quickItems: MenuItem[] = QUICK_ACTIONS.map((a) => ({
@@ -188,7 +215,7 @@ export function ChatPanel() {
           const pos = at >= 0 ? at : a.prompt.length;
           el.setSelectionRange(pos, pos);
         }, 0);
-      } else send(a.prompt);
+      } else send(a.prompt, { label: a.label });
     },
   }));
 
@@ -331,8 +358,8 @@ export function ChatPanel() {
                 <br />
                 Use it from your terminal too:{" "}
                 <code>
-                  claude mcp add --transport http designotron
-                  http://127.0.0.1:5174/mcp
+                  claude mcp add --transport http designotron{" "}
+                  {bridgeHttpBase()}/mcp
                 </code>
               </div>
             )}
@@ -359,7 +386,7 @@ export function ChatPanel() {
             </div>
           </>
         )}
-        {items.map((it) =>
+        {items.map((it, idx) =>
           it.kind === "tool" ? (
             <div
               key={it.id}
@@ -393,6 +420,18 @@ export function ChatPanel() {
                 </div>
               ) : null}
               {it.kind === "assistant" ? <Markdown text={it.text} /> : it.text}
+              {it.kind === "error" && it.retry && !running && idx > lastUser && (
+                <button
+                  className="btn small retry-btn"
+                  onClick={() => {
+                    // One click: the button goes, so nothing is queued twice while offline.
+                    patchItem(it.id, { retry: undefined, retryLabel: undefined });
+                    send(it.retry!, { label: it.retryLabel });
+                  }}
+                >
+                  Retry
+                </button>
+              )}
             </div>
           ),
         )}
@@ -645,7 +684,7 @@ function ConnectCard({ alone }: { alone: boolean }) {
           Use my saved API key instead
         </button>
       )}
-      <details open={mode === "bridge" && !queued && !isPhone()}>
+      <details open={alone && mode === "bridge" && !queued && !isPhone()}>
         <summary>
           <b>Have Claude Pro or Max?</b> Use it at no extra cost
         </summary>
