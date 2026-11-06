@@ -251,13 +251,42 @@ const joinText = (...parts: (string | null | undefined)[]) => parts.filter((p) =
 /** A view-only tab (or a viewer) never writes the conversation: the editing tab owns it. */
 const readOnlyNow = () => !!useStore.getState().es.readOnly || useCollab.getState().viewer;
 
-function saveNow() {
+/** When the first change since the last write happened (a long streaming turn is still saved
+ *  within `MAX_WAIT_MS`, though it keeps changing). */
+let pendingSince = 0;
+const DEBOUNCE_MS = 500;
+const MAX_WAIT_MS = 5000;
+
+function scheduleSave() {
+  pendingSince ||= Date.now();
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => saveNow(), Math.max(0, Math.min(DEBOUNCE_MS, pendingSince + MAX_WAIT_MS - Date.now())));
+}
+
+/** Writes the conversation if it changed since it was read or last written. `force`: also when the
+ *  tab has just become read-only (what it did until that moment is still its own to save). */
+function saveNow(opts: { force?: boolean } = {}) {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = null;
+  pendingSince = 0;
   const s = useChat.getState();
-  if (!dirty || !s.chatFile || loadedFor !== s.chatFile || readOnlyNow()) return;
+  if (!dirty || !s.chatFile || loadedFor !== s.chatFile || (readOnlyNow() && !opts.force)) return;
   dirty = false;
-  void saveConversation(s.chatFile, serialize(s.items, s.sessionId, s.draft));
+  const file = s.chatFile;
+  void saveConversation(file, serialize(s.items, s.sessionId, s.draft)).then(() => chatCh?.postMessage({ fileId: file }));
+}
+
+/** Tells other tabs a conversation was written, so a tab showing the same file (a view-only one,
+ *  or the one that takes over) reads it again when it isn't busy itself. */
+let chatCh: BroadcastChannel | null = null;
+try {
+  chatCh = new BroadcastChannel("dt-chat");
+  chatCh.onmessage = (ev) => {
+    const s = useChat.getState();
+    if (ev.data?.fileId && ev.data.fileId === s.chatFile && !dirty && !s.running) reloadConversation();
+  };
+} catch {
+  /* no BroadcastChannel */
 }
 
 // A conversation is kept shortly after it changes (and at once when its file closes).
@@ -265,20 +294,30 @@ useChat.subscribe((s, prev) => {
   if (!s.chatFile || s.chatFile !== prev.chatFile || loadedFor !== s.chatFile) return;
   if (s.items === prev.items && s.sessionId === prev.sessionId && s.draft === prev.draft) return;
   dirty = true;
-  if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(saveNow, 500);
+  scheduleSave();
 });
-if (typeof window !== "undefined") window.addEventListener("pagehide", saveNow);
+if (typeof window !== "undefined") window.addEventListener("pagehide", () => saveNow());
 
-// A file deleted (here or in another tab) loses its conversation: don't write it back.
+// A file deleted (here or in another tab) loses its conversation: don't write it back. If the
+// editor keeps the file after all ("Keep it"), this visit's conversation is saved again.
+let deletedFile: string | null = null;
 try {
   const ch = new BroadcastChannel("dt-files");
   ch.onmessage = (ev) => {
-    if (ev.data?.deleted && ev.data.fileId === useChat.getState().chatFile) {
+    const file = useChat.getState().chatFile;
+    if (!file || ev.data?.fileId !== file) return;
+    if (ev.data.deleted) {
+      deletedFile = file;
       loadedFor = null;
       dirty = false;
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = null;
+      pendingSince = 0;
+    } else if (deletedFile === file && loadedFor === null) {
+      deletedFile = null;
+      loadedFor = file;
+      dirty = true;
+      scheduleSave();
     }
   };
 } catch {
@@ -314,7 +353,7 @@ function load(id: string, token: number, merge: boolean): Promise<void> {
     loadedFor = id;
     // Whatever was added while reading is saved after the stored part.
     dirty = merge && (now.items.length > 0 || !!now.draft);
-    if (dirty) saveTimer = setTimeout(saveNow, 500);
+    if (dirty) scheduleSave();
   });
 }
 
@@ -387,10 +426,16 @@ const rightsChanged = () => {
       dropTurn();
       push({ kind: "system", text: "Stopped: you can no longer edit this file here." });
     }
+    // Everything up to this moment is this tab's to save (the editing tab reads it when it takes
+    // over); the tab is read-only already, so the usual guard is skipped.
+    saveNow({ force: true });
   } else reloadConversation();
 };
 let rightsHooked = false;
-/** (Not at load: `collab` imports this module's neighbours, so its store doesn't exist yet.) */
+/** (Not at load: this module and `collab` import each other through `bridgeClient`, a cycle that is
+ *  safe only while each is used at run time, not while loading; `useCollab` doesn't exist yet then.)
+ *  Losing the right to edit stops the turn here even when the hand-off was refused elsewhere
+ *  ("Edit here anyway" can force it), because from then on this tab's calls would be refused. */
 function hookRights() {
   if (rightsHooked) return;
   rightsHooked = true;

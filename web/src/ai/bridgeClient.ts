@@ -340,6 +340,11 @@ class BridgeClient {
       return;
     }
     if (e.type === "result") {
+      // The CLI no longer has the session this conversation resumes: its whole answer is this one
+      // error result (no `result` text). The same message goes out again in a new session; the
+      // old turn's chat_error and chat_done are then dropped as an older turn.
+      const lost = e.is_error && /No conversation found/i.test(JSON.stringify(e.errors ?? e.result ?? ""));
+      if (lost && resumeFailed()) return;
       if (e.session_id) useChat.setState({ sessionId: e.session_id });
       if (e.is_error && e.result && !this.turnError) this.reportError(String(e.result));
       // The cost is what the turn would cost on the API; Pro/Max plans aren't billed for it.

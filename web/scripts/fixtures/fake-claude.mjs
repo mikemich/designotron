@@ -23,9 +23,12 @@ if (argv.includes("--version")) {
   process.exit(0);
 }
 
-// Like the CLI, resuming a session it doesn't have fails at once with this message on stderr.
+// Like the CLI, resuming a session it doesn't have fails at once: one error result on stdout (no
+// `result` text, the message in `errors`), the same message on stderr, exit code 1.
 if (argv.includes("--resume=missing-session") || (argv.includes("--resume") && argv[argv.indexOf("--resume") + 1] === "missing-session")) {
-  console.error("No conversation found with session ID: missing-session");
+  const message = "No conversation found with session ID: missing-session";
+  console.log(JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, session_id: "missing-session", errors: [message] }));
+  console.error(message);
   process.exit(1);
 }
 

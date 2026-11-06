@@ -480,11 +480,19 @@ try {
   await until(async () => (await chat(tab3)).items.length > 0, 8000);
   await say(page, "third of three [calls=8][delay=700][tag=T3]");
   await until(async () => (await chat(page)).running, 5000);
+  await until(async () => (await count(page, "T3-")) >= 2, 8000);
   await tab3.getByRole("button", { name: "Edit here instead" }).click();
   check("the other tab becomes the editing tab", await until(async () => !(await tab3.evaluate(() => !!window.__dt.state().readOnly)), 15000));
   check("the tab that lost the file stops its turn and says so", await until(async () => !(await chat(page)).running && /no longer edit this file/.test((await itemsText(page)).join("|")), 15000), (await itemsText(page)).slice(-3).join("|"));
   await sleep(1000);
-  check("the new editing tab has the conversation of the old one", /second of two/.test((await itemsText(tab3)).join("|")), (await itemsText(tab3)).slice(-3).join("|"));
+  check(
+    "the new editing tab shows the stop note and the last tool chips of the old one",
+    await until(async () => {
+      const t = (await itemsText(tab3)).join("|");
+      return /second of two/.test(t) && /no longer edit this file/.test(t) && /tool:create_nodes\|system:Stopped: you can no longer/.test(t);
+    }, 6000),
+    (await itemsText(tab3)).slice(-4).join("|"),
+  );
   await tab3.close();
 
   // ===== L-05: a page loaded while the bridge is down finds it once it starts =====
