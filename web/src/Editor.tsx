@@ -135,6 +135,9 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const toast = useStore((s) => s.toast);
   const variablesOpen = useStore((s) => s.variablesOpen);
   const figmaOpen = useStore((s) => s.figmaOpen);
+  // The Figma import dialog belongs to this file: leaving the file closes it (it stays open to
+  // show import warnings, and must not reappear over the next file).
+  useEffect(() => () => useStore.setState({ figmaOpen: false }), []);
   const pluginsOpen = usePlugins((s) => s.dialogOpen);
   const shareOpen = useCollab((s) => s.dialogOpen);
   const [ready, setReady] = useState(false);
