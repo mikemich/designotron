@@ -1,6 +1,6 @@
 import * as A from "../actions";
 import { dispatch, getDoc, query, selection, toast, useStore, zoomToSelection } from "../store";
-import { ALT, MOD, SHIFT, type MenuItem } from "../ui/controls";
+import { MOD, SHIFT, type MenuItem, ALT_MOD, FRONT_MOD, SHIFT_MOD } from "../ui/controls";
 import { assetDataUrl } from "../assets";
 import { askClaude } from "../ai/chatState";
 import { rasterize } from "../ai/images";
@@ -183,10 +183,10 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   const items: MenuItem[] = [
     { label: "Copy", kbd: `${MOD}C`, onClick: copySelection },
     { label: "Paste here", kbd: `${MOD}V`, onClick: () => pasteHere(at.x, at.y) },
-    { label: "Paste over selection", kbd: `${SHIFT}${MOD}V`, onClick: pasteOverSelection },
-    { label: "Paste to replace", kbd: `${SHIFT}${MOD}R`, onClick: pasteReplace },
-    { label: "Copy properties", kbd: `${ALT}${MOD}C`, onClick: A.copyProperties },
-    { label: "Paste properties", kbd: `${ALT}${MOD}V`, onClick: A.pasteProperties },
+    { label: "Paste over selection", kbd: `${SHIFT_MOD}V`, onClick: pasteOverSelection },
+    { label: "Paste to replace", kbd: `${SHIFT_MOD}R`, onClick: pasteReplace },
+    { label: "Copy properties", kbd: `${ALT_MOD}C`, onClick: A.copyProperties },
+    { label: "Paste properties", kbd: `${ALT_MOD}V`, onClick: A.pasteProperties },
     { heading: "Copy as" },
     { label: "Copy as PNG", disabled: !one, onClick: () => one && copyAsPng(one.id) },
     { label: "Copy as SVG", disabled: !one, onClick: () => one && copyAsSvg(one.id) },
@@ -195,16 +195,16 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
     { label: "Duplicate", kbd: `${MOD}D`, onClick: A.duplicate },
     { label: "Delete", kbd: "⌫", onClick: A.deleteSelection },
     { sep: true },
-    { label: "Bring to front", kbd: `${ALT}${MOD}]`, onClick: () => A.reorder("front") },
+    { label: "Bring to front", kbd: `${FRONT_MOD}]`, onClick: () => A.reorder("front") },
     { label: "Bring forward", kbd: `${MOD}]`, onClick: () => A.reorder("forward") },
     { label: "Send backward", kbd: `${MOD}[`, onClick: () => A.reorder("backward") },
-    { label: "Send to back", kbd: `${ALT}${MOD}[`, onClick: () => A.reorder("back") },
+    { label: "Send to back", kbd: `${FRONT_MOD}[`, onClick: () => A.reorder("back") },
     { sep: true },
     { label: "Group selection", kbd: `${MOD}G`, onClick: A.group },
-    { label: "Frame selection", kbd: `${ALT}${MOD}G`, onClick: A.frameSelection },
+    { label: "Frame selection", kbd: `${ALT_MOD}G`, onClick: A.frameSelection },
   ];
-  if (nodes.some((n) => ["group", "frame"].includes(n.type))) items.push({ label: "Ungroup", kbd: `${SHIFT}${MOD}G`, onClick: A.ungroup });
-  items.push({ label: one?.isMask ? "Remove mask" : "Use as mask", kbd: `${ALT}${MOD}M`, onClick: A.useAsMask });
+  if (nodes.some((n) => ["group", "frame"].includes(n.type))) items.push({ label: "Ungroup", kbd: `${SHIFT_MOD}G`, onClick: A.ungroup });
+  items.push({ label: one?.isMask ? "Remove mask" : "Use as mask", kbd: `${ALT_MOD}M`, onClick: A.useAsMask });
   if (nodes.length > 1) {
     items.push({ heading: "Boolean" });
     items.push({ label: "Union", onClick: () => A.booleanOp("union") });
@@ -213,11 +213,11 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
     items.push({ label: "Exclude", onClick: () => A.booleanOp("exclude") });
   }
   if (nodes.some((n) => n.type !== "text")) items.push({ label: "Flatten", kbd: `${MOD}E`, onClick: A.flatten });
-  if (nodes.some((n) => n.strokeWeight > 0 && n.strokes.some((p) => p.visible))) items.push({ label: "Outline stroke", kbd: `${SHIFT}${MOD}O`, onClick: A.outlineStroke });
+  if (nodes.some((n) => n.strokeWeight > 0 && n.strokes.some((p) => p.visible))) items.push({ label: "Outline stroke", kbd: `${SHIFT_MOD}O`, onClick: A.outlineStroke });
   items.push({ label: "Add auto layout", kbd: `${SHIFT}A`, onClick: A.addAutoLayout });
   if (nodes.length > 1 && nodes.every((n) => !n.parent)) items.push({ label: "Tidy up", kbd: TIDY_KBD, onClick: A.tidyUp });
   items.push({ heading: "Select" });
-  items.push({ label: "Select matching layers", kbd: `${ALT}${MOD}A`, onClick: A.selectMatching });
+  items.push({ label: "Select matching layers", kbd: `${ALT_MOD}A`, onClick: A.selectMatching });
   for (const [prop, label] of SAME_PROPS) items.push({ label, onClick: () => A.selectSame(prop) });
   if (one && ["component", "instance", "componentSet"].includes(one.type)) {
     items.push({ label: "Select all instances", onClick: () => A.selectInstances(false) });
@@ -229,7 +229,7 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
     for (const pg of others) items.push({ label: `Move to ${pg.name}`, onClick: () => A.moveToPage(sel, pg.id) });
   }
   items.push({ sep: true });
-  if (!nodes.some((n) => n.type === "component" || n.type === "instance")) items.push({ label: "Create component", kbd: `${ALT}${MOD}K`, onClick: A.createComponent });
+  if (!nodes.some((n) => n.type === "component" || n.type === "instance")) items.push({ label: "Create component", kbd: `${ALT_MOD}K`, onClick: A.createComponent });
   if (nodes.length > 1 && nodes.every((n) => n.type === "component")) items.push({ label: "Combine as variants", onClick: A.combineVariants });
   if (one && (one.type === "component" || one.type === "componentSet")) items.push({ label: "Add variant", onClick: () => addVariant(one) });
   if (nodes.every((n) => n.type === "instance")) {
@@ -239,11 +239,11 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   if (one?.type === "instance") {
     items.push({ label: "Go to main component", onClick: () => one.instance && dispatch({ op: "select", ids: [one.instance.componentId] }) && zoomToSelection() });
     items.push({ label: "Reset all overrides", onClick: () => dispatch({ op: "resetInstance", ids: [one.id] }) });
-    items.push({ label: "Detach instance", kbd: `${ALT}${MOD}B`, onClick: A.detachInstance });
+    items.push({ label: "Detach instance", kbd: `${ALT_MOD}B`, onClick: A.detachInstance });
   }
   items.push({ sep: true });
-  items.push({ label: "Show/Hide", kbd: `${SHIFT}${MOD}H`, onClick: () => A.toggleVisibility() });
-  items.push({ label: "Lock/Unlock", kbd: `${SHIFT}${MOD}L`, onClick: () => A.toggleLock() });
+  items.push({ label: "Show/Hide", kbd: `${SHIFT_MOD}H`, onClick: () => A.toggleVisibility() });
+  items.push({ label: "Lock/Unlock", kbd: `${SHIFT_MOD}L`, onClick: () => A.toggleLock() });
   items.push({ label: "Flip horizontal", kbd: `${SHIFT}H`, onClick: () => A.flip(true) });
   items.push({ label: "Flip vertical", kbd: `${SHIFT}V`, onClick: () => A.flip(false) });
   items.push({ sep: true });

@@ -55,7 +55,7 @@ const fillOf = (n) => n?.fills?.[0]?.color;
 /** The selected frame, fresh from the document. */
 const frame = async () => (await doc()).nodes[(await sel())[0]];
 const deviceSection = () => p.locator(".section:has(.section-head:has-text('Device'))");
-const theme = (label) => p.locator(`[role=group][aria-label=Theme] button:has-text("${label}")`);
+const theme = (label) => p.locator(`[role=group][aria-label='System UI'] button:has-text("${label}")`);
 const checkbox = (label) => p.locator(`label:has-text("${label}") input[type=checkbox]`);
 
 try {

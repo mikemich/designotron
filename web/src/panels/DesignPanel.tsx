@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 import type { Effect, ExportSetting, LayoutGrid, Node, Paint, VarKind } from "../types";
 import { dispatch, FONTS, getDoc, styleTextSelection, useDoc, useSelection, useStore } from "../store";
-import { ALT, common, IconButton, MIXED, MOD, NumberField, Section, Seg, SelectField, SHIFT, type Maybe } from "../ui/controls";
+import { ALT, common, IconButton, MIXED, MOD, NumberField, Section, Seg, SelectField, SHIFT, type Maybe, ALT_MOD } from "../ui/controls";
 import { paintLabel, PaintSwatch, cssColor, ColorPicker } from "../ui/color";
 import { DEFAULT_EXPORT, exportLayers, rowSuffix } from "../exporter";
 import * as A from "../actions";
@@ -142,7 +142,7 @@ function PagePanel() {
         <div className="muted small" style={{ lineHeight: 1.7 }}>
           F frame · R rectangle · O ellipse · T text · P pen · L line
           <br />
-          {`${SHIFT}A auto layout · ${ALT}${MOD}K component · ${MOD}G group`}
+          {`${SHIFT}A auto layout · ${ALT_MOD}K component · ${MOD}G group`}
           <br />
           {`Space+drag to pan · ${MOD}scroll to zoom · ${SHIFT}1 fit`}
           <br />

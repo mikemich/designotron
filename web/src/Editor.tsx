@@ -19,7 +19,7 @@ import { PhoneNote } from "./panels/PhoneNote";
 import { DemoOverlay, stopDemo } from "./Demo";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
-import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, useStore, zoomToFit, dispatch } from "./store";
+import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, saveHook, useStore, zoomToFit, dispatch } from "./store";
 import { focusCanvas } from "./ui/controls";
 import {
   canSaveDelta,
@@ -511,6 +511,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       }, delay());
     };
 
+    saveHook.flush = flush;
     const off = onDocChange(() => {
       // Selection and page changes move the revision but not the document.
       const rev = docRev();
@@ -596,6 +597,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
         closing.set(fileId, writing);
       }
       closed = true;
+      if (saveHook.flush === flush) saveHook.flush = null;
       tabs?.close();
     };
   }, [ready, fileId]);

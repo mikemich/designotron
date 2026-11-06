@@ -424,6 +424,11 @@ export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(
 export const MOD = isMac ? "⌘" : "Ctrl+";
 export const ALT = isMac ? "⌥" : "Alt+";
 export const SHIFT = isMac ? "⇧" : "Shift+";
+/** Command chords as the platform writes them: ⌥⌘K on a Mac, Ctrl+Alt+K elsewhere. */
+export const ALT_MOD = isMac ? "⌥⌘" : "Ctrl+Alt+";
+export const SHIFT_MOD = isMac ? "⇧⌘" : "Ctrl+Shift+";
+/** Bring to front / send to back: ⌥⌘] on a Mac, Ctrl+Shift+] elsewhere (where Ctrl+Alt is AltGr). */
+export const FRONT_MOD = isMac ? "⌥⌘" : "Ctrl+Shift+";
 
 /** Closes a dialog on Escape, unless a menu inside it is open (the menu closes first).
  *  Listens only while `enabled`, so a closed dialog never swallows the editor's Escape. */

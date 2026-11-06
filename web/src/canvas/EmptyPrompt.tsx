@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { Loader2, Sparkles } from "lucide-react";
+import { Loader2, Sparkles, X } from "lucide-react";
 import { askClaude, claudeReady, discardQueued, sendQueued, useChat, useQueueConfirm } from "../ai/chatState";
 import { playDemo } from "../Demo";
 import { TEMPLATES } from "../templates";
-import { dispatch, zoomToFit } from "../store";
+import { closeEmptyPrompt, dispatch, zoomToFit } from "../store";
 
 const IDEAS = ["A landing page for a coffee subscription", "A habit tracker mobile app, 3 screens", "An admin dashboard for an online store"];
 
@@ -11,7 +11,7 @@ const IDEAS = ["A landing page for a coffee subscription", "A habit tracker mobi
 const preview = (q: string) => (q.length > 160 ? q.slice(0, 160) + "…" : q);
 
 /** Shown on an empty page: describe a design for Claude, or start from a template. */
-export function EmptyPrompt() {
+export function EmptyPrompt({ pageId }: { pageId: string }) {
   const [text, setText] = useState("");
   const ready = useChat((s) => claudeReady(s));
   const queued = useChat((s) => s.queued);
@@ -26,6 +26,9 @@ export function EmptyPrompt() {
   };
   return (
     <div className="empty-prompt" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+      <button className="ibtn empty-close" aria-label="Close" title="Close (Esc)" onClick={() => closeEmptyPrompt(pageId)}>
+        <X size={14} />
+      </button>
       {running ? (
         <div role="status">
           <div className="empty-title">
@@ -73,6 +76,10 @@ export function EmptyPrompt() {
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
               e.stopPropagation();
+              if (e.key === "Escape") {
+                closeEmptyPrompt(pageId);
+                return;
+              }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 send(text);
