@@ -29,7 +29,7 @@ import {
   Radius,
   Blend,
 } from "lucide-react";
-import type { Effect, ExportSetting, LayoutGrid, Node, Paint, VarKind } from "../types";
+import type { Effect, ExportSetting, LayoutGrid, Node, Paint, TextProps, VarKind } from "../types";
 import { dispatch, FONTS, getDoc, styleTextSelection, useDoc, useSelection, useStore } from "../store";
 import { ALT, common, IconButton, MIXED, MOD, NumberField, Section, Seg, SelectField, SHIFT, type Maybe, ALT_MOD, SHIFT_MOD } from "../ui/controls";
 import { paintLabel, PaintSwatch, cssColor, ColorPicker } from "../ui/color";
@@ -42,6 +42,9 @@ import { DeviceSection, isDeviceTarget, resizeToPreset } from "./DeviceSection";
 import { PresetPicker } from "./PresetPicker";
 import { ApplyStyleButton, BoundChip, CreateStyleButton, StyleChip } from "./StyleControls";
 import { inScope } from "./variableScopes";
+import { groupOffset } from "./groupOffset";
+import { rangeValue } from "./textRange";
+import { parseLetterSpacing, parseLineHeight } from "./textUnits";
 
 const begin = () => dispatch({ op: "beginGesture" });
 const end = () => dispatch({ op: "endGesture" });
@@ -308,12 +311,29 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
     ...(canHug ? [{ value: "hug" as const, label: "Hug" }] : []),
     { value: "fill" as const, label: "Fill" },
   ];
+  // X/Y of a layer inside groups are measured from its frame (or the page), like Figma.
+  const off = (n: Node) => groupOffset(doc.nodes, n);
+  const scrubbing = useRef(false);
+  const scrubStart = () => {
+    scrubbing.current = true;
+    begin();
+  };
+  const scrubEnd = () => {
+    scrubbing.current = false;
+    end();
+  };
+  const setPos = (axis: "x" | "y", value: number) => {
+    const wrap = nodes.length > 1 && !scrubbing.current;
+    if (wrap) begin();
+    for (const n of nodes) update([n.id], { [axis]: value - off(n)[axis] });
+    if (wrap) end();
+  };
   return (
     <Section title="Position & size">
       {tool === "scale" && <ScaleField ids={ids} />}
       <div className="grid2">
-        <NumberField label="X" ariaLabel="X position" value={common(nodes, (n) => n.x)} onChange={(x) => update(ids, { x })} onScrubStart={begin} onScrubEnd={end} />
-        <NumberField label="Y" ariaLabel="Y position" value={common(nodes, (n) => n.y)} onChange={(y) => update(ids, { y })} onScrubStart={begin} onScrubEnd={end} />
+        <NumberField label="X" ariaLabel="X position" value={common(nodes, (n) => n.x + off(n).x)} onChange={(x) => setPos("x", x)} onScrubStart={scrubStart} onScrubEnd={scrubEnd} />
+        <NumberField label="Y" ariaLabel="Y position" value={common(nodes, (n) => n.y + off(n).y)} onChange={(y) => setPos("y", y)} onScrubStart={scrubStart} onScrubEnd={scrubEnd} />
         <NumberField
           label="W"
           ariaLabel="Width"
@@ -338,16 +358,16 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           <SelectField
             label="W"
             ariaLabel="Width sizing"
-            value={common(nodes, (n) => n.sizingH)}
+            value={common(nodes, (n) => (n.type === "text" ? textSizing(n, "h") : n.sizingH))}
             options={sizingOptions}
-            onChange={(sizingH) => update(ids, { sizingH })}
+            onChange={(sizingH) => updateEach(nodes, (n) => (n.type === "text" ? setTextSizing(n, "h", sizingH) : { sizingH }))}
           />
           <SelectField
             label="H"
             ariaLabel="Height sizing"
-            value={common(nodes, (n) => n.sizingV)}
+            value={common(nodes, (n) => (n.type === "text" ? textSizing(n, "v") : n.sizingV))}
             options={sizingOptions}
-            onChange={(sizingV) => update(ids, { sizingV })}
+            onChange={(sizingV) => updateEach(nodes, (n) => (n.type === "text" ? setTextSizing(n, "v", sizingV) : { sizingV }))}
           />
         </div>
       )}
@@ -432,6 +452,33 @@ const LIMITS = [
 ] as const;
 
 /** Min and max width/height: hug and fill stop at them, auto-width text wraps at the max. */
+type Sizing = "fixed" | "hug" | "fill";
+
+/** What a text layer's W or H sizing shows: its resize mode decides the size unless it fills the auto layout. */
+function textSizing(n: Node, axis: "h" | "v"): Sizing {
+  if ((axis === "h" ? n.sizingH : n.sizingV) === "fill") return "fill";
+  const mode = n.text!.autoResize;
+  return (axis === "h" ? mode === "width" : mode !== "none") ? "hug" : "fixed";
+}
+
+/** The patch that gives a text layer a sizing on one axis, keeping `text.autoResize` in step. */
+function setTextSizing(n: Node, axis: "h" | "v", sizing: Sizing): Record<string, unknown> {
+  const key = axis === "h" ? "sizingH" : "sizingV";
+  if (sizing === "fill") return { [key]: "fill" };
+  const mode = n.text!.autoResize;
+  let autoResize = mode;
+  if (axis === "h") autoResize = sizing === "hug" ? "width" : mode === "width" ? "height" : mode;
+  else autoResize = sizing === "hug" ? (mode === "none" ? "height" : mode) : "none";
+  return { [key]: "fixed", text: { autoResize } };
+}
+
+/** One patch per layer (they differ), as a single undo step. */
+function updateEach(nodes: Node[], patch: (n: Node) => Record<string, unknown>) {
+  if (nodes.length > 1) begin();
+  for (const n of nodes) update([n.id], patch(n));
+  if (nodes.length > 1) end();
+}
+
 function MinMaxFields({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const anySet = nodes.some((n) => LIMITS.some((l) => n[l.key] != null));
   const [shown, setShown] = useState(false);
@@ -712,12 +759,22 @@ function weightOptions(v: Maybe<number>) {
 
 function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const t = (f: (n: Node) => unknown) => common(nodes, (n) => f(n));
-  // A layer-wide value is "Mixed" when a styled range overrides it with something else.
-  const r = <K extends "fontFamily" | "fontWeight" | "fontSize" | "letterSpacing">(key: K) => {
+  const sel = useStore((s) => s.textSel);
+  const editing = useStore((s) => s.editingText);
+  const partial = !!sel && sel.id === editing && sel.end > sel.start && nodes.length === 1 && nodes[0].id === sel.id;
+  // With characters selected the fields show those characters' values; otherwise a layer-wide value
+  // is "Mixed" when a styled range overrides it with something else.
+  const r = <K extends "fontFamily" | "fontWeight" | "fontSize" | "letterSpacing" | "italic" | "decoration">(key: K) => {
+    if (partial) return rangeValue(nodes[0].text!, sel!.start, sel!.end, key) as Maybe<TextProps[K]>;
     const v = common(nodes, (n) => n.text![key]);
     if (v === MIXED) return v;
     const ranged = nodes.some((n) => (n.text!.runs ?? []).some((run) => run[key] !== undefined && (run[key] as unknown) !== v));
     return ranged ? MIXED : v;
+  };
+  /** The size that % and em in the line height and letter spacing fields are relative to. */
+  const unitSize = () => {
+    const fs = r("fontSize");
+    return fs === MIXED ? nodes[0].text!.fontSize : (fs as number);
   };
   const RUN_KEYS = ["fontFamily", "fontSize", "fontWeight", "italic", "letterSpacing", "decoration"];
   const set = (patch: Record<string, unknown>) => {
@@ -726,9 +783,11 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
     if (Object.keys(runPatch).length === Object.keys(patch).length && styleTextSelection(runPatch)) return;
     update(ids, { text: patch });
   };
-  const sel = useStore((s) => s.textSel);
-  const editing = useStore((s) => s.editingText);
-  const partial = !!sel && sel.id === editing && sel.end > sel.start;
+  // B/I/U/S show and flip what the selected characters have; a click sets the opposite for all of them.
+  const weight = r("fontWeight");
+  const isBold = typeof weight === "number" && weight >= 700;
+  const isItalic = r("italic") === true;
+  const isDecorated = (d: "underline" | "strikethrough") => r("decoration") === d;
   const truncating = nodes.every((n) => !!n.text!.truncate || n.text!.maxLines != null);
   return (
     <Section title={partial ? `Text · ${sel!.end - sel!.start} characters selected` : "Text"} actions={<ApplyStyleButton kind="text" ids={ids} />}>
@@ -743,8 +802,10 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
       <div className="grid2">
         <NumberField
           label="↨"
-          title="Line height (px; 0 or empty for auto)"
+          title="Line height (px, 150% or 1.5×; empty for auto)"
           value={t((n) => n.text!.lineHeight ?? null) as Maybe<number> | null}
+          parse={(raw) => parseLineHeight(raw, unitSize())}
+          onAuto={() => set({ lineHeight: null })}
           autoValue={(() => {
             const fs = r("fontSize");
             return fs === MIXED ? undefined : Math.round((fs as number) * 1.2);
@@ -754,7 +815,7 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           onScrubStart={begin}
           onScrubEnd={end}
         />
-        <NumberField label="|A|" title="Letter spacing" value={r("letterSpacing") as Maybe<number>} step={0.1} onChange={(letterSpacing) => set({ letterSpacing })} onScrubStart={begin} onScrubEnd={end} />
+        <NumberField label="|A|" title="Letter spacing (px or %)" value={r("letterSpacing") as Maybe<number>} step={0.1} parse={(raw) => parseLetterSpacing(raw, unitSize())} onChange={(letterSpacing) => set({ letterSpacing })} onScrubStart={begin} onScrubEnd={end} />
       </div>
       <div className="grid2">
         <NumberField
@@ -831,16 +892,16 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
       {editing && sel && sel.id === editing && <LinkRow nodes={nodes} sel={sel} />}
       <LinkList nodes={nodes} />
       <div className="row">
-        <IconButton title="Bold" on={nodes.every((n) => n.text!.fontWeight >= 700)} onClick={() => set({ fontWeight: nodes[0].text!.fontWeight >= 700 ? 400 : 700 })}>
+        <IconButton title="Bold" on={isBold} onClick={() => set({ fontWeight: isBold ? 400 : 700 })}>
           <Bold size={13} />
         </IconButton>
-        <IconButton title="Italic" on={nodes.every((n) => n.text!.italic)} onClick={() => set({ italic: !nodes[0].text!.italic })}>
+        <IconButton title="Italic" on={isItalic} onClick={() => set({ italic: !isItalic })}>
           <Italic size={13} />
         </IconButton>
-        <IconButton title="Underline" on={nodes.every((n) => n.text!.decoration === "underline")} onClick={() => set({ decoration: nodes[0].text!.decoration === "underline" ? "none" : "underline" })}>
+        <IconButton title="Underline" on={isDecorated("underline")} onClick={() => set({ decoration: isDecorated("underline") ? "none" : "underline" })}>
           <Underline size={13} />
         </IconButton>
-        <IconButton title="Strikethrough" on={nodes.every((n) => n.text!.decoration === "strikethrough")} onClick={() => set({ decoration: nodes[0].text!.decoration === "strikethrough" ? "none" : "strikethrough" })}>
+        <IconButton title="Strikethrough" on={isDecorated("strikethrough")} onClick={() => set({ decoration: isDecorated("strikethrough") ? "none" : "strikethrough" })}>
           <Strikethrough size={13} />
         </IconButton>
         <SelectField
@@ -972,7 +1033,17 @@ function defaultJoin(n: Node): "miter" | "round" {
 
 function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: Node[]; ids: string[]; keyName: "fills" | "strokes" }) {
   const paints = common(nodes, (n) => n[keyName]);
-  const list: Paint[] = paints === MIXED ? [] : paints;
+  let list: Paint[] = paints === MIXED ? [] : paints;
+  // While characters of the text being edited are selected, the fill shows their colour.
+  const sel = useStore((s) => s.textSel);
+  const editingText = useStore((s) => s.editingText);
+  let mixedColors = false;
+  if (keyName === "fills" && sel && sel.id === editingText && sel.end > sel.start && nodes.length === 1 && nodes[0].id === sel.id && nodes[0].type === "text") {
+    const base = list.find((p) => p.visible);
+    const c = rangeValue(nodes[0].text!, sel.start, sel.end, "color", base?.type === "solid" ? base.color : undefined);
+    if (c === MIXED) mixedColors = true;
+    else if (typeof c === "string") list = [{ ...(base?.type === "solid" ? base : { opacity: 1, visible: true }), type: "solid", color: c }];
+  }
   const set = (next: Paint[]) => update(ids, { [keyName]: next, ...(keyName === "fills" ? { fillStyle: null } : {}) });
   const isLineish = nodes.every((n) => n.type === "line" || n.type === "vector");
   // Individual strokes: rectangles, frames, components and instances.
@@ -1004,6 +1075,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
       <StyleChip kind={keyName === "fills" ? "fill" : "stroke"} nodes={nodes} ids={ids} />
       <BoundChip nodes={nodes} ids={ids} prop={keyName === "fills" ? "fill" : "stroke"} label={keyName === "fills" ? "Fill" : "Stroke"} />
       {paints === MIXED && <div className="muted small">Mixed — click + to replace for all</div>}
+      {mixedColors && <div className="muted small">Mixed colours in the selection</div>}
       {[...list].reverse().map((p, ri) => {
         const i = list.length - 1 - ri;
         const setP = (np: Paint) => {

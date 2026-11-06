@@ -2,8 +2,9 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { createPortal } from "react-dom";
 import { dispatch } from "../store";
 
-export const MIXED = Symbol("mixed");
-export type Maybe<T> = T | typeof MIXED;
+import { MIXED, type Maybe } from "./mixed";
+
+export { MIXED, type Maybe };
 
 /** Largest magnitude a number field accepts unless it sets its own range. */
 const MAX_NUMBER = 1e6;
@@ -26,6 +27,10 @@ export function NumberField(props: {
   /** Accessible name; defaults to the title, or the label when that is text. */
   ariaLabel?: string;
   precision?: number;
+  /** Reads typed text instead of the built-in number/math rule: a number to apply, `null` for auto, `undefined` when it can't be read (the field reverts). */
+  parse?: (raw: string) => number | null | undefined;
+  /** Called for `null` from `parse` and for an empty field. */
+  onAuto?: () => void;
 }) {
   const { label, value, onChange, step = 1, min = -MAX_NUMBER, max = MAX_NUMBER, suffix, title, precision = 2 } = props;
   const fmt = (v: Maybe<number> | null) =>
@@ -48,7 +53,26 @@ export function NumberField(props: {
   const commit = (): number | null => {
     edited.current = false;
     const raw = text.replace(suffix ?? "", "").trim();
-    if (!raw || raw === "Mixed" || raw === (props.autoText ?? "Auto")) return null;
+    if (raw === "Mixed" || raw === (props.autoText ?? "Auto")) return null;
+    if (props.parse || props.onAuto) {
+      const parsed = !raw ? null : props.parse?.(raw);
+      if (parsed === null && props.onAuto) {
+        props.onAuto();
+        setText(fmt(null));
+        shown.current = fmt(null);
+        return null;
+      }
+      if (props.parse) {
+        if (parsed === undefined || parsed === null) {
+          setText(fmt(value));
+          return null;
+        }
+        const out = clamp(parsed);
+        onChange(out);
+        return out;
+      }
+    }
+    if (!raw) return null;
     let v: number;
     try {
       // Allow simple expressions like "100/2" or "24+8".

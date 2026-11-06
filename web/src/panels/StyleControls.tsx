@@ -10,6 +10,7 @@ import { ColorPicker, cssColor } from "../ui/color";
 import { addDefaultTextStyle, batch, deleteStyle, nextName, updateColorStyle, updateEffectStyle, updateGridStyle, updateTextStyle } from "../componentOps";
 import { InlineInput } from "./InlineInput";
 import { FolderTree } from "./FolderTree";
+import { parseLetterSpacing, parseLineHeight } from "./textUnits";
 import "./workflow.css";
 
 type ColorStyle = Doc["styles"]["colors"][number];
@@ -332,15 +333,17 @@ function TextStyleRow({ s, label, depth, index, sel, editing, setEditing }: { s:
           <div className="grid2">
             <NumberField
               label="↨"
-              title="Line height (px; 0 or empty for auto)"
+              title="Line height (px, 150% or 1.5×; empty for auto)"
               value={s.lineHeight ?? null}
               autoValue={Math.round(s.fontSize * 1.2)}
               min={0}
+              parse={(raw) => parseLineHeight(raw, s.fontSize)}
+              onAuto={() => set({ lineHeight: null })}
               onChange={(lh) => set({ lineHeight: lh || null })}
               onScrubStart={begin}
               onScrubEnd={end}
             />
-            <NumberField label="|A|" title="Letter spacing" value={s.letterSpacing} step={0.1} onChange={(letterSpacing) => set({ letterSpacing })} onScrubStart={begin} onScrubEnd={end} />
+            <NumberField label="|A|" title="Letter spacing (px or %)" value={s.letterSpacing} step={0.1} parse={(raw) => parseLetterSpacing(raw, s.fontSize)} onChange={(letterSpacing) => set({ letterSpacing })} onScrubStart={begin} onScrubEnd={end} />
           </div>
         </div>
       )}

@@ -93,7 +93,8 @@ fn spec_schema() -> Value {
     "properties": {
       "type": { "type": "string", "enum": ["frame", "rectangle", "ellipse", "text", "line", "polygon", "star", "vector", "group", "image", "instance", "component"], "description": "Default frame (with a warning when missing). Also accepted: div, container, screen (frame), rect, circle, triangle, icon, path" },
       "name": { "type": "string" },
-      "x": { "type": "number" }, "y": { "type": "number" },
+      "x": { "type": "number", "description": "Relative to the parent layer (for a layer inside a group too; the editor's X field measures from the frame instead)" },
+      "y": { "type": "number", "description": "Relative to the parent layer, like x" },
       "width": { "description": "number (px), or 'fill' / 'hug' inside auto layout. Percentages other than '100%' are not supported", "type": ["number", "string"] },
       "height": { "description": "number (px), or 'fill' / 'hug'", "type": ["number", "string"] },
       "fill": { "description": "Hex colour like '#7C5CFF' (rgb()/rgba() also work), a CSS linear-gradient(...), radial-gradient(...) or conic-gradient(from 90deg at 50% 50%, ...) string, a paint object (type solid, linearGradient, radialGradient, angularGradient, diamondGradient with stops [{color, position}] and optional handles {start, end, width} in 0..1 box units), or 'none'", "type": ["string", "object"] },
@@ -137,8 +138,8 @@ fn spec_schema() -> Value {
       "fontSize": { "type": "number" },
       "fontWeight": { "description": "100-900, or thin, light, regular, medium, semibold, bold, extrabold, black", "type": ["number", "string"] },
       "fontFamily": { "type": "string", "description": "Inter, Roboto, Poppins, Montserrat, Playfair Display, DM Sans, Space Grotesk, JetBrains Mono, Lato, Open Sans" },
-      "lineHeight": { "description": "px (24); a number below 4 is a multiple of fontSize (1.5); \"150%\" and \"24px\" also work", "type": ["number", "string"] },
-      "letterSpacing": { "type": "number", "description": "px" },
+      "lineHeight": { "description": "px (24); a number below 4 is a multiple of fontSize (1.5); \"150%\", \"1.5em\" and \"24px\" also work; \"auto\" or 0 is automatic", "type": ["number", "string"] },
+      "letterSpacing": { "type": ["number", "string"], "description": "px (2), or \"10%\" / \"0.05em\" of fontSize" },
       "textAlign": { "type": "string", "enum": ["left", "center", "right", "justify"] },
       "color": { "type": "string", "description": "Text colour" },
       "italic": { "type": "boolean" },
@@ -350,7 +351,7 @@ pub fn tool_defs() -> Value {
       "description": "Create shared colour, text, effect and grid styles (design tokens), e.g. a type scale like Heading/H1, Body/Regular, or Shadow/Card. Link layers to them by name with textStyle / fillStyle / strokeStyle (colour styles only), effectStyle and gridStyle in create_nodes/update_nodes, or in bulk with fix_issues (kinds: [\"unlinkedStyle\"]). A name with slashes shows as a folder in the Assets panel. Variables are bound with bind, not styles.",
       "input_schema": { "type": "object", "properties": {
         "colors": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "color": { "type": "string", "description": "Hex colour; anything unreadable is an error" } }, "required": ["name", "color"] } },
-        "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": "number" } }, "required": ["name", "fontSize"] } },
+        "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": ["number", "string"], "description": "px, or \"10%\" / \"0.05em\" of fontSize" } }, "required": ["name", "fontSize"] } },
         "effects": { "type": "array", "description": "Effect styles: {name, description, shadow: {x, y, blur, spread, color, inset} or an array of them, blur (layer blur px), backgroundBlur (px)}", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "shadow": { "type": ["object", "array", "string"] }, "blur": { "type": "number" }, "backgroundBlur": { "type": "number" } }, "required": ["name"] } },
         "grids": { "type": "array", "description": "Grid styles: {name, description, grids: [{pattern:'columns'|'rows'|'grid', count, gutter, margin, size}]}", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "grids": { "type": "array", "items": { "type": "object" } } }, "required": ["name", "grids"] } }
       } }
