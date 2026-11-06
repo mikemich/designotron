@@ -1,5 +1,7 @@
 //! Structural document operations shared by commands and AI tools.
 
+use std::sync::Arc;
+
 use crate::doc::{normalize_angle, IdGen};
 use crate::geom::{Point, Rect};
 use crate::model::{Document, Node, NodeId, NodeType, Paint, ShapeProps, TextProps};
@@ -127,7 +129,7 @@ pub fn duplicate(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen, offset: Po
         n.parent = orig.parent.clone();
         doc.insert(n, orig.parent.as_deref(), &orig.page, index);
       } else {
-        doc.nodes.insert(n.id.clone(), n);
+        doc.nodes.insert(n.id.clone(), Arc::new(n));
       }
     }
     out.push(root_id);

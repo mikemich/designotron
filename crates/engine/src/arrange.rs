@@ -2,6 +2,7 @@
 //! and the scans behind "select matching layers" / "select all with the same ...".
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -452,7 +453,7 @@ pub fn duplicate_page(doc: &mut Document, gen: &mut IdGen, id: &str) -> Result<S
     }
   }
   for c in copies {
-    doc.nodes.insert(c.id.clone(), c);
+    doc.nodes.insert(c.id.clone(), Arc::new(c));
   }
   let mut flow_start = src.flow_start.clone();
   if let Some(f) = flow_start.as_mut() {

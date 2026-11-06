@@ -12,6 +12,7 @@
 //! takes either form and `legacy` turns a granular delta into the old one.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -457,7 +458,7 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
   if let Some(nodes) = d.get("nodes").and_then(|v| v.as_object()) {
     for (id, v) in nodes {
       let n: Node = serde_json::from_value(v.clone()).map_err(|e| format!("bad node {id}: {e}"))?;
-      doc.nodes.insert(id.clone(), n);
+      doc.nodes.insert(id.clone(), Arc::new(n));
       touched.push(id.clone());
     }
   }
@@ -468,7 +469,7 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
         continue;
       };
       let n = patch_node(n, p).map_err(|e| format!("bad patch {id}: {e}"))?;
-      doc.nodes.insert(id.clone(), n);
+      doc.nodes.insert(id.clone(), Arc::new(n));
       touched.push(id.clone());
     }
   }
@@ -586,7 +587,9 @@ fn revert_inner(doc: &Document, from: &Document, to: &Document) -> Document {
   for item in from.nodes.diff(&to.nodes) {
     match item {
       imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, v) } if out.get(k).is_some() => {
-        let n = merge_fields(out.get(k).unwrap(), o, v, true).unwrap_or_else(|| v.clone());
+        let n = merge_fields(out.get(k).unwrap(), o, v, true)
+          .map(Arc::new)
+          .unwrap_or_else(|| v.clone());
         out.nodes.insert(k.clone(), n);
         touched.push(k.clone());
       }
@@ -661,7 +664,7 @@ fn keep_tokens_in_use(out: &mut Document, doc: &Document) {
   if !drops_tokens(out, doc) {
     return;
   }
-  let used = clipboard::references(out.nodes.values());
+  let used = clipboard::references(out.nodes.values().map(|n| &**n));
   macro_rules! restore_styles {
     ($list:ident) => {
       for (at, s) in doc.styles.$list.iter().enumerate() {

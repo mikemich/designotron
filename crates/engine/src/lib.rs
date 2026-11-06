@@ -22,6 +22,8 @@ pub mod figma;
 pub mod geom;
 pub mod grids;
 pub mod interact;
+#[cfg(test)]
+mod json_golden_tests;
 pub mod layout;
 pub mod lint;
 pub mod model;
