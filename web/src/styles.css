@@ -3290,11 +3290,14 @@ body:has(.phone-note) .toast {
     outline: 1px solid CanvasText;
     outline-offset: -1px;
   }
-  [aria-pressed="true"],
+  [aria-pressed="true"]:not(.avatar),
   .tbtn.active {
     forced-color-adjust: none;
     background: Highlight;
     color: HighlightText;
     border-color: Highlight;
+  }
+  .align-grid button.on i {
+    background: HighlightText;
   }
 }
