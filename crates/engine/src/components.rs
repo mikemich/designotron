@@ -378,12 +378,12 @@ fn group_of(key: &str, sub: Option<&str>) -> &'static str {
     "effects" | "effectStyle" => "effects",
     "text" => match sub {
       Some("characters") | Some("runs") => "text",
+      Some("autoResize") => "size",
       _ => "typography",
     },
     "textStyle" => "typography",
-    "width" | "height" => "size",
-    "layout" | "clipContent" | "sizingH" | "sizingV" | "absolutePosition" | "constraints" | "minWidth" | "maxWidth" | "minHeight"
-    | "maxHeight" | "layoutGrids" | "gridStyle" | "overflow" | "scrollBehavior" => "layout",
+    "width" | "height" | "sizingH" | "sizingV" | "minWidth" | "maxWidth" | "minHeight" | "maxHeight" => "size",
+    "layout" | "clipContent" | "absolutePosition" | "constraints" | "layoutGrids" | "gridStyle" | "overflow" | "scrollBehavior" => "layout",
     "x" | "y" | "rotation" | "flipX" | "flipY" => "position",
     "cornerRadius" | "cornerRadii" => "radius",
     "opacity" | "blendMode" | "isMask" => "appearance",
@@ -394,6 +394,15 @@ fn group_of(key: &str, sub: Option<&str>) -> &'static str {
     props::PROPS_KEY => "props",
     _ => "other",
   }
+}
+
+/// The group of a key inside a `text` override. A change of the runs alone (bolding a word) is
+/// typography; with new characters the runs belong to the text.
+fn text_group(t: &serde_json::Map<String, Value>, sub: &str) -> &'static str {
+  if sub == "runs" && !t.contains_key("characters") {
+    return "typography";
+  }
+  group_of("text", Some(sub))
 }
 
 /// Where the overrides of layer `id` are stored: the instance that holds them, the key in its
@@ -408,6 +417,16 @@ pub fn layer_overrides(doc: &Document, id: &str) -> Option<(NodeId, String, Valu
     (Some(s), Some(m)) => (s.clone(), m),
     _ => return None,
   };
+  // With the main deleted nothing re-applies the entry: there is nothing to reset until it is restored.
+  let missing = |i: &str| {
+    doc
+      .get(i)
+      .and_then(|n| n.instance.as_ref())
+      .is_none_or(|i| doc.get(&i.component_id).is_none())
+  };
+  if missing(&scope) || scopes.first().is_some_and(|o| missing(o)) {
+    return None;
+  }
   let patch = doc.get(&scope)?.instance.as_ref()?.overrides.get(&key)?.clone();
   Some((scope, key, patch))
 }
@@ -423,7 +442,7 @@ pub fn override_groups(doc: &Document, id: &str) -> Vec<(&'static str, &'static 
     match (k.as_str(), v) {
       // The name a swap brings along isn't a change of its own.
       ("name", _) if m.contains_key(SWAP_KEY) => {}
-      ("text", Value::Object(t)) => present.extend(t.keys().map(|s| group_of("text", Some(s)))),
+      ("text", Value::Object(t)) => present.extend(t.keys().map(|s| text_group(t, s))),
       (k, _) => {
         present.insert(group_of(k, None));
       }
@@ -436,9 +455,13 @@ pub fn override_groups(doc: &Document, id: &str) -> Vec<(&'static str, &'static 
 fn strip_groups(patch: &mut Value, groups: &[String]) {
   let Value::Object(m) = patch else { return };
   let hit = |g: &str| groups.is_empty() || groups.iter().any(|x| x == g);
+  // The name a swap brings along goes with it.
+  let swap_hit = m.contains_key(SWAP_KEY) && hit("swap");
   m.retain(|k, v| match (k.as_str(), v) {
+    ("name", _) if swap_hit => false,
     ("text", Value::Object(t)) => {
-      t.retain(|s, _| !hit(group_of("text", Some(s))));
+      let keep: Vec<String> = t.keys().filter(|s| !hit(text_group(t, s))).cloned().collect();
+      t.retain(|s, _| keep.contains(s));
       !t.is_empty()
     }
     (k, _) => !hit(group_of(k, None)),
@@ -491,8 +514,16 @@ pub fn restore_component(doc: &mut Document, prefer: &str, gen: &mut IdGen) -> R
     .map(|n| n.id.clone())
     .collect();
   users.sort();
-  let source = users
-    .iter()
+  // A copy inside another instance links to that instance's main, not to this one: only
+  // instances that stand on their own can be the source (unless every one is nested).
+  let standalone: Vec<&NodeId> = users.iter().filter(|u| doc.instance_ancestor(u).is_none()).collect();
+  let pool: Vec<&NodeId> = if standalone.is_empty() {
+    users.iter().collect()
+  } else {
+    standalone
+  };
+  let source = pool
+    .into_iter()
     .min_by_key(|u| (override_count(doc, u), u.as_str() != prefer))
     .cloned()
     .ok_or("no instance to restore from")?;
@@ -504,7 +535,14 @@ pub fn restore_component(doc: &mut Document, prefer: &str, gen: &mut IdGen) -> R
   let mut used: HashSet<NodeId> = HashSet::from([comp.clone()]);
   map.insert(source.clone(), comp.clone());
   for old in order.iter().skip(1) {
-    let wanted = doc.get(old).and_then(|n| n.master_id.clone());
+    // Follow the links to the layer of the deleted main (a copy of a copy points at an existing layer first).
+    let mut wanted = doc.get(old).and_then(|n| n.master_id.clone());
+    for _ in 0..MAX_SWAP_DEPTH {
+      match wanted.as_ref().and_then(|w| doc.get(w)).and_then(|n| n.master_id.clone()) {
+        Some(next) => wanted = Some(next),
+        None => break,
+      }
+    }
     let new = match wanted {
       Some(m) if doc.get(&m).is_none() && !used.contains(&m) => m,
       _ => gen.next("n_"),
@@ -514,8 +552,8 @@ pub fn restore_component(doc: &mut Document, prefer: &str, gen: &mut IdGen) -> R
   }
 
   // Where it goes: right of the source's top-level layer, clear of other top-level layers.
-  let top = doc.top_level_of(&source);
-  let page = src_root.page.clone();
+  let top = doc.top_level_of(prefer);
+  let page = doc.get(prefer).map(|n| n.page.clone()).unwrap_or_else(|| src_root.page.clone());
   let b = doc.abs_bounds(&top);
   let (x, mut y) = (b.right() + 100.0, b.y);
   let others: Vec<crate::geom::Rect> = doc
@@ -525,7 +563,7 @@ pub fn restore_component(doc: &mut Document, prefer: &str, gen: &mut IdGen) -> R
     .iter()
     .map(|c| doc.abs_bounds(c))
     .collect();
-  for _ in 0..others.len() + 1 {
+  for _ in 0..others.len().min(64) + 1 {
     let hit = others
       .iter()
       .find(|o| x < o.right() && x + src_root.width > o.x && y < o.bottom() && y + src_root.height > o.y);
@@ -564,6 +602,10 @@ pub fn restore_component(doc: &mut Document, prefer: &str, gen: &mut IdGen) -> R
       n.instance = None;
       n.prop_refs = None;
       n.component = Some(ComponentInfo::default());
+      // An instance of a variant is named after its set: the restored main stands alone, so say so.
+      if doc.nodes.values().any(|x| x.kind == NodeType::ComponentSet && x.name == src.name) {
+        n.name = format!("{} (restored)", src.name);
+      }
       for s in [&mut n.sizing_h, &mut n.sizing_v] {
         if *s == Sizing::Fill {
           *s = Sizing::Fixed;
@@ -571,6 +613,7 @@ pub fn restore_component(doc: &mut Document, prefer: &str, gen: &mut IdGen) -> R
       }
     } else {
       n.parent = src.parent.as_ref().and_then(|p| map.get(p).cloned());
+      n.page = page.clone();
       // Layers of nested instances are relinked to the layers they copy below.
       n.master_id = None;
       if !in_nested(doc, old) {
@@ -586,32 +629,16 @@ pub fn restore_component(doc: &mut Document, prefer: &str, gen: &mut IdGen) -> R
       doc.set_node(n);
     }
   }
-  // Layers inside the nested instances link back to the layers of the components they copy.
+  // The instances inside the restored main rebuild their layers from their own components, which
+  // links them (ids are kept by layer path) the way a main component made by hand is linked.
   let nested: Vec<NodeId> = order
     .iter()
     .skip(1)
     .map(|o| map[o].clone())
-    .filter(|n| doc.get(n).is_some_and(|n| n.kind == NodeType::Instance))
+    .filter(|n| doc.get(n).is_some_and(|x| x.kind == NodeType::Instance) && doc.instance_ancestor(n).is_none())
     .collect();
   for ni in nested {
-    let Some(k) = doc.get(&ni).and_then(|n| n.instance.as_ref()).map(|i| i.component_id.clone()) else {
-      continue;
-    };
-    if doc.get(&k).is_none() {
-      continue;
-    }
-    for (d, m) in match_layers(doc, &ni, &k) {
-      let direct = doc
-        .ancestors(&d)
-        .into_iter()
-        .find(|a| doc.get(a).is_some_and(|n| n.kind == NodeType::Instance))
-        .is_some_and(|a| a == ni);
-      if direct {
-        if let Some(n) = doc.get_mut(&d) {
-          n.master_id = Some(m);
-        }
-      }
-    }
+    sync_instance(doc, &ni, gen);
   }
 
   // Every instance of the restored main picks it up again (overrides re-apply by master id).
@@ -3238,6 +3265,222 @@ mod tests {
         })
         .unwrap();
       assert_eq!(width(&k.e, &inst), 180.0, "a resized instance keeps its size");
+    }
+
+    #[test]
+    fn restore_never_takes_a_nested_copy_as_its_source() {
+      let mut k = kit();
+      let main = k.default.clone();
+      let (card, card_inst) = card(&mut k);
+      let a = instance(&mut k.e, &main, None);
+      let b = instance(&mut k.e, &main, None);
+      let al = named(&k.e, &a, "Label");
+      set_text(&mut k.e, &al, "Top A");
+      let bl = named(&k.e, &b, "Label");
+      set_text(&mut k.e, &bl, "Top B");
+      let nested = nested_instance(&k.e, &card_inst);
+      let nl = named(&k.e, &nested, "Label");
+      k.e
+        .dispatch(Command::Delete {
+          ids: vec![main.clone(), card.clone()],
+        })
+        .unwrap();
+      k.e.dispatch(Command::RestoreComponent { id: a.clone() }).unwrap();
+      let restored = named(&k.e, &main, "Label");
+      for (inst, expect) in [(&a, "Top A"), (&b, "Top B")] {
+        let l = named(&k.e, inst, "Label");
+        assert_eq!(text(&k.e, &l), expect, "override intact");
+        assert_eq!(
+          k.e.doc.get(&l).unwrap().master_id.as_deref(),
+          Some(restored.as_str()),
+          "linked to the restored layer"
+        );
+        assert_eq!(groups(&k.e, &l), vec!["text"]);
+      }
+      let _ = nl;
+    }
+
+    #[test]
+    fn resetting_a_swap_takes_its_name_along() {
+      let mut k = kit();
+      let (_, card_inst) = card(&mut k);
+      let f = shape(&mut k.e, NodeType::Frame, 3000.0, None);
+      rename(&mut k.e, &f, "Other");
+      let other = id(k.e.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap());
+      let nested = nested_instance(&k.e, &card_inst);
+      let name0 = k.e.doc.get(&nested).unwrap().name.clone();
+      k.e
+        .dispatch(Command::SwapComponent {
+          id: nested.clone(),
+          component_id: other,
+        })
+        .unwrap();
+      assert_eq!(k.e.doc.get(&nested).unwrap().name, "Other");
+      assert_eq!(
+        groups(&k.e, &nested),
+        vec!["swap"],
+        "the name a swap brings isn't a change of its own"
+      );
+      reset(&mut k.e, &nested, &["swap"]);
+      assert_eq!(k.e.doc.get(&nested).unwrap().name, name0);
+      assert!(groups(&k.e, &nested).is_empty());
+    }
+
+    #[test]
+    fn nothing_resets_while_the_main_is_deleted_and_it_returns_after_a_restore() {
+      let mut k = kit();
+      let main = k.default.clone();
+      let a = instance(&mut k.e, &main, None);
+      let l = named(&k.e, &a, "Label");
+      set_text(&mut k.e, &l, "Mine");
+      k.e.dispatch(Command::Delete { ids: vec![main.clone()] }).unwrap();
+      assert!(groups(&k.e, &l).is_empty() && groups(&k.e, &a).is_empty());
+      let r = k
+        .e
+        .dispatch(Command::ResetOverrideGroups {
+          ids: vec![l.clone()],
+          groups: vec![],
+        })
+        .unwrap();
+      assert_eq!(r["changed"], false);
+      k.e.dispatch(Command::RestoreComponent { id: a.clone() }).unwrap();
+      assert_eq!(text(&k.e, &l), "Mine");
+      assert_eq!(groups(&k.e, &l), vec!["text"]);
+    }
+
+    #[test]
+    fn restore_links_layers_two_instances_deep_to_the_outer_main() {
+      let mut k = kit();
+      let (card, _) = card(&mut k);
+      let f = shape(&mut k.e, NodeType::Frame, 5000.0, None);
+      rename(&mut k.e, &f, "Panel");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![f.clone()],
+          patch: json!({ "width": 400, "height": 300 }),
+        })
+        .unwrap();
+      instance(&mut k.e, &card, Some(&f));
+      let panel = id(k.e.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap());
+      let pi = instance(&mut k.e, &panel, None);
+      let deep = named(&k.e, &pi, "Label");
+      set_text(&mut k.e, &deep, "Deep");
+      k.e.dispatch(Command::Delete { ids: vec![panel.clone()] }).unwrap();
+      k.e.dispatch(Command::RestoreComponent { id: pi.clone() }).unwrap();
+      let card_in = nested_instance(&k.e, &panel);
+      let button_in = nested_instance(&k.e, &card_in);
+      let deep_main = named(&k.e, &button_in, "Label");
+      let deep_copy = named(&k.e, &pi, "Label");
+      assert_eq!(text(&k.e, &deep_copy), "Deep");
+      // The copy points at the restored Panel's layer, which in turn is a copy of the Card main's.
+      assert_eq!(k.e.doc.get(&deep_copy).unwrap().master_id.as_deref(), Some(deep_main.as_str()));
+      assert_ne!(
+        k.e.doc.get(&deep_main).unwrap().master_id,
+        k.e.doc.get(&deep_copy).unwrap().master_id,
+        "the layer in the restored main links one level up"
+      );
+      // An edit in the restored main survives a later edit of the Card main.
+      set_text(&mut k.e, &deep_main, "EditedInMain");
+      let title = named(&k.e, &card, "Title");
+      set_text(&mut k.e, &title, "Card title changed");
+      let again = named(&k.e, &nested_instance(&k.e, &nested_instance(&k.e, &panel)), "Label");
+      assert_eq!(text(&k.e, &again), "EditedInMain");
+    }
+
+    #[test]
+    fn a_restored_main_lands_on_the_page_of_the_instance_you_used() {
+      let mut k = kit();
+      let main = k.default.clone();
+      let p1 = k.e.page.clone();
+      let a = instance(&mut k.e, &main, None);
+      k.e.dispatch(Command::AddPage { name: None }).unwrap();
+      let p2 = k.e.page.clone();
+      assert_ne!(p1, p2);
+      instance(&mut k.e, &main, None);
+      k.e.dispatch(Command::SetPage { id: p1.clone() }).unwrap();
+      k.e.dispatch(Command::Delete { ids: vec![main.clone()] }).unwrap();
+      k.e.dispatch(Command::RestoreComponent { id: a.clone() }).unwrap();
+      for d in k.e.doc.subtree(&main) {
+        assert_eq!(k.e.doc.get(&d).unwrap().page, p1);
+      }
+      assert!(k.e.doc.page(&p1).unwrap().children.contains(&main));
+      assert!(!k.e.doc.page(&p2).unwrap().children.contains(&main));
+    }
+
+    #[test]
+    fn reset_size_brings_back_hug_and_auto_resize_and_runs_are_typography() {
+      let mut k = kit();
+      let inst = instance(&mut k.e, &k.default.clone(), None);
+      let l = named(&k.e, &inst, "Label");
+      let auto = k.e.doc.get(&l).unwrap().text.as_ref().unwrap().auto_resize;
+      let w0 = width(&k.e, &l);
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![l.clone()],
+          patch: json!({ "width": 300.0, "text": { "autoResize": "none" } }),
+        })
+        .unwrap();
+      assert_eq!(groups(&k.e, &l), vec!["size"]);
+      reset(&mut k.e, &l, &["size"]);
+      assert_eq!(k.e.doc.get(&l).unwrap().text.as_ref().unwrap().auto_resize, auto);
+      assert_eq!(width(&k.e, &l), w0);
+      assert!(groups(&k.e, &l).is_empty());
+      // Bolding a word is typography, not text.
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![l.clone()],
+          patch: json!({ "text": { "runs": [{ "start": 0, "end": 2, "fontWeight": 800 }] } }),
+        })
+        .unwrap();
+      assert_eq!(groups(&k.e, &l), vec!["typography"]);
+      reset(&mut k.e, &l, &["typography"]);
+      assert!(groups(&k.e, &l).is_empty());
+      assert!(k.e.doc.get(&l).unwrap().text.as_ref().unwrap().runs.is_empty());
+    }
+
+    #[test]
+    fn a_restored_variant_says_it_stands_alone() {
+      let mut k = kit();
+      let main = k.default.clone();
+      let a = instance(&mut k.e, &main, None);
+      k.e.dispatch(Command::Delete { ids: vec![main.clone()] }).unwrap();
+      k.e.dispatch(Command::RestoreComponent { id: a.clone() }).unwrap();
+      assert_eq!(k.e.doc.get(&main).unwrap().name, "Component Set (restored)");
+    }
+
+    #[test]
+    fn two_people_restoring_the_same_main_converge() {
+      let mut k = kit();
+      let main = k.default.clone();
+      let a = instance(&mut k.e, &main, None);
+      let b = instance(&mut k.e, &main, None);
+      let al = named(&k.e, &a, "Label");
+      set_text(&mut k.e, &al, "A");
+      let bl = named(&k.e, &b, "Label");
+      set_text(&mut k.e, &bl, "B");
+      k.e.dispatch(Command::Delete { ids: vec![main.clone()] }).unwrap();
+      let json = k.e.to_json();
+      let mut p = engine_seeded(101);
+      p.load(&json).unwrap();
+      let mut q = engine_seeded(202);
+      q.load(&json).unwrap();
+      let base = p.doc.clone();
+      p.dispatch(Command::RestoreComponent { id: a.clone() }).unwrap();
+      q.dispatch(Command::RestoreComponent { id: b.clone() }).unwrap();
+      let dp = crate::collab::delta(&base, &p.doc, true, true);
+      let dq = crate::collab::delta(&base, &q.doc, true, true);
+      p.dispatch(Command::ApplyRemote { delta: dq, local: false }).unwrap();
+      q.dispatch(Command::ApplyRemote { delta: dp, local: false }).unwrap();
+      for e in [&p, &q] {
+        assert_eq!(
+          e.doc.pages[0].children.iter().filter(|c| **c == main).count(),
+          1,
+          "one entry on the page"
+        );
+        assert_eq!(text(e, &named(e, &a, "Label")), "A");
+        assert_eq!(text(e, &named(e, &b, "Label")), "B");
+      }
+      assert_eq!(p.doc.subtree(&main).len(), q.doc.subtree(&main).len());
     }
 
     /// A "Button" set (State=Default / State=Hover, each a frame with "Bg" and "Label").

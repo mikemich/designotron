@@ -725,7 +725,7 @@ function Layers() {
                       items: [
                         { label: "Rename", onClick: () => setRenaming(n.id) },
                         { label: "Zoom to layer", kbd: "⇧2", onClick: zoomToSelection },
-                        { label: "Delete", onClick: () => dispatch({ op: "delete", ids: useStore.getState().es.selection }) },
+                        { label: "Delete", onClick: A.deleteSelection },
                       ],
                     });
                   }}
