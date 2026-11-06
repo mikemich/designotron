@@ -133,11 +133,12 @@ fn visit_all(nodes: &mut [Node], comps: &mut [Node], v: &mut impl Visit) {
 
 // ---- copy ----------------------------------------------------------------------------------
 
+/// The variables, collections (pinned modes) and styles some layers refer to.
 #[derive(Default)]
-struct Used {
-  vars: HashSet<String>,
-  colls: HashSet<String>,
-  styles: HashSet<String>,
+pub struct Used {
+  pub vars: HashSet<String>,
+  pub colls: HashSet<String>,
+  pub styles: HashSet<String>,
 }
 
 impl Visit for Used {
@@ -150,6 +151,27 @@ impl Visit for Used {
   fn style(&mut self, _: Kind, id: &mut String) {
     self.styles.insert(id.clone());
   }
+}
+
+/// Everything the layers of `nodes` refer to, read without touching them. Layers that make no
+/// reference are skipped before anything is cloned (the walker takes `&mut`).
+pub fn references<'a>(nodes: impl Iterator<Item = &'a Node>) -> Used {
+  let mut used = Used::default();
+  for n in nodes.filter(|n| has_references(n)) {
+    visit_node(&mut n.clone(), &mut used);
+  }
+  used
+}
+
+fn has_references(n: &Node) -> bool {
+  !n.bindings.is_empty()
+    || !n.variable_modes.is_empty()
+    || n.fill_style.is_some()
+    || n.stroke_style.is_some()
+    || n.text_style.is_some()
+    || n.effect_style.is_some()
+    || n.grid_style.is_some()
+    || n.instance.as_ref().is_some_and(|i| !i.overrides.is_empty())
 }
 
 /// The `variables` and `styles` entries the copied layers need (nothing for layers without
@@ -883,6 +905,52 @@ mod tests {
     assert_eq!(b.doc.nodes.len(), nodes_before);
     b.dispatch(Command::Redo).unwrap();
     assert_eq!(b.doc.variables.len(), 2);
+  }
+
+  #[test]
+  fn undoing_a_paste_keeps_tokens_a_peers_layer_binds() {
+    let mut a = engine(7);
+    let ids = scene(&mut a);
+    let mut b = engine(8);
+    paste(&mut b, a.copy(&[ids["Screen"].clone()]));
+    let mut peer = engine(20);
+    peer.load(&b.to_json()).unwrap();
+    let base = peer.doc.clone();
+    let surface = var_named(&peer, "Theme", "Surface").id.clone();
+    let mine = rect_bound_to_style(&mut peer, &surface);
+    let d = crate::collab::delta(&base, &peer.doc, true, true);
+    b.dispatch(Command::ApplyRemote { delta: d, local: false }).unwrap();
+    b.dispatch(Command::Undo).unwrap();
+    assert!(b.doc.get(&mine).is_some(), "the peer's layer survives");
+    assert_eq!(b.doc.get(&mine).unwrap().bindings.get("fill"), Some(&surface));
+    assert_eq!(var_named(&b, "Theme", "Surface").id, surface);
+    assert_eq!(var_named(&b, "Primitives", "Gray/0").name, "Gray/0", "alias target comes along");
+    assert!(b
+      .doc
+      .variables
+      .iter()
+      .all(|c| c.variables.iter().all(|v| v.id == surface || c.name == "Primitives")));
+    assert_eq!(b.doc.styles.colors.len(), 1, "the style the peer's layer uses stays");
+    assert!(
+      b.doc.styles.texts.is_empty() && b.doc.styles.effects.is_empty(),
+      "unused styles still go"
+    );
+  }
+
+  fn rect_bound_to_style(e: &mut Engine, var_id: &str) -> String {
+    let style = e.doc.styles.colors[0].id.clone();
+    let r = run(
+      e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle", "name": "Peer", "width": 10, "height": 10 }] }),
+    );
+    let id = r["created"][0]["id"].as_str().unwrap().to_string();
+    e.dispatch(Command::Update {
+      ids: vec![id.clone()],
+      patch: json!({ "bindings": { "fill": var_id }, "fillStyle": style }),
+    })
+    .unwrap();
+    id
   }
 
   #[test]

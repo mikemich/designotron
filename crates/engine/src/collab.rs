@@ -17,6 +17,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
+use crate::clipboard;
 use crate::model::{Comment, Document, Node, NodeId};
 use crate::variables::{Collection, Variable};
 
@@ -616,9 +617,86 @@ fn revert_inner(doc: &Document, from: &Document, to: &Document) -> Document {
       };
     }
   }
+  keep_tokens_in_use(&mut out, doc);
   let base = doc.clone();
   repair(&mut out, &base, &touched);
   out
+}
+
+/// A revert may drop a style, variable or collection that `doc` has, because the undone step
+/// created it. When a layer still refers to one (a peer's layer, which per-person undo never
+/// touches), it is put back: an unused token is harmless and can be deleted on purpose,
+/// while unbinding would silently change someone else's work. The layers are scanned only
+/// when something was dropped, so ordinary undo costs nothing extra.
+fn keep_tokens_in_use(out: &mut Document, doc: &Document) {
+  let ids = |d: &Document| -> BTreeSet<String> {
+    let s = &d.styles;
+    let mut v: BTreeSet<String> = s.colors.iter().map(|x| x.id.clone()).collect();
+    v.extend(s.texts.iter().map(|x| x.id.clone()));
+    v.extend(s.effects.iter().map(|x| x.id.clone()));
+    v.extend(s.grids.iter().map(|x| x.id.clone()));
+    v.extend(d.variables.iter().flat_map(|c| c.variables.iter().map(|x| x.id.clone())));
+    v
+  };
+  let kept = ids(out);
+  let dropped_tokens = ids(doc).difference(&kept).next().is_some();
+  let dropped_colls = doc.variables.iter().any(|c| !out.variables.iter().any(|o| o.id == c.id));
+  if !dropped_tokens && !dropped_colls {
+    return;
+  }
+  let used = clipboard::references(out.nodes.values());
+  // Styles.
+  macro_rules! restore_styles {
+    ($list:ident) => {
+      for s in &doc.styles.$list {
+        if used.styles.contains(&s.id) && !out.styles.$list.iter().any(|o| o.id == s.id) {
+          out.styles.$list.push(s.clone());
+        }
+      }
+    };
+  }
+  restore_styles!(colors);
+  restore_styles!(texts);
+  restore_styles!(effects);
+  restore_styles!(grids);
+  // Variables: those layers use, and what the variables that stay alias, to a fixed point.
+  let mut need: BTreeSet<String> = used.vars.iter().cloned().collect();
+  let mut queue: Vec<String> = need.iter().cloned().collect();
+  queue.extend(out.variables.iter().flat_map(|c| c.variables.iter().map(|v| v.id.clone())));
+  let mut seen: BTreeSet<String> = BTreeSet::new();
+  while let Some(id) = queue.pop() {
+    if !seen.insert(id.clone()) {
+      continue;
+    }
+    let found = out
+      .variables
+      .iter()
+      .chain(doc.variables.iter())
+      .flat_map(|c| c.variables.iter())
+      .find(|v| v.id == id);
+    let Some(v) = found else { continue };
+    for target in v.values.values().filter_map(|x| x.get("alias").and_then(|a| a.as_str())) {
+      if need.insert(target.to_string()) {
+        queue.push(target.to_string());
+      }
+    }
+  }
+  for c in &doc.variables {
+    let pinned = used.colls.contains(&c.id);
+    let missing: Vec<&Variable> = c
+      .variables
+      .iter()
+      .filter(|v| need.contains(&v.id) && !out.variables.iter().any(|o| o.variables.iter().any(|x| x.id == v.id)))
+      .collect();
+    match out.variables.iter_mut().find(|o| o.id == c.id) {
+      Some(o) => o.variables.extend(missing.into_iter().cloned()),
+      None if pinned || !missing.is_empty() => out.variables.push(Collection {
+        variables: missing.into_iter().cloned().collect(),
+        ..c.clone()
+      }),
+      None => {}
+    }
+  }
 }
 
 /// Three-way merge of the serialised fields of one item: each field the step changed
@@ -1951,5 +2029,149 @@ mod tests {
     .unwrap();
     assert!(!a.state()["canUndo"].as_bool().unwrap());
     assert!(is_empty(&a.collab_delta()), "applying a peer's change must not be sent back");
+  }
+
+  // ---- undo keeps tokens that a layer still uses ----
+
+  fn ai(e: &mut Engine, tool: &str, input: Value) -> Value {
+    e.dispatch(Command::Ai { tool: tool.into(), input })
+      .unwrap_or_else(|er| panic!("{tool}: {er}"))
+  }
+
+  fn var_id(e: &Engine, coll: &str, name: &str) -> String {
+    e.doc
+      .variables
+      .iter()
+      .find(|c| c.name == coll)
+      .and_then(|c| c.variables.iter().find(|v| v.name == name))
+      .unwrap_or_else(|| panic!("no variable {coll}/{name}"))
+      .id
+      .clone()
+  }
+
+  fn tokens(e: &Engine) -> (usize, usize) {
+    (e.doc.variables.iter().map(|c| c.variables.len()).sum(), e.doc.styles.colors.len())
+  }
+
+  /// Editor 0 defines Theme/Surface (aliasing Primitives/Gray) and a colour style; editor 1
+  /// binds a rectangle to them.
+  fn shared_tokens(room: &mut Room) -> (String, String) {
+    ai(
+      &mut room.editors[0],
+      "define_variables",
+      json!({ "collection": "Primitives", "variables": [{ "name": "Gray", "type": "color", "value": "#111111" }] }),
+    );
+    ai(
+      &mut room.editors[0],
+      "define_variables",
+      json!({ "collection": "Theme", "variables": [{ "name": "Surface", "type": "color", "value": { "alias": "Primitives/Gray" } }] }),
+    );
+    ai(
+      &mut room.editors[0],
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand", "color": "#6D4AFF" }] }),
+    );
+    sync(room, 0);
+    let r = ai(
+      &mut room.editors[1],
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle", "name": "Mine", "width": 20, "height": 20,
+        "bind": { "fill": "Theme/Surface" }, "fillStyle": "Brand" }] }),
+    );
+    let id = r["created"][0]["id"].as_str().unwrap().to_string();
+    sync(room, 1);
+    (id, var_id(&room.editors[1], "Theme", "Surface"))
+  }
+
+  #[test]
+  fn undo_keeps_a_variable_and_style_a_peers_layer_uses() {
+    let (mut room, _) = Room::new(2);
+    // Undo only the style/variable steps of editor 0: three steps.
+    let (mine, surface) = shared_tokens(&mut room);
+    for _ in 0..3 {
+      room.editors[0].dispatch(Command::Undo).unwrap();
+    }
+    sync(&mut room, 0);
+    for e in &room.editors {
+      assert!(e.doc.get(&mine).is_some(), "the peer's layer stays");
+      assert_eq!(e.doc.get(&mine).unwrap().bindings.get("fill"), Some(&surface));
+      assert_eq!(var_id(e, "Theme", "Surface"), surface, "the bound variable stays");
+      // Reached through an alias from the kept variable.
+      var_id(e, "Primitives", "Gray");
+      assert_eq!(e.doc.styles.colors.len(), 1, "the style stays");
+    }
+    // Redo puts nothing twice.
+    for _ in 0..3 {
+      room.editors[0].dispatch(Command::Redo).unwrap();
+    }
+    sync(&mut room, 0);
+    assert_eq!(tokens(&room.editors[0]), (2, 1));
+    assert_eq!(tokens(&room.editors[1]), (2, 1));
+  }
+
+  #[test]
+  fn undo_still_removes_tokens_nobody_uses() {
+    let (mut room, _) = Room::new(1);
+    ai(
+      &mut room.editors[0],
+      "define_variables",
+      json!({ "collection": "Theme", "variables": [{ "name": "Surface", "type": "color", "value": "#111111" }] }),
+    );
+    ai(
+      &mut room.editors[0],
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand", "color": "#6D4AFF" }] }),
+    );
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    room.editors[0].dispatch(Command::Undo).unwrap();
+    assert_eq!(tokens(&room.editors[0]), (0, 0));
+    assert!(room.editors[0].doc.variables.is_empty());
+  }
+
+  #[test]
+  fn a_kept_variable_keeps_its_alias_chain_and_pinned_collection() {
+    let (mut room, _) = Room::new(2);
+    let (_, _) = shared_tokens(&mut room);
+    // Editor 1 also pins a frame to the Theme collection's mode.
+    let theme = room.editors[1].doc.variables.iter().find(|c| c.name == "Theme").unwrap().clone();
+    let primitives = room.editors[1]
+      .doc
+      .variables
+      .iter()
+      .find(|c| c.name == "Primitives")
+      .unwrap()
+      .id
+      .clone();
+    for _ in 0..3 {
+      room.editors[0].dispatch(Command::Undo).unwrap();
+    }
+    sync(&mut room, 0);
+    let e = &room.editors[1];
+    let kept = e.doc.variables.iter().find(|c| c.id == theme.id).unwrap();
+    assert_eq!(kept.modes, theme.modes, "the collection returns with its modes");
+    let gray = e
+      .doc
+      .variables
+      .iter()
+      .find(|c| c.id == primitives)
+      .expect("alias target's collection");
+    assert_eq!(gray.variables.len(), 1);
+  }
+
+  #[test]
+  fn the_reference_scan_runs_only_when_a_revert_drops_a_token() {
+    // No dropped token: nothing to put back and the same document comes out.
+    let mut a = engine(1);
+    let id = rect(&mut a, 0.0, None);
+    let before = a.doc.clone();
+    a.dispatch(Command::Update {
+      ids: vec![id],
+      patch: json!({ "x": 5 }),
+    })
+    .unwrap();
+    let after = a.doc.clone();
+    let reverted = revert(&after, &after, &before);
+    assert_eq!(reverted.variables, after.variables);
+    assert_eq!(reverted.styles, after.styles);
   }
 }
