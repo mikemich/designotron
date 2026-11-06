@@ -27,6 +27,8 @@ pub const KNOWN_KEYS: &[&str] = &[
   "visible",
   "locked",
   "clip",
+  "overflow",
+  "scrollBehavior",
   "absolute",
   "minWidth",
   "maxWidth",

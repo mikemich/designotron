@@ -118,7 +118,7 @@ pub fn export_svg_parts(doc: &Document, id: &str, m: &dyn TextMeasurer, hidden: 
     },
     defs: String::new(),
     uid: 0,
-    scope: String::new(),
+    scope: export_scope(id, true, hidden),
     bounds: HashMap::new(),
   };
   let place = Mat::translate(-b.x, -b.y).mul(&doc.abs_matrix(id));
@@ -147,6 +147,24 @@ pub fn render_bounds(doc: &Document, id: &str, m: &dyn TextMeasurer) -> Rect {
   mat_bounds(&doc.abs_matrix(id), &local)
 }
 
+/// Deterministic def-id prefix for an export, so SVGs inlined into one page (player screens and
+/// overlays, code-export vectors) never share ids. Differs per node, per `children_only` and per
+/// set of hidden layers (the same node renders differently with them).
+fn export_scope(id: &str, children_only: bool, hidden: &[NodeId]) -> String {
+  let mut s = format!("x{}_", id.replace(|c: char| !c.is_ascii_alphanumeric(), ""));
+  if children_only {
+    s.push('k');
+  }
+  if !hidden.is_empty() {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in hidden.iter().flat_map(|n| n.bytes().chain([0u8])) {
+      h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
+    }
+    s.push_str(&format!("h{h:x}"));
+  }
+  s
+}
+
 fn export_svg_in(doc: &Document, id: &str, m: &dyn TextMeasurer, b: Rect, hidden: &[NodeId]) -> String {
   let Some(n) = doc.get(id) else { return String::new() };
   let mut r = Renderer {
@@ -158,7 +176,7 @@ fn export_svg_in(doc: &Document, id: &str, m: &dyn TextMeasurer, b: Rect, hidden
     },
     defs: String::new(),
     uid: 0,
-    scope: String::new(),
+    scope: export_scope(id, false, hidden),
     bounds: HashMap::new(),
   };
   let place = Mat::translate(-b.x, -b.y).mul(&doc.parent_matrix(id));

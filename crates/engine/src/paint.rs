@@ -552,7 +552,7 @@ mod tests {
     // The base disc plus 72 solid wedges on a small layer.
     assert_eq!(pat.matches("<path").count(), 1 + 72);
     assert!(!s.contains("<linearGradient"));
-    assert!(s.contains("fill=\"url(#ag1)\""));
+    assert!(s.contains("fill=\"url(#xr_ag1)\""));
     // Bigger layers get finer steps.
     let count = |side: f64| {
       svg(&doc_with(NodeType::Rectangle, side, 100.0, |n| n.fills = vec![angular(None)]))
@@ -592,7 +592,7 @@ mod tests {
       };
       let t = svg(&doc_with(NodeType::Rectangle, size, size, |n| n.fills = vec![faded]));
       assert!(
-        t.contains("<mask") && t.contains("mask=\"url(#ag1m)\"") && !t.contains("fill-opacity"),
+        t.contains("<mask") && t.contains("mask=\"url(#xr_ag1m)\"") && !t.contains("fill-opacity"),
         "{t}"
       );
     }
@@ -611,7 +611,7 @@ mod tests {
     let s = svg(&doc);
     assert_eq!(s.matches("<linearGradient").count(), 4);
     assert_eq!(s.matches("<rect x=").count(), 4);
-    assert!(s.contains("fill=\"url(#dg1)\""));
+    assert!(s.contains("fill=\"url(#xr_dg1)\""));
   }
 
   #[test]

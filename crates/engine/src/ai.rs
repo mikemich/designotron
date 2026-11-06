@@ -109,6 +109,8 @@ fn spec_schema() -> Value {
       "blur": { "type": "number", "description": "Layer blur radius" },
       "backgroundBlur": { "type": "number" },
       "clip": { "type": "boolean" },
+      "overflow": { "type": "string", "enum": ["none", "horizontal", "vertical", "both"], "description": "Frames: which directions the content scrolls in the prototype (the frame also clips). Needs content taller or wider than the frame" },
+      "scrollBehavior": { "type": "string", "enum": ["scroll", "fixed"], "description": "Layers inside a scrolling frame: scroll with the content (default) or stay put (a fixed header or tab bar). Sticky is not supported" },
       "layout": {
         "type": "object",
         "description": "Auto layout for frames",
@@ -2156,6 +2158,38 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
   }
   if let Some(v) = parse::opt_bool(cx, s, "clip")? {
     n.clip_content = v;
+  }
+  if let Some(v) = s.get("overflow").filter(|v| !v.is_null()) {
+    n.overflow = parse::choice(
+      cx,
+      "overflow",
+      v,
+      &[
+        (&["none"], crate::model::Overflow::None),
+        (&["horizontal"], crate::model::Overflow::Horizontal),
+        (&["vertical"], crate::model::Overflow::Vertical),
+        (&["both"], crate::model::Overflow::Both),
+      ],
+      &parse::no_hint,
+    )?;
+  }
+  if let Some(v) = s.get("scrollBehavior").filter(|v| !v.is_null()) {
+    if v.as_str().is_some_and(|t| t.trim().eq_ignore_ascii_case("sticky")) {
+      cx.warn(
+        "scrollBehavior \"sticky\" is not supported; the layer keeps its current behaviour (use \"fixed\" to keep it in place)".to_string(),
+      );
+    } else {
+      n.scroll_behavior = parse::choice(
+        cx,
+        "scrollBehavior",
+        v,
+        &[
+          (&["scroll"], crate::model::ScrollBehavior::Scroll),
+          (&["fixed"], crate::model::ScrollBehavior::Fixed),
+        ],
+        &parse::no_hint,
+      )?;
+    }
   }
   if let Some(v) = parse::opt_bool(cx, s, "absolute")? {
     n.absolute_position = v;

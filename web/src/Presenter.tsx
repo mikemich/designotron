@@ -1,3 +1,4 @@
+import { focusedByPointer } from "./ui/controls";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { toast, useStore } from "./store";
@@ -76,6 +77,18 @@ const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(pre
 
 /** How long the click that follows a released "While pressing" is ignored. */
 const SWALLOW_CLICK_MS = 500;
+/** A press-and-release that moved less than this (px) still counts as a tap. */
+const TAP_SLOP = 10;
+
+/** The click of a layer that also has "While pressing", run on release (see `press`). */
+interface Tap {
+  act: () => void;
+  /** The layer on screen when the pointer went down, and where. */
+  box: DOMRect;
+  x: number;
+  y: number;
+}
+const within = (b: DOMRect, x: number, y: number) => x >= b.left && x <= b.right && y >= b.top && y <= b.bottom;
 
 /** Prototype player: renders a frame and turns interactions into hotspots, with overlays
  *  (modals, menus) stacked on top. With `remixUrl` it is the view-only player for view links
@@ -286,7 +299,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
    *  the click the browser sends after the release is swallowed so it can't run another link. */
   const pressing = useRef<(() => void) | null>(null);
   const disarmSwallow = useRef<(() => void) | null>(null);
-  const press = (it: Interaction, from: Rect, source: string, inFrame: string, pointerId: number) => {
+  const press = (it: Interaction, from: Rect, source: string, inFrame: string, pointerId: number, tap?: Tap) => {
     if (pressing.current) return;
     const undo = go(it, from, source, inFrame);
     if (!undo) return;
@@ -299,6 +312,9 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       if (e.pointerId !== pointerId) return;
       stop();
       undo();
+      // A layer with both "While pressing" and "On click": the release over the layer is the tap,
+      // so the click runs once the press is put back (not when the press is cancelled).
+      if (tap && e.type === "pointerup" && (within(tap.box, e.clientX, e.clientY) || Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < TAP_SLOP)) tap.act();
       // A mouse release sends no click into the player (the layer under the pointer was replaced),
       // so the next pointerdown, which starts a real click, disarms the swallow too.
       disarmSwallow.current?.();
@@ -366,7 +382,8 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       if (t && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable)) return;
       const k = keys.current;
       // A focused button or link (Back, Close, Remix) keeps Enter and Space.
-      if ((e.key === "Enter" || e.key === " ") && t?.closest("button, a[href]")) return;
+      // (not one a mouse click focused: the bar's Back button must not swallow a key trigger).
+      if ((e.key === "Enter" || e.key === " ") && t?.closest("button, a[href]") && !focusedByPointer(t.closest("button, a[href]"))) return;
       const name = keyName(e);
       // Order: the top overlay's keys, then Escape closes an open overlay, then the base frame's
       // keys, then the built-ins (Escape leaves, the arrows step through the frames).
@@ -433,7 +450,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
           scrollEls={scrollEls}
           onAct={(h, it) => go(it, h.rect, h.id, current.id)}
           onHover={hover}
-          onPress={(h, it, pointerId) => press(it, h.rect, h.id, current.id, pointerId)}
+          onPress={(h, it, pointerId, tap) => press(it, h.rect, h.id, current.id, pointerId, tap)}
         />
       </div>
     </div>
@@ -521,7 +538,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
                 onClose={() => setOverlays((l) => l.slice(0, -1))}
                 onAct={(h, it) => go(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, h.id, o.id)}
                 onHover={hover}
-                onPress={(h, it, pointerId) => press(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, h.id, o.id, pointerId)}
+                onPress={(h, it, pointerId, tap) => press(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, h.id, o.id, pointerId, tap)}
                 onDelay={(it, from) => goRef.current(it, from, o.id, o.id)}
               />
             ))}
@@ -606,7 +623,7 @@ function OverlayLayer({
   onClose: () => void;
   onAct: (h: Hotspot, it: Interaction) => Revert | null;
   onHover: (owner: string, run: () => Revert | null) => void;
-  onPress: (h: Hotspot, it: Interaction, pointerId: number) => void;
+  onPress: (h: Hotspot, it: Interaction, pointerId: number, tap?: Tap) => void;
   onDelay: (it: Interaction, from: Rect) => void;
 }) {
   const n = pdoc().nodes[o.id];
@@ -649,7 +666,7 @@ interface SceneProps {
   scrollEls: ScrollEls;
   onAct?: (h: Hotspot, it: Interaction) => Revert | null;
   onHover?: (owner: string, run: () => Revert | null) => void;
-  onPress?: (h: Hotspot, it: Interaction, pointerId: number) => void;
+  onPress?: (h: Hotspot, it: Interaction, pointerId: number, tap?: Tap) => void;
 }
 
 /** A screen's picture, its scrolling boxes and fixed layers, and a hotspot per layer with
@@ -725,7 +742,11 @@ function SceneView({ scene, flash, interactive, scrolls, scrollEls, onAct, onHov
         for (const owner of h.chain) {
           const o = byId.get(owner);
           const p = o?.interactions.find(is("onPress"));
-          if (o && p) return onPress?.(o, p, e.pointerId);
+          if (o && p) {
+            const c = o.interactions.find(is("onClick"));
+            const box = e.currentTarget.getBoundingClientRect();
+            return onPress?.(o, p, e.pointerId, c ? { act: () => onAct?.(o, c), box, x: e.clientX, y: e.clientY } : undefined);
+          }
           if (o?.interactions.some(is("onClick"))) return;
         }
       }}

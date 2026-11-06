@@ -239,6 +239,39 @@ mod values {
   }
 
   #[test]
+  fn overflow_and_scroll_behavior_are_stored_and_sticky_warns() {
+    use crate::model::{NodeType, Overflow, ScrollBehavior};
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": 100, "height": 100, "overflow": "Vertical",
+        "children": [{ "type": "rectangle", "width": 100, "height": 20, "scrollBehavior": "fixed" }] }] }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+    let frame = e.doc.nodes.values().find(|n| n.kind == NodeType::Frame).unwrap();
+    assert_eq!(
+      (frame.overflow, frame.scroll_behavior),
+      (Overflow::Vertical, ScrollBehavior::Scroll)
+    );
+    let rect = e.doc.nodes.values().find(|n| n.kind == NodeType::Rectangle).unwrap();
+    assert_eq!(rect.scroll_behavior, ScrollBehavior::Fixed);
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": 10, "height": 10, "scrollBehavior": "sticky" }] }),
+    );
+    assert!(r.to_string().contains("sticky"), "{r}");
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "frame", "overflow": "diagonal" }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("overflow") && err.contains("vertical"), "{err}");
+  }
+
+  #[test]
   fn unknown_keys_warn_and_clear_ones_are_mapped() {
     let mut e = engine();
     let r = run(
