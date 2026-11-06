@@ -28,6 +28,7 @@ import {
 import { dispatch, useDoc, useStore, zoomToSelection } from "../store";
 import type { Doc, Node } from "../types";
 import { ALT_MOD, IconButton, Menu, type MenuItem } from "../ui/controls";
+import { PanelClose } from "./PanelChrome";
 import * as A from "../actions";
 import { viewportCenter } from "../actions";
 import { ColorStylesSection, EffectStylesSection, GridStylesSection, TextStylesSection } from "./StyleControls";
@@ -65,7 +66,8 @@ export function LeftPanel() {
     requestAnimationFrame(() => document.getElementById(`left-tab-${id}`)?.focus());
   };
   return (
-    <div className="panel">
+    <div className="panel" id="panel-left" role="region" aria-label="Layers panel">
+      <PanelClose side="left" />
       <div className="tabs" role="tablist" aria-label="Left panel" onKeyDown={onTabKey}>
         {LEFT_TABS.map(([id, label]) => (
           <button

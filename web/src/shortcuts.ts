@@ -1,6 +1,6 @@
 import * as A from "./actions";
 import { copySelection, pasteHere, pasteOverSelection, pasteReplace } from "./canvas/contextMenu";
-import { closeEmptyPrompt, dispatch, getDoc, pointerDrag, selectSibling, selection, setTool, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
+import { closeEmptyPrompt, dispatch, getDoc, pointerDrag, selectSibling, selection, setTool, toggleUi, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
 import { useShortcuts } from "./panels/ShortcutsDialog";
 import { focusedByPointer, isMac } from "./ui/controls";
 import { canOpenCursorChat, openCursorChat } from "./follow";
@@ -43,7 +43,8 @@ const REGIONS: { root: string; focus: () => HTMLElement | null }[] = [
 
 /** F6 / Shift+F6: moves focus to the next (previous) region that is on screen. */
 function cycleRegion(dir: 1 | -1) {
-  const shown = REGIONS.map((r) => ({ r, el: document.querySelector<HTMLElement>(r.root) })).filter((x) => x.el && x.el.getClientRects().length);
+  // A closed panel keeps a zero-width column (desktop) or is not rendered (tablet).
+  const shown = REGIONS.map((r) => ({ r, el: document.querySelector<HTMLElement>(r.root) })).filter((x) => x.el && [...x.el.getClientRects()].some((c) => c.width > 0));
   if (!shown.length) return;
   const at = shown.findIndex((x) => x.el!.contains(document.activeElement));
   for (let step = 1; step <= shown.length; step++) {
@@ -95,6 +96,8 @@ export function installShortcuts(): () => void {
       if (k === "a") return run(st.editingVector ? () => !pointerDrag.active && A.selectAllVectorPoints() : A.selectAll);
       if (k === "s") return run(e.shiftKey ? A.saveDtron : A.saveLocally);
       if (k === "/") return run(() => useStore.setState({ chatOpen: !st.chatOpen }));
+      // Show/hide the UI (Figma's Ctrl+\): the side panels. Plain \ stays "select parent".
+      if (e.key === "\\" && !e.shiftKey && !e.altKey) return run(toggleUi);
       if (k === "g" && e.altKey) return run(A.frameSelection);
       if (k === "g" && e.shiftKey) return run(A.ungroup);
       if (k === "g") return run(A.group);

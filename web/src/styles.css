@@ -95,12 +95,29 @@ textarea {
 }
 
 .main {
+  --lw: 248px;
+  --rw: 272px;
   display: grid;
-  grid-template-columns: 248px 1fr 272px;
+  grid-template-columns: var(--lw) 1fr var(--rw);
   min-height: 0;
 }
 .main.with-chat {
-  grid-template-columns: 248px 1fr 272px 380px;
+  grid-template-columns: var(--lw) 1fr var(--rw) 380px;
+}
+/* A closed panel keeps its grid cell at zero width (hidden, so out of the tab order too). */
+.main.no-left {
+  --lw: 0px;
+}
+.main.no-right {
+  --rw: 0px;
+}
+.main.no-left > .panel:not(.right),
+.main.no-right > .panel.right {
+  visibility: hidden;
+  border-width: 0;
+}
+.panel > .panel-close {
+  display: none;
 }
 
 /* ---------- Top bar ---------- */
@@ -147,6 +164,8 @@ textarea {
 }
 
 .tbtn {
+  white-space: nowrap;
+  flex: none;
   height: 32px;
   min-width: 32px;
   padding: 0 8px;
@@ -1281,10 +1300,71 @@ a.btn {
 /* Laptops: Claude takes the properties panel's place instead of squeezing the canvas. */
 @media (max-width: 1280px) {
   .main.with-chat {
-    grid-template-columns: 248px 1fr 360px;
+    grid-template-columns: var(--lw) 1fr 360px;
   }
   .main.with-chat > .panel.right {
     display: none;
+  }
+}
+/* Tablets: the Layers and Design panels (and Claude) are overlays on a full-width canvas. They
+ * start closed and open from the toolbar's two panel buttons. */
+@media (max-width: 1100px) {
+  .main,
+  .main.with-chat {
+    grid-template-columns: 1fr;
+    position: relative;
+  }
+  .main > .panel,
+  .main > .chat {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 30;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.35);
+    max-width: 100%;
+  }
+  .main > .panel:not(.right) {
+    left: 0;
+    width: 248px;
+  }
+  .main > .panel.right {
+    right: 0;
+    width: 272px;
+  }
+  .main > .chat {
+    right: 0;
+    width: 380px;
+  }
+  .main.no-left > .panel:not(.right),
+  .main.no-right > .panel.right {
+    display: none;
+  }
+  .panel > .panel-close {
+    display: inline-flex;
+    position: absolute;
+    top: 8px;
+    right: 6px;
+    z-index: 1;
+    width: 28px;
+    height: 28px;
+    align-items: center;
+    justify-content: center;
+    background: var(--panel);
+  }
+  .panel > .tabs {
+    padding-right: 38px;
+  }
+  /* The top bar gives up labels and the file name's room before anything overlaps. */
+  .topbar .tbtn .label {
+    display: none;
+  }
+  .topbar .center {
+    overflow: hidden;
+  }
+  .topbar .filename {
+    min-width: 0;
+    flex: 0 1 auto;
+    text-overflow: ellipsis;
   }
 }
 @media (max-width: 820px) {
@@ -2199,9 +2279,20 @@ body:has(.modal-bg) .hint-card {
   top: 90px;
 }
 
+.tbtn.export-code .export-icon {
+  display: none;
+}
 @media (max-width: 1000px) {
-  .topbar .save-state {
+  .topbar .save-state,
+  .topbar .file-loc,
+  .topbar .tool-extra {
     display: none;
+  }
+  .tbtn.export-code .export-label {
+    display: none;
+  }
+  .tbtn.export-code .export-icon {
+    display: block;
   }
 }
 .suggestions button:disabled {
