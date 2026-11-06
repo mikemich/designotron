@@ -1109,7 +1109,11 @@ impl Engine {
   /// Executes a command. Mutations become one undo step (or join the open gesture).
   pub fn dispatch(&mut self, cmd: Command) -> Result<Value, String> {
     if let Command::SetReadOnly { on } = cmd {
-      self.read_only = on;
+      if self.read_only != on {
+        self.read_only = on;
+        // The document is unchanged (doc_rev stays), but the editor's state isn't.
+        self.rev += 1;
+      }
       return Ok(json!({}));
     }
     if self.read_only && !allowed_read_only(&cmd) {
