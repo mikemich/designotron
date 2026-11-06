@@ -900,19 +900,31 @@ impl Engine {
   /// say: the copy stays the same object), else `{nodes: {id: node}, removed: [ids], meta}` where
   /// `meta` carries the small document-level fields (pages, styles, variables, name).
   pub fn doc_delta(&mut self, full: bool) -> Value {
+    serde_json::from_str(&self.doc_delta_json(full)).unwrap_or(Value::Null)
+  }
+
+  /// `doc_delta` as JSON text, written node by node: building a `Value` tree first costs more
+  /// than the serialising on a large change (the undo of a big delete).
+  pub fn doc_delta_json(&mut self, full: bool) -> String {
     let out = match (&self.synced, full) {
-      (Some(prev), false) if *prev == self.doc => return json!({ "same": true }),
+      (Some(prev), false) if *prev == self.doc => return "{\"same\":true}".into(),
       (Some(prev), false) => {
-        let mut nodes = serde_json::Map::new();
+        let mut nodes = String::from("{");
         let mut removed = Vec::new();
         for item in prev.nodes.diff(&self.doc.nodes) {
           match item {
             imbl::ordmap::DiffItem::Add(k, v) | imbl::ordmap::DiffItem::Update { new: (k, v), .. } => {
-              nodes.insert(k.clone(), serde_json::to_value(v).unwrap_or(Value::Null));
+              if nodes.len() > 1 {
+                nodes.push(',');
+              }
+              nodes.push_str(&serde_json::to_string(k).unwrap_or_default());
+              nodes.push(':');
+              nodes.push_str(&serde_json::to_string(v).unwrap_or_else(|_| "null".into()));
             }
             imbl::ordmap::DiffItem::Remove(k, _) => removed.push(k.clone()),
           }
         }
+        nodes.push('}');
         // Every document-level field except the node table (cheap: the node map clone is O(1)).
         let mut shell = self.doc.clone();
         shell.nodes = imbl::OrdMap::new();
@@ -920,9 +932,12 @@ impl Engine {
         if let Some(m) = meta.as_object_mut() {
           m.remove("nodes");
         }
-        json!({ "nodes": nodes, "removed": removed, "meta": meta })
+        format!("{{\"nodes\":{nodes},\"removed\":{},\"meta\":{meta}}}", json!(removed))
       }
-      _ => json!({ "full": self.doc }),
+      _ => format!(
+        "{{\"full\":{}}}",
+        serde_json::to_string(&self.doc).unwrap_or_else(|_| "null".into())
+      ),
     };
     self.synced = Some(self.doc.clone());
     out
@@ -1332,6 +1347,19 @@ impl Engine {
   }
 
   fn push_past(&mut self, s: Snapshot, group: Option<String>) {
+    // A step of the same group that starts exactly where the last one ended (nothing in
+    // between, remote edits included) extends it: a chat turn or plugin run is one step.
+    if group.is_some() {
+      if let Some(last) = self.past.last_mut() {
+        if last.group == group && last.after == s.doc {
+          last.after = self.doc.clone();
+          last.after_page = self.page.clone();
+          last.after_selection = self.selection.clone();
+          self.future.clear();
+          return;
+        }
+      }
+    }
     self.past.push(Step {
       before: s,
       after: self.doc.clone(),
@@ -1351,7 +1379,11 @@ impl Engine {
     let prev = self.doc.clone();
     // Nobody else changed anything since: the saved state is exact (and laid out).
     let exact = self.doc == step.after;
-    self.doc = crate::collab::revert(&self.doc, &step.after, &step.before.doc);
+    self.doc = if exact {
+      step.before.doc.clone()
+    } else {
+      crate::collab::revert(&self.doc, &step.after, &step.before.doc)
+    };
     self.selection = step
       .before
       .selection
@@ -1374,7 +1406,11 @@ impl Engine {
   fn redo_step(&mut self, step: Step) {
     let prev = self.doc.clone();
     let exact = self.doc == step.before.doc;
-    self.doc = crate::collab::revert(&self.doc, &step.before.doc, &step.after);
+    self.doc = if exact {
+      step.after.clone()
+    } else {
+      crate::collab::revert(&self.doc, &step.before.doc, &step.after)
+    };
     self.selection = step
       .after_selection
       .iter()
@@ -3796,7 +3832,7 @@ mod tests {
     add(&mut e, "b1");
     add(&mut e, "b2");
     group(&mut e, None);
-    assert_eq!(e.past.len(), 6);
+    assert_eq!(e.past.len(), 3, "each turn is one step, the user's edit another");
 
     e.dispatch(Command::Undo).unwrap();
     assert_eq!(
@@ -3818,6 +3854,91 @@ mod tests {
     e.dispatch(Command::Redo).unwrap();
     assert_eq!(names(&e).len(), 6);
     assert!(!e.state()["canRedo"].as_bool().unwrap());
+  }
+
+  #[test]
+  fn ten_grouped_steps_make_one_and_undo_redo_are_exact() {
+    let mut e = engine();
+    let base = e.doc.clone();
+    e.dispatch(Command::SetHistoryGroup { group: Some("t".into()) }).unwrap();
+    for i in 0..10 {
+      ai(
+        &mut e,
+        "create_nodes",
+        json!({ "nodes": [{ "type": "frame", "name": format!("n{i}"), "width": 10, "height": 10 }] }),
+      );
+    }
+    e.dispatch(Command::SetHistoryGroup { group: None }).unwrap();
+    assert_eq!(e.past.len(), 1);
+    let done = e.doc.clone();
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.doc == base, "exact undo equals the before document");
+    assert!(!e.state()["canUndo"].as_bool().unwrap());
+    e.dispatch(Command::Redo).unwrap();
+    assert!(e.doc == done, "redo reapplies the whole turn");
+  }
+
+  #[test]
+  fn remote_edit_between_grouped_steps_prevents_merging() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    e.dispatch(Command::SetHistoryGroup { group: Some("t".into()) }).unwrap();
+    ai(&mut e, "update_nodes", json!({ "updates": [{ "id": a, "opacity": 0.5 }] }));
+    let mut theirs = e.doc.clone();
+    theirs.get_mut(&a).unwrap().x = 77.0;
+    let d = crate::collab::delta(&e.doc, &theirs, false, false);
+    e.dispatch(Command::ApplyRemote { delta: d, local: false }).unwrap();
+    let steps = e.past.len();
+    ai(&mut e, "update_nodes", json!({ "updates": [{ "id": a, "opacity": 0.25 }] }));
+    assert_eq!(e.past.len(), steps + 1, "a collaborator's edit in between splits the turn");
+    e.dispatch(Command::SetHistoryGroup { group: None }).unwrap();
+    // Undo takes the turn's steps together but keeps the remote edit.
+    e.dispatch(Command::Undo).unwrap();
+    let n = e.doc.get(&a).unwrap();
+    assert_eq!(n.x, 77.0, "the remote edit stays");
+    assert_eq!(n.opacity, 1.0);
+  }
+
+  #[test]
+  fn relayout_of_a_laid_out_document_copies_nothing() {
+    let mut e = engine();
+    ai(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "F", "width": 200, "layout": { "direction": "vertical", "gap": 4, "padding": 8 },
+        "children": [{ "type": "text", "text": "Hello" }, { "type": "rectangle", "width": 20, "height": 20 }] }] }),
+    );
+    let before = e.doc.nodes.clone();
+    e.dispatch(Command::Relayout).unwrap();
+    assert!(before.ptr_eq(&e.doc.nodes), "no node was rewritten");
+  }
+
+  #[test]
+  fn render_after_move_delete_page_switch_and_undo_matches_a_fresh_render() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
+    let p1 = e.page.clone();
+    e.render_incremental(&p1, &[]);
+    ai(&mut e, "update_nodes", json!({ "updates": [{ "id": a, "x": 300 }] }));
+    e.render_incremental(&p1, &[]);
+    e.dispatch(Command::Delete { ids: vec![a.clone()] }).unwrap();
+    e.render_incremental(&p1, &[]);
+    e.dispatch(Command::AddPage { name: None }).unwrap();
+    let p2 = e.page.clone();
+    e.render_incremental(&p2, &[]);
+    e.dispatch(Command::Undo).unwrap();
+    e.dispatch(Command::Undo).unwrap();
+    let inc = e.render_incremental(&p1, &[]);
+    let fresh = render::render_root(
+      &e.doc,
+      &a,
+      e.measurer.as_ref(),
+      RenderOptions {
+        mode: Mode::Canvas,
+        hidden: &[],
+      },
+    );
+    assert_eq!(inc["changed"][&a].as_str().unwrap(), fresh, "markup carries the move");
   }
 
   #[test]

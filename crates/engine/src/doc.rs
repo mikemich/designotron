@@ -150,6 +150,27 @@ impl Document {
     self.nodes.get_mut(id)
   }
 
+  /// Stores `n` under its id unless an equal node is already there.
+  pub fn set_node(&mut self, n: Node) {
+    if self.nodes.get(&n.id) != Some(&n) {
+      self.nodes.insert(n.id.clone(), n);
+    }
+  }
+
+  /// Applies `f` to a copy of the node and stores it only if something changed. `get_mut`
+  /// path-copies the node's tree branch even when nothing is written, and every undo step
+  /// then keeps that copy alive; hot paths that mostly rewrite equal values use this.
+  pub fn modify(&mut self, id: &str, f: impl FnOnce(&mut Node)) -> bool {
+    let Some(old) = self.nodes.get(id) else { return false };
+    let mut n = old.clone();
+    f(&mut n);
+    if n == *old {
+      return false;
+    }
+    self.nodes.insert(id.to_string(), n);
+    true
+  }
+
   pub fn page(&self, id: &str) -> Option<&Page> {
     self.pages.iter().find(|p| p.id == id)
   }

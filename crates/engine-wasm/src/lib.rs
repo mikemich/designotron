@@ -169,7 +169,7 @@ impl WasmEngine {
   /// JSON delta of the document since the last call (`{full}` or `{nodes, removed, meta}`).
   #[wasm_bindgen(js_name = docDelta)]
   pub fn doc_delta(&mut self, full: bool) -> String {
-    self.inner.doc_delta(full).to_string()
+    self.inner.doc_delta_json(full)
   }
 
   /// JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.

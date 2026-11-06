@@ -304,8 +304,9 @@ pub fn apply(doc: &mut Document) -> bool {
       .iter()
       .filter_map(|(prop, var)| resolve(doc, &id, var).map(|v| (prop.clone(), v)))
       .collect();
-    let Some(n) = doc.get_mut(&id) else { continue };
-    let before = n.clone();
+    // Written back only on a change: `get_mut` would copy the tree branch of every bound layer.
+    let Some(before) = doc.get(&id).cloned() else { continue };
+    let mut n = before.clone();
     for (prop, v) in values {
       let num = v.as_f64();
       match prop.as_str() {
@@ -418,7 +419,8 @@ pub fn apply(doc: &mut Document) -> bool {
         _ => {}
       }
     }
-    if *n != before {
+    if n != before {
+      doc.nodes.insert(id.clone(), n);
       changed = true;
     }
   }

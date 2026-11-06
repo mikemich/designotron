@@ -195,7 +195,7 @@ pub fn sync_instance(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
   // copies are removed by `build` once it has what it needs from them.
   let mut reuse = Reuse::new(doc, inst_id);
   build(doc, gen, &mut reuse, inst_id, &info, &info.overrides, &Vec::new(), 0);
-  reuse.remove_old(doc);
+  reuse.remove_old(doc, &HashSet::new());
 }
 
 /// Records a property edit made on a node that lives in an instance.
@@ -788,7 +788,8 @@ fn build(
     cache: None,
   };
   let mut map = reuse.alloc(doc, gen, &comp_nodes[1..], &mut paths, !swaps.is_empty());
-  reuse.remove_old(doc);
+  // Copies whose id is reused are overwritten below (and left alone if equal).
+  reuse.remove_old(doc, &map.values().cloned().collect());
   map.insert(comp.id.clone(), inst_id.to_string());
 
   let mut bound = false;
@@ -809,7 +810,7 @@ fn build(
       n.children.clear();
       n.instance = Some(si.clone());
     }
-    doc.nodes.insert(n.id.clone(), n);
+    doc.set_node(n);
   }
 
   // Root takes the component's visual props; position and placement stay with the instance.
@@ -837,7 +838,7 @@ fn build(
   root.prop_refs = inst.prop_refs.clone();
   root.instance = Some(info.clone());
   root.children = comp.children.iter().filter_map(|c| map.get(c).cloned()).collect();
-  doc.nodes.insert(root.id.clone(), root);
+  doc.set_node(root);
 
   let mut swapped: Vec<(&NodeId, &InstanceInfo)> = swaps.iter().collect();
   swapped.sort_by(|a, b| a.0.cmp(b.0));
@@ -855,8 +856,10 @@ fn build(
     } else {
       map.get(mid).cloned()
     };
-    if let Some(n) = target.and_then(|t| doc.get_mut(&t)) {
-      let _ = patch::apply(n, p);
+    if let Some(t) = target {
+      doc.modify(&t, |n| {
+        let _ = patch::apply(n, p);
+      });
     }
   }
 
@@ -1157,10 +1160,13 @@ impl Reuse {
     }
   }
 
-  /// Removes the old copies from the document (once).
-  fn remove_old(&mut self, doc: &mut Document) {
+  /// Removes the old copies from the document (once), except those in `keep`, which the
+  /// caller is about to overwrite.
+  fn remove_old(&mut self, doc: &mut Document, keep: &HashSet<NodeId>) {
     for nid in std::mem::take(&mut self.old_ids) {
-      doc.nodes.remove(&nid);
+      if !keep.contains(&nid) {
+        doc.nodes.remove(&nid);
+      }
     }
   }
 
