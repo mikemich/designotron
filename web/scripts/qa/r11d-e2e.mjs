@@ -98,7 +98,7 @@ try {
   const created = await tool(page, "create_nodes", {
     nodes: [
       box("Products", 0, 0, 393, 852, "#FFFFFF", [
-        box("Header", 0, 0, 393, 56, "#FFFFFF", [text("Shop title", "Shop", 24, 16, 22)], { scrollBehavior: "fixed" }),
+        box("Header", 0, 0, 393, 56, "#FFFFFF", [text("Shop title", "Shop", 24, 16, 22), box("Last jump", 250, 8, 120, 40, "#EEF2FF", [text("Last label", "Last item", 14, 11, 14)])], { scrollBehavior: "fixed" }),
         ...cards,
         box("Tab bar", 0, 768, 393, 84, "#FFFFFF", [text("Tab shop", "Shop", 40, 24, 13), text("Tab search", "Search", 170, 24, 13)], { scrollBehavior: "fixed" }),
       ], { overflow: "vertical" }),
@@ -155,6 +155,8 @@ try {
   const docs = await set(await node(page, "Docs link"), { action: "scroll_to", destinationId: await node(page, "Gone") });
   await page.evaluate((id) => window.__dt.dispatch({ op: "delete", ids: [id] }), await node(page, "Gone"));
   await set(await node(page, "Open"), { action: "navigate", destinationId: m.Expanded, transition: "smart_animate" });
+  await set(await node(page, "Last jump"), { action: "scroll_to", destinationId: await node(page, "Card 6") });
+  await set(m.Cart, { action: "navigate", destinationId: m.Products, trigger: "key", key: "Enter" });
   await setStart(page, m.List);
   console.log("setup: docs link interaction ->", JSON.stringify(docs).slice(0, 160));
 
@@ -182,7 +184,6 @@ try {
       }
       return false;
     };
-    await page.locator(".presenter").focus();
     const reached = await focusHotspot();
     const info = await page.evaluate(() => {
       const a = document.activeElement;
@@ -197,13 +198,51 @@ try {
     check("Enter on the focused hotspot runs its click (Expanded)", (await crumb(page)).includes("Expanded"), await crumb(page));
     await page.click(".presenter button[title='Back']");
     await page.waitForTimeout(700);
-    await page.locator(".presenter").focus();
     await focusHotspot();
     await page.keyboard.press("Space");
     await page.waitForTimeout(700);
     check("Space on the focused hotspot runs its click", (await crumb(page)).includes("Expanded"), await crumb(page));
+    const inside = () => page.evaluate(() => !!document.activeElement?.closest(".presenter"));
+    check("after Space navigates, focus is still inside the presenter", await inside(), await page.evaluate(() => document.activeElement?.tagName));
+    await page.keyboard.press("Shift+Tab");
+    check("Shift+Tab after navigating stays inside the presenter", await inside());
     await page.keyboard.press("Escape");
     await page.waitForSelector(".presenter", { state: "detached" });
+  }
+
+  // ---- A click that focused a hotspot leaves Enter to the screen's Key trigger ----
+  {
+    await setStart(page, m.Cart);
+    await present(page);
+    const plus = await page.evaluate((cart) => {
+      const d = window.__dt.doc();
+      const below = (id) => {
+        for (let n = d.nodes[id]; n; n = d.nodes[n.parent]) if (n.id === cart) return true;
+        return false;
+      };
+      return Object.values(d.nodes).find((n) => n.name === "Plus" && below(n.id))?.id;
+    }, m.Cart);
+    await page.locator(`.presenter [data-hotspot="${plus}"]`).click();
+    await page.waitForTimeout(300);
+    check("clicking + stays on Cart", (await crumb(page)).includes("Cart"), await crumb(page));
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(500);
+    check("Enter after a click on a hotspot runs the screen's Key trigger (Products)", (await crumb(page)).includes("Products"), await crumb(page));
+    await page.keyboard.press("Escape");
+    await page.waitForSelector(".presenter", { state: "detached" });
+  }
+
+  // ---- With the Pen tool selected, Escape still closes the presenter ----
+  {
+    await setStart(page, m.List);
+    await page.locator("#dt-canvas").click({ position: { x: 5, y: 5 } });
+    await page.keyboard.press("p");
+    await present(page);
+    await page.keyboard.press("Escape");
+    const closed = await page.waitForSelector(".presenter", { state: "detached", timeout: 3000 }).then(() => true, () => false);
+    check("with the Pen tool selected, the first Escape closes the presenter", closed);
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("v");
   }
 
   // ---- Presenter on a 390 px phone with an overlay open ----
@@ -216,8 +255,15 @@ try {
     await p.goto(`${URL}/#/view/${data}`);
     await p.waitForSelector(".presenter", { timeout: 20000 });
     await p.waitForTimeout(500);
-    await p.locator(`.presenter [data-hotspot="${await node(page, "Zoom")}"]`).tap();
+    // Tab to the Zoom hotspot and open the overlay with Enter: focus must stay in the presenter.
+    let reached = false;
+    for (let i = 0; i < 12 && !reached; i++) {
+      await p.keyboard.press("Tab");
+      reached = await p.evaluate(() => document.activeElement?.getAttribute("aria-label") === "Zoom");
+    }
+    await p.keyboard.press("Enter");
     await p.waitForSelector(".overlay-frame");
+    check("Enter on a hotspot opens its overlay and focus stays inside the presenter", reached && (await p.evaluate(() => !!document.activeElement?.closest(".presenter"))), String(reached));
     await p.waitForTimeout(600);
     const r = await p.evaluate(() => {
       const bar = document.querySelector(".presenter .bar").getBoundingClientRect();
@@ -249,7 +295,7 @@ try {
     check("the export's scrollers carry overscroll-contain", /overscroll-y-contain/.test(get("src/screens/Products.tsx")), "");
     check("the stepper set keeps the picked variant (useState, change: messages)", /useState</.test(comps) && /change:/.test(comps));
     check("the Scroll to jump is a button with a scroll: action", /onNavigate\?\.\("scroll:/.test(settings) && /data-scroll-target/.test(settings));
-    check("the README no longer lists Scroll to as unexported", !/- [^\n]*Scroll to[^\n]*isn't/.test(get("README.md")) && /Scroll to scrolls/.test(get("README.md")));
+    check("the README no longer lists Scroll to as unexported", !/Scroll to/.test(get("README.md").split("What isn't exported")[1]) && /scroll:<id>/.test(get("CLAUDE.md")));
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r11d-project-"));
     for (const f of built.files) {
       fs.mkdirSync(path.dirname(path.join(dir, f.path)), { recursive: true });
@@ -304,6 +350,12 @@ try {
           }));
           const [t1, h1] = [await tabY(), await headY()];
           await shot(p, `r11d-export-tabend-${vp.width}`);
+          // Scroll to inside a phone screen moves the list, not the page.
+          await p.getByText("Last item", { exact: true }).click();
+          await p.waitForTimeout(1000);
+          const after = await p.evaluate(() => window.scrollY);
+          const [t2, h2] = [await tabY(), await headY()];
+          check(`${label}: a Scroll to on a phone screen leaves the page and the fixed bars in place`, after === 0 && t2 === t1 && h2 === h1, `scrollY ${after}, tab ${t1} -> ${t2}, header ${h1} -> ${h2}`);
           check(`${label}: the list scrolled and the page did not (scrollY 0)`, st.list > 0 && st.winY === 0, JSON.stringify(st));
           check(`${label}: the fixed tab bar and header don't move at the end of the list`, t0 === t1 && h0 === h1, `tab ${t0} -> ${t1}, header ${h0} -> ${h1}`);
           console.log(`INFO  ${label}: document height ${st.docH}, viewport ${vp.height} (a phone screen taller than the window still scrolls the page)`);

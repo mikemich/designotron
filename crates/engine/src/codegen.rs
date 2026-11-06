@@ -101,9 +101,21 @@ export default function App() {
     // A Change to nobody owns (its component isn't on this screen) does nothing.
     if (s.startsWith("change:")) return;
     if (s.startsWith("scroll:")) {
-      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       const target = host.current?.querySelector(`[data-scroll-target="${CSS.escape(s.slice(7))}"]`);
-      return target?.scrollIntoView({ block: "start", inline: "start", behavior: reduced ? "auto" : "smooth" });
+      const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+      // Scroll the boxes around the target, innermost first, and leave the page where it is.
+      let anchor = target;
+      for (let el = target?.parentElement; anchor && el && el !== host.current; el = el.parentElement) {
+        const { overflowX, overflowY } = getComputedStyle(el);
+        const x = /auto|scroll/.test(overflowX);
+        const y = /auto|scroll/.test(overflowY);
+        if (!x && !y) continue;
+        const a = anchor.getBoundingClientRect();
+        const b = el.getBoundingClientRect();
+        el.scrollTo({ left: x ? el.scrollLeft + a.left - b.left : el.scrollLeft, top: y ? el.scrollTop + a.top - b.top : el.scrollTop, behavior });
+        anchor = el;
+      }
+      return;
     }
     if (s === "close-overlay") return closeTop();
     if (s.startsWith("overlay:")) return setOverlays((o) => [...o, { ...placed(opts), screen: s.slice(8) } as Overlay]);
@@ -351,8 +363,9 @@ struct Ctx<'a> {
   delays: BTreeMap<String, Vec<serde_json::Value>>,
   /// Layers a Scroll to jumps to: layer id → the `data-scroll-target` value.
   scroll_targets: BTreeMap<String, String>,
-  /// Component sets some click Change to switches: their set functions keep the picked variant.
-  change_sets: BTreeSet<String>,
+  /// Component sets some click Change to switches, with the key naming each in `change:<key>:`
+  /// messages: their set functions keep the picked variant.
+  change_keys: BTreeMap<String, String>,
   /// Main component id → whether it, or a component nested in it, runs click actions.
   navigate_cache: BTreeMap<String, bool>,
 }
@@ -406,7 +419,7 @@ impl<'a> Ctx<'a> {
       keys: BTreeMap::new(),
       delays: BTreeMap::new(),
       scroll_targets: BTreeMap::new(),
-      change_sets: BTreeSet::new(),
+      change_keys: BTreeMap::new(),
       navigate_cache: BTreeMap::new(),
     };
     c.collect_targets();
@@ -428,7 +441,7 @@ impl<'a> Ctx<'a> {
   fn collect_targets(&mut self) {
     let doc = self.doc;
     for n in doc.nodes.values() {
-      for i in n.interactions.iter().filter(|i| is_click(i.trigger)) {
+      for i in &n.interactions {
         let Some(dest) = i.destination.as_ref().and_then(|d| doc.get(d)) else {
           continue;
         };
@@ -441,9 +454,18 @@ impl<'a> Ctx<'a> {
               .collect();
             self.scroll_targets.insert(dest.id.clone(), key);
           }
-          Action::ChangeTo => {
-            if let Some(set) = self.variant_set(&dest.id) {
-              self.change_sets.insert(set.id);
+          // Only a click on a layer of a variant's own function reaches its set's state.
+          Action::ChangeTo if is_click(i.trigger) && self.in_component_fn(n) => {
+            let Some(set) = self.variant_set(&dest.id) else { continue };
+            if !self.change_keys.contains_key(&set.id) {
+              let base = pascal(&set.name, "Component");
+              let mut key = base.clone();
+              let mut k = 2;
+              while self.change_keys.values().any(|v| *v == key) {
+                key = format!("{base}{k}");
+                k += 1;
+              }
+              self.change_keys.insert(set.id, key);
             }
           }
           _ => {}
@@ -560,7 +582,12 @@ impl<'a> Ctx<'a> {
   /// Whether a layer is part of a main component's function (not of a screen, and not below an
   /// instance, which is written inline or as a reference).
   fn in_component_fn(&self, n: &Node) -> bool {
-    let mut at = Some(n);
+    // An instance is a reference in its parent's function; only what is inside it is out of reach.
+    let mut at = if n.kind == NodeType::Instance {
+      n.parent.as_ref().and_then(|p| self.doc.get(p))
+    } else {
+      Some(n)
+    };
     while let Some(x) = at {
       match x.kind {
         NodeType::Component => return true,
@@ -1057,15 +1084,13 @@ impl<'a> Ctx<'a> {
         Some((Some(format!("scroll:{key}")), None, None))
       }
       Action::ChangeTo => {
-        // Only a layer of a variant's own function can reach its set function's state.
         let dest = i.destination.as_ref().and_then(|d| self.doc.get(d))?;
-        let set = self.variant_set(&dest.id)?;
+        let key = self.change_keys.get(&self.variant_set(&dest.id)?.id)?;
         if !self.in_component_fn(n) {
           return None;
         }
         let props: serde_json::Map<String, serde_json::Value> =
           dest.variant_props().into_iter().map(|(k, v)| (prop_ident(&k), json!(v))).collect();
-        let key = set_key(&set);
         Some((Some(format!("change:{key}:{}", serde_json::Value::Object(props))), None, None))
       }
     }
@@ -2896,12 +2921,6 @@ fn is_click(t: crate::model::Trigger) -> bool {
   matches!(t, Trigger::OnClick | Trigger::OnPress | Trigger::MouseDown | Trigger::MouseUp)
 }
 
-/// Names a component set in `change:<set>:<props>` messages, so a nested set passes another
-/// set's change up to its owner.
-fn set_key(set: &Node) -> String {
-  pascal(&set.name, "Component")
-}
-
 fn variants(doc: &Document, set: &Node) -> Vec<Node> {
   set
     .children
@@ -3079,14 +3098,14 @@ fn set_fn(ctx: &Ctx, set: &Node, name: &str) -> String {
   }
   // A click Change to inside the variants picks another variant: the set keeps it as state until
   // its parent passes other props.
-  let stateful = ctx.change_sets.contains(&set.id);
+  let change_key = ctx.change_keys.get(&set.id).filter(|_| !keys.is_empty());
+  let stateful = change_key.is_some();
   let (shown, pass) = if stateful { ("shown.", " onNavigate={change}") } else { ("", "") };
   let mut body = String::new();
   if stateful {
     let picked: Vec<String> = types.iter().take(keys.len()).cloned().collect();
     let idents: Vec<String> = keys.iter().map(|k| prop_ident(k)).collect();
-    let key = set_key(set);
-    let prefix = format!("change:{key}:");
+    let prefix = format!("change:{}:", change_key.map(String::as_str).unwrap_or_default());
     body.push_str(&format!(
       "  const [picked, setPicked] = useState<{{ {} }} | null>(null);\n",
       picked.join("; ")
@@ -3121,11 +3140,20 @@ fn set_fn(ctx: &Ctx, set: &Node, name: &str) -> String {
     .filter_map(|n| n.component.as_ref())
     .map(|c| c.description.as_str())
     .find(|d| !d.trim().is_empty());
+  let mut params = params;
+  if stateful {
+    params.push("onNavigate".into());
+  }
+  params.push("...rest".into());
+  types.extend([
+    "className?: string".into(),
+    "onClick?: () => void".into(),
+    format!("onNavigate?: {NAVIGATE}"),
+  ]);
   format!(
-    "{}export function {name}({{ {}{}, ...rest }}: {{ {}; className?: string; onClick?: () => void; onNavigate?: {NAVIGATE} }}) {{\n{body}}}\n\n",
+    "{}export function {name}({{ {} }}: {{ {} }}) {{\n{body}}}\n\n",
     jsdoc(doc_text),
     params.join(", "),
-    if stateful { ", onNavigate" } else { "" },
     types.join("; ")
   )
 }
@@ -3215,7 +3243,7 @@ const FOCUS_CSS: &str = ":focus-visible { outline: 2px solid #2563eb !important;
 /// What the prototype and the export don't carry over, and the top-level layers left out.
 fn readme_limits(doc: &Document) -> String {
   let mut out = String::from(
-    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- While hovering / While pressing Change to, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert). Click Change to switches the variant a component set shows (`useState` in the set's function in `src/components.tsx`) and Scroll to scrolls its target into view.\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n- Strokes are CSS `outline`s (they take no layout space, like Figma's), so `src/index.css` ends with a `:focus-visible` rule that keeps a keyboard focus ring; restyle it to taste.\n- Accessible names (`aria-label`) generated for icon-only controls are in English (\"Go to Detail\", \"Back\"); translate them for other languages.\n",
+    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- While hovering / While pressing Change to, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert).\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n- Strokes are CSS `outline`s (they take no layout space, like Figma's), so `src/index.css` ends with a `:focus-visible` rule that keeps a keyboard focus ring; restyle it to taste.\n- Accessible names (`aria-label`) generated for icon-only controls are in English (\"Go to Detail\", \"Back\"); translate them for other languages.\n",
   );
   let left_out: Vec<&str> = doc
     .pages
@@ -3412,7 +3440,7 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   files.push(ProjectFile {
     path: "CLAUDE.md".into(),
     content: format!(
-      "# {title}\n\nThis project was generated from a Designotron design. `design.dtron.json` is the design source.\n\n- Screens live in `src/screens/`, one per top-level frame. Reusable components are in `src/components.tsx`.\n- Layout is generated from auto layout (flexbox) and absolute positioning; refactor toward responsive layouts where it makes sense.\n- Prototype links became `onNavigate(\"Screen\")` calls handled in `src/App.tsx`; overlays (`\"overlay:Screen\"`, `\"swap-overlay:Screen\"`, `\"close-overlay\"`) open on top of the current screen, and Escape closes the topmost.\n- If the Designotron bridge is running, its MCP server (`designotron`) can read the live design: use `get_document`, `get_nodes` and `get_screenshot` to check details.\n"
+      "# {title}\n\nThis project was generated from a Designotron design. `design.dtron.json` is the design source.\n\n- Screens live in `src/screens/`, one per top-level frame. Reusable components are in `src/components.tsx`.\n- Layout is generated from auto layout (flexbox) and absolute positioning; refactor toward responsive layouts where it makes sense.\n- Prototype links became `onNavigate(\"Screen\")` calls handled in `src/App.tsx`; Scroll to becomes `onNavigate(\"scroll:<id>\")` (it scrolls the target's scrollers, not the page) and a click Change to inside a component set switches the variant its function shows (`useState` in `src/components.tsx`); overlays (`\"overlay:Screen\"`, `\"swap-overlay:Screen\"`, `\"close-overlay\"`) open on top of the current screen, and Escape closes the topmost.\n- If the Designotron bridge is running, its MCP server (`designotron`) can read the live design: use `get_document`, `get_nodes` and `get_screenshot` to check details.\n"
     ),
   });
   let credits = credits_md(doc);
@@ -5305,10 +5333,16 @@ mod r11_tests {
     assert!(src.contains(r#"data-scroll-target="sec""#), "{src}");
     assert!(src.contains("<button"), "{src}");
     let app = project(&doc, "src/App.tsx");
-    assert!(app.contains("s.startsWith(\"scroll:\")") && app.contains("scrollIntoView"), "{app}");
+    assert!(
+      app.contains("s.startsWith(\"scroll:\")") && app.contains("el.scrollTo(") && !app.contains("scrollIntoView"),
+      "{app}"
+    );
     let readme = project(&doc, "README.md");
     let limits = &readme[readme.find("What isn't exported").unwrap()..];
-    assert!(!limits.contains("- Scroll to") && limits.contains("Scroll to scrolls"), "{limits}");
+    assert!(
+      !limits.contains("Scroll to") && project(&doc, "CLAUDE.md").contains("scroll:<id>"),
+      "{limits}"
+    );
   }
 
   #[test]
@@ -5423,5 +5457,99 @@ mod r11_tests {
     assert!(v3.contains("change:Row:"), "{v3}");
     // The row's variants hand their navigator on to the stepper they hold.
     assert!(src.contains("<Stepper ") && src.contains("onNavigate={onNavigate}"), "{src}");
+  }
+
+  #[test]
+  fn a_change_to_on_an_instance_inside_a_variant_is_exported_and_other_sets_get_no_state() {
+    let (mut doc, comps) = stepper(Trigger::OnHover);
+    // Variants hold a button instance (a design-system stepper's +).
+    let mut gen = IdGen::new(2900);
+    let page = doc.pages[0].id.clone();
+    add(&mut doc, NodeType::Frame, "btn", "Btn", None);
+    doc.get_mut("btn").unwrap().layout = Some(crate::model::AutoLayout::default());
+    add(&mut doc, NodeType::Text, "btn_t", "Sign", Some("btn"));
+    let btn = crate::components::create_component(&mut doc, &["btn".to_string()], &mut gen).unwrap();
+    let inst = crate::components::create_instance(&mut doc, &btn, Some(&comps[0]), &page, 0.0, 0.0, &mut gen).unwrap();
+    doc.get_mut(&inst).unwrap().interactions.push(Interaction {
+      trigger: Trigger::OnClick,
+      action: Action::ChangeTo,
+      destination: Some(comps[1].clone()),
+      ..Default::default()
+    });
+    let src = project(&doc, "src/components.tsx");
+    assert!(src.contains("useState<"), "{src}");
+    assert!(
+      src.contains(r#"onClick={() => onNavigate?.("change:Stepper:{\"qty\":\"2\"}")}"#),
+      "{src}"
+    );
+    // A click Change to on a screen layer can't reach a set: no state, no dead hooks.
+    let (mut doc, comps) = stepper(Trigger::OnHover);
+    doc.get_mut("screen").unwrap().interactions.push(Interaction {
+      trigger: Trigger::OnClick,
+      action: Action::ChangeTo,
+      destination: Some(comps[1].clone()),
+      ..Default::default()
+    });
+    let src = project(&doc, "src/components.tsx");
+    assert!(!src.contains("useState") && !src.contains("useEffect"), "{src}");
+  }
+
+  #[test]
+  fn sets_with_the_same_name_get_their_own_change_key() {
+    let (mut doc, _) = stepper(Trigger::OnClick);
+    let mut gen = IdGen::new(3900);
+    let mut second = vec![];
+    for q in 1..=2 {
+      let id = format!("b{q}");
+      add(&mut doc, NodeType::Frame, &id, &format!("Qty={q}"), None);
+      doc.get_mut(&id).unwrap().layout = Some(crate::model::AutoLayout::default());
+      let plus = format!("bplus{q}");
+      add(&mut doc, NodeType::Frame, &plus, "Plus", Some(&id));
+      second.push(crate::components::create_component(&mut doc, &[id], &mut gen).unwrap());
+    }
+    let set = crate::components::combine_as_variants(&mut doc, &second, &mut gen).unwrap();
+    doc.get_mut(&set).unwrap().name = "stepper".into();
+    doc.get_mut("bplus1").unwrap().interactions.push(Interaction {
+      trigger: Trigger::OnClick,
+      action: Action::ChangeTo,
+      destination: Some(second[1].clone()),
+      ..Default::default()
+    });
+    let page = doc.pages[0].id.clone();
+    crate::components::create_instance(&mut doc, &second[0], Some("screen"), &page, 0.0, 0.0, &mut gen).unwrap();
+    let src = project(&doc, "src/components.tsx");
+    let keys: BTreeSet<&str> = src
+      .match_indices("\"change:")
+      .map(|(i, _)| src[i + 8..].split(':').next().unwrap())
+      .collect();
+    assert!(keys.contains("Stepper") && keys.contains("Stepper2"), "{keys:?}\n{src}");
+  }
+
+  #[test]
+  fn key_and_delay_scroll_to_have_a_target() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Settings", None);
+    add(&mut doc, NodeType::Frame, "sec", "Security", Some("s"));
+    doc.get_mut("s").unwrap().interactions.push(Interaction {
+      trigger: Trigger::Key,
+      key: Some("S".into()),
+      action: Action::ScrollTo,
+      destination: Some("sec".into()),
+      ..Default::default()
+    });
+    let src = project(&doc, "src/screens/Settings.tsx");
+    assert!(src.contains(r#"data-scroll-target="sec""#), "{src}");
+    let app = project(&doc, "src/App.tsx");
+    assert!(app.contains(r#""to":"scroll:sec""#), "{app}");
+  }
+
+  #[test]
+  fn a_set_without_variant_properties_is_valid_tsx() {
+    let (mut doc, comps) = stepper(Trigger::OnClick);
+    for (i, c) in comps.iter().enumerate() {
+      doc.get_mut(c).unwrap().name = format!("Variant {}", ["A", "B", "C"][i]);
+    }
+    let src = project(&doc, "src/components.tsx");
+    assert!(!src.contains("{ ,") && !src.contains("{ ;") && !src.contains(", ,"), "{src}");
   }
 }

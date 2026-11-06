@@ -103,7 +103,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   const [smart, setSmart] = useState<Smart | null>(null);
   const motionKey = useRef(0);
   // Moves when the player's own engine changes (a Change to), so scenes are rebuilt.
-  const [, setRevision] = useState(0);
+  const [revision, setRevision] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const current = history[history.length - 1];
   const doc = pdoc();
@@ -139,6 +139,12 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     return () => window.removeEventListener("resize", fit);
   }, [current.id]);
   useEffect(() => closePlayer, []);
+  // A keyboard-activated hotspot that leaves the screen or opens an overlay takes its focus with
+  // it: put it back in the player, so Tab stays inside.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (root && !root.contains(document.activeElement)) root.focus({ preventScroll: true });
+  }, [history.length, overlays.length, revision]);
 
   /** The motion that really plays: none with reduced motion, a dissolve for a smart animate
    *  between containers with too many children. */
@@ -378,8 +384,6 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   keys.current = { scene, top, frames, current, overlays };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // A focused hotspot already ran its click on this Enter or Space.
-      if (e.defaultPrevented) return;
       const t = e.target as HTMLElement | null;
       if (t && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable)) return;
       const k = keys.current;
@@ -734,7 +738,9 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
   };
   const spot = (h: Hotspot, origin: Rect) => {
     // A hotspot whose tap runs a click is reachable by keyboard: Enter or Space acts.
-    const hit = tabbable ? clickOf(h.chain) : null;
+    const found = tabbable ? clickOf(h.chain) : null;
+    // Only the layer that owns the click is a stop (a child inside it shares that stop).
+    const hit = found && found.o.id === h.id ? found : null;
     const dest = hit?.c.destination ? pdoc().nodes[hit.c.destination]?.name : null;
     return (
       <div
@@ -746,7 +752,11 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
           hit
             ? (e) => {
                 if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ")) return;
+                // A click that focused it keeps Enter and Space for the screen's Key triggers.
+                if (focusedByPointer(e.currentTarget)) return;
+                // This key is the hotspot's: no Key trigger or Escape handler also runs on it.
                 e.preventDefault();
+                e.stopPropagation();
                 click(h.chain);
               }
             : undefined
