@@ -506,6 +506,13 @@ impl Rooms {
       if let Err(e) = std::fs::create_dir_all(d) {
         log::error!("cannot create data dir {}: {e}", d.display());
       }
+      // Temp files of a write that a crash interrupted ("<room>.json.<n>.tmp"); the .json beside them is intact.
+      for entry in std::fs::read_dir(d).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("tmp") && entry.file_type().is_ok_and(|t| t.is_file()) {
+          let _ = std::fs::remove_file(&path);
+        }
+      }
     }
     Arc::new(Rooms {
       rooms: Mutex::new(HashMap::new()),
@@ -1558,6 +1565,20 @@ mod tests {
     // The sender only gets its ack.
     let ack: Value = serde_json::from_str(&old_rx.try_recv().unwrap()).unwrap();
     assert_eq!(ack["type"], "ack");
+  }
+
+  /// Temp files left by an interrupted write are removed at start; room files stay.
+  #[test]
+  fn stray_temp_files_are_removed_at_start() {
+    let dir = std::env::temp_dir().join(format!("dt-rooms-tmp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("room1.json"), "{}").unwrap();
+    std::fs::write(dir.join("room1.json.7.tmp"), "{\"half").unwrap();
+    let _rooms = Rooms::new(Limits::default(), Some(dir.clone()));
+    assert!(dir.join("room1.json").exists());
+    assert!(!dir.join("room1.json.7.tmp").exists());
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   /// `save_dirty` writes a changed room only when its last save is old enough: a second, or
