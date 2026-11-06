@@ -146,6 +146,8 @@ interface Store {
   tabView: boolean;
   toast: { text: string; kind: "info" | "error" } | null;
   dropTarget: string | null;
+  /** Insertion line `[x1, y1, x2, y2]` (page space) for a layer about to enter an auto layout frame. */
+  dropLine: [number, number, number, number] | null;
   /** Character range selected in the text being edited (code points). */
   textSel: { id: string; start: number; end: number } | null;
   showRulers: boolean;
@@ -207,6 +209,7 @@ export const useStore = create<Store>(() => ({
   tabView: false,
   toast: null,
   dropTarget: null,
+  dropLine: null,
   textSel: null,
   showRulers: pref("dt:showRulers", false),
   showGrids: pref("dt:showGrids", true),

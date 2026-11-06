@@ -596,6 +596,13 @@ textarea.textinput {
   outline: 2px solid var(--select);
   outline-offset: -2px;
 }
+/* Canvas: where a layer dropped into an auto layout frame will be inserted. */
+.flow-drop-line {
+  stroke: var(--select);
+  stroke-width: 2px;
+  stroke-linecap: round;
+  pointer-events: none;
+}
 
 /* ---------- Canvas ---------- */
 .canvas {

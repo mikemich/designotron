@@ -193,6 +193,7 @@ export function Canvas() {
   const marquee = useStore((s) => s.marquee);
   const rightTab = useStore((s) => s.rightTab);
   const dropTarget = useStore((s) => s.dropTarget);
+  const dropLine = useStore((s) => s.dropLine);
   const showRulers = useStore((s) => s.showRulers);
   const showGrids = useStore((s) => s.showGrids);
   const docRev = useStore((s) => s.es.docRev);
@@ -777,7 +778,9 @@ export function Canvas() {
         // With the axis locked the layers sit at the locked delta, so the drop target is looked up there.
         const tp = axis === "x" ? { x: p.x, y: d.start.y } : axis === "y" ? { x: d.start.x, y: p.y } : p;
         const target = query<string | null>({ q: "frameAt", x: tp.x, y: tp.y, exclude: d.ids });
-        useStore.setState({ guides: r?.guides ?? [], gaps: r?.gaps ?? [], dropTarget: target });
+        // A layer about to enter an auto layout frame shows where it will land.
+        const slot = target ? query<{ line: [number, number, number, number] } | null>({ q: "dropSlot", ids: d.ids, x: tp.x, y: tp.y }) : null;
+        useStore.setState({ guides: r?.guides ?? [], gaps: r?.gaps ?? [], dropTarget: target, dropLine: slot?.line ?? null });
         break;
       }
       case "resize": {
@@ -907,7 +910,7 @@ export function Canvas() {
         } else if (d.shiftToggle) {
           dispatch({ op: "select", ids: [d.shiftToggle], mode: "toggle" });
         }
-        useStore.setState({ guides: [], gaps: [], dropTarget: null });
+        useStore.setState({ guides: [], gaps: [], dropTarget: null, dropLine: null });
         break;
       case "resize":
       case "rotate":
@@ -1201,6 +1204,7 @@ export function Canvas() {
       }}
       onPointerCancel={() => {
         pointerDrag.active = false;
+        useStore.setState({ dropTarget: null, dropLine: null });
       }}
       onPointerLeave={() => {
         reportCursor(null);
@@ -1241,6 +1245,7 @@ export function Canvas() {
           );
         })}
         {dropTarget && <DropOutline id={dropTarget} v={v} />}
+        {dropLine && <DropLine line={dropLine} v={v} />}
         {hoverItem && !measuring && <polygon points={polyPoints(corners(v, hoverItem.matrix, hoverItem.width, hoverItem.height))} fill="none" stroke="#0d99ff" strokeWidth={1.5} />}
         {/* Vector edit mode draws the path itself instead of the layer's box. */}
         {!editingVector && selItems.items.map((it) => (
@@ -1357,6 +1362,13 @@ function DropOutline({ id, v }: { id: string; v: { x: number; y: number; zoom: n
   const it = query<{ items: BoundsItem[] }>({ q: "bounds", ids: [id] }).items[0];
   if (!it) return null;
   return <polygon points={polyPoints(corners(v, it.matrix, it.width, it.height))} fill="none" stroke="#0d99ff" strokeWidth={2} strokeDasharray="5 3" />;
+}
+
+/** Where a layer dropped into an auto layout frame will be inserted. */
+function DropLine({ line, v }: { line: [number, number, number, number]; v: { x: number; y: number; zoom: number } }) {
+  const a = toScreen(v, { x: line[0], y: line[1] });
+  const b = toScreen(v, { x: line[2], y: line[3] });
+  return <line className="flow-drop-line" x1={a.x} y1={a.y} x2={b.x} y2={b.y} />;
 }
 
 function DrawPreview({ tool, start, cur, v }: { tool: string; start: Pt; cur: Pt; v: { x: number; y: number; zoom: number } }) {
