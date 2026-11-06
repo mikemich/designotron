@@ -3263,3 +3263,25 @@ body:has(.phone-note) .toast {
     height: 40px;
   }
 }
+
+/* Windows high contrast: backgrounds are dropped, so buttons, chips and cards need a boundary of their own. */
+@media (forced-colors: active) {
+  button,
+  .btn,
+  .tbtn,
+  .ibtn,
+  .link-btn,
+  .preset-btn,
+  .tool-chip,
+  .var-chip,
+  .var-alias-chip,
+  .file-card,
+  .folder-card,
+  .demo-card,
+  .hint-card {
+    border: 1px solid ButtonText;
+  }
+  .logo {
+    border: 1px solid CanvasText;
+  }
+}

@@ -72,6 +72,7 @@ export function DesignPanel() {
       {isDeviceTarget(nodes) && <DeviceSection node={nodes[0]} />}
       <PositionSection nodes={nodes} ids={ids} />
       <AutoLayoutSection nodes={nodes} ids={ids} />
+      {nodes.every((n) => n.type === "star" || n.type === "polygon") && <ShapeSection nodes={nodes} ids={ids} />}
       <LayerSection nodes={nodes} ids={ids} />
       {nodes.every((n) => n.type === "text") && <TextSection nodes={nodes} ids={ids} />}
       <PaintsSection title="Fill" nodes={nodes} ids={ids} keyName="fills" />
@@ -573,6 +574,74 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   );
 }
 
+/** The hex field of a solid paint. Enter commits and keeps focus (text selected, ready for the next
+ *  value); the field follows the paint's colour whenever it isn't being typed in. */
+function HexInput({ color, onCommit }: { color: string; onCommit: (color: string) => void }) {
+  const ref = useRef<HTMLInputElement>(null);
+  const shown = color.replace("#", "").slice(0, 6);
+  useEffect(() => {
+    const el = ref.current;
+    if (el && document.activeElement !== el) el.value = shown;
+  }, [shown]);
+  const commit = (el: HTMLInputElement) => {
+    const v = el.value.replace("#", "").trim();
+    if (!/^([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v)) {
+      el.value = shown;
+      return;
+    }
+    const next = "#" + (v.length === 3 ? v.split("").map((c) => c + c).join("") : v).toUpperCase();
+    el.value = next.slice(1);
+    if (next !== color.toUpperCase().slice(0, 7)) onCommit(next);
+  };
+  return (
+    <input
+      ref={ref}
+      aria-label="Hex colour"
+      defaultValue={shown}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          commit(e.currentTarget);
+          e.currentTarget.select();
+        }
+      }}
+      onBlur={(e) => commit(e.currentTarget)}
+    />
+  );
+}
+
+/** Points (3 to 60) of a star or polygon, and a star's inner radius as a percentage of the outer one. */
+function ShapeSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
+  const stars = nodes.every((n) => n.type === "star");
+  return (
+    <Section title={stars ? "Star" : "Polygon"}>
+      <div className="grid2">
+        <NumberField
+          label="Points"
+          value={common(nodes, (n) => n.shape?.pointCount ?? (n.type === "star" ? 5 : 3))}
+          min={3}
+          max={60}
+          onChange={(v) => update(ids, { shape: { pointCount: Math.max(3, Math.min(60, Math.round(v))) } })}
+          title="Points"
+        />
+        {stars && (
+          <NumberField
+            label="Ratio"
+            value={mapMaybe(common(nodes, (n) => n.shape?.innerRadius ?? 0.38), (v) => Math.round(v * 100))}
+            suffix="%"
+            min={1}
+            max={99}
+            onChange={(v) => update(ids, { shape: { innerRadius: Math.max(1, Math.min(99, v)) / 100 } })}
+            onScrubStart={begin}
+            onScrubEnd={end}
+            title="Ratio (inner radius)"
+          />
+        )}
+      </div>
+    </Section>
+  );
+}
+
 function LayerSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   return (
     <Section title="Layer">
@@ -607,13 +676,21 @@ function mapMaybe<T, U>(v: Maybe<T>, f: (t: T) => U): Maybe<U> {
 }
 
 const WEIGHTS = [
+  { value: 100, label: "Thin" },
+  { value: 200, label: "Extra light" },
   { value: 300, label: "Light" },
   { value: 400, label: "Regular" },
   { value: 500, label: "Medium" },
   { value: 600, label: "Semibold" },
   { value: 700, label: "Bold" },
   { value: 800, label: "Extra bold" },
+  { value: 900, label: "Black" },
 ];
+
+/** The weight list, plus the layer's own weight as a number when the list doesn't have it. */
+function weightOptions(v: Maybe<number>) {
+  return typeof v === "number" && !WEIGHTS.some((w) => w.value === v) ? [...WEIGHTS, { value: v, label: String(v) }].sort((a, b) => a.value - b.value) : WEIGHTS;
+}
 
 function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const t = (f: (n: Node) => unknown) => common(nodes, (n) => f(n));
@@ -642,7 +719,7 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         <SelectField ariaLabel="Font family" value={r("fontFamily") as Maybe<string>} options={FONTS.map((f) => ({ value: f, label: f }))} onChange={(fontFamily) => set({ fontFamily })} />
       </div>
       <div className="grid2">
-        <SelectField ariaLabel="Font weight" value={r("fontWeight") as Maybe<number>} options={WEIGHTS} onChange={(fontWeight) => set({ fontWeight })} />
+        <SelectField ariaLabel="Font weight" value={r("fontWeight") as Maybe<number>} options={weightOptions(r("fontWeight") as Maybe<number>)} onChange={(fontWeight) => set({ fontWeight })} />
         <NumberField value={r("fontSize") as Maybe<number>} min={1} onChange={(fontSize) => set({ fontSize })} onScrubStart={begin} onScrubEnd={end} label="Aa" title="Font size" />
       </div>
       <div className="grid2">
@@ -933,19 +1010,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
                 }}
               />
               {p.type === "solid" ? (
-                <input
-                  key={p.color}
-                  aria-label="Hex colour"
-                  defaultValue={p.color.replace("#", "").slice(0, 6)}
-                  onKeyDown={(e) => {
-                    e.stopPropagation();
-                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                  }}
-                  onBlur={(e) => {
-                    const v = e.target.value.replace("#", "").trim();
-                    if (/^([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v)) setP({ ...p, color: "#" + (v.length === 3 ? v.split("").map((c) => c + c).join("") : v).toUpperCase() });
-                  }}
-                />
+                <HexInput color={p.color} onCommit={(color) => setP({ ...p, color })} />
               ) : (
                 <span style={{ flex: 1 }}>{paintLabel(p)}</span>
               )}

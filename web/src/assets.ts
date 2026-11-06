@@ -77,7 +77,54 @@ export function readFileAsDataUrl(file: Blob): Promise<string> {
   });
 }
 
+/** The SVG's own size: `width` and `height` (plain numbers or px), else its `viewBox`. A browser reports
+ *  150x150 for an SVG that only has a viewBox, so the file is read before the image is measured. */
+export function svgSize(text: string): { width: number; height: number } | null {
+  let root: Element | null = null;
+  try {
+    const doc = new DOMParser().parseFromString(text, "image/svg+xml");
+    root = doc.documentElement.nodeName.toLowerCase() === "svg" ? doc.documentElement : null;
+  } catch {
+    return null;
+  }
+  if (!root) return null;
+  const len = (v: string | null) => {
+    const m = v?.trim().match(/^([0-9]*\.?[0-9]+)(px)?$/i);
+    return m ? parseFloat(m[1]) : 0;
+  };
+  const w = len(root.getAttribute("width"));
+  const h = len(root.getAttribute("height"));
+  const vb = (root.getAttribute("viewBox") ?? "").trim().split(/[\s,]+/).map(Number);
+  const [vw, vh] = vb.length === 4 && vb.every(Number.isFinite) ? [vb[2], vb[3]] : [0, 0];
+  if (w && h) return { width: w, height: h };
+  if (vw > 0 && vh > 0) {
+    if (w) return { width: w, height: (w * vh) / vw };
+    if (h) return { width: (h * vw) / vh, height: h };
+    return { width: vw, height: vh };
+  }
+  return w || h ? { width: w || h, height: h || w } : null;
+}
+
+function dataUrlText(url: string): string | null {
+  const m = url.match(/^data:([^,]*),([\s\S]*)$/);
+  if (!m) return null;
+  try {
+    if (/;base64/i.test(m[1])) {
+      const bin = atob(m[2]);
+      return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+    }
+    return decodeURIComponent(m[2]);
+  } catch {
+    return null;
+  }
+}
+
 export function imageSize(url: string): Promise<{ width: number; height: number }> {
+  if (/^data:image\/svg\+xml/i.test(url)) {
+    const text = dataUrlText(url);
+    const size = text ? svgSize(text) : null;
+    if (size) return Promise.resolve({ width: Math.round(size.width), height: Math.round(size.height) });
+  }
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => resolve({ width: img.naturalWidth || 200, height: img.naturalHeight || 200 });

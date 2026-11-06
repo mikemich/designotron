@@ -1357,6 +1357,19 @@ impl<'a> Ctx<'a> {
       el.s("font-style", "italic");
     }
     el.s("line-height", px(t.line_height_px()));
+    if let (Some(Paint::Solid { color, opacity, .. }), true) = (n.strokes.iter().find(|p| p.visible()), n.stroke_weight > 0.0) {
+      // Centre strokes keep their weight; outside ones are doubled and painted under the fill.
+      // CSS has no inside stroke, so it falls back to the centre one.
+      let c = color::css_with_opacity(color, *opacity);
+      let outside = n.stroke_align == StrokeAlign::Outside;
+      let w = if outside { n.stroke_weight * 2.0 } else { n.stroke_weight };
+      el.s("-webkit-text-stroke", format!("{} {c}", px(w)));
+      if outside {
+        el.s("paint-order", "stroke fill");
+      } else if n.stroke_align == StrokeAlign::Inside {
+        el.approx = Some("Inside text strokes have no CSS equivalent; drawn centred.".into());
+      }
+    }
     if t.letter_spacing != 0.0 {
       el.s("letter-spacing", px(t.letter_spacing));
     }
@@ -3238,6 +3251,27 @@ mod tests {
     assert!(html.contains("min-width: 120px") && html.contains("max-height: 64px"));
     assert!(html.contains("margin-top: 12px"));
     assert!(html.contains("<a href=\"https://example.com/docs\""));
+  }
+
+  #[test]
+  fn text_strokes_become_webkit_text_stroke() {
+    let mut doc = sample();
+    let page = doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Text, "st".into(), "S".into());
+    t.text.as_mut().unwrap().characters = "Outlined".into();
+    t.strokes = vec![Paint::solid("#ff0000")];
+    t.stroke_weight = 2.0;
+    t.stroke_align = StrokeAlign::Outside;
+    doc.insert(t, Some("home"), &page, None);
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(html.contains("-webkit-text-stroke: 4px #FF0000"), "{html}");
+    assert!(html.contains("paint-order: stroke fill"), "{html}");
+    doc.get_mut("st").unwrap().stroke_align = StrokeAlign::Center;
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(
+      html.contains("-webkit-text-stroke: 2px #FF0000") && !html.contains("paint-order"),
+      "{html}"
+    );
   }
 
   #[test]

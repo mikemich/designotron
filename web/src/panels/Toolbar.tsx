@@ -235,7 +235,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           </button>
           <button
             className="tbtn"
-            style={{ minWidth: 16, padding: 0 }}
+            style={{ minWidth: 24, padding: 0 }}
             title="Shape tools"
             {...opens("Shape tools")}
             onClick={(e) =>

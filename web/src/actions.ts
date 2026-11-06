@@ -366,7 +366,9 @@ export async function insertImageFile(file: File, x: number, y: number) {
     width = Math.round(width * k);
     height = Math.round(height * k);
   }
-  dispatch({ op: "createImage", src: "asset:" + id, x: x - width / 2, y: y - height / 2, width, height, name: file.name.replace(/\.\w+$/, ""), parent: null });
+  // The frame under the drop point takes the image (the engine reads x and y as page coordinates).
+  const parent = query<string | null>({ q: "frameAt", x, y, exclude: [] });
+  dispatch({ op: "createImage", src: "asset:" + id, x: x - width / 2, y: y - height / 2, width, height, name: file.name.replace(/\.\w+$/, ""), parent });
 }
 
 export async function placeImage() {
