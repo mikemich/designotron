@@ -154,9 +154,10 @@ try {
   await ai(O, "define_variables", { collection: "Primitives", variables: [{ name: "Gray", type: "color", value: "#222222" }] });
   await ai(O, "define_variables", { collection: "Theme", modes: ["Light", "Dark"], variables: [{ name: "Surface", type: "color", values: { Light: { alias: "Primitives/Gray" }, Dark: "#000000" } }] });
   await ai(O, "define_styles", { colors: [{ name: "Brand", color: "#6D4AFF" }] });
-  await waitUntil(async () => (await varNames(G)).length === 2, 8000);
+  // Wait for both the variables and the style to reach Gina (they come in separate changes).
+  await waitUntil(async () => (await varNames(G)).length === 2 && (await doc(G)).styles.colors.some((s) => s.name === "Brand"), 8000);
   await ai(G, "create_nodes", { nodes: [{ type: "rectangle", name: "Gina box", x: 700, y: 400, width: 120, height: 80, bind: { fill: "Theme/Surface" }, fillStyle: "Brand" }] });
-  await sleep(1200);
+  await waitUntil(async () => !!(await named(O, "Gina box")), 8000);
   const ginaId = (await named(G, "Gina box")).id;
   await undo(O);
   await undo(O);
