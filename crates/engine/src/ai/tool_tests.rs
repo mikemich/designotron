@@ -131,6 +131,16 @@ mod values {
     assert_eq!((t.font_weight, t.line_height), (600, Some(30.0)));
     let id = one(&mut e, json!({ "type": "text", "text": "Hi", "fontSize": 20, "lineHeight": "3px" }));
     assert_eq!(e.doc.get(&id).unwrap().text.as_ref().unwrap().line_height, Some(3.0));
+    // A span's % letter spacing follows the span's size, else the layer's.
+    let id = one(
+      &mut e,
+      json!({ "type": "text", "fontSize": 20, "spans": [{ "text": "ab", "letterSpacing": "10%" }, { "text": "cd", "fontSize": 40, "letterSpacing": "10%" }] }),
+    );
+    let runs = e.doc.get(&id).unwrap().text.as_ref().unwrap().runs.clone();
+    assert_eq!(
+      runs.iter().map(|r| r.letter_spacing).collect::<Vec<_>>(),
+      vec![Some(2.0), Some(4.0)]
+    );
     let err = e
       .dispatch(ai(
         "create_nodes",

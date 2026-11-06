@@ -491,65 +491,74 @@ pub fn padding(cx: &Ctx, key: &str, v: &Value) -> Result<[f64; 4], String> {
   }
 }
 
-/// `lineHeight`: a multiple of the font size when below 4, otherwise px; "150%", "24px" and
-/// "normal" are accepted. None means automatic.
+/// A bare line height below this is a multiple of the font size, otherwise px.
+const LINE_HEIGHT_MULTIPLE_BELOW: f64 = 4.0;
+
+/// `lineHeight`, the same notation as the design panel (`web/src/panels/textUnits.ts`): "150%" and
+/// "1.5em" are × the font size, "24px" is px, a bare number below 4 is a multiple and any other is px.
+/// Empty, "auto", "normal" and 0 mean automatic (None). Rounded to 0.01.
 pub fn line_height(cx: &Ctx, key: &str, v: &Value, font_size: f64) -> Result<Option<f64>, String> {
-  let bad = |n: f64| {
+  let bad = |what: &str| {
     cx.err(
       key,
-      format!("{n} isn't a line height; use px (24), a multiple below 4 (1.5) or \"150%\""),
+      format!("{what} isn't a line height; use px (24), a multiple below 4 (1.5), \"150%\" or \"auto\""),
     )
+  };
+  let bare = |n: f64| {
+    if n < LINE_HEIGHT_MULTIPLE_BELOW {
+      n * font_size
+    } else {
+      n
+    }
   };
   let h = match v {
     Value::String(s) => {
       let t = s.trim().to_lowercase();
-      if t == "normal" || t == "auto" {
+      if t.is_empty() || t == "normal" || t == "auto" {
         return Ok(None);
       }
-      if let Some(p) = t.strip_suffix('%') {
-        let p: f64 = p.trim().parse().map_err(|_| cx.err(key, format!("\"{s}\" isn't a line height")))?;
-        p / 100.0 * font_size
-      } else if t.ends_with("px") {
-        number(cx, key, v)?
-      } else if let Some(m) = t.strip_suffix("em") {
-        let m: f64 = m.trim().parse().map_err(|_| cx.err(key, format!("\"{s}\" isn't a line height")))?;
-        m * font_size
-      } else {
-        let n = number(cx, key, v)?;
-        if n < 4.0 {
-          n * font_size
-        } else {
-          n
-        }
-      }
+      measure(&t, font_size, bare).ok_or_else(|| bad(&format!("\"{s}\"")))?
     }
-    other => {
-      let n = number(cx, key, other)?;
-      if n < 4.0 {
-        n * font_size
-      } else {
-        n
-      }
-    }
+    other => round2(bare(number(cx, key, other)?)),
   };
-  if h <= 0.0 {
-    return Err(bad(h));
+  if h == 0.0 {
+    return Ok(None);
+  }
+  if h < 0.0 {
+    return Err(bad(&h.to_string()));
   }
   Ok(Some(h))
 }
 
-/// `letterSpacing` in px; "0.05em" is relative to the font size.
+/// `letterSpacing` in px, the same notation as the design panel: "10%" and "0.05em" are × the font
+/// size, a bare number or "px" is px. Rounded to 0.01.
 pub fn letter_spacing(cx: &Ctx, key: &str, v: &Value, font_size: f64) -> Result<f64, String> {
-  if let Value::String(s) = v {
-    if let Some(e) = s.trim().to_lowercase().strip_suffix("em") {
-      let e: f64 = e
-        .trim()
-        .parse()
-        .map_err(|_| cx.err(key, format!("\"{s}\" isn't a letter spacing")))?;
-      return Ok(e * font_size);
-    }
+  match v {
+    Value::String(s) => measure(&s.trim().to_lowercase(), font_size, |n| n)
+      .ok_or_else(|| cx.err(key, format!("\"{s}\" isn't a letter spacing; use px (2), \"10%\" or \"0.05em\""))),
+    other => number(cx, key, other).map(round2),
   }
-  number(cx, key, v)
+}
+
+/// A number with an optional `%`, `px` or `em` unit; `bare` turns a unitless number into px.
+fn measure(t: &str, size: f64, bare: impl Fn(f64) -> f64) -> Option<f64> {
+  let units = [("%", "%"), ("px", "px"), ("em", "x"), ("x", "x"), ("×", "x")];
+  let (num, unit) = units
+    .iter()
+    .find_map(|(suffix, unit)| t.strip_suffix(suffix).map(|n| (n, *unit)))
+    .unwrap_or((t, ""));
+  let n: f64 = num.trim().parse().ok().filter(|n: &f64| n.is_finite())?;
+  Some(round2(match unit {
+    "%" => n / 100.0 * size,
+    "x" => n * size,
+    "px" => n,
+    _ => bare(n),
+  }))
+}
+
+/// Half away from zero, to 0.01 (the same in `web/src/panels/textUnits.ts`).
+fn round2(v: f64) -> f64 {
+  (v.abs() * 100.0).round() / 100.0 * v.signum()
 }
 
 /// An enum spelled one of several ways (case-insensitive, `_` and spaces as `-`). The first
@@ -817,4 +826,61 @@ pub fn tokens(s: &str) -> Vec<String> {
     out.push(cur);
   }
   out
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use serde_json::json;
+
+  /// Mirrors `web/src/panels/textUnits.test.ts`: the panel and Claude read the same notation.
+  mod units {
+    use super::*;
+
+    #[test]
+    fn line_height_notations() {
+      let cx = Ctx::new();
+      let lh = |v: Value, size: f64| line_height(&cx, "lineHeight", &v, size).unwrap();
+      assert_eq!(lh(json!("150%"), 16.0), Some(24.0));
+      assert_eq!(lh(json!("1.5em"), 16.0), Some(24.0));
+      assert_eq!(lh(json!("24px"), 16.0), Some(24.0));
+      assert_eq!(lh(json!(1.5), 16.0), Some(24.0));
+      assert_eq!(lh(json!("1.5"), 16.0), Some(24.0));
+      assert_eq!(lh(json!(3.9), 10.0), Some(39.0));
+      assert_eq!(lh(json!(4), 16.0), Some(4.0));
+      assert_eq!(lh(json!(24), 16.0), Some(24.0));
+      assert_eq!(lh(json!("133%"), 15.0), Some(19.95));
+      assert_eq!(lh(json!("1.5x"), 16.0), Some(24.0));
+      assert_eq!(lh(json!("1.5×"), 16.0), Some(24.0));
+      assert_eq!(lh(json!("016"), 16.0), Some(16.0));
+      assert_eq!(lh(json!("1e1"), 16.0), Some(10.0));
+    }
+
+    #[test]
+    fn line_height_auto_and_errors() {
+      let cx = Ctx::new();
+      for v in [json!(""), json!("auto"), json!("normal"), json!(0), json!("0"), json!("0%")] {
+        assert_eq!(line_height(&cx, "lineHeight", &v, 16.0).unwrap(), None, "{v}");
+      }
+      for v in [json!("abc"), json!("-10"), json!("%")] {
+        assert!(line_height(&cx, "lineHeight", &v, 16.0).is_err(), "{v}");
+      }
+    }
+
+    #[test]
+    fn letter_spacing_notations() {
+      let cx = Ctx::new();
+      let ls = |v: Value, size: f64| letter_spacing(&cx, "letterSpacing", &v, size).unwrap();
+      assert_eq!(ls(json!("10%"), 16.0), 1.6);
+      assert_eq!(ls(json!("0.05em"), 20.0), 1.0);
+      assert_eq!(ls(json!("2px"), 16.0), 2.0);
+      assert_eq!(ls(json!(2), 16.0), 2.0);
+      assert_eq!(ls(json!("-5%"), 20.0), -1.0);
+      assert_eq!(ls(json!("3%"), 15.0), 0.45);
+      // Halves round away from zero on both sides.
+      assert_eq!(ls(json!("-0.125"), 16.0), -0.13);
+      assert_eq!(ls(json!("0.125"), 16.0), 0.13);
+      assert!(letter_spacing(&cx, "letterSpacing", &json!("wide"), 16.0).is_err());
+    }
+  }
 }
