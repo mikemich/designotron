@@ -325,6 +325,28 @@ pub fn detach_instance(doc: &mut Document, inst_id: &str) {
   }
 }
 
+/// Puts an instance's Hug/Fixed back to its main's (a resize to Fixed isn't recorded as an override);
+/// Fill depends on the parent and stays.
+fn follow_main_sizing(doc: &mut Document, inst_id: &str) {
+  let Some(comp) = doc
+    .get(inst_id)
+    .and_then(|n| n.instance.as_ref())
+    .and_then(|i| doc.get(&i.component_id))
+    .map(|c| (c.sizing_h, c.sizing_v))
+  else {
+    return;
+  };
+  let hug = |s: Sizing| if s == Sizing::Hug { Sizing::Hug } else { Sizing::Fixed };
+  doc.modify(inst_id, |n| {
+    if n.sizing_h != Sizing::Fill {
+      n.sizing_h = hug(comp.0);
+    }
+    if n.sizing_v != Sizing::Fill {
+      n.sizing_v = hug(comp.1);
+    }
+  });
+}
+
 /// Clears an instance's overrides. Inside another instance, this clears the overrides (and
 /// any swap) made on it through the outer instance, so it matches its main component again.
 pub fn reset_overrides(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
@@ -334,6 +356,7 @@ pub fn reset_overrides(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
       info.overrides.clear();
       info.prop_values.clear();
     }
+    follow_main_sizing(doc, inst_id);
     sync_instance(doc, inst_id, gen);
     return;
   };
@@ -475,6 +498,7 @@ pub fn reset_override_groups(doc: &mut Document, id: &str, groups: &[String], ge
   let Some((scope, key, patch)) = layer_overrides(doc, id) else {
     return false;
   };
+  let is_root = key == ROOT_KEY;
   let mut kept = patch.clone();
   strip_groups(&mut kept, groups);
   if kept == patch {
@@ -489,6 +513,9 @@ pub fn reset_override_groups(doc: &mut Document, id: &str, groups: &[String], ge
     }
   }
   persist_scopes(doc, &scopes);
+  if is_root && (groups.is_empty() || groups.iter().any(|g| g == "size")) {
+    follow_main_sizing(doc, id);
+  }
   let outer = scopes.first().cloned().unwrap_or(scope);
   sync_instance(doc, &outer, gen);
   true
@@ -638,6 +665,17 @@ pub fn restore_component(doc: &mut Document, prefer: &str, gen: &mut IdGen) -> R
     .filter(|n| doc.get(n).is_some_and(|x| x.kind == NodeType::Instance) && doc.instance_ancestor(n).is_none())
     .collect();
   for ni in nested {
+    // Link the copies first (by layer path, then position), so the rebuild keeps their ids even
+    // where a copy's name differs from its layer in the component.
+    if let Some(k) = doc.get(&ni).and_then(|n| n.instance.as_ref()).map(|i| i.component_id.clone()) {
+      if doc.get(&k).is_some() {
+        for (d, m) in match_layers(doc, &ni, &k) {
+          if let Some(n) = doc.get_mut(&d) {
+            n.master_id = Some(m);
+          }
+        }
+      }
+    }
     sync_instance(doc, &ni, gen);
   }
 
@@ -3393,9 +3431,12 @@ mod tests {
       let main = k.default.clone();
       let p1 = k.e.page.clone();
       let a = instance(&mut k.e, &main, None);
+      let al = named(&k.e, &a, "Label");
+      set_text(&mut k.e, &al, "x");
       k.e.dispatch(Command::AddPage { name: None }).unwrap();
       let p2 = k.e.page.clone();
       assert_ne!(p1, p2);
+      // The clean instance on page 2 is the least-changed source; the main still goes where `a` is.
       instance(&mut k.e, &main, None);
       k.e.dispatch(Command::SetPage { id: p1.clone() }).unwrap();
       k.e.dispatch(Command::Delete { ids: vec![main.clone()] }).unwrap();
@@ -3481,6 +3522,86 @@ mod tests {
         assert_eq!(text(e, &named(e, &b, "Label")), "B");
       }
       assert_eq!(p.doc.subtree(&main).len(), q.doc.subtree(&main).len());
+    }
+
+    #[test]
+    fn restore_keeps_overrides_on_nested_layers_named_unlike_their_component() {
+      let mut k = kit();
+      let (card, card_inst) = card(&mut k);
+      let in_main = nested_instance(&k.e, &card);
+      let bg_main = named(&k.e, &in_main, "Bg");
+      rename(&mut k.e, &bg_main, "Background");
+      instance(&mut k.e, &card, None);
+      let deep = named(&k.e, &card_inst, "Background");
+      fill(&mut k.e, &deep, "#ABCDEF");
+      k.e.dispatch(Command::Delete { ids: vec![card.clone()] }).unwrap();
+      k.e.dispatch(Command::RestoreComponent { id: card_inst.clone() }).unwrap();
+      let r_bg = named(&k.e, &nested_instance(&k.e, &card), "Background");
+      let deep2 = named(&k.e, &card_inst, "Background");
+      assert_eq!(fill_of(&k.e, &deep2), "#ABCDEF");
+      assert_eq!(k.e.doc.get(&deep2).unwrap().master_id.as_deref(), Some(r_bg.as_str()));
+    }
+
+    #[test]
+    fn restore_keeps_overrides_on_auto_named_text_inside_a_nested_instance() {
+      let mut e = engine();
+      let f = shape(&mut e, NodeType::Frame, 0.0, None);
+      rename(&mut e, &f, "Btn");
+      id(
+        e.dispatch(Command::CreateText {
+          x: 0.0,
+          y: 0.0,
+          characters: "Go".into(),
+          parent: Some(f.clone()),
+        })
+        .unwrap(),
+      );
+      let btn = id(e.dispatch(Command::CreateComponent { ids: vec![f] }).unwrap());
+      let c = shape(&mut e, NodeType::Frame, 1000.0, None);
+      rename(&mut e, &c, "Card2");
+      e.dispatch(Command::Update {
+        ids: vec![c.clone()],
+        patch: json!({ "width": 300, "height": 200 }),
+      })
+      .unwrap();
+      instance(&mut e, &btn, Some(&c));
+      let card = id(e.dispatch(Command::CreateComponent { ids: vec![c] }).unwrap());
+      let is_text = |e: &Engine, i: &String| e.doc.get(i).unwrap().kind == NodeType::Text;
+      let main_text = e.doc.subtree(&card).into_iter().find(|i| is_text(&e, i)).unwrap();
+      set_text(&mut e, &main_text, "Start");
+      let ci = instance(&mut e, &card, None);
+      instance(&mut e, &card, None);
+      let deep = e.doc.subtree(&ci).into_iter().find(|i| is_text(&e, i)).unwrap();
+      set_text(&mut e, &deep, "Mine");
+      e.dispatch(Command::Delete { ids: vec![card.clone()] }).unwrap();
+      e.dispatch(Command::RestoreComponent { id: ci.clone() }).unwrap();
+      let deep2 = e.doc.subtree(&ci).into_iter().find(|i| is_text(&e, i)).unwrap();
+      assert_eq!(text(&e, &deep2), "Mine");
+    }
+
+    #[test]
+    fn resetting_size_on_an_instance_root_brings_hug_back() {
+      let mut k = kit();
+      let main = k.default.clone();
+      k.e.dispatch(Command::AddAutoLayout { ids: vec![main.clone()] }).unwrap();
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![main.clone()],
+          patch: json!({ "sizingH": "hug" }),
+        })
+        .unwrap();
+      let inst = instance(&mut k.e, &main, None);
+      assert_eq!(k.e.doc.get(&inst).unwrap().sizing_h, crate::model::Sizing::Hug);
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![inst.clone()],
+          patch: json!({ "width": 400.0, "sizingH": "fixed" }),
+        })
+        .unwrap();
+      assert_eq!(width(&k.e, &inst), 400.0);
+      reset(&mut k.e, &inst, &["size"]);
+      assert_eq!(k.e.doc.get(&inst).unwrap().sizing_h, crate::model::Sizing::Hug);
+      assert_ne!(width(&k.e, &inst), 400.0);
     }
 
     /// A "Button" set (State=Default / State=Hover, each a frame with "Bg" and "Label").
