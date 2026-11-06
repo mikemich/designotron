@@ -973,7 +973,10 @@ function defaultJoin(n: Node): "miter" | "round" {
 /** A vector whose paths are all closed: line ends do nothing there (open paths and lines have them). */
 function isClosedVector(n: Node): boolean {
   if (n.type !== "vector" || !n.vector) return false;
-  if (n.vector.raw) return n.vector.raw.d.split(/[Mm]/).slice(1).every((part) => /[Zz]/.test(part));
+  if (n.vector.raw) {
+    const parts = n.vector.raw.d.split(/[Mm]/).slice(1);
+    return parts.length > 0 && parts.every((part) => /[Zz]\s*$/.test(part));
+  }
   return n.vector.subpaths.length > 0 && n.vector.subpaths.every((sp) => sp.closed);
 }
 

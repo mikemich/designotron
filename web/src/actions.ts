@@ -351,9 +351,20 @@ const PASTE_IMAGE_KBD = /Mac|iPhone|iPad/.test(typeof navigator === "undefined" 
  * with a toast saying why. `name` is the file name for a dropped file.
  */
 export async function placeSvg(text: string, x: number, y: number, name = "SVG"): Promise<void> {
+  // A view-only visitor or a read-only tab can't add layers, as an image either.
+  if (useStore.getState().es.readOnly || useCollab.getState().viewer) {
+    toast("This file is view-only", "error");
+    return;
+  }
   let reason: string;
   try {
-    dispatchOrThrow({ op: "importSvg", svg: text, x, y, parent: null, name });
+    const r = dispatchOrThrow<{ warnings?: string[] }>({ op: "importSvg", svg: text, x, y, parent: null, name });
+    const warnings = r?.warnings ?? [];
+    if (warnings.length) {
+      const more = warnings.length > 1 ? ` (and ${warnings.length - 1} more)` : "";
+      toast(`SVG placed as editable vectors, with changes: ${warnings[0]}${more}`);
+      return;
+    }
     // Pasting changed from "an image" to "vectors": say once how to get the old behaviour.
     let seen = true;
     try {

@@ -238,8 +238,9 @@ try {
   check("editability: double-click enters vector edit on the imported path", editedNode?.type === "vector" && editedNode.vector.subpaths.length > 0, JSON.stringify(ve).slice(0, 80));
   const anchors = await dt(() => [...document.querySelectorAll(".vector-anchor")].map((e) => ({ tag: e.tagName.toLowerCase(), r: Number(e.getAttribute("r")), sw: Number(e.getAttribute("stroke-width")) })));
   check("anchors are circles of radius 4 with a 1.5px stroke (no squares)", anchors.length > 5 && anchors.every((a) => a.tag === "circle" && a.r === 4 && a.sw === 1.5), JSON.stringify(anchors[0]));
-  const handleStyle = await dt(() => [...document.querySelectorAll("circle.handle[data-vpt]")].filter((e) => e.getAttribute("fill") === "white").map((e) => Number(e.getAttribute("r"))));
-  check("control handles are smaller circles than anchors", handleStyle.every((r) => r < 4));
+  const handleStyle = await dt(() => [...document.querySelectorAll("circle.vector-handle")].map((e) => Number(e.getAttribute("r"))));
+  const handleHits = await dt(() => [...document.querySelectorAll("circle.handle[data-vpt]")].filter((e) => e.getAttribute("data-vpt").endsWith(":out") || e.getAttribute("data-vpt").endsWith(":in")).map((e) => Number(e.getAttribute("r"))));
+  check("control handles are drawn smaller than anchors, with a larger hit circle", handleStyle.every((r) => r < 4) && handleHits.every((r) => r >= 5), JSON.stringify([handleStyle.length, handleHits.length]));
   await page.mouse.click(cb.x + vp.x + (fr.x + 12.0) * vp.zoom, cb.y + vp.y + (fr.y + 2.0) * vp.zoom);
   await shot("vector-edit-anchors");
   await page.keyboard.press("Escape");

@@ -53,7 +53,12 @@ pub fn parse(input: &str) -> Option<Rgba> {
     if parts.len() < 3 {
       return None;
     }
-    let num = |p: &str| p.trim_end_matches(['%', 'd', 'e', 'g']).parse::<f64>().ok();
+    let num = |p: &str| {
+      p.trim_end_matches(['%', 'd', 'e', 'g'])
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())
+    };
     let alpha = match parts.get(3) {
       None => 1.0,
       Some(p) => {

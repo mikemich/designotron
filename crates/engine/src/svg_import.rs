@@ -8,7 +8,9 @@
 //! represented (text, images, filters, masks, patterns, markers, clip paths that aren't one
 //! rectangle) also refuses it, and the caller falls back to placing the SVG as an image.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::color::{self, Rgba};
 use crate::doc::IdGen;
@@ -25,6 +27,17 @@ pub const MAX_USE_DEPTH: usize = 8;
 pub const MAX_POINTS: usize = 200_000;
 /// Above this many subpaths in one evenodd path the holes are left as they are.
 const EVENODD_MAX_SUBPATHS: usize = 500;
+/// Style rules kept, declarations kept per rule, stops per gradient, attributes per element and
+/// dash entries; past them the extra is dropped (rules, stops, dashes) or the markup refused.
+const MAX_RULES: usize = 2_000;
+const MAX_DECLS: usize = 64;
+const MAX_STOPS: usize = 256;
+const MAX_ATTRS: usize = 500;
+const MAX_DASH: usize = 64;
+/// Units of work (bytes parsed, rules matched, declarations applied) the whole import may spend.
+const MAX_WORK: usize = 8 * MAX_BYTES;
+/// Evenodd rewinding compares every subpath with every point: skipped past this many comparisons.
+const EVENODD_WORK: usize = 20_000_000;
 const MAX_COORD: f64 = 1e7;
 const MAX_SIZE: f64 = 100_000.0;
 const MAX_NAME: usize = 80;
@@ -135,6 +148,9 @@ pub fn import(svg: &str, ids: &mut IdGen, opts: &Options) -> Result<Imported, St
   fix_groups(&mut tree);
   let mut nodes = Vec::new();
   flatten(tree, None, (0.0, 0.0), ids, &mut nodes);
+  if !nodes.iter().all(node_ok) {
+    return Err("coordinates that are out of range".into());
+  }
   Ok(Imported {
     nodes,
     warnings: cx.warnings,
@@ -198,7 +214,7 @@ fn parse_xml(s: &str) -> Result<Xml, String> {
       let end = after.find("?>").ok_or_else(bad)?;
       i += 2 + end + 2;
     } else if rest.starts_with("<!") {
-      if rest.len() >= 9 && rest[..9].eq_ignore_ascii_case("<!DOCTYPE") {
+      if rest.as_bytes().get(..9).is_some_and(|p| p.eq_ignore_ascii_case(b"<!DOCTYPE")) {
         let gt = rest.find('>').ok_or_else(bad)?;
         if rest[..gt].contains('[') {
           return Err("a DOCTYPE with an internal subset".into());
@@ -280,6 +296,9 @@ fn parse_xml(s: &str) -> Result<Xml, String> {
         let value = decode_entities(&s[vstart..vend])?;
         j = vend + 1;
         if !(key == "xmlns" || key.starts_with("xmlns:")) {
+          if attrs.len() >= MAX_ATTRS {
+            return Err("an element with too many attributes".into());
+          }
           attrs.push((local_name(key), value));
         }
       }
@@ -371,7 +390,7 @@ struct Rule {
   sel: Sel,
   spec: u32,
   order: usize,
-  decls: Vec<(String, String)>,
+  decls: Rc<Vec<(String, String)>>,
 }
 
 /// Properties read from presentation attributes (and from CSS).
@@ -401,7 +420,7 @@ const PROPS: &[&str] = &[
 
 /// Simple selectors only: `tag`, `.class`, `#id`, `*` and combinations without spaces. Anything
 /// else is dropped (the caller warns).
-fn parse_css(text: &str, rules: &mut Vec<Rule>, unsupported: &mut bool) {
+fn parse_css(text: &str, rules: &mut Vec<Rule>, notes: &mut (bool, bool)) {
   let mut clean = String::with_capacity(text.len());
   let mut rest = text;
   while let Some(p) = rest.find("/*") {
@@ -415,6 +434,10 @@ fn parse_css(text: &str, rules: &mut Vec<Rule>, unsupported: &mut bool) {
   let b = clean.as_bytes();
   let mut i = 0;
   while i < b.len() {
+    if rules.len() >= MAX_RULES {
+      notes.1 = true;
+      break;
+    }
     let Some(stop) = clean[i..].find(['{', ';']).map(|k| i + k) else {
       break;
     };
@@ -445,15 +468,24 @@ fn parse_css(text: &str, rules: &mut Vec<Rule>, unsupported: &mut bool) {
     if prelude.starts_with('@') {
       continue;
     }
-    let decls: Vec<(String, String)> = body
-      .split(';')
-      .filter_map(|d| {
-        let (k, v) = d.split_once(':')?;
-        let v = v.trim().trim_end_matches("!important").trim();
-        Some((k.trim().to_ascii_lowercase(), v.to_string()))
-      })
-      .collect();
+    // Only the properties that are read, shared by every selector of the rule.
+    let decls: Rc<Vec<(String, String)>> = Rc::new(
+      body
+        .split(';')
+        .filter_map(|d| {
+          let (k, v) = d.split_once(':')?;
+          let k = k.trim().to_ascii_lowercase();
+          let v = v.trim().trim_end_matches("!important").trim();
+          PROPS.contains(&k.as_str()).then(|| (k, v.to_string()))
+        })
+        .take(MAX_DECLS)
+        .collect(),
+    );
     for sel in prelude.split(',') {
+      if rules.len() >= MAX_RULES {
+        notes.1 = true;
+        break;
+      }
       match parse_selector(sel.trim()) {
         Some(sel) => {
           let spec = if sel.id.is_some() { 100 } else { 0 } + 10 * sel.classes.len() as u32 + sel.tag.is_some() as u32;
@@ -462,10 +494,10 @@ fn parse_css(text: &str, rules: &mut Vec<Rule>, unsupported: &mut bool) {
             sel,
             spec,
             order,
-            decls: decls.clone(),
+            decls: Rc::clone(&decls),
           });
         }
-        None => *unsupported = true,
+        None => notes.0 = true,
       }
     }
   }
@@ -564,8 +596,8 @@ fn opacity_of(decl: &HashMap<String, String>) -> f64 {
 fn parse_opacity(v: &str) -> Option<f64> {
   let v = v.trim();
   let n = match v.strip_suffix('%') {
-    Some(p) => p.trim().parse::<f64>().ok()? / 100.0,
-    None => v.parse::<f64>().ok()?,
+    Some(p) => parse_f(p.trim())? / 100.0,
+    None => parse_f(v)?,
   };
   n.is_finite().then_some(n.clamp(0.0, 1.0))
 }
@@ -591,6 +623,13 @@ struct Cx<'a> {
   rules: Vec<Rule>,
   count: usize,
   points: usize,
+  /// Nesting of `walk` calls, `use` expansions included.
+  depth: usize,
+  /// Work spent so far (see `MAX_WORK`); a cell so reading helpers can charge it.
+  work: Cell<usize>,
+  geom_cache: HashMap<usize, Rc<Vec<SubPath>>>,
+  tf_cache: HashMap<usize, Option<Mat>>,
+  stops_cache: HashMap<(usize, String), Rc<Vec<GradientStop>>>,
   use_stack: Vec<usize>,
   viewport: Option<(f64, f64, f64, f64)>,
   vb_size: (f64, f64),
@@ -606,6 +645,11 @@ impl<'a> Cx<'a> {
       rules: Vec::new(),
       count: 0,
       points: 0,
+      depth: 0,
+      work: Cell::new(0),
+      geom_cache: HashMap::new(),
+      tf_cache: HashMap::new(),
+      stops_cache: HashMap::new(),
       use_stack: Vec::new(),
       viewport: None,
       vb_size: (100.0, 100.0),
@@ -616,7 +660,7 @@ impl<'a> Cx<'a> {
 
   /// Indexes ids and reads the `<style>` blocks.
   fn collect(&mut self) {
-    let mut unsupported = false;
+    let mut notes = (false, false);
     for (i, el) in self.xml.els.iter().enumerate() {
       if let Some(id) = el.attrs.iter().find(|(k, _)| k == "id") {
         self.ids.entry(id.1.clone()).or_insert(i);
@@ -624,12 +668,15 @@ impl<'a> Cx<'a> {
       if el.name == "style" {
         let ty = self.attr(i, "type").unwrap_or("text/css");
         if ty.is_empty() || ty == "text/css" {
-          parse_css(&el.text, &mut self.rules, &mut unsupported);
+          parse_css(&el.text, &mut self.rules, &mut notes);
         }
       }
     }
-    if unsupported {
+    if notes.0 {
       self.warn("some <style> selectors are not supported and were ignored");
+    }
+    if notes.1 {
+      self.warn("only the first 2,000 style rules were read");
     }
   }
 
@@ -647,6 +694,7 @@ impl<'a> Cx<'a> {
   fn declared(&self, el: usize) -> HashMap<String, String> {
     let e = &self.xml.els[el];
     let mut out: HashMap<String, String> = HashMap::new();
+    self.spend(e.attrs.iter().map(|(k, v)| k.len() + v.len() + 24).sum::<usize>() + self.rules.len() / 4);
     for (k, v) in &e.attrs {
       if PROPS.contains(&k.as_str()) {
         out.insert(k.clone(), v.trim().to_string());
@@ -665,8 +713,9 @@ impl<'a> Cx<'a> {
         })
         .collect();
       hits.sort_by_key(|r| (r.spec, r.order));
+      self.spend(hits.iter().map(|r| r.decls.len()).sum());
       for r in hits {
-        for (k, v) in &r.decls {
+        for (k, v) in r.decls.iter() {
           out.insert(k.clone(), v.clone());
         }
       }
@@ -734,10 +783,11 @@ impl<'a> Cx<'a> {
       } else {
         v.split([',', ' '])
           .filter(|p| !p.is_empty())
+          .take(MAX_DASH + 1)
           .filter_map(|p| parse_length(p, 0.0))
           .collect()
       };
-      st.dash = if d.iter().all(|x| *x >= 0.0) && d.iter().sum::<f64>() > 0.0 {
+      st.dash = if d.len() <= MAX_DASH && d.iter().all(|x| *x >= 0.0) && d.iter().sum::<f64>() > 0.0 {
         d
       } else {
         Vec::new()
@@ -785,7 +835,35 @@ impl<'a> Cx<'a> {
     if self.count > MAX_ELEMENTS {
       return Err("too many elements".into());
     }
+    if self.work.get() > MAX_WORK {
+      return Err("too much content".into());
+    }
     Ok(())
+  }
+
+  fn spend(&self, n: usize) {
+    self.work.set(self.work.get().saturating_add(n));
+  }
+
+  /// Output size (path points, gradient stops) of everything written so far.
+  fn grow(&mut self, n: usize) -> Result<(), String> {
+    self.points += n;
+    if self.points > MAX_POINTS {
+      return Err("too many path points".into());
+    }
+    Ok(())
+  }
+
+  /// A `transform` attribute, parsed once per element.
+  fn transform_of(&mut self, el: usize) -> Option<Mat> {
+    let t = self.attr(el, "transform")?;
+    if let Some(m) = self.tf_cache.get(&el) {
+      return *m;
+    }
+    self.spend(t.len());
+    let m = parse_transform(t);
+    self.tf_cache.insert(el, m);
+    m
   }
 
   fn name_of(&self, el: usize, fallback: &str) -> String {
@@ -795,7 +873,19 @@ impl<'a> Cx<'a> {
     }
   }
 
+  /// One element and what it holds. `depth` counts nested calls across `use` expansions, which
+  /// bounds the recursion (the engine's stack is small) and the depth of the layer tree.
   fn walk(&mut self, el: usize, m: &Mat, parent: &Style, out: &mut Vec<B>) -> Result<(), String> {
+    if self.depth >= MAX_DEPTH {
+      return Err("elements nested too deeply".into());
+    }
+    self.depth += 1;
+    let r = self.walk_element(el, m, parent, out);
+    self.depth -= 1;
+    r
+  }
+
+  fn walk_element(&mut self, el: usize, m: &Mat, parent: &Style, out: &mut Vec<B>) -> Result<(), String> {
     self.count()?;
     let tag = self.xml.els[el].name.as_str();
     match tag {
@@ -829,15 +919,13 @@ impl<'a> Cx<'a> {
     }
     let st = self.compute_style(parent, &decl);
     let opacity = opacity_of(&decl);
-    let m2 = match self.attr(el, "transform") {
-      None => *m,
-      Some(t) => match parse_transform(t) {
-        Some(tm) => m.mul(&tm),
-        None => {
-          self.warn("a transform that can't be read was ignored");
-          *m
-        }
-      },
+    let m2 = match (self.attr(el, "transform").is_some(), self.transform_of(el)) {
+      (false, _) => *m,
+      (true, Some(tm)) => m.mul(&tm),
+      (true, None) => {
+        self.warn("a transform that can't be read was ignored");
+        *m
+      }
     };
     if !mat_ok(&m2) {
       // Collapsed to a line or a point: nothing is drawn.
@@ -985,6 +1073,7 @@ impl<'a> Cx<'a> {
     if self.xml.els[cp].name != "clipPath" || self.attr(cp, "clipPathUnits") == Some("objectBoundingBox") {
       return Err(NOT_RECT.into());
     }
+    self.spend(self.xml.els[cp].kids.len());
     let kids: Vec<usize> = self.xml.els[cp]
       .kids
       .iter()
@@ -1014,7 +1103,9 @@ impl<'a> Cx<'a> {
         ]
       }
       "path" => {
-        let sps = paths::parse_svg_path(self.attr(child, "d").unwrap_or(""));
+        let d = self.attr(child, "d").unwrap_or("");
+        self.spend(d.len());
+        let sps = paths::parse_svg_path(d);
         match &sps[..] {
           [sp]
             if sp.closed
@@ -1060,12 +1151,19 @@ impl<'a> Cx<'a> {
     let diag = ((bw * bw + bh * bh) / 2.0).sqrt();
     Ok(match tag {
       "path" => {
-        let sps = paths::parse_svg_path(self.attr(el, "d").unwrap_or(""));
-        self.points += sps.iter().map(|s| s.points.len()).sum::<usize>();
-        if self.points > MAX_POINTS {
-          return Err("too many path points".into());
-        }
-        Geom::Path(sps)
+        let sps = match self.geom_cache.get(&el) {
+          Some(c) => Rc::clone(c),
+          None => {
+            let d = self.attr(el, "d").unwrap_or("");
+            self.spend(d.len());
+            let c = Rc::new(paths::parse_svg_path(d));
+            self.geom_cache.insert(el, Rc::clone(&c));
+            c
+          }
+        };
+        // Every use of the path adds its points to the output.
+        self.grow(sps.iter().map(|s| s.points.len()).sum())?;
+        Geom::Path((*sps).clone())
       }
       "rect" => {
         let (x, y) = (len(self, "x", bw).unwrap_or(0.0), len(self, "y", bh).unwrap_or(0.0));
@@ -1073,7 +1171,7 @@ impl<'a> Cx<'a> {
         let (mut rx, mut ry) = (len(self, "rx", bw), len(self, "ry", bh));
         // One radius given stands for both; both are limited to half the side.
         if rx.is_none() {
-          rx = ry.map(|_| 0.0);
+          rx = ry;
         }
         if ry.is_none() {
           ry = rx;
@@ -1117,7 +1215,9 @@ impl<'a> Cx<'a> {
       }
       _ => {
         // polyline, polygon
-        let v = numbers(self.attr(el, "points").unwrap_or(""));
+        let raw = self.attr(el, "points").unwrap_or("");
+        self.spend(raw.len());
+        let v = numbers(raw);
         let pts: Vec<VectorPoint> = v.chunks_exact(2).map(|c| VectorPoint::at(c[0], c[1])).collect();
         self.points += pts.len();
         if self.points > MAX_POINTS {
@@ -1211,7 +1311,8 @@ impl<'a> Cx<'a> {
       }
       let fills = !matches!(st.fill, SvgPaint::None);
       if st.evenodd && fills && subs.len() > 1 {
-        if subs.len() <= EVENODD_MAX_SUBPATHS {
+        let total: usize = subs.iter().map(|s| s.points.len() * 12 + 1).sum();
+        if subs.len() <= EVENODD_MAX_SUBPATHS && subs.len() * total <= EVENODD_WORK {
           reorient_evenodd(&mut subs);
         } else {
           self.warn("a path with many holes was not adjusted, its holes may fill in");
@@ -1323,19 +1424,15 @@ impl<'a> Cx<'a> {
     matches!(self.xml.els[t].name.as_str(), "linearGradient" | "radialGradient").then_some(t)
   }
 
-  fn gradient(
-    &mut self,
-    g: usize,
-    opacity: f64,
-    st: &Style,
-    m: &Mat,
-    bbox: (f64, f64, f64, f64),
-    nbox: (f64, f64, f64, f64),
-  ) -> Result<Option<Paint>, String> {
-    if self.grad_attr(g, "spreadMethod").is_some_and(|v| v.trim() != "pad") {
-      return Err("a gradient that repeats or reflects".into());
+  /// The stops of a gradient (from the first gradient in its `href` chain that has any), read once
+  /// per gradient and `currentColor`, and capped. Each use adds them to the output.
+  fn gradient_stops(&mut self, g: usize, st: &Style) -> Result<Rc<Vec<GradientStop>>, String> {
+    let key = (g, st.color.hex());
+    if let Some(c) = self.stops_cache.get(&key) {
+      let c = Rc::clone(c);
+      self.grow(c.len())?;
+      return Ok(c);
     }
-    // Stops come from the first gradient in the href chain that has any.
     let mut holder = g;
     let mut stops_el: Vec<usize> = Vec::new();
     for _ in 0..MAX_USE_DEPTH {
@@ -1353,6 +1450,10 @@ impl<'a> Cx<'a> {
         None => break,
       }
     }
+    if stops_el.len() > MAX_STOPS {
+      self.warn("a gradient with more than 256 stops was cut to its first 256");
+      stops_el.truncate(MAX_STOPS);
+    }
     let mut stops: Vec<GradientStop> = Vec::new();
     let mut last = 0.0_f64;
     for s in stops_el {
@@ -1362,8 +1463,8 @@ impl<'a> Cx<'a> {
         .and_then(|v| {
           let v = v.trim();
           match v.strip_suffix('%') {
-            Some(p) => p.trim().parse::<f64>().ok().map(|x| x / 100.0),
-            None => v.parse::<f64>().ok(),
+            Some(p) => parse_f(p.trim()).map(|x| x / 100.0),
+            None => parse_f(v),
           }
         })
         .unwrap_or(0.0)
@@ -1381,6 +1482,25 @@ impl<'a> Cx<'a> {
         position: off,
       });
     }
+    let c = Rc::new(stops);
+    self.stops_cache.insert(key, Rc::clone(&c));
+    self.grow(c.len())?;
+    Ok(c)
+  }
+
+  fn gradient(
+    &mut self,
+    g: usize,
+    opacity: f64,
+    st: &Style,
+    m: &Mat,
+    bbox: (f64, f64, f64, f64),
+    nbox: (f64, f64, f64, f64),
+  ) -> Result<Option<Paint>, String> {
+    if self.grad_attr(g, "spreadMethod").is_some_and(|v| v.trim() != "pad") {
+      return Err("a gradient that repeats or reflects".into());
+    }
+    let stops: Vec<GradientStop> = (*self.gradient_stops(g, st)?).clone();
     match stops.len() {
       0 => return Ok(None),
       1 => {
@@ -1426,7 +1546,7 @@ impl<'a> Cx<'a> {
       let Some(v) = cx.grad_attr(g, name) else { return default };
       let v = v.trim();
       if let Some(p) = v.strip_suffix('%') {
-        let f = p.trim().parse::<f64>().unwrap_or(default * 100.0) / 100.0;
+        let f = parse_f(p.trim()).unwrap_or(default * 100.0) / 100.0;
         return if bbox_units { f } else { f * if vert { vh } else { vw } };
       }
       parse_length(v, 0.0).unwrap_or(default)
@@ -1534,7 +1654,8 @@ fn dash_of(d: &[f64], k: f64) -> Vec<f64> {
 }
 
 fn mat_ok(m: &Mat) -> bool {
-  [m.a, m.b, m.c, m.d, m.e, m.f].iter().all(|v| v.is_finite()) && (m.a * m.d - m.b * m.c).abs() > 1e-12
+  let det = m.a * m.d - m.b * m.c;
+  [m.a, m.b, m.c, m.d, m.e, m.f].iter().all(|v| v.is_finite()) && det.is_finite() && det.abs() > 1e-12
 }
 
 /// A rounded rectangle as path data (elliptical corners as arcs).
@@ -1592,6 +1713,40 @@ fn flatten(b: B, parent: Option<&str>, parent_abs: (f64, f64), ids: &mut IdGen, 
   let kids: Vec<String> = b.kids.into_iter().map(|k| flatten(k, Some(&id), abs, ids, out)).collect();
   out[at].children = kids;
   id
+}
+
+/// Everything a layer holds that is a number is finite and sane (the saved file keeps no NaN or
+/// infinity, and absurd coordinates break the canvas).
+fn node_ok(n: &Node) -> bool {
+  let ok = |v: f64| v.is_finite() && v.abs() <= MAX_COORD;
+  let unit = |v: f64| v.is_finite() && (0.0..=1.0).contains(&v);
+  let paint = |p: &Paint| match p {
+    Paint::Solid { opacity, .. } => unit(*opacity),
+    Paint::LinearGradient {
+      stops, opacity, handles, ..
+    }
+    | Paint::RadialGradient {
+      stops, opacity, handles, ..
+    } => {
+      unit(*opacity)
+        && stops.iter().all(|s| unit(s.position))
+        && handles.is_none_or(|h| h.start.iter().chain(&h.end).chain(&h.width).all(|v| ok(*v)))
+    }
+    _ => true,
+  };
+  [n.x, n.y, n.width, n.height, n.corner_radius, n.stroke_weight]
+    .iter()
+    .all(|v| ok(*v))
+    && unit(n.opacity)
+    && n.stroke_dash.iter().all(|v| ok(*v))
+    && n.fills.iter().chain(&n.strokes).all(paint)
+    && n.vector.as_ref().is_none_or(|v| {
+      v.subpaths.iter().all(|s| {
+        s.points
+          .iter()
+          .all(|p| [p.x, p.y, p.in_x, p.in_y, p.out_x, p.out_y].iter().all(|c| ok(*c)))
+      })
+    })
 }
 
 // ------------------------------------------------------------------ evenodd
@@ -1704,7 +1859,24 @@ fn read_number(b: &[u8], i: &mut usize) -> Option<f64> {
     }
   }
   *i = j;
-  std::str::from_utf8(&b[start..j]).ok()?.parse().ok()
+  std::str::from_utf8(&b[start..j])
+    .ok()?
+    .parse::<f64>()
+    .ok()
+    .filter(|v| v.is_finite())
+}
+
+/// A plain decimal number; `nan`, `inf` and the like are not numbers here.
+fn parse_f(s: &str) -> Option<f64> {
+  let s = s.trim();
+  if s.is_empty()
+    || !s
+      .bytes()
+      .all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E'))
+  {
+    return None;
+  }
+  s.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
 /// Every number in a list like `0 0 24 24` or `1,2 3-4`.
@@ -2237,6 +2409,189 @@ mod tests {
     }
   }
 
+  mod hostile {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Imports `svg` and says how long it took; every input here must end quickly, either way.
+    fn timed(svg: &str) -> (Result<Imported, String>, Duration) {
+      let t = Instant::now();
+      let r = run(svg);
+      (r, t.elapsed())
+    }
+
+    /// What a debug build may spend: the work budget is 16 M units, so this is generous.
+    const LIMIT: Duration = Duration::from_secs(12);
+
+    fn refused_fast(svg: &str) -> String {
+      let (r, t) = timed(svg);
+      assert!(t < LIMIT, "took {t:?}");
+      r.err().unwrap_or_else(|| panic!("accepted a hostile input"))
+    }
+
+    #[test]
+    fn multibyte_declarations_never_panic() {
+      for s in [
+        "<svg width='9' height='9'><!abcdef\u{e9}><rect width='1' height='1'/></svg>",
+        "<svg width='9' height='9'><!DOCTY\u{20ac}><rect width='1' height='1'/></svg>",
+        "<svg width='9' height='9'><!\u{1f600}\u{1f600}\u{1f600}></svg>",
+        "<svg width='9' height='9'><!DOCTYPE \u{e9}\u{e9}\u{e9}></svg>",
+        "<svg width='9\u{e9}' height='9'\u{20ac}><rect/></svg>",
+        "<svg\u{e9} width='9' height='9'><rect width='1' height='1'/></\u{e9}svg>",
+        "<\u{1f600}/>",
+        "<svg width='9' height='9'><style>.a\u{e9}{fill:\u{20ac}}</style><rect class='a\u{e9}' width='1' height='1' fill='url(\u{e9})'/></svg>",
+      ] {
+        let _ = run(s);
+      }
+    }
+
+    #[test]
+    fn deep_use_chains_are_refused_before_the_stack_is_gone() {
+      // Eight use levels, each wrapping 25 nested groups: 200 frames of recursion.
+      let mut s = String::from(r##"<svg width="9" height="9"><defs><rect id="u0" width="1" height="1"/>"##);
+      for n in 1..=8 {
+        s.push_str(&format!(
+          r##"<g id="u{n}">{}<use href="#u{}"/>{}</g>"##,
+          "<g>".repeat(25),
+          n - 1,
+          "</g>".repeat(25)
+        ));
+      }
+      s.push_str(r##"</defs><use href="#u8"/></svg>"##);
+      assert!(refused_fast(&s).contains("nested"));
+    }
+
+    #[test]
+    fn non_finite_and_absurd_numbers_never_reach_the_layers() {
+      let cases = [
+        r#"<rect width="1" height="1" transform="scale(1e308)"/>"#,
+        r#"<rect width="10000000" height="1" transform="scale(1e302,1e-302)"/>"#,
+        r##"<defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="NaN%" y1="0" x2="inf%" y2="1"><stop/><stop offset="1"/></linearGradient></defs><rect width="4" height="4" fill="url(#g)"/>"##,
+        r#"<rect width="4" height="4" fill="rgba(0,0,0,nan)"/>"#,
+        r#"<rect width="4" height="4" fill="rgb(inf,0,0)"/>"#,
+        r##"<path d="M0 0L4 4" stroke="#000" stroke-width="1" transform="scale(1e200)"/>"##,
+        r#"<rect width="4" height="4" transform="translate(1e300)"/>"#,
+        r##"<path d="M0 0L1e999 1" stroke="#000"/>"##,
+        r##"<defs><linearGradient id="g"><stop offset="nan" stop-color="#f00"/><stop offset="inf"/></linearGradient></defs><rect width="4" height="4" fill="url(#g)"/>"##,
+        r#"<rect width="4" height="4" opacity="nan" fill-opacity="inf"/>"#,
+        r##"<rect width="4" height="4" fill="#000" stroke="#000" stroke-width="1e308" stroke-dasharray="1e308 1e308"/>"##,
+      ];
+      for body in cases {
+        let svg = format!(r#"<svg width="9" height="9" viewBox="0 0 9 9">{body}</svg>"#);
+        if let Ok(i) = run(&svg) {
+          for n in &i.nodes {
+            // What is saved must load again: serde writes NaN and infinity as null.
+            let back: Node = serde_json::from_value(serde_json::to_value(n).unwrap()).unwrap_or_else(|e| panic!("{body}: {e}"));
+            assert_eq!(&back, n, "{body}");
+            assert!(node_ok(n), "{body}");
+          }
+        }
+      }
+      // The element collapses (its matrix has no finite determinant), so nothing is left to draw.
+      assert!(!refused_fast(r#"<svg width="9" height="9"><rect width="1" height="1" transform="scale(1e308)"/></svg>"#).is_empty());
+      assert!(!refused_fast(r#"<svg width="9" height="9"><rect width="1" height="1" x="1e300"/></svg>"#).is_empty());
+      assert!(
+        color::parse("rgba(0,0,0,nan)").is_none() && color::parse("rgb(inf,0,0)").is_none() && color::parse("hsl(nan,1%,1%)").is_none()
+      );
+    }
+
+    #[test]
+    fn a_missing_rx_equals_ry() {
+      let i = ok(r#"<svg width="40" height="20"><rect width="40" height="20" ry="6"/></svg>"#);
+      assert_eq!((i.nodes[1].kind, i.nodes[1].corner_radius), (NodeType::Rectangle, 6.0));
+    }
+
+    #[test]
+    fn style_rule_floods_are_capped() {
+      // 150k universal rules and 19k groups, and a 1 MB selector list with a 1 MB body.
+      let rules = "*{fill:red}".repeat(150_000);
+      let svg = format!("<svg width='9' height='9'><style>{rules}</style>{}</svg>", "<g/>".repeat(19_000));
+      let (r, t) = timed(&svg);
+      assert!(t < LIMIT, "took {t:?}");
+      let _ = r;
+      let huge = format!(
+        "<svg width='9' height='9'><style>{}{{{}}}</style><rect width='1' height='1'/></svg>",
+        "x,".repeat(500_000),
+        "fill:red;".repeat(100_000)
+      );
+      let (r, t) = timed(&huge);
+      assert!(t < LIMIT, "took {t:?}");
+      let _ = r;
+      let many = format!(
+        "<svg width='9' height='9'><style>{}</style><rect width='1' height='1'/></svg>",
+        ".a{fill:red}".repeat(5000)
+      );
+      let i = ok(&many);
+      assert!(i.warnings.iter().any(|w| w.contains("2,000")));
+    }
+
+    #[test]
+    fn attribute_floods_are_refused() {
+      let attrs: String = (0..100_000).map(|n| format!(" a{n}='1'")).collect();
+      assert!(refused_fast(&format!("<svg width='9' height='9'><rect width='1' height='1'{attrs}/></svg>")).contains("attributes"));
+      // 400 attributes on an element that nested uses reach thousands of times.
+      let attrs: String = (0..400).map(|n| format!(" data-a{n}='xxxxxxxxxxxxxxxxxxxx'")).collect();
+      let mut s = format!("<svg width='9' height='9'><defs><rect id='l0' width='1' height='1'{attrs}/>");
+      for n in 1..=4 {
+        s.push_str(&format!("<g id='l{n}'>{}</g>", format!("<use href='#l{}'/>", n - 1).repeat(12)));
+      }
+      s.push_str("</defs><use href='#l4'/></svg>");
+      assert!(!refused_fast(&s).is_empty());
+    }
+
+    #[test]
+    fn long_transforms_and_paths_are_read_once_per_element() {
+      let tf = "translate(0 0) ".repeat(60_000);
+      let svg = format!(
+        "<svg width='9' height='9'><defs><rect id='r' width='1' height='1' transform='{tf}'/></defs>{}</svg>",
+        "<use href='#r'/>".repeat(5_000)
+      );
+      let (r, t) = timed(&svg);
+      assert!(t < LIMIT, "took {t:?}");
+      let _ = r;
+      // A path of 100k points used three times is more output than the limit allows.
+      let d = format!("M0 0{}", "l1 1".repeat(100_000));
+      let svg = format!(
+        "<svg width='9' height='9'><defs><path id='p' stroke='#000' d='{d}'/></defs><use href='#p'/><use href='#p'/><use href='#p'/></svg>"
+      );
+      assert!(refused_fast(&svg).contains("points"));
+    }
+
+    #[test]
+    fn gradient_stops_are_capped_and_counted_per_use() {
+      let stops: String = (0..15_000).map(|n| format!("<stop offset='{}'/>", n as f64 / 15_000.0)).collect();
+      let svg = format!(
+        "<svg width='99' height='99'><defs><linearGradient id='g'>{stops}</linearGradient></defs><rect width='9' height='9' fill='url(#g)'/></svg>"
+      );
+      let i = ok(&svg);
+      let Paint::LinearGradient { stops, .. } = &i.nodes[1].fills[0] else {
+        panic!()
+      };
+      assert_eq!(stops.len(), MAX_STOPS);
+      assert!(i.warnings.iter().any(|w| w.contains("256")));
+      let svg = format!(
+        "<svg width='99' height='99'><defs><linearGradient id='g'>{stops_xml}</linearGradient></defs>{}</svg>",
+        "<rect width='9' height='9' fill='url(#g)'/>".repeat(4_096),
+        stops_xml = (0..15_000)
+          .map(|n| format!("<stop offset='{}'/>", n as f64 / 15_000.0))
+          .collect::<String>()
+      );
+      assert!(refused_fast(&svg).contains("points"));
+    }
+
+    #[test]
+    fn evenodd_with_many_long_subpaths_skips_the_rewinding() {
+      let sub = format!("M0 0{}z", "l1 1l1-1".repeat(300));
+      let svg = format!(
+        "<svg width='99' height='99'><path fill-rule='evenodd' d='{}'/></svg>",
+        sub.repeat(300)
+      );
+      let (r, t) = timed(&svg);
+      assert!(t < LIMIT, "took {t:?}");
+      assert!(r.unwrap().warnings.iter().any(|w| w.contains("holes")));
+    }
+  }
+
   mod fuzz {
     use super::*;
 
@@ -2275,7 +2630,9 @@ mod tests {
     fn garbled_documents_never_panic() {
       let base = r##"<svg width="24" height="24" viewBox="0 0 24 24"><style>.a{fill:red}</style><g transform="rotate(5) scale(2)" opacity="0.5"><path class="a" d="M1 2L3 4C5 6 7 8 9 10Z" stroke="url(#g)"/><circle r="4"/><use href="#x"/></g><linearGradient id="g"><stop offset="50%"/></linearGradient></svg>"##;
       let mut rng = Rng(0x9E3779B97F4A7C15);
-      let alphabet: Vec<char> = "<>/=\"'&;#()-+.,0123456789 eEMmLlHhVvCcSsQqTtAaZz!?[]é\u{0}{}%".chars().collect();
+      let alphabet: Vec<char> = "<>/=\"'&;#()-+.,0123456789 eEMmLlHhVvCcSsQqTtAaZz!?[]é€😀\u{0}{}%"
+        .chars()
+        .collect();
       for round in 0..4000 {
         let mut s: Vec<char> = base.chars().collect();
         for _ in 0..1 + round % 8 {

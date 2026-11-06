@@ -69,6 +69,10 @@ export async function pasteOverSelection() {
       await A.placeSvgAsImage(svg, c.x, c.y);
       return;
     }
+    if (svg === null && !internalClipboard) {
+      toast("The browser blocked clipboard access. Allow it for this site to paste an SVG as an image with this shortcut.", "error");
+      return;
+    }
     toast("Copy some layers first, then paste over the selection", "error");
     return;
   }
@@ -164,13 +168,13 @@ async function clipboardLayers(): Promise<string> {
   }
 }
 
-/** SVG markup on the system clipboard, if that is what it holds. */
-async function clipboardSvg(): Promise<string> {
+/** SVG markup on the system clipboard, if that is what it holds ("" if not, null when it can't be read). */
+async function clipboardSvg(): Promise<string | null> {
   try {
     const t = await navigator.clipboard.readText();
     return A.isSvgText(t) ? t : "";
   } catch {
-    return "";
+    return null;
   }
 }
 

@@ -42,6 +42,8 @@ const ANCHOR_HIT = 4;
 const ANCHOR_HIT_MIN = 1;
 /** Radius (screen px) of a drawn vector anchor: a circle, so it can't pass for a selection handle (a square). */
 const ANCHOR_R = 4;
+/** Radius (screen px) of a control handle's hit area; the drawn circle is smaller. */
+const HANDLE_HIT = 5;
 /** Below this screen distance to a neighbouring anchor, control handles show only for selected anchors. */
 const CROWDED_ANCHOR_GAP = 12;
 /** Segments shorter than this (screen px) are duplicate anchors, not neighbours. */
@@ -1472,12 +1474,14 @@ function VectorPoints({
         if (hasOut) {
           const o = toScreen(v, apply(m, { x: p.x + p.outX, y: p.y + p.outY }));
           handles.push(<line key={`lo${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
-          handles.push(<circle key={`o${si}-${pi}`} data-vpt={`${si}:${pi}:out`} className="handle" cx={o.x} cy={o.y} r={2.5} fill="white" stroke="#0d99ff" />);
+          handles.push(<circle key={`o${si}-${pi}`} className="vector-handle" cx={o.x} cy={o.y} r={2.5} fill="white" stroke="#0d99ff" pointerEvents="none" />);
+          handles.push(<circle key={`oh${si}-${pi}`} data-vpt={`${si}:${pi}:out`} className="handle" cx={o.x} cy={o.y} r={HANDLE_HIT} fill="transparent" />);
         }
         if (hasIn) {
           const o = toScreen(v, apply(m, { x: p.x + p.inX, y: p.y + p.inY }));
           handles.push(<line key={`li${si}-${pi}`} x1={a.x} y1={a.y} x2={o.x} y2={o.y} stroke="#0d99ff" />);
-          handles.push(<circle key={`i${si}-${pi}`} data-vpt={`${si}:${pi}:in`} className="handle" cx={o.x} cy={o.y} r={2.5} fill="white" stroke="#0d99ff" />);
+          handles.push(<circle key={`i${si}-${pi}`} className="vector-handle" cx={o.x} cy={o.y} r={2.5} fill="white" stroke="#0d99ff" pointerEvents="none" />);
+          handles.push(<circle key={`ih${si}-${pi}`} data-vpt={`${si}:${pi}:in`} className="handle" cx={o.x} cy={o.y} r={HANDLE_HIT} fill="transparent" />);
         }
         const hit = Math.max(ANCHOR_HIT_MIN, Math.min(ANCHOR_HIT, gap / 4));
         anchors.push(

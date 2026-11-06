@@ -2206,6 +2206,17 @@ fn build_svg(e: &mut Engine, cx: &mut Ctx, spec: &Value, markup: &str, parent: O
   for w in &imported.warnings {
     cx.warn(format!("svg: {w}"));
   }
+  const USED: [&str; 9] = ["type", "svg", "name", "x", "y", "width", "height", "opacity", "rotation"];
+  let ignored: Vec<&str> = spec
+    .as_object()
+    .map(|o| o.keys().map(String::as_str).filter(|k| !USED.contains(k)).collect())
+    .unwrap_or_default();
+  if !ignored.is_empty() {
+    cx.warn(format!(
+      "svg: {} ignored on an svg layer; style the layers inside it with update_nodes",
+      ignored.join(", ")
+    ));
+  }
   let mut nodes = imported.nodes.into_iter();
   let mut root = nodes.next().ok_or_else(|| cx.err("svg", "nothing to import"))?;
   root.x = parse::opt_number(cx, spec, "x")?.unwrap_or(0.0);
