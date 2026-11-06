@@ -1465,7 +1465,8 @@ body:has(.modal-bg) .hint-card {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 4px 12px;
+  min-height: 37px;
   border-bottom: 1px solid var(--border);
 }
 .version.auto .version-name {
@@ -1492,8 +1493,8 @@ body:has(.modal-bg) .hint-card {
 .version:hover .ibtn,
 .version:focus-within .ibtn {
   position: static;
-  width: auto;
-  height: auto;
+  width: 28px;
+  height: 28px;
   overflow: visible;
   clip-path: none;
   opacity: 1;
@@ -1502,8 +1503,8 @@ body:has(.modal-bg) .hint-card {
 @media (hover: none) {
   .version .ibtn {
     position: static;
-    width: auto;
-    height: auto;
+    width: 28px;
+    height: 28px;
     overflow: visible;
     clip-path: none;
     opacity: 1;
