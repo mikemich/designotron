@@ -455,7 +455,8 @@ impl<'a> Ctx<'a> {
             self.scroll_targets.insert(dest.id.clone(), key);
           }
           // Only a click on a layer of a variant's own function reaches its set's state.
-          Action::ChangeTo if is_click(i.trigger) && self.in_component_fn(n) => {
+          // A destination with no variant properties has nothing to switch to.
+          Action::ChangeTo if is_click(i.trigger) && self.in_component_fn(n) && !dest.variant_props().is_empty() => {
             let Some(set) = self.variant_set(&dest.id) else { continue };
             if !self.change_keys.contains_key(&set.id) {
               let base = pascal(&set.name, "Component");
@@ -1085,6 +1086,9 @@ impl<'a> Ctx<'a> {
       }
       Action::ChangeTo => {
         let dest = i.destination.as_ref().and_then(|d| self.doc.get(d))?;
+        if dest.variant_props().is_empty() {
+          return None;
+        }
         let key = self.change_keys.get(&self.variant_set(&dest.id)?.id)?;
         if !self.in_component_fn(n) {
           return None;
@@ -5546,10 +5550,12 @@ mod r11_tests {
   #[test]
   fn a_set_without_variant_properties_is_valid_tsx() {
     let (mut doc, comps) = stepper(Trigger::OnClick);
-    for (i, c) in comps.iter().enumerate() {
-      doc.get_mut(c).unwrap().name = format!("Variant {}", ["A", "B", "C"][i]);
+    for c in &comps {
+      doc.get_mut(c).unwrap().component.as_mut().unwrap().variant_props.clear();
     }
     let src = project(&doc, "src/components.tsx");
     assert!(!src.contains("{ ,") && !src.contains("{ ;") && !src.contains(", ,"), "{src}");
+    // Nothing to switch to: no state, and the +/- layers aren't dead buttons.
+    assert!(!src.contains("useState") && !src.contains("change:"), "{src}");
   }
 }
