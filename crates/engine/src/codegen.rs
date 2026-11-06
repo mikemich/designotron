@@ -9,8 +9,8 @@ use serde_json::json;
 use crate::components;
 use crate::geom::fmt;
 use crate::model::{
-  Action, Align, Document, EffectType, ImageCredit, InstanceInfo, LayoutDirection, Node, NodeId, NodeType, OverlayPosition,
-  OverlaySettings, Paint, PropKind, ScaleMode, Sizing, StrokeAlign, TextAlignH, TextAutoResize, TextCase, TextDecoration,
+  Action, Align, ConstraintH, ConstraintV, Document, EffectType, ImageCredit, InstanceInfo, LayoutDirection, Node, NodeId, NodeType,
+  OverlayPosition, OverlaySettings, Paint, PropKind, ScaleMode, Sizing, StrokeAlign, TextAlignH, TextAutoResize, TextCase, TextDecoration,
 };
 use crate::paint;
 use crate::props;
@@ -719,6 +719,10 @@ impl<'a> Ctx<'a> {
         let mut e = self.text_el(&n);
         // Text in a button or link is a span, and doesn't use up the screen's h1.
         e.tag = if self.interactive_depth > 0 { "span" } else { self.heading_tag(&n) };
+        // Browsers make headings bold unless the weight is stated.
+        if matches!(e.tag, "h1" | "h2" | "h3") && !e.styles.iter().any(|(k, _)| k == "font-weight") {
+          e.s("font-weight", "400");
+        }
         e
       }
       NodeType::Vector | NodeType::Polygon | NodeType::Star => {
@@ -783,6 +787,16 @@ impl<'a> Ctx<'a> {
       if al.wrap {
         el.s("flex-wrap", "wrap");
         el.s("row-gap", px(al.counter_gap));
+        // Rows sit as one block by the counter axis alignment (flex lines would stretch). A
+        // column layout never wraps in the engine.
+        if al.direction == LayoutDirection::Horizontal {
+          let content = match al.counter_align {
+            Align::Center => "center",
+            Align::End => "flex-end",
+            _ => "flex-start",
+          };
+          el.s("align-content", content);
+        }
       }
       if al.primary_align != Align::SpaceBetween && al.gap != 0.0 {
         el.s(
@@ -1217,6 +1231,8 @@ impl<'a> Ctx<'a> {
     let text_auto_w = n.text.as_ref().map(|t| t.auto_resize == TextAutoResize::Width).unwrap_or(false);
     let text_auto_h = n.text.as_ref().map(|t| t.auto_resize == TextAutoResize::Height).unwrap_or(false);
     let vectorish = matches!(n.kind, NodeType::Vector | NodeType::Polygon | NodeType::Star);
+    // Whether the constraints already set the width / height (left+right, scale).
+    let mut sized = (false, false);
     match place {
       Place::Root => el.s("position", "relative"),
       Place::ComponentRoot => el.s("position", "relative"),
@@ -1228,11 +1244,22 @@ impl<'a> Ctx<'a> {
           el.s("left", px(b.x));
           el.s("top", px(b.y));
         } else {
-          el.s("left", px(n.x));
-          el.s("top", px(n.y));
+          sized = self.pin(el, n);
         }
       }
-      Place::Flow { .. } => {}
+      Place::Flow { .. } => {
+        // Absolutely placed children (and constraint pins) resolve against the nearest positioned
+        // ancestor, which must be this box and not the list or screen around it.
+        let abs_kids = n.kind.is_container()
+          && n
+            .children
+            .iter()
+            .filter_map(|c| self.doc.get(c))
+            .any(|c| n.layout.is_none() || c.absolute_position);
+        if abs_kids {
+          el.s("position", "relative");
+        }
+      }
     }
     let (fill_w, fill_h) = match place {
       Place::Flow { horizontal } => {
@@ -1282,15 +1309,63 @@ impl<'a> Ctx<'a> {
       }
       return;
     }
-    if !fill_w && !hug_w && !text_auto_w {
+    if !fill_w && !hug_w && !text_auto_w && !sized.0 {
       el.s("width", px(n.width));
     }
-    if !fill_h && !hug_h && !text_auto_w && !text_auto_h && n.kind != NodeType::Line {
+    if !fill_h && !hug_h && !text_auto_w && !text_auto_h && n.kind != NodeType::Line && !sized.1 {
       el.s("height", px(n.height));
     }
     if n.rotation != 0.0 && !vectorish {
       el.s("transform", format!("rotate({}deg)", fmt(n.rotation)));
     }
+  }
+
+  /// Offsets of an absolutely placed layer from its constraints, against the parent's design
+  /// size: left/right pins, a centre line, or percentages that scale with the parent. Returns
+  /// whether the width and the height are given by them (left+right, scale) and so are not
+  /// written separately. Default constraints give `left` and `top` in px, as ever.
+  fn pin(&self, el: &mut El, n: &Node) -> (bool, bool) {
+    let (pw, ph) = n
+      .parent
+      .as_ref()
+      .and_then(|p| self.doc.get(p))
+      .map(|p| (p.width, p.height))
+      .unwrap_or((0.0, 0.0));
+    // Layers of a scrolling screen that stay put sit next to the scroller in the same box, so
+    // they pin to it like any other layer.
+    let c = if pw > 0.0 && ph > 0.0 { n.constraints } else { Default::default() };
+    let (mut own_w, mut own_h) = (false, false);
+    match c.horizontal {
+      ConstraintH::Left => el.s("left", px(n.x)),
+      ConstraintH::Right => el.s("right", px(pw - n.x - n.width)),
+      ConstraintH::LeftRight => {
+        el.s("left", px(n.x));
+        el.s("right", px(pw - n.x - n.width));
+        own_w = true;
+      }
+      ConstraintH::Center => el.s("left", centre(pw, n.x)),
+      ConstraintH::Scale => {
+        el.s("left", pct(n.x, pw));
+        el.s("width", pct(n.width, pw));
+        own_w = true;
+      }
+    }
+    match c.vertical {
+      ConstraintV::Top => el.s("top", px(n.y)),
+      ConstraintV::Bottom => el.s("bottom", px(ph - n.y - n.height)),
+      ConstraintV::TopBottom => {
+        el.s("top", px(n.y));
+        el.s("bottom", px(ph - n.y - n.height));
+        own_h = true;
+      }
+      ConstraintV::Center => el.s("top", centre(ph, n.y)),
+      ConstraintV::Scale => {
+        el.s("top", pct(n.y, ph));
+        el.s("height", pct(n.height, ph));
+        own_h = true;
+      }
+    }
+    (own_w, own_h)
   }
 
   /// Min and max size limits (`min-w-`, `max-w-`, `min-h-`, `max-h-` in Tailwind). They replace
@@ -1417,6 +1492,11 @@ impl<'a> Ctx<'a> {
         let class = self.names.texts.get(&style.id).cloned().unwrap_or_else(|| text_class(&style.name));
         const OWN: [&str; 5] = ["font-family", "font-size", "font-weight", "line-height", "letter-spacing"];
         let mut decls: Vec<(String, String)> = el.styles.iter().filter(|(k, _)| OWN.contains(&k.as_str())).cloned().collect();
+        // An automatic line height is a multiple, so one class fits every size that uses it.
+        if style.line_height.is_none() {
+          decls.retain(|(k, _)| k != "line-height");
+          decls.push(("line-height".into(), "1.2".into()));
+        }
         if !decls.iter().any(|(k, _)| k == "font-weight") {
           decls.push(("font-weight".into(), "400".into()));
         }
@@ -1642,7 +1722,13 @@ impl<'a> Ctx<'a> {
     if t.italic {
       el.s("font-style", "italic");
     }
-    el.s("line-height", px(t.line_height_px()));
+    // Auto line height follows each span's own size (the canvas takes the tallest line), so a
+    // text with differently sized runs states it as a multiple that spans inherit.
+    if t.line_height.is_none() && t.runs.iter().any(|r| r.font_size.is_some()) {
+      el.s("line-height", "1.2");
+    } else {
+      el.s("line-height", px(t.line_height_px()));
+    }
     if let (Some(Paint::Solid { color, opacity, .. }), true) = (n.strokes.iter().find(|p| p.visible()), n.stroke_weight > 0.0) {
       // Centre strokes keep their weight; outside ones are doubled and painted under the fill.
       // CSS has no inside stroke, so it falls back to the centre one.
@@ -2361,6 +2447,27 @@ fn css_stops(stops: &[crate::model::GradientStop], opacity: f64) -> String {
     .join(", ")
 }
 
+/// `calc(50% + 12px)` for a box starting `at` px in a parent `size` px long: its start follows
+/// the parent's centre, keeping the distance the design has.
+fn centre(size: f64, at: f64) -> String {
+  let d = at - size / 2.0;
+  match d {
+    d if d.abs() < 0.005 => "50%".into(),
+    d if d > 0.0 => format!("calc(50% + {})", px(d)),
+    d => format!("calc(50% - {})", px(-d)),
+  }
+}
+
+/// `part` as a percentage of `whole`.
+fn pct(part: f64, whole: f64) -> String {
+  let v = part / whole * 100.0;
+  if v.abs() < 0.00005 {
+    "0".into()
+  } else {
+    format!("{}%", (v * 10000.0).round() / 10000.0)
+  }
+}
+
 fn px(v: f64) -> String {
   if v == 0.0 {
     "0".into()
@@ -2423,6 +2530,10 @@ fn tw_class_raw(k: &str, v: &str) -> String {
     ("align-items", "center") => "items-center".into(),
     ("align-items", "flex-end") => "items-end".into(),
     ("align-items", "flex-start") => "items-start".into(),
+    ("align-content", "flex-start") => "content-start".into(),
+    ("align-content", "center") => "content-center".into(),
+    ("align-content", "flex-end") => "content-end".into(),
+    ("font-weight", "400") => "font-normal".into(),
     ("overflow", "hidden") => "overflow-hidden".into(),
     ("overflow", "auto") => "overflow-auto".into(),
     ("overflow-x", "auto") => "overflow-x-auto".into(),
@@ -2471,6 +2582,8 @@ fn tw_class_raw(k: &str, v: &str) -> String {
     ("min-height", _) => format!("min-h-[{a}]"),
     ("left", _) => format!("left-[{a}]"),
     ("top", _) => format!("top-[{a}]"),
+    ("right", _) => format!("right-[{a}]"),
+    ("bottom", _) => format!("bottom-[{a}]"),
     ("width", _) => format!("w-[{a}]"),
     ("height", _) => format!("h-[{a}]"),
     ("column-gap", _) => format!("gap-x-[{a}]"),
@@ -3247,7 +3360,7 @@ const FOCUS_CSS: &str = ":focus-visible { outline: 2px solid #2563eb !important;
 /// What the prototype and the export don't carry over, and the top-level layers left out.
 fn readme_limits(doc: &Document) -> String {
   let mut out = String::from(
-    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- While hovering / While pressing Change to, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert).\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n- Strokes are CSS `outline`s (they take no layout space, like Figma's), so `src/index.css` ends with a `:focus-visible` rule that keeps a keyboard focus ring; restyle it to taste.\n- Accessible names (`aria-label`) generated for icon-only controls are in English (\"Go to Detail\", \"Back\"); translate them for other languages.\n",
+    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- While hovering / While pressing Change to, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert).\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n- Strokes are CSS `outline`s (they take no layout space, like Figma's), so `src/index.css` ends with a `:focus-visible` rule that keeps a keyboard focus ring; restyle it to taste.\n- Fixed-size layers don't shrink below their design width, so in a window narrower than the screen's design they can overflow (the screen is as wide as the window up to its design width); layers pinned to both sides or scaled follow the screen.\n- Accessible names (`aria-label`) generated for icon-only controls are in English (\"Go to Detail\", \"Back\"); translate them for other languages.\n",
   );
   let left_out: Vec<&str> = doc
     .pages
@@ -4917,6 +5030,11 @@ mod r10_tests {
       .unwrap_or_default()
   }
 
+  /// Inline CSS without the spaces after `:` and `;`, for matching declarations.
+  fn tight(html: String) -> String {
+    html.replace(": ", ":").replace("; ", ";")
+  }
+
   fn pad8() -> AutoLayout {
     AutoLayout {
       padding_top: 8.0,
@@ -5062,6 +5180,185 @@ mod r10_tests {
     });
     let src = export_react(&doc, "f", &HeuristicMeasurer);
     assert_eq!(src.matches("gap-y-").count(), 1, "{src}");
+  }
+
+  #[test]
+  fn wrap_rows_keep_their_alignment_as_a_block() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "f", "Chips", None);
+    doc.get_mut("f").unwrap().layout = Some(AutoLayout {
+      wrap: true,
+      direction: LayoutDirection::Horizontal,
+      counter_align: Align::Center,
+      ..Default::default()
+    });
+    let html = tight(export_html(&doc, "f", &HeuristicMeasurer));
+    assert!(html.contains("align-content:center"), "{html}");
+    assert!(export_react(&doc, "f", &HeuristicMeasurer).contains("content-center"));
+    doc.get_mut("f").unwrap().layout.as_mut().unwrap().counter_align = Align::End;
+    assert!(tight(export_html(&doc, "f", &HeuristicMeasurer)).contains("align-content:flex-end"));
+    doc.get_mut("f").unwrap().layout.as_mut().unwrap().counter_align = Align::Start;
+    assert!(export_react(&doc, "f", &HeuristicMeasurer).contains("content-start"));
+  }
+
+  #[test]
+  fn headings_keep_a_regular_weight() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Screen", None);
+    add(&mut doc, NodeType::Text, "t", "Title", Some("s"));
+    {
+      let t = doc.get_mut("t").unwrap().text.as_mut().unwrap();
+      t.characters = "Hello".into();
+      t.font_size = 28.0;
+    }
+    let html = tight(export_html(&doc, "s", &HeuristicMeasurer));
+    assert!(html.contains("<h2") && html.contains("font-weight:400"), "{html}");
+    doc.get_mut("t").unwrap().text.as_mut().unwrap().font_weight = 700;
+    let html = tight(export_html(&doc, "s", &HeuristicMeasurer));
+    assert!(html.contains("font-weight:700") && !html.contains("font-weight:400"), "{html}");
+    // A plain paragraph is as before.
+    doc.get_mut("t").unwrap().text.as_mut().unwrap().font_weight = 400;
+    doc.get_mut("t").unwrap().text.as_mut().unwrap().font_size = 16.0;
+    assert!(!tight(export_html(&doc, "s", &HeuristicMeasurer)).contains("font-weight"));
+  }
+
+  #[test]
+  fn mixed_size_text_has_a_unitless_auto_line_height() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Screen", None);
+    add(&mut doc, NodeType::Text, "t", "Mixed", Some("s"));
+    {
+      let t = doc.get_mut("t").unwrap().text.as_mut().unwrap();
+      t.characters = "Big small".into();
+      t.font_size = 16.0;
+      t.runs = vec![crate::model::TextRun {
+        start: 0,
+        end: 3,
+        font_size: Some(40.0),
+        ..Default::default()
+      }];
+    }
+    assert!(tight(export_html(&doc, "s", &HeuristicMeasurer)).contains("line-height:1.2"));
+    doc.get_mut("t").unwrap().text.as_mut().unwrap().runs.clear();
+    let plain = tight(export_html(&doc, "s", &HeuristicMeasurer));
+    assert!(plain.contains("line-height:19.2px"), "{plain}");
+    // A stated line height stays in px.
+    let t = doc.get_mut("t").unwrap().text.as_mut().unwrap();
+    t.line_height = Some(24.0);
+    t.runs = vec![crate::model::TextRun {
+      start: 0,
+      end: 3,
+      font_size: Some(40.0),
+      ..Default::default()
+    }];
+    assert!(tight(export_html(&doc, "s", &HeuristicMeasurer)).contains("line-height:24px"));
+  }
+
+  #[test]
+  fn constraints_become_responsive_offsets() {
+    use crate::model::{ConstraintH, ConstraintV};
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Phone", None);
+    {
+      let s = doc.get_mut("s").unwrap();
+      s.width = 375.0;
+      s.height = 800.0;
+    }
+    for (id, x, y, w, h) in [
+      ("a", 319.0, 16.0, 40.0, 40.0),
+      ("b", 0.0, 740.0, 375.0, 60.0),
+      ("c", 150.0, 100.0, 75.0, 20.0),
+      ("d", 37.5, 200.0, 75.0, 20.0),
+      ("e", 16.0, 16.0, 40.0, 40.0),
+    ] {
+      add(&mut doc, NodeType::Rectangle, id, id, Some("s"));
+      let n = doc.get_mut(id).unwrap();
+      (n.x, n.y, n.width, n.height) = (x, y, w, h);
+    }
+    doc.get_mut("a").unwrap().constraints.horizontal = ConstraintH::Right;
+    {
+      let b = doc.get_mut("b").unwrap();
+      b.constraints.horizontal = ConstraintH::LeftRight;
+      b.constraints.vertical = ConstraintV::Bottom;
+    }
+    doc.get_mut("c").unwrap().constraints.horizontal = ConstraintH::Center;
+    doc.get_mut("d").unwrap().constraints.horizontal = ConstraintH::Scale;
+    let html = tight(export_html(&doc, "s", &HeuristicMeasurer));
+    // Right: 375 - 319 - 40 = 16 from the right edge, no left.
+    assert!(html.contains("right:16px") && html.contains("left:0;right:0"), "{html}");
+    assert!(html.contains("bottom:0"), "{html}");
+    assert!(html.contains("left:calc(50% - 37.5px)"), "{html}");
+    assert!(html.contains("left:10%") && html.contains("width:20%"), "{html}");
+    // The left-right bar has no width; the default one keeps left and top.
+    let bar = html.lines().find(|l| l.contains("left:0;right:0")).unwrap();
+    assert!(!bar.contains("width:"), "{bar}");
+    let plain = html.lines().find(|l| l.contains("top:16px") && l.contains("left:16px")).unwrap();
+    assert!(!plain.contains("right:") && plain.contains("width:40px"), "{plain}");
+    let pinned = html.lines().find(|l| l.contains("right:16px")).unwrap();
+    assert!(!pinned.contains("left:") && pinned.contains("width:40px"), "{pinned}");
+    let react = export_react(&doc, "s", &HeuristicMeasurer);
+    assert!(react.contains("right-[16px]") && react.contains("bottom-[0]"), "{react}");
+    assert!(react.contains("left-[calc(50%_-_37.5px)]"), "{react}");
+  }
+
+  #[test]
+  fn a_flow_container_with_absolute_children_is_their_positioned_ancestor() {
+    use crate::model::ConstraintH;
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Screen", None);
+    doc.get_mut("s").unwrap().layout = Some(AutoLayout::default());
+    add(&mut doc, NodeType::Frame, "list", "List", Some("s"));
+    doc.get_mut("list").unwrap().layout = Some(AutoLayout::default());
+    add(&mut doc, NodeType::Frame, "card", "Card", Some("list"));
+    add(&mut doc, NodeType::Rectangle, "dot", "Dot", Some("card"));
+    {
+      let c = doc.get_mut("card").unwrap();
+      c.width = 200.0;
+      c.height = 100.0;
+    }
+    {
+      let d = doc.get_mut("dot").unwrap();
+      (d.x, d.y, d.width, d.height) = (176.0, 8.0, 16.0, 16.0);
+      d.constraints.horizontal = ConstraintH::Right;
+    }
+    let html = tight(export_html(&doc, "s", &HeuristicMeasurer));
+    let card = html
+      .lines()
+      .find(|l| l.contains("width:200px") && l.contains("height:100px"))
+      .unwrap();
+    assert!(card.contains("position:relative"), "{card}");
+    let dot = html.lines().find(|l| l.contains("right:8px")).unwrap();
+    assert!(dot.contains("position:absolute") && !dot.contains("left:"), "{dot}");
+    // The list holds only flowing layers: no positioned box needed.
+    let list = html.lines().filter(|l| l.contains("display:flex")).nth(1).unwrap();
+    assert!(!list.contains("position:relative"), "{list}");
+  }
+
+  #[test]
+  fn a_text_style_with_automatic_line_height_is_a_multiple() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Screen", None);
+    add(&mut doc, NodeType::Text, "t", "Body", Some("s"));
+    doc.styles.texts.push(crate::model::TextStyle {
+      id: "ts".into(),
+      name: "Body".into(),
+      font_family: "Inter".into(),
+      font_size: 16.0,
+      font_weight: 400,
+      line_height: None,
+      letter_spacing: 0.0,
+    });
+    {
+      let n = doc.get_mut("t").unwrap();
+      n.text_style = Some("ts".into());
+      let t = n.text.as_mut().unwrap();
+      t.font_family = "Inter".into();
+      t.font_size = 16.0;
+      t.characters = "Hi".into();
+    }
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let css = &files.iter().find(|f| f.path == "src/index.css").unwrap().content;
+    assert!(css.contains("16px/1.2"), "{css}");
   }
 
   #[test]
