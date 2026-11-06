@@ -27,6 +27,8 @@ pub struct RenderOptions<'a> {
   pub mode: Mode,
   /// Nodes painted invisibly (e.g. text being edited in an overlay).
   pub hidden: &'a [NodeId],
+  /// The text layer being edited: drawn live with all its lines (no line limit).
+  pub editing: Option<&'a str>,
 }
 
 struct Renderer<'a> {
@@ -115,6 +117,7 @@ pub fn export_svg_parts(doc: &Document, id: &str, m: &dyn TextMeasurer, hidden: 
     opts: RenderOptions {
       mode: Mode::Export,
       hidden,
+      editing: None,
     },
     defs: String::new(),
     uid: 0,
@@ -173,6 +176,7 @@ fn export_svg_in(doc: &Document, id: &str, m: &dyn TextMeasurer, b: Rect, hidden
     opts: RenderOptions {
       mode: Mode::Export,
       hidden,
+      editing: None,
     },
     defs: String::new(),
     uid: 0,
@@ -880,7 +884,8 @@ impl<'a> Renderer<'a> {
 
   fn text(&mut self, n: &Node) -> String {
     let Some(t) = n.text.as_ref() else { return String::new() };
-    let lay = layout_of_node(n, t, self.m);
+    let editing = self.opts.mode == Mode::Canvas && self.opts.editing == Some(n.id.as_str());
+    let lay = crate::text::layout_for_box_with(t, n.width, Some(n.height), n.max_width, editing, self.m);
     let fill = n
       .fills
       .iter()
@@ -1226,6 +1231,7 @@ mod tests {
       RenderOptions {
         mode: Mode::Canvas,
         hidden: &[],
+        editing: None,
       },
     );
     assert!(svg.contains("data-id=\"f\""));
@@ -1355,6 +1361,7 @@ mod tests {
         RenderOptions {
           mode: Mode::Canvas,
           hidden: &[],
+          editing: None,
         },
       )
     };
@@ -1447,7 +1454,11 @@ mod tests {
     }
     doc.insert(t, None, &page, None);
     crate::layout::relayout_all(&mut doc, &HeuristicMeasurer);
-    let opts = |mode| RenderOptions { mode, hidden: &[] };
+    let opts = |mode| RenderOptions {
+      mode,
+      hidden: &[],
+      editing: None,
+    };
     let svg = render_root(&doc, "t", &HeuristicMeasurer, opts(Mode::Canvas));
     assert!(svg.contains("<text class=\"s16\""), "size 13.2 is in the 16 class: {svg}");
     let path = svg

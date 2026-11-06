@@ -17,7 +17,7 @@ import {
   zoomBy,
 } from "../store";
 import { apply, corners, invert, mid, polyPoints, rectCorners, simplify, toScreen, type Pt } from "./geometry";
-import { openTextGesture, TextEditor } from "./TextEditor";
+import { editTextAt, openTextGesture, TextEditor } from "./TextEditor";
 import { EmptyPrompt } from "./EmptyPrompt";
 import { GridOverlay, PageGuides, Rulers } from "./Rulers";
 import { CommentLayer } from "./Comments";
@@ -268,7 +268,8 @@ export function Canvas() {
     const host = contentRef.current;
     if (!host) return;
     const fresh = rootEls.current.size === 0;
-    const r = renderPageIncremental(page, editingText ? [...demoHidden, editingText] : demoHidden, fresh);
+    // The text being edited is drawn live (all its lines, mixed styles); its textarea is only the input.
+    const r = renderPageIncremental(page, demoHidden, fresh, editingText ?? "");
     if ("full" in r) {
       rootEls.current.clear();
       rootInfo.current.clear();
@@ -980,6 +981,17 @@ export function Canvas() {
     const z = zoom();
     const clicked = Math.hypot(end.x - start.x, end.y - start.y) * z < 3;
     if (tool === "text") {
+      if (clicked) {
+        // A click on an existing text edits it, with the caret where you clicked.
+        const hit = query<string | null>({ q: "pick", x: start.x, y: start.y, zoom: z, deep: true });
+        const hn = hit ? getDoc().nodes[hit] : null;
+        if (hn && hn.type === "text" && hn.visible && !hn.locked) {
+          dispatch({ op: "select", ids: [hn.id] });
+          editTextAt(hn.id, start);
+          setTool("move");
+          return;
+        }
+      }
       openTextGesture();
       const r = dispatch<{ id: string }>({ op: "createText", x: start.x, y: start.y, characters: "", parent: null });
       if (!r) dispatch({ op: "endGesture" });

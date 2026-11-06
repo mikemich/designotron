@@ -776,6 +776,7 @@ mod tests {
       RenderOptions {
         mode: Mode::Canvas,
         hidden: &[],
+        editing: None,
       },
     );
     assert!(out.starts_with("<defs><pattern id=\"r_ag1\""), "{}", &out[..80.min(out.len())]);
