@@ -130,10 +130,12 @@ async function say(p, text) {
 }
 const sentFrames = (p) => {
   const frames = [];
+  frames.focus = 0;
   p.on("websocket", (ws) => {
     if (ws.url().includes("/bridge/ws")) ws.on("framesent", (f) => {
       const s = String(f.payload);
       if (s.includes('"type":"chat"')) frames.push(JSON.parse(s));
+      if (s.includes('"type":"focus"')) frames.focus++;
     });
   });
   return frames;
@@ -375,7 +377,115 @@ try {
   await p4.click("button.retry-btn:has-text('Retry')");
   check("L-04: Retry runs the turn again", await until(async () => (await count(p4, "KL-")) > built, 10000));
   await idle(p4, 30000);
+  check("L-04: the clicked Retry button is gone", (await p4.locator("button.retry-btn").count()) === 0);
+  await p4.evaluate(() => window.__dt.chatSet({ items: [...window.__dt.chat().items, { id: 9999, kind: "error", text: "old failure", retry: "x" }] }));
+  await sleep(900);
+  await p4.reload({ waitUntil: "load" });
+  await p4.waitForSelector("#dt-canvas");
+  await until(async () => (await chat(p4)).items.length > 0, 8000);
+  check("a Retry button isn't kept across a reload", (await itemsText(p4)).some((t) => t === "error:old failure") && (await p4.locator("button.retry-btn").count()) === 0);
   await p4.context().close();
+
+  // ===== A call that waits (a photo download, an import's images) writes nothing once its file is closed =====
+  const slow = { photo: false, image: false };
+  await ctx.route(/^https:\/\/api\.openverse\.org\/v1\/images\/0000000\d-/, async (r) => {
+    if (slow.photo) await sleep(2500);
+    await r.fallback();
+  });
+  await ctx.route("**/__slow.png", async (r) => {
+    if (slow.image) await sleep(2500);
+    await r.fulfill({ status: 200, contentType: "image/png", body: Buffer.alloc(10) }).catch(() => {});
+  });
+  await backToFiles(page);
+  await newFile(page);
+  const W = await fileIdOf(page);
+  slow.photo = true;
+  slow.image = true;
+  const photoCall = page.evaluate(() => window.__dt.tool("place_photo", { id: "openverse:00000001-aaaa-4bbb-8ccc-dddddddddddd" }));
+  const importCall = page.evaluate(() => window.__dt.tool("import_html", { html: `<div style="width:200px;height:100px;background:#fc0"><img src="${location.origin}/__slow.png" width="50" height="50"></div>` }));
+  await sleep(500);
+  await backToFiles(page);
+  await newFile(page);
+  const photoOut = await photoCall;
+  const importOut = await importCall;
+  await sleep(500);
+  check("a photo call that finishes after its file closed is refused", photoOut.ok === false && /left the file/.test(String(photoOut.result)), JSON.stringify(photoOut).slice(0, 160));
+  check("an import that finishes after its file closed is refused", importOut.ok === false && /left the file/.test(String(importOut.result)), JSON.stringify(importOut).slice(0, 160));
+  check("the next file got no layer from them", (await names(page)).filter((n) => /Photo|Imported|div/i.test(n)).length === 0 && (await page.evaluate(() => Object.keys(window.__dt.doc().nodes).length)) <= 2, (await names(page)).join(","));
+  await backToFiles(page);
+  await page.evaluate((id) => (location.hash = `#/file/${id}`), W);
+  await page.waitForSelector("#dt-canvas");
+  await sleep(300);
+  check("and the file they started in got none either", (await page.evaluate(() => Object.keys(window.__dt.doc().nodes).length)) <= 2, (await names(page)).join(","));
+  slow.photo = false;
+  slow.image = false;
+
+  // ===== Unsent text in the box waits in the file's draft (more than one visit) =====
+  await openChat(page);
+  await page.fill('textarea[aria-label="Message to Claude"]', "half typed idea");
+  for (let visit = 1; visit <= 2; visit++) {
+    await backToFiles(page);
+    await page.evaluate((id) => (location.hash = `#/file/${id}`), W);
+    await page.waitForSelector("#dt-canvas");
+    await until(async () => (await chat(page)).chatFile === W, 5000);
+    await openChat(page);
+    const got = await until(async () => (await page.locator('textarea[aria-label="Message to Claude"]').inputValue()) === "half typed idea", 4000);
+    check(`the typed text is back in the box after visit ${visit}`, got, await page.locator('textarea[aria-label="Message to Claude"]').inputValue());
+  }
+  await page.fill('textarea[aria-label="Message to Claude"]', "");
+
+  // ===== The file list isn't the bridge's active tab =====
+  await backToFiles(page);
+  const focusBefore = frames.focus;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await sleep(500);
+  check("a tab on the file list doesn't announce focus", frames.focus === focusBefore);
+
+  // ===== Two tabs on one file: the read-only one never rolls back the editing tab's conversation =====
+  await newFile(page);
+  const T = await fileIdOf(page);
+  await say(page, "first of two [calls=1][tag=T1]");
+  await idle(page);
+  await sleep(900);
+  const tab2 = await newPage(ctx);
+  await tab2.goto(`${URL_}/#/file/${T}`, { waitUntil: "load" });
+  await tab2.waitForSelector("#dt-canvas");
+  await until(() => tab2.evaluate(() => !!window.__dt.state().readOnly), 8000);
+  await until(async () => (await chat(tab2)).items.length > 0, 8000);
+  check("the read-only tab shows the stored conversation", /first of two/.test((await itemsText(tab2)).join("|")));
+  await say(page, "second of two [calls=1][tag=T2]");
+  await idle(page);
+  await sleep(900);
+  const stored2 = () =>
+    page.evaluate(async (id) => {
+      const db = await new Promise((r) => {
+        const q = indexedDB.open("keyval-store");
+        q.onsuccess = () => r(q.result);
+      });
+      return new Promise((r) => {
+        const q = db.transaction("keyval").objectStore("keyval").get("dt:chat:" + id);
+        q.onsuccess = () => r(JSON.stringify(q.result ?? null));
+      });
+    }, T);
+  check("the editing tab stored both turns", /second of two/.test(await stored2()));
+  await tab2.close();
+  await sleep(500);
+  check("closing the read-only tab last doesn't roll back or delete the record", /second of two/.test(await stored2()) && /first of two/.test(await stored2()));
+
+  // The read-only tab takes over: it picks up the newer conversation. A turn running in the tab that loses the file stops.
+  const tab3 = await newPage(ctx);
+  await tab3.goto(`${URL_}/#/file/${T}`, { waitUntil: "load" });
+  await tab3.waitForSelector("#dt-canvas");
+  await until(() => tab3.evaluate(() => !!window.__dt.state().readOnly), 8000);
+  await until(async () => (await chat(tab3)).items.length > 0, 8000);
+  await say(page, "third of three [calls=8][delay=700][tag=T3]");
+  await until(async () => (await chat(page)).running, 5000);
+  await tab3.getByRole("button", { name: "Edit here instead" }).click();
+  check("the other tab becomes the editing tab", await until(async () => !(await tab3.evaluate(() => !!window.__dt.state().readOnly)), 15000));
+  check("the tab that lost the file stops its turn and says so", await until(async () => !(await chat(page)).running && /no longer edit this file/.test((await itemsText(page)).join("|")), 15000), (await itemsText(page)).slice(-3).join("|"));
+  await sleep(1000);
+  check("the new editing tab has the conversation of the old one", /second of two/.test((await itemsText(tab3)).join("|")), (await itemsText(tab3)).slice(-3).join("|"));
+  await tab3.close();
 
   // ===== L-05: a page loaded while the bridge is down finds it once it starts =====
   await stopBridge();
@@ -430,9 +540,13 @@ try {
   await pa.waitForSelector("#dt-canvas");
   await until(async () => (await chat(pa)).items.length > 0, 8000);
   check("API: A has one layer and its transcript, with the stop note", (await count(pa, "API-")) === 1 && /Stopped: you left this file\./.test((await itemsText(pa)).join("|")));
+  check("API: reopening in the same session says nothing about lost messages (they are still in memory)", !/Claude doesn't have the messages above any more/.test((await itemsText(pa)).join("|")));
+  await pa.reload({ waitUntil: "load" });
+  await pa.waitForSelector("#dt-canvas");
+  await until(async () => (await chat(pa)).items.length > 0, 8000);
   await say(pa, "api again");
   await sleep(500);
-  check("API: after a reopen the transcript is back and a note says Claude lost its messages", /Claude doesn't have the messages above any more/.test((await itemsText(pa)).join("|")));
+  check("API: after a reload the transcript is back and a note says Claude lost its messages", /Claude doesn't have the messages above any more/.test((await itemsText(pa)).join("|")));
   await pa.context().close();
 
   check("no uncaught page errors in the whole run", errors.length === 0, errors.join("|"));

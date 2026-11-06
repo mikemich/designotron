@@ -115,6 +115,40 @@ pub fn mcp_config(port: u16, token: &str) -> Value {
   })
 }
 
+/// Session ids are UUIDs; anything else from the editor (which stores them) is not passed on.
+pub fn valid_session_id(s: &str) -> bool {
+  (1..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// The command line of one chat turn. The session id goes in `--resume=<id>` and the prompt comes
+/// after `--`, so neither can be read as an option (`--allowedTools` takes any number of values,
+/// and `--resume` an optional one).
+fn chat_args(prompt: &str, no_images: bool, mcp: &Value, system: &str, allowed: &[String], session: Option<&str>) -> Vec<String> {
+  let mut a: Vec<String> = vec!["-p".into()];
+  if !no_images {
+    a.extend(["--input-format".into(), "stream-json".into()]);
+  }
+  a.extend(["--output-format", "stream-json", "--verbose", "--include-partial-messages"].map(String::from));
+  a.extend([
+    "--mcp-config".into(),
+    mcp.to_string(),
+    "--permission-mode".into(),
+    "acceptEdits".into(),
+    "--append-system-prompt".into(),
+    system.into(),
+    "--allowedTools".into(),
+  ]);
+  a.extend(allowed.iter().cloned());
+  if let Some(s) = session {
+    a.push(format!("--resume={s}"));
+  }
+  if no_images {
+    a.push("--".into());
+    a.push(prompt.into());
+  }
+  a
+}
+
 /// A Claude Code event for the editor. `turn` lets the editor drop events of a turn it has left
 /// behind (the person switched files or started a new conversation).
 fn chat_event_msg(turn: u64, event: Value) -> Value {
@@ -169,26 +203,17 @@ async fn run_turn(
     state.workspace.display()
   );
 
+  // The editor stores session ids; one that isn't an id never reaches the command line.
+  let session = session.filter(|s| valid_session_id(s));
   let mut cmd = Command::new(&state.claude.bin);
-  cmd.arg("-p");
-  if images.is_empty() {
-    cmd.arg(&prompt);
-  } else {
-    cmd.args(["--input-format", "stream-json"]);
-  }
-  cmd
-    .args(["--output-format", "stream-json", "--verbose", "--include-partial-messages"])
-    .arg("--mcp-config")
-    .arg(mcp_config(state.port, token).to_string())
-    .arg("--permission-mode")
-    .arg("acceptEdits")
-    .arg("--append-system-prompt")
-    .arg(&system)
-    .arg("--allowedTools")
-    .args(&allowed);
-  if let Some(s) = &session {
-    cmd.arg("--resume").arg(s);
-  }
+  cmd.args(chat_args(
+    &prompt,
+    images.is_empty(),
+    &mcp_config(state.port, token),
+    &system,
+    &allowed,
+    session.as_deref(),
+  ));
   cmd
     .current_dir(&state.workspace)
     .stdin(if images.is_empty() { Stdio::null() } else { Stdio::piped() })
@@ -310,6 +335,32 @@ mod tests {
     assert_eq!(s["url"], "http://127.0.0.1:5174/mcp");
     assert_eq!(s["alwaysLoad"], true);
     assert_eq!(s["headers"]["X-Designotron-Editor"], "s3cret");
+  }
+
+  #[test]
+  fn only_plain_session_ids_are_accepted() {
+    assert!(valid_session_id("3f2a9c1e-7b64-4c0e-9d52-0a1b2c3d4e5f"));
+    assert!(valid_session_id("fake-session"));
+    for bad in ["", "a b", "a=b", "../x", "id;rm", "x\ny", "--resume=--flag y", &"a".repeat(65)] {
+      assert!(!valid_session_id(bad), "{bad:?} must be refused");
+    }
+    // A dashed id is a plain value: it travels as `--resume=<id>`, never as its own argument.
+    assert!(valid_session_id("--odd-but-harmless"));
+  }
+
+  #[test]
+  fn the_prompt_follows_a_double_dash_and_the_session_is_one_argument() {
+    let mcp = mcp_config(5174, "t");
+    let allowed = vec!["Read".to_string(), "Write".to_string()];
+    let a = chat_args("--help me", true, &mcp, "sys", &allowed, Some("sess-1"));
+    assert_eq!(&a[a.len() - 2..], ["--", "--help me"]);
+    assert!(a.contains(&"--resume=sess-1".to_string()));
+    assert!(!a.contains(&"--resume".to_string()));
+    // The variadic tool list stops at the next option, never swallows the prompt.
+    let tools = a.iter().position(|x| x == "--allowedTools").unwrap();
+    assert_eq!(&a[tools + 1..tools + 3], ["Read", "Write"]);
+    let images = chat_args("p", false, &mcp, "sys", &allowed, None);
+    assert!(images.contains(&"--input-format".to_string()) && !images.contains(&"--".to_string()));
   }
 
   #[test]

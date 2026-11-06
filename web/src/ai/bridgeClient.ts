@@ -127,7 +127,8 @@ class BridgeClient {
    *  Claude Code) and the headless file follow it. It then sends its document, which the bridge
    *  only takes from the active tab. */
   private announceFocus() {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    // On the file list there is no document: another tab with a file open stays the active one.
+    if (this.ws?.readyState !== WebSocket.OPEN || !useChat.getState().chatFile) return;
     this.send({ type: "focus" });
     this.pushDoc();
   }
@@ -148,7 +149,7 @@ class BridgeClient {
       useChat.setState({ bridgeStatus: "connected" });
       ws.send(JSON.stringify({ type: "hello", client: "designotron-editor" }));
       // A tab opened in the background doesn't take over from the one in use.
-      if (document.hasFocus()) ws.send(JSON.stringify({ type: "focus" }));
+      if (document.hasFocus() && useChat.getState().chatFile) ws.send(JSON.stringify({ type: "focus" }));
       this.pushDoc();
     };
     ws.onclose = () => this.offline();
@@ -163,6 +164,11 @@ class BridgeClient {
     if (this.retry) clearTimeout(this.retry);
     this.retry = setTimeout(() => this.connect(), this.delay);
     this.delay = Math.min(this.delay * 1.5, 30000);
+  }
+
+  /** A file just opened in this tab: it becomes the bridge's active tab (if the person is here). */
+  focusEditor() {
+    if (document.hasFocus()) this.announceFocus();
   }
 
   /** Sends a message to the bridge if connected. */
@@ -182,7 +188,7 @@ class BridgeClient {
   /** Mirrors the document to the bridge so headless tools and project export see it. */
   pushDoc() {
     // Serialising a big file costs far more than the send; skip it when nobody is listening.
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (this.ws?.readyState !== WebSocket.OPEN || !useChat.getState().chatFile) return;
     try {
       this.send({ type: "doc", doc: getEngine().save() });
     } catch {

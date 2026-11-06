@@ -16,7 +16,9 @@ import {
   MODELS,
   attachImage,
   newConversation,
+  patchItem,
   push,
+  registerComposer,
   removeImage,
   discardQueued,
   send,
@@ -136,6 +138,8 @@ export function ChatPanel() {
   const hasSelection = useStore((s) => s.es.selection.length > 0);
   const hasContent = useStore((s) => !!getDoc().pages.find((p) => p.id === s.es.page)?.children.length);
   const [text, setText] = useState("");
+  const textRef = useRef("");
+  textRef.current = text;
   const [settings, setSettings] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -155,6 +159,16 @@ export function ChatPanel() {
     [],
   );
 
+  // Unsent text survives closing the panel and leaving the file (it goes to the file's draft).
+  useEffect(() => {
+    registerComposer(() => textRef.current);
+    return () => {
+      registerComposer(null);
+      const t = textRef.current;
+      if (t.trim() && useChat.getState().chatFile) useChat.setState((s) => ({ draft: s.draft ? `${s.draft}\n\n${t}` : t }));
+    };
+  }, []);
+  const lastUser = items.reduce((n, it, i) => (it.kind === "user" ? i : n), -1);
   const queued = useChat((s) => s.queued);
   const draft = useChat((s) => s.draft);
   const staleQueue = useQueueConfirm((s) => s.stale);
@@ -372,7 +386,7 @@ export function ChatPanel() {
             </div>
           </>
         )}
-        {items.map((it) =>
+        {items.map((it, idx) =>
           it.kind === "tool" ? (
             <div
               key={it.id}
@@ -406,8 +420,15 @@ export function ChatPanel() {
                 </div>
               ) : null}
               {it.kind === "assistant" ? <Markdown text={it.text} /> : it.text}
-              {it.kind === "error" && it.retry && !running && (
-                <button className="btn small retry-btn" onClick={() => send(it.retry!)}>
+              {it.kind === "error" && it.retry && !running && idx > lastUser && (
+                <button
+                  className="btn small retry-btn"
+                  onClick={() => {
+                    // One click: the button goes, so nothing is queued twice while offline.
+                    patchItem(it.id, { retry: undefined, retryLabel: undefined });
+                    send(it.retry!, { label: it.retryLabel });
+                  }}
+                >
                   Retry
                 </button>
               )}

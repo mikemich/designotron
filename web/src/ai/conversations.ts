@@ -7,7 +7,7 @@ import { get, set, del } from "idb-keyval";
 
 /** A chat item as stored: no screenshots, and images are only counted. */
 export type StoredItem =
-  | { id: number; kind: "user" | "assistant" | "error" | "system"; text: string; imageCount?: number; title?: string; retry?: string }
+  | { id: number; kind: "user" | "assistant" | "error" | "system"; text: string; imageCount?: number; title?: string }
   | { id: number; kind: "tool"; name: string; ok: boolean; detail?: string };
 
 export interface ChatRecord {
@@ -21,7 +21,7 @@ export interface ChatRecord {
 
 /** The slice of a chat item these helpers read (the full type lives in chatState). */
 export type AnyItem =
-  | { id: number; kind: "user" | "assistant" | "error" | "system"; text: string; images?: string[]; title?: string; retry?: string }
+  | { id: number; kind: "user" | "assistant" | "error" | "system"; text: string; images?: string[]; title?: string; retry?: string; retryLabel?: string }
   | { id: number; kind: "tool"; name: string; ok: boolean | null; detail?: string }
   | { id: number; kind: "shot"; url: string; label: string };
 
@@ -40,7 +40,8 @@ export function serialize(items: readonly AnyItem[], sessionId: string | null, d
       kept.push({ id: it.id, kind: "tool", name: it.name, ok: it.ok === true, ...(it.ok === null ? { detail: "Interrupted" } : it.detail ? { detail: it.detail } : {}) });
       continue;
     }
-    const { images, ...rest } = it;
+    // (A Retry button is for the session it appeared in, not for a later visit.)
+    const { images, retry: _retry, retryLabel: _label, ...rest } = it;
     kept.push({ ...rest, ...(images?.length ? { imageCount: images.length } : {}) });
   }
   let out = kept.slice(-MAX_ITEMS);
@@ -79,7 +80,6 @@ export function restore(record: unknown): { items: AnyItem[]; sessionId: string 
         kind: raw.kind,
         text,
         ...(typeof raw.title === "string" ? { title: raw.title } : {}),
-        ...(typeof raw.retry === "string" ? { retry: raw.retry } : {}),
       });
     }
   }

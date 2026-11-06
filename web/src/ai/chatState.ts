@@ -8,7 +8,7 @@ import { create } from "zustand";
 import { getDoc, onDocChange, toast, useStore, zoomToFit } from "../store";
 import { useCollab } from "../collab";
 import { bridge, type Attachment } from "./bridgeClient";
-import { runApiAgent, resetApiConversation, abortApiAgent } from "./apiAgent";
+import { runApiAgent, resetApiConversation, abortApiAgent, hasApiConversation } from "./apiAgent";
 import { contextLine, setToolFile } from "./tools";
 import { loadConversation, saveConversation, serialize } from "./conversations";
 
@@ -19,8 +19,9 @@ export type ChatItem =
       text: string;
       images?: string[];
       title?: string;
-      /** An error that a Retry button can send again (the prompt, as typed). */
+      /** An error that a Retry button can send again (the prompt, as typed) and the short label it showed. */
       retry?: string;
+      retryLabel?: string;
     }
   | { id: number; kind: "tool"; name: string; ok: boolean | null; detail?: string }
   /** A screenshot Claude took to check its work, shown so you see what it saw. */
@@ -237,6 +238,8 @@ export function setModel(model: string) {
 let enterToken = 0;
 /** The file whose saved conversation has been read (saving earlier would overwrite it). */
 let loadedFor: string | null = null;
+/** Something changed after the saved conversation was read: only then is anything written. */
+let dirty = false;
 /** Resolves once the entered file's saved conversation is in place. */
 let entering: Promise<void> = Promise.resolve();
 /** Files whose conversation came from storage: API mode doesn't have its messages any more. */
@@ -245,41 +248,96 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
 const joinText = (...parts: (string | null | undefined)[]) => parts.filter((p) => p && p.trim()).join("\n\n");
 
+/** A view-only tab (or a viewer) never writes the conversation: the editing tab owns it. */
+const readOnlyNow = () => !!useStore.getState().es.readOnly || useCollab.getState().viewer;
+
 function saveNow() {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = null;
   const s = useChat.getState();
-  if (s.chatFile && loadedFor === s.chatFile) void saveConversation(s.chatFile, serialize(s.items, s.sessionId, s.draft));
+  if (!dirty || !s.chatFile || loadedFor !== s.chatFile || readOnlyNow()) return;
+  dirty = false;
+  void saveConversation(s.chatFile, serialize(s.items, s.sessionId, s.draft));
 }
 
 // A conversation is kept shortly after it changes (and at once when its file closes).
 useChat.subscribe((s, prev) => {
-  if (!s.chatFile || s.chatFile !== prev.chatFile) return;
+  if (!s.chatFile || s.chatFile !== prev.chatFile || loadedFor !== s.chatFile) return;
   if (s.items === prev.items && s.sessionId === prev.sessionId && s.draft === prev.draft) return;
+  dirty = true;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(saveNow, 500);
 });
 if (typeof window !== "undefined") window.addEventListener("pagehide", saveNow);
 
+// A file deleted (here or in another tab) loses its conversation: don't write it back.
+try {
+  const ch = new BroadcastChannel("dt-files");
+  ch.onmessage = (ev) => {
+    if (ev.data?.deleted && ev.data.fileId === useChat.getState().chatFile) {
+      loadedFor = null;
+      dirty = false;
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = null;
+    }
+  };
+} catch {
+  /* no BroadcastChannel */
+}
+
+/** The unsent text in the composer (the panel registers it), so leaving a file can keep it. */
+let composer: (() => string) | null = null;
+export function registerComposer(read: (() => string) | null) {
+  composer = read;
+}
+
+/** Reads this file's saved conversation into the chat. `merge`: what is in the chat already
+ *  (a turn started before the read finished) stays after the stored items; otherwise the stored
+ *  conversation replaces it. */
+function load(id: string, token: number, merge: boolean): Promise<void> {
+  loadedFor = null;
+  return loadConversation(id).then((rec) => {
+    if (token !== enterToken) return;
+    const now = useChat.getState();
+    if (rec && (merge || !now.running)) {
+      // Ids stay unique across files, so a late patch from an old run can't hit another item.
+      const base = nextId - 1;
+      nextId += rec.nextId - 1;
+      const stored = rec.items.map((i) => ({ ...i, id: i.id + base }) as ChatItem);
+      useChat.setState({
+        items: merge ? [...stored, ...now.items] : stored,
+        sessionId: merge ? (now.sessionId ?? rec.sessionId) : rec.sessionId,
+        draft: merge ? joinText(rec.draft, now.draft) : rec.draft,
+      });
+      if (rec.items.length && !hasApiConversation(id)) apiLost.add(id);
+    }
+    loadedFor = id;
+    // Whatever was added while reading is saved after the stored part.
+    dirty = merge && (now.items.length > 0 || !!now.draft);
+    if (dirty) saveTimer = setTimeout(saveNow, 500);
+  });
+}
+
 /** The editor opened `id`: its conversation (transcript and Claude Code session) comes back from
  *  storage, or starts empty. Resolves once that is in place. */
 export function enterFile(id: string): Promise<void> {
   const token = ++enterToken;
-  loadedFor = null;
+  dirty = false;
+  hookRights();
   setToolFile(id);
   useChat.setState({ chatFile: id, items: [], sessionId: null, pending: [], queued: null, running: false, draft: "" });
-  entering = loadConversation(id).then((rec) => {
-    if (token !== enterToken) return;
-    loadedFor = id;
-    // Something already happened in the new file (a turn started before this came back).
-    if (!rec || useChat.getState().items.length) return;
-    // Ids stay unique across files, so a late patch from an old run can't hit another item.
-    const base = nextId - 1;
-    nextId += rec.nextId - 1;
-    useChat.setState({ items: rec.items.map((i) => ({ ...i, id: i.id + base }) as ChatItem), sessionId: rec.sessionId, draft: rec.draft });
-    if (rec.items.length) apiLost.add(id);
-  });
+  // This tab is the one the person works in now: plain MCP calls and the headless file follow it.
+  bridge.focusEditor();
+  entering = load(id, token, true);
   return entering;
+}
+
+/** Reads the open file's conversation again (this tab just became the editing tab: the other one
+ *  may have added to it). Not while a turn runs here. */
+export function reloadConversation() {
+  const s = useChat.getState();
+  if (!s.chatFile || s.running || loadedFor !== s.chatFile) return;
+  entering = load(s.chatFile, ++enterToken, false);
 }
 
 /** Ends the running turn without a note and makes the client forget it (its late events and
@@ -307,10 +365,37 @@ export function leaveFile() {
     push({ kind: "system", text: "Stopped: you left this file." });
   }
   const st = useChat.getState();
-  useChat.setState({ draft: joinText(st.draft, st.queued), queued: null });
+  // Unsent text (a queued message, what was typed in the box) waits in the file's draft.
+  const typed = composer?.() ?? "";
+  if (joinText(st.draft, st.queued, typed) !== st.draft) dirty = dirty || loadedFor === file;
+  useChat.setState({ draft: joinText(st.draft, st.queued, typed), queued: null });
   saveNow();
   loadedFor = null;
+  dirty = false;
   useChat.setState({ chatFile: null, items: [], sessionId: null, pending: [], queued: null, running: false, draft: "" });
+}
+
+// Losing the right to edit (another tab took the file over) ends a running turn like leaving does;
+// getting it back reads the conversation the other tab kept.
+let wasReadOnly = false;
+const rightsChanged = () => {
+  const ro = readOnlyNow();
+  if (ro === wasReadOnly) return;
+  wasReadOnly = ro;
+  if (ro) {
+    if (useChat.getState().chatFile && useChat.getState().running) {
+      dropTurn();
+      push({ kind: "system", text: "Stopped: you can no longer edit this file here." });
+    }
+  } else reloadConversation();
+};
+let rightsHooked = false;
+/** (Not at load: `collab` imports this module's neighbours, so its store doesn't exist yet.) */
+function hookRights() {
+  if (rightsHooked) return;
+  rightsHooked = true;
+  useStore.subscribe(rightsChanged);
+  useCollab.subscribe(rightsChanged);
 }
 
 /** Starts a fresh conversation in this file: the running turn (if any) stops, the saved record
@@ -387,7 +472,7 @@ export async function send(prompt: string, opts: { label?: string } = {}) {
       return;
     }
     useChat.setState({ running: true });
-    lastTurn = { prompt, images: attachments.length };
+    lastTurn = { prompt, images: attachments.length, label };
     lastBridgeTurn = { full, attachments, session: st.sessionId };
     bridge.chat(full, st.sessionId, attachments);
     return;
@@ -398,7 +483,7 @@ export async function send(prompt: string, opts: { label?: string } = {}) {
   }
   const token = ++turnToken;
   const file = st.chatFile;
-  lastTurn = { prompt, images: attachments.length };
+  lastTurn = { prompt, images: attachments.length, label };
   useChat.setState({ running: true });
   // After a reload the transcript is back but the API messages are not.
   if (file && apiLost.delete(file)) {
@@ -418,7 +503,7 @@ export async function send(prompt: string, opts: { label?: string } = {}) {
     // The person has moved to another file or conversation since: this run's errors aren't theirs.
     const here = useChat.getState().chatFile === file;
     // Stopping aborts the request on purpose; it isn't an error to report.
-    if (stoppedToken !== token && here) push({ kind: "error", text: apiErrorText(err), ...(retryable(err) ? { retry: prompt } : {}) });
+    if (stoppedToken !== token && here) push({ kind: "error", text: apiErrorText(err), ...(retryable(err) ? { retry: prompt, retryLabel: label } : {}) });
     // A rejected key: keep the prompt so it sends once a valid key is entered.
     if ((err as { status?: number })?.status === 401 && here) useChat.setState({ queued: prompt });
   } finally {
@@ -427,7 +512,7 @@ export async function send(prompt: string, opts: { label?: string } = {}) {
 }
 
 /** What the last turn was, for the Retry button of an interrupted one. */
-let lastTurn: { prompt: string; images: number } | null = null;
+let lastTurn: { prompt: string; images: number; label?: string } | null = null;
 
 /** Errors that go away by themselves: a busy API, a rate limit, a dropped connection. */
 function retryable(err: unknown): boolean {
@@ -445,7 +530,7 @@ export function connectionLost() {
   push({
     kind: "error",
     text: `Lost the connection to the bridge, so Claude's turn stopped. What it built so far is kept (${UNDO_KEYS} removes it).${t?.images ? " Attached images aren't sent again." : ""}`,
-    ...(t ? { retry: t.prompt } : {}),
+    ...(t ? { retry: t.prompt, retryLabel: t.label } : {}),
   });
 }
 

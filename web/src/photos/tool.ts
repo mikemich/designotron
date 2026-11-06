@@ -5,6 +5,7 @@
 import { viewportCenter } from "../actions";
 import { getDoc } from "../store";
 import type { ToolOutcome } from "../ai/tools";
+import { LEFT_FILE } from "../ai/browserTools";
 import { fetchImageBytes } from "./download";
 import { fillLayers, fillable, placeNewLayer, type Fit } from "./place";
 import { PhotoError, PROVIDERS, parsePhotoId, photoDetails, photoIdFromUrl, searchPhotos, type Orientation, type PhotoResult, type ProviderId } from "./providers";
@@ -15,9 +16,9 @@ const MAX_COUNT = 12;
 const TITLE_CAP = 60;
 const SHEET_WIDTH = 640;
 
-export async function run(name: string, input: any, group?: string): Promise<ToolOutcome> {
+export async function run(name: string, input: any, group?: string, stillOpen?: () => boolean): Promise<ToolOutcome> {
   if (name === "search_photos") return search(input ?? {});
-  return place(input ?? {}, group);
+  return place(input ?? {}, group, stillOpen);
 }
 
 async function search(input: any): Promise<ToolOutcome> {
@@ -51,17 +52,18 @@ async function search(input: any): Promise<ToolOutcome> {
   return sheet ? { ok: true, result: { ...result, preview: "Numbered contact sheet attached" }, image: { data: sheet, mediaType: "image/png" } } : { ok: true, result };
 }
 
-async function place(input: any, group?: string): Promise<ToolOutcome> {
+async function place(input: any, group?: string, stillOpen?: () => boolean): Promise<ToolOutcome> {
   const id = typeof input.id === "string" ? input.id : typeof input.url === "string" ? photoIdFromUrl(input.url) : null;
   if (!id || !parsePhotoId(id)) throw new Error("id: pass an id from search_photos (or an openverse.org / pexels.com photo page URL)");
   const fit = oneOf<Fit>("fit", input.fit, ["fill", "fit"]);
   const photo = await call(() => photoDetails(photoEnv(), id));
+  if (stillOpen && !stillOpen()) throw new Error(LEFT_FILE);
   let nodeId: string;
   if (typeof input.nodeId === "string") {
     const n = getDoc().nodes[input.nodeId];
     if (!n) throw new Error(`nodeId: no layer ${input.nodeId}`);
     if (!fillable(n)) throw new Error(`nodeId: ${input.nodeId} is a ${n.type} layer; a photo fills a rectangle, frame or shape. Omit nodeId to create an image layer instead`);
-    [nodeId] = await call(() => fillLayers(photo, [input.nodeId], { fit, group }));
+    [nodeId] = await call(() => fillLayers(photo, [input.nodeId], { fit, group, stillOpen }));
   } else {
     const c = viewportCenter();
     const corner = Number.isFinite(input.x) && Number.isFinite(input.y);
@@ -76,6 +78,7 @@ async function place(input: any, group?: string): Promise<ToolOutcome> {
         fit,
         name: typeof input.name === "string" ? input.name : undefined,
         group,
+        stillOpen,
       }),
     );
   }

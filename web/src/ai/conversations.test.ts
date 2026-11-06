@@ -25,6 +25,12 @@ describe("serialize", () => {
     expect(rec.items[0]).toEqual({ id: 1, kind: "tool", name: "create_nodes", ok: false, detail: "Interrupted" });
   });
 
+  it("doesn't keep a Retry (it belongs to the visit it appeared in)", () => {
+    const rec = serialize([{ id: 1, kind: "error", text: "Lost it", retry: "again", retryLabel: "Short" }], null);
+    expect(JSON.stringify(rec)).not.toContain("again");
+    expect(restore(rec)!.items[0]).not.toHaveProperty("retry");
+  });
+
   it("keeps the last 200 items", () => {
     const items = Array.from({ length: MAX_ITEMS + 50 }, (_, i) => user(i + 1, `m${i}`));
     const rec = serialize(items, null);

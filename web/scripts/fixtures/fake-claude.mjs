@@ -24,12 +24,14 @@ if (argv.includes("--version")) {
 }
 
 // Like the CLI, resuming a session it doesn't have fails at once with this message on stderr.
-if (argv.includes("--resume") && argv[argv.indexOf("--resume") + 1] === "missing-session") {
+if (argv.includes("--resume=missing-session") || (argv.includes("--resume") && argv[argv.indexOf("--resume") + 1] === "missing-session")) {
   console.error("No conversation found with session ID: missing-session");
   process.exit(1);
 }
 
-const prompt = argv[argv.indexOf("-p") + 1] ?? "";
+// The bridge passes the prompt after `--` (older callers: right after -p).
+const dashes = argv.indexOf("--");
+const prompt = (dashes >= 0 ? argv[dashes + 1] : argv[argv.indexOf("-p") + 1]) ?? "";
 const opt = (name, fallback) => prompt.match(new RegExp(`\\[${name}=([^\\]]*)\\]`))?.[1] ?? fallback;
 const tag = opt("tag", "L");
 const calls = Number(opt("calls", 3));

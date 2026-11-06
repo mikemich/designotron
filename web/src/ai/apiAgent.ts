@@ -9,12 +9,21 @@ import type { Attachment } from "./bridgeClient";
 type Messages = Anthropic.Beta.BetaMessageParam[];
 /** The messages of each file's conversation (in memory: a reload starts them fresh). */
 const conversations = new Map<string, Messages>();
+/** Files whose messages are kept in memory (the most recently used). */
+const MAX_CONVERSATIONS = 5;
 const conversationOf = (file: string | null): Messages => {
   const key = file ?? "";
-  let m = conversations.get(key);
-  if (!m) conversations.set(key, (m = []));
+  const m = conversations.get(key) ?? [];
+  // Most recently used last; the oldest fall out.
+  conversations.delete(key);
+  conversations.set(key, m);
+  while (conversations.size > MAX_CONVERSATIONS) conversations.delete(conversations.keys().next().value as string);
   return m;
 };
+/** Whether API mode still has this file's messages (it doesn't after a reload). */
+export function hasApiConversation(file: string): boolean {
+  return (conversations.get(file)?.length ?? 0) > 0;
+}
 /** The messages of the run that is running now (what `abortApiAgent` answers for). */
 let messages: Messages = [];
 let controller: AbortController | null = null;
