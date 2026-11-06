@@ -196,8 +196,16 @@ pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(
     if before.is_none_or(|o| o.values != v.values) {
       changed.push(&v.id);
     }
-    if before.is_none_or(|o| o.values != v.values || o.kind != v.kind) {
+    // Only values this change introduced are type-checked. A value that equals one the variable
+    // already held (a copy made by Add mode, a mode fill in a paste) or that is unchanged is old
+    // data, which files from before the check may hold in any form; it must not block edits.
+    let retype = before.is_some_and(|o| o.kind != v.kind);
+    if before.is_none_or(|o| o.values != v.values || retype) {
       for (mode, val) in &v.values {
+        let is_new = retype || before.is_none_or(|o| o.values.get(mode) != Some(val) && !o.values.values().any(|x| x == val));
+        if !is_new {
+          continue;
+        }
         let shown = collections
           .iter()
           .flat_map(|c| &c.modes)

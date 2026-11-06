@@ -24,9 +24,6 @@ function save(collections: VariableCollection[]) {
   dispatch({ op: "setVariables", collections });
 }
 
-/** A colour the engine accepts: hex (#RGB to #RRGGBBAA) or rgb()/rgba(). */
-export const isColorText = (x: string) => /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(x) || /^rgba?\(.+\)$/i.test(x);
-
 /** Text input that commits on blur or Enter (one undo step per edit). A refused edit goes back to the stored text. */
 function Commit({ value, onCommit, className, type = "text" }: { value: string; onCommit: (v: string) => void; className?: string; type?: string }) {
   const [v, setV] = useState(value);
@@ -126,18 +123,8 @@ function ValueCell({
             <i style={{ background: cssColor(c) }} />
             <input type="color" value={c.slice(0, 7)} onChange={(e) => onChange(e.target.value.toUpperCase())} style={{ position: "absolute", opacity: 0, width: 0, height: 0 }} />
           </label>
-          <Commit
-            value={c}
-            onCommit={(x) => {
-              const t = x.trim();
-              if (!isColorText(t)) {
-                toast(`"${t}" isn't a colour. Use hex like #7C5CFF, or rgb(...).`, "error");
-                return;
-              }
-              onChange(t);
-            }}
-            className="textinput mono"
-          />
+          {/* The engine checks the colour with its own parser (hex, rgb(), names) and the refusal is toasted. */}
+          <Commit value={c} onCommit={(x) => onChange(x.trim())} className="textinput mono" />
         </div>
       );
       break;

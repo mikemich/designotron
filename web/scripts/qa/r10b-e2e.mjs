@@ -186,7 +186,7 @@ try {
   await hex.fill("banana");
   await hex.press("Enter");
   await a.waitForTimeout(300);
-  check("banana is refused with a toast", /isn't a colour/.test(await toastText(a)), await toastText(a));
+  check("banana is refused with a toast", /unrecognised colour 'banana'/.test(await toastText(a)), await toastText(a));
   await a.waitForTimeout(200);
   check("the cell goes back to the stored colour", (await hex.inputValue()) === "#101828", await hex.inputValue());
   da = await doc(a);

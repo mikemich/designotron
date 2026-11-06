@@ -57,7 +57,17 @@ export const group = () => selection().length && dispatch({ op: "group", ids: se
 export const ungroup = () => dispatch({ op: "ungroup", ids: selection() });
 export const frameSelection = () => selection().length && dispatch({ op: "frameSelection", ids: selection() });
 export const addAutoLayout = () => selection().length && dispatch({ op: "addAutoLayout", ids: selection() });
-export const createComponent = () => selection().length && dispatch({ op: "createComponent", ids: selection() });
+export const createComponent = () => {
+  const ids = selection();
+  if (!ids.length) return;
+  const type = getDoc().nodes[ids[0]]?.type;
+  if (ids.length === 1 && (type === "component" || type === "componentSet")) {
+    toast("Already a main component");
+    return;
+  }
+  // The engine's refusal (a main component inside the selection, nothing to wrap) is toasted by dispatch.
+  dispatch({ op: "createComponent", ids });
+};
 export const createComponents = () => selection().length > 1 && dispatch({ op: "createComponents", ids: selection() });
 export const combineVariants = () => dispatch({ op: "combineVariants", ids: selection() });
 export const detachInstance = () => dispatch({ op: "detachInstance", ids: selection() });

@@ -88,6 +88,17 @@ fn strip_position(n: &Node, is_root: bool) -> Node {
   c
 }
 
+/// The name of a main component (or set) inside the subtree of one of `ids`, other than `ids`
+/// themselves: wrapping such a selection would nest main components.
+pub fn main_inside(doc: &Document, ids: &[NodeId]) -> Option<String> {
+  ids
+    .iter()
+    .flat_map(|i| doc.subtree(i).into_iter().filter(move |n| n != i))
+    .filter_map(|n| doc.get(&n))
+    .find(|n| matches!(n.kind, NodeType::Component | NodeType::ComponentSet))
+    .map(|n| n.name.clone())
+}
+
 /// Turns the given nodes into a main component. Returns the component id.
 pub fn create_component(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) -> Option<NodeId> {
   let single = if ids.len() == 1 { doc.get(&ids[0]).cloned() } else { None };

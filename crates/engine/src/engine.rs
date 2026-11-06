@@ -2561,6 +2561,16 @@ impl Engine {
         Ok(json!({}))
       }
       Command::CreateComponent { ids } => {
+        let already = ids.len() == 1
+          && self
+            .doc
+            .get(&ids[0])
+            .is_some_and(|n| matches!(n.kind, NodeType::Component | NodeType::ComponentSet));
+        if let (false, Some(inner)) = (already, components::main_inside(&self.doc, &ids)) {
+          return Err(format!(
+            "'{inner}' is a main component inside the selection; a component can't contain another main component"
+          ));
+        }
         let id = components::create_component(&mut self.doc, &ids, &mut self.gen).ok_or("select a frame, group or layers")?;
         self.selection = vec![id.clone()];
         Ok(json!({ "id": id }))
@@ -2574,6 +2584,9 @@ impl Engine {
             .get(id)
             .is_none_or(|n| matches!(n.kind, NodeType::Component | NodeType::ComponentSet))
           {
+            continue;
+          }
+          if components::main_inside(&self.doc, std::slice::from_ref(id)).is_some() {
             continue;
           }
           if let Some(c) = components::create_component(&mut self.doc, std::slice::from_ref(id), &mut self.gen) {

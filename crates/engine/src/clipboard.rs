@@ -233,10 +233,14 @@ impl Visit for Remap {
 }
 
 /// Decides whether every token the layers reference is already in the destination: the same id
-/// with the same name (ids alone can collide between unrelated files).
+/// with the same name (ids alone can collide between unrelated files). Inside a collection that
+/// has the same id and name as the clipboard's (same origin), modes and variables match by id
+/// alone, so renaming one doesn't make the paste add it again.
 struct Present<'a> {
-  doc: &'a Document,
-  clip_vars: HashMap<&'a str, &'a Variable>,
+  dest_vars: HashMap<&'a str, (&'a Collection, &'a Variable)>,
+  dest_colls: HashMap<&'a str, &'a Collection>,
+  dest_styles: HashMap<(Kind, &'a str), &'a str>,
+  clip_vars: HashMap<&'a str, (&'a str, &'a Variable)>,
   clip_colls: HashMap<&'a str, &'a Collection>,
   clip_styles: HashMap<&'a str, &'a str>,
   all_present: bool,
@@ -244,36 +248,28 @@ struct Present<'a> {
 
 impl Visit for Present<'_> {
   fn var(&mut self, id: &mut String) {
-    let dest = self.doc.variables.iter().flat_map(|c| c.variables.iter()).find(|v| v.id == *id);
-    let ok = match (dest, self.clip_vars.get(id.as_str())) {
+    let ok = match (self.dest_vars.get(id.as_str()), self.clip_vars.get(id.as_str())) {
       (None, _) => false,
-      (Some(d), Some(c)) => d.name == c.name && d.kind == c.kind,
+      (Some((dc, d)), Some((clip_coll, c))) => d.kind == c.kind && (d.name == c.name || dc.name == *clip_coll),
       (Some(_), None) => true,
     };
     self.all_present &= ok;
   }
   fn pin(&mut self, coll: &mut String, mode: &mut String) {
-    let dest = self.doc.variables.iter().find(|c| c.id == *coll);
-    let ok = match dest {
+    let ok = match self.dest_colls.get(coll.as_str()) {
       None => false,
       Some(d) => {
         let clip = self.clip_colls.get(coll.as_str());
         let named = clip.is_none_or(|c| c.name == d.name);
-        let dm = d.modes.iter().find(|m| m.id == *mode);
-        let cm = clip.and_then(|c| c.modes.iter().find(|m| m.id == *mode));
-        named && dm.is_some() && cm.is_none_or(|c| dm.is_some_and(|d| d.name == c.name))
+        named && d.modes.iter().any(|m| m.id == *mode)
       }
     };
     self.all_present &= ok;
   }
   fn style(&mut self, kind: Kind, id: &mut String) {
-    let name = style_names(&self.doc.styles, kind)
-      .into_iter()
-      .find(|(i, _)| i == id)
-      .map(|(_, n)| n);
-    let ok = match (name, self.clip_styles.get(id.as_str())) {
+    let ok = match (self.dest_styles.get(&(kind, id.as_str())), self.clip_styles.get(id.as_str())) {
       (None, _) => false,
-      (Some(d), Some(c)) => d == *c,
+      (Some(d), Some(c)) => d == c,
       (Some(_), None) => true,
     };
     self.all_present &= ok;
@@ -335,12 +331,22 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
     return Ok(Added::default());
   }
   {
+    let mut dest_styles: HashMap<(Kind, &str), &str> = HashMap::new();
+    dest_styles.extend(doc.styles.colors.iter().map(|x| ((Kind::Color, x.id.as_str()), x.name.as_str())));
+    dest_styles.extend(doc.styles.texts.iter().map(|x| ((Kind::Text, x.id.as_str()), x.name.as_str())));
+    dest_styles.extend(doc.styles.effects.iter().map(|x| ((Kind::Effect, x.id.as_str()), x.name.as_str())));
+    dest_styles.extend(doc.styles.grids.iter().map(|x| ((Kind::Grid, x.id.as_str()), x.name.as_str())));
     let mut present = Present {
-      doc,
+      dest_vars: doc
+        .variables
+        .iter()
+        .flat_map(|c| c.variables.iter().map(move |v| (v.id.as_str(), (c, v))))
+        .collect(),
+      dest_colls: doc.variables.iter().map(|c| (c.id.as_str(), c)).collect(),
+      dest_styles,
       clip_vars: clip_colls
         .iter()
-        .flat_map(|c| c.variables.iter())
-        .map(|v| (v.id.as_str(), v))
+        .flat_map(|c| c.variables.iter().map(move |v| (v.id.as_str(), (c.name.as_str(), v))))
         .collect(),
       clip_colls: clip_colls.iter().map(|c| (c.id.as_str(), c)).collect(),
       clip_styles: [
@@ -385,16 +391,20 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
     .collect();
   // Destination collection (index into `doc.variables`) per clipboard collection, made on first need.
   let mut dest_of: Vec<Option<usize>> = vec![None; clip_colls.len()];
+  let pre_vars: HashSet<String> = doc
+    .variables
+    .iter()
+    .flat_map(|c| c.variables.iter().map(|v| v.id.clone()))
+    .collect();
   let mut ensure_coll = |ci: usize, doc: &mut Document, map: &mut Remap, added: &mut Added, gen: &mut IdGen| -> usize {
     if let Some(di) = dest_of[ci] {
       return di;
     }
     let cc = &clip_colls[ci];
-    let found = doc
-      .variables
-      .iter()
-      .position(|d| d.id == cc.id && d.name == cc.name)
-      .or_else(|| doc.variables.iter().position(|d| d.name == cc.name));
+    // The same id and name: this file is where the layers came from (or a copy of it), so modes
+    // match by id even when they were renamed since.
+    let origin = doc.variables.iter().position(|d| d.id == cc.id && d.name == cc.name);
+    let found = origin.or_else(|| doc.variables.iter().position(|d| d.name == cc.name));
     let di = match found {
       Some(i) => i,
       None => {
@@ -416,7 +426,7 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
       let hit = d
         .modes
         .iter()
-        .find(|m| m.id == cm.id && m.name == cm.name)
+        .find(|m| m.id == cm.id && (origin.is_some() || m.name == cm.name))
         .or_else(|| d.modes.iter().find(|m| m.name == cm.name))
         .map(|m| m.id.clone());
       let dest_mode = match hit {
@@ -467,11 +477,19 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
     let di = ensure_coll(ci, doc, &mut map, &mut added, gen);
     let cv = &clip_colls[ci].variables[vi];
     let coll = &doc.variables[di];
+    let same_origin = coll.id == clip_colls[ci].id && coll.name == clip_colls[ci].name;
+    // Names match only variables that were here before the paste: two same-named variables in
+    // the source stay two.
     let hit = coll
       .variables
       .iter()
-      .find(|v| v.id == cv.id && v.name == cv.name && v.kind == cv.kind)
-      .or_else(|| coll.variables.iter().find(|v| v.name == cv.name && v.kind == cv.kind))
+      .find(|v| v.id == cv.id && v.kind == cv.kind && (same_origin || v.name == cv.name))
+      .or_else(|| {
+        coll
+          .variables
+          .iter()
+          .find(|v| v.name == cv.name && v.kind == cv.kind && pre_vars.contains(&v.id))
+      })
       .map(|v| v.id.clone());
     let id = match hit {
       Some(id) => id,
@@ -521,7 +539,19 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
         .or_else(|| cv.values.values().next())
         .cloned()
         .unwrap_or_else(|| default_value(cv.kind));
-      values.insert(dm, remap_alias(raw, &map));
+      // Source data may be invalid (files from before the type check): a paste never fails on it.
+      let fallback = first.as_ref().and_then(|f| cv.values.get(f));
+      let value = if raw.get("alias").is_some() {
+        remap_alias(raw, &map)
+      } else {
+        crate::variables::check_value(cv.kind, &raw)
+          .ok()
+          .filter(|v| cv.kind != VarKind::Number || v.is_number())
+          .or_else(|| fallback.and_then(|f| crate::variables::check_value(cv.kind, f).ok()))
+          .filter(|v| v.get("alias").is_none())
+          .unwrap_or_else(|| default_value(cv.kind))
+      };
+      values.insert(dm, value);
     }
     doc.variables[di].variables[pos].values = values;
   }
@@ -973,5 +1003,177 @@ mod tests {
       .iter()
       .any(|id| b.doc.get(id).unwrap().bindings.get("fill") == Some(&surface)));
     assert_eq!(r["created"].as_array().unwrap().len(), 1);
+  }
+}
+
+#[cfg(test)]
+mod tests_r10_review {
+  use super::*;
+  use crate::engine::{Command, Engine};
+  use crate::text::HeuristicMeasurer;
+
+  fn engine(seed: u64) -> Engine {
+    Engine::new(Box::new(HeuristicMeasurer), seed)
+  }
+
+  fn run(e: &mut Engine, tool: &str, input: Value) -> Value {
+    e.dispatch(Command::Ai { tool: tool.into(), input })
+      .unwrap_or_else(|er| panic!("{tool}: {er}"))
+  }
+
+  fn old_file(vars: Vec<Variable>) -> Engine {
+    let mut e = engine(7);
+    e.doc.variables = vec![Collection {
+      id: "vc_old".into(),
+      name: "Old".into(),
+      modes: vec![VarMode {
+        id: "vm_a".into(),
+        name: "A".into(),
+      }],
+      variables: vars,
+    }];
+    e
+  }
+
+  fn var(id: &str, name: &str, kind: VarKind, v: Value) -> Variable {
+    Variable {
+      id: id.into(),
+      name: name.into(),
+      kind,
+      values: [("vm_a".to_string(), v)].into_iter().collect(),
+      ..Default::default()
+    }
+  }
+
+  fn rect_bound_to(e: &mut Engine, var_id: &str) -> String {
+    let r = run(
+      e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle", "width": 10, "height": 10 }] }),
+    );
+    let id = r["created"][0]["id"].as_str().unwrap().to_string();
+    e.doc.get_mut(&id).unwrap().bindings.insert("fill".into(), var_id.into());
+    id
+  }
+
+  #[test]
+  fn add_mode_on_a_collection_with_an_old_invalid_value_works() {
+    let mut e = old_file(vec![
+      var("v_bad", "Bad", VarKind::Color, json!("banana")),
+      var("v_n", "N", VarKind::Number, json!("12")),
+    ]);
+    let mut cs = e.doc.variables.clone();
+    cs[0].modes.push(VarMode {
+      id: "vm_b".into(),
+      name: "B".into(),
+    });
+    for v in &mut cs[0].variables {
+      let first = v.values["vm_a"].clone();
+      v.values.insert("vm_b".into(), first);
+    }
+    e.dispatch(Command::SetVariables { collections: cs.clone() }).unwrap();
+    // Deleting the mode again drops values only.
+    cs[0].modes.pop();
+    e.dispatch(Command::SetVariables { collections: cs }).unwrap();
+    // A new bad value is still refused.
+    let mut cs = e.doc.variables.clone();
+    cs[0].variables[0].values.insert("vm_a".into(), json!("kiwi"));
+    assert!(e.dispatch(Command::SetVariables { collections: cs }).is_err());
+  }
+
+  #[test]
+  fn a_paste_never_fails_on_invalid_source_values() {
+    let mut a = old_file(vec![var("v_bad", "Bad", VarKind::Color, json!("banana"))]);
+    let rect = rect_bound_to(&mut a, "v_bad");
+    let mut b = engine(8);
+    let r = b
+      .dispatch(Command::Paste {
+        data: a.copy(&[rect]),
+        parent: None,
+        x: None,
+        y: None,
+      })
+      .unwrap();
+    assert_eq!(r["created"].as_array().unwrap().len(), 1);
+    let v = &b.doc.variables[0].variables[0];
+    assert_eq!(v.values.values().next(), Some(&json!("#000000")));
+  }
+
+  #[test]
+  fn a_paste_adding_a_mode_to_a_file_with_old_values_works() {
+    let mut a = engine(7);
+    run(
+      &mut a,
+      "define_variables",
+      json!({ "collection": "Old", "modes": ["A", "B"], "variables": [{ "name": "N", "type": "number", "value": 3 }] }),
+    );
+    let vid = a.doc.variables[0].variables[0].id.clone();
+    let rect = rect_bound_to(&mut a, &vid);
+    let mut b = old_file(vec![var("v_n", "N", VarKind::Number, json!("12"))]);
+    let r = b
+      .dispatch(Command::Paste {
+        data: a.copy(&[rect]),
+        parent: None,
+        x: None,
+        y: None,
+      })
+      .unwrap();
+    assert_eq!(r["added"]["modes"], 1);
+    assert_eq!(b.doc.variables[0].modes.len(), 2);
+  }
+
+  #[test]
+  fn renaming_a_mode_or_variable_does_not_make_a_same_file_paste_add_it_again() {
+    let mut a = engine(7);
+    run(
+      &mut a,
+      "define_variables",
+      json!({ "collection": "Theme", "modes": ["Light", "Dark"], "variables": [{ "name": "S", "type": "color", "values": { "Light": "#FFFFFF", "Dark": "#000000" } }] }),
+    );
+    let r = run(
+      &mut a,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": 20, "height": 20, "bind": { "fill": "S" }, "variableModes": { "Theme": "Dark" } }] }),
+    );
+    let frame = r["created"][0]["id"].as_str().unwrap().to_string();
+    let data = a.copy(std::slice::from_ref(&frame));
+    let mut cs = a.doc.variables.clone();
+    cs[0].modes[1].name = "Night".into();
+    cs[0].variables[0].name = "Surface".into();
+    a.dispatch(Command::SetVariables { collections: cs }).unwrap();
+    let r = a
+      .dispatch(Command::Paste {
+        data,
+        parent: None,
+        x: None,
+        y: None,
+      })
+      .unwrap();
+    assert_eq!(r["added"], Added::default().to_json());
+    assert_eq!(a.doc.variables[0].modes.len(), 2);
+    assert_eq!(a.doc.variables[0].variables.len(), 1);
+    let pasted = a.doc.get(r["created"][0].as_str().unwrap()).unwrap();
+    assert_eq!(pasted.variable_modes.values().next(), Some(&a.doc.variables[0].modes[1].id));
+  }
+
+  #[test]
+  fn same_named_variables_in_the_source_stay_two() {
+    let mut a = old_file(vec![
+      var("v_1", "Dup", VarKind::Number, json!(1)),
+      var("v_2", "Dup", VarKind::Number, json!(2)),
+    ]);
+    let r1 = rect_bound_to(&mut a, "v_1");
+    let r2 = rect_bound_to(&mut a, "v_2");
+    let mut b = engine(8);
+    b.dispatch(Command::Paste {
+      data: a.copy(&[r1, r2]),
+      parent: None,
+      x: None,
+      y: None,
+    })
+    .unwrap();
+    let names: Vec<&str> = b.doc.variables[0].variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names.len(), 2);
+    assert_ne!(names[0], names[1]);
   }
 }

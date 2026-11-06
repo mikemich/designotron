@@ -2133,4 +2133,37 @@ mod r10_p2 {
     let r = e.dispatch(Command::CreateComponents { ids: vec![comp.clone()] });
     assert!(r.is_err());
   }
+
+  #[test]
+  fn unpinning_a_dangling_collection_does_not_fail_the_update() {
+    let mut e = engine();
+    let id = pinned_frame(&mut e);
+    e.doc
+      .get_mut(&id)
+      .unwrap()
+      .variable_modes
+      .insert("vc_gone".into(), "vm_gone".into());
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "name": "Renamed", "variableModes": { "vc_gone": null } }] }),
+    );
+    let n = e.doc.get(&id).unwrap();
+    assert_eq!(n.name, "Renamed");
+    assert!(!n.variable_modes.contains_key("vc_gone"));
+  }
+
+  #[test]
+  fn a_selection_holding_a_main_component_cannot_become_a_component() {
+    let mut e = engine();
+    let frame = one(
+      &mut e,
+      json!({ "type": "frame", "width": 100, "height": 100, "children": [{ "type": "rectangle", "name": "Inner", "width": 10, "height": 10 }] }),
+    );
+    let inner = e.doc.get(&frame).unwrap().children[0].clone();
+    run(&mut e, "arrange", json!({ "action": "create_component", "ids": [inner] }));
+    let err = e.dispatch(Command::CreateComponent { ids: vec![frame.clone()] }).unwrap_err();
+    assert!(err.contains("main component inside the selection"), "{err}");
+    assert_ne!(e.doc.get(&frame).unwrap().kind, crate::model::NodeType::Component);
+  }
 }

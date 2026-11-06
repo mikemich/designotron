@@ -967,19 +967,33 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
     }
     // A merge patch can't delete map entries: unbound properties and unpinned collections go
     // through their own commands.
+    // Stale keys (a property this build doesn't know, a collection that is gone) are dropped
+    // directly instead of failing the whole update.
     for prop in before.bindings.keys().filter(|p| !after.bindings.contains_key(*p)) {
-      e.dispatch_inner(Command::BindVariable {
-        ids: vec![id.to_string()],
-        property: prop.clone(),
-        variable: None,
-      })?;
+      if crate::variables::property_kind(prop).is_some() {
+        e.dispatch_inner(Command::BindVariable {
+          ids: vec![id.to_string()],
+          property: prop.clone(),
+          variable: None,
+        })?;
+      } else {
+        e.doc.modify(id, |n| {
+          n.bindings.remove(prop);
+        });
+      }
     }
     for coll in before.variable_modes.keys().filter(|c| !after.variable_modes.contains_key(*c)) {
-      e.dispatch_inner(Command::SetVariableMode {
-        ids: vec![id.to_string()],
-        collection: coll.clone(),
-        mode: None,
-      })?;
+      if e.doc.variables.iter().any(|c| c.id == *coll || c.name == *coll) {
+        e.dispatch_inner(Command::SetVariableMode {
+          ids: vec![id.to_string()],
+          collection: coll.clone(),
+          mode: None,
+        })?;
+      } else {
+        e.doc.modify(id, |n| {
+          n.variable_modes.remove(coll);
+        });
+      }
     }
     // Auto layout added or removed (or new padding given) on a device frame: its chrome joins or leaves
     // the flow and the safe area follows. This runs before a device change, which works from `applied`.
