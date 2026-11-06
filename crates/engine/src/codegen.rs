@@ -64,7 +64,7 @@ function startScreen(): string {
     /* keep the raw hash */
   }
   // A frame's own name works too: /#Marketing%20Dark.
-  if (Object.prototype.hasOwnProperty.call(screenNames, hash)) hash = screenNames[hash];
+  if (!Object.prototype.hasOwnProperty.call(screens, hash) && Object.prototype.hasOwnProperty.call(screenNames, hash)) hash = screenNames[hash];
   return Object.prototype.hasOwnProperty.call(screens, hash) ? hash : __START__;
 }
 
@@ -703,7 +703,16 @@ impl<'a> Ctx<'a> {
       // Fixed layers of a scrolling frame stay put: the scrolling content moves into a box of its
       // own and the fixed layers sit next to it.
       let fixed = |c: &Node| c.scroll_behavior == crate::model::ScrollBehavior::Fixed && (n.layout.is_none() || c.absolute_position);
-      let split = n.overflow != crate::model::Overflow::None;
+      // A frame that hugs along its scroll axis has nothing to scroll: keep its content in flow
+      // (an absolute scroller would leave it 0 tall).
+      let hugs = |s: Sizing| n.layout.is_some() && s == Sizing::Hug;
+      let hug_over = match n.overflow {
+        crate::model::Overflow::None => false,
+        crate::model::Overflow::Horizontal => hugs(n.sizing_h),
+        crate::model::Overflow::Vertical => hugs(n.sizing_v),
+        crate::model::Overflow::Both => hugs(n.sizing_h) || hugs(n.sizing_v),
+      };
+      let split = n.overflow != crate::model::Overflow::None && !hug_over;
       let mut stuck = Vec::new();
       let interactive = matches!(el.tag, "button" | "a");
       self.interactive_depth += usize::from(interactive);
@@ -739,9 +748,45 @@ impl<'a> Ctx<'a> {
         };
         inner.styles.extend(el.styles.iter().filter(|(k, _)| moves(k)).cloned());
         el.styles.retain(|(k, _)| !moves(k));
+        // The scroller follows the corners; the outer box still clips what it clipped.
+        inner.s("border-radius", "inherit");
+        if n.clip_content {
+          el.s("overflow", "hidden");
+        }
         inner.children = std::mem::take(&mut el.children);
         el.children.push(inner);
         el.children.extend(stuck);
+      }
+      // An outline is painted before the positioned children, so absolute children would cover
+      // an inside or centre stroke: it becomes the last child instead.
+      let has_absolute = n
+        .children
+        .iter()
+        .filter_map(|c| self.doc.get(c))
+        .any(|c| n.layout.is_none() || c.absolute_position);
+      let scrolls = el.styles.iter().any(|(k, v)| k.starts_with("overflow") && v == "auto");
+      if has_absolute && n.stroke_align != StrokeAlign::Outside && !scrolls && !el.children.is_empty() {
+        if let Some(ov) = el.styles.iter().find(|(k, _)| k == "outline").map(|(_, v)| v.clone()) {
+          el.styles.retain(|(k, _)| k != "outline" && k != "outline-offset");
+          if !el.styles.iter().any(|(k, _)| k == "position") {
+            el.s("position", "relative");
+          }
+          let mut stroke = El::new("div");
+          stroke.attrs.push(("aria-hidden".into(), "true".into()));
+          stroke.s("position", "absolute");
+          stroke.s(
+            "inset",
+            px(if n.stroke_align == StrokeAlign::Center {
+              -n.stroke_weight / 2.0
+            } else {
+              0.0
+            }),
+          );
+          stroke.s("border", ov);
+          stroke.s("border-radius", "inherit");
+          stroke.s("pointer-events", "none");
+          el.children.push(stroke);
+        }
       }
       self.interactive_depth -= usize::from(interactive);
     }
@@ -1165,7 +1210,20 @@ impl<'a> Ctx<'a> {
           }
         }
         "cornerRadius" => set(el, "border-radius", &len),
-        "padding" => set(el, "padding", &len),
+        "padding" => match border_widths(n).filter(|b| b.iter().any(|w| *w > 0.0)) {
+          // Per-side borders come out of the padding, as in `padding_value`.
+          Some(b) => {
+            let side = |w: f64| {
+              if w > 0.0 {
+                format!("max(0px, calc(var({name})*1px - {}px))", fmt(w))
+              } else {
+                len.clone()
+              }
+            };
+            set(el, "padding", &b.map(side).join(" "));
+          }
+          None => set(el, "padding", &len),
+        },
         "gap" => {
           let key = match n.layout.as_ref().map(|l| l.direction) {
             Some(LayoutDirection::Horizontal) => "column-gap",
@@ -1574,6 +1632,9 @@ fn is_default_name(name: &str) -> bool {
       "Image",
       "Instance",
       "Component",
+      "Icon",
+      "SVG",
+      "Text",
     ]
     .contains(&base)
       && (base.len() == name.len() || name[base.len()..].starts_with(' '))
@@ -2018,8 +2079,33 @@ fn css_paint(p: &Paint, w: f64, h: f64) -> String {
     Paint::DiamondGradient {
       stops, opacity, handles, ..
     } => radial_css(stops, *opacity, &handles.unwrap_or_else(|| paint::default_handles(false)), w, h),
-    Paint::Image { src, .. } => format!("url('{}')", src.replace('\'', "%27").replace('"', "%22")),
+    Paint::Image { src, .. } => format!("url('{}')", css_url(src)),
   }
+}
+
+/// An image source safe inside `url('…')` and a Tailwind class: text data URLs (SVG) are fully
+/// percent-encoded, because spaces turn into `_` in a class, `)` ends the value and a lone `%`
+/// is no escape at all.
+fn css_url(src: &str) -> String {
+  let text_data = src.starts_with("data:") && src.split(',').next().is_some_and(|h| !h.contains(";base64"));
+  if !text_data {
+    return src.replace('\'', "%27").replace('"', "%22");
+  }
+  let b = src.as_bytes();
+  let mut out = String::with_capacity(src.len());
+  for (i, c) in src.char_indices() {
+    let escape = match c {
+      ' ' | '(' | ')' | '\'' | '"' | '_' | '`' | '\\' | '#' | '<' | '>' => true,
+      '%' => !(b.get(i + 1).is_some_and(u8::is_ascii_hexdigit) && b.get(i + 2).is_some_and(u8::is_ascii_hexdigit)),
+      _ => false,
+    };
+    if escape {
+      out.push_str(&format!("%{:02X}", c as u32));
+    } else {
+      out.push(c);
+    }
+  }
+  out
 }
 
 fn radial_css(stops: &[crate::model::GradientStop], opacity: f64, hd: &crate::model::GradientHandles, w: f64, h: f64) -> String {
@@ -2539,7 +2625,7 @@ pub fn export_html(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
   let name = doc.get(id).map(|n| n.name.clone()).unwrap_or_default();
   let credits = credits_comment(doc, id);
   format!(
-    "<!doctype html>\n{credits}<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\" />\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0{}\" />\n  <title>{}</title>\n{}  <style>*, *::before, *::after {{ box-sizing: border-box; }} body {{ margin: 0; }}{}</style>\n</head>\n<body>\n{}</body>\n</html>\n",
+    "<!doctype html>\n{credits}<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\" />\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0{}\" />\n  <title>{}</title>\n{}  <style>*, *::before, *::after {{ box-sizing: border-box; }} body {{ margin: 0; }} :focus-visible {{ outline: 2px solid #2563eb !important; outline-offset: 2px !important; }}{}</style>\n</head>\n<body>\n<main>\n{}</main>\n</body>\n</html>\n",
     viewport_fit(doc.get(id).is_some_and(|n| n.device.as_ref().is_some_and(crate::devices::is_mobile))),
     esc(&name),
     if fonts.is_empty() { String::new() } else { format!("  <link rel=\"stylesheet\" href=\"{}\" />\n", esc(&fonts)) },
@@ -2925,10 +3011,13 @@ fn readme_flows(doc: &Document, ctx: &Ctx) -> String {
   )
 }
 
+/// Strokes are author `outline`s, which would hide the browser's focus ring: this puts one back.
+const FOCUS_CSS: &str = ":focus-visible { outline: 2px solid #2563eb !important; outline-offset: 2px !important; }\n";
+
 /// What the prototype and the export don't carry over, and the top-level layers left out.
 fn readme_limits(doc: &Document) -> String {
   let mut out = String::from(
-    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- Hover and Change to states, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert).\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n",
+    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- Hover and Change to states, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert).\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n- Strokes are CSS `outline`s (they take no layout space, like Figma's), so `src/index.css` ends with a `:focus-visible` rule that keeps a keyboard focus ring; restyle it to taste.\n- Accessible names (`aria-label`) generated for icon-only controls are in English (\"Go to Detail\", \"Back\"); translate them for other languages.\n",
   );
   let left_out: Vec<&str> = doc
     .pages
@@ -3030,7 +3119,8 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
     .collect();
   let mut screen_aliases = BTreeMap::new();
   for (id, key) in &screens {
-    if let Some(f) = doc.get(id).filter(|f| &f.name != key) {
+    // A name that is another screen's key stays that screen's.
+    if let Some(f) = doc.get(id).filter(|f| &f.name != key && !screens.iter().any(|(_, k)| *k == f.name)) {
       screen_aliases.entry(f.name.clone()).or_insert_with(|| key.clone());
     }
   }
@@ -3053,7 +3143,7 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   files.push(ProjectFile {
     path: "src/index.css".into(),
     content: format!(
-      "{}{}@tailwind base;\n@tailwind components;\n@tailwind utilities;\n{}",
+      "{}{}@tailwind base;\n@tailwind components;\n@tailwind utilities;\n{FOCUS_CSS}{}",
       if fonts.is_empty() {
         String::new()
       } else {
@@ -4637,7 +4727,7 @@ mod r10_tests {
     assert!(src.contains("h-[874px]") && !src.contains("min-h-[874px]"), "{src}");
     let root = src.lines().find(|l| l.contains("h-[874px]")).unwrap_or_default();
     assert!(
-      root.contains("relative") && !root.contains("overflow") && !root.contains("flex"),
+      root.contains("relative") && !root.contains("overflow-y") && !root.contains("flex"),
       "{src}"
     );
     let scroller = src.lines().find(|l| l.contains("overflow-y-auto")).expect("scroller");
@@ -4778,5 +4868,88 @@ mod r10_tests {
       .description = "Primary action.".into();
     let comps = project(&doc, "src/components.tsx");
     assert!(comps.contains("/** Primary action. */\nexport function Button("), "{comps}");
+  }
+
+  #[test]
+  fn an_inside_stroke_is_the_last_child_when_children_are_absolute() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "f", "Card", None);
+    {
+      let f = doc.get_mut("f").unwrap();
+      f.width = 200.0;
+      f.height = 100.0;
+      f.corner_radius = 12.0;
+      f.strokes = vec![Paint::solid("#112233")];
+      f.stroke_weight = 2.0;
+      f.stroke_align = StrokeAlign::Inside;
+    }
+    add(&mut doc, NodeType::Rectangle, "img", "Cover", Some("f"));
+    let src = export_react(&doc, "f", &HeuristicMeasurer);
+    assert!(!src.contains("outline"), "{src}");
+    let img = src.find("bg-[#D9D9D9]").expect("cover");
+    let last = src.find("[inset:0]").expect("overlay");
+    assert!(
+      last > img && src[last..src.rfind("aria-hidden").unwrap()].contains("[pointer-events:none]"),
+      "{src}"
+    );
+    assert!(
+      src[last..].contains("[inset:0]") && src[last..].contains("rounded-[inherit]"),
+      "{src}"
+    );
+    // Outside strokes can't be covered, so they stay outlines.
+    doc.get_mut("f").unwrap().stroke_align = StrokeAlign::Outside;
+    let src = export_react(&doc, "f", &HeuristicMeasurer);
+    assert!(src.contains("outline") && !src.contains("aria-hidden"), "{src}");
+  }
+
+  #[test]
+  fn a_hugging_scroller_with_a_fixed_child_stays_in_flow() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "f", "List", None);
+    {
+      let f = doc.get_mut("f").unwrap();
+      f.overflow = Overflow::Vertical;
+      f.layout = Some(AutoLayout::default());
+      f.sizing_v = Sizing::Hug;
+    }
+    add(&mut doc, NodeType::Frame, "c", "Row", Some("f"));
+    add(&mut doc, NodeType::Frame, "bar", "Bar", Some("f"));
+    {
+      let b = doc.get_mut("bar").unwrap();
+      b.absolute_position = true;
+      b.scroll_behavior = ScrollBehavior::Fixed;
+    }
+    let src = export_react(&doc, "f", &HeuristicMeasurer);
+    assert!(!src.contains("h-[100%]"), "{src}");
+  }
+
+  #[test]
+  fn text_data_urls_are_fully_percent_encoded() {
+    let svg = "data:image/svg+xml,<svg xmlns='x' a_b='100%'><g fill='url(#g)'/>%20</svg>";
+    let out = css_url(svg);
+    assert!(!out.contains([' ', '(', ')', '_', '\'', '#', '<']), "{out}");
+    assert!(out.contains("100%25") && !out.contains("%20<"), "{out}");
+    assert_eq!(css_url("data:image/png;base64,AAA_"), "data:image/png;base64,AAA_");
+  }
+
+  #[test]
+  fn duplicate_frame_names_do_not_steal_a_screen_key() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "a", "Home", None);
+    add(&mut doc, NodeType::Frame, "b", "Home", None);
+    let app = project(&doc, "src/App.tsx");
+    assert!(app.contains("screenNames: Record<string, string> = {};"), "{app}");
+    assert!(app.contains("!Object.prototype.hasOwnProperty.call(screens, hash) &&"), "{app}");
+  }
+
+  #[test]
+  fn focus_ring_and_main_come_with_outline_strokes() {
+    let doc = base();
+    assert!(project(&doc, "src/index.css").contains(":focus-visible { outline: 2px solid #2563eb !important;"));
+    assert!(project(&doc, "README.md").contains("focus ring"));
+    let mut d = base();
+    add(&mut d, NodeType::Frame, "a", "Home", None);
+    let html = export_html(&d, "a", &HeuristicMeasurer);
+    assert!(html.contains("<main>") && html.contains(":focus-visible"), "{html}");
   }
 }

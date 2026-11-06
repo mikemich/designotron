@@ -21,6 +21,26 @@ describe("externalizeDataUrls", () => {
     expect(externalizeDataUrls(`url('${small}')`, binaries, new Set())).toBe(`url('${small}')`);
     expect(binaries).toEqual([]);
   });
+  it("keeps url(#a), spaces, underscores and 100% intact through the round trip", () => {
+    const body =
+      "<svg xmlns='http://www.w3.org/2000/svg'><defs><linearGradient id='a'/></defs><rect fill='url(#a)' width='100%' transform='translate(1 2)'/>" +
+      "<g/>".repeat(300) +
+      "<text>a_b 100%</text></svg>";
+    // What the code generator writes: everything unsafe is percent-encoded.
+    const url = `data:image/svg+xml,${encodeURIComponent(body).replace(/[!'()*_]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())}`;
+    const binaries: { path: string; dataUrl: string }[] = [];
+    const out = externalizeDataUrls(`bg-[url('${url}')]`, binaries, new Set());
+    expect(out).toBe(`bg-[url('/assets/${hash(url)}.svg')]`);
+    const text = decodeURIComponent(escape(atob(binaries[0].dataUrl.split(",")[1])));
+    expect(text).toContain("url(#a)");
+    expect(text).toContain("a_b 100%");
+  });
+  it("leaves a URL inline when it does not decode", () => {
+    const url = `data:image/svg+xml,${"%".repeat(1100)}`;
+    const binaries: { path: string; dataUrl: string }[] = [];
+    expect(externalizeDataUrls(`url('${url}')`, binaries, new Set())).toBe(`url('${url}')`);
+    expect(binaries).toEqual([]);
+  });
   it("writes SVG text as base64 with an svg extension", () => {
     const svg = `data:image/svg+xml,${encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg'>" + "<g/>".repeat(400) + "</svg>").replace(/'/g, "%27")}`;
     const binaries: { path: string; dataUrl: string }[] = [];

@@ -64,7 +64,7 @@ check("screen has a fixed height, no min-height", feed.includes("h-[874px]") && 
 const scroller = feed.split("\n").find((l) => l.includes("overflow-y-auto")) ?? "";
 check("the scroller holds the auto layout and padding", /flex-col/.test(scroller) && /gap-y-\[12px\]/.test(scroller) && /pt-\[/.test(scroller), scroller.trim().slice(0, 140));
 const rootLine = feed.split("\n").find((l) => l.includes("h-[874px]")) ?? "";
-check("the outer box has no overflow or flex", !/overflow|flex/.test(rootLine), rootLine.trim().slice(0, 140));
+check("the outer box clips but does not scroll or lay out", !/overflow-[xy]|overflow-auto|flex/.test(rootLine), rootLine.trim().slice(0, 140));
 
 // B5: names for text-less controls.
 const detail = read("src/screens/Detail.tsx");
@@ -79,6 +79,7 @@ check("the banner image is in public/assets", assets.length === 1 && /\.png$/.te
 
 // B8, B10.
 check("CLAUDE.md names get_nodes", read("CLAUDE.md").includes("`get_nodes`") && !read("CLAUDE.md").includes("`get_node`"));
+check("index.css keeps a keyboard focus ring", read("src/index.css").includes(":focus-visible { outline: 2px solid"));
 check("a frame name with a space is an alias", read("src/App.tsx").includes('"Filter sheet":"FilterSheet"'));
 
 if (process.env.E2E_DEPS) {

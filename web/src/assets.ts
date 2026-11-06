@@ -148,15 +148,17 @@ const INLINE_IMAGE = /data:image\/(?:png|jpe?g|gif|webp|svg\+xml)[^'")\s`\\]*/g;
 /** Smaller inline images stay where they are (icons, 1px fills). */
 const MIN_INLINE_BYTES = 1024;
 
-/** The same URL with base64 data, so a zip entry can hold it whatever the original encoding. */
-function base64DataUrl(url: string): string {
+/** The same URL with base64 data, so a zip entry can hold it whatever the original encoding; null
+ *  when it can't be decoded (it then stays inline rather than breaking the export). */
+function base64DataUrl(url: string): string | null {
   const comma = url.indexOf(",");
-  if (comma < 0 || url.slice(0, comma).includes(";base64")) return url;
+  if (comma < 0) return null;
+  if (url.slice(0, comma).includes(";base64")) return /^[A-Za-z0-9+/]*={0,2}$/.test(url.slice(comma + 1)) ? url : null;
   try {
     const text = decodeURIComponent(url.slice(comma + 1));
     return url.slice(0, comma).replace(/;.*$/, "") + ";base64," + btoa(unescape(encodeURIComponent(text)));
   } catch {
-    return url;
+    return null;
   }
 }
 
@@ -169,6 +171,7 @@ export function externalizeDataUrls(
   return text.replace(INLINE_IMAGE, (url) => {
     if (url.length < MIN_INLINE_BYTES) return url;
     const full = base64DataUrl(url);
+    if (!full) return url;
     const path = `assets/${hash(url)}.${assetExt(full)}`;
     if (!seen.has(path)) {
       seen.add(path);
