@@ -69,6 +69,7 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Zoom in / out", `${MOD}+ / ${MOD}−`],
       ["Rulers / layout grids", `${SHIFT}R / ${SHIFT_MOD}4`],
       ["Claude panel", `${MOD}/`],
+      ["Show / hide the side panels", `${MOD}\\`],
       ["Cursor chat (with others in the file)", "/"],
       ["Stop following someone", "Esc"],
       ["Save in this browser", `${MOD}S`],

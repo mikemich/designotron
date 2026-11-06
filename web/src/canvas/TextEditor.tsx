@@ -156,6 +156,9 @@ export function TextEditor({ id }: { id: string }) {
   const affRef = useRef<Affinity>("after");
   const goalX = useRef<number | null>(null);
   const pointer = useRef("mouse");
+  /** The last touch press on the textarea: where and when it went down and up. */
+  const lastTouchUp = useRef(0);
+  const touchDown = useRef<{ t: number; x: number; y: number; up: number; gap: number } | null>(null);
   const plainPaste = useRef(0);
   const composing = useRef(false);
   /** The full line layout of the current document revision (clicks and drags reuse it). */
@@ -374,6 +377,32 @@ export function TextEditor({ id }: { id: string }) {
     window.addEventListener("mouseup", up, true);
   };
 
+  /** A touch tap puts the caret where the canvas draws the text (the browser places it from the
+   * invisible textarea's own layout, which is wrong once sizes are mixed). It runs after the
+   * browser's placement, so its handles and IME keep working; a double-tap's word stays native. */
+  const onTouchTap = (e: React.MouseEvent<HTMLTextAreaElement>) => {
+    const ta = e.currentTarget;
+    const d = touchDown.current;
+    if (pointer.current !== "touch" || !d) return;
+    // A quick second or third tap is the browser's word or paragraph selection. A slow one (the
+    // click count can still run on after the double-tap that opened the editor) is a plain tap.
+    const multi = e.detail > 1 && d.gap <= 500;
+    if (multi || (d.up && d.up - d.t >= 400)) return;
+    if (Math.hypot(e.clientX - d.x, e.clientY - d.y) >= 10) return;
+    const hit = hitAt(e.clientX, e.clientY);
+    if (!hit) return;
+    goalX.current = null;
+    select(ta, hit.index, hit.index, hit.affinity);
+  };
+
+  /** The canvas menu never opens over an open editor. A touch tap that the browser reports as a
+   * context menu is swallowed; a real long-press keeps the browser's own text menu. */
+  const onContextMenu = (e: React.MouseEvent<HTMLTextAreaElement>) => {
+    e.stopPropagation();
+    const d = touchDown.current;
+    if (pointer.current === "touch" && d && Date.now() - d.t < 450 && (!d.up || d.up - d.t < 400)) e.preventDefault();
+  };
+
   /** Arrow Up/Down and Home/End move by the engine's lines (the textarea wraps differently
    * once sizes are mixed). Returns true when it handled the key. */
   const moveByLines = (e: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
@@ -516,13 +545,20 @@ export function TextEditor({ id }: { id: string }) {
           setFocused(false);
           // Keep editing while the user styles the selection in the side panel or a popover.
           const next = e.relatedTarget as HTMLElement | null;
-          if (next && next.closest(".panel.right, .popover")) return;
+          if (next && next.closest(".panel.right, .popover, #panel-toggle-right")) return;
           finish();
         }}
         onPointerDown={(e) => {
           pointer.current = e.pointerType;
+          touchDown.current = e.pointerType === "touch" ? { t: Date.now(), x: e.clientX, y: e.clientY, up: 0, gap: lastTouchUp.current ? Date.now() - lastTouchUp.current : Infinity } : null;
           e.stopPropagation();
         }}
+        onPointerUp={(e) => {
+          if (touchDown.current && !touchDown.current.up) touchDown.current.up = lastTouchUp.current = Date.now();
+          e.stopPropagation();
+        }}
+        onClick={onTouchTap}
+        onContextMenu={onContextMenu}
         onMouseDown={onMouseDown}
         onCopy={(e) => onCopy(e, false)}
         onCut={(e) => onCopy(e, true)}

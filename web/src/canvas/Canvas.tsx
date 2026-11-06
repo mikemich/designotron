@@ -171,6 +171,9 @@ function lodLevel(zoom: number): number {
 
 /** How long the selection must stay put before it is announced to screen readers. */
 const ANNOUNCE_DELAY_MS = 300;
+/** A finger held this long (ms) without moving past the slop (px) opens the canvas menu. */
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_SLOP = 8;
 
 const keys = { space: false };
 window.addEventListener("keydown", (e) => {
@@ -228,6 +231,11 @@ export function Canvas() {
   const [link, setLink] = useState<{ from: string; cur: Pt } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [panning, setPanning] = useState(false);
+  // The long-press menu: the latest `openLongPressMenu`, and when it last opened.
+  const longPress = useRef<(x: number, y: number) => void>(() => {});
+  const longPressAt = useRef(0);
+  /** The touch handlers' hold timer and drag abort, for the native context menu and pointercancel. */
+  const holdControl = useRef<{ cancel: () => void; abort: () => void } | null>(null);
   // Alt held with nothing being dragged: show distances from the selection to the hovered layer.
   const [alt, setAlt] = useState(false);
   const measuring = alt && tool === "move" && sel.length > 0 && !editingText && !editingVector;
@@ -388,12 +396,18 @@ export function Canvas() {
   }, []);
 
   // Touch: two fingers pinch to zoom and pan. Runs before the tools' handlers and keeps the
-  // gesture to itself until every finger is lifted.
+  // gesture to itself until every finger is lifted. A second finger cancels what the first one
+  // had started (a move, resize or rotate goes back to where it was, the selection too), and a
+  // single finger held still for 500 ms opens the canvas menu like a right-click.
   useEffect(() => {
     const el = ref.current!;
     const touches = new Map<number, { x: number; y: number }>();
     let pinch: { d: number; mx: number; my: number; v: { x: number; y: number; zoom: number } } | null = null;
     let swallow = false;
+    /** The hold fired for the finger that is down: its lift must not click through to the menu. */
+    let fired = false;
+    /** The first finger: where it went down, what was selected then, and the hold timer. */
+    let first: { id: number; x: number; y: number; sel: string[]; target: Element; timer: number } | null = null;
     const local = (x: number, y: number) => {
       const r = el.getBoundingClientRect();
       return { x: x - r.left, y: y - r.top };
@@ -403,10 +417,63 @@ export function Canvas() {
       const m = local((a.x + b.x) / 2, (a.y + b.y) / 2);
       return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: m.x, my: m.y };
     };
+    const stopHold = () => {
+      if (first) clearTimeout(first.timer);
+    };
+    /** Ends whatever the first finger had started, as if it never touched. */
+    const abortDrag = (restoreSelection: boolean) => {
+      const d = drag.current;
+      drag.current = null;
+      pointerDrag.active = false;
+      if (d) {
+        if ((d.kind === "move" && d.started) || d.kind === "resize" || d.kind === "rotate" || d.kind === "vector") dispatch({ op: "cancelGesture" });
+        if (d.kind === "marquee" || d.kind === "vmarquee") useStore.setState({ marquee: null });
+        if (d.kind === "draw") setDraw(null);
+        if (d.kind === "pencil") setPencil(null);
+        if (d.kind === "link") setLink(null);
+        if (d.kind === "penHandle") setPen((p) => p.slice(0, d.index));
+        if (d.kind === "pan") setPanning(false);
+      }
+      useStore.setState({ guides: [], gaps: [], dropTarget: null, dropLine: null });
+      if (restoreSelection && useStore.getState().draftComment) useStore.setState({ draftComment: null });
+      if (first) {
+        if (restoreSelection) {
+          const cur = useStore.getState().es.selection;
+          const before = first.sel;
+          if (cur.length !== before.length || cur.some((id, i) => id !== before[i])) dispatch({ op: "select", ids: before });
+        }
+      }
+    };
     const down = (e: PointerEvent) => {
       if (e.pointerType !== "touch") return;
+      // A first finger starts afresh: a lift that was missed can't leave a ghost finger behind.
+      if (e.isPrimary) {
+        stopHold();
+        touches.clear();
+        pinch = null;
+        swallow = false;
+        fired = false;
+      }
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 1) {
+        const t = e.target as Element;
+        first = { id: e.pointerId, x: e.clientX, y: e.clientY, sel: [...useStore.getState().es.selection], target: t, timer: 0 };
+        // Only the drawing surface: inputs, prompts and popovers on the canvas keep the browser's menu.
+        const onCanvas = (t === el || !!t.closest?.("svg.dt-content, svg.overlay")) && !t.closest?.("[data-paint-overlay], [data-handle], [data-rotate], [data-vpt], [data-link]");
+        const st = useStore.getState();
+        if (onCanvas && st.tool === "move" && !st.editingText && !st.editingVector) {
+          const at = { x: e.clientX, y: e.clientY };
+          first.timer = window.setTimeout(() => {
+            if (touches.size !== 1) return;
+            fired = true;
+            abortDrag(false);
+            longPress.current(at.x, at.y);
+          }, LONG_PRESS_MS);
+        }
+      }
       if (touches.size === 2) {
+        stopHold();
+        abortDrag(true);
         pinch = { ...measure(), v: { ...useStore.getState().viewport } };
         swallow = true;
       }
@@ -415,6 +482,7 @@ export function Canvas() {
     const move = (e: PointerEvent) => {
       if (e.pointerType !== "touch" || !touches.has(e.pointerId)) return;
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (first && e.pointerId === first.id && Math.hypot(e.clientX - first.x, e.clientY - first.y) > LONG_PRESS_SLOP) stopHold();
       if (!swallow) return;
       e.stopPropagation();
       if (!pinch || touches.size < 2) return;
@@ -426,22 +494,47 @@ export function Canvas() {
       noteZooming();
       useStore.setState({ viewport: { zoom, x: now.mx - px * zoom, y: now.my - py * zoom } });
     };
+    const upAnywhere = (e: PointerEvent) => {
+      if (e.pointerType !== "touch" || !touches.has(e.pointerId)) return;
+      up(e);
+    };
     const up = (e: PointerEvent) => {
-      if (e.pointerType !== "touch") return;
       touches.delete(e.pointerId);
+      stopHold();
       if (touches.size < 2) pinch = null;
       if (swallow) e.stopPropagation();
-      if (touches.size === 0) swallow = false;
+      if (touches.size === 0) {
+        swallow = false;
+        first = null;
+        if (fired) {
+          // The click the browser may synthesise for this lift must not hit the menu under the finger.
+          fired = false;
+          const stop = (ev: Event) => {
+            ev.stopPropagation();
+            ev.preventDefault();
+            done();
+          };
+          const done = () => {
+            clearTimeout(t);
+            window.removeEventListener("click", stop, true);
+          };
+          const t = window.setTimeout(done, 150);
+          window.addEventListener("click", stop, true);
+        }
+      }
     };
     el.addEventListener("pointerdown", down, true);
     el.addEventListener("pointermove", move, true);
-    el.addEventListener("pointerup", up, true);
-    el.addEventListener("pointercancel", up, true);
+    // The lift may land off the canvas (the menu opens under the finger, a pinch drifts onto a panel).
+    window.addEventListener("pointerup", upAnywhere, true);
+    window.addEventListener("pointercancel", upAnywhere, true);
+    holdControl.current = { cancel: stopHold, abort: () => abortDrag(false) };
     return () => {
+      stopHold();
       el.removeEventListener("pointerdown", down, true);
       el.removeEventListener("pointermove", move, true);
-      el.removeEventListener("pointerup", up, true);
-      el.removeEventListener("pointercancel", up, true);
+      window.removeEventListener("pointerup", upAnywhere, true);
+      window.removeEventListener("pointercancel", upAnywhere, true);
     };
   }, []);
 
@@ -1103,10 +1196,20 @@ export function Canvas() {
 
   function onContextMenu(e: React.MouseEvent) {
     e.preventDefault();
-    const p = pagePt(e);
+    holdControl.current?.cancel();
+    // The editor and its caret have their own (the browser's text menu on a long-press).
+    if ((e.target as Element).closest?.(".text-editor, .text-caret")) return;
+    // Android raises one after our own long-press menu is already open.
+    if (Date.now() - longPressAt.current < 1000) return;
+    openMenuAt(e.clientX, e.clientY);
+  }
+
+  /** The canvas menu at a client point, with the layer under it selected. */
+  function openMenuAt(x: number, y: number) {
+    const p = pagePt({ clientX: x, clientY: y });
     const id = query<string | null>({ q: "pick", x: p.x, y: p.y, zoom: zoom(), deep: false });
     if (id && !selection().includes(id)) dispatch({ op: "select", ids: [id] });
-    setMenu({ x: e.clientX, y: e.clientY, items: canvasMenu(p) });
+    setMenu({ x, y, items: canvasMenu(p) });
   }
 
   async function onDrop(e: React.DragEvent) {
@@ -1192,6 +1295,11 @@ export function Canvas() {
     return out;
   }
 
+  longPress.current = (x, y) => {
+    longPressAt.current = Date.now();
+    navigator.vibrate?.(10);
+    openMenuAt(x, y);
+  };
   const cursor = panning ? "grabbing" : keys.space || tool === "hand" ? "grab" : tool === "move" ? (vHover ? "crosshair" : "default") : tool === "text" ? "text" : "crosshair";
   const emptyPromptClosed = useStore((s) => s.emptyPromptClosed);
   // A view-only file offers no Claude: it couldn't change anything.
@@ -1220,8 +1328,10 @@ export function Canvas() {
         onPointerUp(e);
         pointerDrag.active = false;
       }}
-      onPointerCancel={() => {
+      onPointerCancel={(e) => {
         pointerDrag.active = false;
+        // A system gesture took the finger mid-drag: the drag is cancelled, not left open.
+        if (e.pointerType === "touch") holdControl.current?.abort();
         useStore.setState({ dropTarget: null, dropLine: null });
       }}
       onPointerLeave={() => {

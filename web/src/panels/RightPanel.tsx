@@ -9,6 +9,7 @@ import { focusedByPointer, IconButton, NumberField, Section, SelectField } from 
 import type { Direction, Easing, Interaction, Node, Overflow, OverlaySettings } from "../types";
 import { DEFAULT_OVERLAY, enclosingSets, isMissingDestination, newInteraction, overlayDim, SCREEN_TYPES, scrollTargets, startFrame, TRIGGER_LABELS } from "../prototype";
 import { keyName } from "../player";
+import { PanelClose } from "./PanelChrome";
 
 const TABS: { id: RightTab; label: string }[] = [
   { id: "design", label: "Design" },
@@ -37,7 +38,8 @@ export function RightPanel() {
     document.getElementById("right-tab-" + next.id)?.focus();
   };
   return (
-    <aside className="panel right" aria-label="Properties">
+    <aside className="panel right" id="panel-right" aria-label="Properties">
+      <PanelClose side="right" />
       <div className="tabs" role="tablist" aria-label="Properties" onKeyDown={onKeyDown}>
         {TABS.map((t) => (
           <button
