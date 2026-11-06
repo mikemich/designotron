@@ -1471,16 +1471,37 @@ body:has(.modal-bg) .hint-card {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Actions appear on hover or keyboard focus, so names get the full width. */
+/* Actions appear on hover or keyboard focus, so names get the full width. Hidden ones are
+   clipped, not display:none, so Tab can still reach them (and then shows them). */
+.version {
+  position: relative;
+}
 .version .ibtn {
-  display: none;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  opacity: 0;
 }
 .version:hover .ibtn,
 .version:focus-within .ibtn {
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip-path: none;
+  opacity: 1;
   display: grid;
 }
 @media (hover: none) {
   .version .ibtn {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+    opacity: 1;
     display: grid;
   }
 }
@@ -1812,7 +1833,7 @@ body:has(.modal-bg) .hint-card {
   }
   .guest-bar {
     flex-wrap: wrap;
-    width: calc(100vw - 24px);
+    width: calc(100% - 16px);
   }
   .guest-bar > span {
     white-space: normal;
@@ -1841,15 +1862,17 @@ body:has(.modal-bg) .hint-card {
 
 /* ---------- Guest bar (people who opened a shared link) ---------- */
 .guest-bar {
-  position: fixed;
-  top: 52px;
+  /* Inside the canvas column, so it never covers the panel tabs. */
+  position: absolute;
+  top: 10px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 40;
   display: flex;
   align-items: center;
   gap: 10px;
-  max-width: calc(100vw - 24px);
+  width: max-content;
+  max-width: calc(100% - 16px);
   padding: 6px 8px 6px 12px;
   border-radius: 10px;
   background: var(--panel);

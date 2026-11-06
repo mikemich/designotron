@@ -724,7 +724,8 @@ export async function duplicateFile(id: string): Promise<string | null> {
   doc.name = `${doc.name} (copy)`;
   const nid = newFileId();
   // A copy stays next to the original.
-  await saveFile(nid, doc.name, JSON.stringify(doc), { folder: (await getFileMeta(id))?.folder });
+  const meta = await getFileMeta(id);
+  await saveFile(nid, doc.name, JSON.stringify(doc), { folder: meta?.folder, thumbnail: meta?.thumbnail });
   return nid;
 }
 

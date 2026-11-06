@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, Figma, FilePlus, FileStack, Folder as FolderIcon, FolderOpen, FolderPlus, Github, LayoutGrid, Loader2, Menu as MenuIcon, MoreHorizontal, Plus, Search, Sparkles, X } from "lucide-react";
 import { askWhenOpen } from "./Editor";
+import { claudeReady } from "./ai/chatState";
 import { REPO_URL } from "./panels/GuestBar";
 import {
   createFolder,
@@ -24,7 +25,7 @@ import {
 import { ancestors, canMoveFolder, childrenOf, compareNames, contents, deleteSummary, normalizeName, pathLabel, resolveFolder } from "./folders";
 import { bootEngine, getEngine, newEngine, dispatch, toast, useBoot, useStore } from "./store";
 import { TEMPLATES, type Template } from "./templates";
-import { persistentStorage } from "./files";
+import { loadFile, persistentStorage } from "./files";
 import { Menu, useDialog, type MenuItem } from "./ui/controls";
 import { attempt, reportFailure } from "./errors";
 import { ProjectTree, NameInput, dragState } from "./dashboard/ProjectTree";
@@ -232,6 +233,12 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   const designWithClaude = async (prompt: string) => {
     if (!prompt.trim() || opening) return;
     askWhenOpen(prompt.trim());
+    // Without a Claude connection the prompt just waits in the editor. Trying again then reuses
+    // the empty file that was made for it, instead of stacking up "Untitled" files.
+    if (!claudeReady()) {
+      const draft = await emptyClaudeDraft();
+      if (draft) return onOpen(draft);
+    }
     if (!(await create(null, "claude"))) askWhenOpen(null);
   };
   const [idea, setIdea] = useState("");
@@ -251,6 +258,13 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       const id = newFileId();
       const json = getEngine().save();
       await saveFile(id, JSON.parse(json).name, json, { folder: currentFolder });
+      if (key === "claude" && !claudeReady()) {
+        try {
+          sessionStorage.setItem(CLAUDE_DRAFT, id);
+        } catch {
+          /* private mode: no reuse */
+        }
+      }
       onOpen(id);
       return true;
     } catch (err) {
@@ -883,4 +897,21 @@ function TemplateThumb({ t }: { t: Template }) {
       )}
     </div>
   );
+}
+
+/** The file "Design with Claude" last made while Claude wasn't connected. */
+const CLAUDE_DRAFT = "dt:claudeDraft";
+
+/** That file's id, if it still exists and has no layers; otherwise null. */
+async function emptyClaudeDraft(): Promise<string | null> {
+  try {
+    const id = sessionStorage.getItem(CLAUDE_DRAFT);
+    if (!id) return null;
+    const json = await loadFile(id);
+    if (!json) return null;
+    const doc = JSON.parse(json) as { pages?: { children?: unknown[] }[] };
+    return (doc.pages ?? []).every((p) => !p.children?.length) ? id : null;
+  } catch {
+    return null;
+  }
 }

@@ -85,6 +85,8 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
   const chatOpen = useStore((s) => s.chatOpen);
   const claudeOn = useChat((s) => claudeReady(s));
   const doc = useDoc();
+  const viewing = useCollab((s) => s.viewer);
+  const readOnly = !!es.readOnly || viewing;
   const [menu, setMenu] = useState<{
     x: number;
     y: number;
@@ -316,11 +318,14 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           aria-label="File name"
           key={doc.name}
           defaultValue={doc.name}
+          readOnly={readOnly}
+          title={readOnly ? "View only: the file name can't be changed" : undefined}
           onKeyDown={(e) => {
             e.stopPropagation();
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
           onBlur={(e) =>
+            !readOnly &&
             e.target.value.trim() &&
             e.target.value !== doc.name &&
             dispatch({ op: "setDocName", name: e.target.value.trim() })

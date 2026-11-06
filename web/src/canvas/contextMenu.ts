@@ -6,6 +6,7 @@ import { askClaude } from "../ai/chatState";
 import { rasterize } from "../ai/images";
 import type { Node, Rect } from "../types";
 import { addVariant } from "../componentOps";
+import { useCollab } from "../collab";
 import { openSwapPicker } from "../panels/ComponentControls";
 import { cssFor } from "../panels/RightPanel";
 import { copyAsPng, copyAsSvg, copyText } from "../exporter";
@@ -166,12 +167,33 @@ export const SAME_PROPS: [A.SameProp, string][] = [
   ["font", "Select all with same font"],
 ];
 
+/** What a view-only visitor can do: copy, look closer, comment. Nothing that edits. */
+function viewerMenu(nodes: Node[], one: Node | null, sel: string[]): MenuItem[] {
+  const comment: MenuItem = { label: "Comment", kbd: "C", onClick: () => useStore.setState({ tool: "comment" }) };
+  const zoom: MenuItem = { label: "Zoom to fit", kbd: `${SHIFT}1`, onClick: () => import("../store").then((s) => s.zoomToFit()) };
+  if (!nodes.length) return [{ label: "Select all", kbd: `${MOD}A`, onClick: A.selectAll }, zoom, { sep: true }, comment];
+  return keepSelection([
+    { label: "Copy", kbd: `${MOD}C`, onClick: copySelection },
+    { heading: "Copy as" },
+    { label: "Copy as PNG", disabled: !one, onClick: () => one && copyAsPng(one.id) },
+    { label: "Copy as SVG", disabled: !one, onClick: () => one && copyAsSvg(one.id) },
+    { label: "Copy as CSS", disabled: !one, onClick: () => one && copyText(cssFor(one), `Copied CSS for ${one.name}`, "CSS") },
+    { sep: true },
+    { label: "Zoom to selection", kbd: `${SHIFT}2`, onClick: zoomToSelection },
+    { label: "Select all", kbd: `${MOD}A`, onClick: A.selectAll },
+    zoom,
+    { sep: true },
+    comment,
+  ], sel);
+}
+
 /** Right-click menu items for the current selection. */
 export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   const doc = getDoc();
   const sel = selection();
   const nodes = sel.map((id) => doc.nodes[id]).filter(Boolean);
   const one = nodes.length === 1 ? nodes[0] : null;
+  if (useStore.getState().es.readOnly || useCollab.getState().viewer) return viewerMenu(nodes, one, sel);
   if (!nodes.length) {
     return [
       { label: "Paste here", kbd: `${MOD}V`, onClick: () => pasteHere(at.x, at.y) },

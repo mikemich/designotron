@@ -4,6 +4,8 @@
 #   fly deploy
 app = "designotron-relay"
 primary_region = "iad"
+# Time for the relay to save its rooms after SIGINT/SIGTERM before Fly kills it.
+kill_timeout = "10s"
 
 [build]
   dockerfile = "Dockerfile"

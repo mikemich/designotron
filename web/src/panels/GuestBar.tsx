@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { create } from "zustand";
-import { Copy, Eye, Github, X } from "lucide-react";
+import { Copy, Github, X } from "lucide-react";
 import { leaveEndedRoom, remixShared, setMyName, useCollab } from "../collab";
 import { userName } from "../canvas/Comments";
 
@@ -80,12 +80,8 @@ export function GuestBar() {
   };
   return (
     <>
-    <div className="guest-bar">
-      {viewer && (
-        <span className="view-badge">
-          <Eye size={12} /> View only
-        </span>
-      )}
+    {/* Lives inside the canvas: presses here must not reach the canvas's own handlers. */}
+    <div className="guest-bar" onPointerDown={(e) => e.stopPropagation()} onContextMenu={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
       <span className="live-dot" data-live={status === "live" && !ownerGone && !viewError} />
       <span>{message}</span>
       {asking && status === "live" && !ownerGone ? (

@@ -106,6 +106,10 @@ export function LeftPanel() {
 function Pages() {
   const doc = useDoc();
   const page = useStore((s) => s.es.page);
+  /** A view-only visitor can look through the pages but not add, rename, move or delete them. */
+  const engineReadOnly = useStore((s) => !!s.es.readOnly);
+  const viewing = useCollab((s) => s.viewer);
+  const viewOnly = engineReadOnly || viewing;
   const [renaming, setRenaming] = useState<string | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [more, setMore] = useState(0);
@@ -147,7 +151,7 @@ function Pages() {
   };
   const onKey = (e: React.KeyboardEvent, id: string, i: number) => {
     // Alt+Shift+Arrow reorders, as it does in the layers tree.
-    if (e.target === e.currentTarget && e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+    if (!viewOnly && e.target === e.currentTarget && e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
       e.preventDefault();
       e.stopPropagation();
       A.movePage(id, i + (e.key === "ArrowUp" ? -1 : 1));
@@ -177,21 +181,23 @@ function Pages() {
         return dispatch({ op: "setPage", id });
       case "F2":
         e.preventDefault();
-        return setRenaming(id);
+        return viewOnly ? undefined : setRenaming(id);
       case "Delete":
       case "Backspace":
         e.preventDefault();
         e.stopPropagation();
-        if (doc.pages.length > 1) removePage(id);
+        if (!viewOnly && doc.pages.length > 1) removePage(id);
     }
   };
   return (
     <div className="pages">
       <div className="section-head" style={{ marginBottom: 4, padding: "0 4px" }}>
         <span id="pages-label">Pages</span>
-        <IconButton title="Add page" onClick={() => dispatch({ op: "addPage", name: null })}>
-          <Plus size={14} />
-        </IconButton>
+        {!viewOnly && (
+          <IconButton title="Add page" onClick={() => dispatch({ op: "addPage", name: null })}>
+            <Plus size={14} />
+          </IconButton>
+        )}
       </div>
       <div
         className="pages-list"
@@ -219,9 +225,9 @@ function Pages() {
               dispatch({ op: "setPage", id: p.id });
               returnFocusToCanvas(e);
             }}
-            onDoubleClick={() => setRenaming(p.id)}
+            onDoubleClick={() => !viewOnly && setRenaming(p.id)}
             onKeyDown={(e) => onKey(e, p.id, i)}
-            draggable={renaming !== p.id}
+            draggable={!viewOnly && renaming !== p.id}
             onDragStart={(e) => {
               dragPage.current = p.id;
               e.dataTransfer.effectAllowed = "move";
@@ -232,6 +238,7 @@ function Pages() {
               setDrop(null);
             }}
             onDragOver={(e) => {
+              if (viewOnly) return;
               const isPage = e.dataTransfer.types.includes("application/x-designotron-page");
               if (!isPage && !e.dataTransfer.types.includes("application/x-designotron-layer")) return;
               e.preventDefault();
@@ -261,6 +268,7 @@ function Pages() {
             }}
             onContextMenu={(e) => {
               e.preventDefault();
+              if (viewOnly) return;
               setMenu({
                 x: e.clientX,
                 y: e.clientY,

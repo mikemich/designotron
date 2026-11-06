@@ -349,13 +349,57 @@ async fn main() {
   let cfg = parse_args();
   let rooms = Rooms::with_view_links(cfg.limits.clone(), cfg.data_dir.clone());
   let clients = Clients::new(cfg.clients.clone());
+  let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
+  let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
+    log::error!("cannot listen on {addr}: {e}");
+    std::process::exit(1);
+  });
+  log::info!("Designotron relay on http://{addr}");
+  run(cfg, listener, rooms, clients, shutdown_signal()).await;
+}
+
+/// Resolves on SIGINT (Fly, Ctrl-C) or SIGTERM (`docker stop`, Render).
+async fn shutdown_signal() {
+  #[cfg(unix)]
+  {
+    use tokio::signal::unix::{signal, SignalKind};
+    match signal(SignalKind::terminate()) {
+      Ok(mut term) => {
+        tokio::select! {
+          _ = tokio::signal::ctrl_c() => {}
+          _ = term.recv() => {}
+        }
+      }
+      Err(_) => {
+        let _ = tokio::signal::ctrl_c().await;
+      }
+    }
+  }
+  #[cfg(not(unix))]
+  {
+    let _ = tokio::signal::ctrl_c().await;
+  }
+}
+
+/// Serves until `shutdown` resolves. Changed rooms are saved first, then connections get a
+/// few seconds to drain, then everything is saved again.
+async fn run(
+  cfg: Config,
+  listener: tokio::net::TcpListener,
+  rooms: Arc<Rooms>,
+  clients: Arc<Clients>,
+  shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) {
   let (maintain, sweep) = (rooms.clone(), clients.clone());
-  tokio::spawn(async move {
+  let ticker = tokio::spawn(async move {
     let mut tick = 0u32;
     loop {
-      tokio::time::sleep(Duration::from_secs(3)).await;
-      maintain.maintain().await;
-      tick = (tick + 1) % 20;
+      tokio::time::sleep(Duration::from_secs(1)).await;
+      maintain.save_dirty().await;
+      tick = (tick + 1) % 60;
+      if tick.is_multiple_of(3) {
+        maintain.maintain().await;
+      }
       if tick == 0 {
         sweep.sweep();
       }
@@ -363,7 +407,7 @@ async fn main() {
   });
   let app = App {
     rooms: rooms.clone(),
-    clients,
+    clients: clients.clone(),
     serves_editor: cfg.static_dir.is_some(),
   };
   if let Some(d) = &cfg.static_dir {
@@ -385,20 +429,27 @@ async fn main() {
       ""
     }
   );
-  let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
-  let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
-    log::error!("cannot listen on {addr}: {e}");
-    std::process::exit(1);
-  });
-  log::info!("Designotron relay on http://{addr}");
   let service = router(app, cfg.static_dir).into_make_service_with_connect_info::<SocketAddr>();
+  let (drain, drained) = tokio::sync::oneshot::channel::<()>();
   let server = axum::serve(listener, service).with_graceful_shutdown(async {
-    let _ = tokio::signal::ctrl_c().await;
+    let _ = drained.await;
   });
-  if let Err(e) = server.await {
-    log::error!("server error: {e}");
+  let mut serving = tokio::spawn(std::future::IntoFuture::into_future(server));
+  tokio::select! {
+    ended = &mut serving => log::error!("server stopped: {ended:?}"),
+    _ = shutdown => {
+      log::info!("shutting down: saving rooms");
+      // Save before anything else: the drain may be cut short by the host's kill timeout.
+      rooms.maintain().await;
+      let _ = drain.send(());
+      if tokio::time::timeout(Duration::from_secs(5), &mut serving).await.is_err() {
+        log::warn!("connections didn't drain in 5 s; closing them");
+        serving.abort();
+      }
+    }
   }
-  // Save everything before exiting (redeploys).
+  ticker.abort();
+  // Save again for edits that arrived while draining.
   rooms.maintain().await;
 }
 
@@ -982,6 +1033,95 @@ mod tests {
       let mut body = String::new();
       tcp.read_to_string(&mut body).await.unwrap();
       serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    }
+  }
+
+  mod durability {
+    use super::*;
+
+    /// Runs the whole server on a free port; sending on the returned channel shuts it down.
+    async fn start_run(data: PathBuf) -> (SocketAddr, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
+      let cfg = Config {
+        port: 0,
+        static_dir: None,
+        data_dir: Some(data),
+        limits: Limits::default(),
+        clients: ClientLimits::default(),
+      };
+      let rooms = Rooms::with_view_links(cfg.limits.clone(), cfg.data_dir.clone());
+      let clients = Clients::new(cfg.clients.clone());
+      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let addr = listener.local_addr().unwrap();
+      let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+      let handle = tokio::spawn(run(cfg, listener, rooms, clients, async {
+        let _ = rx.await;
+      }));
+      (addr, tx, handle)
+    }
+
+    /// Two people join; the second sees the first's rename, so the relay has applied it.
+    async fn share_and_rename(addr: SocketAddr, room: &str, name: &str) -> (Ws, Ws) {
+      let mut a = connect(addr, room, None).await.unwrap();
+      let mut msg = json!({ "type": "join", "name": "Ana", "doc": doc(), "reset": true });
+      msg["doc"]["name"] = json!("Before");
+      a.send(Message::Text(msg.to_string())).await.unwrap();
+      next_json(&mut a).await;
+      let mut b = connect(addr, room, None).await.unwrap();
+      assert_eq!(join(&mut b, None).await["type"], "welcome");
+      a.send(Message::Text(rename(name))).await.unwrap();
+      assert_eq!(next_delta(&mut b).await["name"], name);
+      (a, b)
+    }
+
+    #[tokio::test]
+    async fn shutdown_saves_edits_made_just_before() {
+      let dir = temp_dir("shutdown");
+      let (addr, stop, handle) = start_run(dir.clone()).await;
+      let room = designotron_rooms::random_token();
+      let _clients = share_and_rename(addr, &room, "Just edited").await;
+      stop.send(()).unwrap();
+      tokio::time::timeout(Duration::from_secs(8), handle).await.unwrap().unwrap();
+      let saved = std::fs::read_to_string(dir.join(format!("{room}.json"))).unwrap();
+      assert!(saved.contains("Just edited"), "the edit reached the disk: {saved}");
+    }
+
+    #[tokio::test]
+    async fn the_server_keeps_running_past_the_drain_time_until_told_to_stop() {
+      let (addr, stop, handle) = start_run(temp_dir("keeps-running")).await;
+      tokio::time::sleep(Duration::from_millis(5500)).await;
+      assert!(
+        start_stats(addr).await["rooms"].is_number(),
+        "still serving after the 5 s drain limit"
+      );
+      assert!(!handle.is_finished());
+      stop.send(()).unwrap();
+      tokio::time::timeout(Duration::from_secs(8), handle).await.unwrap().unwrap();
+    }
+
+    async fn start_stats(addr: SocketAddr) -> serde_json::Value {
+      let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+      tcp.write_all(b"GET /health HTTP/1.0\r\n\r\n").await.unwrap();
+      let mut body = String::new();
+      tcp.read_to_string(&mut body).await.unwrap();
+      serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_changed_room_is_on_disk_within_a_second_or_two() {
+      let dir = temp_dir("cadence");
+      let (addr, _stop, _handle) = start_run(dir.clone()).await;
+      let room = designotron_rooms::random_token();
+      let _clients = share_and_rename(addr, &room, "Quick save").await;
+      let file = dir.join(format!("{room}.json"));
+      let mut saved = false;
+      for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if std::fs::read_to_string(&file).is_ok_and(|s| s.contains("Quick save")) {
+          saved = true;
+          break;
+        }
+      }
+      assert!(saved, "saved within 1.5 s without a shutdown");
     }
   }
 

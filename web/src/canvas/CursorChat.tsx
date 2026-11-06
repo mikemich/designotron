@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { myColor, useCollab } from "../collab";
-import { CHAT_MAX, CHAT_MS, closeCursorChat, setChatText, useFollow } from "../follow";
+import { CHAT_MAX, CHAT_MS, closeCursorChat, sendChatMessage, setChatText, useFollow } from "../follow";
 import { useStore } from "../store";
 import { PresenceBoundary } from "./PresenceBoundary";
 
@@ -62,8 +62,8 @@ function LocalBubble() {
             document.getElementById("dt-canvas")?.focus({ preventScroll: true });
           } else if (e.key === "Enter") {
             e.preventDefault();
-            // A new message: the old one clears (an empty one just closes the bubble).
-            if (chat.text) setChatText("");
+            // Send: the draft clears, the sent message stays up (an empty draft closes the bubble).
+            if (chat.text) sendChatMessage();
             else closeCursorChat();
           }
         }}

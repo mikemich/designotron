@@ -12,7 +12,6 @@ import { FigmaImportDialog } from "./panels/FigmaImportDialog";
 import { PluginWindow, PluginsDialog } from "./panels/PluginsDialog";
 import { stopPlugin, usePlugins } from "./plugins";
 import { joinShared, stopSharing, useCollab } from "./collab";
-import { GuestBar } from "./panels/GuestBar";
 import { ShortcutsDialog } from "./panels/ShortcutsDialog";
 import { ImportDialog } from "./panels/ImportDialog";
 import { PhoneNote } from "./panels/PhoneNote";
@@ -477,6 +476,14 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       else setTimeout(run, 0);
     };
 
+    // A file opened without a preview (a template, an imported .dtron) gets one without waiting
+    // for the first edit.
+    const openThumb = setTimeout(() => {
+      getFileMeta(fileId).then((m) => {
+        if (m && !m.thumbnail) maybeThumbnail();
+      }, () => {});
+    }, 2000);
+
     // 400 ms for ordinary files, rising to 2 s at 18k layers: serialising a big file costs
     // more than the typist notices, so wait for a longer pause. But never longer than
     // 4 s (10 s for big files) since the first unsaved change, however steadily edits arrive.
@@ -578,6 +585,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     return () => {
       off();
       offFolder();
+      clearTimeout(openThumb);
       cancelTimers();
       if (retry) clearTimeout(retry);
       window.removeEventListener("beforeunload", beforeUnload);
@@ -642,7 +650,6 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       {figmaOpen && <FigmaImportDialog />}
       {pluginsOpen && !readOnly && <PluginsDialog />}
       {shareOpen && <ShareDialog />}
-      <GuestBar />
       {gone && (
         <div className="stale-bar" role="alert">
           This file was deleted in another tab. Edits here are no longer saved.

@@ -117,6 +117,11 @@ by /64.
   never dropped, and their edits keep working past the budget. The default leaves half of
   a 512 MB host (Render free, the Fly config) for what the count doesn't see: parsed
   documents and copies made while a file is sent.
+- **Saving**: with a data dir, a changed room is written to disk about a second after its
+  last save (five seconds for rooms over 2 MB). On SIGINT (Fly) or SIGTERM (`docker stop`,
+  Render) the relay saves every changed room first, lets connections drain for up to five
+  seconds, then saves again; `fly.toml` sets `kill_timeout = "10s"` to leave room for that.
+  Only a hard kill (SIGKILL, a crash, power loss) can lose the last second of edits.
 - **Slow connections**: an editor that stops reading (16 MB queued for it) is disconnected
   and reconnects to the current file instead of the relay buffering without bound;
   cursors are skipped for editors a little behind.
