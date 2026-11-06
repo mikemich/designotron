@@ -289,6 +289,193 @@ for (let run = 1; run <= 5; run++) {
   await ctx.close();
 }
 
+// ---------------------------------------------------------------- review fixes: stuck touch, prompts, slow double-tap, phone chat, tabs
+{
+  const { ctx, page, cdp } = await open(IPAD);
+  await create(page, [
+    { type: "rectangle", name: "Box", x: 100, y: 100, width: 200, height: 200, fill: "#4F46E5" },
+    { type: "rectangle", name: "Box2", x: 100, y: 500, width: 200, height: 200, fill: "#EF4444" },
+  ]);
+  await page.evaluate(() => window.__dt.setViewport({ zoom: 1, x: 0, y: 0 }));
+  await page.waitForTimeout(300);
+  const box = await byName(page, "Box");
+  const box2 = await byName(page, "Box2");
+  const zoomNow = () => dt(page, () => window.__dt.viewport().zoom);
+  /** Canvas touch is alive: a tap selects a layer and a one-finger drag moves it (it does not zoom). */
+  const alive = async (label) => {
+    const r = await rectOf(page, box2.id);
+    const z0 = await zoomNow();
+    const x0 = (await byName(page, "Box2")).x;
+    await dt(page, () => window.__dt.dispatch({ op: "select", ids: [] }));
+    await tap(cdp, r.cx, r.cy);
+    await sleep(250);
+    const sel = (await state(page)).selection;
+    check(`${label}: a tap on another layer selects it`, sel.length === 1 && sel[0] === box2.id, JSON.stringify(sel));
+    await touch(cdp, "touchStart", [[r.cx, r.cy]]);
+    await sleep(60);
+    for (let i = 1; i <= 5; i++) await touch(cdp, "touchMove", [[r.cx + i * 10, r.cy]]);
+    await sleep(60);
+    await touch(cdp, "touchEnd", []);
+    await sleep(250);
+    check(`${label}: a one-finger drag moves the layer and does not zoom`, Math.abs((await zoomNow()) - z0) < 0.001 && (await byName(page, "Box2")).x > x0 + 20, `zoom ${z0} -> ${await zoomNow()}`);
+    await page.keyboard.press("Control+z");
+    await sleep(150);
+  };
+
+  // Long-press, lift over the menu that opened under the finger, Escape.
+  const r = await rectOf(page, box.id);
+  await touch(cdp, "touchStart", [[r.cx, r.cy]]);
+  await sleep(650);
+  const m = await dt(page, () => document.querySelector("[role=menu]")?.getBoundingClientRect().toJSON() ?? null);
+  await touch(cdp, "touchMove", [[m ? m.x + 20 : r.cx, m ? m.y + 20 : r.cy]]);
+  await touch(cdp, "touchEnd", []);
+  await sleep(300);
+  await page.keyboard.press("Escape");
+  await sleep(250);
+  await alive("after a long-press lifted over its menu");
+
+  // A menu item tapped 250 ms after the lift still works (the lift's own click is the only one blocked).
+  const r1 = await rectOf(page, box.id);
+  const count0 = await dt(page, () => Object.keys(window.__dt.doc().nodes).length);
+  await touch(cdp, "touchStart", [[r1.cx, r1.cy]]);
+  await sleep(650);
+  await touch(cdp, "touchEnd", []);
+  await sleep(250);
+  const dup = await dt(page, () => {
+    const it = [...document.querySelectorAll("[role=menuitem]")].find((e) => /^Duplicate/.test(e.textContent.trim()));
+    const b = it?.getBoundingClientRect();
+    return b ? { x: b.x + b.width / 2, y: b.y + b.height / 2 } : null;
+  });
+  if (dup) await tap(cdp, dup.x, dup.y);
+  await sleep(400);
+  check("a menu item tapped 250 ms after the lift runs", dup !== null && (await dt(page, () => Object.keys(window.__dt.doc().nodes).length)) > count0);
+  await dt(page, () => window.__dt.dispatch({ op: "select", ids: [] }));
+  await page.keyboard.press("Escape");
+
+  // Android: the native contextmenu (at about 400 ms) opens the menu and cancels our timer, so
+  // there is no second open (our own path vibrates, the native one does not).
+  await page.evaluate(() => {
+    window.__vib = 0;
+    navigator.vibrate = () => ((window.__vib += 1), true);
+  });
+  const r3 = await rectOf(page, box.id);
+  await touch(cdp, "touchStart", [[r3.cx, r3.cy]]);
+  await sleep(380);
+  await page.evaluate(([x, y]) => document.elementFromPoint(x, y).dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: x, clientY: y })), [r3.cx, r3.cy]);
+  await sleep(300);
+  const nativeMenu = await menuOpen(page);
+  await touch(cdp, "touchEnd", []);
+  await sleep(250);
+  check("a native contextmenu opens the menu and cancels the pending hold", nativeMenu && (await dt(page, () => window.__vib)) === 0, `vibrations ${await dt(page, () => window.__vib)}`);
+  await page.keyboard.press("Escape");
+  await sleep(200);
+
+  // Pinch whose first finger lifts over an open overlay panel.
+  await page.click("#panel-toggle-right");
+  await sleep(400);
+  await dt(page, () => window.__dt.dispatch({ op: "select", ids: [] }));
+  const pr = await rectOf(page, box.id);
+  await touch(cdp, "touchStart", [[pr.cx, pr.cy, 1]]);
+  await sleep(60);
+  await touch(cdp, "touchStart", [[pr.cx, pr.cy, 1], [pr.cx + 60, pr.cy, 2]]);
+  await sleep(60);
+  await touch(cdp, "touchMove", [[700, 300, 1], [pr.cx + 100, pr.cy, 2]]);
+  await sleep(60);
+  await touch(cdp, "touchEnd", [[pr.cx + 100, pr.cy, 2]]);
+  await sleep(60);
+  await touch(cdp, "touchEnd", []);
+  await sleep(250);
+  await page.evaluate(() => window.__dt.setViewport({ zoom: 1, x: 0, y: 0 }));
+  await page.click("#panel-toggle-right");
+  await sleep(300);
+  await alive("after a pinch whose finger lifted over the overlay");
+  await ctx.close();
+}
+{
+  // A hold in the prompt's textarea is the browser's, not the canvas menu.
+  const { ctx, page, cdp } = await open(IPAD);
+  const ta = await dt(page, () => document.querySelector("#empty-prompt-input")?.getBoundingClientRect().toJSON() ?? null);
+  if (ta) {
+    await touch(cdp, "touchStart", [[ta.x + 60, ta.y + 30]]);
+    await sleep(750);
+    await touch(cdp, "touchEnd", []);
+    await sleep(250);
+  }
+  check("a 700 ms hold in the prompt textarea opens no canvas menu", ta !== null && !(await dt(page, () => !!document.querySelector(".menu"))));
+  await ctx.close();
+}
+{
+  // A slightly slow double-tap inside the open editor still selects the word.
+  const { ctx, page, cdp } = await open(IPAD);
+  await create(page, [{ type: "frame", name: "Card", x: 0, y: 0, width: 400, height: 300, fill: "#FFFFFF", children: [{ type: "text", name: "Title", x: 40, y: 120, text: "Hello world", fontSize: 28, fontWeight: 700, color: "#111111" }] }]);
+  const title = await byName(page, "Title");
+  const card = await byName(page, "Card");
+  await dt(page, (id) => window.__dt.tool("select", { ids: [id] }), card.id);
+  await page.keyboard.press("Shift+2");
+  await sleep(400);
+  const t = await rectOf(page, title.id);
+  await tap(cdp, t.cx, t.cy);
+  await sleep(120);
+  await tap(cdp, t.cx, t.cy);
+  await sleep(600);
+  await tap(cdp, t.l + 10, t.cy, 60);
+  await sleep(700);
+  await tap(cdp, t.l + 20, t.cy, 80);
+  await sleep(280);
+  await tap(cdp, t.l + 20, t.cy, 80);
+  await sleep(400);
+  const sel = await dt(page, () => {
+    const ta = document.querySelector(".text-editor");
+    return ta ? [ta.selectionStart, ta.selectionEnd] : null;
+  });
+  check("inside the editor a slow double-tap (80 ms hold, 280 ms pause) still selects the word", sel !== null && sel[1] > sel[0] && sel[1] - sel[0] < 11, JSON.stringify(sel));
+  await ctx.close();
+}
+{
+  // The phone's Claude sheet is full width.
+  const { ctx, page } = await open(devices["iPhone 14 Pro Max"]);
+  await page.click("#claude-toggle");
+  await sleep(400);
+  const w = await dt(page, () => ({ chat: document.querySelector(".main > .chat")?.getBoundingClientRect().width ?? 0, win: innerWidth, shadow: document.querySelector(".main > .chat") ? getComputedStyle(document.querySelector(".main > .chat")).boxShadow : "" }));
+  check("phone: the Claude sheet spans the full width", Math.abs(w.chat - w.win) < 1 && w.shadow === "none", JSON.stringify(w));
+  await ctx.close();
+}
+for (const [w, h] of [[834, 1194], [1024, 768]]) {
+  // Every tab of an overlay panel can be hit: the close button covers none of them.
+  const { ctx, page } = await open({ ...IPAD, viewport: { width: w, height: h }, screen: { width: w, height: h } });
+  for (const side of ["left", "right"]) {
+    await page.click(`#panel-toggle-${side}`);
+    await sleep(300);
+    const bad = await dt(page, (s) => {
+      const panel = document.querySelector(s === "left" ? ".main > .panel:not(.right)" : ".main > .panel.right");
+      const out = [];
+      for (const tab of panel.querySelectorAll("[role=tab]")) {
+        tab.scrollIntoView({ inline: "nearest" });
+        const r = tab.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        if (hit !== tab && !tab.contains(hit)) out.push(tab.textContent);
+      }
+      return out;
+    }, side);
+    check(`${w} px: no tab of the ${side} overlay is covered`, bad.length === 0, bad.join(", "));
+    await page.click(`#panel-toggle-${side}`);
+    await sleep(200);
+  }
+  await ctx.close();
+}
+{
+  // Ctrl+\ twice leaves Claude open at 1101-1280 px.
+  const { ctx, page } = await open({ viewport: { width: 1200, height: 800 }, deviceScaleFactor: 1 });
+  await page.click("#claude-toggle");
+  await sleep(300);
+  await page.keyboard.press("Control+\\");
+  await sleep(200);
+  await page.keyboard.press("Control+\\");
+  await sleep(300);
+  check("Ctrl+\\ twice at 1200 px keeps Claude open", await dt(page, () => !!document.querySelector(".main > .chat")));
+  await ctx.close();
+}
+
 // ---------------------------------------------------------------- toolbar fit
 async function toolbarFit(label, device, scheme) {
   const { ctx, page } = await open(device, { scheme });

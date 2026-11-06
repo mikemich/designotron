@@ -157,6 +157,7 @@ export function TextEditor({ id }: { id: string }) {
   const goalX = useRef<number | null>(null);
   const pointer = useRef("mouse");
   /** The last touch press on the textarea: where and when it went down and up. */
+  const lastTouchUp = useRef(0);
   const touchDown = useRef<{ t: number; x: number; y: number; up: number; gap: number } | null>(null);
   const plainPaste = useRef(0);
   const composing = useRef(false);
@@ -385,7 +386,7 @@ export function TextEditor({ id }: { id: string }) {
     if (pointer.current !== "touch" || !d) return;
     // A quick second or third tap is the browser's word or paragraph selection. A slow one (the
     // click count can still run on after the double-tap that opened the editor) is a plain tap.
-    const multi = e.detail > 1 && d.gap <= 350;
+    const multi = e.detail > 1 && d.gap <= 500;
     if (multi || (d.up && d.up - d.t >= 400)) return;
     if (Math.hypot(e.clientX - d.x, e.clientY - d.y) >= 10) return;
     const hit = hitAt(e.clientX, e.clientY);
@@ -544,16 +545,16 @@ export function TextEditor({ id }: { id: string }) {
           setFocused(false);
           // Keep editing while the user styles the selection in the side panel or a popover.
           const next = e.relatedTarget as HTMLElement | null;
-          if (next && next.closest(".panel.right, .popover")) return;
+          if (next && next.closest(".panel.right, .popover, .panel-toggle")) return;
           finish();
         }}
         onPointerDown={(e) => {
           pointer.current = e.pointerType;
-          touchDown.current = e.pointerType === "touch" ? { t: Date.now(), x: e.clientX, y: e.clientY, up: 0, gap: Date.now() - (touchDown.current?.t ?? 0) } : null;
+          touchDown.current = e.pointerType === "touch" ? { t: Date.now(), x: e.clientX, y: e.clientY, up: 0, gap: lastTouchUp.current ? Date.now() - lastTouchUp.current : Infinity } : null;
           e.stopPropagation();
         }}
         onPointerUp={(e) => {
-          if (touchDown.current && !touchDown.current.up) touchDown.current.up = Date.now();
+          if (touchDown.current && !touchDown.current.up) touchDown.current.up = lastTouchUp.current = Date.now();
           e.stopPropagation();
         }}
         onClick={onTouchTap}

@@ -243,7 +243,6 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     <header className="topbar">
       <h1 className="sr-only">Designotron editor</h1>
       <div className="group">
-        {panelToggle("left")}
         <button
           className="tbtn"
           onClick={(e) => open(e, "Main menu", mainMenu)}
@@ -253,6 +252,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           <div className="logo">D</div>
           <ChevronDown size={12} data-phone="hide" />
         </button>
+        {panelToggle("left")}
         {toolBtn("move", "Move (V)", <MousePointer2 size={16} />)}
         {/* Drawing tools are hidden on phones (view, comment, present and Claude only). */}
         <span className="draw-tools">

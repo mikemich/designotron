@@ -257,7 +257,8 @@ export function togglePanel(side: keyof Panels, open?: boolean) {
 export function toggleUi() {
   const st = useStore.getState();
   const r = toggleUiPanels(st.panels, st.panelsStash, st.compact);
-  const chatOpen = r.panels.right && st.tight ? false : st.chatOpen;
+  // Claude stays as it was: where it covers the Design panel, that panel just isn't shown.
+  const chatOpen = st.chatOpen;
   const keep = keepCentre(st, r.panels, chatOpen);
   useStore.setState({ panels: r.panels, panelsStash: r.stash, chatOpen, ...keep });
   writePanels(st.compact, r.panels, storage());

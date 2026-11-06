@@ -1308,7 +1308,7 @@ a.btn {
 }
 /* Tablets: the Layers and Design panels (and Claude) are overlays on a full-width canvas. They
  * start closed and open from the toolbar's two panel buttons. */
-@media (max-width: 1100px) {
+@media (min-width: 821px) and (max-width: 1100px) {
   .main,
   .main.with-chat {
     grid-template-columns: 1fr;
@@ -1339,21 +1339,36 @@ a.btn {
   .main.no-right > .panel.right {
     display: none;
   }
-  .panel > .panel-close {
-    display: inline-flex;
-    position: absolute;
-    top: 8px;
-    right: 6px;
-    z-index: 1;
-    width: 28px;
-    height: 28px;
-    align-items: center;
-    justify-content: center;
-    background: var(--panel);
+  /* The tab row and the close button share the panel's first row, so the button never covers a tab. */
+  .main > .panel {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 40px;
+    grid-template-rows: auto minmax(0, 1fr);
   }
   .panel > .tabs {
-    padding-right: 38px;
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
   }
+  .panel > .tabpanel {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-height: 0;
+  }
+  .panel > .panel-close {
+    display: inline-flex;
+    grid-column: 2;
+    grid-row: 1;
+    width: auto;
+    height: auto;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 14px;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
+  }
+}
+@media (max-width: 1100px) {
   /* The top bar gives up labels and the file name's room before anything overlaps. */
   .topbar .tbtn .label {
     display: none;
@@ -2281,6 +2296,10 @@ body:has(.modal-bg) .hint-card {
 
 .tbtn.export-code .export-icon {
   display: none;
+}
+/* The Layers toggle sits first on the bar; it follows the main menu in the DOM (tab order, scripts). */
+#panel-toggle-left {
+  order: -1;
 }
 @media (max-width: 1000px) {
   .topbar .save-state,
