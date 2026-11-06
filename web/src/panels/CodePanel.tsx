@@ -116,7 +116,8 @@ async function copyInline(raw: string, name: string) {
 
 export function cssFor(n: Node): string {
   const html = query<string>({ q: "exportHtml", id: n.id });
-  const m = html.match(/<body>\s*<\w+ style="([^"]*)"/);
+  // The layer is the first element in the body, inside the optional <main> landmark.
+  const m = html.match(/<body>\s*(?:<main[^>]*>\s*)?<\w+[^>]*?\sstyle="([^"]*)"/);
   const decl = (m?.[1] ?? "").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
   const lines = decl
     .split(";")
