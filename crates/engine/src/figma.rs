@@ -1144,7 +1144,11 @@ impl Import<'_> {
 fn to_ms(v: f64, unit: f64) -> f64 {
   // REST values are whole milliseconds; a small fractional one (0.3) was written in seconds.
   // "After delay 1 ms" is a common auto-advance trick, so a whole 1 stays 1 ms.
-  let ms = if unit == 1.0 && v > 0.0 && v < 20.0 && v.fract() != 0.0 { v * 1000.0 } else { v * unit };
+  let ms = if unit == 1.0 && v > 0.0 && v < 20.0 && v.fract() != 0.0 {
+    v * 1000.0
+  } else {
+    v * unit
+  };
   if ms.is_finite() {
     ms.clamp(0.0, 10_000.0).round()
   } else {
