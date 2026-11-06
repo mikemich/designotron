@@ -139,12 +139,6 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     return () => window.removeEventListener("resize", fit);
   }, [current.id]);
   useEffect(() => closePlayer, []);
-  // A keyboard-activated hotspot that leaves the screen or opens an overlay takes its focus with
-  // it: put it back in the player, so Tab stays inside.
-  useEffect(() => {
-    const root = rootRef.current;
-    if (root && !root.contains(document.activeElement)) root.focus({ preventScroll: true });
-  }, [history.length, overlays.length, revision]);
 
   /** The motion that really plays: none with reduced motion, a dissolve for a smart animate
    *  between containers with too many children. */
@@ -377,6 +371,13 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       if (before?.isConnected) before.focus?.();
     };
   }, []);
+  // A keyboard-activated hotspot that leaves the screen or opens an overlay takes its focus with
+  // it: put it back in the player, so Tab stays inside. (Declared after the opener effect, which
+  // must see the opener focused when the player mounts.)
+  useEffect(() => {
+    const root = rootRef.current;
+    if (root && !root.contains(document.activeElement)) root.focus({ preventScroll: true });
+  }, [history.length, overlays.length, revision]);
 
   // Keys: a Key interaction of the top overlay, else of the base frame, wins; otherwise Escape
   // closes and the arrows step through the page's frames.
