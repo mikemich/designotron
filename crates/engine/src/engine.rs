@@ -2308,7 +2308,8 @@ impl Engine {
         Ok(json!({}))
       }
       Command::DropInto { ids, x, y } => {
-        let ids = ops::top_most(&self.doc, &ids);
+        // Layer order, not selection order, so a bottom-up shift-selection lands as it was stacked.
+        let ids = ops::paint_order(&self.doc, &ops::top_most(&self.doc, &ids));
         let pt = Point::new(x, y);
         let target = ops::frame_at(&self.doc, &self.page, pt, &ids, true);
         // One place for the whole drop, so several layers keep their order.
