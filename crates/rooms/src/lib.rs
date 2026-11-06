@@ -189,6 +189,8 @@ pub struct Rooms {
 /// A room's log is compacted into its snapshot after this long, or past `LOG_COMPACT_BYTES`.
 const COMPACT_EVERY: Duration = Duration::from_secs(30);
 const LOG_COMPACT_BYTES: usize = 8 << 20;
+/// A connection whose changes leave this much unwritten log waits for the disk.
+const LOG_BACKLOG: usize = 16 << 20;
 /// A log sync slower than this is logged.
 const SLOW_SYNC: Duration = Duration::from_millis(200);
 
@@ -712,6 +714,12 @@ impl Rooms {
     let (doc, assets, seq, held) = {
       let mut r = room.lock().await;
       let held = std::mem::take(&mut r.held);
+      if !r.dirty && !r.compact {
+        // Another compaction got here first: the snapshot is current.
+        drop(r);
+        self.release(held);
+        return;
+      }
       r.log_buf.clear();
       r.compact = false;
       let Some(doc) = r.doc.clone() else {
@@ -740,7 +748,7 @@ impl Rooms {
       f.sync_all()?;
       drop(f);
       std::fs::rename(&tmp2, &path2)?;
-      sync_dir(&path2);
+      sync_dir(&path2)?;
       // Lines at or below the snapshot's `seq` are skipped on load, so a crash before this
       // truncation only leaves a log that replays nothing.
       match std::fs::OpenOptions::new().write(true).open(&log_path) {
@@ -760,7 +768,7 @@ impl Rooms {
     match written {
       Ok(len) => {
         if started.elapsed() > SLOW_SYNC {
-          log::warn!("room {id}: snapshot of {len} bytes took {:?}", started.elapsed());
+          log::warn!("room {}: snapshot of {len} bytes took {:?}", tag(id), started.elapsed());
         }
         let mut r = room.lock().await;
         let doc_bytes = len.saturating_sub(r.asset_bytes);
@@ -769,7 +777,7 @@ impl Rooms {
         self.release(held);
       }
       Err(e) => {
-        log::warn!("cannot save room {id}: {e}");
+        log::warn!("cannot save room {}: {e}", tag(id));
         let _ = tokio::fs::remove_file(&tmp).await;
         {
           let mut r = room.lock().await;
@@ -812,7 +820,7 @@ impl Rooms {
           Some(f) => f,
           None => {
             let f = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
-            sync_dir(&path);
+            sync_dir(&path)?;
             Arc::new(f)
           }
         };
@@ -832,11 +840,11 @@ impl Rooms {
           self.sync_micros.fetch_add(us, Ordering::Relaxed);
           self.sync_max_micros.fetch_max(us, Ordering::Relaxed);
           if took > SLOW_SYNC {
-            log::warn!("room {id}: syncing {lines} changes took {took:?}");
+            log::warn!("room {}: syncing {lines} changes took {took:?}", tag(&id));
           }
         }
         Err(e) => {
-          log::warn!("cannot write the log of room {id}: {e}");
+          log::warn!("cannot write the log of room {}: {e}", tag(&id));
           log.file = None;
           {
             let mut r = room.lock().await;
@@ -854,11 +862,17 @@ impl Rooms {
 
   /// Sends what was held back, in order, now that the changes before it are durable.
   fn release(&self, held: Vec<Held>) {
+    // What a peer had queued before the batch: the batch itself doesn't make a peer that was
+    // keeping up look behind.
+    let mut before: HashMap<usize, usize> = HashMap::new();
     for h in held {
       if h.direct {
         h.out.send_shared(h.text);
       } else {
-        self.deliver(&h.out, &h.text, false);
+        let queued = *before
+          .entry(Arc::as_ptr(&h.out.meter) as usize)
+          .or_insert_with(|| h.out.meter.queued.load(Ordering::Relaxed));
+        self.deliver_at(&h.out, &h.text, false, queued);
       }
     }
   }
@@ -915,6 +929,11 @@ impl Rooms {
           }
           false
         } else if idle > ttl {
+          // Files go before the map lock is released, so a joiner can't load them and then
+          // have them deleted under it.
+          for path in [self.file(id), self.log_file(id)].into_iter().flatten() {
+            let _ = std::fs::remove_file(path);
+          }
           deleted.push(id.clone());
           false
         } else {
@@ -927,14 +946,6 @@ impl Rooms {
         keep
       });
       self.evict_idle(&mut rooms, 0);
-    }
-    for id in &deleted {
-      if let Some(path) = self.file(id) {
-        let _ = tokio::fs::remove_file(path).await;
-      }
-      if let Some(path) = self.log_file(id) {
-        let _ = tokio::fs::remove_file(path).await;
-      }
     }
     if self.view_links {
       // Forget links of rooms that exist nowhere any more.
@@ -1062,7 +1073,7 @@ impl Rooms {
           let name = m.name.as_deref().unwrap_or("").trim().chars().take(40).collect::<String>();
           if let (false, Some(peer)) = (name.is_empty(), r.peers.get_mut(&id)) {
             peer.name = name.clone();
-            self.broadcast(&r, id, &json!({ "type": "rename", "id": id, "name": name }), false);
+            self.notify(&mut r, id, &json!({ "type": "rename", "id": id, "name": name }));
           }
           Step::Go
         }
@@ -1105,10 +1116,18 @@ impl Rooms {
         }
         _ => Step::Go,
       };
+      let backlog = r.log_buf.len() > LOG_BACKLOG;
+      let held = !r.held.is_empty();
       drop(r);
-      if self.data_dir.is_some() && matches!(m.kind.as_ref(), "join" | "delta") {
-        // Not awaited: this connection keeps reading, and its next changes share the next sync.
-        tokio::spawn(self.clone().commit(room_id.clone(), room.clone(), io.clone()));
+      if self.data_dir.is_some() && (matches!(m.kind.as_ref(), "join" | "delta") || held) {
+        let commit = self.clone().commit(room_id.clone(), room.clone(), io.clone());
+        if backlog {
+          // The disk can't keep up: stop reading from this connection until it has.
+          commit.await;
+        } else {
+          // Not awaited: this connection keeps reading, and its next changes share the next sync.
+          tokio::spawn(commit);
+        }
       }
       match step {
         Step::Go => {}
@@ -1123,10 +1142,14 @@ impl Rooms {
     let mut r = room.lock().await;
     if r.peers.remove(&id).is_some() {
       self.people.fetch_sub(1, Ordering::Relaxed);
-      self.broadcast(&r, id, &json!({ "type": "leave", "id": id }), false);
+      self.notify(&mut r, id, &json!({ "type": "leave", "id": id }));
     }
     r.last_active = Some(Instant::now());
+    let held = !r.held.is_empty();
     drop(r);
+    if held {
+      tokio::spawn(self.clone().commit(room_id.clone(), room.clone(), io.clone()));
+    }
     // Let the writer deliver a final error, but not wait on a peer that stopped reading.
     drop(out);
     if tokio::time::timeout(Duration::from_secs(2), &mut writer).await.is_err() {
@@ -1297,7 +1320,7 @@ impl Rooms {
     if let Some(role) = role.name() {
       peer["role"] = json!(role);
     }
-    self.broadcast(r, id, &peer, false);
+    self.notify(r, id, &peer);
     Step::Go
   }
 
@@ -1377,18 +1400,21 @@ impl Rooms {
     r.dirty = true;
     if self.data_dir.is_some() {
       // The line holds what was applied (the repaired delta, the kept images), in one line.
-      r.seq += 1;
       let line = LogLine {
-        seq: r.seq,
+        seq: r.seq + 1,
         delta: Cow::Borrowed(&delta),
         assets: assets.as_ref().filter(|_| keep).map(Cow::Borrowed),
       };
-      let before = r.log_buf.len();
-      if serde_json::to_writer(&mut r.log_buf, &line).is_err() {
-        r.log_buf.truncate(before);
+      let mut bytes = Vec::new();
+      if serde_json::to_writer(&mut bytes, &line).is_ok() {
+        bytes.push(b'\n');
+        r.seq += 1;
+        r.log_bytes += bytes.len();
+        r.log_buf.extend_from_slice(&bytes);
+      } else {
+        // Can't happen for a JSON value; if it did, the snapshot the commit takes covers it.
+        r.compact = true;
       }
-      r.log_buf.push(b'\n');
-      r.log_bytes += r.log_buf.len() - before;
     }
     let out = DeltaOut {
       kind: "delta",
@@ -1466,14 +1492,18 @@ impl Rooms {
         if r.good < bytes.len() {
           // A torn tail (a write the crash cut short, never acknowledged): cut it off, or later
           // lines would sit behind it and never replay.
-          log::warn!("room {id}: dropped {} bytes of a torn log tail", bytes.len() - r.good);
+          log::warn!("room {}: dropped {} bytes of a torn log tail", tag(id), bytes.len() - r.good);
           if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&log_path) {
             let _ = file.set_len(r.good as u64).and_then(|_| file.sync_data());
           }
+          // Whether or not the cut worked, the first commit snapshots and empties the log
+          // before anything is appended behind garbage.
+          room.compact = true;
+          room.dirty = true;
         }
         room.log_bytes = r.good;
         if r.applied > 0 {
-          log::info!("room {id}: replayed {} logged changes", r.applied);
+          log::info!("room {}: replayed {} logged changes", tag(id), r.applied);
           room.seq = room.seq.max(r.last);
           room.dirty = true;
           doc_bytes = json_size(&doc);
@@ -1577,6 +1607,16 @@ impl Rooms {
     }
   }
 
+  /// `broadcast` for peers coming, going and renaming: behind whatever is held (a re-sharer's
+  /// welcome carries the peer list as of its join, so a later `peer` or `leave` must not overtake it).
+  fn notify(&self, room: &mut Room, from: u64, msg: &impl Serialize) {
+    if self.data_dir.is_some() && !room.held.is_empty() {
+      self.hold_broadcast(room, from, msg);
+    } else {
+      self.broadcast(room, from, msg, false);
+    }
+  }
+
   /// `broadcast` for messages that belong to the change stream.
   fn hold_broadcast(&self, room: &mut Room, from: u64, msg: &impl Serialize) {
     if !room.peers.keys().any(|id| *id != from) {
@@ -1614,7 +1654,12 @@ impl Rooms {
   /// Queues a broadcast for one peer, unless it has fallen behind: then presence is
   /// skipped and anything else disconnects it (it reconnects and gets the current file).
   fn deliver(&self, out: &Outbox, text: &Arc<String>, droppable: bool) {
-    let (len, queued) = (text.len(), out.meter.queued.load(Ordering::Relaxed));
+    self.deliver_at(out, text, droppable, out.meter.queued.load(Ordering::Relaxed));
+  }
+
+  /// `deliver`, judging the backlog as `queued` bytes.
+  fn deliver_at(&self, out: &Outbox, text: &Arc<String>, droppable: bool, queued: usize) {
+    let len = text.len();
     if droppable {
       if queued > PRESENCE_BACKLOG {
         return;
@@ -1787,13 +1832,19 @@ fn replay(doc: &mut Document, assets: &mut Map<String, Value>, snapshot_seq: u64
 }
 
 /// Makes a new or renamed file's directory entry durable.
-fn sync_dir(file: &std::path::Path) {
+fn sync_dir(file: &std::path::Path) -> std::io::Result<()> {
   #[cfg(unix)]
-  if let Some(dir) = file.parent().and_then(|d| std::fs::File::open(d).ok()) {
-    let _ = dir.sync_all();
+  if let Some(dir) = file.parent() {
+    return std::fs::File::open(dir)?.sync_all();
   }
-  #[cfg(not(unix))]
   let _ = file;
+  Ok(())
+}
+
+/// A short stand-in for a room id in logs (the id is the access token to the room).
+fn tag(room_id: &str) -> String {
+  let digest = Sha256::digest(format!("designotron-log\0{room_id}").as_bytes());
+  digest.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
 
 /// JSON size of `value`, without building the string.
@@ -1992,6 +2043,8 @@ mod tests {
     room: Arc<Mutex<Room>>,
     io: Arc<Mutex<RoomLog>>,
     next: u64,
+    /// Each joined connection's `kick`.
+    kicks: Vec<Arc<Notify>>,
   }
 
   type Rx = mpsc::UnboundedReceiver<Arc<String>>;
@@ -2004,7 +2057,13 @@ mod tests {
     async fn with(rooms: Arc<Rooms>) -> Harness {
       let room = rooms.room(ROOM).await.unwrap();
       let io = room.lock().await.io.clone();
-      Harness { rooms, room, io, next: 0 }
+      Harness {
+        rooms,
+        room,
+        io,
+        next: 0,
+        kicks: Vec::new(),
+      }
     }
 
     async fn commit(&self) {
@@ -2013,14 +2072,22 @@ mod tests {
 
     /// Joins (committing like a connection does); returns the person's id, the welcome and the receiver.
     async fn join(&mut self, doc: Option<Value>, reset: bool) -> (u64, Value, Rx) {
+      let (id, mut rx) = self.join_uncommitted(doc, reset).await;
+      self.commit().await;
+      let welcome: Value = serde_json::from_str(&rx.try_recv().expect("welcome")).unwrap();
+      (id, welcome, rx)
+    }
+
+    async fn join_uncommitted(&mut self, doc: Option<Value>, reset: bool) -> (u64, Rx) {
       self.next += 1;
       let id = self.next;
-      let (tx, mut rx) = mpsc::unbounded_channel();
+      let (tx, rx) = mpsc::unbounded_channel();
       let out = Outbox {
         tx,
         meter: Arc::new(Meter::new(self.rooms.conn_bytes.clone())),
         kick: Arc::new(Notify::new()),
       };
+      self.kicks.push(out.kick.clone());
       let mut msg = json!({ "type": "join", "name": "p", "color": "#000", "granular": true, "reset": reset });
       if let Some(d) = doc {
         msg["doc"] = d;
@@ -2030,10 +2097,7 @@ mod tests {
       let mut r = self.room.lock().await;
       let step = self.rooms.join(ROOM, &mut r, id, Role::Editor, &out, &m, text.len()).await;
       assert!(matches!(step, Step::Go));
-      drop(r);
-      self.commit().await;
-      let welcome: Value = serde_json::from_str(&rx.try_recv().expect("welcome")).unwrap();
-      (id, welcome, rx)
+      (id, rx)
     }
 
     async fn delta_text(&self, id: u64, text: &str) {
@@ -2163,7 +2227,11 @@ mod tests {
     let mut h = Harness::open(&dir).await;
     let (owner, w, _rx) = h.join(None, false).await;
     assert_eq!(w["doc"]["comments"]["c1"]["x"], 2.0);
-    assert!(std::fs::read(&log).unwrap().ends_with(b"}\n"), "the torn tail is gone");
+    assert_eq!(
+      std::fs::metadata(&log).unwrap().len(),
+      0,
+      "the first commit after the load snapshots and empties the log"
+    );
     h.send(owner, 4.0).await;
     drop(h);
     assert_eq!(welcome_x(&dir).await, 4.0, "a change appended after the reload replays");
@@ -2233,7 +2301,7 @@ mod tests {
     let (_, _, _fresh_rx) = h.join(Some(sample_doc()), true).await;
     assert_eq!(
       types(&drain(&mut peer_rx)),
-      ["peer", "delta", "reload"],
+      ["delta", "reload", "peer"],
       "the reload follows the change before it"
     );
     drop(h);
@@ -2322,5 +2390,99 @@ mod tests {
       assert_eq!(dir.join(format!("{id}.json")).exists(), saved, "{id}");
     }
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// A re-sharer's welcome waits for its snapshot; a person joining or leaving meanwhile is
+  /// announced behind it, or the welcome's peer list would erase them.
+  #[tokio::test]
+  async fn peers_joining_and_leaving_do_not_overtake_a_held_welcome() {
+    let dir = tmp_dir("welcome");
+    let mut h = Harness::open(&dir).await;
+    let (_, _, _first) = h.join(Some(sample_doc()), true).await;
+    let (resharer, mut rx) = h.join_uncommitted(Some(sample_doc()), true).await;
+    assert!(rx.try_recv().is_err(), "the welcome is held for the snapshot");
+    let (late, _, _late_rx) = {
+      // Someone joins before the snapshot is done (joining commits, so go through the pieces).
+      let (id, rx) = h.join_uncommitted(None, false).await;
+      (id, 0, rx)
+    };
+    {
+      let mut r = h.room.lock().await;
+      r.peers.remove(&late);
+      h.rooms.notify(&mut r, late, &json!({ "type": "leave", "id": late }));
+    }
+    assert!(rx.try_recv().is_err(), "still nothing before the commit");
+    h.commit().await;
+    let got = drain(&mut rx);
+    assert_eq!(types(&got)[0], "welcome", "{:?}", types(&got));
+    assert_eq!(types(&got)[1..], ["peer", "leave"]);
+    let _ = (resharer, std::fs::remove_dir_all(&dir));
+  }
+
+  /// A failed log write acknowledges nothing and sends everyone away to reconnect.
+  #[tokio::test]
+  async fn a_failed_log_write_acknowledges_nothing_and_kicks_everyone() {
+    let dir = tmp_dir("failwrite");
+    let mut h = Harness::open(&dir).await;
+    let (owner, _, mut owner_rx) = h.join(Some(sample_doc()), true).await;
+    let (_, _, mut peer_rx) = h.join(None, false).await;
+    drain(&mut owner_rx);
+    drain(&mut peer_rx);
+    // The log can't be opened for appending.
+    std::fs::create_dir(dir.join(format!("{ROOM}.log"))).unwrap();
+    h.send(owner, 1.0).await;
+    let (own, peer) = (drain(&mut owner_rx), drain(&mut peer_rx));
+    assert!(!types(&own).contains(&"ack".to_string()), "no ack: {:?}", types(&own));
+    assert!(!types(&peer).contains(&"delta".to_string()), "nobody sees the unsaved change");
+    assert_eq!(types(&peer), ["error"]);
+    for kick in &h.kicks {
+      tokio::time::timeout(Duration::from_secs(1), kick.notified()).await.expect("kicked");
+    }
+    assert!(h.room.lock().await.compact, "the next commit snapshots instead of appending");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// A batch of held changes doesn't make a peer that was keeping up look behind.
+  #[tokio::test]
+  async fn a_big_batch_does_not_kick_a_peer_that_was_keeping_up() {
+    let rooms = Rooms::new(Limits::default(), None);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let out = Outbox {
+      tx,
+      meter: Arc::new(Meter::new(rooms.conn_bytes.clone())),
+      kick: Arc::new(Notify::new()),
+    };
+    let held: Vec<Held> = (0..3)
+      .map(|_| Held {
+        out: out.clone(),
+        text: Arc::new("x".repeat(PEER_BACKLOG / 3 + 1)),
+        direct: false,
+      })
+      .collect();
+    rooms.release(held);
+    assert!(
+      tokio::time::timeout(Duration::from_millis(50), out.kick.notified()).await.is_err(),
+      "not kicked"
+    );
+    assert_eq!(std::iter::from_fn(|| rx.try_recv().ok()).count(), 3);
+  }
+
+  /// Nothing to snapshot, nothing written, however it is asked.
+  #[tokio::test]
+  async fn an_unchanged_room_is_not_snapshotted_again() {
+    let dir = tmp_dir("unchanged");
+    let mut h = Harness::open(&dir).await;
+    let (_, _, _rx) = h.join(Some(sample_doc()), true).await;
+    let json = dir.join(format!("{ROOM}.json"));
+    std::fs::remove_file(&json).unwrap();
+    h.rooms.save_all().await;
+    assert!(!json.exists(), "not dirty: no second snapshot");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn sync_dir_reports_failures() {
+    assert!(sync_dir(std::path::Path::new("/nonexistent-dir-for-test/file")).is_err() || cfg!(not(unix)));
+    assert!(sync_dir(&std::env::temp_dir().join("x")).is_ok());
   }
 }

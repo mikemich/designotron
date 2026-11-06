@@ -1114,6 +1114,11 @@ mod tests {
       let room = designotron_rooms::random_token();
       let (mut a, _b) = share_and_rename(addr, &room, "Acked").await;
       while next_json(&mut a).await["type"] != "ack" {}
+      // The snapshot has not seen the edit (it is about 30 s away), so only the log can bring it back.
+      let snapshot = std::fs::read_to_string(dir.join(format!("{room}.json"))).unwrap();
+      assert!(!snapshot.contains("Acked"), "not in the snapshot yet");
+      // Aborting the run task stops the ticker's owner and the server like a kill does for the
+      // test's purposes: no `save_all` runs, and the new relay starts from the files alone.
       handle.abort();
       let (addr2, stop2, handle2) = start_run(dir.clone()).await;
       let mut c = connect(addr2, &room, None).await.unwrap();
