@@ -12,8 +12,6 @@ pub mod codegen;
 pub mod collab;
 #[cfg(test)]
 mod collab_sim;
-#[cfg(test)]
-mod json_golden_tests;
 pub mod color;
 pub mod comments;
 pub mod components;
@@ -24,6 +22,8 @@ pub mod figma;
 pub mod geom;
 pub mod grids;
 pub mod interact;
+#[cfg(test)]
+mod json_golden_tests;
 pub mod layout;
 pub mod lint;
 pub mod model;

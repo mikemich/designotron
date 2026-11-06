@@ -2090,7 +2090,7 @@ fn credits_under(doc: &Document, root: Option<&str>) -> Vec<ImageCredit> {
     }
   };
   match root {
-    None => doc.nodes.values().for_each(&mut add),
+    None => doc.nodes.values().for_each(|n| add(n)),
     Some(id) => {
       let mut stack = vec![id.to_string()];
       while let Some(id) = stack.pop() {
@@ -4582,7 +4582,7 @@ mod tests {
         c.source_url = format!("https://example.com/a b)\n- [x](https://evil{i})");
         c.license_url = "https://creativecommons.org/licenses/by/2.0/".into();
       }
-      bad.nodes.insert("pic".into(), n);
+      bad.nodes.insert("pic".into(), std::sync::Arc::new(n));
       let html = export_html(&bad, "home", &HeuristicMeasurer);
       assert_eq!(html.matches("-->").count(), 1, "{title}: {html}");
       assert!(!html.contains("--!>") && !html.contains("<script>alert"), "{html}");

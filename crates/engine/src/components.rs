@@ -14,6 +14,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -1086,7 +1087,7 @@ fn remap_overrides(doc: &Document, from: &str, to: &str, overrides: &BTreeMap<No
 }
 
 /// Each layer's path under `root`: (name, how many earlier siblings share it) per level.
-fn layer_paths(nodes: &imbl::OrdMap<NodeId, Node>, root: &str) -> HashMap<NodeId, LayerPath> {
+fn layer_paths(nodes: &imbl::OrdMap<NodeId, Arc<Node>>, root: &str) -> HashMap<NodeId, LayerPath> {
   let mut out = HashMap::new();
   let mut stack = vec![(root.to_string(), Vec::new())];
   while let Some((id, path)) = stack.pop() {

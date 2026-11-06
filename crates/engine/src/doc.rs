@@ -1,7 +1,7 @@
 //! Tree navigation and structural edits on a [`Document`].
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use imbl::ordmap::DiffItem;
 
@@ -74,7 +74,7 @@ pub struct NameCache(Mutex<NameIndex>);
 
 #[derive(Default, Clone)]
 struct NameIndex {
-  seen: imbl::OrdMap<NodeId, Node>,
+  seen: imbl::OrdMap<NodeId, Arc<Node>>,
   /// Layers whose name starts with the base, for every base asked about so far.
   counts: HashMap<String, usize>,
 }
@@ -104,7 +104,7 @@ impl NameCache {
 }
 
 impl NameIndex {
-  fn sync(&mut self, nodes: &imbl::OrdMap<NodeId, Node>) {
+  fn sync(&mut self, nodes: &imbl::OrdMap<NodeId, Arc<Node>>) {
     if self.seen.ptr_eq(nodes) {
       return;
     }
@@ -137,23 +137,24 @@ impl Document {
     let ids: Vec<NodeId> = self.nodes.values().filter(|n| pred(n)).map(|n| n.id.clone()).collect();
     for id in ids {
       if let Some(n) = self.nodes.get_mut(&id) {
-        f(n);
+        f(Arc::make_mut(n));
       }
     }
   }
 
   pub fn get(&self, id: &str) -> Option<&Node> {
-    self.nodes.get(id)
+    self.nodes.get(id).map(|n| &**n)
   }
 
+  /// Copies the node out of its `Arc` only when another document (an undo snapshot) shares it.
   pub fn get_mut(&mut self, id: &str) -> Option<&mut Node> {
-    self.nodes.get_mut(id)
+    self.nodes.get_mut(id).map(Arc::make_mut)
   }
 
   /// Stores `n` under its id unless an equal node is already there.
   pub fn set_node(&mut self, n: Node) {
-    if self.nodes.get(&n.id) != Some(&n) {
-      self.nodes.insert(n.id.clone(), n);
+    if self.get(&n.id) != Some(&n) {
+      self.nodes.insert(n.id.clone(), Arc::new(n));
     }
   }
 
@@ -161,13 +162,13 @@ impl Document {
   /// path-copies the node's tree branch even when nothing is written, and every undo step
   /// then keeps that copy alive; hot paths that mostly rewrite equal values use this.
   pub fn modify(&mut self, id: &str, f: impl FnOnce(&mut Node)) -> bool {
-    let Some(old) = self.nodes.get(id) else { return false };
+    let Some(old) = self.get(id) else { return false };
     let mut n = old.clone();
     f(&mut n);
     if n == *old {
       return false;
     }
-    self.nodes.insert(id.to_string(), n);
+    self.nodes.insert(id.to_string(), Arc::new(n));
     true
   }
 
@@ -189,7 +190,7 @@ impl Document {
 
   fn child_list_mut(&mut self, parent: Option<&str>, page: &str) -> Option<&mut Vec<NodeId>> {
     match parent {
-      Some(p) => self.nodes.get_mut(p).map(|n| &mut n.children),
+      Some(p) => self.get_mut(p).map(|n| &mut n.children),
       None => self.page_mut(page).map(|p| &mut p.children),
     }
   }
@@ -333,7 +334,7 @@ impl Document {
     node.parent = parent.map(|p| p.to_string());
     node.page = page.to_string();
     let id = node.id.clone();
-    self.nodes.insert(id.clone(), node);
+    self.nodes.insert(id.clone(), Arc::new(node));
     if let Some(list) = self.child_list_mut(parent, page) {
       let i = index.unwrap_or(list.len()).min(list.len());
       list.insert(i, id);
@@ -441,7 +442,12 @@ impl Document {
   }
 
   pub fn components(&self) -> Vec<&Node> {
-    self.nodes.values().filter(|n| n.kind == NodeType::Component).collect()
+    self
+      .nodes
+      .values()
+      .map(|n| &**n)
+      .filter(|n| n.kind == NodeType::Component)
+      .collect()
   }
 
   /// Unique layer name like "Rectangle 3": the base plus one more than the number of layers

@@ -38,7 +38,11 @@ fn mb() -> f64 {
 /// Print net and peak (since the previous mark), then restart the peak at the current net.
 fn mark(label: &str) {
   let net = NET.load(Ordering::Relaxed);
-  println!("{label:<36} net {:>7.1} MB  peak {:>7.1} MB", net as f64 / 1048576.0, PEAK.load(Ordering::Relaxed) as f64 / 1048576.0);
+  println!(
+    "{label:<36} net {:>7.1} MB  peak {:>7.1} MB",
+    net as f64 / 1048576.0,
+    PEAK.load(Ordering::Relaxed) as f64 / 1048576.0
+  );
   PEAK.store(net, Ordering::Relaxed);
 }
 
@@ -80,9 +84,24 @@ fn t20k(layers: usize) {
   let id = e.doc.nodes.values().find(|n| n.name == "Dot 7").map(|n| n.id.clone()).unwrap();
   let base = NET.load(Ordering::Relaxed);
   for i in 0..20 {
-    e.dispatch(Command::Ai { tool: "update_nodes".into(), input: json!({ "updates": [{ "id": id, "opacity": 0.1 + i as f64 / 40.0 }] }) }).unwrap();
+    e.dispatch(Command::Ai {
+      tool: "update_nodes".into(),
+      input: json!({ "updates": [{ "id": id, "opacity": 0.1 + i as f64 / 40.0 }] }),
+    })
+    .unwrap();
   }
-  println!("single edit retains {:.1} KB/step (20 steps)", (NET.load(Ordering::Relaxed) - base) as f64 / 1024.0 / 20.0);
+  println!(
+    "single edit retains {:.1} KB/step (20 steps)",
+    (NET.load(Ordering::Relaxed) - base) as f64 / 1024.0 / 20.0
+  );
+  // A step keeps two document clones (before, after); the page list (root ids) is copied by each.
+  let n0 = NET.load(Ordering::Relaxed);
+  let pages = std::hint::black_box(e.doc.pages.clone());
+  println!(
+    "  of which one page-list clone: {:.1} KB",
+    (NET.load(Ordering::Relaxed) - n0) as f64 / 1024.0
+  );
+  drop(pages);
   PEAK.store(NET.load(Ordering::Relaxed), Ordering::Relaxed);
   let json = e.to_json();
   println!("doc json {:.1} MB", json.len() as f64 / 1048576.0);
