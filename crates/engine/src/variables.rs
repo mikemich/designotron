@@ -315,9 +315,13 @@ pub fn validate(collections: &[impl Borrow<Collection>], previous: &[Arc<Collect
     .collect();
   let old_colls: BTreeMap<&str, &str> = previous.iter().map(|c| (c.id.as_str(), c.name.as_str())).collect();
   for (i, c) in collections.iter().enumerate() {
+    let c: &Collection = c.borrow();
     let name = c.name.trim();
     if old_colls.get(c.id.as_str()).is_none_or(|o| o.trim() != name)
-      && collections.iter().enumerate().any(|(j, d)| j != i && d.name.trim() == name)
+      && collections
+        .iter()
+        .enumerate()
+        .any(|(j, d)| j != i && d.borrow().name.trim() == name)
     {
       return Err(format!("A collection named {name} already exists"));
     }
@@ -1530,7 +1534,7 @@ mod tests {
   fn tokens_json_is_dtcg_with_modes_in_an_extension() {
     let mut doc = crate::doc::new_document(&mut crate::doc::IdGen::new(1), "T");
     doc.variables = vec![
-      Collection {
+      Arc::new(Collection {
         id: "c1".into(),
         name: "Primitives".into(),
         modes: vec![VarMode {
@@ -1543,9 +1547,12 @@ mod tests {
           named("space2", "Space/2", VarKind::Number, &[("m", json!(8))]),
           named("half", "Space/0.5", VarKind::Number, &[("m", json!(2))]),
           named("flag", "Flags/On", VarKind::Boolean, &[("m", json!(true))]),
-        ],
-      },
-      Collection {
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
+      }),
+      Arc::new(Collection {
         id: "c2".into(),
         name: "Theme".into(),
         modes: vec![
@@ -1572,8 +1579,11 @@ mod tests {
             &[("l", json!("#11223380")), ("d", json!("#112233"))],
           ),
           named("font", "Font", VarKind::String, &[("l", json!("Inter")), ("d", json!("Georgia"))]),
-        ],
-      },
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
+      }),
     ];
     let v = tokens_json(&doc);
     assert_eq!(
@@ -1604,7 +1614,7 @@ mod tests {
     assert_eq!(v["Theme"]["Font"]["$extensions"]["com.designotron"]["type"], "string");
     assert_eq!(v["Primitives"]["Flags"]["On"]["$value"], true);
     // An alias as the default value is a reference too.
-    doc.variables[1].variables[0]
+    Arc::make_mut(&mut Arc::make_mut(&mut doc.variables[1]).variables[0])
       .values
       .insert("l".into(), json!({ "alias": "space2" }));
     assert_eq!(tokens_json(&doc)["Theme"]["Surface"]["Bg"]["$value"], "{Primitives.Space.2}");

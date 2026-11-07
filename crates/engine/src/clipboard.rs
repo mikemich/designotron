@@ -592,7 +592,7 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
     for (cm, dm) in added_modes {
       let Some(raw) = cv.values.get(&cm).cloned() else { continue };
       let value = pasted_value(cv, raw, first.as_ref(), &map);
-      if let Some(v) = doc.variables[di].variables.iter_mut().find(|v| v.id == dest_id) {
+      if let Some(v) = crate::variables::var_mut(Arc::make_mut(&mut doc.variables[di]), &dest_id) {
         v.values.insert(dm, value);
       }
     }
@@ -647,7 +647,7 @@ fn d_is_new(before: &[Arc<Collection>], id: &str) -> bool {
 
 /// (clipboard mode id, destination mode id) for the modes this paste added to a collection the
 /// destination already had.
-fn added_modes_of(before: &[Collection], cc: &Collection, dest: &Collection, map: &Remap) -> Vec<(String, String)> {
+fn added_modes_of(before: &[Arc<Collection>], cc: &Collection, dest: &Collection, map: &Remap) -> Vec<(String, String)> {
   let Some(old) = before.iter().find(|c| c.id == dest.id) else {
     return Vec::new();
   };
@@ -1281,13 +1281,13 @@ mod tests_r10_review {
   #[test]
   fn a_paste_matches_collection_and_mode_names_ignoring_surrounding_spaces() {
     let mut a = old_file(vec![var("v_n", "N", VarKind::Number, json!(3))]);
-    a.doc.variables[0].name = "Theme ".into();
-    a.doc.variables[0].modes[0].name = "Dark ".into();
+    std::sync::Arc::make_mut(&mut a.doc.variables[0]).name = "Theme ".into();
+    std::sync::Arc::make_mut(&mut a.doc.variables[0]).modes[0].name = "Dark ".into();
     let rect = rect_bound_to(&mut a, "v_n");
     let mut b = old_file(vec![var("v_m", "M", VarKind::Number, json!(1))]);
-    b.doc.variables[0].id = "vc_other".into();
-    b.doc.variables[0].name = "Theme".into();
-    b.doc.variables[0].modes[0].name = "Dark".into();
+    std::sync::Arc::make_mut(&mut b.doc.variables[0]).id = "vc_other".into();
+    std::sync::Arc::make_mut(&mut b.doc.variables[0]).name = "Theme".into();
+    std::sync::Arc::make_mut(&mut b.doc.variables[0]).modes[0].name = "Dark".into();
     b.dispatch(Command::Paste {
       data: a.copy(&[rect]),
       parent: None,

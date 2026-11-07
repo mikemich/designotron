@@ -4022,7 +4022,7 @@ mod tests {
       let mut k = kit();
       tokens(&mut k.e);
       let rename_mode = |e: &mut Engine, name: &str| {
-        let mut cs = e.doc.variables.clone();
+        let mut cs = crate::variables::plain(&e.doc.variables);
         cs[0].modes[1].name = name.into();
         e.dispatch(Command::SetVariables { collections: cs })
       };
@@ -4030,7 +4030,7 @@ mod tests {
       assert!(rename_mode(&mut k.e, " Light ").is_err());
       rename_mode(&mut k.e, "Night").unwrap();
       // A new collection with a taken name.
-      let mut cs = k.e.doc.variables.clone();
+      let mut cs = crate::variables::plain(&k.e.doc.variables);
       cs.push(crate::variables::Collection {
         id: "c_2".into(),
         name: "Theme".into(),
@@ -4041,7 +4041,7 @@ mod tests {
         .dispatch(Command::SetVariables { collections: cs })
         .unwrap_err()
         .contains("Theme"));
-      let mut cs = k.e.doc.variables.clone();
+      let mut cs = crate::variables::plain(&k.e.doc.variables);
       cs.push(crate::variables::Collection {
         id: "c_2".into(),
         name: "Spacing".into(),
@@ -4052,11 +4052,11 @@ mod tests {
       cs[1].name = "Spacing".into();
       k.e.dispatch(Command::SetVariables { collections: cs }).unwrap();
       // A file that already has two "Dark" modes can still edit a value.
-      let mut dup = k.e.doc.variables.clone();
-      dup[0].modes[0].name = "Night".into();
-      k.e.doc.variables = dup;
-      let mut cs = k.e.doc.variables.clone();
-      cs[0].variables[0].values.insert("m_l".into(), json!("#222222"));
+      std::sync::Arc::make_mut(&mut k.e.doc.variables[0]).modes[0].name = "Night".into();
+      let mut cs = crate::variables::plain(&k.e.doc.variables);
+      std::sync::Arc::make_mut(&mut cs[0].variables[0])
+        .values
+        .insert("m_l".into(), json!("#222222"));
       k.e.dispatch(Command::SetVariables { collections: cs }).unwrap();
     }
 

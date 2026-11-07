@@ -6318,6 +6318,7 @@ mod r14_tests {
   use crate::text::HeuristicMeasurer;
   use crate::variables::{Collection, VarKind, VarMode, Variable};
   use serde_json::json;
+  use std::sync::Arc;
 
   fn number(id: &str, name: &str, v: f64) -> Variable {
     Variable {
@@ -6334,7 +6335,7 @@ mod r14_tests {
     let mut gen = IdGen::new(14);
     let mut doc = new_document(&mut gen, "R14");
     let page = doc.pages[0].id.clone();
-    doc.variables = vec![Collection {
+    doc.variables = vec![Arc::new(Collection {
       id: "c".into(),
       name: "Space".into(),
       modes: vec![VarMode {
@@ -6345,8 +6346,9 @@ mod r14_tests {
         .iter()
         .enumerate()
         .map(|(i, n)| number(&format!("v{}", i + 1), n, [8.0, 24.0, 32.0][i]))
+        .map(Arc::new)
         .collect(),
-    }];
+    })];
     let mut f = crate::ops::default_node(NodeType::Frame, "f".into(), "F".into());
     f.width = 320.0;
     f.height = 200.0;
@@ -6499,7 +6501,7 @@ mod r14_tests {
   #[test]
   fn typography_follows_the_variables() {
     let mut doc = doc_with(|_| {});
-    doc.variables.push(Collection {
+    doc.variables.push(Arc::new(Collection {
       id: "t".into(),
       name: "Type".into(),
       modes: vec![VarMode {
@@ -6517,8 +6519,11 @@ mod r14_tests {
           values: [("m".to_string(), json!("Inter"))].into(),
           ..Default::default()
         },
-      ],
-    });
+      ]
+      .into_iter()
+      .map(Arc::new)
+      .collect(),
+    }));
     let page = doc.pages[0].id.clone();
     let mut t = crate::ops::default_node(NodeType::Text, "t1".into(), "T".into());
     {
@@ -6603,7 +6608,7 @@ mod r14_tests {
   #[test]
   fn duplicate_mode_names_export_with_distinct_slugs() {
     let mut doc = doc_with(|_| {});
-    let c = &mut doc.variables[0];
+    let c = Arc::make_mut(&mut doc.variables[0]);
     c.modes = ["Light", "Dark", "Dark", "Dark 2"]
       .iter()
       .enumerate()
@@ -6613,7 +6618,7 @@ mod r14_tests {
       })
       .collect();
     let modes = c.modes.clone();
-    for v in &mut c.variables {
+    for v in c.variables.iter_mut().map(Arc::make_mut) {
       v.values = modes.iter().enumerate().map(|(i, m)| (m.id.clone(), json!(i as f64))).collect();
     }
     let slugs: Vec<String> = c.modes.iter().map(|m| crate::variables::mode_slug(c, m)).collect();
@@ -6640,17 +6645,18 @@ mod r14_tests {
   /// `fw2` (700) and a string `ff`.
   fn text_doc(styled: bool, props: &[(&str, &str)]) -> Document {
     let mut doc = doc_with(|_| {});
-    doc.variables[0].variables.push(number("sz", "Size", 20.0));
-    doc.variables[0].variables.push(number("lh", "Lh", 0.0));
-    doc.variables[0].variables.push(number("fw", "Weight", 650.0));
-    doc.variables[0].variables.push(number("fw2", "Weight 2", 700.0));
-    doc.variables[0].variables.push(Variable {
+    let c = Arc::make_mut(&mut doc.variables[0]);
+    c.variables.push(Arc::new(number("sz", "Size", 20.0)));
+    c.variables.push(Arc::new(number("lh", "Lh", 0.0)));
+    c.variables.push(Arc::new(number("fw", "Weight", 650.0)));
+    c.variables.push(Arc::new(number("fw2", "Weight 2", 700.0)));
+    c.variables.push(Arc::new(Variable {
       id: "ff".into(),
       name: "Family".into(),
       kind: VarKind::String,
       values: [("m".to_string(), json!("Playfair Display"))].into(),
       ..Default::default()
-    });
+    }));
     let page = doc.pages[0].id.clone();
     let mut t = crate::ops::default_node(NodeType::Text, "t1".into(), "T".into());
     {
@@ -6662,7 +6668,7 @@ mod r14_tests {
       tx.font_family = "Playfair Display".into();
     }
     if styled {
-      doc.styles.texts.push(crate::model::TextStyle {
+      doc.styles_mut().texts.push(crate::model::TextStyle {
         id: "ts".into(),
         name: "Body".into(),
         font_family: "Playfair Display".into(),
