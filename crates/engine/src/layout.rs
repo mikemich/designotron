@@ -117,6 +117,9 @@ pub fn normalize_group(doc: &mut Document, id: &str) {
 struct Item {
   id: NodeId,
   main: f64,
+  /// The size a wrap frame breaks rows by: `main`, except for a fill child, which breaks at its
+  /// minimum (0 without one) and then grows to share its row.
+  line: f64,
   counter: f64,
   fill_main: bool,
   fill_counter: bool,
@@ -136,6 +139,7 @@ struct Axes {
   pad_main: f64,
   pad_cross: f64,
   gap_total: f64,
+  gap: f64,
 }
 
 fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
@@ -178,6 +182,7 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
     pad_main: pad_main_start + pad_main_end,
     pad_cross: pad_cross_start + pad_cross_end,
     gap_total,
+    gap: al.gap,
   };
   // A hugging frame with wrap and a max width wraps once its content passes the max.
   let wrap_at_max = al.wrap && horizontal && main_sizing == Sizing::Hug && main_bounds.1.is_finite();
@@ -271,6 +276,7 @@ fn item_of(doc: &Document, cid: &str, horizontal: bool) -> Item {
   Item {
     id: cid.to_string(),
     main,
+    line: main,
     counter,
     // Fill can't stretch a tilted box: stored sizing stays, so turning it back restores Fill.
     fill_main: sm == Sizing::Fill && !rotated,
@@ -325,6 +331,7 @@ fn main_pass(
       layout_node(doc, &it.id, m);
       *it = item_of(doc, &it.id, horizontal);
       it.main = size;
+      it.line = size;
     }
     let natural = items.iter().map(|i| i.main).sum::<f64>() + ax.gap_total + ax.pad_main;
     *main_size = clamp_to(natural, limits);
@@ -333,10 +340,12 @@ fn main_pass(
       return true;
     }
     if *main_size != natural {
-      share_main(doc, m, ax, items, *main_size - ax.pad_main);
+      share_main(doc, m, ax, items, *main_size - ax.pad_main, ax.gap_total);
     }
   } else if !ax.wrap {
-    share_main(doc, m, ax, items, *main_size - ax.pad_main);
+    share_main(doc, m, ax, items, *main_size - ax.pad_main, ax.gap_total);
+  } else {
+    share_wrapped(doc, m, ax, items, *main_size - ax.pad_main);
   }
   false
 }
@@ -344,7 +353,7 @@ fn main_pass(
 /// Splits `inner` (main axis, padding excluded) between the fill children after the fixed
 /// ones and the gaps. A child that would pass its max or min size keeps that size and the
 /// others share the rest.
-fn share_main(doc: &mut Document, m: &dyn TextMeasurer, ax: &Axes, items: &mut [Item], inner: f64) {
+fn share_main(doc: &mut Document, m: &dyn TextMeasurer, ax: &Axes, items: &mut [Item], inner: f64, gap_total: f64) {
   let fixed: f64 = items.iter().filter(|i| !i.fill_main).map(|i| i.main).sum();
   let fills: Vec<usize> = (0..items.len()).filter(|i| items[*i].fill_main).collect();
   if fills.is_empty() {
@@ -355,7 +364,7 @@ fn share_main(doc: &mut Document, m: &dyn TextMeasurer, ax: &Axes, items: &mut [
     .map(|i| bounds(doc.get(&items[*i].id).unwrap(), ax.horizontal))
     .collect();
   let mut size: Vec<Option<f64>> = vec![None; fills.len()];
-  let avail = inner - fixed - ax.gap_total;
+  let avail = inner - fixed - gap_total;
   loop {
     let held: f64 = size.iter().flatten().sum();
     let open = size.iter().filter(|s| s.is_none()).count();
@@ -389,6 +398,46 @@ fn share_main(doc: &mut Document, m: &dyn TextMeasurer, ax: &Axes, items: &mut [
     *it = item_of(doc, &it.id, ax.horizontal);
     it.main = each;
   }
+}
+
+/// Wrap rows form by `line` sizes (a fill child counts as its minimum), then each row's fill
+/// children share that row's free space within their min and max, as flexbox does.
+fn share_wrapped(doc: &mut Document, m: &dyn TextMeasurer, ax: &Axes, items: &mut [Item], inner: f64) {
+  if !items.iter().any(|i| i.fill_main) {
+    return;
+  }
+  for it in items.iter_mut().filter(|i| i.fill_main) {
+    let (lo, hi) = bounds(doc.get(&it.id).unwrap(), ax.horizontal);
+    it.line = lo.max(1.0).min(hi.max(1.0));
+  }
+  let rows = wrap_rows(items, inner, ax.gap);
+  for r in rows {
+    let lines: Vec<f64> = items[r.clone()].iter().map(|i| i.line).collect();
+    let gap_total = ax.gap * (r.len() as f64 - 1.0);
+    share_main(doc, m, ax, &mut items[r.clone()], inner, gap_total);
+    for (it, l) in items[r].iter_mut().zip(lines) {
+      it.line = l;
+    }
+  }
+}
+
+/// The index ranges of the rows a wrap frame breaks its children into.
+fn wrap_rows(items: &[Item], inner: f64, gap: f64) -> Vec<std::ops::Range<usize>> {
+  let mut rows = Vec::new();
+  let (mut start, mut row_w) = (0, 0.0);
+  for (i, it) in items.iter().enumerate() {
+    if i > start && row_w + gap + it.line > inner + 0.01 {
+      rows.push(start..i);
+      start = i;
+      row_w = it.line;
+    } else {
+      row_w += if i == start { it.line } else { gap + it.line };
+    }
+  }
+  if start < items.len() {
+    rows.push(start..items.len());
+  }
+  rows
 }
 
 /// Resolves the frame's size along the cross axis and the cross size of its fill children. A
@@ -521,18 +570,9 @@ fn hug_size(doc: &mut Document, id: &str, horizontal: bool, m: &dyn TextMeasurer
 fn arrange_wrapped(doc: &mut Document, id: &str, items: &[Item], width: f64, hug_cross: bool) {
   let al = doc.get(id).unwrap().layout.clone().unwrap();
   let inner = width - al.padding_left - al.padding_right;
-  let mut rows: Vec<Vec<&Item>> = vec![Vec::new()];
-  let mut row_w = 0.0;
-  for it in items {
-    let row = rows.last_mut().unwrap();
-    let add = if row.is_empty() { it.main } else { al.gap + it.main };
-    if !row.is_empty() && row_w + add > inner + 0.01 {
-      rows.push(vec![it]);
-      row_w = it.main;
-    } else {
-      row.push(it);
-      row_w += add;
-    }
+  let mut rows: Vec<&[Item]> = wrap_rows(items, inner, al.gap).into_iter().map(|r| &items[r]).collect();
+  if rows.is_empty() {
+    rows.push(&[]);
   }
   let mut y = al.padding_top;
   if !hug_cross {
@@ -552,7 +592,7 @@ fn arrange_wrapped(doc: &mut Document, id: &str, items: &[Item], width: f64, hug
         Align::End => inner - used,
         _ => 0.0,
       };
-    for it in row {
+    for it in row.iter() {
       let cy = match al.counter_align {
         Align::Center => y + (row_h - it.counter) / 2.0,
         Align::End => y + row_h - it.counter,
@@ -1415,5 +1455,112 @@ mod tests {
     let doc = flow(true, true, 0.0, 0.0, &[("a", 40.0, 80.0, 90.0)]);
     // The frame's first flowing child is tilted: 80 wide, 40 tall box, bottom edge at 40.
     assert!(near(baseline_of(&doc, "f", &HeuristicMeasurer, 0), 40.0));
+  }
+
+  /// A wrap frame `width` wide (padding `pad`, gap `gap`) with one child per `(sizing, width, min, max)`;
+  /// returns each child's (x, y, width).
+  #[allow(clippy::type_complexity)]
+  fn wrap_fill(width: f64, pad: f64, gap: f64, align: Align, kids: &[(Sizing, f64, Option<f64>, Option<f64>)]) -> Vec<(f64, f64, f64)> {
+    let (mut doc, page) = setup();
+    let frame = Node {
+      id: "f".into(),
+      kind: NodeType::Frame,
+      width,
+      height: 100.0,
+      sizing_v: Sizing::Hug,
+      layout: Some(AutoLayout {
+        direction: LayoutDirection::Horizontal,
+        wrap: true,
+        gap,
+        counter_gap: gap,
+        primary_align: align,
+        padding_left: pad,
+        padding_right: pad,
+        padding_top: pad,
+        padding_bottom: pad,
+        ..Default::default()
+      }),
+      ..Default::default()
+    };
+    doc.insert(frame, None, &page, None);
+    for (i, (sizing, w, min, max)) in kids.iter().enumerate() {
+      let n = Node {
+        id: format!("c{i}"),
+        width: *w,
+        height: 50.0,
+        sizing_h: *sizing,
+        min_width: *min,
+        max_width: *max,
+        ..Default::default()
+      };
+      doc.insert(n, Some("f"), &page, None);
+    }
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    (0..kids.len())
+      .map(|i| {
+        let n = doc.get(&format!("c{i}")).unwrap();
+        (n.x, n.y, n.width)
+      })
+      .collect()
+  }
+
+  fn fills(n: usize, min: Option<f64>, max: Option<f64>) -> Vec<(Sizing, f64, Option<f64>, Option<f64>)> {
+    vec![(Sizing::Fill, 100.0, min, max); n]
+  }
+
+  fn same(got: &[(f64, f64, f64)], want: &[(f64, f64)], width: &[f64]) {
+    for (i, (g, (x, y))) in got.iter().zip(want).enumerate() {
+      assert!(near(g.0, *x) && near(g.1, *y), "child {i}: {g:?} want {x},{y}");
+      assert!(near(g.2, width[i.min(width.len() - 1)]), "child {i} width {}", g.2);
+    }
+  }
+
+  #[test]
+  fn wrap_fill_children_break_at_their_min_and_share_the_row_within_max() {
+    // The features grid: inner 1344, gap 24, min 280, max 420.
+    let got = wrap_fill(1440.0, 48.0, 24.0, Align::Start, &fills(6, Some(280.0), Some(420.0)));
+    let y2 = got[4].1;
+    assert!(y2 > got[0].1);
+    same(
+      &got,
+      &[(48.0, 48.0), (390.0, 48.0), (732.0, 48.0), (1074.0, 48.0), (48.0, y2), (492.0, y2)],
+      &[318.0, 318.0, 318.0, 318.0, 420.0, 420.0],
+    );
+    // Stats: inner 1136, gap 16, min 180: four in one row, 272 each.
+    let got = wrap_fill(1200.0, 32.0, 16.0, Align::Start, &fills(4, Some(180.0), None));
+    assert!(got.iter().all(|g| near(g.2, 272.0) && near(g.1, got[0].1)), "{got:?}");
+    // No min width: all in one row, (1344 - 5 * 24) / 6 = 204.
+    let got = wrap_fill(1440.0, 48.0, 24.0, Align::Start, &fills(6, None, None));
+    assert!(got.iter().all(|g| near(g.2, 204.0) && near(g.1, got[0].1)), "{got:?}");
+  }
+
+  #[test]
+  fn wrap_rows_mix_fixed_and_fill_and_place_leftover_space_by_alignment() {
+    // Fixed 300 + fill (min 200) + fill (min 200) in 600: the third doesn't fit, so it wraps.
+    let kids = [
+      (Sizing::Fixed, 300.0, None, None),
+      (Sizing::Fill, 100.0, Some(200.0), None),
+      (Sizing::Fill, 100.0, Some(200.0), None),
+    ];
+    let got = wrap_fill(600.0, 0.0, 10.0, Align::Start, &kids);
+    assert!(near(got[0].2, 300.0) && near(got[1].2, 290.0), "{got:?}");
+    assert!(near(got[2].2, 600.0) && near(got[2].0, 0.0) && got[2].1 > got[0].1, "{got:?}");
+    // All at max: free space stays, and the primary alignment places the row.
+    let capped = fills(2, Some(50.0), Some(100.0));
+    let start = wrap_fill(500.0, 0.0, 20.0, Align::Start, &capped);
+    let centre = wrap_fill(500.0, 0.0, 20.0, Align::Center, &capped);
+    let end = wrap_fill(500.0, 0.0, 20.0, Align::End, &capped);
+    assert!(
+      near(start[0].2, 100.0) && near(start[0].0, 0.0) && near(start[1].0, 120.0),
+      "{start:?}"
+    );
+    assert!(near(centre[0].0, 140.0), "{centre:?}");
+    assert!(near(end[0].0, 280.0), "{end:?}");
+    // A min wider than the frame takes a row of its own and overflows.
+    let wide = wrap_fill(300.0, 0.0, 10.0, Align::Start, &fills(2, Some(400.0), None));
+    assert!(
+      near(wide[0].2, 400.0) && near(wide[1].2, 400.0) && wide[1].1 > wide[0].1,
+      "{wide:?}"
+    );
   }
 }

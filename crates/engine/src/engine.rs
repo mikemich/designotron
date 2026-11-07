@@ -2436,6 +2436,18 @@ impl Engine {
           }
         }
         crate::variables::validate(&collections, &self.doc.variables)?;
+        // Layers inside instances keep what they show: record it before the bindings go.
+        let kept: std::collections::HashSet<&str> = collections.iter().flat_map(|c| c.variables.iter().map(|v| v.id.as_str())).collect();
+        let removed: std::collections::HashSet<String> = self
+          .doc
+          .variables
+          .iter()
+          .flat_map(|c| c.variables.iter().map(|v| v.id.clone()))
+          .filter(|id| !kept.contains(id.as_str()))
+          .collect();
+        if !removed.is_empty() {
+          crate::components::keep_values_of_removed(&mut self.doc, &removed);
+        }
         // Equal collections and variables keep their old allocations, so this step shares them.
         self.doc.variables = crate::variables::intern(collections, &self.doc.variables);
         crate::variables::prune(&mut self.doc);
