@@ -1369,6 +1369,12 @@ a.btn {
     border-radius: 0;
   }
 }
+/* The Share label is the first to go: it is the newest and the bar is tight below 1280 px. */
+@media (max-width: 1280px) {
+  .topbar .tbtn .share-label {
+    display: none;
+  }
+}
 @media (max-width: 1100px) {
   /* The top bar gives up labels and the file name's room before anything overlaps. */
   .topbar .tbtn .label {
@@ -1441,6 +1447,38 @@ a.btn {
   padding: 20px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
   cursor: default;
+}
+/* The compact form after the first close: a pill at the bottom centre, clear of the canvas middle. */
+.empty-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  max-width: calc(100% - 140px);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  white-space: nowrap;
+  cursor: pointer;
+  font: inherit;
+}
+.empty-pill:hover {
+  border-color: var(--accent);
+}
+.empty-pill > span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.empty-pill-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border);
 }
 .empty-close {
   position: absolute;
@@ -3606,4 +3644,18 @@ body:has(.phone-note) .toast {
   .align-grid button.on i {
     background: HighlightText;
   }
+}
+
+/* The dashboard's note under the start prompt while Claude isn't connected. */
+.claude-note {
+  margin: 8px 0 4px;
+  line-height: 1.6;
+}
+.claude-note-steps {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-2);
 }

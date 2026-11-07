@@ -42,7 +42,7 @@ const HINTS: Hint[] = [
     id: "claude",
     selector: "button[title^='Claude']",
     title: "Ask Claude",
-    body: `Claude can design, critique and fix this file, and turn it into real code. Open it any time with ${MOD}/.`,
+    body: `Claude can design, critique and fix this file, and turn it into real code. Open it any time with ${MOD}/. Needs Claude Code (Pro or Max) or an API key; the panel shows how.`,
     when: () => hasLayers() && !useStore.getState().chatOpen,
   },
 ];

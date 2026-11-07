@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight, Figma, FilePlus, FileStack, Folder as FolderIcon, FolderOpen, FolderPlus, Github, LayoutGrid, Loader2, Menu as MenuIcon, MoreHorizontal, Plus, Search, Sparkles, X } from "lucide-react";
-import { askWhenOpen } from "./Editor";
-import { claudeReady } from "./ai/chatState";
+import { askWhenOpen, demoWhenOpen } from "./Editor";
+import { claudeReady, useChat } from "./ai/chatState";
+import { ClaudeSetupSteps } from "./ai/ClaudeSetup";
+import { FigmaImportDialog, type FigmaSource } from "./panels/FigmaImportDialog";
 import { REPO_URL } from "./panels/GuestBar";
 import {
   createFolder,
@@ -255,9 +257,18 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
     if (!(await create(null, "claude"))) askWhenOpen(null);
   };
   const [idea, setIdea] = useState("");
+  /** The replay of Claude designing a page, in a new file. */
+  const watchReplay = async () => {
+    if (opening) return;
+    demoWhenOpen(true);
+    if (!(await create(null, "demo"))) demoWhenOpen(false);
+  };
+  const claudeOn = useChat((c) => claudeReady(c));
+  const [setupOpen, setSetupOpen] = useState(false);
+  const figmaOpen = useStore((st) => st.figmaOpen);
 
   /** Creates and opens a file in the folder being viewed (Drafts from All files and Drafts); false when it couldn't be created. */
-  const create = async (template: Template | null, key?: string): Promise<boolean> => {
+  const create = async (template: Template | null, key?: string, name?: string): Promise<boolean> => {
     setOpening(key ?? template?.id ?? "new");
     try {
       try {
@@ -267,7 +278,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       }
       newEngine();
       if (template) template.build();
-      else dispatch({ op: "setDocName", name: "Untitled" });
+      else dispatch({ op: "setDocName", name: name ?? "Untitled" });
       const id = newFileId();
       const json = getEngine().save();
       await saveFile(id, JSON.parse(json).name, json, { folder: currentFolder });
@@ -351,9 +362,13 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       await refresh();
     }
   };
-  const importFigma = async () => {
-    useStore.setState({ figmaOpen: "new" });
-    if (!(await create(null))) useStore.setState({ figmaOpen: false });
+  // The dialog opens here; the file is created only when Import has its data (the editor then imports it).
+  const importFigma = () => useStore.setState({ figmaOpen: "new" });
+  const createFromFigma = async (src: FigmaSource, name?: string) => {
+    useStore.setState({ pendingFigma: src });
+    const ok = await create(null, undefined, name);
+    if (!ok) useStore.setState({ pendingFigma: null });
+    return ok;
   };
 
   /** A new project (parent null) or folder; its name is typed in place. */
@@ -815,6 +830,23 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
                   {opening === "claude" ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />} Design with Claude
                 </button>
               </div>
+              {!claudeOn && (
+                <div className="claude-note muted small" role="status">
+                  <span>Claude isn't connected on this computer yet. Your idea waits in the new file until it is.</span>{" "}
+                  <button className="link-btn" aria-expanded={setupOpen} onClick={() => setSetupOpen(!setupOpen)}>
+                    How to connect
+                  </button>
+                  <span aria-hidden="true"> · </span>
+                  <button className="link-btn" disabled={!!opening} onClick={watchReplay}>
+                    Watch a replay
+                  </button>
+                  {setupOpen && (
+                    <div className="claude-note-steps">
+                      <ClaudeSetupSteps />
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="suggestions">
                 {["A landing page for a coffee subscription", "A habit tracker mobile app, 3 screens", "A music player with a lyrics view"].map((i) => (
                   <button key={i} onClick={() => designWithClaude(i)} disabled={!!opening}>
@@ -886,6 +918,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
           </>
         )}
         {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
+        {figmaOpen === "new" && <FigmaImportDialog onCreate={createFromFigma} />}
         {confirm && confirmText && <ConfirmDialog title={confirmText.title} message={confirmText.message} confirmLabel={confirmText.label} onCancel={() => setConfirm(null)} onConfirm={() => runDelete(confirm)} />}
         {moving && moveItem && (
           <MoveDialog

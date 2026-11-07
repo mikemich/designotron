@@ -15,7 +15,8 @@ import { joinShared, stopSharing, useCollab } from "./collab";
 import { ShortcutsDialog } from "./panels/ShortcutsDialog";
 import { ImportDialog } from "./panels/ImportDialog";
 import { PhoneNote } from "./panels/PhoneNote";
-import { DemoOverlay, stopDemo } from "./Demo";
+import { DemoOverlay, playDemo, stopDemo } from "./Demo";
+import { importFigmaJson } from "./figma";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
 import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, saveHook, toast as showToast, useStore, zoomToFit, dispatch } from "./store";
@@ -113,6 +114,27 @@ function setViewOnly(on: boolean) {
 let askOnOpen: string | null = null;
 export function askWhenOpen(prompt: string | null) {
   askOnOpen = prompt;
+}
+
+/** Play the replay of Claude designing a page once the next file has opened (from the start screen). */
+let demoOnOpen = false;
+export function demoWhenOpen(on: boolean) {
+  demoOnOpen = on;
+}
+
+/** The dashboard fetched a Figma file and made this one for it: import it now, once (taking it out of the
+ *  store first, so a second mount can't repeat it). Warnings open the dialog's result view. */
+function runPendingFigma() {
+  const pending = useStore.getState().pendingFigma;
+  if (!pending) return;
+  useStore.setState({ pendingFigma: null });
+  try {
+    const r = importFigmaJson(pending.file, pending.images);
+    showToast(`Imported ${r.layers} layers from Figma`);
+    if (r.warnings.length) useStore.setState({ figmaResult: r, figmaOpen: "result" });
+  } catch (err) {
+    reportFailure("import from Figma", err);
+  }
 }
 
 /** What to write for the document as of one moment: the layers that changed since the last
@@ -223,12 +245,14 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       // Storage failed and there is no recovery copy: the file may well be here, so don't
       // claim it isn't.
       if (readFailed && recovered === null) {
+        useStore.setState({ pendingFigma: null });
         console.error(readFailed);
         setReadError(failureText("read this file", readFailed));
         return;
       }
       // A link to a file that isn't in this browser (deleted, or from another device).
       if (json === null) {
+        useStore.setState({ pendingFigma: null });
         setMissing(true);
         return;
       }
@@ -250,10 +274,15 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       setReady(true);
       // Two frames: the canvas has its final size by then.
       requestAnimationFrame(() => requestAnimationFrame(zoomToFit));
+      runPendingFigma();
       joinShared();
       // This file's own conversation (after the first paint: it only reads storage).
       await enterFile(fileId);
       if (cancelled) return;
+      if (demoOnOpen) {
+        demoOnOpen = false;
+        void playDemo();
+      }
       if (askOnOpen) {
         const prompt = askOnOpen;
         askOnOpen = null;

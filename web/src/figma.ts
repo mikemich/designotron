@@ -86,7 +86,8 @@ export function importFigmaJson(file: unknown, images: Record<string, string> = 
   return r;
 }
 
-export async function importFigmaUrl(url: string, token: string, progress: (s: string) => void): Promise<ImportResult> {
+/** Everything before the conversion: the file JSON and its images (nothing in the document changes). */
+export async function fetchFigmaUrl(url: string, token: string, progress: (s: string) => void): Promise<{ file: unknown; images: Record<string, string> }> {
   const parsed = parseFigmaUrl(url);
   if (!parsed) throw new Error("That doesn't look like a Figma file link (figma.com/design/…).");
   progress("Fetching the file from Figma…");
@@ -101,5 +102,16 @@ export async function importFigmaUrl(url: string, token: string, progress: (s: s
     images = await downloadImages(meta?.meta?.images ?? {}, refs, progress);
   }
   progress("Converting…");
+  return { file, images };
+}
+
+export async function importFigmaUrl(url: string, token: string, progress: (s: string) => void): Promise<ImportResult> {
+  const { file, images } = await fetchFigmaUrl(url, token, progress);
   return importFigmaJson(file, images);
+}
+
+/** The name a fetched Figma file carries, if any. */
+export function figmaFileName(file: unknown): string | undefined {
+  const n = (file as { name?: unknown } | null)?.name;
+  return typeof n === "string" && n.trim() ? n.trim() : undefined;
 }

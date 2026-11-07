@@ -162,8 +162,13 @@ interface Store {
   showRulers: boolean;
   showGrids: boolean;
   variablesOpen: boolean;
-  /** "new": opened from the files dashboard for a new file, which is discarded if nothing is imported. */
-  figmaOpen: boolean | "new";
+  /** "new": opened from the files dashboard (no file exists until Import); "result": the editor shows the
+   *  warnings of an import that just ran (`figmaResult`). */
+  figmaOpen: boolean | "new" | "result";
+  /** Fetched Figma data waiting for the new file to open; the editor imports it once and clears it. */
+  pendingFigma: { file: unknown; images: Record<string, string> } | null;
+  /** The warnings shown by the dialog's result view when the import ran as the file opened. */
+  figmaResult: { pages: string[]; layers: number; warnings: string[] } | null;
   /** A control on the dashboard to focus once it mounts (its `data-focus-key`), set by flows that end there. */
   focusOnDashboard: string | null;
   /** Comment thread open in a popover. */
@@ -240,6 +245,8 @@ export const useStore = create<Store>(() => ({
   showGrids: pref("dt:showGrids", true),
   variablesOpen: false,
   figmaOpen: false,
+  pendingFigma: null,
+  figmaResult: null,
   focusOnDashboard: null,
   openComment: null,
   draftComment: null,
@@ -661,8 +668,14 @@ export function describeSelection(): string {
 /** The open editor's autosave: Ctrl+S runs it at once (set by `Editor`, null while no file is open). */
 export const saveHook: { flush: (() => Promise<void>) | null } = { flush: null };
 
-/** Closes the empty-page prompt for a page until the editor is reloaded. */
+/** Closes the empty-page prompt for a page until the editor is reloaded, and makes later ones compact. */
 export function closeEmptyPrompt(page: string) {
+  // After the first close, blank files show the compact pill instead of the centred card.
+  try {
+    localStorage.setItem("dt:emptyPrompt", "compact");
+  } catch {
+    /* storage unavailable */
+  }
   const key = emptyPromptKey(page);
   useStore.setState((s) => (s.emptyPromptClosed.includes(key) ? s : { emptyPromptClosed: [...s.emptyPromptClosed, key] }));
 }

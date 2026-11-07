@@ -10,6 +10,7 @@ import { useCollab } from "../collab";
 import { bridge, type Attachment } from "./bridgeClient";
 import { runApiAgent, resetApiConversation, abortApiAgent, hasApiConversation } from "./apiAgent";
 import { contextLine, setToolFile } from "./tools";
+import { queueJoin } from "./queue";
 import { loadConversation, saveConversation, serialize } from "./conversations";
 
 export type ChatItem =
@@ -489,12 +490,13 @@ export async function send(prompt: string, opts: { label?: string } = {}) {
   }
   // Claude is busy: the message goes out when this turn ends (no need to stop it to ask).
   if (st.running) {
-    useChat.setState({ queued: st.queued ? `${st.queued}\n\n${prompt}` : prompt });
+    useChat.setState({ queued: queueJoin(st.queued, prompt) });
     return;
   }
-  // Not connected yet: keep the prompt (the panel shows how to connect) instead of failing.
+  // Not connected yet: keep the prompt (the panel shows how to connect) instead of failing. A second
+  // message waits next to the first, as while Claude is busy.
   if (!claudeReady(st) && !(st.mode === "bridge" && st.claude?.available === false)) {
-    useChat.setState({ queued: prompt });
+    useChat.setState({ queued: queueJoin(st.queued, prompt) });
     return;
   }
   const label = opts.label ?? labels.get(prompt);

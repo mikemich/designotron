@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 import type { Effect, ExportSetting, LayoutGrid, Node, Paint, TextProps, VarKind } from "../types";
 import { dispatch, FONTS, getDoc, styleTextSelection, useDoc, useSelection, useStore } from "../store";
-import { ALT, common, IconButton, MIXED, MOD, NumberField, Section, Seg, SelectField, SHIFT, type Maybe, ALT_MOD, SHIFT_MOD } from "../ui/controls";
+import { ALT, common, focusCanvas, leavesFieldOnEnter, IconButton, MIXED, MOD, NumberField, Section, Seg, SelectField, SHIFT, type Maybe, ALT_MOD, SHIFT_MOD } from "../ui/controls";
 import { paintLabel, PaintSwatch, cssColor, ColorPicker } from "../ui/color";
 import { DEFAULT_EXPORT, exportLayers, exportPdf, formatExportSize, parseExportSize, rowSuffix } from "../exporter";
 import * as A from "../actions";
@@ -627,8 +627,8 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   );
 }
 
-/** The hex field of a solid paint. Enter commits and keeps focus (text selected, ready for the next
- *  value); the field follows the paint's colour whenever it isn't being typed in. */
+/** The hex field of a solid paint. Enter commits and gives the keys back to the canvas (Figma; in a
+ *  dialog it keeps focus, text selected); the field follows the paint's colour whenever it isn't being typed in. */
 function HexInput({ color, onCommit }: { color: string; onCommit: (color: string) => void }) {
   const ref = useRef<HTMLInputElement>(null);
   const shown = color.replace("#", "").slice(0, 6);
@@ -667,8 +667,13 @@ function HexInput({ color, onCommit }: { color: string; onCommit: (color: string
       onKeyDown={(e) => {
         e.stopPropagation();
         if (e.key === "Enter") {
-          commit(e.currentTarget);
-          e.currentTarget.select();
+          const el = e.currentTarget;
+          commit(el);
+          if (leavesFieldOnEnter(el)) {
+            edited.current = false;
+            el.blur();
+            focusCanvas();
+          } else el.select();
         }
       }}
       onBlur={(e) => {

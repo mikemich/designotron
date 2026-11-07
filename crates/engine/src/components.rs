@@ -127,7 +127,11 @@ pub fn create_component(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) -> 
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| doc.next_name("Component"));
       let id = crate::ops::wrap_in_frame(doc, ids, gen, NodeType::Frame)?;
-      doc.get_mut(&id)?.name = name;
+      // The wrapper is a transparent holder: a lone rounded rectangle or circle must not gain
+      // white corners (Figma's wrapper has no fill either).
+      let w = doc.get_mut(&id)?;
+      w.name = name;
+      w.fills.clear();
       id
     }
   };
@@ -4421,5 +4425,90 @@ mod tests {
         other => format!("{other:?}"),
       }
     }
+  }
+}
+
+#[cfg(test)]
+mod wrapper_tests {
+  use crate::engine::{Command, Engine};
+  use crate::model::*;
+  use serde_json::json;
+
+  fn engine() -> Engine {
+    Engine::new(Box::new(crate::text::HeuristicMeasurer), 4)
+  }
+
+  fn shape(e: &mut Engine, kind: NodeType, x: f64) -> String {
+    e.dispatch(Command::CreateShape {
+      kind,
+      x,
+      y: 0.0,
+      width: 80.0,
+      height: 60.0,
+      parent: None,
+    })
+    .unwrap()["id"]
+      .as_str()
+      .unwrap()
+      .to_string()
+  }
+
+  fn make(e: &mut Engine, ids: Vec<String>) -> String {
+    e.dispatch(Command::CreateComponent { ids }).unwrap()["id"]
+      .as_str()
+      .unwrap()
+      .to_string()
+  }
+
+  #[test]
+  fn lone_rounded_rectangle_gets_a_transparent_wrapper() {
+    let mut e = engine();
+    let r = shape(&mut e, NodeType::Rectangle, 0.0);
+    e.dispatch(Command::Update {
+      ids: vec![r.clone()],
+      patch: json!({ "cornerRadius": 12.0 }),
+    })
+    .unwrap();
+    let c = make(&mut e, vec![r.clone()]);
+    let comp = e.doc.get(&c).unwrap();
+    assert_eq!(comp.kind, NodeType::Component);
+    assert!(comp.fills.is_empty(), "no white wrapper fill");
+    assert!(!comp.clip_content);
+    assert_eq!(comp.children, vec![r.clone()]);
+    assert_eq!(e.doc.get(&r).unwrap().corner_radius, 12.0);
+    // The change travels as a delta to a peer holding the old document.
+    let done = e.doc.clone();
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.doc.get(&c).is_none(), "one undo step removes the component and its wrapper");
+    assert!(e.doc.get(&r).unwrap().parent.is_none());
+    let d = crate::collab::delta(&e.doc, &done, false, false);
+    let mut peer = e.doc.clone();
+    crate::collab::apply(&mut peer, &d).unwrap();
+    assert!(peer == done);
+  }
+
+  #[test]
+  fn lone_ellipse_and_several_layers_get_a_transparent_wrapper() {
+    let mut e = engine();
+    let el = shape(&mut e, NodeType::Ellipse, 0.0);
+    let c = make(&mut e, vec![el]);
+    assert!(e.doc.get(&c).unwrap().fills.is_empty());
+    let a = shape(&mut e, NodeType::Rectangle, 300.0);
+    let b = shape(&mut e, NodeType::Rectangle, 500.0);
+    let c = make(&mut e, vec![a, b]);
+    let comp = e.doc.get(&c).unwrap();
+    assert!(comp.fills.is_empty());
+    assert_eq!(comp.children.len(), 2);
+  }
+
+  #[test]
+  fn a_frame_keeps_its_fill_as_the_component() {
+    let mut e = engine();
+    let f = shape(&mut e, NodeType::Frame, 0.0);
+    let had = e.doc.get(&f).unwrap().fills.clone();
+    assert!(!had.is_empty());
+    let c = make(&mut e, vec![f.clone()]);
+    assert_eq!(c, f);
+    assert_eq!(e.doc.get(&c).unwrap().fills, had);
   }
 }

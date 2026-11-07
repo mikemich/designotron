@@ -415,17 +415,16 @@ await newFile();
   await page.waitForTimeout(300);
   a = await active();
   const fill = (await doc()).nodes[text.id].fills[0];
-  check("focus: Enter in the hex field keeps focus there", a.label === "Hex colour", JSON.stringify(a));
+  // Changed in r15d (Y-01): Enter in a panel field commits and gives the keys back to the canvas
+  // (Figma). It used to keep focus in the field with the text selected; Tab is how to go on.
+  check("focus: Enter in the hex field hands focus to the canvas", a.id === "dt-canvas", JSON.stringify(a));
   check("focus: and applies the colour", fill.color.toUpperCase() === "#FF5500", fill.color);
-  const sel = await dt(() => {
-    const e = document.activeElement;
-    return e.selectionEnd - e.selectionStart;
-  });
-  check("focus: the hex text is selected again", sel === 6, String(sel));
+  await hexField.focus();
+  await page.keyboard.press("Control+a");
   await page.keyboard.type("00AAFF");
-  await page.keyboard.press("Enter");
+  await page.keyboard.press("Tab");
   await page.waitForTimeout(300);
-  check("focus: a second value goes in without tabbing back", (await doc()).nodes[text.id].fills[0].color.toUpperCase() === "#00AAFF");
+  check("focus: Tab applies a second value and moves on", (await doc()).nodes[text.id].fills[0].color.toUpperCase() === "#00AAFF");
   {
     // Clicking into the field and out without typing must not write the old colour over a newer one.
     await hexField.focus();

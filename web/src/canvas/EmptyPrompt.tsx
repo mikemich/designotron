@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2, Sparkles, X } from "lucide-react";
 import { askClaude, claudeReady, discardQueued, sendQueued, useChat, useQueueConfirm } from "../ai/chatState";
 import { playDemo } from "../Demo";
@@ -10,9 +10,25 @@ const IDEAS = ["A landing page for a coffee subscription", "A habit tracker mobi
 /** A queued prompt, shortened for display. */
 const preview = (q: string) => (q.length > 160 ? q.slice(0, 160) + "…" : q);
 
+/** After the first close (`closeEmptyPrompt`) blank files show a one-line pill instead of the centred card. */
+function compactPref(): boolean {
+  try {
+    return localStorage.getItem("dt:emptyPrompt") === "compact";
+  } catch {
+    return false;
+  }
+}
+
 /** Shown on an empty page: describe a design for Claude, or start from a template. */
 export function EmptyPrompt({ pageId }: { pageId: string }) {
   const [text, setText] = useState("");
+  // Read once per mount: closing the card must not turn the next frame of this very file into a pill.
+  const [compact, setCompact] = useState(compactPref);
+  const [grab, setGrab] = useState(false);
+  const input = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (grab && !compact) input.current?.focus();
+  }, [grab, compact]);
   const ready = useChat((s) => claudeReady(s));
   const queued = useChat((s) => s.queued);
   const running = useChat((s) => s.running);
@@ -24,6 +40,24 @@ export function EmptyPrompt({ pageId }: { pageId: string }) {
     askClaude(prompt.trim());
     setText("");
   };
+  const pill = compact && !running && !queued;
+  if (pill)
+    return (
+      <button
+        className="empty-pill"
+        onPointerDown={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+        onClick={() => {
+          setCompact(false);
+          setGrab(true);
+        }}
+      >
+        <Sparkles size={13} />
+        <span>Describe a design for Claude…</span>
+        <span className="empty-pill-sep" aria-hidden="true" />
+        <span className="muted">Templates</span>
+      </button>
+    );
   return (
     <div className="empty-prompt" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
       <button className="ibtn empty-close" aria-label="Close" title="Close (Esc)" onClick={() => closeEmptyPrompt(pageId)}>
@@ -69,6 +103,7 @@ export function EmptyPrompt({ pageId }: { pageId: string }) {
           <div className="empty-title">What do you want to design?</div>
           <textarea
             id="empty-prompt-input"
+            ref={input}
             className="textinput"
             aria-label="What do you want to design?"
             placeholder="Describe a screen, a flow or a whole app…"

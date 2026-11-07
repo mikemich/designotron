@@ -133,8 +133,9 @@ export function NumberField(props: {
         onKeyDown={(e) => {
           if (e.key === "Enter") {
             // preventDefault: committing can move focus (e.g. back into text being edited),
-            // and the Enter must not land there as a newline. Focus stays in the field so the
-            // next value can be typed (or Tab moves on).
+            // and the Enter must not land there as a newline. In the side panels Enter commits and
+            // gives the keys back to the canvas (Figma); Tab moves on to the next field. Dialogs
+            // keep focus in the field, text selected.
             e.preventDefault();
             const input = e.target as HTMLInputElement;
             const out = commit();
@@ -142,7 +143,13 @@ export function NumberField(props: {
               setText(fmt(out));
               shown.current = fmt(out);
             }
-            requestAnimationFrame(() => document.activeElement === input && input.select());
+            if (document.activeElement === input) {
+              if (leavesFieldOnEnter(input)) {
+                edited.current = false;
+                input.blur();
+                focusCanvas();
+              } else requestAnimationFrame(() => document.activeElement === input && input.select());
+            }
           } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y") && !pending()) {
             // Nothing typed since the last commit: undo and redo belong to the design, not the text box.
             e.preventDefault();
@@ -491,6 +498,11 @@ export function common<T, V>(items: T[], get: (t: T) => V): Maybe<V> {
   const first = get(items[0]);
   const same = items.every((i) => JSON.stringify(get(i)) === JSON.stringify(first));
   return same ? first : (MIXED as Maybe<V>);
+}
+
+/** Enter in a panel field hands the keys back to the canvas; fields inside a dialog keep them. */
+export function leavesFieldOnEnter(input: Element) {
+  return !input.closest('[role="dialog"], .modal, .modal-bg');
 }
 
 /** Puts keyboard focus on the canvas (after a field or panel gives it up). */
