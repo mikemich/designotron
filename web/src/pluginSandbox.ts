@@ -6,18 +6,22 @@
 export const PLUGIN_SANDBOX = "allow-scripts";
 
 /** The only script the frame runs from its own page. It is constant: the plugin's code arrives
- *  by postMessage and runs through `new Function`, so no nonce exists for the plugin to find, and
- *  `import()` from plugin code is governed by a policy with no host sources.
+ *  over a MessagePort and runs through `new Function`, so no nonce exists for the plugin to
+ *  find, and `import()` from plugin code is governed by a policy with no host sources.
  *  A frame the plugin creates inside itself inherits the policy, and the only inline script it
  *  can run is this one, which removes WebRTC first and then waits for code that only its own
  *  parent could send.
  *
- *  The per-run token arrives with the code and lives only in this closure; every message the
- *  bootstrap sends carries it, and the editor ignores any message without it. A document that
- *  replaces the plugin in this frame (the plugin navigates it) never receives the token, so it can
- *  neither call tools nor keep the run looking alive. `parent`, `postMessage` and `addEventListener`
- *  are captured before plugin code exists, so the plugin can't swap them for spies. The script is
- *  strict, so plugin code (sloppy, from `new Function`) can't reach its callers through
+ *  The channel to the editor is a MessageChannel, not window messages. The host sends the code once
+ *  by window postMessage and transfers one end of the channel; the bootstrap keeps that port in its
+ *  closure and uses only it from then on (calls, pongs, navigation signal on one side; replies,
+ *  pings, selection events on the other). So nothing a document that replaces the plugin in this
+ *  frame (document.open(), a navigation) can reach carries a secret or a result, and the editor
+ *  ignores everything that doesn't arrive on its end of the port. The plugin can't get at the port:
+ *  `parent`, `postMessage`, `addEventListener`, the port's `postMessage` and the `data`/`ports`
+ *  getters of MessageEvent are captured before plugin code exists, the plugin starts from a timer
+ *  task (so `window.event` is undefined, and it never sees the message that carried the port), and
+ *  the script is strict, so the plugin (sloppy, from `new Function`) can't reach its callers through
  *  `arguments.callee.caller` or stack-trace hooks. */
 export const BOOTSTRAP_SCRIPT = String.raw`"use strict";
 (() => {
@@ -26,9 +30,12 @@ export const BOOTSTRAP_SCRIPT = String.raw`"use strict";
     try { Object.defineProperty(window, k, { value: undefined, configurable: false }); } catch (e) {}
   }
   const host = window.parent;
-  const send = host.postMessage.bind(host);
   const listen = window.addEventListener.bind(window);
-  let token = null;
+  const unlisten = window.removeEventListener.bind(window);
+  const later = window.setTimeout.bind(window);
+  const eventData = Object.getOwnPropertyDescriptor(MessageEvent.prototype, "data").get;
+  const eventPorts = Object.getOwnPropertyDescriptor(MessageEvent.prototype, "ports").get;
+  let send = null;
   let seq = 0;
   let started = false;
   let leaving = false;
@@ -37,20 +44,20 @@ export const BOOTSTRAP_SCRIPT = String.raw`"use strict";
   const call = (method, args) => new Promise((resolve, reject) => {
     const id = ++seq;
     pending.set(id, { resolve, reject });
-    send({ dtPlugin: true, token, id, method, args }, "*");
+    send({ dtPlugin: true, id, method, args });
   });
   // The frame is going away or being replaced: tell the editor while it still can listen.
-  const leave = () => {
-    if (leaving || token === null) return;
+  const leave = (e) => {
+    if (leaving || !send || !e.isTrusted) return;
     leaving = true;
-    send({ dtPlugin: true, token, navigating: true }, "*");
+    send({ dtPlugin: true, navigating: true });
   };
   listen("pagehide", leave);
   listen("beforeunload", leave);
   listen("unhandledrejection", (e) => {
-    if (token === null) return;
+    if (!send || !e.isTrusted) return;
     const r = e.reason;
-    send({ dtPlugin: true, token, method: "warn", args: [String(r && r.message || r)] }, "*");
+    send({ dtPlugin: true, method: "warn", args: [String(r && r.message || r)] });
   });
   window.dt = {
     tool: (name, input) => call("tool", [name, input || {}]),
@@ -63,32 +70,42 @@ export const BOOTSTRAP_SCRIPT = String.raw`"use strict";
     on: (event, fn) => (listeners[event] || (listeners[event] = [])).push(fn),
     ui: { show: (html, size) => { document.body.innerHTML = html; return call("showUi", [size || {}]); } },
   };
-  listen("message", (e) => {
-    const m = e.data;
-    if (!m || !m.dtHost || e.source !== host) return;
-    if (typeof m.code === "string") {
-      if (started || typeof m.token !== "string" || m.token.length < 16) return;
-      started = true;
-      token = m.token;
-      // Compiled inside the chain so a syntax error is reported like any other plugin error.
-      Promise.resolve()
-        .then(() => new Function("dt", "return (async () => {\n" + m.code + "\n})()")(window.dt))
-        .then(() => call("done", []), (err) => call("error", [String(err && err.stack || err)]));
-      return;
-    }
-    if (!started) return;
-    if (m.ping) return send({ dtPlugin: true, token, pong: true }, "*");
+  const onPort = (e) => {
+    const m = eventData.call(e);
+    if (!m) return;
+    if (m.ping) return send({ dtPlugin: true, pong: true });
     if (m.event) return (listeners[m.event] || []).forEach((fn) => fn(m.data));
     const p = pending.get(m.id);
     if (!p) return;
     pending.delete(m.id);
     m.error ? p.reject(new Error(m.error)) : p.resolve(m.result);
-  });
+  };
+  const onStart = (e) => {
+    const m = eventData.call(e);
+    const port = eventPorts.call(e)[0];
+    if (started || !e.isTrusted || e.source !== host || !m || !m.dtHost || typeof m.code !== "string" || !port) return;
+    started = true;
+    unlisten("message", onStart);
+    const post = port.postMessage.bind(port);
+    send = (msg) => post(msg);
+    port.addEventListener("message", onPort);
+    port.start();
+    const code = m.code;
+    // From a timer task, not from this event: window.event is undefined there, so plugin code can't
+    // read the message (or its port) off it. Compiled inside the chain so a syntax error is
+    // reported like any other plugin error.
+    later(() => {
+      Promise.resolve()
+        .then(() => new Function("dt", "return (async () => {\n" + code + "\n})()")(window.dt))
+        .then(() => call("done", []), (err) => call("error", [String(err && err.stack || err)]));
+    }, 0);
+  };
+  listen("message", onStart);
 })();
 `;
 
 /** base64 SHA-256 of `BOOTSTRAP_SCRIPT` (the text between the script tags). */
-export const BOOTSTRAP_HASH = "sha256-2yK8NAP78SrCvlq9zt9Ce3tuTG9m0Xc6Mr3mYHA+EgI=";
+export const BOOTSTRAP_HASH = "sha256-034wF++Z8Jf4i8COseKkto+yJO1G1AfZm8TZWjFA1GM=";
 
 /** Frame policy: nothing loads or connects; images only from data: and blob:; scripts only the
  *  bootstrap (by hash) and eval. No `unsafe-inline`: a plugin's frames can't use `on*=`

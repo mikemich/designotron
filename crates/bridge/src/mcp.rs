@@ -128,7 +128,8 @@ fn tool_list() -> Vec<Value> {
 
 async fn call_tool(state: &Shared, route: &Route, params: &Value) -> Value {
   let name = params["name"].as_str().unwrap_or("").to_string();
-  let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+  let mut args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+  scrub_args(&name, &mut args);
   // Calls of one chat turn share an undo group, so the tab undoes the turn in one step.
   let (target, group) = match route {
     Route::Active => (Target::Active, None),
@@ -159,6 +160,16 @@ async fn call_tool(state: &Shared, route: &Route, params: &Value) -> Value {
   }
 }
 
+/// Who signs a comment reply is the caller's business, not an argument: the editor stamps it
+/// ("Claude", or "<person> via <plugin>"), and a headless call has only "Claude".
+fn scrub_args(name: &str, args: &mut Value) {
+  if name == "reply_comment" {
+    if let Some(o) = args.as_object_mut() {
+      o.remove("author");
+    }
+  }
+}
+
 /// A chat's calls carry the secret of their turn in a header; anything else goes to the active tab.
 fn route_of(headers: &HeaderMap) -> Route {
   match headers.get(EDITOR_HEADER).and_then(|v| v.to_str().ok()).map(str::trim) {
@@ -183,6 +194,16 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_reply_cannot_choose_its_author() {
+    let mut args = json!({ "id": "c1", "text": "Done", "author": "Ana" });
+    scrub_args("reply_comment", &mut args);
+    assert_eq!(args, json!({ "id": "c1", "text": "Done" }));
+    let mut other = json!({ "author": "kept" });
+    scrub_args("update_nodes", &mut other);
+    assert_eq!(other["author"], "kept");
+  }
 
   #[test]
   fn tool_list_uses_mcp_field_names() {

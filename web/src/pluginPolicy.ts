@@ -5,8 +5,9 @@
  *  Only `frame-src`, so nothing else in the editor is affected. It is what stops a plugin's
  *  sandboxed frame from navigating itself to the web: the browser refuses the navigation before
  *  any request is made. srcdoc frames (plugins, `import_html`) are not fetches and still load;
- *  the localhost entries are the app preview. There is deliberately no `'self'`: nothing in the
- *  editor frames its own origin, and a plugin must not be able to load the editor in its frame. */
+ *  the localhost entries are the app preview. There is deliberately no `'self'`, but that alone
+ *  doesn't keep the editor out of a plugin frame: local installs serve the editor on those same
+ *  localhost origins, so `main.tsx` also refuses to boot in a frame with an opaque origin. */
 export const EDITOR_FRAME_SRC = "frame-src http://localhost:* http://127.0.0.1:*";
 
 /** Namespace declarations (`xmlns="…"`, `xmlns:xlink="…"`) for exactly these URLs are markup, not
@@ -19,7 +20,8 @@ const WEB_ADDRESS = /https?:\/\//i;
  *  exact SVG/XHTML namespace declarations. Plugins can't use web addresses (no network). */
 export function hasWebAddress(input: unknown, depth = 0): boolean {
   if (typeof input === "string") return WEB_ADDRESS.test(input.replace(NAMESPACE_DECL, ""));
-  if (depth > 200 || input === null || typeof input !== "object") return false;
+  if (depth > 200) return true; // too deep to look through: refuse
+  if (input === null || typeof input !== "object") return false;
   if (Array.isArray(input)) return input.some((v) => hasWebAddress(v, depth + 1));
   // Keys count too: they end up as JSON text on the engine side as well.
   return Object.entries(input).some(([k, v]) => hasWebAddress(k, depth + 1) || hasWebAddress(v, depth + 1));

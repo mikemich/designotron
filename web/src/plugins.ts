@@ -2,9 +2,9 @@
 // editor's DOM, storage or API key). They call the same tool layer Claude uses through
 // a small promise API over postMessage. A run is one undo step (see runPlugin). They have no
 // network: a CSP in the frame, web addresses and fetching tools refused, and the editor page's
-// frame-src (index.html) refuses the frame's navigation to the web. Every message the frame sends
-// carries a per-run secret token that only the bootstrap holds (pluginSandbox.ts), so a document
-// that replaces the plugin in the frame can't call tools or keep the run alive.
+// frame-src (index.html) refuses the frame's navigation to the web. The editor talks to the frame
+// over a MessageChannel whose far end only the bootstrap holds (pluginSandbox.ts), so a document
+// that replaces the plugin in the frame can't call tools, hear replies or keep the run alive.
 
 import { create } from "zustand";
 import { selection, toast, useStore } from "./store";
@@ -140,14 +140,20 @@ export function runPlugin(plugin: Plugin) {
   const runId = ++runSeq;
   let step = 0;
   let lastCall = 0;
-  // Secret of this run: from the CSPRNG (crypto.randomUUID needs a secure context, and the LAN
-  // share is plain http). Sent once with the code; the frame's own bootstrap is the only holder.
-  const token = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
-  const author = `${userName() || "You"} via ${plugin.name}`.slice(0, 80);
-  // Nothing is posted to the frame once it is gone or navigated: a replacing document would read it.
+  // The channel to the frame: one end goes to the bootstrap with the code, this end is ours. Only
+  // what arrives on `port` is a plugin message, and only the bootstrap holds the other end, so a
+  // document that replaces the plugin in the frame (document.open(), a navigation) can neither send
+  // to us nor receive from us.
+  const channel = new MessageChannel();
+  const port = channel.port1;
+  // Cut by code point (never in the middle of a pair) and with control characters out of the name.
+  const author = Array.from(`${userName() || "You"} via ${plugin.name}`.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " "))
+    .slice(0, 80)
+    .join("");
+  // Once the frame navigated or the run stopped, nothing more is posted.
   let navigated = false;
   const post = (msg: object) => {
-    if (!navigated && usePlugins.getState().running?.frame === frame) frame.contentWindow?.postMessage({ dtHost: true, ...msg }, "*");
+    if (!navigated && usePlugins.getState().running?.frame === frame) port.postMessage(msg);
   };
   const reply = (id: number, result?: unknown, error?: string) => post({ id, result: result ?? null, error: error ?? null });
   const navigatedAway = () => {
@@ -157,10 +163,8 @@ export function runPlugin(plugin: Plugin) {
     stopPlugin();
   };
   const onMessage = async (e: MessageEvent) => {
-    // Only the bootstrap holds the token; a document that replaced it (or a frame inside it) doesn't.
-    if (e.source !== frame.contentWindow || e.origin !== "null") return;
     const m = e.data;
-    if (m?.dtPlugin !== true || m.token !== token) return;
+    if (m?.dtPlugin !== true) return;
     lastPong = Date.now();
     if (m.navigating) return navigatedAway();
     if (m.pong) {
@@ -170,9 +174,18 @@ export function runPlugin(plugin: Plugin) {
     try {
       switch (m.method) {
         case "tool": {
-          const [name, input] = m.args;
+          const [name, raw] = m.args;
           if (PLUGIN_REFUSED_TOOLS.has(String(name))) throw new Error(`plugins can't use ${name}`);
-          if (hasWebAddress(input ?? null)) throw new Error("plugins can't use web addresses yet");
+          // What arrives is a structured clone, which keeps things JSON would turn into something
+          // else (a `new String("https://…")`, whose entries are single characters). The checks and
+          // the engine both see this plain-JSON copy, never the clone.
+          let input: unknown;
+          try {
+            input = JSON.parse(JSON.stringify(raw ?? {}));
+          } catch {
+            throw new Error("tool input must be plain JSON");
+          }
+          if (hasWebAddress(input)) throw new Error("plugins can't use web addresses yet");
           // The pause is measured from the previous call, before waiting for the canvas.
           if (running.ui && lastCall && Date.now() - lastCall > 1000) step++;
           if (!(await whenCanvasIdle())) throw new Error(DRAG_BUSY);
@@ -189,7 +202,7 @@ export function runPlugin(plugin: Plugin) {
           return reply(m.id, (out.result as any)?.nodes ?? out.result);
         }
         case "notify":
-          toast(m.args[0]);
+          toast(String(m.args[0]));
           return reply(m.id);
         case "showUi":
           running.ui = { width: Math.min(640, m.args[0]?.width ?? 300), height: Math.min(720, m.args[0]?.height ?? 240) };
@@ -221,7 +234,7 @@ export function runPlugin(plugin: Plugin) {
       reply(m.id, null, String(err instanceof Error ? err.message : err));
     }
   };
-  window.addEventListener("message", onMessage);
+  port.onmessage = onMessage;
   // Watchdog: a plugin that stops answering is flagged so the person can stop it.
   let lastPong = Date.now();
   const watchdog = setInterval(() => {
@@ -241,7 +254,7 @@ export function runPlugin(plugin: Plugin) {
   frame.addEventListener("load", () => {
     if (loads++ === 0) {
       // The page is constant (see pluginSandbox.ts); the code is sent in once it is ready.
-      post({ code: plugin.code, token });
+      frame.contentWindow?.postMessage({ dtHost: true, code: plugin.code }, "*", [channel.port2]);
     } else {
       navigatedAway();
     }
@@ -252,7 +265,7 @@ export function runPlugin(plugin: Plugin) {
   cleanup = () => {
     clearTimeout(slow);
     clearInterval(watchdog);
-    window.removeEventListener("message", onMessage);
+    port.close();
     unsub();
     frame.remove();
   };

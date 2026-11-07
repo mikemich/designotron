@@ -27,6 +27,21 @@ describe("hasWebAddress", () => {
     expect(hasWebAddress(undefined)).toBe(false);
     expect(hasWebAddress(12)).toBe(false);
   });
+
+  it("fails closed when the input is nested too deeply to look through", () => {
+    let deep: unknown = { a: "fine" };
+    for (let i = 0; i < 205; i++) deep = { a: deep };
+    expect(hasWebAddress(deep)).toBe(true);
+  });
+
+  it("sees a String wrapper once the input is reduced to plain JSON (what plugins.ts does)", () => {
+    // postMessage's structured clone keeps new String(...); JSON turns it into the URL itself.
+    const cloned = structuredClone({ a: new String("https://x"), b: [new String("fine")] });
+    const plain = JSON.parse(JSON.stringify(cloned));
+    expect(plain).toEqual({ a: "https://x", b: ["fine"] });
+    expect(hasWebAddress(plain)).toBe(true);
+    expect(hasWebAddress(JSON.parse(JSON.stringify(structuredClone({ b: [new String("fine")] }))))).toBe(false);
+  });
 });
 
 describe("editor frame policy", () => {
