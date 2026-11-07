@@ -600,7 +600,7 @@ try {
   const net = JSON.parse(await nodeName(target));
   check(
     "plugin has no network: fetch, XHR, images, WebRTC, import_url/import_html/save_plugin/search_photos and web addresses all fail",
-    net.fetch === "blocked" && net.img === "blocked" && net.xhr === "blocked" && net.rtc === "undefined/undefined" && net.url.includes("plugins can't") && net.html.includes("plugins can't") && net.save.includes("plugins can't") && net.photo.includes("plugins can't") && net.addr.includes("web addresses") && stubHits.length === 0,
+    net.fetch === "blocked" && net.img === "blocked" && net.xhr === "blocked" && net.rtc === "undefined/undefined" && net.url.includes("plugins can't") && net.html.includes("plugins can't") && net.save.includes("plugins can't") && net.photo.includes("plugins can't") && net.addr.includes("web addresse") && stubHits.length === 0,
     JSON.stringify({ ...net, stubHits: stubHits.length }),
   );
 

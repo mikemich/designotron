@@ -2050,8 +2050,7 @@ body:has(.modal-bg) .hint-card {
 .textinput.code {
   font-family: ui-monospace, monospace;
   font-size: 12px;
-  min-height: 300px;
-  resize: vertical;
+  resize: none;
   white-space: pre;
 }
 .plugin-header {
@@ -2085,6 +2084,184 @@ body:has(.modal-bg) .hint-card {
   height: 0;
   border: 0;
   visibility: hidden;
+}
+
+/* Plugin editor: line numbers, console, API reference */
+.code-box {
+  display: flex;
+  background: var(--panel-2);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  overflow: hidden;
+  flex: none;
+}
+.code-box:focus-within {
+  border-color: var(--select);
+}
+.code-box.bad {
+  border-color: var(--danger);
+}
+.code-gutter {
+  flex: none;
+  min-width: 36px;
+  padding: 6px 8px 22px 8px;
+  overflow: hidden;
+  text-align: right;
+  white-space: pre;
+  color: var(--text-3);
+  background: rgba(0, 0, 0, 0.18);
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 18px;
+  user-select: none;
+  height: 260px;
+}
+.code-box .textinput.code {
+  flex: 1;
+  min-width: 0;
+  height: 260px;
+  min-height: 120px;
+  line-height: 18px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: auto;
+}
+.plugin-problem {
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.plugin-problem .plugin-log-line {
+  color: inherit;
+  font-weight: 600;
+}
+.plugin-console {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 12px;
+}
+.plugin-console-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+.plugin-console-head .btn.small {
+  height: 22px;
+  padding: 0 8px;
+}
+.plugin-console-body {
+  max-height: 130px;
+  min-height: 52px;
+  overflow: auto;
+  padding: 4px 0;
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+}
+.plugin-console-empty {
+  padding: 4px 10px;
+  font-family: var(--font);
+}
+.plugin-log {
+  display: flex;
+  gap: 8px;
+  padding: 1px 10px;
+  align-items: baseline;
+  line-height: 1.5;
+}
+.plugin-log-t {
+  flex: none;
+  color: var(--text-3);
+  min-width: 46px;
+}
+.plugin-log-kind {
+  flex: none;
+  min-width: 42px;
+  color: var(--text-3);
+}
+.plugin-log-text {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.plugin-log.warn .plugin-log-text,
+.plugin-log.tool .plugin-log-text {
+  color: #f5c451;
+}
+.plugin-log.error .plugin-log-text,
+.plugin-log.error .plugin-log-kind {
+  color: #ff8a73;
+}
+.plugin-log.notify .plugin-log-text {
+  color: var(--accent-2);
+}
+.plugin-log.dropped {
+  color: var(--text-3);
+  font-style: italic;
+}
+.plugin-log-line {
+  flex: none;
+  color: var(--accent-2);
+  font: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  text-decoration: underline;
+}
+button.plugin-log-line {
+  cursor: pointer;
+}
+.plugin-console-float {
+  position: fixed;
+  right: 16px;
+  z-index: 40;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  background: var(--panel);
+  border-radius: 8px;
+}
+.plugin-api {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.plugin-api summary {
+  cursor: pointer;
+  padding: 6px 10px;
+  font-weight: 600;
+}
+.plugin-api-body {
+  padding: 2px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.plugin-api-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.plugin-api-row code {
+  color: var(--text);
+  font-family: ui-monospace, monospace;
+}
+.plugin-api-shape {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border-radius: 6px;
+  overflow: auto;
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 /* Multiplayer */

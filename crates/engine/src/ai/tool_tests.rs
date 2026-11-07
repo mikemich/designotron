@@ -1677,6 +1677,29 @@ mod r9_p2 {
   }
 
   #[test]
+  fn arrange_unknown_action_lists_the_valid_ones() {
+    let mut e = engine();
+    let id = created(&run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle", "width": 10, "height": 10 }] }),
+    ))[0]
+      .clone();
+    let err = e.dispatch(ai("arrange", json!({ "action": "wobble", "ids": [id] }))).unwrap_err();
+    assert!(
+      err.contains("'wobble'") && err.contains("use one of:") && err.contains("align_left") && err.contains("distribute_vertical"),
+      "{err}"
+    );
+    for bare in ["align", "distribute"] {
+      let err = e.dispatch(ai("arrange", json!({ "action": bare, "ids": [id] }))).unwrap_err();
+      assert!(
+        err.contains("did you mean align_left") && err.contains("distribute_horizontal"),
+        "{err}"
+      );
+    }
+  }
+
+  #[test]
   fn component_prop_errors_name_the_op() {
     let mut e = engine();
     let err = e

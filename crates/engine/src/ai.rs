@@ -1236,7 +1236,18 @@ fn arrange(e: &mut Engine, input: &Value) -> Result<Value, String> {
     },
     "distribute_horizontal" => Command::Distribute { ids, horizontal: true },
     "distribute_vertical" => Command::Distribute { ids, horizontal: false },
-    other => return Err(format!("unknown arrange action '{other}'")),
+    "align" | "distribute" => {
+      return Err(format!(
+        "unknown arrange action '{action}': did you mean align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal or distribute_vertical? Valid actions: {}",
+        ARRANGE_ACTIONS.join(", ")
+      ))
+    }
+    other => {
+      return Err(format!(
+        "unknown arrange action '{other}'; use one of: {}",
+        ARRANGE_ACTIONS.join(", ")
+      ))
+    }
   };
   let mut r = e.dispatch_inner(cmd)?;
   if let Value::Object(m) = &mut r {
