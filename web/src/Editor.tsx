@@ -15,7 +15,8 @@ import { joinShared, stopSharing, useCollab } from "./collab";
 import { ShortcutsDialog } from "./panels/ShortcutsDialog";
 import { ImportDialog } from "./panels/ImportDialog";
 import { PhoneNote } from "./panels/PhoneNote";
-import { DemoOverlay, stopDemo } from "./Demo";
+import { DemoOverlay, playDemo, stopDemo } from "./Demo";
+import { importFigmaJson } from "./figma";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
 import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, saveHook, toast as showToast, useStore, zoomToFit, dispatch } from "./store";
@@ -115,6 +116,28 @@ export function askWhenOpen(prompt: string | null) {
   askOnOpen = prompt;
 }
 
+/** Play the replay of Claude designing a page once the next file has opened (from the start screen). */
+let demoOnOpen: string | null = null;
+export function demoWhenOpen(fileId: string | null) {
+  demoOnOpen = fileId;
+}
+
+/** The dashboard fetched a Figma file and made this one for it: import it now, once (taking it out of the
+ *  store first, so a second mount can't repeat it). Warnings open the dialog's result view. */
+function runPendingFigma(fileId: string) {
+  const pending = useStore.getState().pendingFigma;
+  if (!pending) return;
+  useStore.setState({ pendingFigma: null });
+  if (pending.fileId !== fileId) return; // meant for another file
+  try {
+    const r = importFigmaJson(pending.file, pending.images);
+    showToast(`Imported ${r.layers} layers from Figma`);
+    if (r.warnings.length) useStore.setState({ figmaResult: r, figmaOpen: "result" });
+  } catch (err) {
+    reportFailure("import from Figma", err);
+  }
+}
+
 /** What to write for the document as of one moment: the layers that changed since the last
  * stored write, with the engine revision it was taken at. */
 interface Snapshot {
@@ -136,7 +159,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const figmaOpen = useStore((s) => s.figmaOpen);
   // The Figma import dialog belongs to this file: leaving the file closes it (it stays open to
   // show import warnings, and must not reappear over the next file).
-  useEffect(() => () => useStore.setState({ figmaOpen: false }), []);
+  useEffect(() => () => useStore.setState({ figmaOpen: false, figmaResult: null, pendingFigma: null }), []);
   const pluginsOpen = usePlugins((s) => s.dialogOpen);
   const shareOpen = useCollab((s) => s.dialogOpen);
   const [ready, setReady] = useState(false);
@@ -223,12 +246,14 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       // Storage failed and there is no recovery copy: the file may well be here, so don't
       // claim it isn't.
       if (readFailed && recovered === null) {
+        useStore.setState({ pendingFigma: null });
         console.error(readFailed);
         setReadError(failureText("read this file", readFailed));
         return;
       }
       // A link to a file that isn't in this browser (deleted, or from another device).
       if (json === null) {
+        useStore.setState({ pendingFigma: null });
         setMissing(true);
         return;
       }
@@ -250,10 +275,16 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       setReady(true);
       // Two frames: the canvas has its final size by then.
       requestAnimationFrame(() => requestAnimationFrame(zoomToFit));
+      runPendingFigma(fileId);
       joinShared();
       // This file's own conversation (after the first paint: it only reads storage).
       await enterFile(fileId);
       if (cancelled) return;
+      if (demoOnOpen) {
+        const mine = demoOnOpen === fileId;
+        demoOnOpen = null;
+        if (mine) void playDemo();
+      }
       if (askOnOpen) {
         const prompt = askOnOpen;
         askOnOpen = null;
@@ -262,6 +293,10 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     })();
     return () => {
       cancelled = true;
+      // Data or a replay meant for this file that never got to run (the load was cancelled or failed)
+      // must not land in the next file opened.
+      if (useStore.getState().pendingFigma?.fileId === fileId) useStore.setState({ pendingFigma: null });
+      if (demoOnOpen === fileId) demoOnOpen = null;
       // The lock goes once the closing editor's last write has finished (its cleanup runs next).
       const lock = tabRef.current.lock;
       tabRef.current.lock = null;
@@ -1071,7 +1106,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       {presenting && <Presenter start={presenting} />}
       <Tour />
       {variablesOpen && <VariablesDialog />}
-      {figmaOpen && <FigmaImportDialog />}
+      {(figmaOpen === true || figmaOpen === "result") && <FigmaImportDialog />}
       {pluginsOpen && !readOnly && <PluginsDialog />}
       {shareOpen && <ShareDialog />}
       {gone && (

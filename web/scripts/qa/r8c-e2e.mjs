@@ -269,15 +269,18 @@ try {
   const p2 = (await run({ op: "addPage", name: "Page 2" }))?.id;
   if (p2) await run({ op: "setPage", id: p2 });
   await page.waitForTimeout(200);
-  check("a second empty page has its own prompt", !!(await page.$(".empty-prompt")));
+  // Once closed, later empty pages show the compact pill (r15d) instead of the full card.
+  check("a second empty page has its own (compact) prompt", !!(await page.$(".empty-pill")));
   await run({ op: "setPage", id: first });
   await page.waitForTimeout(200);
-  check("the first page stays closed", !(await page.$(".empty-prompt")));
-  await page.click(".empty-close").catch(() => {});
+  check("the first page stays closed", !(await page.$(".empty-prompt, .empty-pill")));
   await run({ op: "setPage", id: p2 });
   await page.waitForTimeout(150);
+  await page.click(".empty-pill button");
+  check("the pill expands to the full prompt", !!(await page.$(".empty-prompt .empty-close")));
   await page.click(".empty-close");
   check("the close button closes it too", !(await page.$(".empty-prompt")));
+  await page.evaluate(() => localStorage.removeItem("dt:emptyPrompt"));
   await newFile();
   await page.click("#empty-prompt-input");
   await page.keyboard.press("Escape");

@@ -1302,6 +1302,8 @@ export function Canvas() {
   };
   const cursor = panning ? "grabbing" : keys.space || tool === "hand" ? "grab" : tool === "move" ? (vHover ? "crosshair" : "default") : tool === "text" ? "text" : "crosshair";
   const emptyPromptClosed = useStore((s) => s.emptyPromptClosed);
+  /** The Figma import dialog is open: it has the say, not the blank-file prompt. */
+  const figmaOpen = useStore((s) => s.figmaOpen);
   // A view-only file offers no Claude: it couldn't change anything.
   const engineReadOnly = useStore((s) => !!s.es.readOnly);
   const viewer = useCollab((s) => s.viewer);
@@ -1454,7 +1456,7 @@ export function Canvas() {
       <FollowFrame />
       {showRulers && <Rulers v={v} width={size.w} height={size.h} selection={selItems.union} />}
       {editingText && <TextEditor id={editingText} />}
-      {empty && (tool === "move" || tool === "hand") && <EmptyPrompt pageId={pageObj?.id ?? ""} />}
+      {empty && !figmaOpen && (tool === "move" || tool === "hand") && <EmptyPrompt pageId={pageObj?.id ?? ""} />}
       <ZoomFlash zoom={v.zoom} />
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>

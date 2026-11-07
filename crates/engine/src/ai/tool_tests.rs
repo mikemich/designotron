@@ -2224,3 +2224,718 @@ mod r10_p2 {
     assert_ne!(e.doc.get(&frame).unwrap().kind, crate::model::NodeType::Component);
   }
 }
+
+mod r15b {
+  use super::*;
+
+  fn err(e: &mut Engine, tool: &str, input: Value) -> String {
+    e.dispatch(ai(tool, input)).unwrap_err()
+  }
+
+  fn layer_names(e: &Engine) -> Vec<String> {
+    let page = e.doc.page(&e.page).unwrap();
+    page.children.iter().map(|c| e.doc.get(c).unwrap().name.clone()).collect()
+  }
+
+  #[test]
+  fn boolean_and_flatten_refuse_frames_with_layers_inside() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "frame", "name": "Home", "width": 100, "height": 100, "children": [{ "type": "rectangle", "name": "Kid", "width": 20, "height": 20 }] },
+        { "type": "rectangle", "name": "R1", "x": 50, "width": 100, "height": 100 },
+        { "type": "rectangle", "name": "R2", "x": 80, "width": 100, "height": 100 },
+        { "type": "frame", "name": "Empty", "x": 400, "width": 60, "height": 60 }] }),
+    );
+    let ids = created(&r);
+    let before = layer_names(&e);
+    for action in ["union", "subtract", "intersect", "exclude", "flatten"] {
+      let m = err(&mut e, "arrange", json!({ "action": action, "ids": [ids[0], ids[1]] }));
+      assert!(m.contains("Home is a frame with layers inside"), "{m}");
+      assert!(
+        m.contains(if action == "flatten" {
+          "flatten combines shapes"
+        } else {
+          "boolean operations combine shapes"
+        }),
+        "{m}"
+      );
+      assert_eq!(layer_names(&e), before, "{action} left the document unchanged");
+    }
+    let kid = e.doc.get(&ids[0]).unwrap().children[0].clone();
+    assert!(e.doc.get(&kid).is_some());
+    // Rectangles still combine, and so does a group with a rectangle.
+    run(&mut e, "arrange", json!({ "action": "union", "ids": [ids[1], ids[2]] }));
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "rectangle", "name": "A", "x": 600, "width": 50, "height": 50 },
+        { "type": "rectangle", "name": "B", "x": 620, "width": 50, "height": 50 },
+        { "type": "rectangle", "name": "C", "x": 630, "width": 50, "height": 50 }] }),
+    );
+    let p = created(&r);
+    run(&mut e, "arrange", json!({ "action": "group", "ids": [p[0], p[1]] }));
+    let grp = e.doc.get(&p[0]).unwrap().parent.clone().unwrap();
+    run(&mut e, "arrange", json!({ "action": "union", "ids": [grp, p[2]] }));
+  }
+
+  #[test]
+  fn create_instance_checks_its_parent() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "component", "name": "Card", "width": 80, "height": 40 },
+        { "type": "text", "text": "Hi", "x": 300 },
+        { "type": "frame", "name": "Host", "x": 500, "width": 200, "height": 200 }] }),
+    );
+    let ids = created(&r);
+    let nodes_before = e.doc.nodes.len();
+    let m = err(&mut e, "create_instance", json!({ "componentId": ids[0], "parentId": "n_nope" }));
+    assert!(m.contains("no parent layer n_nope"), "{m}");
+    let m = err(&mut e, "create_instance", json!({ "componentId": ids[0], "parentId": ids[1] }));
+    assert!(m.contains("cannot have children"), "{m}");
+    let m = err(&mut e, "create_instance", json!({ "componentId": ids[2] }));
+    assert!(m.contains("not a main component"), "{m}");
+    let m = err(&mut e, "create_instance", json!({ "componentId": ids[0], "parentId": ids[0] }));
+    assert!(m.contains("can't place an instance of Card inside Card"), "{m}");
+    assert_eq!(e.doc.nodes.len(), nodes_before, "nothing was inserted");
+    let r = run(&mut e, "create_instance", json!({ "componentId": ids[0], "parentId": ids[2] }));
+    let inst = e.doc.get(r["id"].as_str().unwrap()).unwrap();
+    assert_eq!(inst.parent.as_deref(), Some(ids[2].as_str()));
+    assert_eq!(inst.page, e.page);
+  }
+
+  #[test]
+  fn sizes_are_bounded_and_min_stays_below_max() {
+    let mut e = engine();
+    let m = err(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": -120, "height": 50 }] }),
+    );
+    assert!(m.contains("nodes[0].width") && m.contains("0 or more"), "{m}");
+    let m = err(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": -1, "height": 1e9 }] }),
+    );
+    assert!(
+      m.contains("width must be 0 or more") && m.contains("height must be at most 100000"),
+      "both fields reported: {m}"
+    );
+    let m = err(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": "hug", "maxWidth": 1e9 }] }),
+    );
+    assert!(m.contains("maxWidth must be at most 100000"), "{m}");
+    let m = err(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": "hug", "minWidth": 200, "maxWidth": 40 }] }),
+    );
+    assert!(m.contains("minWidth 200 is larger than maxWidth 40"), "{m}");
+    let m = err(&mut e, "create_nodes", json!({ "nodes": [{ "type": "frame", "minHeight": -3 }] }));
+    assert!(m.contains("minHeight must be 0 or more"), "{m}");
+    assert!(e.doc.nodes.is_empty());
+    let id = one(&mut e, json!({ "type": "frame", "width": 0, "height": 100000 }));
+    assert_eq!(e.doc.get(&id).unwrap().width, 0.0);
+    let keep = e.doc.get(&id).unwrap().clone();
+    let other = one(&mut e, json!({ "type": "rectangle", "width": 10, "height": 10 }));
+    let m = err(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": other, "width": 20 }, { "id": id, "width": -40 }] }),
+    );
+    assert!(m.contains("updates[1].width"), "{m}");
+    assert_eq!(e.doc.get(&other).unwrap().width, 10.0, "the batch is atomic");
+    assert_eq!(e.doc.get(&id).unwrap().width, keep.width);
+    // min is judged against the stored max.
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": other, "maxWidth": 40 }] }));
+    let m = err(&mut e, "update_nodes", json!({ "updates": [{ "id": other, "minWidth": 100 }] }));
+    assert!(m.contains("minWidth 100 is larger than maxWidth 40"), "{m}");
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": other, "minWidth": 0, "maxWidth": 0 }] }),
+    );
+    assert_eq!(e.doc.get(&other).unwrap().max_width, None);
+  }
+
+  #[test]
+  fn define_variables_refuses_duplicates_and_keeps_types() {
+    let mut e = engine();
+    let m = err(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Dd", "variables": [
+        { "name": "Dup", "type": "color", "value": "#000000" }, { "name": "Dup", "type": "number", "value": 3 }] }),
+    );
+    assert!(m.contains("variables[1]: Dup is already in this call (variables[0])"), "{m}");
+    assert!(e.doc.variables.is_empty());
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Num", "variables": [{ "name": "Gap", "type": "number", "value": 4 }] }),
+    );
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Num", "variables": [{ "name": "Gap", "value": 8 }] }),
+    );
+    let v = &e.doc.variables[0].variables[0];
+    assert_eq!(v.kind, crate::variables::VarKind::Number, "a missing type keeps the kind");
+    assert_eq!(v.values.values().next().unwrap(), &json!(8));
+    let m = err(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Num", "variables": [{ "name": "Gap", "type": "color", "value": "#fff" }] }),
+    );
+    assert!(m.contains("Gap is a number variable") && m.contains("delete"), "{m}");
+    // New variables still default to colour.
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Num", "variables": [{ "name": "Ink", "value": "#111111" }] }),
+    );
+    assert_eq!(e.doc.variables[0].variables[1].kind, crate::variables::VarKind::Color);
+  }
+
+  fn themed(e: &mut Engine) -> (String, String) {
+    run(
+      e,
+      "define_variables",
+      json!({ "collection": "Theme", "modes": ["Light", "Dark"], "variables": [
+        { "name": "Brand", "type": "color", "values": { "Light": "#7C5CFF", "Dark": "#B3A3FF" } },
+        { "name": "Soft", "type": "color", "value": { "alias": "Theme/Brand" } },
+        { "name": "Gap", "type": "number", "value": 8 }] }),
+    );
+    let id = one(
+      e,
+      json!({ "type": "frame", "width": 50, "height": 50, "bind": { "fill": "Brand", "gap": "Gap" } }),
+    );
+    let var = e.doc.variables[0].variables[0].id.clone();
+    (id, var)
+  }
+
+  fn fill_of(e: &Engine, id: &str) -> String {
+    match &e.doc.get(id).unwrap().fills[0] {
+      crate::model::Paint::Solid { color, .. } => color.clone(),
+      _ => String::new(),
+    }
+  }
+
+  #[test]
+  fn renaming_variables_modes_and_collections_keeps_bindings() {
+    let mut e = engine();
+    let (id, var) = themed(&mut e);
+    let r = run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "rename": [{ "from": "Brand", "to": "Accent" }],
+        "renameModes": [{ "from": "Dark", "to": "Night" }], "renameCollection": "Colors" }),
+    );
+    assert_eq!(r["unbound"], 0);
+    let c = &e.doc.variables[0];
+    assert_eq!(
+      (c.name.as_str(), c.modes[1].name.as_str(), c.variables[0].name.as_str()),
+      ("Colors", "Night", "Accent")
+    );
+    assert_eq!(c.variables[0].id, var, "the id is kept");
+    assert_eq!(e.doc.get(&id).unwrap().bindings["fill"], var);
+    assert_eq!(fill_of(&e, &id).to_lowercase(), "#7c5cff");
+    assert!(crate::variables::tokens_css(&e.doc).contains("--accent"));
+    // The renamed names work in bind.
+    assert!(e
+      .dispatch(ai(
+        "update_nodes",
+        json!({ "updates": [{ "id": id, "bind": { "fill": "Accent" } }] })
+      ))
+      .is_ok());
+    let m = err(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Colors", "rename": [{ "from": "Accent", "to": "Soft" }] }),
+    );
+    assert!(m.contains("Soft already exists"), "{m}");
+    let m = err(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Colors", "rename": [{ "from": "Nope", "to": "X" }], "delete": ["Nada"] }),
+    );
+    assert!(m.contains("no variable 'Nope'") && m.contains("no variable 'Nada'"), "{m}");
+    let m = err(&mut e, "define_variables", json!({ "collection": "Missing", "delete": ["x"] }));
+    assert!(m.contains("no collection 'Missing'") && m.contains("Colors"), "{m}");
+  }
+
+  #[test]
+  fn deleting_variables_modes_and_collections_reports_what_it_unbound() {
+    let mut e = engine();
+    let (id, var) = themed(&mut e);
+    let r = run(&mut e, "define_variables", json!({ "collection": "Theme", "delete": ["Brand"] }));
+    assert_eq!(r["unbound"], 1);
+    assert!(r["note"].as_str().unwrap().contains("1 layer"), "{r}");
+    assert!(r["note"].as_str().unwrap().contains("2 aliases"), "{r}");
+    assert!(!e.doc.get(&id).unwrap().bindings.contains_key("fill"));
+    assert!(e.doc.get(&id).unwrap().bindings.contains_key("gap"));
+    assert_eq!(fill_of(&e, &id).to_lowercase(), "#7c5cff", "the layer keeps its value");
+    assert!(e.doc.variables[0].variables.iter().all(|v| v.id != var));
+    // One undo step restores it with the binding.
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.get(&id).unwrap().bindings["fill"], var);
+    // Modes.
+    let m = err(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "deleteModes": ["Light", "Dark"] }),
+    );
+    assert!(m.contains("only mode"), "{m}");
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "deleteModes": ["Dark"] }),
+    );
+    assert_eq!(e.doc.variables[0].modes.len(), 1);
+    assert_eq!(e.doc.variables[0].variables[0].values.len(), 1);
+    // Collection.
+    let r = run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "deleteCollection": true }),
+    );
+    assert_eq!(r["unbound"], 1);
+    assert!(e.doc.variables.is_empty());
+    assert!(e.doc.get(&id).unwrap().bindings.is_empty());
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.variables.len(), 1);
+    assert_eq!(e.doc.get(&id).unwrap().bindings.len(), 2);
+  }
+
+  #[test]
+  fn define_styles_refuses_duplicates_renames_and_deletes() {
+    let mut e = engine();
+    let m = err(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand/Primary", "color": "#7C5CFF" }, { "name": "Brand/Primary", "color": "#000000" }] }),
+    );
+    assert!(m.contains("colors[1]: Brand/Primary is already in this call (colors[0])"), "{m}");
+    assert!(e.doc.styles.colors.is_empty());
+    let a = run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand", "color": "#7C5CFF" }], "texts": [{ "name": "Brand", "fontSize": 20 }] }),
+    );
+    let b = run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand", "color": "#FF0000" }] }),
+    );
+    assert_eq!(
+      b["updated"],
+      json!([a["created"][0]]),
+      "the same name across calls updates in place"
+    );
+    let id = one(
+      &mut e,
+      json!({ "type": "rectangle", "width": 10, "height": 10, "fillStyle": "Brand" }),
+    );
+    let t = one(&mut e, json!({ "type": "text", "text": "Hi", "textStyle": "Brand" }));
+    // Ambiguous across kinds.
+    let m = err(&mut e, "define_styles", json!({ "rename": [{ "from": "Brand", "to": "Main" }] }));
+    assert!(
+      m.contains("names several styles") && m.contains("color style") && m.contains("text style"),
+      "{m}"
+    );
+    let color_id = e.doc.styles.colors[0].id.clone();
+    let r = run(&mut e, "define_styles", json!({ "rename": [{ "from": color_id, "to": "Main" }] }));
+    assert_eq!(r["renamed"][0]["to"], "Main");
+    assert_eq!(e.doc.styles.colors[0].name, "Main");
+    assert_eq!(
+      e.doc.get(&id).unwrap().fill_style.as_deref(),
+      Some(color_id.as_str()),
+      "links follow the id"
+    );
+    let m = err(&mut e, "define_styles", json!({ "delete": ["Nope"] }));
+    assert!(m.contains("no style named 'Nope'"), "{m}");
+    let r = run(&mut e, "define_styles", json!({ "delete": ["Main"] }));
+    assert_eq!(r["unlinked"], 1);
+    assert!(r["note"].as_str().unwrap().contains("1 layer"), "{r}");
+    assert!(e.doc.styles.colors.is_empty());
+    assert!(e.doc.get(&id).unwrap().fill_style.is_none());
+    assert_eq!(fill_of(&e, &id).to_lowercase(), "#ff0000", "values stay");
+    assert!(e.doc.get(&t).unwrap().text_style.is_some(), "the text style is untouched");
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.get(&id).unwrap().fill_style.as_deref(), Some(color_id.as_str()));
+  }
+
+  fn spans() -> Value {
+    json!([{ "text": "Plain, " }, { "text": "bold", "fontWeight": 800 }, { "text": " and " }, { "text": "blue", "color": "#0000FF" }, { "text": " end" }])
+  }
+
+  #[test]
+  fn new_characters_take_the_first_characters_style() {
+    let mut e = engine();
+    let id = one(&mut e, json!({ "type": "text", "spans": spans() }));
+    assert_eq!(e.doc.get(&id).unwrap().text.as_ref().unwrap().runs.len(), 2);
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "text": "Lorem ipsum dolor sit amet" }] }),
+    );
+    let t = e.doc.get(&id).unwrap().text.clone().unwrap();
+    assert_eq!(t.characters, "Lorem ipsum dolor sit amet");
+    assert!(t.runs.is_empty(), "{:?}", t.runs);
+    // A bold first run covers the new text.
+    let id = one(
+      &mut e,
+      json!({ "type": "text", "spans": [{ "text": "Head", "fontWeight": 700 }, { "text": " tail" }] }),
+    );
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "text": "A brand new headline" }] }),
+    );
+    let t = e.doc.get(&id).unwrap().text.clone().unwrap();
+    assert_eq!(t.runs.len(), 1);
+    assert_eq!((t.runs[0].start, t.runs[0].end, t.runs[0].font_weight), (0, 20, Some(700)));
+    // The same characters keep their runs; spans still win.
+    let id = one(&mut e, json!({ "type": "text", "spans": spans() }));
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "text": "Plain, bold and blue end", "fontSize": 20 }] }),
+    );
+    assert_eq!(e.doc.get(&id).unwrap().text.as_ref().unwrap().runs.len(), 2);
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "spans": [{ "text": "ab" }, { "text": "cd", "fontWeight": 700 }] }] }),
+    );
+    assert_eq!(e.doc.get(&id).unwrap().text.as_ref().unwrap().runs.len(), 1);
+  }
+
+  #[test]
+  fn new_characters_on_an_instance_copy_override_the_text_and_survive_a_main_edit() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "component", "name": "Card", "width": 200, "height": 60, "children": [
+        { "type": "text", "name": "Title", "spans": [{ "text": "Head", "fontWeight": 700 }, { "text": " tail" }] }] }] }),
+    );
+    let comp = created(&r)[0].clone();
+    let title = e.doc.get(&comp).unwrap().children[0].clone();
+    let inst = run(&mut e, "create_instance", json!({ "componentId": comp }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let inner = e.doc.get(&inst).unwrap().children[0].clone();
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": inner, "text": "Totally different words" }] }),
+    );
+    let t = e.doc.get(&inner).unwrap().text.clone().unwrap();
+    assert_eq!(t.characters, "Totally different words");
+    assert_eq!(t.runs.len(), 1);
+    assert_eq!(t.runs[0].end, 23);
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": title, "fontSize": 30 }] }));
+    let inner = e.doc.get(&inst).unwrap().children[0].clone();
+    let t = e.doc.get(&inner).unwrap().text.clone().unwrap();
+    assert_eq!(t.characters, "Totally different words");
+    assert_eq!(t.font_size, 30.0);
+  }
+
+  #[test]
+  fn small_result_fixes() {
+    let mut e = engine();
+    // X-07
+    let r = one(&mut e, json!({ "type": "rectangle", "width": 10, "height": 10 }));
+    let u = run(&mut e, "update_nodes", json!({ "updates": [{ "id": r, "svg": "<svg/>" }] }));
+    assert!(u["warnings"].to_string().contains("svg is only read by create_nodes"), "{u}");
+    // X-08
+    let m = err(&mut e, "get_nodes", json!({}));
+    assert!(m.contains("ids is required"), "{m}");
+    let m = err(&mut e, "get_nodes", json!({ "ids": [] }));
+    assert!(m.contains("ids is required"), "{m}");
+    // X-10
+    let m = err(&mut e, "create_nodes", json!({ "nodes": [{ "type": "svg" }] }));
+    assert!(m.contains("type svg needs an svg string"), "{m}");
+    let m = err(&mut e, "create_nodes", json!({ "nodes": [{ "type": "button" }] }));
+    assert!(m.contains("svg"), "{m}");
+    // X-12
+    let (mut p, ids) = prototype_screens();
+    run(&mut p, "set_prototype", json!({ "nodeId": ids[0], "destinationId": ids[1] }));
+    assert_eq!(p.doc.get(&ids[0]).unwrap().interactions.len(), 1);
+    let c = run(&mut p, "set_prototype", json!({ "nodeId": ids[0], "clear": true }));
+    assert_eq!(c["cleared"], 1);
+    assert!(p.doc.get(&ids[0]).unwrap().interactions.is_empty());
+    // X-13
+    let t = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "text", "spans": [{ "text": "a", "colour": "#f00", "fontWeigth": "bold", "zzz": 1 }] }] }),
+    );
+    let w = t["warnings"].to_string();
+    assert!(w.contains("'colour'") && w.contains("did you mean color"), "{w}");
+    assert!(w.contains("'fontWeigth'") && w.contains("did you mean fontWeight"), "{w}");
+    assert!(w.contains("'zzz'"), "{w}");
+    // X-17
+    let f = run(&mut e, "find_nodes", json!({ "limit": 0 }));
+    assert_eq!(f["nodes"], json!([]));
+    assert!(f["total"].as_u64().unwrap() >= 2);
+    // X-19
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "variables": [{ "name": "Surface", "type": "color", "value": "#101010" }] }),
+    );
+    let u = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": r, "fill": "#00FF00", "stroke": "#FF0000", "bind": { "fill": "Surface", "stroke": "Surface" } }] }),
+    );
+    let w = u["warnings"].to_string();
+    assert!(
+      w.contains("fill ignored: bind.fill sets it") && w.contains("stroke ignored: bind.stroke sets it"),
+      "{w}"
+    );
+    // X-21
+    let c = one(&mut e, json!({ "type": "component", "name": "Btn", "width": 40, "height": 20 }));
+    run(&mut e, "create_instance", json!({ "componentId": c }));
+    run(&mut e, "create_instance", json!({ "componentId": c, "x": 100 }));
+    let d = run(&mut e, "delete_nodes", json!({ "ids": [c] }));
+    assert_eq!(d["instancesDetached"], 2);
+    let d = run(&mut e, "delete_nodes", json!({ "ids": [r] }));
+    assert!(d.get("instancesDetached").is_none());
+    // X-22
+    let long = "x".repeat(3600);
+    let l = one(&mut e, json!({ "type": "text", "text": long }));
+    let g = run(&mut e, "get_nodes", json!({ "ids": [l] }));
+    assert_eq!(g[0]["text"]["charactersTruncated"], true);
+    assert_eq!(g[0]["text"]["charactersLength"], 3600);
+    // X-23
+    let pg = run(&mut e, "pages", json!({ "action": "add", "name": "Two" }));
+    let pid = pg["id"].as_str().unwrap().to_string();
+    let r = run(&mut e, "pages", json!({ "action": "delete", "id": pid }));
+    assert_eq!(r["deleted"], json!(pid));
+  }
+
+  #[test]
+  fn a_layer_that_already_has_min_above_max_stays_editable() {
+    let mut e = engine();
+    let id = one(&mut e, json!({ "type": "frame", "name": "Old", "width": "hug", "height": 50 }));
+    e.dispatch(Command::Update {
+      ids: vec![id.clone()],
+      patch: json!({ "minWidth": 200, "maxWidth": 40 }),
+    })
+    .unwrap();
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "fill": "#FF0000", "name": "Renamed" }] }),
+    );
+    assert_eq!(e.doc.get(&id).unwrap().name, "Renamed");
+    let m = err(&mut e, "update_nodes", json!({ "updates": [{ "id": id, "maxWidth": 30 }] }));
+    assert!(m.contains("minWidth 200 is larger than maxWidth 30"), "{m}");
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": id, "minWidth": 10 }] }));
+  }
+
+  #[test]
+  fn boolean_ops_refuse_a_frame_hidden_inside_a_group() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "frame", "name": "Home", "width": 100, "height": 100, "children": [{ "type": "rectangle", "name": "Kid", "width": 20, "height": 20 }] },
+        { "type": "rectangle", "name": "R1", "x": 50, "width": 100, "height": 100 },
+        { "type": "component", "name": "Btn", "x": 300, "width": 60, "height": 30, "children": [{ "type": "rectangle", "name": "Dot", "width": 5, "height": 5 }] }] }),
+    );
+    let ids = created(&r);
+    run(&mut e, "arrange", json!({ "action": "group", "ids": [ids[0]] }));
+    let group = e.doc.get(&ids[0]).unwrap().parent.clone().unwrap();
+    let nodes_before = e.doc.nodes.len();
+    for action in ["union", "flatten"] {
+      let m = err(&mut e, "arrange", json!({ "action": action, "ids": [group, ids[1]] }));
+      assert!(m.contains("Home is a frame with layers inside"), "{m}");
+    }
+    assert_eq!(e.doc.nodes.len(), nodes_before, "nothing was removed");
+    // An instance with layers: the article is right and the hint says to detach it.
+    let inst = run(&mut e, "create_instance", json!({ "componentId": ids[2] }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let m = err(&mut e, "arrange", json!({ "action": "union", "ids": [inst, ids[1]] }));
+    assert!(
+      m.contains("is an instance with layers inside") && m.contains("detach_instance"),
+      "{m}"
+    );
+  }
+
+  #[test]
+  fn instances_detached_counts_like_the_editor() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "component", "name": "Btn", "width": 40, "height": 20 },
+        { "type": "component", "name": "Card", "x": 200, "width": 100, "height": 60 }] }),
+    );
+    let ids = created(&r);
+    let (btn, card) = (ids[0].clone(), ids[1].clone());
+    run(&mut e, "create_instance", json!({ "componentId": btn, "parentId": card }));
+    run(&mut e, "create_instance", json!({ "componentId": card, "x": 400 }));
+    run(&mut e, "create_instance", json!({ "componentId": card, "x": 600 }));
+    run(&mut e, "create_instance", json!({ "componentId": btn, "x": 800 }));
+    let d = run(&mut e, "delete_nodes", json!({ "ids": [btn] }));
+    assert_eq!(
+      d["instancesDetached"], 2,
+      "copies inside Card instances follow their outer instance: {d}"
+    );
+    // A frame or component set holding a main counts too.
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Kit", "width": 300, "height": 100, "children": [
+        { "type": "component", "name": "Chip", "width": 40, "height": 20 }] }] }),
+    );
+    let kit = created(&r)[0].clone();
+    let chip = e.doc.get(&kit).unwrap().children[0].clone();
+    run(&mut e, "create_instance", json!({ "componentId": chip, "x": 500 }));
+    let d = run(&mut e, "delete_nodes", json!({ "ids": [kit] }));
+    assert_eq!(d["instancesDetached"], 1, "{d}");
+  }
+
+  #[test]
+  fn create_instance_names_the_real_problem() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "component", "name": "Button", "width": 40, "height": 20 },
+        { "type": "component", "name": "Card", "x": 200, "width": 100, "height": 60 }] }),
+    );
+    let ids = created(&r);
+    let (button, card) = (ids[0].clone(), ids[1].clone());
+    let inner = run(&mut e, "create_instance", json!({ "componentId": button, "parentId": card }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let m = err(&mut e, "create_instance", json!({ "componentId": card, "parentId": button }));
+    assert!(m.contains("Button is used inside Card, so Card can't go inside Button"), "{m}");
+    // Through an instance that sits inside the main.
+    let m = err(&mut e, "create_instance", json!({ "componentId": card, "parentId": inner }));
+    assert!(m.contains("can't place an instance of Card inside Card itself"), "{m}");
+    // A deeper frame inside the main.
+    let f = one(&mut e, json!({ "type": "frame", "width": 10, "height": 10 }));
+    run(&mut e, "move_nodes", json!({ "ids": [f], "parentId": card }));
+    let m = err(&mut e, "create_instance", json!({ "componentId": card, "parentId": f }));
+    assert!(m.contains("Card inside Card itself"), "{m}");
+    // On the canvas it is fine, also inside an instance of Card.
+    let outer = run(&mut e, "create_instance", json!({ "componentId": card, "x": 500 }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    assert!(e
+      .dispatch(ai("create_instance", json!({ "componentId": button, "parentId": outer })))
+      .is_ok());
+    // Pointers: a set lists its variants, other layers point at find_nodes.
+    let m = err(&mut e, "create_instance", json!({ "componentId": f }));
+    assert!(m.contains("find_nodes type component") && !m.contains("get_nodes"), "{m}");
+    let m = err(&mut e, "create_instance", json!({ "componentId": "n_nope" }));
+    assert!(m.contains("find_nodes"), "{m}");
+  }
+
+  #[test]
+  fn variable_edit_conflicts_and_inference() {
+    let mut e = engine();
+    let (_, _) = themed(&mut e);
+    let m = err(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "deleteCollection": true, "rename": [{ "from": "Brand", "to": "X" }] }),
+    );
+    assert!(m.contains("deleteCollection can't be combined"), "{m}");
+    let m = err(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "deleteCollection": "yes" }),
+    );
+    assert!(m.contains("true or false"), "{m}");
+    assert_eq!(e.doc.variables.len(), 1);
+    // rename B to C beside delete C.
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "rename": [{ "from": "Brand", "to": "Soft" }], "delete": ["Soft"] }),
+    );
+    let names: Vec<&str> = e.doc.variables[0].variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["Soft", "Gap"]);
+    // Types come from the value when none is given.
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Misc", "variables": [
+        { "name": "N", "value": 8 }, { "name": "B", "value": true }, { "name": "S", "value": "hello" }, { "name": "C", "value": "#112233" }] }),
+    );
+    let kinds: Vec<_> = e.doc.variables.last().unwrap().variables.iter().map(|v| v.kind).collect();
+    use crate::variables::VarKind::*;
+    assert_eq!(kinds, [Number, Boolean, String, Color]);
+  }
+
+  #[test]
+  fn huge_sizes_print_short_and_a_negative_limit_errors() {
+    let mut e = engine();
+    let m = err(&mut e, "create_nodes", json!({ "nodes": [{ "type": "frame", "width": 1e308 }] }));
+    assert!(m.len() < 200 && m.contains("e308"), "{m}");
+    let m = err(&mut e, "find_nodes", json!({ "limit": -1 }));
+    assert!(m.contains("limit"), "{m}");
+  }
+
+  #[test]
+  fn variable_and_style_edits_round_trip_through_collab_deltas() {
+    let mut e = engine();
+    let (id, _) = themed(&mut e);
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Ink", "color": "#111111" }] }),
+    );
+    let base = e.doc.clone();
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "rename": [{ "from": "Brand", "to": "Accent" }], "renameModes": [{ "from": "Dark", "to": "Night" }], "delete": ["Gap"] }),
+    );
+    run(&mut e, "define_styles", json!({ "rename": [{ "from": "Ink", "to": "Text" }] }));
+    let d = crate::collab::delta(&base, &e.doc, true, true);
+    let mut b = base.clone();
+    crate::collab::apply(&mut b, &d).unwrap();
+    assert_eq!(b.variables, e.doc.variables);
+    assert_eq!(b.styles.colors, e.doc.styles.colors);
+    assert_eq!(b.get(&id).unwrap().bindings, e.doc.get(&id).unwrap().bindings);
+    // And a deletion of the whole collection.
+    let base = e.doc.clone();
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "deleteCollection": true }),
+    );
+    run(&mut e, "define_styles", json!({ "delete": ["Text"] }));
+    let d = crate::collab::delta(&base, &e.doc, true, true);
+    let mut b = base.clone();
+    crate::collab::apply(&mut b, &d).unwrap();
+    assert!(b.variables.is_empty() && b.styles.colors.is_empty());
+    assert!(b.get(&id).unwrap().bindings.is_empty());
+  }
+}

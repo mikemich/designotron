@@ -498,5 +498,6 @@ export async function exportProjectZip() {
   const blob = await zip.generateAsync({ type: "blob" });
   const name = `${fileSafe(getDoc().name)}-react.zip`;
   download(name, blob, "application/zip");
-  toast(`Downloaded ${name}`);
+  // An unnamed file gives "Untitled-react.zip": say where the project's name comes from.
+  toast(/^untitled$/i.test(getDoc().name.trim()) ? `Downloaded ${name}. Rename the file in the top bar to name the project.` : `Downloaded ${name}`);
 }

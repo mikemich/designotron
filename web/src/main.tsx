@@ -82,7 +82,14 @@ const failed = (err: unknown) => {
 // StrictMode is intentionally off: editor effects open/close undo gestures.
 const render = () => ReactDOM.createRoot(document.getElementById("root")!).render(<App />);
 
-if (joinFromUrl()) {
+// The editor must not run inside a plugin's frame: local installs serve it on the localhost origins
+// the editor's frame-src allows, so a plugin could navigate its frame to it. A sandboxed frame
+// without allow-same-origin (opaque origin) gets an empty page: no engine, no rooms, no bridge.
+const inOpaqueFrame = window !== window.top && window.origin === "null";
+
+if (inOpaqueFrame) {
+  document.getElementById("root")!.textContent = "";
+} else if (joinFromUrl()) {
   // Opening a shared link: a local file for it (needs the engine), then the editor joins the room.
   bootEngine()
     .then(async () => {

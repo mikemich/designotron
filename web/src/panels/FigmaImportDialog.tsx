@@ -1,10 +1,8 @@
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { FileJson, Loader2, X } from "lucide-react";
-import { getDoc, useStore, toast } from "../store";
-import { deleteFile } from "../files";
-import { importFigmaJson, importFigmaUrl, type ImportResult } from "../figma";
+import { useStore, toast } from "../store";
+import { checkFigmaJson, fetchFigmaUrl, figmaFileName, importFigmaJson, importFigmaUrl, type ImportResult } from "../figma";
 import { useDialog } from "../ui/controls";
-import { reportFailure } from "../errors";
 
 const TOKEN_KEY = "dt:figmaToken";
 const readToken = () => {
@@ -15,31 +13,42 @@ const readToken = () => {
   }
 };
 
-/** File → Import from Figma: a file link plus a personal access token, or a saved JSON export. */
-export function FigmaImportDialog() {
+/** The data an import dialog on the dashboard hands over: the new file is created from it. */
+export type FigmaSource = { file: unknown; images: Record<string, string> };
+
+/** File → Import from Figma: a file link plus a personal access token, or a saved JSON export.
+ *  On the dashboard (`onCreate` given) nothing exists yet: Import fetches the data and creates the
+ *  file named after the Figma file, which the editor then fills. Cancel just closes. */
+export function FigmaImportDialog({ onCreate }: { onCreate?: (src: FigmaSource, name?: string) => Promise<boolean> }) {
+  /** Set by closing: an import still being fetched is dropped when it arrives (nothing is created). */
+  const closed = useRef(false);
+  /** From the moment the file is being made: closing would race the new file opening, so it waits. */
+  const creating = useRef(false);
   const [url, setUrl] = useState("");
   const [token, setToken] = useState(readToken);
   const [remember, setRemember] = useState(!!readToken());
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<ImportResult | null>(null);
+  const [result, setResult] = useState<ImportResult | null>(() => (onCreate ? null : useStore.getState().figmaResult));
   const fileRef = useRef<HTMLInputElement>(null);
   const urlId = useId();
   const tokenId = useId();
   const close = async () => {
-    const { figmaOpen, fileId } = useStore.getState();
-    useStore.setState({ figmaOpen: false });
-    // Cancelled from the dashboard: don't leave an empty "Untitled" file behind.
-    if (figmaOpen === "new" && fileId && getDoc().pages.every((p) => p.children.length === 0)) {
-      try {
-        await deleteFile(fileId);
-      } catch (e) {
-        reportFailure("remove the empty file", e);
-      }
-      useStore.setState({ focusOnDashboard: "import-figma" });
-      location.hash = "#/";
-    }
+    if (creating.current) return;
+    closed.current = true;
+    useStore.setState({ figmaOpen: false, figmaResult: null });
   };
+  // Leaving the dashboard with the dialog open (browser Back, a link) ends it: it must not follow the
+  // person into the editor, and an import still being fetched is dropped.
+  useEffect(
+    () => () => {
+      if (!onCreate) return;
+      closed.current = true;
+      if (useStore.getState().figmaOpen === "new") useStore.setState({ figmaOpen: false });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
   const dialogRef = useDialog(close);
 
   const finish = (r: ImportResult) => {
@@ -47,6 +56,22 @@ export function FigmaImportDialog() {
     setBusy(null);
     toast(`Imported ${r.layers} layers from Figma`);
     if (!r.warnings.length) close();
+  };
+  /** Dashboard mode: the file is made from what was fetched, and the dialog goes with the dashboard. */
+  const create = async (src: FigmaSource, name?: string) => {
+    if (closed.current) return;
+    checkFigmaJson(src.file);
+    setBusy("Creating the file…");
+    creating.current = true;
+    try {
+      if (await onCreate!(src, name)) useStore.setState({ figmaOpen: false });
+      else {
+        setBusy(null);
+        setError("Couldn't create the file.");
+      }
+    } finally {
+      creating.current = false;
+    }
   };
   const run = async () => {
     setError(null);
@@ -57,8 +82,13 @@ export function FigmaImportDialog() {
       /* storage unavailable */
     }
     try {
-      finish(await importFigmaUrl(url.trim(), token.trim(), setBusy));
+      if (onCreate) {
+        const src = await fetchFigmaUrl(url.trim(), token.trim(), (m) => !closed.current && setBusy(m));
+        if (closed.current) return;
+        await create(src, figmaFileName(src.file));
+      } else finish(await importFigmaUrl(url.trim(), token.trim(), setBusy));
     } catch (e) {
+      if (closed.current) return;
       setBusy(null);
       setError(String(e instanceof Error ? e.message : e));
     }
@@ -67,7 +97,9 @@ export function FigmaImportDialog() {
     if (!f) return;
     setError(null);
     try {
-      finish(importFigmaJson(JSON.parse(await f.text())));
+      const json = JSON.parse(await f.text());
+      if (onCreate) await create({ file: json, images: {} }, figmaFileName(json) ?? (f.name.replace(/\.json$/i, "").trim() || undefined));
+      else finish(importFigmaJson(json));
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
     }
@@ -104,7 +136,7 @@ export function FigmaImportDialog() {
               <label className="small muted" htmlFor={urlId}>
                 Figma file or frame link
               </label>
-              <input id={urlId} className="textinput" placeholder="https://www.figma.com/design/…" value={url} onChange={(e) => setUrl(e.target.value)} autoFocus />
+              <input id={urlId} className="textinput" placeholder="https://www.figma.com/design/…" value={url} onChange={(e) => setUrl(e.target.value)} />
               <label className="small muted" style={{ marginTop: 10 }} htmlFor={tokenId}>
                 Personal access token{" "}
                 <a href="https://www.figma.com/developers/api#access-tokens" target="_blank" rel="noreferrer">
@@ -120,7 +152,7 @@ export function FigmaImportDialog() {
               </div>
               {error && <div className="error-box">{error}</div>}
               <div className="row" style={{ marginTop: 12, justifyContent: "space-between" }}>
-                <button className="btn" onClick={() => fileRef.current?.click()} title="A file saved from GET /v1/files/:key?geometry=paths">
+                <button className="btn" disabled={!!busy} onClick={() => fileRef.current?.click()} title="A file saved from GET /v1/files/:key?geometry=paths">
                   <FileJson size={13} /> Open JSON export…
                 </button>
                 <button className="btn primary" disabled={!url.trim() || !token.trim() || !!busy} onClick={run}>

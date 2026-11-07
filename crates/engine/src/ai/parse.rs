@@ -346,17 +346,36 @@ pub fn string(cx: &Ctx, key: &str, v: &Value) -> Result<String, String> {
   }
 }
 
+/// Largest width, height or min/max size a layer may have.
+pub const MAX_SIZE: f64 = 100_000.0;
+
+/// A size in px: 0 to 100,000.
+pub fn size_px(cx: &Ctx, key: &str, x: f64) -> Result<f64, String> {
+  let shown = if x.abs() >= 1e9 { format!("{x:e}") } else { x.to_string() };
+  if x < 0.0 {
+    Err(cx.err(key, format!("{key} must be 0 or more (got {shown})")))
+  } else if x > MAX_SIZE {
+    Err(cx.err(key, format!("{key} must be at most {MAX_SIZE} px (got {shown})")))
+  } else {
+    Ok(x)
+  }
+}
+
 pub fn dimension(cx: &Ctx, key: &str, v: Option<&Value>) -> Result<Option<Dim>, String> {
   let bad = |shown: String| cx.err(key, format!("{shown} isn't supported; use a number, \"fill\" or \"hug\""));
   Ok(match v {
     None | Some(Value::Null) => None,
-    Some(Value::Number(n)) => Some(Dim::Px(n.as_f64().filter(|x| x.is_finite()).ok_or_else(|| bad(n.to_string()))?)),
+    Some(Value::Number(n)) => Some(Dim::Px(size_px(
+      cx,
+      key,
+      n.as_f64().filter(|x| x.is_finite()).ok_or_else(|| bad(n.to_string()))?,
+    )?)),
     Some(Value::String(s)) => {
       let l = s.trim().to_lowercase();
       match l.as_str() {
         "fill" | "100%" | "fill-container" | "stretch" => Some(Dim::Fill),
         "hug" | "auto" | "fit-content" | "hug-contents" => Some(Dim::Hug),
-        _ => Some(Dim::Px(px(&l).ok_or_else(|| bad(format!("\"{s}\"")))?)),
+        _ => Some(Dim::Px(size_px(cx, key, px(&l).ok_or_else(|| bad(format!("\"{s}\"")))?)?)),
       }
     }
     Some(other) => return Err(bad(kind_of(other).to_string())),
@@ -765,6 +784,43 @@ pub fn desugar(cx: &mut Ctx, s: &Value, kind: NodeType) -> Option<Value> {
     }
   }
   out.map(Value::Object)
+}
+
+const SPAN_KEYS: &[&str] = &[
+  "text",
+  "fontWeight",
+  "italic",
+  "color",
+  "fontSize",
+  "fontFamily",
+  "decoration",
+  "letterSpacing",
+  "link",
+];
+
+/// Warns about keys of a text span that nothing reads (`colour`, `fontWeigth`), with a suggestion.
+pub fn warn_span_keys(cx: &mut Ctx, span: &Value) {
+  let Some(obj) = span.as_object() else { return };
+  for key in obj.keys().filter(|k| !SPAN_KEYS.contains(&k.as_str())) {
+    let known: Vec<String> = SPAN_KEYS.iter().map(|k| k.to_string()).collect();
+    let lower = key.to_lowercase();
+    let near = match lower.as_str() {
+      "colour" | "fill" | "textcolor" => Some("color".to_string()),
+      "bold" | "weight" | "fontstyle" => Some(if lower == "fontstyle" { "italic" } else { "fontWeight" }.to_string()),
+      "size" => Some("fontSize".to_string()),
+      "font" | "family" => Some("fontFamily".to_string()),
+      "underline" | "strikethrough" => Some("decoration".to_string()),
+      "url" | "href" => Some("link".to_string()),
+      _ => closest(key, &known, 1)
+        .first()
+        .filter(|n| distance(&lower, &n.to_lowercase()) <= 2)
+        .cloned(),
+    };
+    match near {
+      Some(n) => cx.warn(format!("unknown span key '{key}' ignored (did you mean {n}?)")),
+      None => cx.warn(format!("unknown span key '{key}' ignored (spans take {})", SPAN_KEYS.join(", "))),
+    }
+  }
 }
 
 /// A CSS `box-shadow` string as shadow objects.
