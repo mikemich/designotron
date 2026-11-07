@@ -1006,7 +1006,13 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
     "reply_comment" => e.dispatch_inner(Command::ReplyComment {
       id: input.get("id").and_then(|v| v.as_str()).ok_or("id is required")?.to_string(),
       text: input.get("text").and_then(|v| v.as_str()).ok_or("text is required")?.to_string(),
-      author: "Claude".into(),
+      // The editor stamps the author (a plugin's replies say "<person> via <plugin>"); at most 80 characters.
+      author: input
+        .get("author")
+        .and_then(|v| v.as_str())
+        .map(|a| a.trim().chars().take(80).collect::<String>())
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| "Claude".into()),
       time: input.get("time").and_then(|v| v.as_f64()).unwrap_or(0.0),
     }),
     "resolve_comment" => e.dispatch_inner(Command::ResolveComment {

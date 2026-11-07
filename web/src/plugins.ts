@@ -1,12 +1,17 @@
 // Plugins: user JavaScript run in a sandboxed iframe (opaque origin: no access to the
 // editor's DOM, storage or API key). They call the same tool layer Claude uses through
 // a small promise API over postMessage. A run is one undo step (see runPlugin). They have no
-// network: a CSP in the frame, web addresses and fetching tools refused.
+// network: a CSP in the frame, web addresses and fetching tools refused, and the editor page's
+// frame-src (index.html) refuses the frame's navigation to the web. The editor talks to the frame
+// over a MessageChannel whose far end only the bootstrap holds (pluginSandbox.ts), so a document
+// that replaces the plugin in the frame can't call tools, hear replies or keep the run alive.
 
 import { create } from "zustand";
 import { selection, toast, useStore } from "./store";
 import { DRAG_BUSY, executeTool, whenCanvasIdle } from "./ai/tools";
-import { sandboxDocument } from "./pluginSandbox";
+import { PLUGIN_SANDBOX, sandboxDocument } from "./pluginSandbox";
+import { hasWebAddress } from "./pluginPolicy";
+import { userName } from "./canvas/Comments";
 
 export interface Plugin {
   id: string;
@@ -126,7 +131,8 @@ let runSeq = 0;
 export function runPlugin(plugin: Plugin) {
   stopPlugin();
   const frame = document.createElement("iframe");
-  frame.setAttribute("sandbox", "allow-scripts");
+  frame.setAttribute("sandbox", PLUGIN_SANDBOX);
+  frame.referrerPolicy = "no-referrer";
   frame.className = "plugin-frame hidden";
   frame.title = plugin.name;
   const running: Running = { plugin, frame, ui: null };
@@ -134,13 +140,33 @@ export function runPlugin(plugin: Plugin) {
   const runId = ++runSeq;
   let step = 0;
   let lastCall = 0;
-  const reply = (id: number, result?: unknown, error?: string) =>
-    frame.contentWindow?.postMessage({ dtHost: true, id, result: result ?? null, error: error ?? null }, "*");
+  // The channel to the frame: one end goes to the bootstrap with the code, this end is ours. Only
+  // what arrives on `port` is a plugin message, and only the bootstrap holds the other end, so a
+  // document that replaces the plugin in the frame (document.open(), a navigation) can neither send
+  // to us nor receive from us.
+  const channel = new MessageChannel();
+  const port = channel.port1;
+  // Cut by code point (never in the middle of a pair) and with control characters out of the name.
+  const author = Array.from(`${userName() || "You"} via ${plugin.name}`.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " "))
+    .slice(0, 80)
+    .join("");
+  // Once the frame navigated or the run stopped, nothing more is posted.
+  let navigated = false;
+  const post = (msg: object) => {
+    if (!navigated && usePlugins.getState().running?.frame === frame) port.postMessage(msg);
+  };
+  const reply = (id: number, result?: unknown, error?: string) => post({ id, result: result ?? null, error: error ?? null });
+  const navigatedAway = () => {
+    if (navigated) return;
+    navigated = true;
+    toast(`Plugin “${plugin.name}” was stopped: it tried to navigate its frame`, "error");
+    stopPlugin();
+  };
   const onMessage = async (e: MessageEvent) => {
-    if (e.source !== frame.contentWindow) return;
     const m = e.data;
-    if (!m?.dtPlugin) return;
+    if (m?.dtPlugin !== true) return;
     lastPong = Date.now();
+    if (m.navigating) return navigatedAway();
     if (m.pong) {
       if (usePlugins.getState().running?.stuck) usePlugins.setState({ running: { ...running, stuck: false } });
       return;
@@ -148,14 +174,23 @@ export function runPlugin(plugin: Plugin) {
     try {
       switch (m.method) {
         case "tool": {
-          const [name, input] = m.args;
+          const [name, raw] = m.args;
           if (PLUGIN_REFUSED_TOOLS.has(String(name))) throw new Error(`plugins can't use ${name}`);
-          if (/https?:\/\//i.test(JSON.stringify(input ?? null))) throw new Error("plugins can't use web addresses yet");
+          // What arrives is a structured clone, which keeps things JSON would turn into something
+          // else (a `new String("https://…")`, whose entries are single characters). The checks and
+          // the engine both see this plain-JSON copy, never the clone.
+          let input: unknown;
+          try {
+            input = JSON.parse(JSON.stringify(raw ?? {}));
+          } catch {
+            throw new Error("tool input must be plain JSON");
+          }
+          if (hasWebAddress(input)) throw new Error("plugins can't use web addresses yet");
           // The pause is measured from the previous call, before waiting for the canvas.
           if (running.ui && lastCall && Date.now() - lastCall > 1000) step++;
           if (!(await whenCanvasIdle())) throw new Error(DRAG_BUSY);
           if (usePlugins.getState().running?.frame !== frame) throw new Error("plugin stopped");
-          const out = await executeTool(String(name), input, { group: `plugin:${runId}:${step}` });
+          const out = await executeTool(String(name), input, { group: `plugin:${runId}:${step}`, author });
           lastCall = Date.now();
           if (!out.ok) throw new Error(String(out.result));
           return reply(m.id, out.result);
@@ -167,7 +202,7 @@ export function runPlugin(plugin: Plugin) {
           return reply(m.id, (out.result as any)?.nodes ?? out.result);
         }
         case "notify":
-          toast(m.args[0]);
+          toast(String(m.args[0]));
           return reply(m.id);
         case "showUi":
           running.ui = { width: Math.min(640, m.args[0]?.width ?? 300), height: Math.min(720, m.args[0]?.height ?? 240) };
@@ -186,6 +221,10 @@ export function runPlugin(plugin: Plugin) {
           toast(`Plugin “${plugin.name}” failed: ${String(m.args[0]).split("\n")[0]}`, "error");
           stopPlugin();
           return;
+        case "warn":
+          // An un-awaited dt.tool() that failed: nothing else would show it.
+          toast(`Plugin “${plugin.name}”: ${String(m.args[0]).split("\n")[0]}`, "error");
+          return;
         case "close":
           stopPlugin();
           return;
@@ -195,11 +234,11 @@ export function runPlugin(plugin: Plugin) {
       reply(m.id, null, String(err instanceof Error ? err.message : err));
     }
   };
-  window.addEventListener("message", onMessage);
+  port.onmessage = onMessage;
   // Watchdog: a plugin that stops answering is flagged so the person can stop it.
   let lastPong = Date.now();
   const watchdog = setInterval(() => {
-    frame.contentWindow?.postMessage({ dtHost: true, ping: true }, "*");
+    post({ ping: true });
     const cur = usePlugins.getState().running;
     if (cur?.frame === frame && !cur.stuck && Date.now() - lastPong > 6000) {
       usePlugins.setState({ running: { ...cur, stuck: true } });
@@ -215,19 +254,18 @@ export function runPlugin(plugin: Plugin) {
   frame.addEventListener("load", () => {
     if (loads++ === 0) {
       // The page is constant (see pluginSandbox.ts); the code is sent in once it is ready.
-      frame.contentWindow?.postMessage({ dtHost: true, code: plugin.code }, "*");
+      frame.contentWindow?.postMessage({ dtHost: true, code: plugin.code }, "*", [channel.port2]);
     } else {
-      toast(`Plugin “${plugin.name}” was stopped: it tried to navigate its frame`, "error");
-      stopPlugin();
+      navigatedAway();
     }
   });
   const unsub = useStore.subscribe((s, prev) => {
-    if (s.es.selection !== prev.es.selection) frame.contentWindow?.postMessage({ dtHost: true, event: "selectionchange", data: s.es.selection }, "*");
+    if (s.es.selection !== prev.es.selection) post({ event: "selectionchange", data: s.es.selection });
   });
   cleanup = () => {
     clearTimeout(slow);
     clearInterval(watchdog);
-    window.removeEventListener("message", onMessage);
+    port.close();
     unsub();
     frame.remove();
   };

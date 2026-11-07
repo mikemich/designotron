@@ -4834,9 +4834,24 @@ mod tests {
     );
     assert_eq!(list[0]["nodeId"], card);
     ai(&mut e, "reply_comment", json!({ "id": id, "text": "Done: 80×80" }));
+    let long = format!("  Ana via {}  ", "x".repeat(100));
+    ai(
+      &mut e,
+      "reply_comment",
+      json!({ "id": id, "text": "From a plugin", "author": "Ana via Tidy" }),
+    );
+    ai(
+      &mut e,
+      "reply_comment",
+      json!({ "id": id, "text": "Blank author", "author": "   " }),
+    );
+    ai(&mut e, "reply_comment", json!({ "id": id, "text": "Long author", "author": long }));
     ai(&mut e, "resolve_comment", json!({ "id": id }));
     let c = &e.doc.comments[&id];
-    assert!(c.resolved && c.messages[1].author == "Claude");
+    let authors: Vec<&str> = c.messages.iter().map(|m| m.author.as_str()).collect();
+    assert_eq!(&authors[1..4], ["Claude", "Ana via Tidy", "Claude"]);
+    assert_eq!(c.messages[4].author.chars().count(), 80);
+    assert!(c.resolved);
     assert_eq!(
       ai(&mut e, "get_comments", json!({})).as_array().unwrap().len(),
       0,
