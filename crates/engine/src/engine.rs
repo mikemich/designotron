@@ -3958,9 +3958,7 @@ fn without_unsafe_links(mut p: Value) -> Value {
     return p;
   };
   for r in runs.iter_mut() {
-    let bad = r
-      .get("link")
-      .is_some_and(|l| l.as_str().is_none_or(|l| crate::model::safe_link(l).is_none()));
+    let bad = r.get("link").is_some_and(unsafe_link_value);
     if bad {
       if let Some(o) = r.as_object_mut() {
         o.remove("link");
@@ -4001,19 +3999,50 @@ fn delta_ids(d: &Value) -> Vec<NodeId> {
     .collect()
 }
 
-/// An instance override (or any patch) with unsafe text links and prototype URLs removed.
+/// Whether a link or URL value is unsafe (`null` is no link at all, so it is fine).
+fn unsafe_link_value(v: &Value) -> bool {
+  !v.is_null() && v.as_str().is_none_or(|u| crate::model::safe_link(u).is_none())
+}
+
+/// How deep swap records may nest inside overrides (as `components::MAX_SWAP_DEPTH`).
+const MAX_OVERRIDE_DEPTH: usize = 16;
+
+/// Whether an instance override (or any patch) carries an unsafe text link or prototype URL,
+/// also inside the swap records of nested instances. Doesn't allocate.
+fn patch_has_unsafe_link(p: &Value, depth: usize) -> bool {
+  let runs = p.pointer("/text/runs").and_then(|r| r.as_array());
+  let ints = p.get("interactions").and_then(|i| i.as_array());
+  runs.is_some_and(|r| r.iter().any(|r| r.get("link").is_some_and(unsafe_link_value)))
+    || ints.is_some_and(|l| l.iter().any(|i| i.get("url").is_some_and(unsafe_link_value)))
+    || p
+      .pointer("/instance/overrides")
+      .and_then(|o| o.as_object())
+      .is_some_and(|o| depth >= MAX_OVERRIDE_DEPTH || o.values().any(|v| patch_has_unsafe_link(v, depth + 1)))
+}
+
+/// An instance override (or any patch) with unsafe text links and prototype URLs removed, in
+/// the swap records of nested instances too.
 fn clean_patch(p: Value) -> Value {
+  clean_patch_at(p, 0)
+}
+
+fn clean_patch_at(p: Value, depth: usize) -> Value {
   let mut p = without_unsafe_links(p);
   if let Some(list) = p.get_mut("interactions").and_then(|i| i.as_array_mut()) {
     for i in list.iter_mut() {
-      let bad = i
-        .get("url")
-        .is_some_and(|u| u.as_str().is_none_or(|u| crate::model::safe_link(u).is_none()));
-      if bad {
+      if i.get("url").is_some_and(unsafe_link_value) {
         if let Some(o) = i.as_object_mut() {
           o.remove("url");
         }
       }
+    }
+  }
+  if let Some(o) = p.pointer_mut("/instance/overrides").and_then(|o| o.as_object_mut()) {
+    if depth >= MAX_OVERRIDE_DEPTH {
+      o.clear();
+    }
+    for v in o.values_mut() {
+      *v = clean_patch_at(std::mem::take(v), depth + 1);
     }
   }
   p
@@ -4031,7 +4060,7 @@ fn has_unsafe_link(n: &Node) -> bool {
     || n
       .instance
       .as_ref()
-      .is_some_and(|i| i.overrides.values().any(|v| clean_patch(v.clone()) != *v))
+      .is_some_and(|i| i.overrides.values().any(|v| patch_has_unsafe_link(v, 0)))
 }
 
 /// Drops the unsafe links of one node: text runs, prototype URLs and instance overrides.
@@ -7700,5 +7729,110 @@ mod r15_link_fix_tests {
     assert!(dst.doc.nodes.len() >= 2);
     no_js(&dst.doc);
     assert!(!serde_json::to_string(&dst.doc).unwrap().contains("data:text/html"));
+  }
+}
+
+#[cfg(test)]
+mod r15_swap_link_tests {
+  use super::*;
+  use crate::text::HeuristicMeasurer;
+
+  fn comp(e: &mut Engine, id: &str, x: f64) -> (String, String) {
+    let page = e.doc.pages[0].id.clone();
+    let mut f = crate::ops::default_node(NodeType::Frame, id.into(), id.into());
+    f.x = x;
+    f.width = 80.0;
+    f.height = 40.0;
+    e.doc.insert(f, None, &page, None);
+    let mut t = crate::ops::default_node(NodeType::Text, format!("{id}_t"), "T".into());
+    t.text.as_mut().unwrap().characters = "abcdef".into();
+    e.doc.insert(t, Some(id), &page, None);
+    let c = crate::components::create_component(&mut e.doc, &[id.to_string()], &mut e.gen).unwrap();
+    let t = e.doc.get(&c).unwrap().children[0].clone();
+    (c, t)
+  }
+
+  /// Card holds a Btn instance; an instance of Card swaps it to Btn2 with a bad override inside
+  /// the swap record. Returns the engine, the outer instance and the Card main's id.
+  fn planted() -> (Engine, String, String) {
+    let mut e = Engine::new(Box::new(HeuristicMeasurer), 42);
+    let page = e.doc.pages[0].id.clone();
+    let (btn, _) = comp(&mut e, "btn", 0.0);
+    let (btn2, btn2_t) = comp(&mut e, "btn2", 200.0);
+    let mut card = crate::ops::default_node(NodeType::Frame, "card".into(), "Card".into());
+    card.x = 400.0;
+    card.width = 200.0;
+    card.height = 100.0;
+    e.doc.insert(card, None, &page, None);
+    let nested = crate::components::create_instance(&mut e.doc, &btn, Some("card"), &page, 0.0, 0.0, &mut e.gen).unwrap();
+    let card_c = crate::components::create_component(&mut e.doc, &["card".to_string()], &mut e.gen).unwrap();
+    let outer = crate::components::create_instance(&mut e.doc, &card_c, None, &page, 800.0, 0.0, &mut e.gen).unwrap();
+    let swap = json!({"instance": {"componentId": btn2, "overrides": {
+      btn2_t: {"text": {"runs": [{"start": 0, "end": 2, "link": "javascript:alert(7)"}, {"start": 2, "end": 4, "link": null, "color": "#ff0000"}]},
+               "interactions": [{"action": "openUrl", "url": "javascript:alert(6)"}, {"action": "openUrl", "url": null}]}}}});
+    e.doc
+      .get_mut(&outer)
+      .unwrap()
+      .instance
+      .as_mut()
+      .unwrap()
+      .overrides
+      .insert(nested, swap);
+    crate::components::sync_instance(&mut e.doc, &outer, &mut e.gen);
+    (e, outer, card_c)
+  }
+
+  fn no_js(doc: &Document) {
+    assert!(!serde_json::to_string(doc).unwrap().contains("javascript:"));
+    assert!(!doc.nodes.values().any(|n| has_unsafe_link(n)));
+  }
+
+  #[test]
+  fn swap_records_lose_unsafe_links_on_load_and_after_a_main_edit() {
+    let (e, _, _) = planted();
+    assert!(serde_json::to_string(&e.doc).unwrap().contains("javascript:alert(7)"));
+    let json = serde_json::to_string(&e.doc).unwrap();
+    let mut e2 = Engine::new(Box::new(HeuristicMeasurer), 43);
+    e2.load(&json).unwrap();
+    no_js(&e2.doc);
+    // A null link or url is no link: it is kept as it was.
+    assert!(serde_json::to_string(&e2.doc).unwrap().contains("#ff0000"));
+    e2.dispatch(Command::Update {
+      ids: vec!["card".into()],
+      patch: json!({ "opacity": 0.5 }),
+    })
+    .unwrap();
+    no_js(&e2.doc);
+  }
+
+  #[test]
+  fn a_remote_swap_record_is_cleaned() {
+    let (bad, outer, _) = planted();
+    let mut clean = bad.doc.clone();
+    clean.get_mut(&outer).unwrap().instance.as_mut().unwrap().overrides.clear();
+    clean.update_where(has_unsafe_link, fix_links);
+    let mut e = Engine::new(Box::new(HeuristicMeasurer), 44);
+    e.doc = clean.clone();
+    let d = crate::collab::delta(&clean, &bad.doc, false, false);
+    e.dispatch(Command::ApplyRemote { delta: d, local: false }).unwrap();
+    no_js(&e.doc);
+    e.dispatch(Command::Update {
+      ids: vec!["card".into()],
+      patch: json!({ "opacity": 0.5 }),
+    })
+    .unwrap();
+    no_js(&e.doc);
+  }
+
+  #[test]
+  fn null_links_are_not_flagged() {
+    assert!(!patch_has_unsafe_link(
+      &json!({"text": {"runs": [{"start": 0, "end": 1, "link": null}]}, "interactions": [{"url": null}]}),
+      0
+    ));
+    assert!(patch_has_unsafe_link(
+      &json!({"instance": {"overrides": {"a": {"interactions": [{"url": "data:x"}]}}}}),
+      0
+    ));
   }
 }
