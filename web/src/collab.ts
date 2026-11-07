@@ -297,6 +297,10 @@ function isEmptyDelta(d: any): boolean {
     !(d.removed ?? []).length &&
     !Object.keys(d.comments ?? {}).length &&
     !(d.commentsRemoved ?? []).length &&
+    // Reordering, and replying to or resolving an existing thread, travel only as these (`collab::is_empty`).
+    !Object.keys(d.moves ?? {}).length &&
+    !Object.keys(d.pageMoves ?? {}).length &&
+    !Object.keys(d.commentChanges ?? {}).length &&
     !["name", "pages", "styles", "variables", ...GRANULAR_KEYS].some((k) => k in d)
   );
 }

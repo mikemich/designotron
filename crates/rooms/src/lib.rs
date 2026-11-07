@@ -2201,6 +2201,12 @@ mod tests {
     }
 
     async fn join_uncommitted(&mut self, doc: Option<Value>, reset: bool) -> (u64, Rx) {
+      self.join_as(doc, reset, true, false).await
+    }
+
+    /// Joins as an editor of the given dialect (`granular`: per-id changes, `lists`: moves and
+    /// per-message comments); the welcome is the first message in the receiver.
+    async fn join_as(&mut self, doc: Option<Value>, reset: bool, granular: bool, lists: bool) -> (u64, Rx) {
       self.next += 1;
       let id = self.next;
       let (tx, rx) = mpsc::unbounded_channel();
@@ -2210,7 +2216,7 @@ mod tests {
         kick: Arc::new(Notify::new()),
       };
       self.kicks.push(out.kick.clone());
-      let mut msg = json!({ "type": "join", "name": "p", "color": "#000", "granular": true, "reset": reset });
+      let mut msg = json!({ "type": "join", "name": "p", "color": "#000", "granular": granular, "lists": lists, "reset": reset });
       if let Some(d) = doc {
         msg["doc"] = d;
       }
@@ -2220,6 +2226,14 @@ mod tests {
       let step = self.rooms.join(ROOM, &mut r, id, Role::Editor, &out, &m, text.len()).await;
       assert!(matches!(step, Step::Go));
       (id, rx)
+    }
+
+    /// `join_as` for a lists editor, committed, with its welcome read.
+    async fn join_as_welcomed(&mut self, doc: Option<Value>, reset: bool) -> (u64, Value, Rx) {
+      let (id, mut rx) = self.join_as(doc, reset, true, true).await;
+      self.commit().await;
+      let welcome: Value = serde_json::from_str(&rx.try_recv().expect("welcome")).unwrap();
+      (id, welcome, rx)
     }
 
     async fn delta_text(&self, id: u64, text: &str) {
@@ -2237,6 +2251,297 @@ mod tests {
       self.send_uncommitted(id, x).await;
       self.commit().await;
     }
+  }
+
+  /// A document with a frame holding layers A, B, C and T, a rectangle R bound to a variable, and
+  /// the variable; and the ids.
+  fn lists_doc() -> (Value, Vec<String>) {
+    use designotron_engine::engine::{Command, Engine};
+    let mut e = Engine::new(Box::new(designotron_engine::text::HeuristicMeasurer), 5);
+    let mut make = |kind: designotron_engine::model::NodeType, parent: Option<String>| {
+      e.dispatch(Command::CreateShape {
+        kind,
+        x: 0.0,
+        y: 0.0,
+        width: 20.0,
+        height: 20.0,
+        parent,
+      })
+      .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+    };
+    use designotron_engine::model::NodeType::{Frame, Rectangle};
+    let r = make(Rectangle, None);
+    let frame = make(Frame, None);
+    let mut ids = vec![frame.clone()];
+    for _ in 0..4 {
+      ids.push(make(Rectangle, Some(frame.clone())));
+    }
+    ids.push(r.clone());
+    e.dispatch(Command::Ai {
+      tool: "define_variables".into(),
+      input: json!({ "collection": "Theme", "variables": [{ "name": "Ink", "type": "color", "value": "#112233" }] }),
+    })
+    .unwrap();
+    let var = e.doc.variables[0].variables[0].id.clone();
+    e.dispatch(Command::BindVariable {
+      ids: vec![r],
+      property: "fill".into(),
+      variable: Some(var.clone()),
+    })
+    .unwrap();
+    ids.push(var);
+    (serde_json::to_value(&e.doc).unwrap(), ids)
+  }
+
+  /// `{type: delta, delta}` for a hand-written change.
+  fn delta_msg(delta: Value) -> String {
+    json!({ "type": "delta", "delta": delta }).to_string()
+  }
+
+  #[tokio::test]
+  async fn the_welcome_says_lists_and_only_lists_editors_get_moves() {
+    let dir = tmp_dir("lists-welcome");
+    let mut h = Harness::open(&dir).await;
+    let (doc, ids) = lists_doc();
+    let frame = ids[0].clone();
+    let (ana, welcome, mut ana_rx) = {
+      let (id, mut rx) = h.join_as(Some(doc), true, true, true).await;
+      h.commit().await;
+      let w: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+      (id, w, rx)
+    };
+    assert_eq!((welcome["lists"].clone(), welcome["granular"].clone()), (json!(true), json!(true)));
+    // Ben speaks `lists`, Cai only per-id changes, Dan only whole lists.
+    let (_ben, mut ben_rx) = h.join_as(None, false, true, true).await;
+    let (_cai, mut cai_rx) = h.join_as(None, false, true, false).await;
+    let (_dan, mut dan_rx) = h.join_as(None, false, false, false).await;
+    h.commit().await;
+    for rx in [&mut ben_rx, &mut cai_rx, &mut dan_rx] {
+      let w = drain(rx).into_iter().find(|m| m["type"] == "welcome").unwrap();
+      assert_eq!(w["lists"], json!(true), "the room always offers it");
+    }
+    drain(&mut ana_rx);
+    // Ana takes A (ids[1]) to the front, replies to a comment, and the room is told what moved.
+    let (a, b, c, t) = (ids[1].clone(), ids[2].clone(), ids[3].clone(), ids[4].clone());
+    let new = json!([b, c, t, a]);
+    let create = json!({ "nodes": {}, "removed": [], "commentsRemoved": [],
+      "comments": { "c1": { "id": "c1", "page": "p", "x": 0.0, "y": 0.0, "messages": [{ "author": "Ana", "text": "Q", "time": 1.0 }] } } });
+    h.delta_text(ana, &delta_msg(create)).await;
+    h.commit().await;
+    for rx in [&mut ben_rx, &mut cai_rx, &mut dan_rx] {
+      drain(rx);
+    }
+    let change = json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [],
+      "patch": { frame.clone(): { "children": new.clone() } },
+      "moves": { frame.clone(): [a.clone()] },
+      "commentChanges": { "c1": { "add": [{ "author": "Ana", "text": "R", "time": 2.0 }] } } });
+    h.delta_text(ana, &delta_msg(change)).await;
+    h.commit().await;
+    let ben = &drain(&mut ben_rx)[0]["delta"];
+    assert_eq!(ben["moves"][&frame], json!([a]), "a lists editor gets the delta as sent");
+    assert_eq!(ben["commentChanges"]["c1"]["add"][0]["text"], "R");
+    for (name, rx) in [("cai", &mut cai_rx), ("dan", &mut dan_rx)] {
+      let got = drain(rx);
+      let d = &got[0]["delta"];
+      assert!(d.get("moves").is_none() && d.get("commentChanges").is_none(), "{name}: {d}");
+      assert_eq!(d["patch"][&frame]["children"], new, "{name}: the room's whole child list");
+      assert_eq!(
+        d["comments"]["c1"]["messages"].as_array().unwrap().len(),
+        2,
+        "{name}: the whole thread"
+      );
+    }
+    // The room's document holds the placed order and both messages.
+    let r = h.room.lock().await;
+    let doc = r.doc.as_ref().unwrap();
+    assert_eq!(doc.get(&frame).unwrap().children, [b, c, t, a]);
+    assert_eq!(doc.comments["c1"].messages.len(), 2);
+  }
+
+  #[tokio::test]
+  async fn concurrent_replies_through_the_room_both_stay() {
+    let dir = tmp_dir("lists-replies");
+    let mut h = Harness::open(&dir).await;
+    let (doc, _) = lists_doc();
+    let (ana, _, _) = h.join_as_welcomed(Some(doc), true).await;
+    let (ben, _) = h.join_as(None, false, true, true).await;
+    let (cai, _) = h.join_as(None, false, true, true).await;
+    h.commit().await;
+    let create = json!({ "nodes": {}, "removed": [], "commentsRemoved": [],
+      "comments": { "c1": { "id": "c1", "page": "p", "x": 0.0, "y": 0.0, "messages": [{ "author": "Ana", "text": "Q1", "time": 1.0 }] } } });
+    h.delta_text(ana, &delta_msg(create)).await;
+    let reply = |who: &str, time: f64| {
+      delta_msg(json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [],
+        "commentChanges": { "c1": { "add": [{ "author": who, "text": format!("{who}-1"), "time": time }] } } }))
+    };
+    // Both replied to [Q1]; Cai's reaches the room first, with the later client clock.
+    h.delta_text(cai, &reply("Cai", 9.0)).await;
+    h.delta_text(ben, &reply("Ben", 3.0)).await;
+    h.commit().await;
+    let r = h.room.lock().await;
+    let texts: Vec<_> = r.doc.as_ref().unwrap().comments["c1"]
+      .messages
+      .iter()
+      .map(|m| m.text.clone())
+      .collect();
+    assert_eq!(texts, ["Q1", "Cai-1", "Ben-1"], "the room's order, not the clocks'");
+  }
+
+  #[tokio::test]
+  async fn a_pruned_layer_reaches_older_peers_whole_and_lists_peers_prune_themselves() {
+    let dir = tmp_dir("lists-prune");
+    let mut h = Harness::open(&dir).await;
+    let (doc, ids) = lists_doc();
+    let (rect, var) = (ids[5].clone(), ids[6].clone());
+    let (ana, _, mut ana_rx) = h.join_as_welcomed(Some(doc), true).await;
+    let (_ben, mut ben_rx) = h.join_as(None, false, true, true).await;
+    let (cai, mut cai_rx) = h.join_as(None, false, true, false).await;
+    h.commit().await;
+    drain(&mut ben_rx);
+    drain(&mut cai_rx);
+    drain(&mut ana_rx);
+    // Ana deletes the variable (her own copy would unbind R, but this change doesn't say so: another
+    // editor's bind that the room orders after it has the same effect).
+    let colls = {
+      let r = h.room.lock().await;
+      r.doc.as_ref().unwrap().variables[0].id.clone()
+    };
+    let delete = json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [],
+      "variableChanges": { colls.clone(): { "del": [var.clone()] } } });
+    h.delta_text(ana, &delta_msg(delete)).await;
+    h.commit().await;
+    {
+      let r = h.room.lock().await;
+      assert!(
+        r.doc.as_ref().unwrap().get(&rect).unwrap().bindings.is_empty(),
+        "the room pruned the dangling binding"
+      );
+    }
+    // A lists peer is sent the delta as it was: it prunes by itself.
+    let ben = drain(&mut ben_rx);
+    assert!(
+      ben[0]["delta"].get("nodes").is_none_or(|n| n.as_object().unwrap().is_empty()),
+      "{}",
+      ben[0]
+    );
+    // An older peer is sent the layer whole, without the link.
+    let cai_got = drain(&mut cai_rx);
+    assert_eq!(cai_got[0]["delta"]["nodes"][&rect]["id"], json!(rect));
+    assert!(cai_got[0]["delta"]["nodes"][&rect]["bindings"]
+      .as_object()
+      .is_none_or(|b| b.is_empty()));
+    // The editor that sent it is a lists one, and hears only its ack.
+    assert_eq!(types(&drain(&mut ana_rx)), ["ack"]);
+    // An older editor that causes a prune is told what the room pruned right after its ack.
+    let bind = json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [],
+      "patch": { rect.clone(): { "bindings": { "fill": "gone-variable" } } } });
+    h.delta_text(cai, &delta_msg(bind)).await;
+    h.commit().await;
+    let got = drain(&mut cai_rx);
+    assert_eq!(got[0]["type"], "ack");
+    assert_eq!(got[1]["type"], "delta");
+    assert_eq!(got[1]["delta"]["nodes"][&rect]["id"], json!(rect));
+    assert!(got[1]["delta"]["nodes"][&rect]["bindings"].as_object().is_none_or(|b| b.is_empty()));
+  }
+
+  #[test]
+  fn viewers_may_reply_and_resolve_through_comment_changes_only() {
+    use designotron_engine::model::{Comment, CommentMessage};
+    let mut doc = designotron_engine::doc::new_document(&mut designotron_engine::doc::IdGen::new(1), "t");
+    doc.comments_mut().insert(
+      "c1".into(),
+      Comment {
+        id: "c1".into(),
+        page: "p".into(),
+        messages: vec![CommentMessage {
+          author: "Ana".into(),
+          text: "Q".into(),
+          time: 1.0,
+        }],
+        ..Default::default()
+      },
+    );
+    let wrap = |changes: Value| json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [], "commentChanges": changes });
+    let reply = json!({ "author": "Vic", "text": "hi", "time": 5.0 });
+    let ok = viewer_delta(
+      &wrap(json!({ "c1": { "add": [reply.clone()], "set": { "resolved": true } } })),
+      &doc,
+    )
+    .expect("a reply and a resolve");
+    assert_eq!(ok["commentChanges"]["c1"]["add"][0]["text"], "hi");
+    assert_eq!(ok["commentChanges"]["c1"]["set"], json!({ "resolved": true }));
+    assert!(ok["comments"].as_object().unwrap().is_empty());
+    // Rebuilt from typed values: unknown keys on a message are gone.
+    let sneaky = json!({ "author": "Vic", "text": "hi", "time": 5.0, "page": "x", "extra": 1 });
+    let ok = viewer_delta(&wrap(json!({ "c1": { "add": [sneaky] } })), &doc).unwrap();
+    assert_eq!(
+      ok["commentChanges"]["c1"]["add"][0],
+      json!({ "author": "Vic", "text": "hi", "time": 5.0 })
+    );
+    // Never: removing a message, moving or re-homing the thread, or anything else in the change.
+    for bad in [
+      json!({ "c1": { "del": [["Ana", 1.0, "Q"]] } }),
+      json!({ "c1": { "set": { "x": 3.0 } } }),
+      json!({ "c1": { "set": { "y": 3.0 } } }),
+      json!({ "c1": { "set": { "node": "n" } } }),
+      json!({ "c1": { "set": { "page": "q" } } }),
+      json!({ "c1": { "set": { "resolved": "yes" } } }),
+      json!({ "c1": { "other": 1 } }),
+      json!({ "c1": { "add": [{ "author": "x", "text": "t".repeat(VIEWER_MAX_TEXT + 1), "time": 1.0 }] } }),
+      json!({ "c1": { "add": (0..=VIEWER_MAX_NEW_MESSAGES).map(|i| json!({ "author": "x", "text": "t", "time": i })).collect::<Vec<_>>() } }),
+      json!({ "c1": { "add": [{ "author": "x".repeat(201), "text": "t", "time": 1.0 }] } }),
+      json!({ "c1": { "add": [5] } }),
+      json!({}),
+    ] {
+      assert!(viewer_delta(&wrap(bad.clone()), &doc).is_none(), "{bad}");
+    }
+    // An empty `del` is harmless; a delta that also carries other parts is not.
+    assert!(viewer_delta(&wrap(json!({ "c1": { "add": [reply.clone()], "del": [] } })), &doc).is_some());
+    let mut with_nodes = wrap(json!({ "c1": { "add": [reply.clone()] } }));
+    with_nodes["pages"] = json!([]);
+    assert!(viewer_delta(&with_nodes, &doc).is_none());
+    // The whole-comment form older editors send keeps working, and a new thread may be sent beside a reply.
+    let whole = json!({ "nodes": {}, "removed": [], "commentsRemoved": [], "comments": { "c1": { "id": "c1", "page": "p", "x": 0.0, "y": 0.0, "resolved": false,
+      "messages": [{ "author": "Ana", "text": "Q", "time": 1.0 }, { "author": "Vic", "text": "hi", "time": 5.0 }] } } });
+    assert!(viewer_delta(&whole, &doc).is_some());
+    let mut both = whole.clone();
+    both["comments"]["c2"] =
+      json!({ "id": "c2", "page": "p", "x": 1.0, "y": 1.0, "messages": [{ "author": "Vic", "text": "new", "time": 6.0 }] });
+    both["comments"].as_object_mut().unwrap().remove("c1");
+    both["commentChanges"] = json!({ "c1": { "add": [reply] } });
+    let d = viewer_delta(&both, &doc).unwrap();
+    assert!(d["comments"]["c2"].is_object() && d["commentChanges"]["c1"].is_object());
+  }
+
+  #[tokio::test]
+  async fn replaying_the_log_reproduces_the_pruned_document() {
+    let dir = tmp_dir("lists-replay");
+    let (doc, ids) = lists_doc();
+    let (rect, var) = (ids[5].clone(), ids[6].clone());
+    let colls = doc["variables"][0]["id"].as_str().unwrap().to_string();
+    let first = {
+      let mut h = Harness::open(&dir).await;
+      let (ana, _, _) = h.join_as_welcomed(Some(doc.clone()), true).await;
+      let delete = json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [],
+        "variableChanges": { colls: { "del": [var] } } });
+      h.delta_text(ana, &delta_msg(delete)).await;
+      h.commit().await;
+      let r = h.room.lock().await;
+      assert!(r.doc.as_ref().unwrap().get(&rect).unwrap().bindings.is_empty());
+      serde_json::to_value(r.doc.as_ref().unwrap()).unwrap()
+    };
+    // A crash: the snapshot is the shared file as first saved, the log holds the delete.
+    let mut h = Harness::open(&dir).await;
+    let (_, w, _) = h.join_as_welcomed(None, false).await;
+    assert_eq!(
+      w["doc"]["nodes"][&rect]["bindings"], first["nodes"][&rect]["bindings"],
+      "the replayed layer is unbound too"
+    );
+    assert_eq!(w["doc"]["nodes"], first["nodes"]);
+    assert_eq!(w["doc"]["variables"], first["variables"]);
   }
 
   fn comment_delta_body(x: f64) -> Value {

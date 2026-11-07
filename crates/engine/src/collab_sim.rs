@@ -680,7 +680,7 @@ fn local_op_in(e: &mut Engine, r: &mut Rng, solo: bool, rich: bool) {
         time: r.below(100) as f64,
       });
     }
-    34 | 35 | 36 if !comments.is_empty() => {
+    34..=36 if !comments.is_empty() => {
       let _ = e.dispatch(Command::ReplyComment {
         id: comments[r.below(comments.len())].clone(),
         text: format!("r{}", r.below(1000)),
@@ -901,7 +901,7 @@ fn diff_nodes(a: &Document, b: &Document) -> String {
       return format!("node {id}: {}", keys.join("; "));
     }
   }
-  for id in b.nodes.keys().filter(|k| !a.nodes.contains_key(*k)) {
+  if let Some(id) = b.nodes.keys().find(|k| !a.nodes.contains_key(*k)) {
     return format!("node {id} missing on the left");
   }
   "none".into()

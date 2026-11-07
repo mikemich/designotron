@@ -673,7 +673,7 @@ pub fn prune_refs(doc: &mut Document, scope: Scope) -> Vec<NodeId> {
     }
     Scope::Nodes(ids) => ids
       .iter()
-      .filter(|id| doc.get(id).is_some_and(|n| has_refs(n)))
+      .filter(|id| doc.get(id).is_some_and(has_refs))
       .cloned()
       .collect::<BTreeSet<_>>()
       .into_iter()
@@ -3649,10 +3649,10 @@ mod tests {
     }
     h.assert_converged();
     assert_eq!(h.order(1, &frame), "A,B,C,T");
-    for i in 1..=3 {
+    for want in states.iter().skip(1).take(3) {
       h.eds[0].dispatch(Command::Redo).unwrap();
       h.sync(0);
-      assert_eq!(h.eds[0].doc.nodes, states[i].nodes);
+      assert_eq!(h.eds[0].doc.nodes, want.nodes);
     }
     h.assert_converged();
   }
@@ -4170,7 +4170,7 @@ mod tests {
       legacy_lists(&json!({ "nodes": {}, "removed": [] }), &h.doc, &[]).is_none(),
       "nothing to rewrite"
     );
-    let old = legacy_lists(&d, &h.doc, &[b.clone()]).unwrap();
+    let old = legacy_lists(&d, &h.doc, std::slice::from_ref(&b)).unwrap();
     assert!(old.get("moves").is_none() && old.get("commentChanges").is_none());
     assert_eq!(old["patch"][&frame]["children"], json!(h.doc.get(&frame).unwrap().children));
     assert_eq!(old["comments"][&cid]["messages"].as_array().unwrap().len(), 2, "the whole thread");
