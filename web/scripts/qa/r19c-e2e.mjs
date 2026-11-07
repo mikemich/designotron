@@ -273,7 +273,7 @@ for (const [key, device] of Object.entries(DEVICES)) {
   const after = await ev(page, (i) => window.__dt.doc().nodes[i], card.id);
   const same = after.width === 200 && after.height === 120 && after.x === 40 && after.y === 80;
   check("iPad landscape: a touch drag from the link dot keeps the layer's size and place", !!dot && same, JSON.stringify({ dot: !!dot, w: after.width, h: after.height }));
-  check("iPad landscape: ... and makes a prototype link", !!dot && canon(after) !== before && /Navigate|navigate|reactions|interactions|link/i.test(canon(after)), canon(after).slice(0, 160));
+  check("iPad landscape: ... and makes a prototype link", !!dot && canon(after) !== before && (after.interactions || []).some((i) => i.action === "navigate" && i.destination === b.id), JSON.stringify(after.interactions || []).slice(0, 160));
   await ctx.close();
 }
 
