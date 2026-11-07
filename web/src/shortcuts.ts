@@ -32,6 +32,9 @@ function onCanvasOrBody(e: KeyboardEvent): boolean {
 
 /** The F6 regions in order, each with how to put focus in it (null: not shown right now). */
 const REGIONS: { root: string; focus: () => HTMLElement | null }[] = [
+  // Alert bars come first: the stopped-engine bar, then the other notices (stale file, storage full).
+  { root: ".engine-bar", focus: () => document.querySelector<HTMLElement>(".engine-bar button:not(:disabled)") },
+  { root: ".stale-bar:not(.engine-bar)", focus: () => document.querySelector<HTMLElement>(".stale-bar:not(.engine-bar) button:not(:disabled)") },
   { root: ".topbar", focus: () => document.querySelector<HTMLElement>(".topbar button:not(:disabled)") },
   {
     root: ".main > .panel:not(.right)",
@@ -223,7 +226,8 @@ export function installShortcuts(): () => void {
         return has && run(A.selectParent);
       case "Tab":
         // Sibling selection on the canvas; with nothing selected Tab moves on (no keyboard trap).
-        return has && onCanvas(e) && !e.altKey && !st.editingVector && run(() => selectSibling(e.shiftKey ? -1 : 1));
+        // A stopped engine has no layers to walk: Tab follows the page order, to the crash banner's buttons.
+        return has && onCanvas(e) && !e.altKey && !st.editingVector && !st.engineFailed && run(() => selectSibling(e.shiftKey ? -1 : 1));
       case "Enter":
         // A control reached by keyboard keeps Enter; one that was clicked doesn't, so Enter acts on
         // the design as it does on the canvas.

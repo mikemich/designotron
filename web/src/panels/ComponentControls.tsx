@@ -312,7 +312,7 @@ export function SwapPicker({ ids, anchor, onClose }: { ids: string[]; anchor: DO
     })
     .filter((g) => g.items.length);
   return (
-    <Popover anchor={anchor} onClose={onClose} width={260}>
+    <Popover anchor={anchor} onClose={onClose} width={260} label="Swap component">
       <div className="wf-picker">
         <input
           className="textinput"

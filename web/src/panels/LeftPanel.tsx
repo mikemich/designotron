@@ -30,12 +30,11 @@ import {
 } from "lucide-react";
 import { dispatch, useDoc, useStore, zoomToSelection } from "../store";
 import type { Doc, Node } from "../types";
-import { ALT, ALT_MOD, IconButton, Menu, SHIFT, type MenuItem } from "../ui/controls";
+import { ALT, ALT_MOD, IconButton, Menu, SHIFT, focusCanvas, type MenuItem } from "../ui/controls";
 import { canvasMenu } from "../canvas/contextMenu";
 import { LAYER_FILTERS, LAYER_FILTER_LABELS, collapseAllLayers, descendantContainers, rangeIds, searchLayers, setLayerExpanded, useLayerTree, type LayerFilter, type LayerSearch } from "./layerTree";
 import { PanelClose } from "./PanelChrome";
 import * as A from "../actions";
-import { viewportCenter } from "../actions";
 import { ColorStylesSection, EffectStylesSection, GridStylesSection, TextStylesSection } from "./StyleControls";
 import { FolderTree } from "./FolderTree";
 import { useThumb } from "./assetThumbs";
@@ -1085,7 +1084,6 @@ function LayerSearchBar({
         <button
           className={"ibtn layer-filter-btn" + (filters.length ? " active" : "")}
           aria-label="Filter layers"
-          aria-haspopup="dialog"
           aria-controls="layer-filter-menu"
           aria-expanded={open}
           title="Filter layers"
@@ -1116,14 +1114,18 @@ function LayerSearchBar({
         </div>
       )}
       {count !== null && (
-        <div className="layer-search-count muted small" role="status">
-          <span>
+        <div className="layer-search-count muted small">
+          {/* Only the count is announced; the button is a sibling, so it is not read into the status. */}
+          <span role="status">
             {count} {count === 1 ? "match" : "matches"}
           </span>
           {count > 1 && (
-            <button className="layer-select-all" onClick={onSelectAll}>
-              Select all {count}
-            </button>
+            <>
+              <span className="sr-only"> · </span>
+              <button className="layer-select-all" onClick={onSelectAll}>
+                Select all {count}
+              </button>
+            </>
           )}
         </div>
       )}
@@ -1217,7 +1219,6 @@ function SearchResults({
             data-layer-hit={n.id}
             role="option"
             aria-selected={isSel}
-            aria-label={name + (h.path.length ? `, in ${h.path.join(" / ")}` : "")}
             tabIndex={n.id === tabHit ? 0 : -1}
             className={"layer layer-hit" + (isSel ? " selected" : "") + (!n.visible ? " hidden-layer" : "")}
             title={[...h.path, name].join(" / ")}
@@ -1236,7 +1237,13 @@ function SearchResults({
             ) : (
               <span className={"name" + (comp ? " component" : "")}>{mark(name)}</span>
             )}
-            {renaming !== n.id && h.path.length > 0 && <span className="hit-path muted small">{h.path.join(" / ")}</span>}
+            {/* The name a screen reader speaks is the visible text: "Item 19 label, in Frame 1". */}
+            {renaming !== n.id && h.path.length > 0 && (
+              <span className="hit-path muted small">
+                <span className="sr-only">, in </span>
+                {h.path.join(" / ")}
+              </span>
+            )}
           </div>
         );
       })}
@@ -1289,33 +1296,68 @@ function Assets() {
   // One entry per set and per loose component, so "Buttons/Primary" style names fold into folders.
   const entries: AssetEntry[] = groups.flatMap((g) => (g.set ? [g] : g.items.map((c) => ({ set: null, items: [c] }))));
   const entryName = (e: AssetEntry) => (e.set ?? e.items[0]).name;
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  /** Places an instance at the viewport centre, selects it and hands the keys to the canvas so the arrows nudge it. */
   const place = (c: Node) => {
-    const p = viewportCenter();
-    // The frame under the viewport centre takes it (never a main component or set).
-    dispatch({ op: "createInstance", componentId: c.id, x: p.x - c.width / 2, y: p.y - c.height / 2, parent: null, anchor: p });
+    if (A.insertInstance(c.id)) focusCanvas();
   };
-  const row = (c: Node, label: string, indent: boolean) => {
+  const rowMenu = (e: React.MouseEvent, c: Node) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Shift+F10 and the Menu key fire this without a pointer position: use the row's corner.
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const [x, y] = e.clientX || e.clientY ? [e.clientX, e.clientY] : [r.left + 24, r.bottom - 4];
+    setMenu({
+      x,
+      y,
+      items: [
+        ...(viewer ? [] : [{ label: "Insert instance", onClick: () => place(c) }]),
+        { label: "Go to main component", onClick: () => dispatch({ op: "select", ids: [c.id] }) && zoomToSelection() },
+      ],
+    });
+  };
+  const row = (c: Node, label: string, indent: boolean, setName?: string) => {
     const description = c.component?.description?.trim();
-    return (
-      <div
-        key={c.id}
-        className="layer asset-row"
-        draggable
-        onDragStart={(e) => e.dataTransfer.setData("application/x-designotron-component", c.id)}
-        onClick={() => place(c)}
-        title={"Click or drag to place an instance" + (description ? `\n${description}` : "")}
-      >
+    // Spoken before the visible name: "Insert instance of Buttons / Primary". The visible text stays inside the name.
+    const spoken = setName ? `${setName} / ` : c.name.endsWith(label) ? c.name.slice(0, c.name.length - label.length) : "";
+    const inner = (
+      <>
         <span style={{ marginLeft: indent ? 20 : 4, display: "flex" }}>
           <Thumb id={c.id} />
         </span>
         <span className="asset-text">
-          <span className="name component">{label}</span>
+          <span className="name component">
+            {!viewer && <span className="sr-only">Insert instance of {spoken}</span>}
+            {label}
+          </span>
           {description && <span className="asset-desc muted small">{description}</span>}
         </span>
         <span className="muted small">
           {Math.round(c.width)}×{Math.round(c.height)}
         </span>
-      </div>
+      </>
+    );
+    // A person who can only look (a view link) gets plain rows, not buttons that would do nothing.
+    if (viewer)
+      return (
+        <div key={c.id} className="layer asset-row" title={description}>
+          {inner}
+        </div>
+      );
+    return (
+      <button
+        key={c.id}
+        type="button"
+        className="layer asset-row"
+        draggable
+        onDragStart={(e) => e.dataTransfer.setData("application/x-designotron-component", c.id)}
+        onClick={() => place(c)}
+        onContextMenu={(e) => rowMenu(e, c)}
+        title={"Click or drag to place an instance" + (description ? `
+${description}` : "")}
+      >
+        {inner}
+      </button>
     );
   };
   const entryRow = (e: AssetEntry, label: string) => {
@@ -1334,7 +1376,7 @@ function Assets() {
             ))}
           </span>
         </div>
-        {e.items.map((c) => row(c, orderedEntries(c.component?.variantProps ?? {}, order).map(([, v]) => v).join(", ") || c.name, true))}
+        {e.items.map((c) => row(c, orderedEntries(c.component?.variantProps ?? {}, order).map(([, v]) => v).join(", ") || c.name, true, label))}
       </div>
     ) : (
       row(e.items[0], label, false)
@@ -1365,6 +1407,7 @@ function Assets() {
       <TextStylesSection filter={q} />
       <EffectStylesSection filter={q} />
       <GridStylesSection filter={q} />
+      {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>
   );
 }

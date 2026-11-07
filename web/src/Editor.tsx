@@ -1203,6 +1203,8 @@ function EditorInner({ fileId, onHome }: { fileId: string; onHome: () => void })
   return (
     <div className={"app" + (readOnly ? " view-only" : "")}>
       <Toolbar onHome={onHome} />
+      {/* Before the main area in the DOM, so Tab reaches its buttons without crossing the canvas. */}
+      {engineFailed && <EngineFailedBar fileId={fileId} second={!!(tabBar || gone || stale)} />}
       <main
         className={"main" + (chatOpen && !readOnly ? " with-chat" : "") + (panels.left ? "" : " no-left") + (panels.right ? "" : " no-right") + (compact ? " compact" : "")}
         onKeyDown={(e) => {
@@ -1310,7 +1312,6 @@ function EditorInner({ fileId, onHome }: { fileId: string; onHome: () => void })
           </button>
         </div>
       )}
-      {engineFailed && <EngineFailedBar fileId={fileId} second={!!(tabBar || gone || stale)} />}
       {storageBar && !engineFailed && (
         <div className={"stale-bar" + (tabBar || gone || stale ? " second" : "")} role="alert">
           This browser can't store the file (storage is full or blocked), so your changes aren't saved.
@@ -1333,6 +1334,9 @@ function EditorInner({ fileId, onHome }: { fileId: string; onHome: () => void })
  *  last try at a .dtron copy of what is in memory. */
 function EngineFailedBar({ fileId, second = false }: { fileId: string; second?: boolean }) {
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  const reload = useRef<HTMLButtonElement>(null);
+  // The engine stopping is the one thing on screen that matters: focus goes to Reload.
+  useEffect(() => reload.current?.focus({ preventScroll: true }), []);
   useEffect(() => {
     getFileMeta(fileId).then((m) => setSavedAt(m?.updatedAt ?? null), () => {});
   }, [fileId]);
@@ -1364,11 +1368,11 @@ function EngineFailedBar({ fileId, second = false }: { fileId: string; second?: 
     }
   };
   return (
-    <div className={"stale-bar engine-bar" + (second ? " second" : "")} role="alert" aria-label="The editor stopped">
+    <div className={"stale-bar engine-bar" + (second ? " second" : "")} role="alert" aria-label="The editor stopped" tabIndex={-1}>
       <span>
         The editor ran out of memory and stopped. Your file is safe up to the last save{time ? ` (${time})` : ""}. Reload to reopen it.
       </span>
-      <button className="btn primary small" onClick={() => location.reload()}>
+      <button ref={reload} className="btn primary small" onClick={() => location.reload()}>
         Reload
       </button>
       <button className="btn small" onClick={download}>

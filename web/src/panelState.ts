@@ -2,6 +2,10 @@
 // closed and remember their own choice; above it they are columns that start open. Ctrl+\ hides
 // both and brings back what was open (Figma's Show/Hide UI).
 
+/** The phone layout: under 640 CSS px, or up to 820 px with a touch screen as the main pointer. A
+ *  desktop at 200% zoom (720 px) keeps the tablet layout. The CSS phone queries must say the same. */
+export const PHONE_QUERY = "(max-width: 639px), (max-width: 820px) and (pointer: coarse)";
+
 /** Tablet widths: the panels are overlays on the canvas. */
 export const COMPACT_QUERY = "(max-width: 1100px)";
 /** Up to here Claude's chat takes the Design panel's place (it has no room beside it). */

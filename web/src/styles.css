@@ -473,6 +473,31 @@ textarea.textinput {
   position: absolute;
   inset: 0;
 }
+/* r18b: a swatch that opens a popover is a button with a 24 px hit area; the 18 px chip is drawn inside it. */
+button.swatch {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  overflow: visible;
+  padding: 0;
+}
+button.swatch::before {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background-image: linear-gradient(45deg, #666 25%, transparent 25%), linear-gradient(-45deg, #666 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #666 75%), linear-gradient(-45deg, transparent 75%, #666 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+}
+button.swatch > i {
+  inset: 4px;
+  border-radius: 2px;
+}
 
 .seg {
   display: flex;
@@ -652,6 +677,7 @@ textarea.textinput {
 .layer-search-field input {
   flex: 1;
   min-width: 0;
+  height: 24px; /* r18b: a 24 px target */
   background: none;
   border: 0;
   outline: none;
@@ -659,8 +685,8 @@ textarea.textinput {
   padding: 0;
 }
 .layer-search-field .ibtn {
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
 }
 .layer-filter-btn {
   position: relative;
@@ -699,6 +725,7 @@ textarea.textinput {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: 24px; /* the whole row is the target */
   padding: 4px 6px;
   border-radius: 4px;
   cursor: pointer;
@@ -718,6 +745,7 @@ textarea.textinput {
   color: var(--select);
   cursor: pointer;
   padding: 4px 6px;
+  min-height: 24px;
   text-align: left;
 }
 .layer-search-count {
@@ -940,6 +968,31 @@ textarea.textinput {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
   padding: 10px;
   width: 240px;
+}
+.picker-sv:focus-visible,
+.picker-slider:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: 2px;
+}
+/* r18b: the hue and alpha bars are sliders with a 24 px hit area around the 12 px bar. */
+.picker-slider {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+.picker-slider .picker-bar {
+  flex: 1;
+  margin-bottom: 0;
+}
+.picker-bar button.dot {
+  padding: 0;
+  pointer-events: all;
+}
+.picker-bar button.dot::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
 }
 .picker-sv {
   position: relative;
@@ -1182,6 +1235,8 @@ textarea.textinput {
 }
 .copy-line button {
   flex: none;
+  min-height: 24px;
+  min-width: 24px;
   padding: 2px 8px;
   border-radius: 4px;
   background: var(--panel-3);
@@ -1577,12 +1632,21 @@ a.btn {
     overflow: hidden;
   }
   .topbar .filename {
-    min-width: 0;
+    min-width: 48px; /* r18b: never narrower than a 24 px target, even at 200% zoom */
     flex: 0 1 auto;
     text-overflow: ellipsis;
   }
 }
-@media (max-width: 820px) {
+/* r18b: a desktop at 200% zoom (about 720 px) keeps the tablet layout, where the tool groups leave no room
+   for the file name between them: it gives way (it was clipped to nothing there already). */
+@media (min-width: 640px) and (max-width: 800px) {
+  .topbar .center {
+    display: none;
+  }
+}
+/* Phone layout: under 640 px, or up to 820 px with a touch screen. Every phone query below must match
+   PHONE_QUERY in panelState.ts (a desktop at 200% zoom, 720 px, keeps the tablet layout). */
+@media (max-width: 639px), (max-width: 820px) and (pointer: coarse) {
   .main,
   .main.with-chat {
     grid-template-columns: 1fr;
@@ -1971,7 +2035,7 @@ body:has(.modal-bg) .hint-card {
   font-size: 12px;
 }
 .var-import-report.error {
-  color: var(--danger, #f24822);
+  color: #ff8a73; /* r18b: 5.1:1 on the report's #383838 (--danger was 3.2:1) */
 }
 .var-import-line {
   display: flex;
@@ -1982,10 +2046,14 @@ body:has(.modal-bg) .hint-card {
 .var-import-skipped-btn {
   background: none;
   border: 0;
-  color: var(--select);
+  /* r18b: #4db5ff on the report's #383838 is 5.2:1 (the old #0d99ff was 3.9:1) */
+  color: #4db5ff;
   cursor: pointer;
-  padding: 0 2px;
+  padding: 0 4px;
   font: inherit;
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
 }
 .var-import-skipped {
   margin: 6px 0 0;
@@ -2354,7 +2422,7 @@ body:has(.modal-bg) .hint-card {
   overflow: auto;
 }
 .plugin-problem {
-  color: var(--danger);
+  color: #ff8a73; /* r18b: --danger is 3.8:1 on the dialog; this is 6.1:1 (same red as a console error) */
   font-size: 12px;
   line-height: 1.4;
 }
@@ -2378,8 +2446,35 @@ body:has(.modal-bg) .hint-card {
   color: var(--text-2);
 }
 .plugin-console-head .btn.small {
-  height: 22px;
+  height: 24px;
   padding: 0 8px;
+}
+/* r18b: the plugin list opens by its name (a button); leaving with unsaved code asks first. */
+.plugin-row-name {
+  display: block;
+  max-width: 100%;
+  min-height: 24px;
+  text-align: left;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plugin-discard {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border-radius: 8px;
+  background: #3a2a10;
+  border: 1px solid #f5b13d;
+}
+.plugin-discard span {
+  flex: 1;
+}
+.plugin-discard .btn.small {
+  height: 24px;
+  padding: 0 10px;
 }
 .plugin-console-body {
   max-height: 130px;
@@ -2534,7 +2629,7 @@ button.plugin-log-line {
 .share-count {
   display: none;
 }
-@media (max-width: 820px) {
+@media (max-width: 639px), (max-width: 820px) and (pointer: coarse) {
   .peer-avatars,
   .topbar .reconnecting {
     display: none;
@@ -3266,11 +3361,13 @@ body:has(.phone-note) .toast {
   grid-template-columns: 78px minmax(0, 1fr) 30px;
   align-items: center;
   gap: 6px;
-  height: 22px;
+  height: 24px;
   font-size: 11px;
   color: var(--text-2);
 }
 .image-adjust-row input[type="range"] {
+  height: 24px;
+  margin: 0;
   width: 100%;
   min-width: 0;
   accent-color: var(--select);
@@ -3500,6 +3597,16 @@ body:has(.phone-note) .toast {
 }
 .var-folder td {
   padding: 0;
+}
+/* r18b: a component row is a button (Enter places an instance) */
+button.layer.asset-row {
+  width: 100%;
+  text-align: left;
+  font: inherit;
+}
+button.layer.asset-row:focus-visible {
+  outline: 2px solid var(--select);
+  outline-offset: -2px;
 }
 .layer.asset-row {
   height: auto;
@@ -4045,6 +4152,11 @@ body:has(.phone-note) .toast {
   min-width: 0;
 }
 .file-loc a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  min-width: 24px;
   color: inherit;
   text-decoration: none;
   max-width: 90px;
@@ -4056,7 +4168,7 @@ body:has(.phone-note) .toast {
   color: var(--text);
   text-decoration: underline;
 }
-@media (max-width: 820px) {
+@media (max-width: 639px), (max-width: 820px) and (pointer: coarse) {
   .sheet-bg {
     place-items: end stretch;
   }
@@ -4126,7 +4238,7 @@ body:has(.phone-note) .toast {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
-@media (max-width: 820px) {
+@media (max-width: 639px), (max-width: 820px) and (pointer: coarse) {
   .side-link {
     height: 40px;
   }

@@ -66,7 +66,7 @@ export function PluginConsole({ onJump, maxHeight }: { onJump?: (line: number) =
           Clear
         </button>
       </div>
-      <div className="plugin-console-body" ref={box} style={maxHeight ? { maxHeight } : undefined} role="log">
+      <div className="plugin-console-body" ref={box} style={maxHeight ? { maxHeight } : undefined} role="log" aria-label="Plugin console output">
         {!entries.length && !dropped && <div className="muted small plugin-console-empty">console.log output, notifications and errors from a run show here.</div>}
         {dropped > 0 && <div className="plugin-log dropped">{dropped} earlier lines dropped</div>}
         {entries.map((e, i) => (
@@ -108,7 +108,56 @@ export function PluginsDialog() {
   // Set when Run was pressed in the editor: a plugin that then shows a panel closes the dialog.
   const launched = useRef(false);
   const close = () => usePlugins.setState({ dialogOpen: false });
-  const dialogRef = useDialog(close);
+  /** What Discard does once the person confirms: leave the dialog (Escape, Close) or go back to the list (Back). */
+  const [discard, setDiscard] = useState<"close" | "back" | null>(null);
+  // Where to put focus when the view changes: the Name field of a new plugin, the code of an old one,
+  // the row that was opened when going back to the list.
+  const nameField = useRef<HTMLInputElement>(null);
+  const keepButton = useRef<HTMLButtonElement>(null);
+  const listEl = useRef<HTMLDivElement>(null);
+  const want = useRef<"name" | "code" | "row" | null>(null);
+  const opened = useRef<string | null>(null);
+  const caret = useRef<[number, number]>([0, 0]);
+  const saved = editing ? list.find((p) => p.id === editing.id) : undefined;
+  // Unsaved changes: anything different from the saved plugin, or any text in a new one. A built-in is read-only.
+  const dirty =
+    !!editing &&
+    !editing.builtin &&
+    (saved
+      ? saved.name !== editing.name || saved.description !== editing.description || saved.code !== editing.code
+      : !!editing.name.trim() || !!editing.description.trim() || editing.code !== TEMPLATE);
+  const keepEditing = () => {
+    setDiscard(null);
+    requestAnimationFrame(() => {
+      const ta = area.current;
+      if (!ta) return;
+      ta.focus({ preventScroll: true });
+      ta.setSelectionRange(caret.current[0], caret.current[1]);
+    });
+  };
+  const ask = (what: "close" | "back") => {
+    const ta = area.current;
+    if (ta) caret.current = [ta.selectionStart, ta.selectionEnd];
+    setDiscard(what);
+  };
+  /** Escape or Close: the confirm bar first when there is something to lose. */
+  const leave = () => {
+    if (discard) return keepEditing();
+    if (dirty) return ask("close");
+    close();
+  };
+  const dialogRef = useDialog(leave);
+  useEffect(() => {
+    if (discard) keepButton.current?.focus();
+  }, [discard]);
+  useEffect(() => {
+    const to = want.current;
+    if (!to) return;
+    want.current = null;
+    if (to === "name") nameField.current?.focus();
+    else if (to === "code") area.current?.focus({ preventScroll: true });
+    else (listEl.current?.querySelector<HTMLElement>(`[data-plugin-edit="${opened.current}"]`) ?? listEl.current?.querySelector<HTMLElement>("[data-plugin-new]"))?.focus();
+  }, [editing === null, editing?.id]);
   const runFromList = (p: Plugin) => {
     close();
     runPlugin(p);
@@ -149,7 +198,8 @@ export function PluginsDialog() {
   const save = async (p: Plugin) => {
     if (checking || !(await valid(p))) return;
     savePlugin(p);
-    setEditing(null);
+    opened.current = p.id;
+    edit(null);
   };
   const runEditing = async (p: Plugin) => {
     if (checking) return;
@@ -162,6 +212,11 @@ export function PluginsDialog() {
     runPlugin(p);
   };
   const edit = (p: Plugin | null) => {
+    if (p) {
+      opened.current = list.some((x) => x.id === p.id) ? p.id : null;
+      want.current = list.some((x) => x.id === p.id) ? "code" : "name";
+    } else want.current = "row";
+    setDiscard(null);
     setEditing(p);
     setProblem(null);
     launched.current = false;
@@ -169,20 +224,21 @@ export function PluginsDialog() {
   };
   const lines = (editing?.code ?? "").split("\n").length;
   return (
-    <div className="modal-bg" onPointerDown={(e) => e.target === e.currentTarget && close()}>
+    <div className="modal-bg" onPointerDown={(e) => e.target === e.currentTarget && !discard && leave()}>
       <div ref={dialogRef} className="modal plugins-dialog" role="dialog" aria-modal="true" aria-label="Plugins" onKeyDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <b>{editing ? (editing.builtin ? editing.name : "Edit plugin") : "Plugins"}</b>
-          <button className="ibtn" title="Close" onClick={close} style={{ marginLeft: "auto" }}>
+          <button className="ibtn" title="Close" aria-label="Close" onClick={leave} style={{ marginLeft: "auto" }}>
             <X size={14} />
           </button>
         </div>
         {editing ? (
           <div className="plugin-editor">
-            <input className="textinput" placeholder="Name" value={editing.name} disabled={editing.builtin} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
+            <input ref={nameField} className="textinput" placeholder="Name" aria-label="Name" value={editing.name} disabled={editing.builtin} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
             <input
               className="textinput"
               placeholder="What it does"
+              aria-label="What it does"
               value={editing.description}
               disabled={editing.builtin}
               onChange={(e) => setEditing({ ...editing, description: e.target.value })}
@@ -256,8 +312,29 @@ export function PluginsDialog() {
                 </div>
               </div>
             </details>
+            {discard && (
+              <div className="plugin-discard" role="alertdialog" aria-label="Discard changes?">
+                <span>
+                  Discard changes{editing.name.trim() ? ` to ${editing.name.trim()}` : ""}?
+                </span>
+                <button
+                  className="btn small"
+                  onClick={() => {
+                    const what = discard;
+                    setDiscard(null);
+                    if (what === "close") close();
+                    else edit(null);
+                  }}
+                >
+                  Discard
+                </button>
+                <button ref={keepButton} className="btn primary small" onClick={keepEditing}>
+                  Keep editing
+                </button>
+              </div>
+            )}
             <div className="row" style={{ justifyContent: "space-between" }}>
-              <button className="btn" onClick={() => edit(null)}>
+              <button className="btn" onClick={() => (dirty ? ask("back") : edit(null))}>
                 Back
               </button>
               <div className="row">
@@ -273,25 +350,29 @@ export function PluginsDialog() {
             </div>
           </div>
         ) : (
-          <div className="plugin-list">
+          <div className="plugin-list" ref={listEl}>
             {list.map((p) => (
               <div key={p.id} className="plugin-row">
+                {/* The name is the keyboard way in; a click anywhere on the block opens it too. */}
                 <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => edit(p)}>
-                  <div style={{ fontWeight: 600 }}>{p.name}</div>
+                  <button type="button" className="plugin-row-name" data-plugin-edit={p.id}>
+                    <span className="sr-only">Edit </span>
+                    {p.name}
+                  </button>
                   <div className="muted small">{p.description || (p.builtin ? "Built in" : "")}</div>
                 </div>
-                <button className="ibtn" title="Run" onClick={() => runFromList(p)}>
+                <button className="ibtn" title={`Run ${p.name}`} aria-label={`Run ${p.name}`} onClick={() => runFromList(p)}>
                   <Play size={13} />
                 </button>
                 {!p.builtin && (
-                  <button className="ibtn" title="Delete" onClick={() => deletePlugin(p.id)}>
+                  <button className="ibtn" title={`Delete ${p.name}`} aria-label={`Delete ${p.name}`} onClick={() => deletePlugin(p.id)}>
                     <Trash2 size={13} />
                   </button>
                 )}
               </div>
             ))}
             <div className="row" style={{ marginTop: 10 }}>
-              <button className="btn" onClick={() => edit({ id: "p_" + Date.now().toString(36), name: "", description: "", code: TEMPLATE })}>
+              <button className="btn" data-plugin-new="" onClick={() => edit({ id: "p_" + Date.now().toString(36), name: "", description: "", code: TEMPLATE })}>
                 <Plus size={13} /> New plugin
               </button>
               <button

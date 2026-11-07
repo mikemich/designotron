@@ -50,7 +50,7 @@ function viewLinkOf(link: string, viewId: string): string {
 
 /** Share → invite people to edit this file live, online (through a relay) or on the local network. */
 export function ShareDialog() {
-  const { status, role, mode, link, peers, previewLink, reconnecting, viewer, viewId } = useCollab();
+  const { status, role, mode, link, peers, previewLink, linkLocalOnly, reconnecting, viewer, viewId } = useCollab();
   const bridgeStatus = useChat((s) => s.bridgeStatus);
   const [name, setName] = useState(userName());
   const nameId = useId();
@@ -300,7 +300,7 @@ export function ShareDialog() {
                     <b>Can edit</b>
                   </div>
                   <div className="row" style={{ marginTop: 6 }}>
-                    <input id="share-link" className="textinput mono" readOnly value={link} onFocus={(e) => e.target.select()} />
+                    <input id="share-link" className="textinput mono" aria-label="Link that can edit" readOnly value={link} onFocus={(e) => e.target.select()} />
                     <button className="btn primary" onClick={() => copy(link, document.getElementById("share-link") as HTMLInputElement)}>
                       {copied ? <Check size={13} /> : <Copy size={13} />} {copied ? "Copied" : "Copy"}
                     </button>
@@ -316,6 +316,11 @@ export function ShareDialog() {
                       <a href={previewLink} target="_blank" rel="noreferrer" title={`Open the same link on this editor instead of ${hostOf(link)}, in a new tab`}>
                         Open here in a new tab
                       </a>
+                    </div>
+                  )}
+                  {linkLocalOnly && mode === "online" && (
+                    <div className="muted small share-local-only" style={{ marginTop: 8 }}>
+                      This link works on this computer only (it names localhost).
                     </div>
                   )}
                   <div className="muted small" style={{ marginTop: 8 }}>

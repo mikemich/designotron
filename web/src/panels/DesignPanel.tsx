@@ -106,16 +106,23 @@ function PagePanel() {
     <div className="scroll">
       <Section title="Page">
         <div className="row">
-          <div className="swatch" onClick={(e) => setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect())}>
+          <button
+            type="button"
+            className="swatch"
+            aria-label={`Page background ${page.background}`}
+            aria-haspopup="dialog"
+            aria-expanded={!!anchor}
+            onClick={(e) => setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect())}
+          >
             <i style={{ background: page.background }} />
-          </div>
+          </button>
           <span>{page.background}</span>
           <span className="muted small" style={{ marginLeft: "auto" }}>
             Background
           </span>
         </div>
         {anchor && (
-          <Popover anchor={anchor} onClose={() => setAnchor(null)}>
+          <Popover anchor={anchor} label="Page background" onClose={() => setAnchor(null)}>
             <ColorPicker color={page.background} onChange={(color) => dispatch({ op: "setPageBackground", id: page.id, color })} />
           </Popover>
         )}
@@ -283,7 +290,7 @@ function FrameSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         </button>
       </div>
       {anchor && (
-        <Popover anchor={anchor} width={280} onClose={close}>
+        <Popover anchor={anchor} width={280} label="Size presets" onClose={close}>
           <PresetPicker
             autoFocus
             label="Search size presets"
@@ -1172,7 +1179,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
         };
         return (
           <div className="row" key={i}>
-            <label className="field" style={{ paddingLeft: 5, gap: 6 }}>
+            <div className="field" style={{ paddingLeft: 5, gap: 6 }}>
               <PaintSwatch
                 paint={p}
                 onChange={setP}
@@ -1191,7 +1198,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
               ) : (
                 <span style={{ flex: 1 }}>{paintLabel(p)}</span>
               )}
-            </label>
+            </div>
             <div style={{ width: 62 }}>
               <NumberField ariaLabel="Opacity" value={Math.round(p.opacity * 100)} suffix="%" min={0} max={100} onChange={(v) => setP({ ...p, opacity: v / 100 })} />
             </div>
