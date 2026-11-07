@@ -521,7 +521,8 @@ export function dispatch<T = any>(cmd: Record<string, unknown>, opts: { quiet?: 
   try {
     const r = JSON.parse(getEngine().dispatch(JSON.stringify(cmd)));
     sync();
-    if ((cmd.op === "undo" || cmd.op === "redo") && useStore.getState().vectorPoints.length) useStore.setState({ vectorPoints: [] });
+    // Redo keeps the anchor selection while the path has the same shape (dropStalePoints clears it otherwise).
+    if (cmd.op === "undo" && useStore.getState().vectorPoints.length) useStore.setState({ vectorPoints: [] });
     return r;
   } catch (err) {
     if (noteEngineError(err)) return null;

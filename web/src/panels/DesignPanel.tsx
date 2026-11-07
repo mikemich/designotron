@@ -43,6 +43,7 @@ import { PresetPicker } from "./PresetPicker";
 import { ApplyStyleButton, BoundChip, CreateStyleButton, StyleChip } from "./StyleControls";
 import { inScope } from "./variableScopes";
 import { framePosition, ownCoordinate } from "./groupOffset";
+import { isOpenPath } from "../canvas/vectorSnap";
 import { rangeValue } from "./textRange";
 import { parseLetterSpacing, parseLineHeight } from "./textUnits";
 
@@ -247,6 +248,7 @@ function FramePresets() {
 function ScaleField({ ids }: { ids: string[] }) {
   // The field always reads 100%: a scale applies to the layers as they are, then the field starts over.
   const [again, setAgain] = useState(0);
+  const [strokes, setStrokes] = useState(A.getScaleStrokes);
   return (
     <div className="row scale-row">
       <span className="muted small">Scale</span>
@@ -259,10 +261,21 @@ function ScaleField({ ids }: { ids: string[] }) {
         max={10000}
         suffix="%"
         onChange={(pct) => {
-          dispatch({ op: "scaleNodes", ids, factor: pct / 100, anchor: null });
+          dispatch({ op: "scaleNodes", ids, factor: pct / 100, anchor: null, strokes: A.getScaleStrokes() });
           setAgain((n) => n + 1);
         }}
       />
+      <label className="scale-strokes" title="Scale stroke weights along with the layers (K tool and this field)">
+        <input
+          type="checkbox"
+          checked={strokes}
+          onChange={(e) => {
+            A.setScaleStrokes(e.target.checked);
+            setStrokes(e.target.checked);
+          }}
+        />
+        <span className="muted small">Scale strokes</span>
+      </label>
     </div>
   );
 }
@@ -1095,6 +1108,15 @@ function defaultJoin(n: Node): "miter" | "round" {
   return "round";
 }
 
+/** Line end choices; the same list for the start and the end. */
+const CAP_OPTIONS = [
+  { value: "none", label: "None" },
+  { value: "round", label: "Round" },
+  { value: "square", label: "Square" },
+  { value: "arrow", label: "Arrow" },
+  { value: "circle", label: "Circle" },
+];
+
 /** A vector whose paths are all closed: line ends do nothing there (open paths and lines have them). */
 function isClosedVector(n: Node): boolean {
   if (n.type !== "vector" || !n.vector) return false;
@@ -1216,16 +1238,19 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
               onScrubStart={begin}
               onScrubEnd={end}
             />
-            <SelectField
-              ariaLabel="Stroke position"
-              value={common(nodes, (n) => n.strokeAlign)}
-              options={[
-                { value: "inside", label: "Inside" },
-                { value: "center", label: "Center" },
-                { value: "outside", label: "Outside" },
-              ]}
-              onChange={(strokeAlign) => update(ids, { strokeAlign })}
-            />
+            {/* Position is meaningless on an open path (it has no inside), so it is left out there. */}
+            {!nodes.every(isOpenPath) && (
+              <SelectField
+                ariaLabel="Stroke position"
+                value={common(nodes, (n) => n.strokeAlign)}
+                options={[
+                  { value: "inside", label: "Inside" },
+                  { value: "center", label: "Center" },
+                  { value: "outside", label: "Outside" },
+                ]}
+                onChange={(strokeAlign) => update(ids, { strokeAlign })}
+              />
+            )}
           </div>
           <div className="grid2">
             <SelectField
@@ -1239,21 +1264,13 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
               disabled={individual}
               title={individual ? "Dashes don't apply to individual strokes" : undefined}
             />
-            {isLineish && (
-              <SelectField
-                ariaLabel="Line end"
-                value={common(nodes, (n) => n.shape?.endCap ?? "none")}
-                options={[
-                  { value: "none", label: "No end cap" },
-                  { value: "round", label: "Round" },
-                  { value: "square", label: "Square" },
-                  { value: "arrow", label: "Arrow" },
-                  { value: "circle", label: "Circle" },
-                ]}
-                onChange={(endCap) => update(ids, { shape: { endCap } })}
-              />
-            )}
           </div>
+          {isLineish && (
+            <div className="grid2">
+              <SelectField label="Start" ariaLabel="Line start" title="Cap at the start of the line" value={common(nodes, (n) => n.shape?.startCap ?? "none")} options={CAP_OPTIONS} onChange={(startCap) => update(ids, { shape: { startCap } })} />
+              <SelectField label="End" ariaLabel="Line end" title="Cap at the end of the line" value={common(nodes, (n) => n.shape?.endCap ?? "none")} options={CAP_OPTIONS} onChange={(endCap) => update(ids, { shape: { endCap } })} />
+            </div>
+          )}
           {dashed && !individual && (
             <div className="grid2">
               <NumberField label="Dash" ariaLabel="Dash length" min={0} value={dash[0] ?? 0} onChange={(d) => update(ids, { strokeDash: [d, dash[1] ?? d] })} />

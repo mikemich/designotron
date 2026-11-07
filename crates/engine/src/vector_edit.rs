@@ -198,6 +198,153 @@ pub fn move_points(v: &mut VectorData, refs: &[[usize; 2]], dx: f64, dy: f64) {
   }
 }
 
+/// Two anchors closer than this (node-local units) count as the same place.
+const JOIN_EPS: f64 = 0.01;
+
+/// Anchors in reverse order, each with its handles swapped.
+fn reversed(points: &[VectorPoint]) -> Vec<VectorPoint> {
+  points
+    .iter()
+    .rev()
+    .map(|p| VectorPoint {
+      in_x: p.out_x,
+      in_y: p.out_y,
+      out_x: p.in_x,
+      out_y: p.in_y,
+      ..*p
+    })
+    .collect()
+}
+
+/// Splits paths at anchors (`[subpath, index]`). A closed subpath opens at the first of its
+/// selected anchors (that anchor becomes both ends); an open one is cut in two at each
+/// selected inner anchor, which is duplicated. The ends of an open path are left alone.
+/// Returns the anchors that are now ends, or an error when nothing could be split.
+pub fn split_at(v: &mut VectorData, refs: &[[usize; 2]]) -> Result<Vec<[usize; 2]>, String> {
+  let mut subs: Vec<SubPath> = Vec::new();
+  let mut ends: Vec<[usize; 2]> = Vec::new();
+  let mut changed = false;
+  for (si, sp) in v.subpaths.iter().enumerate() {
+    let mut cuts: Vec<usize> = refs.iter().filter(|r| r[0] == si && r[1] < sp.points.len()).map(|r| r[1]).collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    if cuts.is_empty() || sp.points.len() < 2 {
+      subs.push(sp.clone());
+      continue;
+    }
+    let mut pts = sp.points.clone();
+    let opened = sp.closed;
+    if opened {
+      // Rotate so the first selected anchor leads, then repeat it as the other end.
+      let i = cuts[0];
+      pts.rotate_left(i);
+      let mut head = pts[0];
+      let mut tail = head;
+      (head.in_x, head.in_y) = (0.0, 0.0);
+      (tail.out_x, tail.out_y) = (0.0, 0.0);
+      pts[0] = head;
+      pts.push(tail);
+      cuts = cuts[1..].iter().map(|j| j - i).collect();
+    }
+    let last = pts.len() - 1;
+    let mut pieces: Vec<Vec<VectorPoint>> = Vec::new();
+    let mut cur: Vec<VectorPoint> = Vec::new();
+    for (k, p) in pts.iter().enumerate() {
+      if k > 0 && k < last && cuts.contains(&k) {
+        let mut a = *p;
+        (a.out_x, a.out_y) = (0.0, 0.0);
+        cur.push(a);
+        pieces.push(std::mem::take(&mut cur));
+        let mut b = *p;
+        (b.in_x, b.in_y) = (0.0, 0.0);
+        cur.push(b);
+      } else {
+        cur.push(*p);
+      }
+    }
+    pieces.push(cur);
+    if pieces.len() == 1 && !opened {
+      subs.push(sp.clone());
+      continue;
+    }
+    changed = true;
+    let base = subs.len();
+    if opened {
+      ends.push([base, 0]);
+      ends.push([base + pieces.len() - 1, pieces[pieces.len() - 1].len() - 1]);
+    }
+    for k in 1..pieces.len() {
+      ends.push([base + k - 1, pieces[k - 1].len() - 1]);
+      ends.push([base + k, 0]);
+    }
+    subs.extend(pieces.into_iter().map(|points| SubPath { points, closed: false }));
+  }
+  if !changed {
+    return Err("select an anchor to split at (not the end of an open path)".into());
+  }
+  v.subpaths = subs;
+  ends.sort_unstable();
+  ends.dedup();
+  Ok(ends)
+}
+
+/// Whether anchor `r` is an end of an open subpath.
+pub fn is_end(v: &VectorData, r: [usize; 2]) -> bool {
+  v.subpaths
+    .get(r[0])
+    .is_some_and(|sp| !sp.closed && sp.points.len() >= 2 && (r[1] == 0 || r[1] + 1 == sp.points.len()))
+}
+
+/// Joins two ends of open subpaths. On one subpath that closes it; on two it connects them
+/// with a straight segment into one subpath (turning one around if needed). Ends within
+/// `JOIN_EPS` of each other merge into one anchor. Returns the anchor(s) where they met.
+pub fn join_ends(v: &mut VectorData, a: [usize; 2], b: [usize; 2]) -> Result<Vec<[usize; 2]>, String> {
+  if a == b || !is_end(v, a) || !is_end(v, b) {
+    return Err("select two ends of open paths to join".into());
+  }
+  let close = |p: &VectorPoint, q: &VectorPoint| (p.x - q.x).hypot(p.y - q.y) < JOIN_EPS;
+  if a[0] == b[0] {
+    let sp = &mut v.subpaths[a[0]];
+    if sp.points.len() < 3 {
+      return Err("a path needs at least three anchors to close".into());
+    }
+    let tail = sp.points[sp.points.len() - 1];
+    if close(&sp.points[0], &tail) {
+      sp.points[0].in_x = tail.in_x;
+      sp.points[0].in_y = tail.in_y;
+      sp.points.pop();
+    }
+    sp.closed = true;
+    return Ok(vec![[a[0], 0]]);
+  }
+  let (first, second) = (a[0].min(b[0]), a[0].max(b[0]));
+  // `from` is the end that stays the tail of the joined path, `to` the one that becomes its head.
+  let (from, to) = if a[0] == first { (a, b) } else { (b, a) };
+  let mut head = v.subpaths[first].points.clone();
+  if from[1] == 0 {
+    head = reversed(&head);
+  }
+  let mut tail = v.subpaths[second].points.clone();
+  if to[1] != 0 {
+    tail = reversed(&tail);
+  }
+  let join = head.len() - 1;
+  let merged = close(&head[join], &tail[0]);
+  if merged {
+    head[join].out_x = tail[0].out_x;
+    head[join].out_y = tail[0].out_y;
+    tail.remove(0);
+  }
+  head.extend(tail);
+  v.subpaths[first].points = head;
+  v.subpaths.remove(second);
+  Ok(if merged {
+    vec![[first, join]]
+  } else {
+    vec![[first, join], [first, join + 1]]
+  })
+}
+
 /// Continues an open subpath from one of its ends with node-local anchors (in drawing
 /// order, starting next to the end), optionally closing it.
 pub fn extend(v: &mut VectorData, sub: usize, prepend: bool, points: &[VectorPoint], close: bool) -> Result<(), String> {
@@ -491,6 +638,137 @@ mod tests {
     assert!((p.out_x - third).abs() < 1e-9 && p.out_y.abs() < 1e-9, "{p:?}");
     set_smooth(&mut v, &[[0, 1]], false);
     assert!(!is_smooth(&v.subpaths[0].points[1]));
+  }
+
+  fn square(closed: bool) -> SubPath {
+    SubPath {
+      points: [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+        .iter()
+        .map(|&(x, y)| VectorPoint::at(x, y))
+        .collect(),
+      closed,
+    }
+  }
+
+  fn xy(sp: &SubPath) -> Vec<(f64, f64)> {
+    sp.points.iter().map(|p| (p.x, p.y)).collect()
+  }
+
+  #[test]
+  fn splitting_a_closed_path_opens_it_at_the_anchor() {
+    let mut v = data(vec![square(true)]);
+    let ends = split_at(&mut v, &[[0, 2]]).unwrap();
+    assert_eq!(v.subpaths.len(), 1);
+    let sp = &v.subpaths[0];
+    assert!(!sp.closed);
+    assert_eq!(xy(sp), vec![(10.0, 10.0), (0.0, 10.0), (0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]);
+    assert_eq!(ends, vec![[0, 0], [0, 4]]);
+    // A two-anchor loop opens too.
+    let mut v = data(vec![SubPath {
+      points: vec![VectorPoint::at(0.0, 0.0), VectorPoint::at(5.0, 0.0)],
+      closed: true,
+    }]);
+    split_at(&mut v, &[[0, 0]]).unwrap();
+    assert_eq!(v.subpaths[0].points.len(), 3);
+  }
+
+  #[test]
+  fn splitting_a_closed_path_keeps_the_outer_handles() {
+    let mut sp = curvy(true);
+    sp.points[1].in_x = -7.0;
+    sp.points[1].out_x = 9.0;
+    let mut v = data(vec![sp]);
+    split_at(&mut v, &[[0, 1]]).unwrap();
+    let pts = &v.subpaths[0].points;
+    assert_eq!((pts[0].in_x, pts[0].out_x), (0.0, 9.0), "the start keeps its outgoing handle");
+    assert_eq!((pts[3].in_x, pts[3].out_x), (-7.0, 0.0), "the end keeps its incoming handle");
+  }
+
+  #[test]
+  fn splitting_an_open_path_cuts_it_in_two() {
+    let mut v = data(vec![square(false)]);
+    let ends = split_at(&mut v, &[[0, 1], [0, 3]]).unwrap();
+    // Anchor 3 is an end: only anchor 1 cuts.
+    assert_eq!(v.subpaths.len(), 2);
+    assert_eq!(xy(&v.subpaths[0]), vec![(0.0, 0.0), (10.0, 0.0)]);
+    assert_eq!(xy(&v.subpaths[1]), vec![(10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+    assert_eq!(ends, vec![[0, 1], [1, 0]]);
+    assert!(split_at(&mut v, &[[0, 0], [1, 2]]).is_err(), "ends can't be split");
+    let mut v = data(vec![square(false)]);
+    split_at(&mut v, &[[0, 1], [0, 2]]).unwrap();
+    assert_eq!(v.subpaths.len(), 3);
+  }
+
+  #[test]
+  fn joining_the_two_ends_of_one_path_closes_it() {
+    let mut v = data(vec![square(false)]);
+    join_ends(&mut v, [0, 0], [0, 3]).unwrap();
+    assert!(v.subpaths[0].closed && v.subpaths[0].points.len() == 4);
+    // Ends on the same spot merge into one anchor.
+    let mut sp = square(false);
+    sp.points.push(VectorPoint::at(0.0, 0.005));
+    let mut v = data(vec![sp]);
+    join_ends(&mut v, [0, 4], [0, 0]).unwrap();
+    assert!(v.subpaths[0].closed && v.subpaths[0].points.len() == 4);
+    // Two anchors can't make a loop.
+    let mut v = data(vec![SubPath {
+      points: vec![VectorPoint::at(0.0, 0.0), VectorPoint::at(5.0, 0.0)],
+      closed: false,
+    }]);
+    assert!(join_ends(&mut v, [0, 0], [0, 1]).is_err());
+  }
+
+  #[test]
+  fn joining_ends_of_two_paths_connects_them() {
+    let a = SubPath {
+      points: vec![VectorPoint::at(0.0, 0.0), VectorPoint::at(10.0, 0.0)],
+      closed: false,
+    };
+    let b = SubPath {
+      points: vec![VectorPoint::at(30.0, 0.0), VectorPoint::at(20.0, 0.0)],
+      closed: false,
+    };
+    // a's end to b's end: b is turned around.
+    let mut v = data(vec![a.clone(), b.clone()]);
+    let at = join_ends(&mut v, [0, 1], [1, 1]).unwrap();
+    assert_eq!(v.subpaths.len(), 1);
+    assert_eq!(xy(&v.subpaths[0]), vec![(0.0, 0.0), (10.0, 0.0), (20.0, 0.0), (30.0, 0.0)]);
+    assert_eq!(at, vec![[0, 1], [0, 2]]);
+    // Start to start, picked in the other order: a is turned around.
+    let mut v = data(vec![a.clone(), b.clone()]);
+    join_ends(&mut v, [1, 0], [0, 0]).unwrap();
+    assert_eq!(xy(&v.subpaths[0]), vec![(10.0, 0.0), (0.0, 0.0), (30.0, 0.0), (20.0, 0.0)]);
+    // Ends on the same spot merge, keeping the incoming handle of the first and the outgoing of the second.
+    let mut a2 = a.clone();
+    a2.points[1].in_x = -3.0;
+    a2.points[1].out_x = 4.0;
+    let mut b2 = SubPath {
+      points: vec![VectorPoint::at(10.0, 0.0), VectorPoint::at(20.0, 0.0)],
+      closed: false,
+    };
+    b2.points[0].out_x = 5.0;
+    b2.points[0].in_x = -6.0;
+    let mut v = data(vec![a2, b2]);
+    let at = join_ends(&mut v, [0, 1], [1, 0]).unwrap();
+    let sp = &v.subpaths[0];
+    assert_eq!(sp.points.len(), 3);
+    assert_eq!((sp.points[1].in_x, sp.points[1].out_x), (-3.0, 5.0));
+    assert_eq!(at, vec![[0, 1]]);
+    // Inner anchors and the same anchor twice are refused.
+    let mut v = data(vec![square(false), a]);
+    assert!(join_ends(&mut v, [0, 1], [1, 0]).is_err());
+    assert!(join_ends(&mut v, [1, 0], [1, 0]).is_err());
+  }
+
+  #[test]
+  fn split_then_join_restores_the_loop() {
+    let mut v = data(vec![square(true)]);
+    split_at(&mut v, &[[0, 1]]).unwrap();
+    let n = v.subpaths[0].points.len();
+    join_ends(&mut v, [0, 0], [0, n - 1]).unwrap();
+    let sp = &v.subpaths[0];
+    assert!(sp.closed);
+    assert_eq!(xy(sp), vec![(10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (0.0, 0.0)]);
   }
 
   #[test]

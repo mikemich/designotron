@@ -274,11 +274,58 @@ mod scale {
   }
 
   #[test]
+  fn scale_nodes_with_strokes_off_keeps_stroke_weights() {
+    let mut e = engine();
+    let f = scale_fixture(&mut e);
+    e.dispatch(Command::ScaleNodes {
+      ids: vec![f.clone()],
+      factor: 2.0,
+      anchor: None,
+      strokes: false,
+    })
+    .unwrap();
+    let n = e.doc.get(&f).unwrap();
+    assert_eq!((n.width, n.stroke_weight, n.corner_radius), (200.0, 2.0, 16.0));
+    // A command without the field (an older caller) still scales strokes.
+    let cmd: Command = serde_json::from_value(json!({ "op": "scaleNodes", "ids": [f.clone()], "factor": 2.0 })).unwrap();
+    e.dispatch(cmd).unwrap();
+    assert_eq!(e.doc.get(&f).unwrap().stroke_weight, 4.0);
+  }
+
+  #[test]
+  fn the_scale_drag_keeps_strokes_when_asked_and_is_one_undo_step() {
+    let mut e = engine();
+    let f = scale_fixture(&mut e);
+    e.dispatch(Command::BeginGesture).unwrap();
+    for dx in [20.0, 100.0] {
+      e.dispatch(Command::Resize {
+        scale_strokes: false,
+        ids: vec![f.clone()],
+        handle: Handle::Se,
+        dx,
+        dy: 0.0,
+        keep_aspect: false,
+        from_center: false,
+        snap: false,
+        zoom: 1.0,
+        scale: true,
+      })
+      .unwrap();
+    }
+    e.dispatch(Command::EndGesture).unwrap();
+    let n = e.doc.get(&f).unwrap();
+    assert_eq!((n.width, n.stroke_weight, n.corner_radius), (200.0, 2.0, 16.0));
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.get(&f).unwrap().width, 100.0);
+  }
+
+  #[test]
   fn resize_with_scale_doubles_lengths() {
     let mut e = engine();
     let f = scale_fixture(&mut e);
     e.dispatch(Command::BeginGesture).unwrap();
     e.dispatch(Command::Resize {
+      scale_strokes: true,
       ids: vec![f.clone()],
       handle: Handle::Se,
       dx: 100.0,
@@ -309,6 +356,7 @@ mod scale {
     e.doc.get_mut(&f).unwrap().locked = true;
     assert!(e
       .dispatch(Command::ScaleNodes {
+        strokes: true,
         ids: vec![f.clone()],
         factor: 2.0,
         anchor: None
@@ -317,6 +365,7 @@ mod scale {
     assert_eq!(e.doc.get(&f).unwrap().width, 100.0);
     e.doc.get_mut(&f).unwrap().locked = false;
     e.dispatch(Command::ScaleNodes {
+      strokes: true,
       ids: vec![f.clone()],
       factor: 0.5,
       anchor: None,
@@ -341,6 +390,7 @@ mod scale {
     e.dispatch(Command::Group { ids }).unwrap();
     let g = e.selection[0].clone();
     e.dispatch(Command::ScaleNodes {
+      strokes: true,
       ids: vec![g.clone()],
       factor: 0.5,
       anchor: None,
@@ -358,6 +408,7 @@ mod scale {
     instance(&mut e, &main, 300.0);
     let inst = e.doc.nodes.values().find(|n| n.kind == NodeType::Instance).unwrap().id.clone();
     e.dispatch(Command::ScaleNodes {
+      strokes: true,
       ids: vec![inst.clone()],
       factor: 2.0,
       anchor: None,
@@ -369,6 +420,7 @@ mod scale {
     let inner = e.doc.get(&inst).unwrap().children[0].clone();
     assert!(e
       .dispatch(Command::ScaleNodes {
+        strokes: true,
         ids: vec![inner],
         factor: 2.0,
         anchor: None
@@ -565,6 +617,7 @@ mod scale_instances {
     let (main, inst) = fixture(&mut e, false);
     let before = e.doc.nodes.clone();
     e.dispatch(Command::ScaleNodes {
+      strokes: true,
       ids: vec![inst.clone()],
       factor: 2.0,
       anchor: None,
@@ -595,6 +648,7 @@ mod scale_instances {
     let (_, inst) = fixture(&mut e, true);
     let frame = e.doc.get(&inst).unwrap().parent.clone().unwrap();
     e.dispatch(Command::ScaleNodes {
+      strokes: true,
       ids: vec![frame],
       factor: 2.0,
       anchor: None,
@@ -616,6 +670,7 @@ mod scale_instances {
     })
     .unwrap();
     e.dispatch(Command::ScaleNodes {
+      strokes: true,
       ids: vec![inst.clone()],
       factor: 2.0,
       anchor: None,
@@ -636,6 +691,7 @@ mod scale_instances {
     .unwrap();
     assert!(e.doc.get(&t).unwrap().text_style.is_some());
     e.dispatch(Command::ScaleNodes {
+      strokes: true,
       ids: vec![t.clone()],
       factor: 2.0,
       anchor: None,
@@ -666,6 +722,7 @@ mod scale_bookkeeping {
     let t = std::time::Instant::now();
     for s in 1..=10 {
       e.dispatch(Command::Resize {
+        scale_strokes: true,
         ids: vec![big.clone()],
         handle: Handle::Se,
         dx: s as f64 * 5.0,
@@ -698,6 +755,7 @@ mod scale_bookkeeping {
     instance(&mut e, &main, 300.0);
     let inst = e.doc.nodes.values().find(|n| n.kind == NodeType::Instance).unwrap().id.clone();
     e.dispatch(Command::ScaleNodes {
+      strokes: true,
       ids: vec![inst.clone()],
       factor: 2.0,
       anchor: None,
@@ -728,6 +786,7 @@ mod scale_bookkeeping {
     instance(&mut e, &main, 300.0);
     let inst = e.doc.nodes.values().find(|n| n.kind == NodeType::Instance).unwrap().id.clone();
     e.dispatch(Command::ScaleNodes {
+      strokes: true,
       ids: vec![inst.clone()],
       factor: 2.0,
       anchor: None,
