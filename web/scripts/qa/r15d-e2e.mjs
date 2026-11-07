@@ -255,6 +255,21 @@ async function suite(tour) {
     check("figma: and a plain new file afterwards has no dialog", (await page.locator(".figma-dialog").count()) === 0 && Object.keys((await doc(page)).nodes).length === 0);
     await toDashboard(page);
 
+    // The dialog left open on the dashboard doesn't follow the person into an existing empty file
+    // (browser Back) and Close doesn't delete that file.
+    await newFile(page);
+    const emptyId = page.url().split("/").pop();
+    const countBack = (await storedFiles(page)).length;
+    await toDashboard(page);
+    await trigger.click();
+    await page.waitForSelector(".figma-dialog");
+    await page.goBack();
+    await page.waitForSelector("#dt-canvas", { timeout: 15000 });
+    await sleep(600);
+    check("figma: Back with the dialog open shows the file without the dialog", (await page.locator(".figma-dialog").count()) === 0 && (await page.locator("#dt-canvas").count()) === 1);
+    check("figma: and the empty file is still there", (await storedFiles(page)).length === countBack, `${emptyId}`);
+    await toDashboard(page);
+
     // A second import still works (the pending data was cleared) and an empty new file isn't touched.
     await newFile(page);
     check("figma: a plain new file afterwards is blank (nothing pending)", Object.keys((await doc(page)).nodes).length === 0);

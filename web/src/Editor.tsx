@@ -1106,7 +1106,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       {presenting && <Presenter start={presenting} />}
       <Tour />
       {variablesOpen && <VariablesDialog />}
-      {figmaOpen && <FigmaImportDialog />}
+      {(figmaOpen === true || figmaOpen === "result") && <FigmaImportDialog />}
       {pluginsOpen && !readOnly && <PluginsDialog />}
       {shareOpen && <ShareDialog />}
       {gone && (
