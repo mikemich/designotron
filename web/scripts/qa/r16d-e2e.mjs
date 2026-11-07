@@ -58,7 +58,8 @@ const track = (page) => {
 const shot = (page, name) => (SHOTS ? page.screenshot({ path: path.join(SHOTS, name + ".png") }) : null);
 
 const label = (page) => page.locator(".save-state").textContent();
-const labelShort = (page) => page.locator(".save-state").evaluate((el) => el.firstChild?.textContent ?? "");
+// The visible short label (round 19 put a colour dot before it; the rest of the sentence is screen-reader text).
+const labelShort = (page) => page.locator(".save-state").evaluate((el) => (el.querySelector(".save-text") ?? el.firstChild)?.textContent ?? "");
 const dirty = (page) => page.evaluate(() => window.__dt.dirty());
 const waitSaved = (page, ms = 10000) => waitFor(async () => (await label(page)).includes("Saved locally") && !(await dirty(page)), ms);
 const fileIdOf = (page) => page.evaluate(() => location.hash.replace(/^#\/file\//, ""));
@@ -515,9 +516,11 @@ let dupSourceId;
       const a = document.querySelector(".file-loc a");
       const nav = document.querySelector(".file-loc");
       const st = document.querySelector(".save-state");
-      return a && nav && st ? { text: a.textContent, truncated: a.scrollWidth > a.clientWidth + 1, navW: nav.getBoundingClientRect().width, label: st.firstChild?.textContent, title: st.getAttribute("title") } : null;
+      return a && nav && st ? { text: a.textContent, truncated: a.scrollWidth > a.clientWidth + 1, navW: nav.getBoundingClientRect().width, label: (st.querySelector(".save-text") ?? st.firstChild)?.textContent, title: st.getAttribute("title") } : null;
     });
-    check(`${width}px: the breadcrumb shows "Drafts" in full`, !!m && m.text === "Drafts" && !m.truncated && m.navW >= 40, JSON.stringify(m));
+    // Round 19 hides the breadcrumb at 1100 px and below so the file name has room.
+    if (width > 1100) check(`${width}px: the breadcrumb shows "Drafts" in full`, !!m && m.text === "Drafts" && !m.truncated && m.navW >= 40, JSON.stringify(m));
+    else check(`${width}px: the breadcrumb is hidden to make room for the file name`, !!m && m.navW === 0, JSON.stringify(m));
     check(`${width}px: the label is the short 'Not saved' with the full sentence in the title`, m?.label === "Not saved" && m?.title === "Not saved: browser storage is full or blocked");
     await shot(page, `p5-breadcrumb-${width}`);
   }
