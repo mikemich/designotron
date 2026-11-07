@@ -12,7 +12,7 @@ import { selection, toast, useStore } from "./store";
 import { DRAG_BUSY, executeTool, whenCanvasIdle } from "./ai/tools";
 import { PLUGIN_SANDBOX, sandboxDocument } from "./pluginSandbox";
 import { WEB_ADDRESS_REFUSAL, hasWebAddress } from "./pluginPolicy";
-import { asLevel, asLine, logPush, logStart, usePluginLog } from "./pluginLog";
+import { asLevel, asLine, logFlush, logPush, logStart, usePluginLog } from "./pluginLog";
 import { userName } from "./canvas/Comments";
 
 export interface Plugin {
@@ -310,7 +310,7 @@ export function stopPlugin() {
   const p = loadPlugins().find((x) => x.id === id);
   if (p) runPlugin(p);
   return !!p;
-}, plugin: () => usePlugins.getState().running?.plugin.id ?? null, pluginLog: () => usePluginLog.getState().entries };
+}, plugin: () => usePlugins.getState().running?.plugin.id ?? null, pluginLog: () => (logFlush(), usePluginLog.getState().entries) };
 
 export type CheckResult = { ok: true } | { ok: false; message: string; line?: number; column?: number };
 

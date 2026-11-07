@@ -54,13 +54,15 @@ async function open() {
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
   page.on("popup", () => errors.push("POPUP opened"));
+  const consoleLines = [];
+  page.on("console", (m) => consoleLines.push(m.text()));
   await page.goto(URL + "/#/");
   await page.waitForSelector(".files", { timeout: 30000 });
   await page.click("button:has-text('New design file')");
   await page.waitForSelector("#dt-canvas", { timeout: 30000 });
   await page.waitForFunction(() => window.__dt?.tool && window.__dt.doc().pages);
   await sleep(400);
-  return { ctx, page, errors };
+  return { ctx, page, errors, consoleLines };
 }
 
 const doc = (page) => page.evaluate(() => window.__dt.doc());
@@ -332,6 +334,43 @@ const dialogOpen = (page) => page.locator(".plugins-dialog").count().then((n) =>
   check("the safety text no longer says a plugin could navigate its frame", !/navigating its frame/.test(safety) && /Chromium/.test(safety) && /only run plugins you trust/.test(safety), safety.slice(-420));
   check("no page errors, popups or requests beyond the editor's own font stylesheet", errors.length === 0 && stray().length === 0, JSON.stringify({ errors, stray: stray() }));
   await ctx.close();
+}
+
+// ---------- Save and Run never execute code that only fails to compile ----------
+{
+  console.log("\n# Diagnosis never runs plugin code");
+  const { ctx, page, consoleLines } = await open();
+  // Invalid under the run wrapper (let dt clashes with its parameter), but after the early "})" it is a
+  // valid script: a diagnosis that evaluated it would run the console.log and the tool call.
+  const escape = '// one\n}); console.log("ESCAPED-MARKER"); window.dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: "ESCAPED", width: 5, height: 5 }] }); window.__ran = 1; let dt = 1; (async function(){\n';
+  await openDialog(page);
+  await newPlugin(page, "Escaper", escape);
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.waitForSelector(".plugin-problem");
+  await sleep(500);
+  const msg = await page.locator(".plugin-problem").innerText();
+  check("Save refuses code that closes the wrapper early", msg.length > 0, msg);
+  check("and nothing is stored", (await stored(page)).length === 0);
+  check("Save executed none of it: no console line, no layer", !consoleLines.some((l) => /ESCAPED-MARKER/.test(l)) && !(await nodes(page)).some((n) => n.name === "ESCAPED"), JSON.stringify(consoleLines.filter((l) => /ESCAPED/.test(l))));
+  // The real error is still found, with its line, in code that also closes the wrapper early.
+  await page.locator("textarea.code").fill('// one\n});\nlet x = ;\nconsole.log("ESCAPED-MARKER");');
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.waitForSelector(".plugin-problem");
+  const m2 = (await page.locator(".plugin-problem").innerText()).replace(/\s+/g, " ");
+  check("a real syntax error is still reported with its line", /^Line 3, column \d+: Unexpected token/.test(m2), m2);
+  check("and that ran nothing either", !consoleLines.some((l) => /ESCAPED-MARKER/.test(l)));
+  await ctx.close();
+
+  // Run of a stored plugin that only fails to compile: reported as a SyntaxError, nothing executed.
+  const b = await open();
+  await addPlugin(b.page, "esc", escape, "Escaper run");
+  await run(b.page, "esc");
+  await waitStopped(b.page, 5000);
+  await sleep(300);
+  const t = await toasts(b.page);
+  check("Run reports a SyntaxError", t.some((x) => /Plugin “Escaper run” failed.*SyntaxError/.test(x)), JSON.stringify(t));
+  check("Run executed none of it: no console line, no layer, no marker", !b.consoleLines.some((l) => /ESCAPED-MARKER/.test(l)) && !(await nodes(b.page)).some((n) => n.name === "ESCAPED") && !(await logText(b.page)).some((x) => /ESCAPED/.test(x)), JSON.stringify(await logText(b.page)));
+  await b.ctx.close();
 }
 
 // ---------- Runtime errors in the dialog flow: runtime error plus saved plugin ----------

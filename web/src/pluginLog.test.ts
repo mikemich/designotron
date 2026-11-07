@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { BOOTSTRAP_SCRIPT } from "./pluginSandbox";
-import { LOG_CAP, asLevel, asLine, formatArgs, logClear, logPush, mapLine, stackPos, usePluginLog } from "./pluginLog";
+import { LOG_CAP, asLevel, asLine, formatArgs, logClear, logFlush, logPush, mapLine, stackPos, usePluginLog } from "./pluginLog";
 
 describe("formatArgs", () => {
   it("prints strings as they are and joins arguments with spaces", () => {
@@ -104,6 +104,8 @@ describe("the log store", () => {
   it("keeps entries in order with their level and line", () => {
     logPush("log", "a");
     logPush("error", "b", 3);
+    expect(usePluginLog.getState().entries.length).toBe(0); // queued until the next frame
+    logFlush();
     const { entries } = usePluginLog.getState();
     expect(entries.map((e) => [e.level, e.text, e.line])).toEqual([
       ["log", "a", undefined],
@@ -113,6 +115,7 @@ describe("the log store", () => {
 
   it("caps at 500 and counts what was dropped", () => {
     for (let i = 0; i < LOG_CAP + 100; i++) logPush("log", String(i));
+    logFlush();
     const s = usePluginLog.getState();
     expect(s.entries.length).toBe(LOG_CAP);
     expect(s.dropped).toBe(100);
@@ -123,6 +126,7 @@ describe("the log store", () => {
 
   it("cuts a long entry", () => {
     logPush("log", "z".repeat(5000));
+    logFlush();
     expect(usePluginLog.getState().entries[0].text.length).toBe(2001);
   });
 

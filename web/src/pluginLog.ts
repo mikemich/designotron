@@ -105,19 +105,45 @@ interface LogState {
 
 export const usePluginLog = create<LogState>(() => ({ entries: [], dropped: 0, panelOpen: false, start: Date.now() }));
 
-export function logPush(level: LogLevel, text: string, line?: number) {
+// Lines wait here and reach the store once per frame, so a burst (every notify, warning and console
+// line of a busy run) copies the 500-entry list once, not once per line.
+let queued: LogEntry[] = [];
+let flushTimer = 0;
+
+/** Moves the queued lines into the store now. */
+export function logFlush() {
+  clearTimeout(flushTimer);
+  flushTimer = 0;
+  if (!queued.length) return;
+  const add = queued;
+  queued = [];
   usePluginLog.setState((s) => {
-    const entries = [...s.entries, { t: Date.now(), level, text: text.length > ENTRY_CAP ? text.slice(0, ENTRY_CAP) + "…" : text, line }];
+    const entries = [...s.entries, ...add];
     const over = Math.max(0, entries.length - LOG_CAP);
     return over ? { entries: entries.slice(over), dropped: s.dropped + over } : { entries };
   });
 }
 
+export function logPush(level: LogLevel, text: string, line?: number) {
+  queued.push({ t: Date.now(), level, text: text.length > ENTRY_CAP ? text.slice(0, ENTRY_CAP) + "…" : text, line });
+  // Never hold more than the store could show.
+  if (queued.length > LOG_CAP * 2) logFlush();
+  else if (!flushTimer) flushTimer = globalThis.setTimeout(logFlush, 16) as unknown as number;
+}
+
+function dropQueued() {
+  clearTimeout(flushTimer);
+  flushTimer = 0;
+  queued = [];
+}
+
 export function logClear() {
+  dropQueued();
   usePluginLog.setState({ entries: [], dropped: 0 });
 }
 
 /** A new run starts: the console shows only it. */
 export function logStart() {
+  dropQueued();
   usePluginLog.setState({ entries: [], dropped: 0, start: Date.now(), panelOpen: false });
 }

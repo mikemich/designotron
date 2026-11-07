@@ -29,7 +29,7 @@ export const PLUGIN_SANDBOX = "allow-scripts";
  *  been answered (plus a short grace for the unhandled-rejection report), so an un-awaited failing
  *  dt.tool isn't lost; errors and failed calls carry the plugin's own line (the wrapper's line
  *  offset is measured at start-up, and a syntax error's position comes from compiling the code once
- *  more as a string timer, which nothing runs); console.* reaches the editor in throttled batches;
+ *  more as a string timer that throws before evaluating anything); console.* reaches the editor in throttled batches;
  *  and a check start only compiles, so Save can tell the author about a syntax error. A plugin's
  *  Error.prepareStackTrace can only change the text read for a line, which is coerced, cut and
  *  matched against one pattern. */
@@ -243,19 +243,21 @@ export const BOOTSTRAP_SCRIPT = String.raw`"use strict";
     }
   };
   // Where new Function found a syntax error: it doesn't say, but a string timer's compile error
-  // reaches the window's error event with a position. The wrapper there adds one line. If the code
-  // parses in this wrapper, only a function expression is evaluated: nothing of it runs.
+  // reaches the window's error event with a position. The script starts with a throw, so it is
+  // compiled whole (a syntax error anywhere is reported with its position) and then stops before
+  // evaluating anything: code that closes the wrapper early can't run. The wrapper there adds two
+  // lines; the throw's own error event is on line 1 and is ignored.
   const diagnose = (code) => new Promise((resolve) => {
     let found = null;
     diagnosing = true;
     const h = (e) => {
       if (!e.isTrusted || found) return;
-      const l = e.lineno - 1;
+      const l = e.lineno - 2;
       if (Number.isInteger(l) && l >= 1 && l <= lines) found = [l, e.colno];
       e.preventDefault();
     };
     listen("error", h);
-    later("(async function(dt){\n" + code + "\n})", 0);
+    later("throw null;\n(async function(dt){\n" + code + "\n})", 0);
     later(() => {
       unlisten("error", h);
       diagnosing = false;
@@ -313,7 +315,7 @@ export const BOOTSTRAP_SCRIPT = String.raw`"use strict";
 `;
 
 /** base64 SHA-256 of `BOOTSTRAP_SCRIPT` (the text between the script tags). */
-export const BOOTSTRAP_HASH = "sha256-LrsaKZ1zudXlekvSkI0BtNlKOwvO6ddHTxta75fVhPk=";
+export const BOOTSTRAP_HASH = "sha256-HrpAuTUyZ6ONF1h+B4vvrgKx6pd4mHwJUHUj/xJemPw=";
 
 /** Frame policy: nothing loads or connects; images only from data: and blob:; scripts only the
  *  bootstrap (by hash) and eval. No `unsafe-inline`: a plugin's frames can't use `on*=`

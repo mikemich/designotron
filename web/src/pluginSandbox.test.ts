@@ -93,6 +93,24 @@ describe("plugin sandbox channel and capture", () => {
     for (const level of ["log", "info", "warn", "error", "debug"]) expect(s).toContain('"' + level + '"');
   });
 
+  it("the syntax-error diagnosis script throws before it evaluates anything", () => {
+    // Code that closes the wrapper early ("})") would otherwise run at top level.
+    const m = /later\("([^"]*)" \+ code \+ "([^"]*)", 0\)/.exec(s);
+    expect(m).not.toBeNull();
+    expect(m![1].startsWith("throw null;")).toBe(true);
+    expect(s).toContain("const l = e.lineno - 2;");
+    // Compile-only: code that is invalid under the run wrapper but valid as a script still stops at the throw.
+    const code = "}); globalThis.__ran = 1; let dt = 1; (async function(){";
+    const runWrapper = () => new Function("dt", "return (async () => {\n" + code + "\n})()");
+    expect(runWrapper).toThrow(SyntaxError);
+    const script = JSON.parse('"' + m![1] + '"') + code + JSON.parse('"' + m![2] + '"');
+    // It parses (so the early close really is valid there), and constructing it ran nothing; at run time the throw comes first.
+    const fn = new Function(script);
+    expect((globalThis as any).__ran).toBeUndefined();
+    expect(() => fn()).toThrow();
+    expect((globalThis as any).__ran).toBeUndefined();
+  });
+
   it("a check start only compiles", () => {
     const run = s.slice(s.indexOf("const run = async"), s.indexOf("const onStart"));
     expect(run.indexOf("if (check) return send({ dtPlugin: true, checked: true, ok: true })")).toBeLessThan(run.indexOf("await fn(window.dt)"));
