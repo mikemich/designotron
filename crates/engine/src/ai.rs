@@ -303,6 +303,7 @@ pub fn tool_defs() -> Value {
           "background": { "type": ["string", "null"], "description": "Dim colour behind the overlay (hex, default #000000); null or \"none\" for no dimming" },
           "backgroundOpacity": { "type": "number", "description": "0-1, default 0.3" }
         } },
+        "preserveScroll": { "type": "boolean", "description": "For navigate, swap_overlay and change_to: the screen that opens keeps the scroll position of the one it replaces (scrolling frames matched by layer name). Default false" },
         "trigger": { "type": "string", "enum": ["click", "hover", "press", "delay", "mouse_enter", "mouse_leave", "mouse_down", "mouse_up", "key"], "description": "hover and press revert when the pointer leaves or lets go; key needs `key`" },
         "key": { "type": "string", "description": "For trigger key: a key or combination such as 'Enter', 'ArrowRight' or 'Shift+K'" },
         "transition": { "type": "string", "enum": ["instant", "dissolve", "smart_animate", "slide_left", "slide_right", "slide_up", "slide_down", "move_in", "move_out", "push"], "description": "smart_animate matches the direct children of both screens by name" },
@@ -1500,7 +1501,7 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
     return Err(format!("no layer {id}"));
   }
   // `clear: true` alone removes the interactions without adding one.
-  let wants_new = ["action", "destinationId", "url", "trigger", "overlay"]
+  let wants_new = ["action", "destinationId", "url", "trigger", "overlay", "preserveScroll"]
     .iter()
     .any(|k| input.get(*k).is_some_and(|v| !v.is_null()));
   if input.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) && !wants_new {
@@ -1683,6 +1684,10 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
     _ => {}
   }
   let overlay = overlay_settings(input.get("overlay"))?;
+  let preserve_scroll = match input.get("preserveScroll").filter(|v| !v.is_null()) {
+    None => false,
+    Some(v) => v.as_bool().ok_or_else(|| cx.err("preserveScroll", "must be true or false"))?,
+  };
   let delay_ms = match input.get("delay").filter(|v| !v.is_null()) {
     Some(v) => parse::number(&cx, "delay", v).and_then(|d| {
       if d >= 0.0 {
@@ -1715,6 +1720,7 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
     direction,
     easing,
     overlay,
+    preserve_scroll,
   });
   let mut r = json!({ "ok": true });
   if !replaced.is_empty() {
@@ -4485,6 +4491,35 @@ mod tests {
       let bg = swap.overlay.background.as_ref().unwrap();
       assert_eq!((bg.color.as_str(), bg.opacity), ("#1E293B", 0.6));
       assert_eq!(e.doc.get(modal).unwrap().interactions[0].action, Action::CloseOverlay);
+    }
+
+    #[test]
+    fn preserve_scroll_is_set_cleared_and_not_saved_when_off() {
+      let (mut e, ids) = screens();
+      let (other, btn) = (&ids[1], &ids[3]);
+      let run = |e: &mut Engine, v: serde_json::Value| {
+        e.dispatch(Command::Ai {
+          tool: "set_prototype".into(),
+          input: v,
+        })
+        .unwrap();
+      };
+      run(&mut e, json!({ "nodeId": btn, "destinationId": other, "preserveScroll": true }));
+      let i = &e.doc.get(btn).unwrap().interactions[0];
+      assert!(i.preserve_scroll);
+      assert_eq!(serde_json::to_value(i).unwrap()["preserveScroll"], json!(true));
+      // The same trigger replaces the interaction; leaving the flag out turns it off again.
+      run(&mut e, json!({ "nodeId": btn, "destinationId": other }));
+      let i = &e.doc.get(btn).unwrap().interactions[0];
+      assert!(!i.preserve_scroll);
+      assert!(serde_json::to_value(i).unwrap().get("preserveScroll").is_none());
+      run(&mut e, json!({ "nodeId": btn, "destinationId": other, "preserveScroll": false }));
+      assert!(!e.doc.get(btn).unwrap().interactions[0].preserve_scroll);
+      let bad = e.dispatch(Command::Ai {
+        tool: "set_prototype".into(),
+        input: json!({ "nodeId": btn, "destinationId": other, "preserveScroll": "yes" }),
+      });
+      assert!(bad.is_err());
     }
 
     #[test]

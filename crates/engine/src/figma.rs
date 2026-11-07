@@ -910,6 +910,12 @@ impl Import<'_> {
             }
           };
           pending.json.insert("action".into(), json!(action));
+          // Figma's "Preserve scroll position" (Navigate to, Swap overlay and Change to).
+          if a.get("preserveScrollPosition").and_then(|v| v.as_bool()) == Some(true)
+            && matches!(action, "navigate" | "swapOverlay" | "changeTo")
+          {
+            pending.json.insert("preserveScroll".into(), json!(true));
+          }
           // A NODE action can arrive without its destination; the layer's own field has it.
           pending.destination = str_of(a, "destinationId").or(legacy).map(str::to_string);
           if let Some(o) = a.get("overlayRelativePosition") {
@@ -1518,7 +1524,7 @@ mod tests {
             "1:3",
             "Hover",
             json!({ "interactions": [{ "trigger": { "type": "ON_HOVER" }, "actions": [{
-          "type": "NODE", "destinationId": "2:1", "navigation": "NAVIGATE",
+          "type": "NODE", "destinationId": "2:1", "navigation": "NAVIGATE", "preserveScrollPosition": true,
           "transition": { "type": "SMART_ANIMATE", "duration": 300, "easing": { "type": "EASE_IN_AND_OUT" } }
         }] }] }),
           ),
@@ -1538,7 +1544,7 @@ mod tests {
             "1:8",
             "Variant",
             click(
-              json!([{ "type": "NODE", "destinationId": "7:2", "navigation": "CHANGE_TO", "transition": { "type": "DISSOLVE", "duration": 200 } }]),
+              json!([{ "type": "NODE", "destinationId": "7:2", "navigation": "CHANGE_TO", "preserveScrollPosition": true, "transition": { "type": "DISSOLVE", "duration": 200 } }]),
             ),
           ),
           rect("1:9", "Close", click(json!([{ "type": "CLOSE" }]))),
@@ -1603,6 +1609,10 @@ mod tests {
       (hover.transition, hover.duration_ms, hover.easing),
       (Transition::SmartAnimate, 300.0, Easing::EaseInOut)
     );
+
+    // "Preserve scroll position" comes across where Designotron has it, and stays off elsewhere.
+    assert!(hover.preserve_scroll && only("Variant").preserve_scroll);
+    assert!(!open.preserve_scroll && !only("Wait").preserve_scroll);
 
     let wait = only("Wait");
     assert_eq!(

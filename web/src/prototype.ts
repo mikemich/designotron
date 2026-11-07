@@ -66,31 +66,49 @@ export const isMissingDestination = (doc: Doc, i: Interaction) =>
 /** Actions that show a frame as an overlay. */
 export const isOverlayLink = (i: Interaction) => i.action === "openOverlay" || i.action === "swapOverlay";
 
-/** Top-left of an overlay of `size` on a frame of `frame` size. `trigger` is the rect of the
- *  layer that opened it (frame coordinates), used by the manual position. */
-export function overlayOrigin(o: OverlaySettings, frame: { width: number; height: number }, size: { width: number; height: number }, trigger: Rect): { x: number; y: number } {
-  const cx = (frame.width - size.width) / 2;
-  const cy = (frame.height - size.height) / 2;
-  const right = frame.width - size.width;
-  const bottom = frame.height - size.height;
+/** The box an overlay of `size` takes on a frame of `frame` size: limited to the frame (a bigger
+ *  overlay scrolls inside it), placed by its position, then kept inside the frame so a manual
+ *  offset can't push it past an edge. `trigger` is the rect of the layer that opened it (frame
+ *  coordinates), used by the manual position. */
+export function overlayBox(o: OverlaySettings, frame: { width: number; height: number }, size: { width: number; height: number }, trigger: Rect): Rect {
+  const width = Math.min(size.width, frame.width);
+  const height = Math.min(size.height, frame.height);
+  const cx = (frame.width - width) / 2;
+  const cy = (frame.height - height) / 2;
+  const right = frame.width - width;
+  const bottom = frame.height - height;
+  let x = cx;
+  let y = cy;
   switch (o.position) {
     case "topLeft":
-      return { x: 0, y: 0 };
+      [x, y] = [0, 0];
+      break;
     case "topCenter":
-      return { x: cx, y: 0 };
+      [x, y] = [cx, 0];
+      break;
     case "topRight":
-      return { x: right, y: 0 };
+      [x, y] = [right, 0];
+      break;
     case "bottomLeft":
-      return { x: 0, y: bottom };
+      [x, y] = [0, bottom];
+      break;
     case "bottomCenter":
-      return { x: cx, y: bottom };
+      [x, y] = [cx, bottom];
+      break;
     case "bottomRight":
-      return { x: right, y: bottom };
+      [x, y] = [right, bottom];
+      break;
     case "manual":
-      return { x: trigger.x + o.offsetX, y: trigger.y + o.offsetY };
-    default:
-      return { x: cx, y: cy };
+      [x, y] = [trigger.x + o.offsetX, trigger.y + o.offsetY];
+      break;
   }
+  return { x: Math.min(Math.max(x, 0), right), y: Math.min(Math.max(y, 0), bottom), width, height };
+}
+
+/** Top-left of an overlay (see `overlayBox`). */
+export function overlayOrigin(o: OverlaySettings, frame: { width: number; height: number }, size: { width: number; height: number }, trigger: Rect): { x: number; y: number } {
+  const { x, y } = overlayBox(o, frame, size, trigger);
+  return { x, y };
 }
 
 /** CSS colour for the dimmed background, or transparent. */

@@ -235,8 +235,8 @@ export function ShareDialog() {
                   {dest.elsewhere ? (
                     <>
                       Opens in <b>{dest.host}</b>; your file stays in the link.{" "}
-                      <button className="link-btn" title="Open this link on this editor, in a new tab" onClick={previewHere}>
-                        Preview here
+                      <button className="link-btn" title={`Open the same link on this editor instead of ${dest.host}, in a new tab`} onClick={previewHere}>
+                        Open here in a new tab
                       </button>
                     </>
                   ) : (
@@ -313,8 +313,8 @@ export function ShareDialog() {
                   {previewLink && mode === "online" && (
                     <div className="muted small share-destination" style={{ marginTop: 8, lineHeight: 1.5 }}>
                       Opens in <b>{hostOf(link)}</b>.{" "}
-                      <a href={previewLink} target="_blank" rel="noreferrer" title="Open this link on this editor, in a new tab">
-                        Preview here
+                      <a href={previewLink} target="_blank" rel="noreferrer" title={`Open the same link on this editor instead of ${hostOf(link)}, in a new tab`}>
+                        Open here in a new tab
                       </a>
                     </div>
                   )}
