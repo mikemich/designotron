@@ -57,6 +57,8 @@ export function RightPanel() {
         ))}
       </div>
       <div className="tabpanel" role="tabpanel" id="right-tabpanel" aria-labelledby={"right-tab-" + tab}>
+        {/* The section titles below are level 3; this keeps the heading outline in order. */}
+        <h2 className="sr-only">{TABS.find((t) => t.id === tab)?.label}</h2>
         {tab === "design" && <DesignPanel />}
         {tab === "prototype" && <PrototypePanel />}
         {tab === "code" && <CodePanel />}

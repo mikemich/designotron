@@ -4,6 +4,7 @@ import { closeEmptyPrompt, dispatch, getDoc, pointerDrag, selectSibling, selecti
 import { useShortcuts } from "./panels/ShortcutsDialog";
 import { focusedByPointer, isMac } from "./ui/controls";
 import { canOpenCursorChat, openCursorChat } from "./follow";
+import { nextOpacity, type PendingDigit } from "./opacityKeys";
 
 function isTyping(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement;
@@ -51,6 +52,18 @@ function cycleRegion(dir: 1 | -1) {
     const target = shown[(((at < 0 ? (dir > 0 ? -1 : 0) : at) + dir * step) % shown.length + shown.length) % shown.length].r.focus();
     if (target) return target.focus();
   }
+}
+
+/** The first digit of a possible two-digit opacity, while its window is open. */
+let pendingDigit: PendingDigit | null = null;
+
+/** Digit keys: opacity of the selection (1-9 = 10-90 %, 0 = 100 %, two quick digits = that percent). */
+function setOpacityByKey(digit: number) {
+  const ids = selection();
+  const r = nextOpacity(pendingDigit, digit, performance.now());
+  pendingDigit = r.pending;
+  // Each key is one update, so one undo step; the engine detaches an opacity binding like the field does.
+  dispatch({ op: "update", ids, patch: { opacity: r.value } });
 }
 
 /** Alt+PageDown / Alt+PageUp: the next / previous page. */
@@ -202,6 +215,7 @@ export function installShortcuts(): () => void {
         return has && run(e.shiftKey ? A.selectParent : A.selectChildren);
     }
     if (e.shiftKey || e.altKey) return;
+    if (!e.repeat && /^[0-9]$/.test(e.key) && /^(Digit|Numpad)\d$/.test(e.code) && has && !st.editingVector && !pointerDrag.active) return run(() => setOpacityByKey(Number(e.key)));
     const tools: Record<string, Parameters<typeof setTool>[0]> = {
       v: "move",
       f: "frame",

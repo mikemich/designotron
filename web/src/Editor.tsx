@@ -19,7 +19,7 @@ import { DemoOverlay, stopDemo } from "./Demo";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
 import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, saveHook, toast as showToast, useStore, zoomToFit, dispatch } from "./store";
-import { focusCanvas } from "./ui/controls";
+import { focusCanvas, ToastLive } from "./ui/controls";
 import { closePanel } from "./panels/PanelChrome";
 import {
   askPersist,
@@ -132,7 +132,6 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const viewing = useCollab((s) => s.viewer);
   const readOnly = engineReadOnly || viewing;
   const presenting = useStore((s) => s.presenting);
-  const toast = useStore((s) => s.toast);
   const variablesOpen = useStore((s) => s.variablesOpen);
   const figmaOpen = useStore((s) => s.figmaOpen);
   // The Figma import dialog belongs to this file: leaving the file closes it (it stays open to
@@ -1172,11 +1171,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       <PhoneNote />
       <DemoOverlay />
       {!readOnly && <PluginWindow />}
-      {toast && (
-        <div className={"toast " + toast.kind} role="status" aria-live="polite">
-          {toast.text}
-        </div>
-      )}
+      <ToastLive />
     </div>
   );
 }

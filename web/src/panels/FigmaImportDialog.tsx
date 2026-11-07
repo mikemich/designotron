@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { FileJson, Loader2, X } from "lucide-react";
 import { getDoc, useStore, toast } from "../store";
 import { deleteFile } from "../files";
@@ -24,6 +24,8 @@ export function FigmaImportDialog() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const urlId = useId();
+  const tokenId = useId();
   const close = async () => {
     const { figmaOpen, fileId } = useStore.getState();
     useStore.setState({ figmaOpen: false });
@@ -34,6 +36,7 @@ export function FigmaImportDialog() {
       } catch (e) {
         reportFailure("remove the empty file", e);
       }
+      useStore.setState({ focusOnDashboard: "import-figma" });
       location.hash = "#/";
     }
   };
@@ -98,15 +101,17 @@ export function FigmaImportDialog() {
             </>
           ) : (
             <>
-              <label className="small muted">Figma file or frame link</label>
-              <input className="textinput" placeholder="https://www.figma.com/design/…" value={url} onChange={(e) => setUrl(e.target.value)} autoFocus />
-              <label className="small muted" style={{ marginTop: 10 }}>
+              <label className="small muted" htmlFor={urlId}>
+                Figma file or frame link
+              </label>
+              <input id={urlId} className="textinput" placeholder="https://www.figma.com/design/…" value={url} onChange={(e) => setUrl(e.target.value)} autoFocus />
+              <label className="small muted" style={{ marginTop: 10 }} htmlFor={tokenId}>
                 Personal access token{" "}
                 <a href="https://www.figma.com/developers/api#access-tokens" target="_blank" rel="noreferrer">
                   (how to get one)
                 </a>
               </label>
-              <input className="textinput" type="password" placeholder="figd_…" value={token} onChange={(e) => setToken(e.target.value)} />
+              <input id={tokenId} className="textinput" type="password" placeholder="figd_…" value={token} onChange={(e) => setToken(e.target.value)} />
               <label className="row small" style={{ gap: 6, marginTop: 6 }}>
                 <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} /> Remember the token in this browser
               </label>

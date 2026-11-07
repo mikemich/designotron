@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { Check, Copy, Globe, Link2, Loader2, Share2, Users, Wifi, X } from "lucide-react";
 import { copyUrl, encodeFile, linkBase, linkDestination, previewUrl, viewUrl } from "../snapshot";
 import { myColor, pageIsRelay, relayUrl, remixShared, startOnline, startSharing, stopSharing, useCollab } from "../collab";
@@ -53,6 +53,8 @@ export function ShareDialog() {
   const { status, role, mode, link, peers, previewLink, reconnecting, viewer, viewId } = useCollab();
   const bridgeStatus = useChat((s) => s.bridgeStatus);
   const [name, setName] = useState(userName());
+  const nameId = useId();
+  const relayId = useId();
   const [relay, setRelay] = useState(relayUrl());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"online" | "lan" | null>(null);
@@ -174,8 +176,10 @@ export function ShareDialog() {
         <div className="figma-body">
           {!role ? (
             <>
-              <label className="small muted">Your name</label>
-              <input className="textinput" value={name} onChange={(e) => setName(e.target.value)} placeholder="Shown next to your cursor" />
+              <label className="small muted" htmlFor={nameId}>
+                Your name
+              </label>
+              <input id={nameId} className="textinput" value={name} onChange={(e) => setName(e.target.value)} placeholder="Shown next to your cursor" />
 
               <div className="share-option">
                 <div className="row" style={{ gap: 6 }}>
@@ -184,7 +188,10 @@ export function ShareDialog() {
                 </div>
                 {customRelay ? (
                   <>
-                    <input className="textinput mono" value={relay} onChange={(e) => setRelay(e.target.value)} placeholder="Relay address, e.g. https://designotron-relay.fly.dev" />
+                    <label className="small muted" htmlFor={relayId}>
+                      Relay address
+                    </label>
+                    <input id={relayId} className="textinput mono" value={relay} onChange={(e) => setRelay(e.target.value)} placeholder="Relay address, e.g. https://designotron-relay.fly.dev" />
                     <div className="muted small" style={{ lineHeight: 1.5 }}>
                       Rooms are hosted on a Designotron relay: a small open-source server.{" "}
                       <a href={RELAY_DOCS} target="_blank" rel="noreferrer">

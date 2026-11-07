@@ -26,7 +26,7 @@ import { ancestors, canMoveFolder, childrenOf, compareNames, contents, deleteSum
 import { bootEngine, getEngine, newEngine, dispatch, toast, useBoot, useStore } from "./store";
 import { TEMPLATES, type Template } from "./templates";
 import { isEmptyFile, persistentStorage } from "./files";
-import { Menu, useDialog, type MenuItem } from "./ui/controls";
+import { Menu, ToastLive, useDialog, type MenuItem } from "./ui/controls";
 import { attempt, reportFailure } from "./errors";
 import { ProjectTree, NameInput, dragState } from "./dashboard/ProjectTree";
 import { ConfirmDialog } from "./dashboard/ConfirmDialog";
@@ -96,8 +96,21 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       return new Set();
     }
   });
-  const t = useStore((s) => s.toast);
   const engineError = useBoot((s) => s.error);
+  // A flow that ended here (a cancelled Figma import) asks for focus on the control it started from.
+  useEffect(() => {
+    const key = useStore.getState().focusOnDashboard;
+    if (!key) return;
+    let tries = 0;
+    const go = () => {
+      const el = document.querySelector<HTMLElement>(`[data-focus-key="${key}"]`);
+      if (el) {
+        el.focus({ preventScroll: true });
+        useStore.setState({ focusOnDashboard: null });
+      } else if (tries++ < 30) requestAnimationFrame(go);
+    };
+    requestAnimationFrame(go);
+  }, []);
   /** The file being created while the engine loads ("new" or a template id). */
   const [opening, setOpening] = useState<string | null>(null);
 
@@ -716,7 +729,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
               <button className="btn" onClick={importFile}>
                 <FolderOpen size={14} /> Open .dtron
               </button>
-              <button className="btn" onClick={importFigma}>
+              <button className="btn" onClick={importFigma} data-focus-key="import-figma">
                 <Figma size={14} /> Import from Figma
               </button>
               <button className="btn primary" onClick={() => create(null)} disabled={!!opening}>
@@ -810,7 +823,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
                 ))}
               </div>
             </div>
-            <div className="section-head" style={{ marginBottom: 12, fontSize: 14 }}>
+            <div className="section-head" role="heading" aria-level={2} style={{ marginBottom: 12, fontSize: 14 }}>
               Or start from a template
             </div>
             <div className="files-grid" style={{ marginBottom: 32 }}>
@@ -840,7 +853,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
 
         {!missing && (
           <>
-            <div className="section-head" style={{ marginBottom: 12, fontSize: 14 }}>
+            <div className="section-head" role="heading" aria-level={2} style={{ marginBottom: 12, fontSize: 14 }}>
               {q ? `Results for “${query.trim()}”` : loc === "all" ? "Your files" : loc === "drafts" ? "Drafts" : shownFolders.length && shownFiles.length ? "Folders and files" : shownFolders.length ? "Folders" : "Files"}
             </div>
             {shownFolders.length > 0 && (
@@ -890,9 +903,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
             {sidebar}
           </LocationSheet>
         )}
-        <div role="status" aria-live="polite">
-          {t && <div className={"toast " + t.kind}>{t.text}</div>}
-        </div>
+        <ToastLive />
       </main>
     </div>
   );

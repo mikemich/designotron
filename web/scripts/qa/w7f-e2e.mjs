@@ -140,8 +140,10 @@ try {
   await press("ArrowUp");
   check("layers: plain arrows collapse a range to one row", (await sel()).length === 1);
   await press(" ");
-  check("layers: Space toggles the focused row out of the selection", (await sel()).length === 0);
+  check("layers: Space on the lone selected row keeps it selected (round 14, U2)", (await sel()).length === 1);
+  await press("Shift+ArrowDown");
   await press(" ");
+  check("layers: Space toggles the focused row out of a larger selection", (await sel()).length === 1);
 
   // Rename with F2: Enter commits, Escape cancels, focus returns to the row.
   const heroBefore = await named("Hero");

@@ -490,5 +490,7 @@ export async function exportProjectZip() {
   for (const f of files) zip.file(f.path, f.content);
   for (const b of binaries) zip.file(b.path, b.dataUrl.split(",")[1], { base64: true });
   const blob = await zip.generateAsync({ type: "blob" });
-  download(`${fileSafe(getDoc().name)}-react.zip`, blob, "application/zip");
+  const name = `${fileSafe(getDoc().name)}-react.zip`;
+  download(name, blob, "application/zip");
+  toast(`Downloaded ${name}`);
 }
