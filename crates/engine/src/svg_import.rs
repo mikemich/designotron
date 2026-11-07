@@ -130,6 +130,7 @@ pub fn import(svg: &str, ids: &mut IdGen, opts: &Options) -> Result<Imported, St
   for k in xml.els[root].kids.clone() {
     cx.walk(k, &m, &st, &mut kids)?;
   }
+  merge_fill_stroke(&mut kids);
   if kids.is_empty() {
     return Err(NOTHING_TO_DRAW.into());
   }
@@ -983,6 +984,7 @@ impl<'a> Cx<'a> {
         }
       }
     }
+    merge_fill_stroke(&mut built);
     if built.is_empty() {
       return Ok(());
     }
@@ -1378,16 +1380,14 @@ impl<'a> Cx<'a> {
     if is_vector {
       let open = subs.iter().any(|s| !s.closed);
       if open && !node.strokes.is_empty() {
-        let end_cap = match st.cap {
+        let cap = match st.cap {
           Cap::Round => StrokeCap::Round,
           Cap::Square => StrokeCap::Square,
-          Cap::Butt => {
-            self.warn("flat line ends are drawn round");
-            StrokeCap::None
-          }
+          Cap::Butt => StrokeCap::None,
         };
         node.shape = Some(ShapeProps {
-          end_cap,
+          start_cap: cap,
+          end_cap: cap,
           ..Default::default()
         });
       }
@@ -1631,6 +1631,76 @@ impl<'a> Cx<'a> {
         handles: Some(handles),
       }
     }))
+  }
+}
+
+/// Whether `a` and `b` are the same shape in the same place: kind, box, radii and (for a
+/// vector) outline.
+fn same_geometry(a: &Node, b: &Node) -> bool {
+  let near = |x: f64, y: f64| (x - y).abs() < 1e-6;
+  if a.kind != b.kind
+    || !(near(a.x, b.x) && near(a.y, b.y) && near(a.width, b.width) && near(a.height, b.height))
+    || !near(a.rotation, b.rotation)
+    || !near(a.corner_radius, b.corner_radius)
+  {
+    return false;
+  }
+  match (&a.vector, &b.vector) {
+    (None, None) => true,
+    (Some(va), Some(vb)) => {
+      va.raw.is_none()
+        && vb.raw.is_none()
+        && va.subpaths.len() == vb.subpaths.len()
+        && va.subpaths.iter().zip(&vb.subpaths).all(|(p, q)| {
+          p.closed == q.closed
+            && p.points.len() == q.points.len()
+            && p.points.iter().zip(&q.points).all(|(u, v)| {
+              near(u.x, v.x)
+                && near(u.y, v.y)
+                && near(u.in_x, v.in_x)
+                && near(u.in_y, v.in_y)
+                && near(u.out_x, v.out_x)
+                && near(u.out_y, v.out_y)
+            })
+        })
+    }
+    _ => false,
+  }
+}
+
+/// Merges a fill-only layer followed by a stroke-only layer of the same shape into one layer
+/// with both (what older exports wrote as two elements). A stroke painted before its fill is
+/// a different picture, so only that order merges; of three copies only the first pair does.
+fn merge_fill_stroke(list: &mut Vec<B>) {
+  let mut i = 0;
+  while i + 1 < list.len() {
+    let (a, b) = (&list[i], &list[i + 1]);
+    let (na, nb) = (&a.node, &b.node);
+    let generic = |n: &str| matches!(n, "Rectangle" | "Ellipse" | "Vector");
+    let ok = a.kids.is_empty()
+      && b.kids.is_empty()
+      && !na.fills.is_empty()
+      && na.strokes.is_empty()
+      && nb.fills.is_empty()
+      && !nb.strokes.is_empty()
+      && (na.opacity - nb.opacity).abs() < 1e-9
+      && na.visible == nb.visible
+      && na.blend_mode == nb.blend_mode
+      && !na.is_mask
+      && !nb.is_mask
+      && (nb.name.is_empty() || nb.name == na.name || (generic(&nb.name) && generic(&na.name)))
+      && same_geometry(na, nb);
+    if ok {
+      let b = list.remove(i + 1);
+      let n = &mut list[i].node;
+      n.strokes = b.node.strokes;
+      n.stroke_weight = b.node.stroke_weight;
+      n.stroke_align = b.node.stroke_align;
+      n.stroke_join = b.node.stroke_join;
+      n.stroke_dash = b.node.stroke_dash;
+      n.shape = b.node.shape.or(n.shape.take());
+    }
+    i += 1;
   }
 }
 
@@ -2761,5 +2831,251 @@ mod tests {
       );
       assert!(run(&too_many_holes).unwrap().warnings.iter().any(|w| w.contains("holes")));
     }
+  }
+}
+
+#[cfg(test)]
+mod r18d_tests {
+  use super::*;
+  use crate::doc::new_document;
+  use crate::render::export_svg;
+  use crate::text::HeuristicMeasurer;
+
+  fn ok(svg: &str) -> Imported {
+    import(svg, &mut IdGen::new(7), &Options::default()).unwrap_or_else(|e| panic!("refused: {e}"))
+  }
+
+  /// The layers under the frame, whatever the nesting.
+  fn shapes(i: &Imported) -> Vec<&Node> {
+    i.nodes.iter().skip(1).collect()
+  }
+
+  const BADGE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="42" height="22" viewBox="0 0 42 22" fill="none"><g transform="matrix(1 0 0 1 1 1)"><rect width="40" height="20" fill="#3366FF"/><rect width="40" height="20" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" fill="none" stroke="#000000"/></g></svg>"##;
+
+  #[test]
+  fn an_old_export_with_a_fill_and_a_stroke_element_is_one_layer() {
+    let i = ok(BADGE);
+    let s = shapes(&i);
+    assert_eq!(s.len(), 1, "{:?}", s.iter().map(|n| &n.name).collect::<Vec<_>>());
+    assert_eq!(s[0].kind, NodeType::Rectangle);
+    assert_eq!((s[0].fills.len(), s[0].strokes.len(), s[0].stroke_weight), (1, 1, 1.0));
+    assert_eq!(s[0].stroke_align, StrokeAlign::Center);
+    assert_eq!((s[0].x, s[0].y, s[0].width, s[0].height), (1.0, 1.0, 40.0, 20.0));
+    assert_eq!(i.nodes[0].children.len(), 1, "no group around it");
+  }
+
+  #[test]
+  fn a_filled_and_stroked_path_pair_merges_with_its_stroke_style() {
+    let d = "M0 8L8 0L16 8L14 8L14 17L2 17L2 8L0 8Z";
+    let svg = format!(
+      r##"<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="{d}" fill="#D9D9D9"/><path d="{d}" stroke="#000" stroke-width="2" stroke-dasharray="3 1" stroke-opacity=".5" stroke-linejoin="bevel"/></svg>"##
+    );
+    let i = ok(&svg);
+    let s = shapes(&i);
+    assert_eq!(s.len(), 1);
+    assert_eq!(s[0].kind, NodeType::Vector);
+    assert_eq!((s[0].stroke_weight, s[0].stroke_dash.clone()), (2.0, vec![3.0, 1.0]));
+    assert_eq!(s[0].stroke_join, Some(StrokeJoin::Bevel));
+    match &s[0].strokes[0] {
+      Paint::Solid { opacity, .. } => assert_eq!(*opacity, 0.5),
+      other => panic!("{other:?}"),
+    }
+  }
+
+  #[test]
+  fn pairs_that_differ_or_come_in_the_wrong_order_stay_apart() {
+    // Different size.
+    let a = ok(
+      r##"<svg width="50" height="50"><rect width="40" height="20" fill="#f00"/><rect width="40" height="21" fill="none" stroke="#000"/></svg>"##,
+    );
+    assert_eq!(shapes(&a).len(), 2);
+    // Different opacity.
+    let b = ok(
+      r##"<svg width="50" height="50"><rect width="40" height="20" fill="#f00"/><rect width="40" height="20" fill="none" stroke="#000" opacity=".5"/></svg>"##,
+    );
+    assert_eq!(shapes(&b).len(), 2);
+    // Stroke first: the fill would cover half of it.
+    let c = ok(
+      r##"<svg width="50" height="50"><rect width="40" height="20" fill="none" stroke="#000"/><rect width="40" height="20" fill="#f00"/></svg>"##,
+    );
+    assert_eq!(shapes(&c).len(), 2);
+    // A second fill is not a stroke-only layer.
+    let d = ok(
+      r##"<svg width="50" height="50"><rect width="40" height="20" fill="#f00"/><rect width="40" height="20" fill="#0f0" stroke="#000"/></svg>"##,
+    );
+    assert_eq!(shapes(&d).len(), 2);
+    // A different shape of the same size.
+    let e = ok(
+      r##"<svg width="50" height="50"><rect width="40" height="20" fill="#f00"/><ellipse cx="20" cy="10" rx="20" ry="10" fill="none" stroke="#000"/></svg>"##,
+    );
+    assert_eq!(shapes(&e).len(), 2);
+  }
+
+  #[test]
+  fn three_identical_shapes_merge_only_the_first_pair() {
+    let i = ok(
+      r##"<svg width="50" height="50"><rect width="40" height="20" fill="#f00"/><rect width="40" height="20" fill="none" stroke="#000"/><rect width="40" height="20" fill="none" stroke="#00f"/></svg>"##,
+    );
+    let s = shapes(&i);
+    assert_eq!(s.len(), 2);
+    assert_eq!((s[0].fills.len(), s[0].strokes.len()), (1, 1));
+    assert_eq!((s[1].fills.len(), s[1].strokes.len()), (0, 1));
+  }
+
+  #[test]
+  fn different_transform_attributes_with_the_same_matrix_merge() {
+    let i = ok(
+      r##"<svg width="50" height="50"><g transform="translate(5 5)"><path d="M0 0L10 0L10 10Z" fill="#f00"/></g><g transform="matrix(1 0 0 1 5 5)"><path d="M0 0L10 0L10 10Z" fill="none" stroke="#000"/></g></svg>"##,
+    );
+    // Each group holds one shape and collapses, so the pair ends up adjacent and merges.
+    assert_eq!(shapes(&i).len(), 1);
+    let j = ok(
+      r##"<svg width="50" height="50"><path transform="translate(5 5)" d="M0 0L10 0L10 10Z" fill="#f00"/><path transform="matrix(1 0 0 1 5 5)" d="M0 0L10 0L10 10Z" fill="none" stroke="#000"/></svg>"##,
+    );
+    assert_eq!(shapes(&j).len(), 1);
+  }
+
+  #[test]
+  fn the_tester_files_import_as_one_layer_per_shape() {
+    let frame = r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"><defs><clipPath id="c"><rect width="24" height="24"/></clipPath></defs><g><rect width="24" height="24" fill="#FFFFFF"/><g clip-path="url(#c)"><g transform="matrix(1 0 0 1 4 3)"><path d="M0 8L8 0L16 8L14 8L14 17L2 17L2 8L0 8Z" fill="#D9D9D9"/><path d="M0 8L8 0L16 8L14 8L14 17L2 17L2 8L0 8Z" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" fill="none" stroke="#000000"/></g></g></g></svg>"##;
+    let i = ok(frame);
+    let vectors: Vec<&Node> = i.nodes.iter().filter(|n| n.kind == NodeType::Vector).collect();
+    assert_eq!(vectors.len(), 1);
+    assert_eq!((vectors[0].fills.len(), vectors[0].strokes.len()), (1, 1));
+    // Frame, the file's own group, the background rectangle and the one vector: no group
+    // wraps the pair any more.
+    assert_eq!(
+      i.nodes.len(),
+      4,
+      "{:?}",
+      i.nodes.iter().map(|n| (n.kind, n.children.len())).collect::<Vec<_>>()
+    );
+  }
+
+  /// Renders a node and imports the result: the layers inside the import frame.
+  fn round_trip(make: impl FnOnce(&mut Node)) -> (Node, Imported) {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut n = crate::ops::default_node(NodeType::Rectangle, "n".into(), "N".into());
+    n.x = 10.0;
+    n.y = 10.0;
+    n.width = 60.0;
+    n.height = 40.0;
+    n.fills = vec![Paint::solid("#3366FF")];
+    n.strokes = vec![Paint::solid("#112233")];
+    n.stroke_weight = 3.0;
+    n.stroke_align = StrokeAlign::Center;
+    make(&mut n);
+    doc.insert(n.clone(), None, &page, None);
+    let svg = export_svg(&doc, "n", &HeuristicMeasurer);
+    (n, ok(&svg))
+  }
+
+  #[test]
+  fn a_centre_stroke_is_one_element_and_survives_a_round_trip() {
+    for kind in [NodeType::Rectangle, NodeType::Ellipse] {
+      let (n, i) = round_trip(|n| n.kind = kind);
+      let mut gen = IdGen::new(5);
+      let mut doc = new_document(&mut gen, "t");
+      let page = doc.pages[0].id.clone();
+      doc.insert(n.clone(), None, &page, None);
+      let svg = export_svg(&doc, "n", &HeuristicMeasurer);
+      assert_eq!(svg.matches("<rect").count() + svg.matches("<ellipse").count(), 1, "{svg}");
+      assert!(svg.contains("fill=\"#3366FF\"") && svg.contains("stroke=\"#112233\""), "{svg}");
+      let s = shapes(&i);
+      assert_eq!(s.len(), 1, "{kind:?}");
+      assert_eq!(s[0].kind, kind);
+      assert_eq!((s[0].fills.len(), s[0].strokes.len(), s[0].stroke_weight), (1, 1, 3.0));
+      assert_eq!((s[0].width, s[0].height), (60.0, 40.0));
+    }
+  }
+
+  #[test]
+  fn inside_and_outside_strokes_stay_two_elements() {
+    for align in [StrokeAlign::Inside, StrokeAlign::Outside] {
+      let mut gen = IdGen::new(5);
+      let mut doc = new_document(&mut gen, "t");
+      let page = doc.pages[0].id.clone();
+      let mut n = crate::ops::default_node(NodeType::Rectangle, "n".into(), "N".into());
+      n.width = 60.0;
+      n.height = 40.0;
+      n.fills = vec![Paint::solid("#3366FF")];
+      n.strokes = vec![Paint::solid("#112233")];
+      n.stroke_weight = 3.0;
+      n.stroke_align = align;
+      doc.insert(n, None, &page, None);
+      let svg = export_svg(&doc, "n", &HeuristicMeasurer);
+      assert_eq!(svg.matches("<rect").count() + svg.matches("<path").count(), 2, "{svg}");
+    }
+  }
+
+  #[test]
+  fn paths_and_stars_round_trip_with_fill_stroke_weight_and_geometry() {
+    use crate::model::{SubPath, VectorData, VectorPoint};
+    let open = SubPath {
+      points: vec![
+        VectorPoint::at(0.0, 0.0),
+        VectorPoint {
+          in_x: -10.0,
+          out_x: 10.0,
+          ..VectorPoint::at(30.0, 20.0)
+        },
+        VectorPoint::at(60.0, 0.0),
+      ],
+      closed: false,
+    };
+    let closed = SubPath {
+      points: vec![VectorPoint::at(0.0, 0.0), VectorPoint::at(60.0, 0.0), VectorPoint::at(30.0, 40.0)],
+      closed: true,
+    };
+    for (name, sp) in [("open", Some(open)), ("closed", Some(closed)), ("star", None)] {
+      let (n, i) = round_trip(|n| match &sp {
+        Some(sp) => {
+          n.kind = NodeType::Vector;
+          n.vector = Some(VectorData {
+            subpaths: vec![sp.clone()],
+            raw: None,
+          });
+          if !sp.closed {
+            n.shape = Some(crate::model::ShapeProps {
+              start_cap: StrokeCap::Round,
+              end_cap: StrokeCap::Round,
+              ..Default::default()
+            });
+          }
+        }
+        None => n.kind = NodeType::Star,
+      });
+      let s = shapes(&i);
+      assert_eq!(s.len(), 1, "{name}");
+      assert_eq!(s[0].kind, NodeType::Vector, "{name}");
+      assert_eq!((s[0].fills.len(), s[0].strokes.len(), s[0].stroke_weight), (1, 1, 3.0), "{name}");
+      if let Some(sp) = &sp {
+        let got = &s[0].vector.as_ref().unwrap().subpaths[0];
+        assert_eq!((got.closed, got.points.len()), (sp.closed, sp.points.len()), "{name}");
+        // The box moves with the curve's extent, so compare the point spacing, not the origin.
+        let (g0, g1) = (got.points[0], got.points[got.points.len() - 1]);
+        let (p0, p1) = (sp.points[0], sp.points[sp.points.len() - 1]);
+        assert!(
+          ((g1.x - g0.x) - (p1.x - p0.x)).abs() < 1e-6 && ((g1.y - g0.y) - (p1.y - p0.y)).abs() < 1e-6,
+          "{name}"
+        );
+        if !sp.closed {
+          let shape = s[0].shape.as_ref().unwrap();
+          assert_eq!((shape.start_cap, shape.end_cap), (StrokeCap::Round, StrokeCap::Round));
+        }
+      }
+      let _ = n;
+    }
+  }
+
+  #[test]
+  fn flat_line_ends_import_as_none_without_a_warning() {
+    let i = ok(r##"<svg width="20" height="20" fill="none" stroke="#000" stroke-width="2"><path d="M2 2L18 2"/></svg>"##);
+    let v = &i.nodes[1];
+    let shape = v.shape.as_ref().unwrap();
+    assert_eq!((shape.start_cap, shape.end_cap), (StrokeCap::None, StrokeCap::None));
+    assert!(i.warnings.is_empty(), "{:?}", i.warnings);
   }
 }

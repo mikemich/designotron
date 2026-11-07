@@ -23,7 +23,7 @@ import {
 import { useCollab } from "./collab";
 import { ALT_MOD, MOD } from "./ui/controls";
 import { openTextGesture } from "./canvas/TextEditor";
-import type { DeviceFrame, Rect, Tool } from "./types";
+import type { DeviceFrame, Node, Rect, Tool } from "./types";
 import { hasDeviceUi, type DevicePreset } from "./panels/presetList";
 
 const CLIPBOARD_TAG = "designotron/nodes";
@@ -153,6 +153,69 @@ export function deleteVectorPoints() {
   if (r?.deleted) toast("Path deleted: it needs at least two points");
 }
 
+const SCALE_STROKES_KEY = "dt:scale-strokes";
+
+/** The Scale tool's "Scale strokes" option (on unless turned off), remembered per browser. */
+export function getScaleStrokes(): boolean {
+  try {
+    return localStorage.getItem(SCALE_STROKES_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+export function setScaleStrokes(on: boolean) {
+  try {
+    localStorage.setItem(SCALE_STROKES_KEY, on ? "1" : "0");
+  } catch {
+    /* the option just isn't remembered */
+  }
+}
+
+/** Splits the path at the selected anchors (a closed path opens, an open one is cut). */
+export function splitVectorAtPoints() {
+  const id = useStore.getState().editingVector;
+  const points = vectorPoints();
+  if (!id || !points.length) return;
+  const r = dispatch<{ points: [number, number][] }>({ op: "splitVectorAt", id, points });
+  if (r) useStore.setState({ vectorPoints: r.points });
+}
+
+/** Joins two selected ends of open paths (the same path closes). */
+export function joinVectorEnds() {
+  const id = useStore.getState().editingVector;
+  const points = vectorPoints();
+  if (!id || points.length !== 2) return;
+  const r = dispatch<{ points: [number, number][] }>({ op: "joinVectorEnds", id, a: points[0], b: points[1] });
+  if (r) useStore.setState({ vectorPoints: r.points });
+}
+
+/** Whether the selected anchors can be split (any anchor that is not an end of an open path). */
+export function canSplitVectorPoints(): boolean {
+  const st = useStore.getState();
+  const sps = st.editingVector ? getDoc().nodes[st.editingVector]?.vector?.subpaths : null;
+  if (!sps) return false;
+  return vectorPoints().some(([s, i]) => {
+    const sp = sps[s];
+    return !!sp && sp.points.length >= 2 && (sp.closed || (i > 0 && i < sp.points.length - 1));
+  });
+}
+
+/** Whether exactly two anchors are selected and both are ends of open paths. */
+export function canJoinVectorEnds(): boolean {
+  const st = useStore.getState();
+  const sps = st.editingVector ? getDoc().nodes[st.editingVector]?.vector?.subpaths : null;
+  const pts = vectorPoints();
+  if (!sps || pts.length !== 2) return false;
+  if (pts[0][0] === pts[1][0] && pts[0][1] === pts[1][1]) return false;
+  const isEnd = ([s, i]: [number, number]) => {
+    const sp = sps[s];
+    return !!sp && !sp.closed && sp.points.length >= 2 && (i === 0 || i === sp.points.length - 1);
+  };
+  if (!pts.every(isEnd)) return false;
+  return pts[0][0] !== pts[1][0] || sps[pts[0][0]].points.length >= 3;
+}
+
 export function nudgeVectorPoints(dx: number, dy: number) {
   const id = useStore.getState().editingVector;
   const points = vectorPoints();
@@ -211,14 +274,20 @@ export function selectParent() {
 }
 
 export function selectChildren() {
+  // Enter in vector edit leaves it, as Enter on the layer entered it.
+  if (useStore.getState().editingVector) return useStore.setState({ editingVector: null });
   const doc = getDoc();
   const kids = selection().flatMap((id) => doc.nodes[id]?.children ?? []);
   if (kids.length) dispatch({ op: "select", ids: kids });
   else {
     const only = selection().length === 1 ? doc.nodes[selection()[0]] : null;
     if (only?.type === "text") useStore.setState({ editingText: only.id });
+    else if (only && useStore.getState().tool === "move" && canEditVector(only)) useStore.setState({ editingVector: only.id, vectorPoints: [] });
   }
 }
+
+/** A vector with anchors of its own (not an imported raw path), which vector edit can open. */
+export const canEditVector = (n: Node | undefined) => !!n && n.type === "vector" && !!n.vector && !n.vector.raw && !n.locked;
 
 // ---------- Keyboard insert ----------
 

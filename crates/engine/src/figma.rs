@@ -439,6 +439,17 @@ impl Import<'_> {
         json!([side("top"), side("right"), side("bottom"), side("left")]),
       );
     }
+    // One REST value for both ends: plain caps go to both, an arrow or dot only to the end.
+    let caps = match str_of(f, "strokeCap") {
+      Some("ROUND") => Some(("round", "round")),
+      Some("SQUARE") => Some(("square", "square")),
+      Some("ARROW_LINES" | "ARROW_EQUILATERAL" | "TRIANGLE_FILLED") => Some(("none", "arrow")),
+      Some("CIRCLE_FILLED") => Some(("none", "circle")),
+      _ => None,
+    };
+    if let Some((start, end)) = caps {
+      n.insert("shape".into(), json!({ "startCap": start, "endCap": end }));
+    }
     if let Some(j) = str_of(f, "strokeJoin") {
       n.insert(
         "strokeJoin".into(),
@@ -1447,6 +1458,47 @@ mod tests {
     assert!(matches!(&n.fills[1], crate::model::Paint::DiamondGradient { handles: None, .. }));
     assert_eq!(n.stroke_weights, Some([4.0, 0.0, 1.0, 2.0]));
     assert_eq!(n.stroke_join, Some(crate::model::StrokeJoin::Bevel));
+  }
+
+  #[test]
+  fn stroke_caps_map_to_start_and_end() {
+    use crate::model::StrokeCap::*;
+    let vector = |name: &str, cap: Option<&str>| {
+      let mut v = json!({ "id": name, "type": "LINE", "name": name,
+        "absoluteBoundingBox": { "x": 0, "y": 0, "width": 50, "height": 0 }, "size": { "x": 50, "y": 0 },
+        "relativeTransform": [[1, 0, 0], [0, 1, 0]],
+        "strokes": [{ "type": "SOLID", "color": { "r": 0, "g": 0, "b": 0, "a": 1 } }], "strokeWeight": 4 });
+      if let Some(c) = cap {
+        v["strokeCap"] = json!(c);
+      }
+      v
+    };
+    let caps = [
+      "NONE",
+      "ROUND",
+      "SQUARE",
+      "ARROW_LINES",
+      "ARROW_EQUILATERAL",
+      "TRIANGLE_FILLED",
+      "CIRCLE_FILLED",
+      "DIAMOND_FILLED",
+    ];
+    let mut kids: Vec<Value> = caps.iter().map(|c| vector(c, Some(c))).collect();
+    kids.push(vector("missing", Option::None));
+    let (doc, _) = run(&proto_file(kids));
+    let ends = |name: &str| {
+      let s = named(&doc, name).shape.unwrap_or_default();
+      (s.start_cap, s.end_cap)
+    };
+    assert_eq!(ends("NONE"), (None, None));
+    assert_eq!(ends("ROUND"), (Round, Round));
+    assert_eq!(ends("SQUARE"), (Square, Square));
+    for arrow in ["ARROW_LINES", "ARROW_EQUILATERAL", "TRIANGLE_FILLED"] {
+      assert_eq!(ends(arrow), (None, Arrow), "{arrow}");
+    }
+    assert_eq!(ends("CIRCLE_FILLED"), (None, Circle));
+    assert_eq!(ends("DIAMOND_FILLED"), (None, None));
+    assert_eq!(ends("missing"), (None, None));
   }
 
   #[test]

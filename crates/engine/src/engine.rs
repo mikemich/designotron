@@ -135,6 +135,9 @@ pub enum Command {
     factor: f64,
     #[serde(default)]
     anchor: Option<Point>,
+    /// Stroke weights scale too (default); off keeps them, like Figma's "Scale stroke" option.
+    #[serde(default = "yes")]
+    strokes: bool,
   },
   SetPageBackground {
     id: String,
@@ -288,6 +291,18 @@ pub enum Command {
     #[serde(default)]
     close: bool,
   },
+  /// Splits a path at anchors: a closed one opens there, an open one is cut in two. Returns
+  /// the anchors that are now ends.
+  SplitVectorAt {
+    id: NodeId,
+    points: Vec<[usize; 2]>,
+  },
+  /// Joins two ends of open paths of one layer: the same path closes, two paths connect.
+  JoinVectorEnds {
+    id: NodeId,
+    a: [usize; 2],
+    b: [usize; 2],
+  },
   /// Refits a vector's box to its path without moving it on the page (after point drags).
   FitVectorBounds {
     id: NodeId,
@@ -393,6 +408,9 @@ pub enum Command {
     /// proportionally (the aspect is always locked).
     #[serde(default)]
     scale: bool,
+    /// With `scale`: stroke weights scale too (default).
+    #[serde(default = "yes")]
+    scale_strokes: bool,
   },
   /// Gesture-relative rotation in degrees around a page-space pivot.
   Rotate {
@@ -790,6 +808,10 @@ fn rect_array(r: &Rect) -> [f64; 4] {
 
 fn one() -> f64 {
   1.0
+}
+
+fn yes() -> bool {
+  true
 }
 
 fn three() -> usize {
@@ -2052,7 +2074,12 @@ impl Engine {
         arrange::tidy_up(&mut self.doc, &ids, spacing)?;
         Ok(json!({}))
       }
-      Command::ScaleNodes { ids, factor, anchor } => {
+      Command::ScaleNodes {
+        ids,
+        factor,
+        anchor,
+        strokes,
+      } => {
         if !(factor.is_finite() && factor > 0.0) {
           return Err("the scale factor must be above zero".into());
         }
@@ -2064,7 +2091,7 @@ impl Engine {
             Point::new(b.x, b.y)
           }
         };
-        arrange::scale_nodes(&mut self.doc, &ids, factor, anchor);
+        arrange::scale_nodes(&mut self.doc, &ids, factor, anchor, strokes);
         Ok(json!({}))
       }
       Command::SetPageBackground { id, color } => {
@@ -2353,6 +2380,14 @@ impl Engine {
         self.selection = vec![id];
         Ok(json!({}))
       }
+      Command::SplitVectorAt { id, points } => {
+        let ends = self.edit_vector(&id, true, |v| vector_edit::split_at(v, &points))?;
+        Ok(json!({ "points": ends }))
+      }
+      Command::JoinVectorEnds { id, a, b } => {
+        let at = self.edit_vector(&id, true, |v| vector_edit::join_ends(v, a, b))?;
+        Ok(json!({ "points": at }))
+      }
       Command::FitVectorBounds { id } => {
         self.edit_vector(&id, true, |_| Ok(()))?;
         Ok(json!({}))
@@ -2640,9 +2675,10 @@ impl Engine {
         snap,
         zoom,
         scale,
+        scale_strokes,
       } => {
         if scale {
-          self.resize_scale(&ids, handle, dx, dy, from_center)
+          self.resize_scale(&ids, handle, dx, dy, from_center, scale_strokes)
         } else {
           self.resize(&ids, handle, dx, dy, keep_aspect, from_center, snap, zoom)
         }
@@ -3668,7 +3704,7 @@ impl Engine {
 
   /// The Scale tool's handle drag: proportional (the larger change wins at a corner), around
   /// the opposite handle, or the centre.
-  fn resize_scale(&mut self, ids: &[NodeId], handle: Handle, dx: f64, dy: f64, from_center: bool) -> Result<Value, String> {
+  fn resize_scale(&mut self, ids: &[NodeId], handle: Handle, dx: f64, dy: f64, from_center: bool, strokes: bool) -> Result<Value, String> {
     let ids = arrange::scalable(&self.doc, ids);
     let from = self.doc.bounds_of_many(&ids).ok_or("nothing to scale")?;
     let (fx, fy) = handle.factors();
@@ -3716,7 +3752,7 @@ impl Engine {
         },
       )
     };
-    arrange::scale_nodes(&mut self.doc, &ids, k, anchor);
+    arrange::scale_nodes(&mut self.doc, &ids, k, anchor, strokes);
     Ok(json!({ "guides": [], "gaps": [], "scale": k }))
   }
 
@@ -5255,6 +5291,7 @@ mod tests {
     e.dispatch(Command::BeginGesture).unwrap();
     let r = e
       .dispatch(Command::Resize {
+        scale_strokes: true,
         ids: vec![id.to_string()],
         handle: Handle::E,
         dx,
@@ -6337,6 +6374,7 @@ mod tests {
     let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
     let b = rect(&mut e, 100.0, 0.0, 50.0, 50.0, None);
     e.dispatch(Command::Resize {
+      scale_strokes: true,
       ids: vec![a.clone(), b.clone()],
       handle: Handle::E,
       dx: -200.0,
@@ -7688,6 +7726,72 @@ mod tests {
       let id = path(&mut e, false);
       e.doc.get_mut(&id).unwrap().vector.as_mut().unwrap().raw = Some(Default::default());
       assert!(e.dispatch(Command::DeleteVectorPoints { id, points: vec![[0, 0]] }).is_err());
+    }
+
+    #[test]
+    fn split_and_join_are_one_undo_step_each() {
+      let mut e = engine();
+      let id = path(&mut e, true);
+      let subs = |e: &Engine| e.doc.get(&id).unwrap().vector.as_ref().unwrap().subpaths.clone();
+      let r = e
+        .dispatch(Command::SplitVectorAt {
+          id: id.clone(),
+          points: vec![[0, 1]],
+        })
+        .unwrap();
+      assert_eq!(r["points"], json!([[0, 0], [0, 3]]));
+      let opened = subs(&e);
+      assert!(!opened[0].closed && opened[0].points.len() == 4);
+      let r = e
+        .dispatch(Command::JoinVectorEnds {
+          id: id.clone(),
+          a: [0, 0],
+          b: [0, 3],
+        })
+        .unwrap();
+      assert_eq!(r["points"], json!([[0, 0]]));
+      let rejoined = subs(&e);
+      assert!(
+        rejoined[0].closed && rejoined[0].points.len() == 3,
+        "the same point count as at the start"
+      );
+      e.dispatch(Command::Undo).unwrap();
+      assert_eq!(subs(&e), opened);
+      e.dispatch(Command::Undo).unwrap();
+      let orig = subs(&e);
+      assert!(orig[0].closed && orig[0].points.len() == 3);
+      e.dispatch(Command::Redo).unwrap();
+      assert_eq!(subs(&e), opened);
+      // Nothing to split, or to join: an error and no undo step.
+      let mut e = engine();
+      let id = path(&mut e, false);
+      assert!(e
+        .dispatch(Command::SplitVectorAt {
+          id: id.clone(),
+          points: vec![[0, 0], [0, 2]]
+        })
+        .is_err());
+      assert!(e
+        .dispatch(Command::JoinVectorEnds {
+          id: id.clone(),
+          a: [0, 0],
+          b: [0, 1]
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn splitting_keeps_the_path_where_it_is_on_the_page() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      e.dispatch(Command::SplitVectorAt {
+        id: id.clone(),
+        points: vec![[0, 1]],
+      })
+      .unwrap();
+      let n = e.doc.get(&id).unwrap();
+      assert_eq!((n.x, n.y, n.width, n.height), (100.0, 100.0, 100.0, 50.0));
+      assert_eq!(n.vector.as_ref().unwrap().subpaths.len(), 2);
     }
 
     /// A V-shaped path through (100,100), (150,150), (200,100), optionally closed.

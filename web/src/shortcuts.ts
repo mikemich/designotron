@@ -9,8 +9,9 @@ import { collapseAllLayers } from "./panels/layerTree";
 import { nextOpacity, type PendingDigit } from "./opacityKeys";
 
 function isTyping(e: KeyboardEvent): boolean {
-  const t = e.target as HTMLElement;
-  return !!t && (t.matches("input, textarea, select") || t.isContentEditable);
+  const t = e.target as HTMLElement | null;
+  // A paste dispatched on `document` has no Element target.
+  return t instanceof Element && (t.matches("input, textarea, select") || t.isContentEditable);
 }
 
 /** Menus and dialogs own their keys; the canvas shortcuts stay out (⌘ combos still pass). */
