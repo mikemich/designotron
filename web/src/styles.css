@@ -603,6 +603,127 @@ textarea.textinput {
   outline: none;
   padding: 2px 4px;
 }
+/* Layers: Shift-click selects a range, so a click must not also select text. */
+.layer {
+  user-select: none;
+}
+/* Layers: search field, filter menu and the flat list of matches. */
+.layer-search {
+  position: relative;
+  padding: 6px 8px 4px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.layer-search-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.layer-search-field {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px;
+  height: 28px;
+  background: var(--panel-2);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-3);
+}
+.layer-search-field:focus-within {
+  border-color: var(--select);
+}
+.layer-search-field input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: 0;
+  outline: none;
+  color: var(--text);
+  padding: 0;
+}
+.layer-search-field .ibtn {
+  width: 20px;
+  height: 20px;
+}
+.layer-filter-btn {
+  position: relative;
+  width: 28px;
+  height: 28px;
+}
+.layer-filter-btn.active {
+  color: var(--select);
+}
+.layer-filter-count {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 12px;
+  height: 12px;
+  border-radius: 6px;
+  background: var(--select);
+  color: #fff;
+  font-size: 9px;
+  line-height: 12px;
+  text-align: center;
+}
+.layer-filter-menu {
+  position: absolute;
+  right: 8px;
+  top: 38px;
+  z-index: 30;
+  min-width: 150px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.layer-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.layer-filter-item:hover {
+  background: var(--panel-2);
+}
+.layer-filter-clear,
+.layer-select-all {
+  background: none;
+  border: 0;
+  color: var(--select);
+  cursor: pointer;
+  padding: 4px 6px;
+  text-align: left;
+}
+.layer-search-count {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 2px 0;
+}
+.layer-hit .name {
+  flex: 0 1 auto;
+}
+.layer-hit mark {
+  background: rgba(13, 153, 255, 0.35);
+  color: inherit;
+  border-radius: 2px;
+}
+.layer-hit .hit-path {
+  flex: 1;
+  min-width: 0;
+  margin-left: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
 .drop-line {
   position: absolute;
   left: 0;

@@ -210,8 +210,9 @@ function viewerMenu(nodes: Node[], one: Node | null, sel: string[]): MenuItem[] 
   ], sel);
 }
 
-/** Right-click menu items for the current selection. */
-export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
+/** Right-click menu items for the current selection. `at` is the canvas point to paste at; the Layers
+ * panel passes null, and Paste then uses the default place. */
+export function canvasMenu(at: { x: number; y: number } | null): MenuItem[] {
   const doc = getDoc();
   const sel = selection();
   const nodes = sel.map((id) => doc.nodes[id]).filter(Boolean);
@@ -219,7 +220,7 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   if (useStore.getState().es.readOnly || useCollab.getState().viewer) return viewerMenu(nodes, one, sel);
   if (!nodes.length) {
     return [
-      { label: "Paste here", kbd: `${MOD}V`, onClick: () => pasteHere(at.x, at.y) },
+      { label: at ? "Paste here" : "Paste", kbd: `${MOD}V`, onClick: () => pasteHere(at?.x, at?.y) },
       { sep: true },
       { label: "Select all", kbd: `${MOD}A`, onClick: A.selectAll },
       { label: "Zoom to fit", kbd: `${SHIFT}1`, onClick: () => import("../store").then((s) => s.zoomToFit()) },
@@ -227,7 +228,7 @@ export function canvasMenu(at: { x: number; y: number }): MenuItem[] {
   }
   const items: MenuItem[] = [
     { label: "Copy", kbd: `${MOD}C`, onClick: copySelection },
-    { label: "Paste here", kbd: `${MOD}V`, onClick: () => pasteHere(at.x, at.y) },
+    { label: at ? "Paste here" : "Paste", kbd: `${MOD}V`, onClick: () => pasteHere(at?.x, at?.y) },
     { label: "Paste over selection", kbd: `${SHIFT_MOD}V`, onClick: pasteOverSelection },
     { label: "Paste to replace", kbd: `${SHIFT_MOD}R`, onClick: pasteReplace },
     { label: "Copy properties", kbd: `${ALT_MOD}C`, onClick: A.copyProperties },

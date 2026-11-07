@@ -107,16 +107,16 @@ try {
   });
   check("layers: role=tree with label, multiselectable, treeitems with level and one tab stop", treeAttrs.label === "Layers" && treeAttrs.multi === "true" && treeAttrs.rows === 3 && treeAttrs.levels === "1" && treeAttrs.tabStops === 1 && treeAttrs.expandable === 1, JSON.stringify(treeAttrs));
 
-  // Tab from the Layers tab: Add page, the page list, then the tree (one stop each).
+  // Tab from the Layers tab: Add page, the page list, the layer search field and filter button, then the tree (one stop each).
   await p.evaluate(() => document.querySelector("#left-tab-layers").focus());
   let stops = [];
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 8; i++) {
     await press("Tab", 40);
     const a = await active();
     stops.push(a.page ? "page" : a.layer ? "layer" : a.tag);
     if (a.layer) break;
   }
-  check("Tab reaches the page list and the layers tree in one stop each", stops.join() === "BUTTON,page,layer", stops.join());
+  check("Tab reaches the page list, layer search and the layers tree in one stop each", stops.join() === "BUTTON,page,INPUT,BUTTON,layer", stops.join());
   check("tab stop of the tree is the first row when nothing is selected", (await active()).layer === (await named("Screen C")).id);
 
   await press("ArrowDown");
