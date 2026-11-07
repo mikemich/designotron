@@ -112,7 +112,8 @@ function usePaintKeys() {
       if (e.key !== "Enter" && e.key !== "Escape") return;
       const t = e.target as Element | null;
       if (t?.closest?.("input, textarea, select, [contenteditable]")) return;
-      if (e.key === "Enter" && t?.closest?.(".popover")) return;
+      // The popover's own frame holds focus after a click: Enter there still finishes the edit.
+      if (e.key === "Enter" && t?.closest?.(".popover") && !t.classList.contains("popover")) return;
       e.preventDefault();
       e.stopPropagation();
       useStore.setState({ paintEdit: null });

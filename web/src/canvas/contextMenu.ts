@@ -287,6 +287,7 @@ export function canvasMenu(at: { x: number; y: number } | null): MenuItem[] {
   if (nodes.length > 1 && !nodes.some((n) => n.type === "component" || n.type === "instance")) items.push({ label: "Create multiple components", onClick: A.createComponents });
   if (nodes.length > 1 && nodes.every((n) => n.type === "component")) items.push({ label: "Combine as variants", onClick: A.combineVariants });
   if (one && (one.type === "component" || one.type === "componentSet")) items.push({ label: "Add variant", onClick: () => addVariant(one) });
+  if (one && (one.type === "component" || one.type === "componentSet")) items.push({ label: "Insert instance", onClick: () => A.insertInstance(one.id, "beside") });
   if (nodes.every((n) => n.type === "instance")) {
     const at = menuAt;
     items.push({ label: "Swap instance…", onClick: () => openSwapPicker(sel, at.x, at.y) });

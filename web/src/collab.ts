@@ -2,6 +2,7 @@
 // shared link (guest). Local changes go out as engine deltas; peers' deltas come in
 // through `applyRemote` (never part of local undo). Presence: cursors and selections.
 
+import { linkFor } from "./relayHost";
 import { create } from "zustand";
 import { allAssets, loadAssets, referencedAssets } from "./assets";
 import { bridgeChecked, bridgeHttpBase } from "./ai/bridgeClient";
@@ -52,6 +53,8 @@ interface CollabState {
   reconnecting: boolean;
   /** Online owners: the same room link on this editor, for trying what a guest sees. */
   previewLink: string | null;
+  /** Online owners: the link only works on this computer (it names localhost). */
+  linkLocalOnly: boolean;
   /** Guests: the person who shared the file has left ("left") or stopped sharing ("ended"). */
   ownerGone: { name: string; how: "left" | "ended"; /** Before this guest ever got the file. */ early?: boolean } | null;
   /** This connection's id in the room (peers refer to it, e.g. `following`). */
@@ -77,6 +80,7 @@ export const useCollab = create<CollabState>(() => ({
   dialogOpen: false,
   reconnecting: false,
   previewLink: null,
+  linkLocalOnly: false,
   ownerGone: null,
   me: null,
   viewer: false,
@@ -654,11 +658,10 @@ export async function startOnline(relay: string): Promise<void> {
   wsUrl = `${base.replace(/^http/, "ws")}/ws?room=${room}`;
   // Guests open this editor (or, when this runs on localhost, the one `editorBase` names),
   // pointed at the relay: never the relay's bundled editor, which can be older than this one.
-  const here = location.origin + location.pathname;
-  const own = base === location.origin; // this page is served by the relay itself
-  const query = own ? `?room=${room}` : `?room=${room}&relay=${encodeURIComponent(base)}`;
-  const link = `${own || !isLocalPage() ? here : editorBase()}${query}`;
-  useCollab.setState({ role: "owner", mode: "online", link, previewLink: link === `${here}${query}` ? null : `${here}${query}` });
+  // A relay on this computer or the local network that serves an editor is the exception: its link
+  // opens that relay's own editor, which can reach it (the hosted one can't).
+  const r = linkFor({ relay: base, room, here: location.origin + location.pathname, pageLocal: isLocalPage(), own: base === location.origin, editor: info.editor, hosted: editorBase() });
+  useCollab.setState({ role: "owner", mode: "online", link: r.link, previewLink: r.previewLink, linkLocalOnly: r.localOnly });
   shareCurrentFile();
 }
 
@@ -694,6 +697,7 @@ export function stopSharing() {
     peers: {},
     link: null,
     previewLink: null,
+    linkLocalOnly: false,
     ownerGone: null,
     me: null,
     viewer: false,

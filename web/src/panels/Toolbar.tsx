@@ -41,7 +41,7 @@ import {
   zoomToSelection,
 } from "../store";
 import type { Tool } from "../types";
-import { Menu, MOD, SHIFT, type MenuItem, ALT_MOD, SHIFT_MOD } from "../ui/controls";
+import { Menu, MOD, Popover, SHIFT, type MenuItem, ALT_MOD, SHIFT_MOD } from "../ui/controls";
 import { runPlugin, usePlugins } from "../plugins";
 import { myColor, useCollab } from "../collab";
 import { startSpotlight, stopSpotlight, toggleFollow, useFollow } from "../follow";
@@ -125,6 +125,8 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     items: MenuItem[];
     label: string;
   } | null>(null);
+  // "Rename file…" in the main menu: the name field in the bar is hidden when the window is narrow.
+  const [renameAt, setRenameAt] = useState<DOMRect | null>(null);
   const [lastShape, setLastShape] = useState<Tool>("rectangle");
   const shape = SHAPES.find(
     (s) => s.tool === (SHAPES.some((x) => x.tool === tool) ? tool : lastShape),
@@ -141,6 +143,18 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     { label: "Back to files", onClick: onHome },
     { sep: true },
     { heading: "File" },
+    ...(readOnly
+      ? []
+      : [
+          {
+            label: "Rename file…",
+            onClick: () => {
+              // After the menu has closed and given focus back to its button.
+              const r = document.querySelector<HTMLElement>(".topbar [title='Main menu']")?.getBoundingClientRect();
+              requestAnimationFrame(() => setRenameAt(r ?? new DOMRect(8, 8, 60, 32)));
+            },
+          },
+        ]),
     { label: "Open .dtron file…", onClick: A.openDtron },
     { label: "Save as .dtron", kbd: `${SHIFT_MOD}S`, onClick: A.saveDtron },
     { label: "Save locally", kbd: `${MOD}S`, onClick: () => void A.saveLocally() },
@@ -496,6 +510,26 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         {panelToggle("right")}
       </div>
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
+      {renameAt && (
+        <Popover anchor={renameAt} width={260} label="Rename file" onClose={() => setRenameAt(null)}>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const raw = (e.currentTarget.elements.namedItem("name") as HTMLInputElement).value;
+              const clean = normalizeName(raw);
+              if (!clean) return;
+              if (nameWasCut(raw)) toast(NAME_CUT_NOTICE);
+              if (clean !== doc.name) dispatch({ op: "setDocName", name: clean });
+              setRenameAt(null);
+            }}
+          >
+            <label className="small muted" htmlFor="rename-file">
+              File name
+            </label>
+            <input id="rename-file" name="name" className="textinput" defaultValue={doc.name} autoFocus onFocus={(e) => e.target.select()} onKeyDown={(e) => e.key !== "Escape" && e.stopPropagation()} />
+          </form>
+        </Popover>
+      )}
     </header>
   );
 }

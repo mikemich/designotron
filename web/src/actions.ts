@@ -344,6 +344,36 @@ export function insertDefaultLayer(inSelected = false): boolean {
   return true;
 }
 
+/** Places an instance of a main component (or of a component set's first variant) and selects it.
+ *  `"center"` puts it at the viewport centre (the Assets panel); `"beside"` puts it 40 px right of the
+ *  main's top-level frame, or at the viewport centre when that spot is taken (the canvas menu).
+ *  Never inside a main. Returns the new instance's id. */
+export function insertInstance(componentId: string, where: "center" | "beside" = "center"): string | null {
+  const doc = getDoc();
+  let main = doc.nodes[componentId];
+  if (main?.type === "componentSet") main = doc.nodes[main.children[0]];
+  if (!main || main.type !== "component") return null;
+  const c = viewportCenter();
+  let at = { x: c.x - main.width / 2, y: c.y - main.height / 2 };
+  if (where === "beside") {
+    let top = main;
+    while (top.parent && doc.nodes[top.parent]) top = doc.nodes[top.parent];
+    const roots = doc.pages.find((pg) => pg.id === useStore.getState().es.page)?.children ?? [];
+    const box = query<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids: [...new Set([top.id, ...roots])] }).items;
+    const own = box.find((b) => b.id === top.id)?.bounds;
+    if (own) {
+      const spot = { x: own.x + own.width + 40, y: own.y };
+      const w = main.width;
+      const h = main.height;
+      const taken = box.some((b) => b.bounds.x < spot.x + w && b.bounds.x + b.bounds.width > spot.x && b.bounds.y < spot.y + h && b.bounds.y + b.bounds.height > spot.y);
+      if (!taken) at = spot;
+    }
+  }
+  // `anchor` is the page point that picks the parent frame: inside whichever frame is there, never a main.
+  const r = dispatch<{ id: string }>({ op: "createInstance", componentId: main.id, x: at.x, y: at.y, parent: null, anchor: { x: at.x + main.width / 2, y: at.y + main.height / 2 } });
+  return r?.id ?? null;
+}
+
 // ---------- Copy / paste properties (Figma ⌥⌘C / ⌥⌘V) ----------
 
 /** Look properties pasted onto any layer. */

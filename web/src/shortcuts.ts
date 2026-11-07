@@ -33,6 +33,9 @@ function onCanvasOrBody(e: KeyboardEvent): boolean {
 
 /** The F6 regions in order, each with how to put focus in it (null: not shown right now). */
 const REGIONS: { root: string; focus: () => HTMLElement | null }[] = [
+  // Alert bars come first: the stopped-engine bar, then the other notices (stale file, storage full).
+  { root: ".engine-bar", focus: () => document.querySelector<HTMLElement>(".engine-bar button:not(:disabled)") },
+  { root: ".stale-bar:not(.engine-bar)", focus: () => document.querySelector<HTMLElement>(".stale-bar:not(.engine-bar) button:not(:disabled)") },
   { root: ".topbar", focus: () => document.querySelector<HTMLElement>(".topbar button:not(:disabled)") },
   {
     root: ".main > .panel:not(.right)",
@@ -48,9 +51,10 @@ const REGIONS: { root: string; focus: () => HTMLElement | null }[] = [
 /** F6 / Shift+F6: moves focus to the next (previous) region that is on screen. */
 function cycleRegion(dir: 1 | -1) {
   // A closed panel keeps a zero-width column (desktop) or is not rendered (tablet).
-  const shown = REGIONS.map((r) => ({ r, el: document.querySelector<HTMLElement>(r.root) })).filter((x) => x.el && [...x.el.getClientRects()].some((c) => c.width > 0));
+  // `els` holds every match: several alert bars share one region, and focus may be in any of them.
+  const shown = REGIONS.map((r) => ({ r, els: [...document.querySelectorAll<HTMLElement>(r.root)].filter((el) => [...el.getClientRects()].some((c) => c.width > 0)) })).filter((x) => x.els.length);
   if (!shown.length) return;
-  const at = shown.findIndex((x) => x.el!.contains(document.activeElement));
+  const at = shown.findIndex((x) => x.els.some((el) => el.contains(document.activeElement)));
   for (let step = 1; step <= shown.length; step++) {
     const target = shown[(((at < 0 ? (dir > 0 ? -1 : 0) : at) + dir * step) % shown.length + shown.length) % shown.length].r.focus();
     if (target) return target.focus();
@@ -224,7 +228,8 @@ export function installShortcuts(): () => void {
         return has && run(A.selectParent);
       case "Tab":
         // Sibling selection on the canvas; with nothing selected Tab moves on (no keyboard trap).
-        return has && onCanvas(e) && !e.altKey && !st.editingVector && run(() => selectSibling(e.shiftKey ? -1 : 1));
+        // A stopped engine has no layers to walk: Tab follows the page order, to the crash banner's buttons.
+        return has && onCanvas(e) && !e.altKey && !st.editingVector && !st.engineFailed && run(() => selectSibling(e.shiftKey ? -1 : 1));
       case "Enter":
         // A control reached by keyboard keeps Enter; one that was clicked doesn't, so Enter acts on
         // the design as it does on the canvas.

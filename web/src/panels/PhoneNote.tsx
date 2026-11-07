@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { setTool } from "../store";
+import { isPhone } from "../panelState";
 
 const KEY = "dt:phone-note";
-export const isPhone = () => window.matchMedia("(max-width: 820px)").matches;
+export { isPhone };
 
 /** On phones: start with the hand tool and say what works here. */
 export function PhoneNote() {

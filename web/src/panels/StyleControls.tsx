@@ -262,6 +262,7 @@ function ColorStyleRow({ s, label, depth, sel, editing, setEditing }: { s: Color
       {anchor && (
         <Popover
           anchor={anchor}
+          label="Edit colour style"
           onClose={() => {
             setAnchor(null);
             end();

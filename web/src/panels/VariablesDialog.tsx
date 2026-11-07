@@ -239,6 +239,7 @@ export function VariablesDialog() {
   const coll = collections.find((c) => c.id === active) ?? collections[0];
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
+  const importRef = useRef<HTMLButtonElement>(null);
   const close = () => useStore.setState({ variablesOpen: false });
   // Escape in the search field clears the search first; the next Escape closes the dialog.
   const dialogRef = useDialog(() => {
@@ -428,6 +429,7 @@ export function VariablesDialog() {
                 }}
               />
               <button
+                ref={importRef}
                 className="ibtn"
                 title="Import JSON (design tokens, Tokens Studio or Designotron variables)"
                 aria-label="Import JSON"
@@ -460,7 +462,11 @@ export function VariablesDialog() {
                 )}
                 {imported.report && importSummary(imported.report) !== "Nothing changed" && ` · ${MOD}Z removes the import`}
               </span>
-              <button className="ibtn" title="Dismiss" aria-label="Dismiss import report" onClick={() => setImported(null)}>
+              <button className="ibtn" title="Dismiss" aria-label="Dismiss import report" onClick={() => {
+                  setImported(null);
+                  // The button that was pressed goes with the report: focus moves to Import (or to the search field).
+                  requestAnimationFrame(() => (importRef.current ?? searchRef.current)?.focus());
+                }}>
                 <X size={12} />
               </button>
             </div>
@@ -638,7 +644,7 @@ function ScopePopover({ variable, anchor, onChange, onClose }: { variable?: Vari
   const on = variable.scopes ?? [];
   const toggle = (id: string) => onChange(on.includes(id) ? on.filter((x) => x !== id) : [...on, id]);
   return (
-    <Popover anchor={anchor} onClose={onClose}>
+    <Popover anchor={anchor} onClose={onClose} label={`Show ${variable.name} in`}>
       <div className="var-scopes" role="group" aria-label={`Show ${variable.name} in`}>
         <label className="var-scope">
           <input type="checkbox" checked={on.length === 0} onChange={() => onChange([])} />
