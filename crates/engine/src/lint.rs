@@ -140,7 +140,10 @@ fn check_text(doc: &Document, n: &Node, page_bg: &str, m: &dyn TextMeasurer, out
       } else {
         nearest_passing_shade(fg, bg, needed)
       };
-      let fix = match shade {
+      // A colour driven by a variable or a style is the design system's to change: an automatic
+      // fix would detach it, so there is none, and the message says where to change it.
+      let text_lock = fill_lock(doc, n);
+      let fix = match shade.filter(|_| text_lock.is_none()) {
         Some(better) => {
           let hex = better.hex6();
           Some((
@@ -148,21 +151,30 @@ fn check_text(doc: &Document, n: &Node, page_bg: &str, m: &dyn TextMeasurer, out
             update(&n.id, json!({ "fills": [{ "type": "solid", "color": hex }] })),
           ))
         }
-        // No shade of the text colour works: adjust the background instead.
-        None => bg_node.and_then(|bid| {
-          let adjusted = adjust_for_contrast(fg, bg, needed)?;
-          let hex = adjusted.hex6();
-          Some((
-            format!("Background {hex}"),
-            update(&bid, json!({ "fills": [{ "type": "solid", "color": hex }] })),
-          ))
-        }),
+        // No shade of the text colour works: adjust the background instead (unless either colour
+        // is bound or linked).
+        None if text_lock.is_some() => None,
+        None => bg_node
+          .filter(|bid| doc.get(bid).is_some_and(|b| fill_lock(doc, b).is_none()))
+          .and_then(|bid| {
+            let adjusted = adjust_for_contrast(fg, bg, needed)?;
+            let hex = adjusted.hex6();
+            Some((
+              format!("Background {hex}"),
+              update(&bid, json!({ "fills": [{ "type": "solid", "color": hex }] })),
+            ))
+          }),
       };
       out.push(issue(
         n,
         "lowContrast",
         Severity::Error,
-        format!("Contrast {:.1}:1 against {}; WCAG AA needs {needed}:1.", ratio, bg.hex6()),
+        format!(
+          "Contrast {:.1}:1 against {}; WCAG AA needs {needed}:1.{}",
+          ratio,
+          bg.hex6(),
+          text_lock.map(|l| format!(" ({l})")).unwrap_or_default()
+        ),
         fix.as_ref().map(|(l, v)| (l.as_str(), v.clone())),
       ));
     }
@@ -179,6 +191,27 @@ fn check_text(doc: &Document, n: &Node, page_bg: &str, m: &dyn TextMeasurer, out
       ));
     }
   }
+}
+
+/// Why a layer's fill can't be fixed automatically: it is bound to a variable or linked to a
+/// colour style (fixing it would detach it).
+fn fill_lock(doc: &Document, n: &Node) -> Option<String> {
+  if let Some(key) = n.bindings.get("fill") {
+    let name = crate::variables::find(doc, key)
+      .map(|(c, v)| format!("{}/{}", c.name, v.name))
+      .unwrap_or_else(|| key.clone());
+    return Some(format!("bound to {name}; change the variable for this mode or bind another"));
+  }
+  n.fill_style.as_ref().map(|id| {
+    let name = doc
+      .styles
+      .colors
+      .iter()
+      .find(|s| &s.id == id)
+      .map(|s| s.name.clone())
+      .unwrap_or_else(|| id.clone());
+    format!("linked to style {name}; edit the style or link another")
+  })
 }
 
 fn check_spacing(n: &Node, out: &mut Vec<Issue>) {
@@ -293,7 +326,7 @@ fn check_colors(doc: &Document, nodes: &[NodeId], out: &mut Vec<Issue>) {
   let mut unlinked: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
   for id in nodes {
     let Some(n) = doc.get(id) else { continue };
-    if n.fill_style.is_some() || doc.instance_ancestor(id).is_some() {
+    if n.fill_style.is_some() || n.bindings.contains_key("fill") || doc.instance_ancestor(id).is_some() {
       continue;
     }
     let Some(Paint::Solid { color, .. }) = n.fills.iter().find(|p| p.visible()) else {

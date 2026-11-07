@@ -739,7 +739,16 @@ export function describeSelection(): string {
 }
 
 /** The open editor's autosave: Ctrl+S runs it at once (set by `Editor`, null while no file is open). */
-export const saveHook: { flush: (() => Promise<void>) | null } = { flush: null };
+export const saveHook: { flush: (() => Promise<void>) | null; soon: (() => void) | null } = { flush: null, soon: null };
+
+/** The engine's document revision now (see `saveSoonSince`). */
+export const currentDocRev = (): number => useStore.getState().es.docRev;
+
+/** After a Claude or MCP tool call that began at document revision `rev`: when it changed the
+ *  document, autosave starts at once instead of after the typing debounce. */
+export function saveSoonSince(rev: number) {
+  if (currentDocRev() !== rev) saveHook.soon?.();
+}
 
 /** Closes the empty-page prompt for a page until the editor is reloaded, and makes later ones compact. */
 export function closeEmptyPrompt(page: string) {
