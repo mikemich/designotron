@@ -159,7 +159,7 @@ async function build(p) {
 const pageText = (p) =>
   p.evaluate(() => {
     const c = document.body.cloneNode(true);
-    c.querySelectorAll(".toast").forEach((t) => t.remove());
+    c.querySelectorAll(".toast, [data-toast-live]").forEach((t) => t.remove());
     return c.textContent;
   });
 const items = async (p) => p.$$eval("[role=menu] [role=menuitem]", (els) => els.map((e) => e.textContent.trim()));
