@@ -2381,6 +2381,14 @@ fn outline_plan(e: &Engine, roots: &[NodeId], depth: usize) -> (HashSet<String>,
 
 fn component_summary(e: &Engine, c: &Node) -> Value {
   let mut m = json!({ "id": c.id, "name": c.name, "width": c.width, "height": c.height });
+  // Variants list their property keys in the written order (the saved props are alphabetical).
+  if let Some(set) = c
+    .parent
+    .as_deref()
+    .filter(|p| e.doc.get(p).is_some_and(|s| s.kind == NodeType::ComponentSet))
+  {
+    m["variantOrder"] = json!(crate::components::variant_order(&e.doc, set));
+  }
   let props = crate::props::props_of(&e.doc, &c.id);
   if !props.is_empty() {
     m["props"] = json!(props

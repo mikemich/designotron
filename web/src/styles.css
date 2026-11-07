@@ -1926,6 +1926,14 @@ body:has(.modal-bg) .hint-card {
   justify-content: space-between;
   gap: 8px;
 }
+.var-import-skipped-btn {
+  background: none;
+  border: 0;
+  color: var(--select);
+  cursor: pointer;
+  padding: 0 2px;
+  font: inherit;
+}
 .var-import-skipped {
   margin: 6px 0 0;
   padding: 0 0 0 16px;

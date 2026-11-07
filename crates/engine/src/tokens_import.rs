@@ -22,6 +22,8 @@ const LISTED: usize = 50;
 const DEPTH: usize = 8;
 /// Bytes of JSON read at most (the dialog limits files to 5 MB as well).
 const MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Modes per collection and themes per file that are read; more are skipped with a note.
+const MAX_MODES: usize = 100;
 
 // ---------- Ordered JSON ----------
 
@@ -108,6 +110,8 @@ impl Reader<'_> {
       b'{' => {
         self.i += 1;
         let mut m: Vec<(String, J)> = Vec::new();
+        // Key -> position, so a repeated key is found without scanning the object.
+        let mut at: HashMap<String, usize> = HashMap::new();
         self.ws();
         if self.b.get(self.i) == Some(&b'}') {
           self.i += 1;
@@ -123,9 +127,12 @@ impl Reader<'_> {
           self.i += 1;
           let v = self.value(depth + 1)?;
           // A key written twice keeps the last value in its first position.
-          match m.iter_mut().find(|(ek, _)| *ek == k) {
-            Some(slot) => slot.1 = v,
-            None => m.push((k, v)),
+          match at.get(&k) {
+            Some(i) => m[*i].1 = v,
+            None => {
+              at.insert(k.clone(), m.len());
+              m.push((k, v));
+            }
           }
           self.ws();
           match self.b.get(self.i) {
@@ -185,13 +192,16 @@ impl Reader<'_> {
       _ => self.err("unexpected character"),
     }
   }
+  /// Four hex digits (no sign: `from_str_radix` would take "+041").
+  fn try_hex4(&mut self) -> Option<u32> {
+    let d = self.b.get(self.i..self.i + 4).filter(|d| d.iter().all(u8::is_ascii_hexdigit))?;
+    let n = u32::from_str_radix(std::str::from_utf8(d).ok()?, 16).ok()?;
+    self.i += 4;
+    Some(n)
+  }
   fn hex4(&mut self) -> Result<u32, String> {
-    let s = self.b.get(self.i..self.i + 4).and_then(|s| std::str::from_utf8(s).ok());
-    match s.and_then(|s| u32::from_str_radix(s, 16).ok()) {
-      Some(n) => {
-        self.i += 4;
-        Ok(n)
-      }
+    match self.try_hex4() {
+      Some(n) => Ok(n),
       None => self.err("bad \\u escape"),
     }
   }
@@ -223,13 +233,27 @@ impl Reader<'_> {
             b'r' => '\r',
             b't' => '\t',
             b'u' => {
-              let mut n = self.hex4()?;
-              if (0xD800..0xDC00).contains(&n) && self.b[self.i..].starts_with(b"\\u") {
-                self.i += 2;
-                let lo = self.hex4()?;
-                n = 0x10000 + ((n - 0xD800) << 10) + (lo.wrapping_sub(0xDC00) & 0x3FF);
+              let n = self.hex4()?;
+              if (0xD800..0xDC00).contains(&n) {
+                // A high half takes a following low half; anything else leaves it alone (U+FFFD)
+                // and the next escape is read on its own.
+                let mark = self.i;
+                let low = if self.b[self.i..].starts_with(b"\\u") {
+                  self.i += 2;
+                  self.try_hex4().filter(|lo| (0xDC00..0xE000).contains(lo))
+                } else {
+                  None
+                };
+                match low {
+                  Some(lo) => char::from_u32(0x10000 + ((n - 0xD800) << 10) + (lo - 0xDC00)).unwrap_or('\u{FFFD}'),
+                  None => {
+                    self.i = mark;
+                    '\u{FFFD}'
+                  }
+                }
+              } else {
+                char::from_u32(n).unwrap_or('\u{FFFD}')
               }
-              char::from_u32(n).unwrap_or('\u{FFFD}')
             }
             _ => return self.err("bad escape"),
           };
@@ -316,6 +340,9 @@ struct IColl {
   name: String,
   modes: Vec<String>,
   vars: Vec<IVar>,
+  /// The file has no modes of its own (`modes` is the made-up "Default"): into a collection the
+  /// file already has, it writes the first mode instead of adding one.
+  synthetic: bool,
 }
 
 /// A token as written in the file.
@@ -386,11 +413,17 @@ fn colour(v: &J) -> Result<Value, String> {
       if s.contains('{') {
         return Err("a colour made from a reference".into());
       }
-      check_value(VarKind::Color, &json!(s)).map_err(|_| format!("can't read the colour '{s}'"))
+      check_value(VarKind::Color, &json!(s)).map_err(|_| {
+        let s = short(s);
+        format!("can't read the colour '{s}'")
+      })
     }
     J::Obj(_) => {
       if let Some(h) = v.get("hex").and_then(J::str) {
-        return check_value(VarKind::Color, &json!(h)).map_err(|_| format!("can't read the colour '{h}'"));
+        return check_value(VarKind::Color, &json!(h)).map_err(|_| {
+          let h = short(h);
+          format!("can't read the colour '{h}'")
+        });
       }
       let space = v.get("colorSpace").and_then(J::str).unwrap_or("srgb");
       if space != "srgb" {
@@ -415,21 +448,59 @@ fn colour(v: &J) -> Result<Value, String> {
 }
 
 /// A number with an optional unit suffix, as (number, lower-case unit): `12px`, `1.5rem`, `50%`.
+/// The leading numeric run is scanned once; the rest is the unit.
 fn number_unit(s: &str) -> Option<(f64, String)> {
   let s = s.trim();
-  (1..=s.len()).rev().filter(|e| s.is_char_boundary(*e)).find_map(|e| {
-    s[..e]
-      .parse::<f64>()
-      .ok()
-      .filter(|n| n.is_finite())
-      .map(|n| (n, s[e..].trim().to_lowercase()))
-  })
+  let b = s.as_bytes();
+  let digits = |mut i: usize| {
+    while b.get(i).is_some_and(u8::is_ascii_digit) {
+      i += 1;
+    }
+    i
+  };
+  let mut i = usize::from(matches!(b.first(), Some(b'-' | b'+')));
+  let int_end = digits(i);
+  i = int_end;
+  let mut frac = 0;
+  if b.get(i) == Some(&b'.') {
+    let f = digits(i + 1);
+    frac = f - (i + 1);
+    i = f;
+  }
+  if int_end == usize::from(matches!(b.first(), Some(b'-' | b'+'))) && frac == 0 {
+    return None;
+  }
+  // An exponent only counts when digits follow ("1em" is one em, not an exponent).
+  if matches!(b.get(i), Some(b'e' | b'E')) {
+    let mut k = i + 1;
+    if matches!(b.get(k), Some(b'-' | b'+')) {
+      k += 1;
+    }
+    let e = digits(k);
+    if e > k {
+      i = e;
+    }
+  }
+  let n: f64 = s[..i].parse().ok()?;
+  n.is_finite().then(|| (n, s[i..].trim().to_lowercase()))
+}
+
+/// A value shortened for an error message.
+fn short(s: &str) -> String {
+  let mut t: String = s.chars().take(40).collect();
+  if t.len() < s.len() {
+    t.push('…');
+  }
+  t
 }
 
 fn dimension(v: &J) -> Result<Value, String> {
   let (n, unit) = match v {
     J::Num(n) => (*n, String::new()),
-    J::Str(s) => number_unit(s).ok_or_else(|| format!("can't read '{s}' as a size"))?,
+    J::Str(s) => number_unit(s).ok_or_else(|| {
+      let s = short(s);
+      format!("can't read '{s}' as a size")
+    })?,
     J::Obj(_) => {
       let n = match v.get("value") {
         Some(J::Num(n)) => *n,
@@ -442,20 +513,17 @@ fn dimension(v: &J) -> Result<Value, String> {
   match unit.as_str() {
     "" | "px" => Ok(number(n)),
     "rem" => Ok(number(n * 16.0)),
-    u => Err(format!("the unit {u} can't become a number")),
+    u => Err(format!("the unit {} can't become a number", short(u))),
   }
 }
 
 fn plain_number(v: &J) -> Result<Value, String> {
   match v {
     J::Num(n) => Ok(number(*n)),
-    J::Str(s) => s
-      .trim()
-      .parse::<f64>()
-      .ok()
-      .filter(|n| n.is_finite())
-      .map(number)
-      .ok_or_else(|| format!("can't read '{s}' as a number")),
+    J::Str(s) => s.trim().parse::<f64>().ok().filter(|n| n.is_finite()).map(number).ok_or_else(|| {
+      let s = short(s);
+      format!("can't read '{s}' as a number")
+    }),
     _ => Err("a number was expected".into()),
   }
 }
@@ -479,7 +547,12 @@ fn font_weight(v: &J) -> Result<Value, String> {
     "extrabold" | "ultrabold" => 800,
     "black" | "heavy" => 900,
     "extrablack" | "ultrablack" => 950,
-    _ => return Err(format!("unknown font weight '{s}'")),
+    _ => {
+      return Err({
+        let s = short(s);
+        format!("unknown font weight '{s}'")
+      })
+    }
   };
   Ok(json!(n))
 }
@@ -487,7 +560,10 @@ fn font_weight(v: &J) -> Result<Value, String> {
 fn duration(v: &J) -> Result<Value, String> {
   let (n, unit) = match v {
     J::Num(n) => (*n, "ms".to_string()),
-    J::Str(s) => number_unit(s).ok_or_else(|| format!("can't read '{s}' as a duration"))?,
+    J::Str(s) => number_unit(s).ok_or_else(|| {
+      let s = short(s);
+      format!("can't read '{s}' as a duration")
+    })?,
     J::Obj(_) => match v.get("value") {
       Some(J::Num(n)) => (*n, v.get("unit").and_then(J::str).unwrap_or("ms").to_lowercase()),
       _ => return Err("a duration needs a numeric value".into()),
@@ -497,7 +573,7 @@ fn duration(v: &J) -> Result<Value, String> {
   match unit.as_str() {
     "" | "ms" => Ok(number(n)),
     "s" => Ok(number(n * 1000.0)),
-    u => Err(format!("the unit {u} isn't a duration")),
+    u => Err(format!("the unit {} isn't a duration", short(u))),
   }
 }
 
@@ -580,7 +656,10 @@ fn convert(ty: Option<&str>, v: &J, ts: bool) -> Result<(VarKind, Value), String
     (_, "dimension" | "sizing" | "spacing" | "borderradius" | "borderwidth" | "fontsizes") => dimension(v)?,
     (_, "opacity") => match v {
       J::Str(s) if s.trim().ends_with('%') => {
-        let (n, _) = number_unit(s).ok_or_else(|| format!("can't read '{s}' as an opacity"))?;
+        let (n, _) = number_unit(s).ok_or_else(|| {
+          let s = short(s);
+          format!("can't read '{s}' as an opacity")
+        })?;
         number(n / 100.0)
       }
       _ => plain_number(v)?,
@@ -625,7 +704,11 @@ struct Resolved {
 
 struct PTok {
   coll: usize,
+  /// Dotted path from the file's root, the form references use.
+  full: String,
   tok: Tok,
+  /// Position the Designotron export wrote (`index` in its extension).
+  order: usize,
   /// Variable type pinned by the Designotron extension.
   pinned: Option<String>,
 }
@@ -646,16 +729,25 @@ fn import_dtcg(root: &J, file_name: &str, report: &mut Report) -> Vec<IColl> {
   let mut ptoks: Vec<PTok> = Vec::new();
   // Full path (from the file's root) of each token, for references.
   let mut index: HashMap<String, usize> = HashMap::new();
+  let index_of = |ext: Option<&J>| {
+    ext
+      .and_then(|e| e.get("index"))
+      .and_then(|n| if let J::Num(n) = n { Some(*n as usize) } else { None })
+  };
   if designotron {
-    for (key, group) in entries {
-      if key.starts_with('$') || group.obj().is_none() {
-        continue;
-      }
+    // Collections in the order the export wrote down (older exports have none: file order).
+    let mut groups: Vec<(&String, &J)> = entries
+      .iter()
+      .filter(|(k, g)| !k.starts_with('$') && g.obj().is_some())
+      .map(|(k, g)| (k, g))
+      .collect();
+    groups.sort_by_key(|(_, g)| index_of(g.get("$extensions").and_then(|e| e.get(EXT))).unwrap_or(usize::MAX));
+    for (key, group) in groups {
       let ext = group.get("$extensions").and_then(|e| e.get(EXT));
       let modes: Vec<String> = ext
         .and_then(|e| e.get("modes"))
         .and_then(J::arr)
-        .map(|a| a.iter().filter_map(J::str).map(String::from).collect())
+        .map(|a| a.iter().filter_map(J::str).take(MAX_MODES).map(String::from).collect())
         .filter(|m: &Vec<String>| !m.is_empty())
         .unwrap_or_else(|| vec!["Default".into()]);
       let ci = colls.len();
@@ -664,17 +756,26 @@ fn import_dtcg(root: &J, file_name: &str, report: &mut Report) -> Vec<IColl> {
         name: ext.and_then(|e| e.get("name")).and_then(J::str).unwrap_or(key).into(),
         modes,
         vars: Vec::new(),
+        synthetic: false,
       });
       let mut toks = Vec::new();
       flatten(group, group.get("$type").and_then(J::str), &mut Vec::new(), false, &mut toks, 0);
       for t in toks {
-        let mut full = vec![key.clone()];
-        full.extend(t.path.iter().cloned());
-        index.insert(full.join("."), ptoks.len());
+        let full = format!("{key}.{}", t.path.join("."));
         let pinned = ext_of(&t).and_then(|e| e.get("type")).and_then(J::str).map(String::from);
-        ptoks.push(PTok { coll: ci, tok: t, pinned });
+        let order = index_of(ext_of(&t)).unwrap_or(usize::MAX);
+        ptoks.push(PTok {
+          coll: ci,
+          full,
+          tok: t,
+          order,
+          pinned,
+        });
       }
     }
+    // Variables in the order the export wrote down, within each collection (stable, so tokens
+    // of an older export keep the file's order).
+    ptoks.sort_by_key(|p| (p.coll, p.order));
   } else {
     let name = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
     let name = name.strip_suffix(".json").unwrap_or(name).trim();
@@ -683,37 +784,60 @@ fn import_dtcg(root: &J, file_name: &str, report: &mut Report) -> Vec<IColl> {
       name: if name.is_empty() { "Tokens".into() } else { name.into() },
       modes: vec!["Default".into()],
       vars: Vec::new(),
+      synthetic: true,
     });
     let mut toks = Vec::new();
     flatten(root, root.get("$type").and_then(J::str), &mut Vec::new(), false, &mut toks, 0);
     for t in toks {
-      index.insert(t.path.join("."), ptoks.len());
       ptoks.push(PTok {
         coll: 0,
+        full: t.path.join("."),
         tok: t,
+        order: 0,
         pinned: None,
       });
     }
   }
+  for (i, p) in ptoks.iter().enumerate() {
+    index.insert(p.full.clone(), i);
+  }
+  // The variable name of each token, and the later one of two tokens that end up with the same
+  // name in a collection (`x/y` and `x.y`) is left out.
+  let names: Vec<String> = ptoks
+    .iter()
+    .map(|p| {
+      ext_of(&p.tok)
+        .and_then(|e| e.get("name"))
+        .and_then(J::str)
+        .map(String::from)
+        .unwrap_or_else(|| path_name(&p.tok.path))
+    })
+    .collect();
 
   // What each token resolves to, or why it can't be a variable.
   let n = ptoks.len();
   let mut results: Vec<Result<Resolved, String>> = (0..n).map(|i| resolve_token(i, 0, &ptoks, &index)).collect();
-  // An alias to a token that was skipped is skipped too.
-  loop {
-    let mut changed = false;
-    for i in 0..n {
-      let target = match &results[i] {
-        Ok(Resolved { def: Def::To(t), .. }) => *t,
-        _ => continue,
-      };
-      if results[target].is_err() {
-        results[i] = Err("it refers to a token that was skipped".into());
-        changed = true;
-      }
+  let mut seen_names: HashSet<(usize, &str)> = HashSet::new();
+  for (i, p) in ptoks.iter().enumerate() {
+    if results[i].is_ok() && !seen_names.insert((p.coll, names[i].as_str())) {
+      results[i] = Err("another token has the same name".into());
     }
-    if !changed {
-      break;
+  }
+  // An alias to a token that was skipped is skipped too: walk from each skipped token to the
+  // tokens that alias it, so every token is looked at once.
+  let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
+  for (i, r) in results.iter().enumerate() {
+    if let Ok(Resolved { def: Def::To(t), .. }) = r {
+      dependents[*t].push(i);
+    }
+  }
+  let mut queue: Vec<usize> = (0..n).filter(|i| results[*i].is_err()).collect();
+  while let Some(skipped) = queue.pop() {
+    for &d in &dependents[skipped] {
+      if results[d].is_ok() {
+        results[d] = Err("it refers to a token that was skipped".into());
+        queue.push(d);
+      }
     }
   }
   // Variable slots in file order.
@@ -722,11 +846,7 @@ fn import_dtcg(root: &J, file_name: &str, report: &mut Report) -> Vec<IColl> {
     match &results[i] {
       Ok(r) => {
         let ext = ext_of(&p.tok);
-        let name = ext
-          .and_then(|e| e.get("name"))
-          .and_then(J::str)
-          .map(String::from)
-          .unwrap_or_else(|| path_name(&p.tok.path));
+        let name = names[i].clone();
         let c = &mut colls[p.coll];
         slot[i] = Some((p.coll, c.vars.len()));
         c.vars.push(IVar {
@@ -893,8 +1013,11 @@ fn ts_sets(root: &J) -> Vec<TsSet> {
     });
   }
   if let Some(order) = root.get("$metadata").and_then(|m| m.get("tokenSetOrder")).and_then(J::arr) {
-    let want: Vec<&str> = order.iter().filter_map(J::str).collect();
-    sets.sort_by_key(|s| want.iter().position(|w| *w == s.name).unwrap_or(usize::MAX));
+    let mut want: HashMap<&str, usize> = HashMap::new();
+    for (i, w) in order.iter().filter_map(J::str).enumerate() {
+      want.entry(w).or_insert(i);
+    }
+    sets.sort_by_key(|s| want.get(s.name.as_str()).copied().unwrap_or(usize::MAX));
   }
   sets
 }
@@ -917,18 +1040,36 @@ fn ts_literal<'a>(tok: &'a Tok, find: &dyn Fn(&str) -> Option<&'a Tok>, depth: u
 
 fn import_ts(root: &J, report: &mut Report) -> Vec<IColl> {
   let sets = ts_sets(root);
-  let themes: Vec<&J> = root
+  let mut all: Vec<&J> = root
     .get("$themes")
     .and_then(J::arr)
     .map(|a| a.iter().filter(|t| t.obj().is_some()).collect())
     .unwrap_or_default();
-  if themes.is_empty() {
+  if all.is_empty() {
     return ts_without_themes(&sets, report);
   }
+  if all.len() > MAX_MODES {
+    report.skip("$themes", format!("only the first {MAX_MODES} themes are imported"));
+    all.truncate(MAX_MODES);
+  }
+  // Each theme with its sets' states looked up by name.
+  type Theme<'a> = (&'a J, HashMap<&'a str, &'a str>);
+  let themes: Vec<Theme> = all
+    .into_iter()
+    .map(|t| {
+      let sel = t
+        .get("selectedTokenSets")
+        .and_then(J::obj)
+        .map(|m| m.iter().filter_map(|(k, v)| v.str().map(|v| (k.as_str(), v))).collect())
+        .unwrap_or_default();
+      (t, sel)
+    })
+    .collect();
   // One collection per theme group; its themes are its modes.
-  let mut groups: Vec<(String, Vec<&J>)> = Vec::new();
+  let mut groups: Vec<(String, Vec<&Theme>)> = Vec::new();
   for t in &themes {
     let g = t
+      .0
       .get("group")
       .and_then(J::str)
       .filter(|g| !g.trim().is_empty())
@@ -939,19 +1080,14 @@ fn import_ts(root: &J, report: &mut Report) -> Vec<IColl> {
       None => groups.push((g, vec![t])),
     }
   }
-  let status = |theme: &J, set: &str| {
-    theme
-      .get("selectedTokenSets")
-      .and_then(|s| s.get(set))
-      .and_then(J::str)
-      .unwrap_or("disabled")
-      .to_string()
-  };
+  fn status<'a>(theme: &Theme<'a>, set: &str) -> &'a str {
+    theme.1.get(set).copied().unwrap_or("disabled")
+  }
   let mut colls: Vec<IColl> = Vec::new();
   for (gname, gthemes) in &groups {
     let mut modes: Vec<String> = Vec::new();
     for t in gthemes {
-      let n = unique(t.get("name").and_then(J::str).unwrap_or("Theme"), &modes);
+      let n = unique(t.0.get("name").and_then(J::str).unwrap_or("Theme"), &modes);
       modes.push(n);
     }
     // Per theme: the tokens of its enabled sets (they give the values) and of its enabled and
@@ -1002,13 +1138,18 @@ fn import_ts(root: &J, report: &mut Report) -> Vec<IColl> {
     let ci = colls.len();
     let mut var_at: HashMap<&str, usize> = HashMap::new();
     let mut vars: Vec<IVar> = Vec::new();
+    let mut taken: HashSet<String> = HashSet::new();
     for p in &paths {
       match kinds.get(p.as_str()) {
         Some(k) => {
-          var_at.insert(p, vars.len());
           let Some(tok) = enabled.iter().find_map(|e| e.get(p.as_str())) else {
             continue;
           };
+          if !taken.insert(path_name(&tok.path)) {
+            report.skip(format!("{gname}/{}", p.replace('.', "/")), "another token has the same name");
+            continue;
+          }
+          var_at.insert(p, vars.len());
           vars.push(IVar {
             id: None,
             name: path_name(&tok.path),
@@ -1051,6 +1192,7 @@ fn import_ts(root: &J, report: &mut Report) -> Vec<IColl> {
       name: gname.clone(),
       modes,
       vars,
+      synthetic: false,
     });
   }
   colls
@@ -1072,15 +1214,20 @@ fn ts_without_themes(sets: &[TsSet], report: &mut Report) -> Vec<IColl> {
       name: s.name.clone(),
       modes: vec!["Default".into()],
       vars: Vec::new(),
+      synthetic: true,
     })
     .collect();
   let mut var_at: HashMap<String, (usize, usize)> = HashMap::new();
   // (set, token index) -> its literal, for the tokens that became variables.
   let mut lits: Vec<(usize, usize, VarKind, Value)> = Vec::new();
+  let mut taken: HashSet<(usize, String)> = HashSet::new();
   for (si, s) in sets.iter().enumerate() {
     for (ti, t) in s.toks.iter().enumerate() {
       let p = dotted(&t.path);
       match ts_literal(t, &find, 0) {
+        Ok(_) if !taken.insert((si, path_name(&t.path))) => {
+          report.skip(format!("{}/{}", s.name, path_name(&t.path)), "another token has the same name")
+        }
         Ok((kind, v)) => {
           if table.get(&p).is_some_and(|(owner, _)| *owner == si) {
             var_at.insert(p, (si, colls[si].vars.len()));
@@ -1128,7 +1275,8 @@ pub fn import(doc: &Document, text: &str, file_name: &str, gen: &mut IdGen) -> R
     || root.get("$metadata").is_some()
     || entries.iter().filter(|(k, _)| !k.starts_with('$')).any(|(_, g)| {
       let plain = |t: &J| t.get("value").is_some() && t.get("$value").is_none();
-      plain(g) || g.obj().is_some_and(|m| m.iter().any(|(_, c)| plain(c)))
+      // `$type`, `$value` and the other `$` keys of a DTCG token are not tokens themselves.
+      plain(g) || g.obj().is_some_and(|m| m.iter().any(|(k, c)| !k.starts_with('$') && plain(c)))
     });
   let imported = if ts {
     import_ts(&root, &mut report)
@@ -1154,6 +1302,8 @@ struct Plan {
   modes: Vec<String>,
   /// Final id of each imported variable (None: skipped).
   vars: Vec<Option<String>>,
+  /// Position of each imported variable in its collection.
+  pos: Vec<usize>,
 }
 
 /// `wanted` if no id in `used` is it, else a fresh one.
@@ -1177,19 +1327,25 @@ fn merge(doc: &Document, imported: Vec<IColl>, gen: &mut IdGen, report: &mut Rep
   let mut used_vars: HashSet<String> = out.iter().flat_map(|c| c.variables.iter().map(|v| v.id.clone())).collect();
   let mut used_modes: HashSet<String> = out.iter().flat_map(|c| c.modes.iter().map(|m| m.id.clone())).collect();
   let mut matched: HashSet<usize> = HashSet::new();
+  // Collection names are unique in a file, so the name finds the collection.
+  let mut coll_by_name: HashMap<String, usize> = HashMap::new();
+  for (i, c) in out.iter().enumerate() {
+    coll_by_name.entry(c.name.clone()).or_insert(i);
+  }
 
   // Collections and modes.
   let mut plans: Vec<Plan> = Vec::new();
   for ic in &imported {
-    let existing = out
-      .iter()
-      .enumerate()
-      .position(|(i, c)| !matched.contains(&i) && ic.id.as_ref() == Some(&c.id) && ic.name == c.name)
-      .or_else(|| out.iter().enumerate().position(|(i, c)| !matched.contains(&i) && c.name == ic.name));
+    let existing = coll_by_name.get(&ic.name).copied().filter(|i| !matched.contains(i));
     let at = match existing {
       Some(i) => {
         let c = &mut out[i];
-        for mname in &ic.modes {
+        // A file without modes of its own writes the destination's first mode, not a new one.
+        let wanted: Vec<String> = match c.modes.first() {
+          Some(first) if ic.synthetic => vec![first.name.clone()],
+          _ => ic.modes.clone(),
+        };
+        for mname in &wanted {
           if c.modes.iter().any(|m| m.name == *mname) {
             continue;
           }
@@ -1226,27 +1382,27 @@ fn merge(doc: &Document, imported: Vec<IColl>, gen: &mut IdGen, report: &mut Rep
           })
           .collect();
         out.push(Collection::new(&id, &ic.name, modes, Vec::new()));
+        coll_by_name.entry(ic.name.clone()).or_insert(out.len() - 1);
         report.collections_added += 1;
         out.len() - 1
       }
     };
     matched.insert(at);
+    let c = &out[at];
+    // Imported mode -> destination mode id: by name, or the first mode for a file without modes.
     let modes = ic
       .modes
       .iter()
-      .map(|n| {
-        out[at]
-          .modes
-          .iter()
-          .find(|m| m.name == *n)
-          .map(|m| m.id.clone())
-          .unwrap_or_default()
+      .map(|n| match c.modes.first() {
+        Some(first) if ic.synthetic && !c.modes.iter().any(|m| m.name == *n) => first.id.clone(),
+        _ => c.modes.iter().find(|m| m.name == *n).map(|m| m.id.clone()).unwrap_or_default(),
       })
       .collect();
     plans.push(Plan {
       at,
       modes,
       vars: vec![None; ic.vars.len()],
+      pos: vec![0; ic.vars.len()],
     });
   }
 
@@ -1255,21 +1411,32 @@ fn merge(doc: &Document, imported: Vec<IColl>, gen: &mut IdGen, report: &mut Rep
   for (ci, ic) in imported.iter().enumerate() {
     let at = plans[ci].at;
     let mut news = vec![false; ic.vars.len()];
+    let c = &mut out[at];
+    let mut by_id: HashMap<String, usize> = HashMap::new();
+    let mut by_name: HashMap<String, usize> = HashMap::new();
+    for (i, v) in c.variables.iter().enumerate() {
+      by_id.entry(v.id.clone()).or_insert(i);
+      by_name.entry(v.name.clone()).or_insert(i);
+    }
     for (vi, iv) in ic.vars.iter().enumerate() {
-      let c = &mut out[at];
       let hit = iv
         .id
         .as_ref()
-        .and_then(|id| c.variables.iter().find(|v| v.id == *id))
-        .or_else(|| c.variables.iter().find(|v| v.name == iv.name));
+        .and_then(|id| by_id.get(id))
+        .or_else(|| by_name.get(&iv.name))
+        .copied();
       match hit {
-        Some(v) if v.kind != iv.kind => report.skip(
+        Some(i) if c.variables[i].kind != iv.kind => report.skip(
           format!("{}/{}", ic.name, iv.name),
           "the file already has a variable of this name with another type",
         ),
-        Some(v) => plans[ci].vars[vi] = Some(v.id.clone()),
+        Some(i) => {
+          plans[ci].vars[vi] = Some(c.variables[i].id.clone());
+          plans[ci].pos[vi] = i;
+        }
         None => {
           let id = fresh(gen, "v_", iv.id.as_ref(), &mut used_vars);
+          let i = c.variables.len();
           c.variables.push(Arc::new(Variable {
             id: id.clone(),
             name: iv.name.clone(),
@@ -1278,7 +1445,10 @@ fn merge(doc: &Document, imported: Vec<IColl>, gen: &mut IdGen, report: &mut Rep
             description: iv.description.clone(),
             scopes: iv.scopes.clone(),
           }));
+          by_id.insert(id.clone(), i);
+          by_name.insert(iv.name.clone(), i);
           plans[ci].vars[vi] = Some(id);
+          plans[ci].pos[vi] = i;
           news[vi] = true;
           report.variables_added += 1;
         }
@@ -1290,8 +1460,11 @@ fn merge(doc: &Document, imported: Vec<IColl>, gen: &mut IdGen, report: &mut Rep
   // Values.
   for (ci, ic) in imported.iter().enumerate() {
     let at = plans[ci].at;
+    let all_modes: Vec<String> = out[at].modes.iter().map(|m| m.id.clone()).collect();
     for (vi, iv) in ic.vars.iter().enumerate() {
-      let Some(id) = plans[ci].vars[vi].clone() else { continue };
+      if plans[ci].vars[vi].is_none() {
+        continue;
+      }
       let mut values: BTreeMap<String, Value> = BTreeMap::new();
       for (mi, val) in &iv.values {
         let mode = plans[ci].modes[*mi].clone();
@@ -1306,16 +1479,14 @@ fn merge(doc: &Document, imported: Vec<IColl>, gen: &mut IdGen, report: &mut Rep
           None => report.skip(format!("{}/{}", ic.name, iv.name), "the value doesn't fit the variable's type"),
         }
       }
-      let c = &mut out[at];
-      let all_modes: Vec<String> = c.modes.iter().map(|m| m.id.clone()).collect();
-      let Some(var) = crate::variables::var_mut(c, &id) else { continue };
+      let var = Arc::make_mut(&mut out[at].variables[plans[ci].pos[vi]]);
       if is_new[ci][vi] {
         // Modes the file doesn't have start at its first value.
         let first = iv.values.keys().next().and_then(|mi| values.get(&plans[ci].modes[*mi])).cloned();
         let fill = first.unwrap_or_else(|| default_value(iv.kind));
-        for m in all_modes {
-          let v = values.get(&m).cloned().unwrap_or_else(|| fill.clone());
-          var.values.insert(m, v);
+        for m in &all_modes {
+          let v = values.get(m).cloned().unwrap_or_else(|| fill.clone());
+          var.values.insert(m.clone(), v);
         }
       } else {
         let mut changed = false;

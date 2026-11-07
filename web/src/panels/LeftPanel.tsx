@@ -1317,8 +1317,10 @@ function Assets() {
       </div>
     );
   };
-  const entryRow = (e: AssetEntry, label: string) =>
-    e.set ? (
+  const entryRow = (e: AssetEntry, label: string) => {
+    // One property order per set, not one per variant row.
+    const order = e.set ? propertyOrder(doc, e.set) : [];
+    return e.set ? (
       <div key={e.set.id}>
         <div className="layer asset-set" title={"Component set: place one of its variants" + (e.set.component?.description ? `\n${e.set.component.description}` : "")}>
           <span className="icon component" style={{ marginLeft: 4 }}>
@@ -1331,11 +1333,12 @@ function Assets() {
             ))}
           </span>
         </div>
-        {e.items.map((c) => row(c, orderedEntries(c.component?.variantProps ?? {}, propertyOrder(doc, e.set!)).map(([, v]) => v).join(", ") || c.name, true))}
+        {e.items.map((c) => row(c, orderedEntries(c.component?.variantProps ?? {}, order).map(([, v]) => v).join(", ") || c.name, true))}
       </div>
     ) : (
       row(e.items[0], label, false)
     );
+  };
   return (
     <div className="scroll">
       <div className="section">

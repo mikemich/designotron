@@ -3,7 +3,7 @@
 //! every change, so rendering, export and lint keep reading plain properties.
 
 use std::borrow::Borrow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -262,7 +262,7 @@ pub fn check_value(kind: VarKind, v: &Value) -> Result<Value, String> {
 /// cycle two peers made at once can't block every later edit of unrelated variables. A touched
 /// variable also needs values of its type and a name no other variable of its collection has.
 pub fn validate(collections: &[impl Borrow<Collection>], previous: &[Arc<Collection>]) -> Result<(), String> {
-  let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+  let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
   let mut names: BTreeMap<&str, &str> = BTreeMap::new();
   let old: BTreeMap<&str, &Variable> = previous
     .iter()
@@ -291,17 +291,20 @@ pub fn validate(collections: &[impl Borrow<Collection>], previous: &[Arc<Collect
         if !is_new {
           continue;
         }
-        let shown = collections
-          .iter()
-          .flat_map(|c| &c.borrow().modes)
-          .find(|m| m.id == *mode)
-          .map_or(mode.as_str(), |m| m.name.as_str());
+        // Only an error needs the mode's name, so it is looked up there.
+        let shown_of = || {
+          collections
+            .iter()
+            .flat_map(|c| &c.borrow().modes)
+            .find(|m| m.id == *mode)
+            .map_or(mode.as_str(), |m| m.name.as_str())
+        };
         // Stored numbers are real numbers: "12" would be accepted by `check_value` but never applied.
         let loose_number = v.kind == VarKind::Number && val.is_string();
         match check_value(v.kind, val) {
           Ok(_) if !loose_number => {}
-          Ok(_) => return Err(format!("{} ({shown}): expected a number, got a string", v.name)),
-          Err(msg) => return Err(format!("{} ({shown}): {msg}", v.name)),
+          Ok(_) => return Err(format!("{} ({}): expected a number, got a string", v.name, shown_of())),
+          Err(msg) => return Err(format!("{} ({}): {msg}", v.name, shown_of())),
         }
       }
     }
@@ -314,57 +317,91 @@ pub fn validate(collections: &[impl Borrow<Collection>], previous: &[Arc<Collect
     .flat_map(|c| c.modes.iter().map(move |m| ((c.id.as_str(), m.id.as_str()), m.name.as_str())))
     .collect();
   let old_colls: BTreeMap<&str, &str> = previous.iter().map(|c| (c.id.as_str(), c.name.as_str())).collect();
-  for (i, c) in collections.iter().enumerate() {
+  // How many times each name occurs, so the checks below are one lookup each.
+  let mut coll_counts: HashMap<&str, usize> = HashMap::new();
+  for c in collections {
+    *coll_counts.entry(c.borrow().name.trim()).or_default() += 1;
+  }
+  for c in collections {
     let c: &Collection = c.borrow();
     let name = c.name.trim();
-    if old_colls.get(c.id.as_str()).is_none_or(|o| o.trim() != name)
-      && collections
-        .iter()
-        .enumerate()
-        .any(|(j, d)| j != i && d.borrow().name.trim() == name)
-    {
+    if old_colls.get(c.id.as_str()).is_none_or(|o| o.trim() != name) && coll_counts.get(name).is_some_and(|n| *n > 1) {
       return Err(format!("A collection named {name} already exists"));
     }
-    for (k, m) in c.modes.iter().enumerate() {
+    let mut mode_counts: HashMap<&str, usize> = HashMap::new();
+    for m in &c.modes {
+      *mode_counts.entry(m.name.trim()).or_default() += 1;
+    }
+    for m in &c.modes {
       let name = m.name.trim();
-      if old_modes.get(&(c.id.as_str(), m.id.as_str())).is_none_or(|o| o.trim() != name)
-        && c.modes.iter().enumerate().any(|(l, n)| l != k && n.name.trim() == name)
-      {
+      if old_modes.get(&(c.id.as_str(), m.id.as_str())).is_none_or(|o| o.trim() != name) && mode_counts.get(name).is_some_and(|n| *n > 1) {
         return Err(format!("{name} already exists in {}", c.name));
       }
     }
   }
   for c in collections {
     let c = c.borrow();
-    for (i, v) in c.variables.iter().enumerate() {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for v in &c.variables {
+      *counts.entry(v.name.as_str()).or_default() += 1;
+    }
+    for v in &c.variables {
       let renamed = old.get(v.id.as_str()).is_none_or(|o| o.name != v.name);
-      if renamed && c.variables.iter().enumerate().any(|(j, w)| j != i && w.name == v.name) {
+      if renamed && counts.get(v.name.as_str()).is_some_and(|n| *n > 1) {
         return Err(format!("{} already exists in {}", v.name, c.name));
       }
     }
   }
-  /// Longest alias chain from `node`, or the variable that closes a loop.
-  fn depth<'a>(edges: &BTreeMap<&'a str, Vec<&'a str>>, node: &'a str, path: &mut Vec<&'a str>) -> Result<usize, &'a str> {
-    if path.contains(&node) {
-      return Err(node);
+  /// How a walk over the aliases ended: the variable that closes a loop, or a chain too long.
+  enum Stop<'a> {
+    Cycle(&'a str),
+    TooLong,
+  }
+  /// Longest alias chain from `node`. Each variable is measured once (`done`), and a variable met
+  /// again while still being walked (`grey`) closes a loop, so the walk is O(variables + aliases).
+  /// It gives up past `MAX_ALIAS_DEPTH`, which the caller refuses anyway.
+  fn depth<'a>(
+    edges: &HashMap<&'a str, Vec<&'a str>>,
+    node: &'a str,
+    level: usize,
+    grey: &mut HashSet<&'a str>,
+    done: &mut HashMap<&'a str, usize>,
+  ) -> Result<usize, Stop<'a>> {
+    if let Some(n) = done.get(node) {
+      return Ok(*n);
     }
-    path.push(node);
+    if grey.contains(node) {
+      return Err(Stop::Cycle(node));
+    }
+    if level > MAX_ALIAS_DEPTH {
+      return Err(Stop::TooLong);
+    }
+    grey.insert(node);
     let mut longest = 0;
     for t in edges.get(node).into_iter().flatten() {
       if edges.contains_key(t) {
-        longest = longest.max(1 + depth(edges, t, path)?);
+        longest = longest.max(1 + depth(edges, t, level + 1, grey, done)?);
       }
     }
-    path.pop();
+    grey.remove(node);
+    done.insert(node, longest);
     Ok(longest)
   }
+  let mut done: HashMap<&str, usize> = HashMap::new();
   for start in changed {
-    match depth(&edges, start, &mut Vec::new()) {
-      Err(at) => {
+    match depth(&edges, start, 0, &mut HashSet::new(), &mut done) {
+      Err(Stop::Cycle(at)) => {
         return Err(format!(
           "alias cycle: {} refers back to itself through {}",
           names.get(at).unwrap_or(&at),
           names.get(start).unwrap_or(&start)
+        ))
+      }
+      Err(Stop::TooLong) => {
+        return Err(format!(
+          "{} is at the end of an alias chain of {MAX_ALIAS_DEPTH} or more; at most {} aliases can be followed",
+          names.get(start).unwrap_or(&start),
+          MAX_ALIAS_DEPTH - 1
         ))
       }
       Ok(n) if n >= MAX_ALIAS_DEPTH => {
@@ -781,7 +818,7 @@ pub fn set_binding(doc: &mut Document, id: &str, prop: &str, var: Option<&str>) 
 
 /// Drops bindings and mode overrides that point at variables, collections or modes that no longer exist.
 pub fn prune(doc: &mut Document) {
-  let vars: Vec<String> = doc
+  let vars: HashSet<String> = doc
     .variables
     .iter()
     .flat_map(|c| c.variables.iter().map(|v| v.id.clone()))
@@ -792,10 +829,11 @@ pub fn prune(doc: &mut Document) {
     .map(|c| (c.id.clone(), c.modes.iter().map(|m| m.id.clone()).collect()))
     .collect();
   let mode_ok = |c: &String, m: &String| modes.iter().any(|(cid, ms)| cid == c && ms.contains(m));
-  let stale =
-    |n: &crate::model::Node| n.bindings.values().any(|v| !vars.contains(v)) || n.variable_modes.iter().any(|(c, m)| !mode_ok(c, m));
+  let stale = |n: &crate::model::Node| {
+    n.bindings.values().any(|v| !vars.contains(v.as_str())) || n.variable_modes.iter().any(|(c, m)| !mode_ok(c, m))
+  };
   doc.update_where(stale, |n| {
-    n.bindings.retain(|_, v| vars.contains(v));
+    n.bindings.retain(|_, v| vars.contains(v.as_str()));
     n.variable_modes.retain(|c, m| mode_ok(c, m));
   });
 }
@@ -1018,7 +1056,7 @@ pub fn tokens_json(doc: &Document) -> Value {
     })
   };
   let mut root = Map::new();
-  for (c, cname) in doc.variables.iter().zip(&coll_names) {
+  for (coll_index, (c, cname)) in doc.variables.iter().zip(&coll_names).enumerate() {
     let mut mode_names: Vec<String> = Vec::new();
     for m in &c.modes {
       let name = unique_name(&m.name, &mode_names);
@@ -1027,13 +1065,13 @@ pub fn tokens_json(doc: &Document) -> Value {
     let mut group = Map::new();
     group.insert(
       "$extensions".into(),
-      json!({ EXT: { "id": c.id, "name": c.name, "modes": mode_names } }),
+      json!({ EXT: { "id": c.id, "name": c.name, "modes": mode_names, "index": coll_index } }),
     );
     let Some(default) = c.modes.first() else {
       root.insert(cname.clone(), Value::Object(group));
       continue;
     };
-    for v in &c.variables {
+    for (var_index, v) in c.variables.iter().enumerate() {
       let raw = v
         .values
         .get(&default.id)
@@ -1052,6 +1090,8 @@ pub fn tokens_json(doc: &Document) -> Value {
       }
       let mut ext = Map::new();
       ext.insert("id".into(), json!(v.id));
+      // Keys of a JSON object come back sorted, so the order is written down.
+      ext.insert("index".into(), json!(var_index));
       let shown: Vec<&str> = path[1..].iter().filter(|p| *p != "$root").map(String::as_str).collect();
       if shown.join("/") != v.name {
         ext.insert("name".into(), json!(v.name));
@@ -1609,7 +1649,7 @@ mod tests {
       json!({
         "$type": "color",
         "$value": "#000000",
-        "$extensions": { "com.designotron": { "id": "black" } }
+        "$extensions": { "com.designotron": { "id": "black", "index": 0 } }
       })
     );
     // A token that is also a group goes under $root, and an alias to it follows.

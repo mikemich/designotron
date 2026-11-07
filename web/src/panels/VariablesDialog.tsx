@@ -453,12 +453,12 @@ export function VariablesDialog() {
                 {imported.report && imported.report.skippedCount > 0 && (
                   <>
                     {", "}
-                    <button className="layer-select-all" aria-expanded={showSkipped} onClick={() => setShowSkipped(!showSkipped)}>
+                    <button className="var-import-skipped-btn" aria-expanded={showSkipped} onClick={() => setShowSkipped(!showSkipped)}>
                       {imported.report.skippedCount} skipped {showSkipped ? "▾" : "▸"}
                     </button>
                   </>
                 )}
-                {imported.report && importSummary(imported.report) !== "Nothing changed" && " · Ctrl+Z removes the import"}
+                {imported.report && importSummary(imported.report) !== "Nothing changed" && ` · ${MOD}Z removes the import`}
               </span>
               <button className="ibtn" title="Dismiss" aria-label="Dismiss import report" onClick={() => setImported(null)}>
                 <X size={12} />

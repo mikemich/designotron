@@ -405,3 +405,283 @@ fn designotron_fixture_is_the_scene_export() {
   }
   assert_eq!(std::fs::read_to_string(path).unwrap(), text);
 }
+
+// ---------- Review fixes ----------
+
+/// A string token's value in the collection a one-token file made.
+fn string_value(text: &str) -> String {
+  let mut e = engine(1);
+  import(&mut e, text, "s.json");
+  let (c, v) = (&e.doc.variables[0], &e.doc.variables[0].variables[0]);
+  v.values[&c.modes[0].id].as_str().unwrap().to_string()
+}
+
+#[test]
+fn a_lattice_of_aliases_validates_in_linear_time() {
+  // L layers of two variables, two modes, each aliasing both variables of the next layer: the
+  // number of paths doubles per layer, the number of aliases does not.
+  let layers = 40;
+  let lattice = |layers: usize| {
+    let modes = vec![mode("a", "A"), mode("b", "B")];
+    let mut vars = Vec::new();
+    for l in 0..layers {
+      for w in 0..2 {
+        let values: Vec<(&str, Value)> = if l + 1 < layers {
+          vec![
+            ("a", json!({ "alias": format!("v{}_0", l + 1) })),
+            ("b", json!({ "alias": format!("v{}_1", l + 1) })),
+          ]
+        } else {
+          vec![("a", json!("#FFFFFF")), ("b", json!("#000000"))]
+        };
+        vars.push(var(&format!("v{l}_{w}"), &format!("L{l}w{w}"), VarKind::Color, &values));
+      }
+    }
+    vec![Collection::new("c", "C", modes, vars)]
+  };
+  let t = std::time::Instant::now();
+  let err = crate::variables::validate(&lattice(layers), &[]).unwrap_err();
+  assert!(err.contains("alias chain"), "{err}");
+  // A lattice within the allowed depth is accepted.
+  crate::variables::validate(&lattice(6), &[]).unwrap();
+  assert!(t.elapsed().as_millis() < 100, "{:?}", t.elapsed());
+  // Through the import command too.
+  let mut e = engine(1);
+  let mut file = serde_json::Map::new();
+  file.insert(
+    "$extensions".into(),
+    json!({ "com.designotron": { "id": "c", "name": "C", "modes": ["A", "B"] } }),
+  );
+  for l in 0..layers {
+    for w in 0..2 {
+      let tok = if l + 1 < layers {
+        json!({ "$type": "color", "$value": format!("{{C.L{}w0}}", l + 1),
+          "$extensions": { "com.designotron": { "modes": { "B": format!("{{C.L{}w1}}", l + 1) } } } })
+      } else {
+        json!({ "$type": "color", "$value": "#ffffff" })
+      };
+      file.insert(format!("L{l}w{w}"), tok);
+    }
+  }
+  let t = std::time::Instant::now();
+  let text = json!({ "C": file }).to_string();
+  assert!(e
+    .dispatch(Command::ImportVariables {
+      json: text,
+      name: "l.json".into()
+    })
+    .is_err());
+  assert!(t.elapsed().as_millis() < 500, "{:?}", t.elapsed());
+}
+
+#[test]
+fn big_files_import_and_reimport_without_quadratic_work() {
+  let mut text = String::from("{");
+  for g in 0..400 {
+    if g > 0 {
+      text.push(',');
+    }
+    text += &format!("\"g{g}\":{{");
+    for i in 0..100 {
+      if i > 0 {
+        text.push(',');
+      }
+      text += &format!("\"t{i}\":{{\"$type\":\"number\",\"$value\":{i}}}");
+    }
+    text.push('}');
+  }
+  text.push('}');
+  let mut e = engine(1);
+  let t = std::time::Instant::now();
+  let r = import(&mut e, &text, "big.json");
+  let first = t.elapsed();
+  assert_eq!(r["variablesAdded"], 40000);
+  let t = std::time::Instant::now();
+  let again = import(&mut e, &text, "big.json");
+  let second = t.elapsed();
+  assert_eq!(
+    (again["variablesAdded"].as_u64(), again["variablesUpdated"].as_u64()),
+    (Some(0), Some(0))
+  );
+  println!("40k tokens: import {first:?}, re-import {second:?}");
+  // Debug builds are several times slower than release; the bound only has to tell linear from
+  // quadratic.
+  assert!(first.as_secs() < 20 && second.as_secs() < 20, "{first:?} {second:?}");
+}
+
+#[test]
+fn two_hundred_thousand_keys_in_one_object_parse_quickly() {
+  let mut text = String::from("{\"g\":{");
+  for i in 0..200_000 {
+    if i > 0 {
+      text.push(',');
+    }
+    text += &format!("\"k{i}\":0");
+  }
+  text += "}}";
+  let t = std::time::Instant::now();
+  let _ = engine(1).dispatch(Command::ImportVariables {
+    json: text,
+    name: "k.json".into(),
+  });
+  println!("200k keys: {:?}", t.elapsed());
+  assert!(t.elapsed().as_secs() < 10, "{:?}", t.elapsed());
+}
+
+#[test]
+fn a_huge_dimension_string_is_scanned_once() {
+  let text = format!(
+    r#"{{"a":{{"$type":"dimension","$value":"{}px!"}},"b":{{"$type":"dimension","$value":"{}"}}}}"#,
+    "1".repeat(1 << 20),
+    "x".repeat(1 << 20)
+  );
+  let t = std::time::Instant::now();
+  let r = engine(1).dispatch(Command::ImportVariables {
+    json: text,
+    name: "d.json".into(),
+  });
+  assert!(r.is_err() || r.unwrap()["skippedCount"].as_u64().unwrap() >= 1);
+  assert!(t.elapsed().as_secs() < 2, "{:?}", t.elapsed());
+  // The message for a value that is no size stays short.
+  let small = format!(
+    r#"{{"a":{{"$type":"dimension","$value":"{}"}},"ok":{{"$type":"number","$value":1}}}}"#,
+    "q".repeat(5000)
+  );
+  let r = import(&mut engine(1), &small, "d.json");
+  assert!(
+    r["skipped"][0]["reason"].as_str().unwrap().len() < 200,
+    "{}",
+    r["skipped"][0]["reason"]
+  );
+}
+
+#[test]
+fn a_dtcg_file_with_an_object_dimension_at_the_root_is_not_taken_for_tokens_studio() {
+  let mut e = engine(1);
+  let file = json!({
+    "space": { "$type": "dimension", "$value": { "value": 4, "unit": "px" } },
+    "brand": { "$type": "color", "$value": "#ff0000" }
+  });
+  let r = import(&mut e, &file.to_string(), "root.json");
+  assert_eq!(r["variablesAdded"], 2);
+  assert_eq!(e.doc.variables.len(), 1);
+  assert_eq!(e.doc.variables[0].name, "root");
+  assert_eq!(value_in(&e, "root", "space", "Default"), json!(4));
+}
+
+#[test]
+fn the_designotron_round_trip_keeps_collection_and_variable_order() {
+  let src = with_scene();
+  let text = tokens_json_text(&src.doc);
+  let mut dst = engine(2);
+  import(&mut dst, &text, "tokens.json");
+  let order = |e: &Engine| -> Vec<(String, Vec<String>)> {
+    e.doc
+      .variables
+      .iter()
+      .map(|c| (c.name.clone(), c.variables.iter().map(|v| v.name.clone()).collect()))
+      .collect()
+  };
+  assert_eq!(order(&dst), order(&src));
+  // Source order is not alphabetical (Space before Flags/On), so this is not the sorted map.
+  assert_eq!(order(&src)[0].1, ["Black", "Space", "Space/2", "Flags/On"]);
+  // An older export has no indexes: the keys come back in file order and nothing breaks.
+  let mut old: Value = serde_json::from_str(&text).unwrap();
+  for c in old.as_object_mut().unwrap().values_mut() {
+    c["$extensions"]["com.designotron"].as_object_mut().unwrap().remove("index");
+    for t in c.as_object_mut().unwrap().values_mut() {
+      if let Some(x) = t.pointer_mut("/$extensions/com.designotron").and_then(Value::as_object_mut) {
+        x.remove("index");
+      }
+    }
+  }
+  let mut e3 = engine(3);
+  let r = import(&mut e3, &old.to_string(), "tokens.json");
+  assert_eq!(r["variablesAdded"], 8);
+  assert_eq!(canon(&e3), canon(&src));
+}
+
+#[test]
+fn a_plain_file_writes_the_destinations_first_mode_instead_of_adding_default() {
+  let mut e = with_scene();
+  let file = json!({ "Surface/Bg": { "$type": "color", "$value": "#ff0000" }, "New": { "$type": "number", "$value": 3 } });
+  let r = import(&mut e, &file.to_string(), "Theme.json");
+  assert_eq!(r["modesAdded"], 0, "{r}");
+  assert_eq!(r["collectionsAdded"], 0);
+  let theme = e.doc.variables.iter().find(|c| c.name == "Theme").unwrap();
+  assert_eq!(theme.modes.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["Light", "Dark"]);
+  assert_eq!(value_in(&e, "Theme", "Surface/Bg", "Light"), json!("#FF0000"));
+  // Dark is untouched, and the new variable starts both modes at the file's value.
+  assert_eq!(value_in(&e, "Theme", "Surface/Bg", "Dark"), json!({ "alias": "black" }));
+  assert_eq!(value_in(&e, "Theme", "New", "Dark"), json!(3));
+  // Tokens Studio sets without themes do the same.
+  let studio = json!({ "Theme": { "Font": { "value": "Mono", "type": "fontFamilies" } }, "$metadata": { "tokenSetOrder": ["Theme"] } });
+  let r = import(&mut e, &studio.to_string(), "ts.json");
+  assert_eq!(r["modesAdded"], 0, "{r}");
+  assert_eq!(value_in(&e, "Theme", "Font", "Light"), json!("Mono"));
+  assert_eq!(value_in(&e, "Theme", "Font", "Dark"), json!("Georgia"));
+}
+
+#[test]
+fn names_that_collide_inside_a_file_skip_the_later_token() {
+  let mut e = engine(1);
+  let file = json!({
+    "x/y": { "$type": "color", "$value": "#ffffff" },
+    "x": { "y": { "$type": "color", "$value": "#000000" } }
+  });
+  let r = import(&mut e, &file.to_string(), "c.json");
+  assert_eq!(r["variablesAdded"], 1);
+  assert_eq!(r["skipped"][0]["reason"], "another token has the same name");
+  // The first in the text stays (serde sorts the keys of the json! above: "x" comes first).
+  assert_eq!(value_in(&e, "c", "x/y", "Default"), json!("#000000"));
+  // Tokens Studio: the same name from "a/b" and a group a with b.
+  let mut e = engine(1);
+  let ts = json!({ "s": { "a/b": { "value": "#fff", "type": "color" }, "a": { "b": { "value": "#000", "type": "color" } } } });
+  let r = import(&mut e, &ts.to_string(), "t.json");
+  assert_eq!(r["variablesAdded"], 1);
+  assert!(r["skipped"][0]["reason"].as_str().unwrap().contains("same name"));
+}
+
+#[test]
+fn json_escapes_follow_the_rules_for_surrogates_and_signs() {
+  let tok = |v: &str| format!(r#"{{"a":{{"$type":"string","$value":"{v}"}}}}"#);
+  assert_eq!(string_value(&tok(r"😀")), "😀");
+  assert_eq!(string_value(&tok(r"\ud800A")), "\u{FFFD}A");
+  // A high half followed by an escape that is not a low half: the escape stands on its own.
+  assert_eq!(string_value(&tok(r"\ud800A")), "\u{FFFD}A");
+  assert_eq!(string_value(&tok(r"\ud800😀")), "\u{FFFD}😀");
+  assert_eq!(string_value(&tok(r"\udc00")), "\u{FFFD}");
+  let err = engine(1)
+    .dispatch(Command::ImportVariables {
+      json: tok(r"\u+041"),
+      name: "s.json".into(),
+    })
+    .unwrap_err();
+  assert!(err.contains("bad \\u escape"), "{err}");
+}
+
+#[test]
+fn hostile_tokens_studio_files_stay_bounded() {
+  // 150 themes in one group: the first 100 are modes, the rest are reported.
+  let mut themes = Vec::new();
+  for i in 0..150 {
+    themes.push(json!({ "name": format!("T{i}"), "selectedTokenSets": { "s": "enabled" } }));
+  }
+  let file = json!({ "s": { "a": { "value": "#fff", "type": "color" } }, "$themes": themes });
+  let mut e = engine(1);
+  let r = import(&mut e, &file.to_string(), "t.json");
+  assert_eq!(e.doc.variables[0].modes.len(), 100);
+  assert_eq!(r["skipped"][0]["path"], "$themes");
+  // Thousands of token sets with a reversed order list.
+  let mut sets = serde_json::Map::new();
+  let mut order = Vec::new();
+  for i in 0..5000 {
+    sets.insert(format!("s{i}"), json!({ format!("a{i}"): { "value": "#fff", "type": "color" } }));
+    order.push(format!("s{}", 4999 - i));
+  }
+  sets.insert("$metadata".into(), json!({ "tokenSetOrder": order }));
+  let t = std::time::Instant::now();
+  let r = import(&mut engine(1), &Value::Object(sets).to_string(), "t.json");
+  assert_eq!(r["collectionsAdded"], 5000);
+  assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
+}
