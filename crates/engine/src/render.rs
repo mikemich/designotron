@@ -705,14 +705,11 @@ impl<'a> Renderer<'a> {
 
   fn line_caps(&mut self, n: &Node) -> String {
     let Some(shape) = n.shape.as_ref() else { return String::new() };
-    if !matches!(n.kind, NodeType::Line | NodeType::Vector) {
+    // Closed and imported raw paths have no ends to mark.
+    if !matches!(n.kind, NodeType::Line | NodeType::Vector) || is_closed(n) {
       return String::new();
     }
-    let color = n.strokes.iter().find_map(|p| match p {
-      Paint::Solid { color, .. } => Some(color.clone()),
-      _ => None,
-    });
-    let color = color.unwrap_or_else(|| "#000000".into());
+    let (color, opacity) = marker_paint(n);
     let mut out = String::new();
     for (cap, attr) in [(shape.start_cap, "marker-start"), (shape.end_cap, "marker-end")] {
       let flat = body_cap(n);
@@ -720,14 +717,15 @@ impl<'a> Renderer<'a> {
         StrokeCap::Round | StrokeCap::Square if cap != flat => {
           // One unit is the stroke width (markerUnits), so the end is sized to the stroke.
           let mid = self.id("mk");
-          let fill = color::css_with_opacity(&color, 1.0);
-          let (w, shape, ref_x) = if cap == StrokeCap::Round {
-            ("1", format!("<circle cx=\"0.5\" cy=\"0.5\" r=\"0.5\" fill=\"{fill}\"/>"), "0.5")
+          let fill = color::css_with_opacity(&color, opacity);
+          // Only the half beyond the end (+x in the marker), so the stroke is not painted twice.
+          let shape = if cap == StrokeCap::Round {
+            format!("<path d=\"M0 0A0.5 0.5 0 0 1 0 1Z\" fill=\"{fill}\"/>")
           } else {
-            ("0.5", format!("<rect width=\"0.5\" height=\"1\" fill=\"{fill}\"/>"), "0")
+            format!("<rect width=\"0.5\" height=\"1\" fill=\"{fill}\"/>")
           };
           self.defs.push_str(&format!(
-            "<marker id=\"{mid}\" viewBox=\"0 0 {w} 1\" refX=\"{ref_x}\" refY=\"0.5\" markerWidth=\"{w}\" markerHeight=\"1\" markerUnits=\"strokeWidth\" orient=\"auto-start-reverse\">{shape}</marker>"
+            "<marker id=\"{mid}\" viewBox=\"0 0 0.5 1\" refX=\"0\" refY=\"0.5\" markerWidth=\"0.5\" markerHeight=\"1\" markerUnits=\"strokeWidth\" orient=\"auto-start-reverse\">{shape}</marker>"
           ));
           out.push_str(&format!(" {attr}=\"url(#{mid})\""));
           continue;
@@ -743,9 +741,9 @@ impl<'a> Renderer<'a> {
         "/>",
         &format!(
           " stroke=\"{}\" {}/>",
-          color::css_with_opacity(&color, 1.0),
+          color::css_with_opacity(&color, opacity),
           if cap == StrokeCap::Circle {
-            format!("fill=\"{}\"", color::css_with_opacity(&color, 1.0))
+            format!("fill=\"{}\"", color::css_with_opacity(&color, opacity))
           } else {
             String::new()
           }
@@ -1190,6 +1188,21 @@ fn linecap(n: &Node) -> &'static str {
     StrokeCap::Round => "round",
     StrokeCap::Square => "square",
     _ => "butt",
+  }
+}
+
+/// The colour and opacity line-end markers are drawn in: the first visible stroke paint (a
+/// gradient's first stop, an image as black).
+fn marker_paint(n: &Node) -> (String, f64) {
+  match n.strokes.iter().find(|p| p.visible()) {
+    Some(Paint::Solid { color, opacity, .. }) => (color.clone(), *opacity),
+    Some(
+      Paint::LinearGradient { stops, opacity, .. }
+      | Paint::RadialGradient { stops, opacity, .. }
+      | Paint::AngularGradient { stops, opacity, .. }
+      | Paint::DiamondGradient { stops, opacity, .. },
+    ) => (stops.first().map_or("#000000".to_string(), |s| s.color.clone()), *opacity),
+    _ => ("#000000".into(), 1.0),
   }
 }
 
@@ -2136,12 +2149,90 @@ mod r18d_tests {
     assert!(s.contains("stroke-linecap=\"butt\""), "{s}");
     assert_eq!(s.matches("<marker").count(), 2, "{s}");
     assert!(s.contains("marker-start=") && s.contains("marker-end="), "{s}");
-    assert!(s.contains("markerUnits=\"strokeWidth\"") && s.contains("<circle cx=\"0.5\""), "{s}");
+    assert!(
+      s.contains("markerUnits=\"strokeWidth\"") && s.contains("M0 0A0.5 0.5 0 0 1 0 1Z"),
+      "{s}"
+    );
     let sq = svg(&open_path(StrokeCap::None, StrokeCap::Square));
     assert!(sq.contains("stroke-linecap=\"butt\""), "{sq}");
     assert_eq!(sq.matches("<marker").count(), 1, "{sq}");
     assert!(sq.contains("marker-end=") && !sq.contains("marker-start="), "{sq}");
     assert!(sq.contains("<rect width=\"0.5\" height=\"1\""), "{sq}");
+  }
+
+  #[test]
+  fn closed_and_raw_paths_have_no_end_markers() {
+    let mut closed = open_path(StrokeCap::Round, StrokeCap::Arrow);
+    let id = closed.pages[0].children[0].clone();
+    closed.get_mut(&id).unwrap().vector.as_mut().unwrap().subpaths[0].closed = true;
+    let s = svg(&closed);
+    assert!(!s.contains("<marker") && !s.contains("marker-end"), "{s}");
+    let raw = doc_with(|n| {
+      n.kind = NodeType::Vector;
+      n.vector = Some(VectorData {
+        subpaths: vec![],
+        raw: Some(crate::model::RawPath {
+          d: "M0 0L60 0L30 40".into(),
+          view_box: [0.0, 0.0, 60.0, 40.0],
+          fill_rule: String::new(),
+        }),
+      });
+      n.shape = Some(ShapeProps {
+        start_cap: StrokeCap::Round,
+        end_cap: StrokeCap::Circle,
+        ..Default::default()
+      });
+    });
+    let s = svg(&raw);
+    assert!(!s.contains("<marker"), "{s}");
+  }
+
+  #[test]
+  fn round_and_square_markers_use_the_stroke_opacity_and_a_half_disk() {
+    let s = svg(&doc_with(|n| {
+      n.kind = NodeType::Line;
+      n.fills.clear();
+      n.strokes = vec![Paint::Solid {
+        color: "#112233".into(),
+        opacity: 0.5,
+        visible: true,
+      }];
+      n.shape = Some(ShapeProps {
+        start_cap: StrokeCap::Round,
+        end_cap: StrokeCap::Square,
+        ..Default::default()
+      });
+    }));
+    assert_eq!(s.matches("<marker").count(), 2, "{s}");
+    assert!(s.contains("M0 0A0.5 0.5 0 0 1 0 1Z") && !s.contains("<circle"), "{s}");
+    assert_eq!(s.matches("fill=\"rgba(17, 34, 51, 0.5)\"").count(), 2, "{s}");
+    // A gradient stroke uses its first stop.
+    let g = svg(&doc_with(|n| {
+      n.kind = NodeType::Line;
+      n.fills.clear();
+      n.strokes = vec![Paint::LinearGradient {
+        stops: vec![
+          crate::model::GradientStop {
+            position: 0.0,
+            color: "#FF0000".into(),
+          },
+          crate::model::GradientStop {
+            position: 1.0,
+            color: "#0000FF".into(),
+          },
+        ],
+        angle: 90.0,
+        opacity: 1.0,
+        handles: None,
+        visible: true,
+      }];
+      n.shape = Some(ShapeProps {
+        start_cap: StrokeCap::None,
+        end_cap: StrokeCap::Round,
+        ..Default::default()
+      });
+    }));
+    assert!(g.contains("<marker") && g.to_lowercase().contains("#ff0000"), "{g}");
   }
 
   #[test]

@@ -1672,27 +1672,16 @@ fn same_geometry(a: &Node, b: &Node) -> bool {
 /// with both (what older exports wrote as two elements). A stroke painted before its fill is
 /// a different picture, so only that order merges; of three copies only the first pair does.
 fn merge_fill_stroke(list: &mut Vec<B>) {
-  let mut i = 0;
-  while i + 1 < list.len() {
-    let (a, b) = (&list[i], &list[i + 1]);
-    let (na, nb) = (&a.node, &b.node);
-    let generic = |n: &str| matches!(n, "Rectangle" | "Ellipse" | "Vector");
-    let ok = a.kids.is_empty()
-      && b.kids.is_empty()
-      && !na.fills.is_empty()
-      && na.strokes.is_empty()
-      && nb.fills.is_empty()
-      && !nb.strokes.is_empty()
-      && (na.opacity - nb.opacity).abs() < 1e-9
-      && na.visible == nb.visible
-      && na.blend_mode == nb.blend_mode
-      && !na.is_mask
-      && !nb.is_mask
-      && (nb.name.is_empty() || nb.name == na.name || (generic(&nb.name) && generic(&na.name)))
-      && same_geometry(na, nb);
-    if ok {
-      let b = list.remove(i + 1);
-      let n = &mut list[i].node;
+  if list.len() < 2 {
+    return;
+  }
+  // One pass into a new list (removing from the middle of a long list is quadratic).
+  let mut out: Vec<B> = Vec::with_capacity(list.len());
+  let mut it = std::mem::take(list).into_iter().peekable();
+  while let Some(mut a) = it.next() {
+    if it.peek().is_some_and(|b| fill_stroke_pair(&a, b)) {
+      let b = it.next().expect("peeked");
+      let n = &mut a.node;
       n.strokes = b.node.strokes;
       n.stroke_weight = b.node.stroke_weight;
       n.stroke_align = b.node.stroke_align;
@@ -1700,8 +1689,28 @@ fn merge_fill_stroke(list: &mut Vec<B>) {
       n.stroke_dash = b.node.stroke_dash;
       n.shape = b.node.shape.or(n.shape.take());
     }
-    i += 1;
+    out.push(a);
   }
+  *list = out;
+}
+
+/// Whether `b` is the stroke-only twin of the fill-only layer `a`.
+fn fill_stroke_pair(a: &B, b: &B) -> bool {
+  let (na, nb) = (&a.node, &b.node);
+  let generic = |n: &str| matches!(n, "Rectangle" | "Ellipse" | "Vector");
+  a.kids.is_empty()
+    && b.kids.is_empty()
+    && !na.fills.is_empty()
+    && na.strokes.is_empty()
+    && nb.fills.is_empty()
+    && !nb.strokes.is_empty()
+    && (na.opacity - nb.opacity).abs() < 1e-9
+    && na.visible == nb.visible
+    && na.blend_mode == nb.blend_mode
+    && !na.is_mask
+    && !nb.is_mask
+    && (nb.name.is_empty() || nb.name == na.name || (generic(&nb.name) && generic(&na.name)))
+    && same_geometry(na, nb)
 }
 
 fn vector_node(name: &str) -> Node {
@@ -3068,6 +3077,22 @@ mod r18d_tests {
       }
       let _ = n;
     }
+  }
+
+  #[test]
+  fn nearly_ten_thousand_fill_stroke_pairs_merge_quickly() {
+    let mut svg = String::from(r##"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000">"##);
+    for i in 0..9_999 {
+      let (x, y) = ((i % 100) * 10, (i / 100) * 10);
+      svg.push_str(&format!(r##"<rect x="{x}" y="{y}" width="8" height="8" fill="#f00"/><rect x="{x}" y="{y}" width="8" height="8" fill="none" stroke="#000"/>"##));
+    }
+    svg.push_str("</svg>");
+    let t = std::time::Instant::now();
+    let i = ok(&svg);
+    let took = t.elapsed();
+    assert_eq!(i.nodes.len(), 10_000);
+    assert!(i.nodes[1..].iter().all(|n| n.fills.len() == 1 && n.strokes.len() == 1));
+    assert!(took.as_secs_f64() < 20.0, "took {took:?}");
   }
 
   #[test]

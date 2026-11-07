@@ -33,10 +33,10 @@ import { assetUrl, noteRemoteImage } from "../assets";
 import { imagesIn } from "../imageAssets";
 import { getScaleStrokes, insertImageFile, insertSvgFile, joinVectorEnds, openDtronFile, pasteData, placeImageSource, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu, insideInstance } from "./contextMenu";
-import { limitCandidates, snapPoint } from "./vectorSnap";
+import { limitCandidates, MAX_CANDIDATES, snapPoint } from "./vectorSnap";
 import { pickColorAt } from "./eyedropper";
 import { useDemo } from "../Demo";
-import { Menu, type MenuItem } from "../ui/controls";
+import { isMac, Menu, type MenuItem } from "../ui/controls";
 import { isOverlayLink, newInteraction } from "../prototype";
 
 /** Half-size (screen px) of a vector anchor's hit area; it shrinks to a quarter of the gap to a close
@@ -63,7 +63,7 @@ interface BoundsItem {
 type Drag =
   | { kind: "pan"; sx: number; sy: number; vx: number; vy: number }
   | { kind: "move"; start: Pt; ids: string[]; started: boolean; alt: boolean; clickSelect: string | null; shiftToggle: string | null; dropAt?: Pt }
-  | { kind: "resize"; handle: Handle; start: Pt; ids: string[]; scale: boolean }
+  | { kind: "resize"; handle: Handle; start: Pt; ids: string[]; scale: boolean; /** The Scale tool's "Scale strokes" option, read once when the drag starts. */ scaleStrokes: boolean }
   | { kind: "rotate"; pivot: Pt; startAngle: number; ids: string[] }
   | { kind: "marquee"; start: Pt; base: string[] }
   | { kind: "draw"; start: Pt; cur: Pt }
@@ -227,7 +227,7 @@ export function Canvas() {
   // The anchor a dragged point or a new pen point is snapping to (page space).
   const [snapMark, setSnapMark] = useState<Pt | null>(null);
   // Anchors of the page's top-level vectors, for the pen (per document revision).
-  const penCands = useRef<{ rev: number; pts: Pt[] } | null>(null);
+  const penCands = useRef<{ key: string; pts: Pt[] } | null>(null);
   // Pen continuing an open path from one of its ends.
   const [penFrom, setPenFrom] = useState<PenFrom | null>(null);
   // Vector edit mode: the point on the path under the pointer (where a click adds an anchor).
@@ -565,6 +565,7 @@ export function Canvas() {
     if (tool !== "pen") {
       if (pen.length) setPen([]);
       if (penFrom) setPenFrom(null);
+      setSnapMark(null);
       return;
     }
     const onKey = (e: KeyboardEvent) => {
@@ -575,7 +576,7 @@ export function Canvas() {
     };
     // The preview follows Shift going down or up without the pointer moving.
     const onShift = (e: KeyboardEvent) => {
-      if (e.key === "Shift" && penLast.current) setPenCursor(penSnap(penLast.current, e.type === "keydown"));
+      if (e.key === "Shift" && penLast.current) setPenCursor(penSnap(penLast.current, e.type === "keydown", e.ctrlKey));
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("keydown", onShift);
@@ -616,6 +617,9 @@ export function Canvas() {
       if (e.key === "Escape") useStore.setState({ editingVector: null });
       // Enter leaves too: selectChildren (the Enter shortcut) toggles vector edit.
       else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "j") {
+        // A field or a dialog keeps its own keys.
+        const t = e.target;
+        if (t instanceof Element && (t.matches("input, textarea, select, [contenteditable]") || t.closest("[role=dialog], [role=menu]"))) return;
         e.preventDefault();
         joinVectorEnds();
       }
@@ -663,8 +667,17 @@ export function Canvas() {
     });
     if (!vecs.length) return [];
     const items = query<{ items: BoundsItem[] }>({ q: "bounds", ids: vecs }).items;
-    const lists = items.map((it) => (doc.nodes[it.id]?.vector?.subpaths ?? []).flatMap((sp) => sp.points.map((pt) => apply(it.matrix, pt))));
-    return limitCandidates(lists);
+    // Stop at the cap rather than building every point first.
+    const out: Pt[] = [];
+    for (const it of items) {
+      for (const sp of doc.nodes[it.id]?.vector?.subpaths ?? []) {
+        for (const pt of sp.points) {
+          if (out.length >= MAX_CANDIDATES) return out;
+          out.push(apply(it.matrix, pt));
+        }
+      }
+    }
+    return out;
   }
 
   /** Snap targets for dragging anchors of `n`: its anchors that stay put, then its siblings' anchors. */
@@ -690,8 +703,8 @@ export function Canvas() {
     // The anchors of the page's top-level vectors (not the path being drawn: a point a few pixels
     // from the last one is meant to be there, and closing is the click on the first point), else
     // whole pixels.
-    const rev = useStore.getState().es.docRev;
-    if (penCands.current?.rev !== rev) penCands.current = { rev, pts: siblingAnchors(null, null) };
+    const key = `${page}:${useStore.getState().es.docRev}`;
+    if (penCands.current?.key !== key) penCands.current = { key, pts: siblingAnchors(null, null) };
     const sn = snapPoint(p, penCands.current.pts, zoom(), { pixel: true });
     setSnapMark(sn.kind === "anchor" ? sn.target ?? null : null);
     return sn.p;
@@ -764,7 +777,7 @@ export function Canvas() {
     const handle = target.getAttribute("data-handle") as Handle | null;
     if (handle) {
       dispatch({ op: "beginGesture" });
-      drag.current = { kind: "resize", handle, start: p, ids: [...sel], scale: tool === "scale" };
+      drag.current = { kind: "resize", handle, start: p, ids: [...sel], scale: tool === "scale", scaleStrokes: getScaleStrokes() };
       return;
     }
     if (target.hasAttribute("data-rotate")) {
@@ -949,7 +962,7 @@ export function Canvas() {
       }
       case "resize": {
         const r = dispatch<{ guides: any[]; gaps: any[] }>(
-          { op: "resize", ids: d.ids, handle: d.handle, dx: p.x - d.start.x, dy: p.y - d.start.y, keepAspect: e.shiftKey, fromCenter: e.altKey, snap: !e.ctrlKey, zoom: zoom(), scale: d.scale, scaleStrokes: d.scale ? getScaleStrokes() : true },
+          { op: "resize", ids: d.ids, handle: d.handle, dx: p.x - d.start.x, dy: p.y - d.start.y, keepAspect: e.shiftKey, fromCenter: e.altKey, snap: !e.ctrlKey, zoom: zoom(), scale: d.scale, scaleStrokes: d.scaleStrokes },
           { quiet: true },
         );
         useStore.setState({ guides: r?.guides ?? [], gaps: r?.gaps ?? [] });
@@ -1278,6 +1291,9 @@ export function Canvas() {
 
   function onContextMenu(e: React.MouseEvent) {
     e.preventDefault();
+    // On a Mac Ctrl-click (the snapping override) also raises a context menu: while the pen is
+    // down or a drag is on, it is a click with Ctrl, not a request for the menu.
+    if (isMac && e.ctrlKey && e.button === 0 && (tool === "pen" || drag.current)) return;
     holdControl.current?.cancel();
     // The editor and its caret have their own (the browser's text menu on a long-press).
     if ((e.target as Element).closest?.(".text-editor, .text-caret")) return;

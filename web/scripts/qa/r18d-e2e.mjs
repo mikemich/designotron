@@ -421,6 +421,45 @@ await newFile();
   check("no page errors in the whole run", pageErrors === 0);
 }
 
+// ---------- 9. macOS: Ctrl-click while drawing is not a context menu ----------
+{
+  const mac = await browser.newContext({ viewport: { width: 1500, height: 950 }, deviceScaleFactor: 2 });
+  const mp = await mac.newPage();
+  await mp.route("**/*", (r) => (/^(http:\/\/(localhost|127\.0\.0\.1)|data:|blob:|ws:)/.test(r.request().url()) ? r.continue() : r.abort()));
+  await mp.addInitScript(() => {
+    localStorage.setItem("dt:tour-done", "1");
+    Object.defineProperty(Navigator.prototype, "platform", { get: () => "MacIntel" });
+  });
+  mp.on("pageerror", (e) => check("no page errors (mac)", false, String(e)));
+  await mp.goto(URL);
+  await mp.click("button:has-text('New design file')");
+  await mp.waitForSelector("#dt-canvas");
+  await mp.waitForTimeout(300);
+  await mp.evaluate(() => window.__dt.setViewport({ zoom: 1, x: 0, y: 0 }));
+  const box = await mp.locator("#dt-canvas").boundingBox();
+  await mp.keyboard.press("Escape");
+  await mp.keyboard.press("p");
+  await mp.mouse.click(box.x + 200, box.y + 200);
+  await mp.mouse.click(box.x + 300, box.y + 260);
+  // What macOS sends for a Ctrl-click: a contextmenu with button 0 and ctrlKey.
+  await mp.evaluate(([x, y]) => {
+    document.querySelector("#dt-canvas").dispatchEvent(new MouseEvent("contextmenu", { clientX: x, clientY: y, ctrlKey: true, button: 0, bubbles: true, cancelable: true }));
+  }, [box.x + 400, box.y + 200]);
+  await mp.waitForTimeout(250);
+  check("mac: a Ctrl-click with the pen opens no canvas menu", (await mp.locator('[role="menuitem"]').count()) === 0);
+  await mp.mouse.click(box.x + 400, box.y + 200);
+  await mp.keyboard.press("Enter");
+  await mp.waitForTimeout(300);
+  const st = await mp.evaluate(() => window.__dt.state());
+  const n = await mp.evaluate((id) => window.__dt.doc().nodes[id], st.selection[0]);
+  check("mac: the pen path goes on and keeps its three points", n?.type === "vector" && n.vector.subpaths[0].points.length === 3, n ? String(n.vector?.subpaths[0].points.length) : "none");
+  // A real right-click (button 2) still opens it.
+  await mp.mouse.click(box.x + 600, box.y + 400, { button: "right" });
+  await mp.waitForTimeout(250);
+  check("mac: a right-click still opens the menu", (await mp.locator('[role="menuitem"]').count()) > 0);
+  await mac.close();
+}
+
 await browser.close();
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
