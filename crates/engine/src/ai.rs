@@ -2779,7 +2779,23 @@ pub fn insert_specs_ex(e: &mut Engine, specs: &[Value], parent: Option<&str>) ->
   for r in &roots {
     settle_fill_in_hug(&mut e.doc, r);
   }
-  crate::layout::relayout_all(&mut e.doc, e.measurer.as_ref());
+  if e.reference {
+    crate::layout::relayout_all(&mut e.doc, e.measurer.as_ref());
+  } else {
+    // Layout never crosses a top-level layer and every other one was laid out already: only
+    // the trees the new layers (and their parent) sit in need it.
+    let mut tops: Vec<crate::model::NodeId> = Vec::new();
+    let mut seen: HashSet<crate::model::NodeId> = HashSet::new();
+    for id in roots.iter().map(|r| r.as_str()).chain(parent) {
+      let top = e.doc.top_level_of(id);
+      if seen.insert(top.clone()) {
+        tops.push(top);
+      }
+    }
+    for top in &tops {
+      crate::layout::layout_node(&mut e.doc, top, e.measurer.as_ref());
+    }
+  }
   if parent.is_none() {
     // Layers still waiting for their spot sit at the origin and must not count as content.
     let mut waiting: Vec<&str> = roots

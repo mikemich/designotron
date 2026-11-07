@@ -93,6 +93,23 @@ must never be committed.
   parts keep their old `Arc`. `Document` equality and `collab::delta` short-circuit on `Arc::ptr_eq`
   (`model::arc_eq`). JSON is unchanged (`json_golden_tests.rs`). Measure with
   `cargo run --release -p designotron-engine --example memstep vars300`.
+- Variables, layout and render work only on what changed (round 18). `variables::apply_since(doc, prev)` and
+  `normalize_since` resolve just the layers in `prev.nodes.diff(&doc.nodes)`, the bound layers below a layer that
+  was added, re-parented or got other `variableModes`, and every bound layer when the variables themselves changed;
+  `prev` must be a fixed point of `normalize` + `apply`, which `Engine::vars_settled` tracks (false after `load`
+  and after an exact undo to such a snapshot, so the first change runs the full passes: a loaded file is not
+  touched until then). The full `apply` stays as the oracle. `after_mutation` skips layout for a top-level layer
+  whose changed layers are all `ops::layout_neutral` (paints, names, bindings, style links, prototype data,
+  instance records, ...), and `render_incremental` keeps the cached SVG of a root whose changes are all
+  `ops::render_neutral`; both lists are checked by a test that changes each field and compares layout and
+  markup, and a new `Node` field is never on them. `Node` is `Eq` (marker impl) so `Arc<Node>` equality and
+  `imbl` diffs skip shared nodes. `ops::paint_order` sorts by path (no walk of every layer), `copy`/`paste` parse
+  and write the clipboard in one go (`ClipIn`/`ClipOut`), `create_nodes` lays out only the top-level layers it
+  touched, and a variable delete prunes layers and instance overrides in one pass (one `after_mutation`).
+  `Engine::reference` switches every one of these back to the whole-document passes: change any of this code
+  with `engine/lockstep_tests.rs` in mind (two engines on one random command stream must stay identical,
+  documents, canvas, fingerprints and deltas). Measure with `cargo run --release -p designotron-engine --example
+  perf18 20000 [scenario]`.
 - Big files on the canvas: `render_incremental` also returns each root's painted bounds and text
   count; `Canvas.tsx` hides roots outside the view (`display="none"`) and draws text under 5 px
   (and, while zooming a page with 400+ texts in view, all text) as the bars `render.rs` emits next
@@ -133,6 +150,7 @@ cd web && node scripts/bridge-e2e.mjs  # MCP + live editor (E2E_CLAUDE=1 adds a 
 cd web && node scripts/collab-e2e.mjs  # Multiplayer with two browsers (bridge serving web/dist)
 cargo run -p designotron-relay -- --static web/dist   # Online relay on :8787 (E2E_RELAY=… for the e2e)
 cargo run --release -p designotron-engine --example bench   # Engine timings on a 6k-layer file
+cargo run --release -p designotron-engine --example perf18 20000 [scenario]   # One edit on a 5k/20k/50k-layer file with variables (settext, nudge, mode1, delvar, clip2k, create10, ...)
 cd web && node scripts/perf.mjs [frames] [cards]           # Browser drag timings (PROFILE=1, TRACE=1)
 ```
 

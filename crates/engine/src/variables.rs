@@ -475,18 +475,25 @@ pub fn normalize(doc: &mut Document) {
   if doc.variables.is_empty() {
     return;
   }
+  let ids = names_to_fix(doc, doc.nodes.values().map(|n| &**n));
+  normalize_ids(doc, ids);
+}
+
+/// The layers among `nodes` that hold a variable or mode name instead of an id.
+fn names_to_fix<'a>(doc: &Document, nodes: impl Iterator<Item = &'a crate::model::Node>) -> Vec<NodeId> {
   let var_ids: std::collections::HashSet<&str> = doc
     .variables
     .iter()
     .flat_map(|c| c.variables.iter().map(|v| v.id.as_str()))
     .collect();
   let mode_ok = |c: &str, m: &str| doc.variables.iter().any(|x| x.id == c && x.modes.iter().any(|y| y.id == m));
-  let ids: Vec<NodeId> = doc
-    .nodes
-    .values()
+  nodes
     .filter(|n| n.bindings.values().any(|v| !var_ids.contains(v.as_str())) || n.variable_modes.iter().any(|(c, m)| !mode_ok(c, m)))
     .map(|n| n.id.clone())
-    .collect();
+    .collect()
+}
+
+fn normalize_ids(doc: &mut Document, ids: Vec<NodeId>) {
   for id in ids {
     let (bindings, modes) = {
       let n = doc.get(&id).unwrap();
@@ -547,116 +554,7 @@ pub fn apply(doc: &mut Document) -> bool {
     let Some(before) = doc.get(&id).cloned() else { continue };
     let mut n = before.clone();
     for (prop, v) in values {
-      let num = v.as_f64();
-      match prop.as_str() {
-        "fill" | "stroke" => {
-          let Some(color) = v.as_str().map(crate::color::normalize) else {
-            continue;
-          };
-          let paints = if prop == "fill" { &mut n.fills } else { &mut n.strokes };
-          match paints.first_mut() {
-            Some(Paint::Solid { color: c, .. }) => *c = color,
-            Some(first) => *first = Paint::solid(&color),
-            None => paints.push(Paint::solid(&color)),
-          }
-        }
-        "cornerRadius" => {
-          if let Some(r) = num {
-            n.corner_radius = r.max(0.0);
-            n.corner_radii = None;
-          }
-        }
-        "gap" => {
-          if let (Some(g), Some(l)) = (num, n.layout.as_mut()) {
-            l.gap = g;
-          }
-        }
-        "padding" => {
-          if let (Some(p), Some(l)) = (num, n.layout.as_mut()) {
-            l.padding_top = p;
-            l.padding_right = p;
-            l.padding_bottom = p;
-            l.padding_left = p;
-          }
-        }
-        "opacity" => {
-          if let Some(o) = num {
-            n.opacity = if o > 1.0 { o / 100.0 } else { o }.clamp(0.0, 1.0);
-          }
-        }
-        "width" => {
-          if let Some(w) = num {
-            n.width = w.max(0.01);
-            n.sizing_h = crate::model::Sizing::Fixed;
-          }
-        }
-        "height" => {
-          if let Some(h) = num {
-            n.height = h.max(0.01);
-            n.sizing_v = crate::model::Sizing::Fixed;
-          }
-        }
-        "strokeWeight" => {
-          if let Some(w) = num {
-            n.stroke_weight = w.max(0.0);
-          }
-        }
-        "fontSize" => {
-          if let (Some(s), Some(t)) = (num, n.text.as_mut()) {
-            t.font_size = s.max(1.0);
-          }
-        }
-        "fontFamily" => {
-          if let (Some(f), Some(t)) = (v.as_str(), n.text.as_mut()) {
-            t.font_family = f.to_string();
-          }
-        }
-        "fontWeight" => {
-          if let (Some(w), Some(t)) = (num, n.text.as_mut()) {
-            t.font_weight = ((w / 100.0).round() * 100.0).clamp(100.0, 900.0) as u32;
-          }
-        }
-        "lineHeight" => {
-          if let (Some(h), Some(t)) = (num, n.text.as_mut()) {
-            t.line_height = (h > 0.0).then_some(h);
-          }
-        }
-        "letterSpacing" => {
-          if let (Some(l), Some(t)) = (num, n.text.as_mut()) {
-            t.letter_spacing = l;
-          }
-        }
-        "paragraphSpacing" => {
-          if let (Some(p), Some(t)) = (num, n.text.as_mut()) {
-            t.paragraph_spacing = p.max(0.0);
-          }
-        }
-        "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft" | "counterGap" => {
-          if let (Some(p), Some(l)) = (num, n.layout.as_mut()) {
-            match prop.as_str() {
-              "paddingTop" => l.padding_top = p,
-              "paddingRight" => l.padding_right = p,
-              "paddingBottom" => l.padding_bottom = p,
-              "paddingLeft" => l.padding_left = p,
-              _ => l.counter_gap = p,
-            }
-          }
-        }
-        "characters" => {
-          if let (Some(s), Some(t)) = (v.as_str(), n.text.as_mut()) {
-            if t.characters != s {
-              t.runs = crate::text::remap_runs(&t.characters, s, &t.runs);
-              t.characters = s.to_string();
-            }
-          }
-        }
-        "visible" => {
-          if let Some(b) = v.as_bool() {
-            n.visible = b;
-          }
-        }
-        _ => {}
-      }
+      write_prop(&mut n, &prop, &v);
     }
     if n != before {
       doc.nodes.insert(id.clone(), Arc::new(n));
@@ -664,6 +562,330 @@ pub fn apply(doc: &mut Document) -> bool {
     }
   }
   changed
+}
+
+/// Writes one bound value into the layer property it is bound to.
+fn write_prop(n: &mut crate::model::Node, prop: &str, v: &Value) {
+  let num = v.as_f64();
+  match prop {
+    "fill" | "stroke" => {
+      let Some(color) = v.as_str().map(crate::color::normalize) else {
+        return;
+      };
+      let paints = if prop == "fill" { &mut n.fills } else { &mut n.strokes };
+      match paints.first_mut() {
+        Some(Paint::Solid { color: c, .. }) => *c = color,
+        Some(first) => *first = Paint::solid(&color),
+        None => paints.push(Paint::solid(&color)),
+      }
+    }
+    "cornerRadius" => {
+      if let Some(r) = num {
+        n.corner_radius = r.max(0.0);
+        n.corner_radii = None;
+      }
+    }
+    "gap" => {
+      if let (Some(g), Some(l)) = (num, n.layout.as_mut()) {
+        l.gap = g;
+      }
+    }
+    "padding" => {
+      if let (Some(p), Some(l)) = (num, n.layout.as_mut()) {
+        l.padding_top = p;
+        l.padding_right = p;
+        l.padding_bottom = p;
+        l.padding_left = p;
+      }
+    }
+    "opacity" => {
+      if let Some(o) = num {
+        n.opacity = if o > 1.0 { o / 100.0 } else { o }.clamp(0.0, 1.0);
+      }
+    }
+    "width" => {
+      if let Some(w) = num {
+        n.width = w.max(0.01);
+        n.sizing_h = crate::model::Sizing::Fixed;
+      }
+    }
+    "height" => {
+      if let Some(h) = num {
+        n.height = h.max(0.01);
+        n.sizing_v = crate::model::Sizing::Fixed;
+      }
+    }
+    "strokeWeight" => {
+      if let Some(w) = num {
+        n.stroke_weight = w.max(0.0);
+      }
+    }
+    "fontSize" => {
+      if let (Some(s), Some(t)) = (num, n.text.as_mut()) {
+        t.font_size = s.max(1.0);
+      }
+    }
+    "fontFamily" => {
+      if let (Some(f), Some(t)) = (v.as_str(), n.text.as_mut()) {
+        t.font_family = f.to_string();
+      }
+    }
+    "fontWeight" => {
+      if let (Some(w), Some(t)) = (num, n.text.as_mut()) {
+        t.font_weight = ((w / 100.0).round() * 100.0).clamp(100.0, 900.0) as u32;
+      }
+    }
+    "lineHeight" => {
+      if let (Some(h), Some(t)) = (num, n.text.as_mut()) {
+        t.line_height = (h > 0.0).then_some(h);
+      }
+    }
+    "letterSpacing" => {
+      if let (Some(l), Some(t)) = (num, n.text.as_mut()) {
+        t.letter_spacing = l;
+      }
+    }
+    "paragraphSpacing" => {
+      if let (Some(p), Some(t)) = (num, n.text.as_mut()) {
+        t.paragraph_spacing = p.max(0.0);
+      }
+    }
+    "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft" | "counterGap" => {
+      if let (Some(p), Some(l)) = (num, n.layout.as_mut()) {
+        match prop {
+          "paddingTop" => l.padding_top = p,
+          "paddingRight" => l.padding_right = p,
+          "paddingBottom" => l.padding_bottom = p,
+          "paddingLeft" => l.padding_left = p,
+          _ => l.counter_gap = p,
+        }
+      }
+    }
+    "characters" => {
+      if let (Some(s), Some(t)) = (v.as_str(), n.text.as_mut()) {
+        if t.characters != s {
+          t.runs = crate::text::remap_runs(&t.characters, s, &t.runs);
+          t.characters = s.to_string();
+        }
+      }
+    }
+    "visible" => {
+      if let Some(b) = v.as_bool() {
+        n.visible = b;
+      }
+    }
+    _ => {}
+  }
+}
+
+/// Looks variables up and finds the modes layers see, without the per-call string building and
+/// ancestor `String` clones of [`find`] / [`mode_for`] (same answers, built once per pass).
+pub(crate) struct Resolver<'a> {
+  doc: &'a Document,
+  /// Variable id, name and `Collection/name` → (collection, variable) index. Filled in
+  /// `find`'s iteration order with `or_insert`, so the first match wins exactly as in `find`.
+  by_key: HashMap<std::borrow::Cow<'a, str>, (usize, usize)>,
+  /// Mode a layer sees per collection (index), memoised for every layer walked on the way.
+  modes: HashMap<(&'a str, usize), Option<&'a str>>,
+}
+
+impl<'a> Resolver<'a> {
+  pub(crate) fn new(doc: &'a Document) -> Self {
+    use std::borrow::Cow;
+    let mut by_key: HashMap<Cow<'a, str>, (usize, usize)> = HashMap::new();
+    for (ci, c) in doc.variables.iter().enumerate() {
+      for (vi, v) in c.variables.iter().enumerate() {
+        by_key.entry(Cow::Borrowed(v.id.as_str())).or_insert((ci, vi));
+        by_key.entry(Cow::Borrowed(v.name.as_str())).or_insert((ci, vi));
+        by_key.entry(Cow::Owned(format!("{}/{}", c.name, v.name))).or_insert((ci, vi));
+      }
+    }
+    Resolver {
+      doc,
+      by_key,
+      modes: HashMap::new(),
+    }
+  }
+
+  /// [`mode_for`]: nearest ancestor override that names a mode of the collection, else its default.
+  pub(crate) fn mode(&mut self, node: &'a str, ci: usize) -> Option<&'a str> {
+    let doc = self.doc;
+    let coll: &'a Collection = &doc.variables[ci];
+    let mut walked: Vec<&'a str> = Vec::new();
+    let mut cur = node;
+    let found = loop {
+      if let Some(m) = self.modes.get(&(cur, ci)) {
+        break *m;
+      }
+      // A missing layer in the chain ends the walk with no mode, as `mode_for` does.
+      let Some(n) = doc.get(cur) else { break None };
+      walked.push(cur);
+      if let Some(m) = n.variable_modes.get(&coll.id) {
+        if coll.modes.iter().any(|x| &x.id == m) {
+          break Some(m.as_str());
+        }
+      }
+      match n.parent.as_deref() {
+        Some(p) if walked.len() <= doc.nodes.len() => cur = p,
+        Some(_) => break None,
+        None => break coll.modes.first().map(|m| m.id.as_str()),
+      }
+    };
+    for w in walked {
+      self.modes.insert((w, ci), found);
+    }
+    found
+  }
+
+  /// [`resolve`]: a variable's value as seen by `node`, aliases followed.
+  pub(crate) fn resolve(&mut self, node: &'a str, var: &str) -> Option<Value> {
+    let doc = self.doc;
+    let (mut ci, mut vi) = *self.by_key.get(var)?;
+    for _ in 0..MAX_ALIAS_DEPTH {
+      let c: &'a Collection = &doc.variables[ci];
+      let v: &'a Variable = &c.variables[vi];
+      let mode = self.mode(node, ci)?;
+      let val = v
+        .values
+        .get(mode)
+        .or_else(|| c.modes.first().and_then(|m| v.values.get(&m.id)))
+        .or_else(|| v.values.values().next())?;
+      match val.get("alias").and_then(|a| a.as_str()) {
+        Some(next) => (ci, vi) = *self.by_key.get(next)?,
+        None => return Some(val.clone()),
+      }
+    }
+    None
+  }
+}
+
+/// True when writing `v` into `prop` could change `n`. Only a cheap pre-filter for the common
+/// properties (answering true is always safe: the caller compares the written copy anyway).
+fn may_change(n: &crate::model::Node, prop: &str, v: &Value) -> bool {
+  match prop {
+    "fill" | "stroke" => {
+      let Some(color) = v.as_str().map(crate::color::normalize) else {
+        return false;
+      };
+      let paints = if prop == "fill" { &n.fills } else { &n.strokes };
+      !matches!(paints.first(), Some(Paint::Solid { color: c, .. }) if *c == color)
+    }
+    _ => true,
+  }
+}
+
+/// Resolves and writes the bindings of the layers in `ids` (a bound layer each), in two phases:
+/// the values are read first, and a layer is cloned only when one of them would differ.
+fn apply_ids(doc: &mut Document, ids: &[NodeId]) -> bool {
+  let writes: Vec<(NodeId, Vec<(String, Value)>)> = {
+    let doc: &Document = doc;
+    let mut r = Resolver::new(doc);
+    ids
+      .iter()
+      .filter_map(|id| {
+        let n = doc.get(id)?;
+        let values: Vec<(String, Value)> = n
+          .bindings
+          .iter()
+          .filter_map(|(prop, var)| r.resolve(&n.id, var).map(|v| (prop.clone(), v)))
+          .filter(|(prop, v)| may_change(n, prop, v))
+          .collect();
+        (!values.is_empty()).then(|| (id.clone(), values))
+      })
+      .collect()
+  };
+  let mut changed = false;
+  for (id, values) in writes {
+    let Some(before) = doc.get(&id) else { continue };
+    let mut n = before.clone();
+    for (prop, v) in &values {
+      write_prop(&mut n, prop, v);
+    }
+    if n != *before {
+      doc.nodes.insert(id, Arc::new(n));
+      changed = true;
+    }
+  }
+  changed
+}
+
+/// The layers that were added or changed from `base` to `doc`, and those whose own change can
+/// alter what their descendants resolve (added, re-parented, or with other `variableModes`).
+fn diff_layers(base: &Document, doc: &Document) -> (Vec<NodeId>, Vec<NodeId>) {
+  let mut dirty: Vec<NodeId> = Vec::new();
+  let mut context: Vec<NodeId> = Vec::new();
+  for item in base.nodes.diff(&doc.nodes) {
+    match item {
+      imbl::ordmap::DiffItem::Add(k, _) => {
+        dirty.push(k.clone());
+        context.push(k.clone());
+      }
+      imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, n) } => {
+        dirty.push(k.clone());
+        if o.parent != n.parent || o.variable_modes != n.variable_modes {
+          context.push(k.clone());
+        }
+      }
+      imbl::ordmap::DiffItem::Remove(..) => {}
+    }
+  }
+  (dirty, context)
+}
+
+/// [`apply`] for a document that follows `base` (a fixed point of `normalize` + `apply`, as every
+/// document the engine finished a change on is): only layers whose result can differ are
+/// resolved, that is the layers that changed, the bound layers below a layer that was added,
+/// moved or got other mode pins, and every bound layer when the variables themselves changed.
+/// The full [`apply`] is the oracle for this.
+pub fn apply_since(doc: &mut Document, base: &Document) -> bool {
+  if doc.variables.is_empty() {
+    return false;
+  }
+  let all = !crate::model::arcs_eq(&doc.variables, &base.variables);
+  let mut ids: Vec<NodeId> = Vec::new();
+  if all {
+    ids.extend(doc.nodes.values().filter(|n| !n.bindings.is_empty()).map(|n| n.id.clone()));
+  } else {
+    let (dirty, context) = diff_layers(base, doc);
+    ids.extend(dirty.into_iter().filter(|id| doc.get(id).is_some_and(|n| !n.bindings.is_empty())));
+    // The bound layers below a layer whose own context changed (one walk over the union).
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut stack: Vec<&str> = context.iter().map(|s| s.as_str()).collect();
+    while let Some(cur) = stack.pop() {
+      let Some(n) = doc.get(cur) else { continue };
+      if !seen.insert(cur) {
+        continue;
+      }
+      if !n.bindings.is_empty() {
+        ids.push(n.id.clone());
+      }
+      stack.extend(n.children.iter().map(|c| c.as_str()));
+    }
+    ids.sort();
+    ids.dedup();
+  }
+  apply_ids(doc, &ids)
+}
+
+/// [`normalize`] for a document that follows `base` (already normalized): only changed layers can
+/// hold a name or a stale mode, unless the variables themselves changed.
+pub fn normalize_since(doc: &mut Document, base: &Document) {
+  if doc.variables.is_empty() {
+    return;
+  }
+  if !crate::model::arcs_eq(&doc.variables, &base.variables) {
+    return normalize(doc);
+  }
+  let (dirty, _) = diff_layers(base, doc);
+  let candidates: Vec<NodeId> = dirty
+    .into_iter()
+    .filter(|id| doc.get(id).is_some_and(|n| !n.bindings.is_empty() || !n.variable_modes.is_empty()))
+    .collect();
+  if candidates.is_empty() {
+    return;
+  }
+  let ids = names_to_fix(doc, candidates.iter().filter_map(|id| doc.get(id)));
+  normalize_ids(doc, ids);
 }
 
 /// Property bindings a direct edit replaces (editing a bound fill detaches its variable).

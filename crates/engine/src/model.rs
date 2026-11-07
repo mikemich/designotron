@@ -236,6 +236,12 @@ fn map_skip_nulls<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<Str
   Ok(raw.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect())
 }
 
+/// Marks `Node` equality as a full equivalence so that std's `Arc<T: Eq>` comparison checks
+/// `Arc::ptr_eq` first: `imbl` diffs and `Document` equality then skip nodes two documents share,
+/// instead of comparing every node of a touched B-tree leaf field by field. (A NaN field now equals
+/// itself through the same `Arc`, which is what history and deltas want.)
+impl Eq for Node {}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Node {
