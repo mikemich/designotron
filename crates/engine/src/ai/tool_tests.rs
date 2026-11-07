@@ -698,14 +698,19 @@ mod tokens {
       (n.bindings.contains_key("fontSize"), n.text.as_ref().unwrap().font_size),
       (true, 40.0)
     );
-    // Both in one spec: the style is linked and the property this spec binds stays bound.
-    run(
+    // Both in one spec: the binding wins, no style is linked, and the result says so.
+    let r = run(
       &mut e,
       "update_nodes",
       json!({ "updates": [{ "id": t, "textStyle": "Body", "bind": { "fontSize": "Size" } }] }),
     );
     let n = e.doc.get(&t).unwrap();
-    assert!(n.text_style.is_some() && n.bindings.contains_key("fontSize"));
+    assert!(n.text_style.is_none() && n.bindings.contains_key("fontSize"));
+    assert!(
+      r["warnings"].to_string().contains("textStyle 'Body' not linked: bind.fontSize"),
+      "{r}"
+    );
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": t, "textStyle": "Body" }] }));
     // A style that doesn't set paragraph spacing leaves its binding alone, one that does drops it.
     run(
       &mut e,
@@ -2827,9 +2832,9 @@ mod r15b {
     run(&mut e, "create_instance", json!({ "componentId": c }));
     run(&mut e, "create_instance", json!({ "componentId": c, "x": 100 }));
     let d = run(&mut e, "delete_nodes", json!({ "ids": [c] }));
-    assert_eq!(d["instancesDetached"], 2);
+    assert_eq!(d["instancesKept"], 2);
     let d = run(&mut e, "delete_nodes", json!({ "ids": [r] }));
-    assert!(d.get("instancesDetached").is_none());
+    assert!(d.get("instancesKept").is_none());
     // X-22
     let long = "x".repeat(3600);
     let l = one(&mut e, json!({ "type": "text", "text": long }));
@@ -2913,7 +2918,7 @@ mod r15b {
     run(&mut e, "create_instance", json!({ "componentId": btn, "x": 800 }));
     let d = run(&mut e, "delete_nodes", json!({ "ids": [btn] }));
     assert_eq!(
-      d["instancesDetached"], 2,
+      d["instancesKept"], 2,
       "copies inside Card instances follow their outer instance: {d}"
     );
     // A frame or component set holding a main counts too.
@@ -2928,7 +2933,7 @@ mod r15b {
     let chip = e.doc.get(&kit).unwrap().children[0].clone();
     run(&mut e, "create_instance", json!({ "componentId": chip, "x": 500 }));
     let d = run(&mut e, "delete_nodes", json!({ "ids": [kit] }));
-    assert_eq!(d["instancesDetached"], 1, "{d}");
+    assert_eq!(d["instancesKept"], 1, "{d}");
   }
 
   #[test]
@@ -3296,5 +3301,597 @@ mod placement {
     assert!(disjoint(bounds(&e, &comp), bounds(&e, a)));
     assert!(disjoint(bounds(&e, a), bounds(&e, b)));
     assert_eq!((bounds(&e, c).0, bounds(&e, c).1), (5.0, 7.0));
+  }
+}
+
+mod r19d {
+  use super::*;
+
+  fn child_named(e: &Engine, root: &str, name: &str) -> String {
+    e.doc
+      .subtree(root)
+      .into_iter()
+      .find(|i| i != root && e.doc.get(i).unwrap().name == name)
+      .unwrap()
+  }
+
+  fn warnings(r: &Value) -> String {
+    r["warnings"].to_string()
+  }
+
+  /// A page with theme variables and a low-contrast "Logout" text whose fill is bound.
+  fn bound_logout(e: &mut Engine) -> String {
+    run(
+      e,
+      "define_variables",
+      json!({ "collection": "Theme", "modes": ["Light", "Night"], "variables": [
+      { "name": "Danger", "values": { "Light": "#CCCCCC", "Night": "#111111" } } ] }),
+    );
+    one(
+      e,
+      json!({ "type": "text", "name": "Logout", "text": "Log out", "fontSize": 14, "bind": { "fill": "Theme/Danger" } }),
+    )
+  }
+
+  #[test]
+  fn contrast_has_no_fix_for_a_bound_colour_and_the_binding_survives() {
+    let mut e = engine();
+    let t = bound_logout(&mut e);
+    let issues = run(&mut e, "lint_design", json!({}));
+    let low = issues["issues"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .find(|i| i["kind"] == "lowContrast")
+      .unwrap()
+      .clone();
+    assert!(low["fix"].is_null(), "{low}");
+    assert!(
+      low["message"]
+        .as_str()
+        .unwrap()
+        .contains("bound to Theme/Danger; change the variable for this mode or bind another"),
+      "{low}"
+    );
+    let r = run(&mut e, "fix_issues", json!({ "kinds": ["lowContrast"] }));
+    assert_eq!(r["fixed"], 0);
+    assert_eq!(r["skipped"][0]["id"], json!(t));
+    assert_eq!(r["skipped"][0]["kind"], "lowContrast");
+    assert!(e.doc.get(&t).unwrap().bindings.contains_key("fill"));
+  }
+
+  #[test]
+  fn contrast_has_no_fix_for_a_style_linked_colour_or_background() {
+    let mut e = engine();
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Muted", "color": "#CCCCCC" }] }),
+    );
+    let t = one(
+      &mut e,
+      json!({ "type": "text", "text": "Hello", "fontSize": 14, "fillStyle": "Muted" }),
+    );
+    let r = run(&mut e, "fix_issues", json!({ "kinds": ["lowContrast"] }));
+    assert_eq!(r["fixed"], 0);
+    assert!(r["skipped"][0]["reason"].as_str().unwrap().contains("linked to style Muted"), "{r}");
+    assert!(e.doc.get(&t).unwrap().fill_style.is_some());
+    // A text with no shade that works falls back to its background; a style-linked background is
+    // left alone, a plain one is changed.
+    let mut e = engine();
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Card", "color": "#777777" }] }),
+    );
+    let card = one(
+      &mut e,
+      json!({ "type": "frame", "name": "Card", "width": 200, "height": 80, "fillStyle": "Card",
+      "children": [{ "type": "text", "text": "Hello there", "fontSize": 14, "fill": "#7A7A7A" }] }),
+    );
+    run(&mut e, "fix_issues", json!({ "kinds": ["lowContrast"] }));
+    assert!(e.doc.get(&card).unwrap().fill_style.is_some());
+  }
+
+  #[test]
+  fn an_unbound_low_contrast_text_is_still_fixed() {
+    let mut e = engine();
+    let t = one(
+      &mut e,
+      json!({ "type": "text", "text": "Hello", "fontSize": 14, "fill": "#CCCCCC" }),
+    );
+    let r = run(&mut e, "fix_issues", json!({ "kinds": ["lowContrast"] }));
+    assert_eq!(r["fixed"], 1);
+    assert!(r.get("skipped").is_none());
+    assert_ne!(
+      format!("{:?}", e.doc.get(&t).unwrap().fills),
+      format!("{:?}", vec![crate::model::Paint::solid("#CCCCCC")])
+    );
+  }
+
+  fn styled_text(e: &mut Engine) -> String {
+    run(
+      e,
+      "define_variables",
+      json!({ "collection": "Type", "variables": [{ "name": "lg", "type": "number", "value": 20 }] }),
+    );
+    run(e, "define_styles", json!({ "texts": [{ "name": "Heading/H1", "fontSize": 32 }] }));
+    one(e, json!({ "type": "text", "text": "Hi", "textStyle": "Heading/H1" }))
+  }
+
+  #[test]
+  fn binding_a_typography_variable_on_a_styled_text_detaches_the_style_and_says_so() {
+    let mut e = engine();
+    let t = styled_text(&mut e);
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": t, "bind": { "fontSize": "lg" } }] }),
+    );
+    let n = e.doc.get(&t).unwrap();
+    assert!(n.text_style.is_none() && n.bindings.contains_key("fontSize"));
+    assert!(
+      warnings(&r).contains("text style 'Heading/H1' detached (fontSize changed); values kept"),
+      "{r}"
+    );
+    // create_nodes with both: the binding wins, no style link, a warning.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+      { "type": "text", "text": "Hi", "x": 300, "textStyle": "Heading/H1", "bind": { "fontSize": "lg" } }] }),
+    );
+    let id = created(&r)[0].clone();
+    let n = e.doc.get(&id).unwrap();
+    assert!(n.text_style.is_none() && n.bindings.contains_key("fontSize"));
+    assert!(warnings(&r).contains("textStyle 'Heading/H1' not linked: bind.fontSize"), "{r}");
+  }
+
+  #[test]
+  fn a_plain_edit_detaches_styles_with_a_warning_but_a_text_edit_and_null_do_not() {
+    let mut e = engine();
+    let t = styled_text(&mut e);
+    // Changing the words keeps the style and says nothing.
+    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": t, "text": "Hello" }] }));
+    assert!(e.doc.get(&t).unwrap().text_style.is_some());
+    assert!(r.get("warnings").is_none(), "{r}");
+    // textStyle null plus a bind: no warning, no style.
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": t, "textStyle": null, "bind": { "fontSize": "lg" } }] }),
+    );
+    assert!(e.doc.get(&t).unwrap().text_style.is_none());
+    assert!(r.get("warnings").is_none(), "{r}");
+    // A style that doesn't set the bound property stays linked, no warning (paragraph spacing).
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Type", "variables": [{ "name": "gap", "type": "number", "value": 4 }] }),
+    );
+    let t3 = one(&mut e, json!({ "type": "text", "text": "Hi", "x": 600, "textStyle": "Heading/H1" }));
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": t3, "bind": { "paragraphSpacing": "gap" } }] }),
+    );
+    assert!(e.doc.get(&t3).unwrap().text_style.is_some());
+    assert!(r.get("warnings").is_none(), "{r}");
+    // A fill style too.
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand", "color": "#7C5CFF" }] }),
+    );
+    let r1 = one(
+      &mut e,
+      json!({ "type": "rectangle", "x": 900, "width": 20, "height": 20, "fillStyle": "Brand" }),
+    );
+    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": r1, "fill": "#FF0000" }] }));
+    assert!(warnings(&r).contains("fill style 'Brand' detached"), "{r}");
+  }
+
+  #[test]
+  fn an_unbound_component_property_is_stored_and_reported_unused() {
+    let mut e = engine();
+    let comp = one(
+      &mut e,
+      json!({ "type": "component", "name": "Row", "width": 200, "height": 40, "children": [
+      { "type": "text", "name": "T", "text": "Bench press" } ] }),
+    );
+    let inst = run(&mut e, "create_instance", json!({ "componentId": comp, "x": 400 }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let added = run(
+      &mut e,
+      "set_component_props",
+      json!({ "ops": [{ "op": "add", "component": comp, "kind": "text", "name": "Title" }] }),
+    );
+    assert_eq!(added["results"][0]["warning"], "not bound to any layer yet");
+    let set = run(
+      &mut e,
+      "set_component_props",
+      json!({ "ops": [{ "op": "set", "instance": inst, "prop": "Title", "value": "Squat" }] }),
+    );
+    let r = &set["results"][0];
+    assert_eq!(r["unused"], true, "{set}");
+    assert_eq!((r["prop"].as_str(), r["value"].as_str()), (Some("Title"), Some("Squat")));
+    assert!(
+      r["warning"].as_str().unwrap().contains("no layer of this instance uses 'Title'"),
+      "{set}"
+    );
+    // Once a layer is bound, a set reports {prop, value} and the layer shows it.
+    let label = child_named(&e, &comp, "T");
+    run(
+      &mut e,
+      "set_component_props",
+      json!({ "ops": [{ "op": "bind", "node": label, "field": "characters", "prop": "Title" }] }),
+    );
+    let set = run(
+      &mut e,
+      "set_component_props",
+      json!({ "ops": [{ "op": "set", "instance": inst, "prop": "Title", "value": "Deadlift" }] }),
+    );
+    let r = &set["results"][0];
+    assert!(r.get("unused").is_none(), "{set}");
+    assert_eq!(r["value"], "Deadlift");
+    let shown = child_named(&e, &inst, "T");
+    assert_eq!(e.doc.get(&shown).unwrap().text.as_ref().unwrap().characters, "Deadlift");
+  }
+
+  #[test]
+  fn deleting_a_main_reports_instances_kept_with_a_note() {
+    let mut e = engine();
+    let c = one(&mut e, json!({ "type": "component", "name": "Btn", "width": 40, "height": 20 }));
+    run(&mut e, "create_instance", json!({ "componentId": c }));
+    let d = run(&mut e, "delete_nodes", json!({ "ids": [c] }));
+    assert_eq!(d["instancesKept"], 1);
+    assert!(d["note"].as_str().unwrap().contains("Restore main component"), "{d}");
+    assert!(d.get("instancesDetached").is_none());
+  }
+
+  #[test]
+  fn combine_variants_explains_generated_property_names() {
+    let mut e = engine();
+    let a = one(
+      &mut e,
+      json!({ "type": "component", "name": "Chip/Default", "width": 40, "height": 20 }),
+    );
+    let b = one(
+      &mut e,
+      json!({ "type": "component", "name": "Chip/Selected", "x": 100, "width": 40, "height": 20 }),
+    );
+    let r = run(&mut e, "arrange", json!({ "action": "combine_variants", "ids": [a, b] }));
+    assert!(r["note"].as_str().unwrap().contains("Property 1"), "{r}");
+    let a = one(
+      &mut e,
+      json!({ "type": "component", "name": "State=Default", "x": 300, "width": 40, "height": 20 }),
+    );
+    let b = one(
+      &mut e,
+      json!({ "type": "component", "name": "State=Error", "x": 400, "width": 40, "height": 20 }),
+    );
+    let r = run(&mut e, "arrange", json!({ "action": "combine_variants", "ids": [a, b] }));
+    assert!(r.get("note").is_none(), "{r}");
+  }
+
+  fn swap_setup(e: &mut Engine) -> (String, String, String) {
+    let a = one(e, json!({ "type": "component", "name": "A", "width": 20, "height": 20 }));
+    let b = one(e, json!({ "type": "component", "name": "B", "x": 100, "width": 30, "height": 30 }));
+    let inst = run(e, "create_instance", json!({ "componentId": a, "x": 400 }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    (a, b, inst)
+  }
+
+  #[test]
+  fn update_nodes_component_id_swaps_an_instance_in_one_undo_step() {
+    let mut e = engine();
+    let (a, b, inst) = swap_setup(&mut e);
+    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": inst, "componentId": b }] }));
+    assert_eq!(r["swapped"], json!([{ "id": inst, "from": a, "to": b }]), "{r}");
+    assert!(r.get("warnings").is_none(), "{r}");
+    let n = e.doc.get(&inst).unwrap();
+    assert_eq!(n.instance.as_ref().unwrap().component_id, b);
+    assert_eq!((n.width, n.height), (30.0, 30.0));
+    // The same component again is a no-op without a `swapped` entry.
+    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": inst, "componentId": b }] }));
+    assert!(r.get("swapped").is_none(), "{r}");
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.get(&inst).unwrap().instance.as_ref().unwrap().component_id, a);
+  }
+
+  #[test]
+  fn update_nodes_swap_refusals() {
+    let mut e = engine();
+    let (a, b, inst) = swap_setup(&mut e);
+    // Not a component, a component set, a missing id.
+    let frame = one(&mut e, json!({ "type": "frame", "x": 700, "width": 10, "height": 10 }));
+    let err = e
+      .dispatch(ai("update_nodes", json!({ "updates": [{ "id": inst, "componentId": frame }] })))
+      .unwrap_err();
+    assert!(err.contains("not a main component"), "{err}");
+    let err = e
+      .dispatch(ai("update_nodes", json!({ "updates": [{ "id": inst, "componentId": "n_nope" }] })))
+      .unwrap_err();
+    assert!(err.contains("no component n_nope"), "{err}");
+    let v1 = one(
+      &mut e,
+      json!({ "type": "component", "name": "Size=S", "x": 900, "width": 10, "height": 10 }),
+    );
+    let v2 = one(
+      &mut e,
+      json!({ "type": "component", "name": "Size=L", "x": 950, "width": 20, "height": 20 }),
+    );
+    let set = run(&mut e, "arrange", json!({ "action": "combine_variants", "ids": [v1, v2] }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let err = e
+      .dispatch(ai("update_nodes", json!({ "updates": [{ "id": inst, "componentId": set }] })))
+      .unwrap_err();
+    assert!(err.contains("component set") && err.contains(&v1), "{err}");
+    // A swap that would nest a component inside itself.
+    let host = one(
+      &mut e,
+      json!({ "type": "component", "name": "Host", "x": 1200, "width": 100, "height": 100 }),
+    );
+    let inner = run(&mut e, "create_instance", json!({ "componentId": a, "parentId": host }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let err = e
+      .dispatch(ai("update_nodes", json!({ "updates": [{ "id": inner, "componentId": host }] })))
+      .unwrap_err();
+    assert!(err.contains("can't swap to Host"), "{err}");
+    // A nested instance inside an instance of Host can't become Host either (it used to answer
+    // `swapped` and change nothing).
+    run(&mut e, "create_instance", json!({ "componentId": host, "x": 1500 }));
+    let outer = run(&mut e, "create_instance", json!({ "componentId": host, "x": 1700 }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let nested = e.doc.get(&outer).unwrap().children[0].clone();
+    let err = e
+      .dispatch(ai("update_nodes", json!({ "updates": [{ "id": nested, "componentId": host }] })))
+      .unwrap_err();
+    assert!(err.contains("can't swap to Host"), "{err}");
+    // A non-instance only warns.
+    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": frame, "componentId": b }] }));
+    assert!(warnings(&r).contains("componentId only swaps instances; ignored"), "{r}");
+    assert!(e.doc.get(&frame).unwrap().instance.is_none());
+  }
+
+  #[test]
+  fn a_swap_between_styled_mains_gives_no_detached_warning() {
+    let mut e = engine();
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Red", "color": "#EF4444" }, { "name": "Blue", "color": "#3B82F6" }] }),
+    );
+    let a = one(
+      &mut e,
+      json!({ "type": "component", "name": "A", "width": 20, "height": 20, "fillStyle": "Red" }),
+    );
+    let b = one(
+      &mut e,
+      json!({ "type": "component", "name": "B", "x": 100, "width": 20, "height": 20, "fillStyle": "Blue" }),
+    );
+    let c = one(
+      &mut e,
+      json!({ "type": "component", "name": "C", "x": 200, "width": 20, "height": 20, "fill": "#00FF00" }),
+    );
+    let inst = run(&mut e, "create_instance", json!({ "componentId": a, "x": 400 }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    for to in [&b, &c] {
+      let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": inst, "componentId": to }] }));
+      assert!(r["swapped"].is_array(), "{r}");
+      assert!(r.get("warnings").is_none(), "{r}");
+    }
+  }
+
+  #[test]
+  fn set_reports_the_requested_value_even_when_it_matches_the_main() {
+    let mut e = engine();
+    let comp = one(
+      &mut e,
+      json!({ "type": "component", "name": "Row", "width": 200, "height": 40, "children": [
+        { "type": "text", "name": "T", "text": "Same" } ] }),
+    );
+    let inst = run(&mut e, "create_instance", json!({ "componentId": comp, "x": 400 }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let label = child_named(&e, &comp, "T");
+    run(
+      &mut e,
+      "set_component_props",
+      json!({ "ops": [{ "op": "add", "component": comp, "kind": "text", "name": "Title", "bind": label }] }),
+    );
+    let set = run(
+      &mut e,
+      "set_component_props",
+      json!({ "ops": [{ "op": "set", "instance": inst, "prop": "Title", "value": "Same" }] }),
+    );
+    assert_eq!(set["results"][0]["value"], "Same", "{set}");
+  }
+
+  #[test]
+  fn fix_issues_counts_what_it_skipped() {
+    let mut e = engine();
+    bound_logout(&mut e);
+    let r = run(&mut e, "fix_issues", json!({ "kinds": ["lowContrast"] }));
+    assert_eq!(r["skippedCount"], 1, "{r}");
+  }
+
+  #[test]
+  fn update_nodes_swaps_a_nested_instance_through_its_outer_instance() {
+    let mut e = engine();
+    let (a, b, _) = swap_setup(&mut e);
+    let host = one(
+      &mut e,
+      json!({ "type": "component", "name": "Host", "x": 1200, "width": 100, "height": 100 }),
+    );
+    run(&mut e, "create_instance", json!({ "componentId": a, "parentId": host }));
+    let outer = run(&mut e, "create_instance", json!({ "componentId": host, "x": 1500 }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let nested = e.doc.get(&outer).unwrap().children[0].clone();
+    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": nested, "componentId": b }] }));
+    assert_eq!(r["swapped"][0]["to"], json!(b), "{r}");
+    let nested = e.doc.get(&outer).unwrap().children[0].clone();
+    assert_eq!(e.doc.get(&nested).unwrap().instance.as_ref().unwrap().component_id, b);
+  }
+
+  #[test]
+  fn colour_errors_point_at_variables_and_styles() {
+    let mut e = engine();
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "variables": [{ "name": "Background", "values": "#FFFFFF" }] }),
+    );
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand", "color": "#7C5CFF" }] }),
+    );
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "rectangle", "fill": "Theme/Background" }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("use bind: {fill: 'Theme/Background'}"), "{err}");
+    let err = e
+      .dispatch(ai("create_nodes", json!({ "nodes": [{ "type": "rectangle", "stroke": "Brand" }] })))
+      .unwrap_err();
+    assert!(err.contains("use strokeStyle: 'Brand'"), "{err}");
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "rectangle", "fill": "mauve-ish" }] }),
+      ))
+      .unwrap_err();
+    assert!(
+      err.contains("unrecognised colour 'mauve-ish'") && !err.contains("use bind"),
+      "{err}"
+    );
+  }
+
+  #[test]
+  fn comment_tools_return_the_thread_state() {
+    let mut e = engine();
+    let page = e.page.clone();
+    e.dispatch(Command::AddComment {
+      page: Some(page),
+      x: 1.0,
+      y: 2.0,
+      node: None,
+      text: "Hi".into(),
+      author: "Me".into(),
+      time: 1.0,
+    })
+    .unwrap();
+    let id = e.doc.comments.keys().next().unwrap().clone();
+    let r = run(&mut e, "reply_comment", json!({ "id": id, "text": "Done" }));
+    assert_eq!(r, json!({ "id": id, "replies": 1, "resolved": false }));
+    let r = run(&mut e, "resolve_comment", json!({ "id": id }));
+    assert_eq!(r, json!({ "id": id, "resolved": true }));
+  }
+
+  #[test]
+  fn effect_style_error_names_the_keys() {
+    let mut e = engine();
+    let err = e
+      .dispatch(ai("define_styles", json!({ "effects": [{ "name": "Soft" }] })))
+      .unwrap_err();
+    assert!(err.contains("shadow {x, y, blur, spread, color}, blur or backgroundBlur"), "{err}");
+  }
+
+  #[test]
+  fn truncated_gives_counts() {
+    let mut e = engine();
+    let nodes: Vec<Value> = (0..300)
+      .map(|i| json!({ "type": "rectangle", "name": format!("r{i}"), "x": i * 12, "width": 10, "height": 10 }))
+      .collect();
+    run(&mut e, "create_nodes", json!({ "nodes": nodes }));
+    let d = run(&mut e, "get_document", json!({}));
+    let t = d["truncated"].as_str().unwrap();
+    assert!(t.contains("of 300 layers on this page") && t.contains("outline cap"), "{t}");
+    assert!(d["moreLayers"].as_u64().unwrap() > 0);
+  }
+
+  #[test]
+  fn define_variables_returns_only_the_touched_collections() {
+    let mut e = engine();
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Other", "variables": [{ "name": "x", "type": "number", "value": 1 }] }),
+    );
+    let r = run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "variables": [{ "name": "a", "type": "number", "value": 1 }] }),
+    );
+    assert_eq!(r["collections"].as_array().unwrap().len(), 1);
+    assert_eq!(r["collections"][0]["name"], "Theme");
+    assert_eq!(r["others"], 1);
+    let r = run(&mut e, "define_variables", json!({ "collection": "Theme", "delete": ["a"] }));
+    assert_eq!(r["collections"].as_array().unwrap().len(), 1);
+    assert_eq!(r["others"], 1);
+    assert_eq!(r["unbound"], 0);
+  }
+
+  #[test]
+  fn set_prototype_echoes_the_interaction() {
+    let mut e = engine();
+    let a = one(&mut e, json!({ "type": "frame", "name": "A", "width": 100, "height": 100 }));
+    let b = one(
+      &mut e,
+      json!({ "type": "frame", "name": "B", "x": 200, "width": 100, "height": 100 }),
+    );
+    let btn = created(&run(
+      &mut e,
+      "create_nodes",
+      json!({ "parentId": a, "nodes": [{ "type": "rectangle", "name": "Go", "width": 40, "height": 20 }] }),
+    ))[0]
+      .clone();
+    let r = run(
+      &mut e,
+      "set_prototype",
+      json!({ "nodeId": btn, "destinationId": b, "transition": "slide_left" }),
+    );
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["interaction"]["destinationId"], json!(b), "{r}");
+    assert!(r["interaction"]["trigger"].is_string());
+    assert!(r["interaction"]["transition"].is_string());
+    let r = run(&mut e, "set_prototype", json!({ "nodeId": btn, "url": "https://example.com" }));
+    assert_eq!(r["interaction"]["url"], "https://example.com");
+    assert!(r["replaced"].is_array());
+  }
+
+  #[test]
+  fn tool_descriptions_carry_the_new_text() {
+    let tools = crate::ai::tool_defs();
+    let text = |name: &str| {
+      tools.as_array().unwrap().iter().find(|t| t["name"] == name).unwrap()["description"]
+        .as_str()
+        .unwrap()
+        .to_string()
+    };
+    assert!(text("update_nodes").contains("`componentId` swaps it"));
+    assert!(text("arrange").contains("Property 1"));
+    assert!(text("create_nodes").contains("`type: image` layer is a rectangle with an image fill"));
+    assert!(text("delete_nodes").contains("instancesKept"));
+    assert!(text("fix_issues").contains("skipped"));
+    assert!(text("set_component_props").contains("unused"));
   }
 }

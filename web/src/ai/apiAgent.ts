@@ -5,6 +5,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { useChat, push, appendText, patchItem, showScreenshot } from "./chatState";
 import { DRAG_BUSY, executeTool, systemPrompt, toolDefs, whenCanvasIdle, type ToolOutcome } from "./tools";
 import type { Attachment } from "./bridgeClient";
+import { currentDocRev, saveSoonSince } from "../store";
 
 type Messages = Anthropic.Beta.BetaMessageParam[];
 /** The messages of each file's conversation (in memory: a reload starts them fresh). */
@@ -185,7 +186,9 @@ async function runTurns(
         patchItem(chip, { ok: false, detail: "Stopped" });
         throw aborted();
       }
+      const rev = currentDocRev();
       const out: ToolOutcome = idle ? await executeTool(use.name, use.input, { group, fileId: file }) : { ok: false, result: DRAG_BUSY };
+      saveSoonSince(rev);
       patchItem(chip, { ok: out.ok, detail: out.ok ? undefined : String(out.result) });
       showScreenshot(out, use.name);
       const text = typeof out.result === "string" ? out.result : JSON.stringify(out.result);

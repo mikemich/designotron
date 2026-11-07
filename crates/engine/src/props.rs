@@ -337,6 +337,7 @@ fn add(
   };
   let value = coerce(doc, kind, &first)?;
   let id = gen.next("pr_");
+  let unbound = bind_to.is_none();
   let n = doc.get_mut(&owner).ok_or("no such component")?;
   n.component.get_or_insert_with(ComponentInfo::default).props.push(PropDef {
     id: id.clone(),
@@ -351,6 +352,9 @@ fn add(
     if let (Some(v), Some(_)) = (default, layer_default) {
       apply_default(doc, gen, &owner, &id, &v)?;
     }
+  }
+  if unbound {
+    return Ok(json!({ "id": id, "warning": "not bound to any layer yet" }));
   }
   Ok(json!({ "id": id }))
 }
@@ -799,14 +803,32 @@ fn set(doc: &mut Document, gen: &mut IdGen, instance: &str, prop: &str, value: O
     return set_swap(doc, gen, instance, &def, value).map(|_| json!({}));
   }
   // A value the component already shows is no value at all.
-  let value = match value {
-    Some(v) => Some(coerce(doc, def.kind, &v)?).filter(|v| *v != baseline(doc, instance, &def)),
+  let requested = match value {
+    Some(v) => Some(coerce(doc, def.kind, &v)?),
     None => None,
   };
+  let shown = requested.clone().unwrap_or(Value::Null);
+  let value = requested.filter(|v| *v != baseline(doc, instance, &def));
   write_value(doc, instance, prop, value)?;
   let top = outermost(doc, instance);
   components::sync_instance(doc, &top, gen);
-  Ok(json!({}))
+  // The value is kept either way, but a property no layer of this instance uses changes nothing.
+  if bound_in_instance(doc, instance, PropField::of(def.kind), &def.id).is_empty() {
+    let field = match def.kind {
+      PropKind::Boolean => "visible",
+      _ => "characters",
+    };
+    return Ok(json!({
+      "prop": def.name,
+      "value": shown,
+      "unused": true,
+      "warning": format!(
+        "no layer of this instance uses '{}'; bind one with {{op:'bind', node, field:'{field}', prop}}",
+        def.name
+      ),
+    }));
+  }
+  Ok(json!({ "prop": def.name, "value": shown }))
 }
 
 fn set_swap(doc: &mut Document, gen: &mut IdGen, a: &str, def: &PropDef, value: Option<Value>) -> Result<(), String> {
