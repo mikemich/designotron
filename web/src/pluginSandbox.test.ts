@@ -64,12 +64,56 @@ describe("plugin sandbox channel and capture", () => {
     const start = s.slice(s.indexOf("const onStart"));
     const timerAt = start.indexOf("later(() => {");
     expect(timerAt).toBeGreaterThan(-1);
-    // The code is compiled and run only inside the timer callback.
-    expect(start.indexOf("new Function")).toBeGreaterThan(timerAt);
-    expect(start.indexOf("}, 0);")).toBeGreaterThan(start.indexOf("new Function"));
+    // Plugin code is compiled and run only by `run`, which only the timer callback calls.
+    expect([...s.matchAll(/new Function\(/g)].length).toBe(1);
+    expect([...s.matchAll(/\bcompile\(/g)].length).toBe(2); // the probe and the code
+    expect(s.slice(0, s.indexOf("const run = async")).includes("compile(code)")).toBe(false);
+    expect([...s.matchAll(/\brun\(/g)].length).toBe(1);
+    expect(start.indexOf("run(code, check)")).toBeGreaterThan(timerAt);
+    expect(start.indexOf("}, 0);")).toBeGreaterThan(start.indexOf("run(code, check)"));
     // Inside the callback nothing refers to the event, the message or the port.
     const callback = start.slice(timerAt, start.indexOf("}, 0);"));
     expect(callback).not.toMatch(/\bm\b|\be\b|port/);
+  });
+
+  it("waits for calls in flight before it says done, and reports an error at once", () => {
+    const run = s.slice(s.indexOf("const run = async"), s.indexOf("const onStart"));
+    expect(run.indexOf("await settle()")).toBeGreaterThan(run.indexOf("await fn(window.dt)"));
+    expect(run.indexOf('call("done"')).toBeGreaterThan(run.indexOf("await settle()"));
+    expect(run).toContain('call("error", describe(err))');
+    expect(s).toMatch(/const check = \(\) => \(pending\.size \? later\(check, 20\) : later\(\(\) => \(pending\.size \? check\(\) : resolve\(\)\), 50\)\)/);
+  });
+
+  it("throttles console output and flushes before calls, errors and navigation", () => {
+    expect(s).toContain("buf.length >= 200");
+    expect(s).toContain("later(flushLogs, 100)");
+    expect(s).toContain('" lines dropped)"');
+    expect(s.slice(s.indexOf("const call = "), s.indexOf("const describe")).includes("flushLogs();")).toBe(true);
+    expect(s.slice(s.indexOf("const leave"), s.indexOf('listen("pagehide"')).includes("flushLogs();")).toBe(true);
+    for (const level of ["log", "info", "warn", "error", "debug"]) expect(s).toContain('"' + level + '"');
+  });
+
+  it("the syntax-error diagnosis script throws before it evaluates anything", () => {
+    // Code that closes the wrapper early ("})") would otherwise run at top level.
+    const m = /later\("([^"]*)" \+ code \+ "([^"]*)", 0\)/.exec(s);
+    expect(m).not.toBeNull();
+    expect(m![1].startsWith("throw null;")).toBe(true);
+    expect(s).toContain("const l = e.lineno - 2;");
+    // Compile-only: code that is invalid under the run wrapper but valid as a script still stops at the throw.
+    const code = "}); globalThis.__ran = 1; let dt = 1; (async function(){";
+    const runWrapper = () => new Function("dt", "return (async () => {\n" + code + "\n})()");
+    expect(runWrapper).toThrow(SyntaxError);
+    const script = JSON.parse('"' + m![1] + '"') + code + JSON.parse('"' + m![2] + '"');
+    // It parses (so the early close really is valid there), and constructing it ran nothing; at run time the throw comes first.
+    const fn = new Function(script);
+    expect((globalThis as any).__ran).toBeUndefined();
+    expect(() => fn()).toThrow();
+    expect((globalThis as any).__ran).toBeUndefined();
+  });
+
+  it("a check start only compiles", () => {
+    const run = s.slice(s.indexOf("const run = async"), s.indexOf("const onStart"));
+    expect(run.indexOf("if (check) return send({ dtPlugin: true, checked: true, ok: true })")).toBeLessThan(run.indexOf("await fn(window.dt)"));
   });
 
   it("reports navigation and unhandled rejections, trusted events only", () => {

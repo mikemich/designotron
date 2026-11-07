@@ -5,12 +5,14 @@
 // frame-src (index.html) refuses the frame's navigation to the web. The editor talks to the frame
 // over a MessageChannel whose far end only the bootstrap holds (pluginSandbox.ts), so a document
 // that replaces the plugin in the frame can't call tools, hear replies or keep the run alive.
+// What a run says (console.*, notify, failures, tool warnings) goes to the plugin console (pluginLog.ts).
 
 import { create } from "zustand";
 import { selection, toast, useStore } from "./store";
 import { DRAG_BUSY, executeTool, whenCanvasIdle } from "./ai/tools";
 import { PLUGIN_SANDBOX, sandboxDocument } from "./pluginSandbox";
-import { hasWebAddress } from "./pluginPolicy";
+import { WEB_ADDRESS_REFUSAL, hasWebAddress } from "./pluginPolicy";
+import { asLevel, asLine, logFlush, logPush, logStart, usePluginLog } from "./pluginLog";
 import { userName } from "./canvas/Comments";
 
 export interface Plugin {
@@ -136,6 +138,7 @@ export function runPlugin(plugin: Plugin) {
   frame.className = "plugin-frame hidden";
   frame.title = plugin.name;
   const running: Running = { plugin, frame, ui: null };
+  logStart();
   usePlugins.setState({ running });
   const runId = ++runSeq;
   let step = 0;
@@ -167,6 +170,12 @@ export function runPlugin(plugin: Plugin) {
     if (m?.dtPlugin !== true) return;
     lastPong = Date.now();
     if (m.navigating) return navigatedAway();
+    if (m.log !== undefined) {
+      // A console line: [level, text, line]. No id, no reply. Whatever the frame sends is cut and checked.
+      const l = Array.isArray(m.log) ? m.log : [];
+      logPush(asLevel(l[0]), String(l[1] ?? "").slice(0, 2100), asLine(l[2]));
+      return;
+    }
     if (m.pong) {
       if (usePlugins.getState().running?.stuck) usePlugins.setState({ running: { ...running, stuck: false } });
       return;
@@ -185,7 +194,7 @@ export function runPlugin(plugin: Plugin) {
           } catch {
             throw new Error("tool input must be plain JSON");
           }
-          if (hasWebAddress(input)) throw new Error("plugins can't use web addresses yet");
+          if (hasWebAddress(input)) throw new Error(WEB_ADDRESS_REFUSAL);
           // The pause is measured from the previous call, before waiting for the canvas.
           if (running.ui && lastCall && Date.now() - lastCall > 1000) step++;
           if (!(await whenCanvasIdle())) throw new Error(DRAG_BUSY);
@@ -193,6 +202,9 @@ export function runPlugin(plugin: Plugin) {
           const out = await executeTool(String(name), input, { group: `plugin:${runId}:${step}`, author });
           lastCall = Date.now();
           if (!out.ok) throw new Error(String(out.result));
+          // Warnings come back to the plugin, and the author sees them in the console too.
+          const warnings = (out.result as { warnings?: unknown } | null)?.warnings;
+          if (Array.isArray(warnings)) for (const w of warnings.slice(0, 20)) logPush("tool", `${String(name)}: ${String(w)}`, asLine(m.line));
           return reply(m.id, out.result);
         }
         case "selection": {
@@ -202,6 +214,7 @@ export function runPlugin(plugin: Plugin) {
           return reply(m.id, (out.result as any)?.nodes ?? out.result);
         }
         case "notify":
+          logPush("notify", String(m.args[0]), asLine(m.line));
           toast(String(m.args[0]));
           return reply(m.id);
         case "showUi":
@@ -215,17 +228,28 @@ export function runPlugin(plugin: Plugin) {
           step++;
           return reply(m.id);
         case "done":
-          if (!running.ui) stopPlugin();
+          if (!running.ui) {
+            logPush("info", "Done");
+            stopPlugin();
+          }
           return reply(m.id);
-        case "error":
-          toast(`Plugin “${plugin.name}” failed: ${String(m.args[0]).split("\n")[0]}`, "error");
+        case "error": {
+          const text = String(m.args[0]).split("\n")[0].slice(0, 500);
+          const line = asLine(m.args[1]);
+          logPush("error", text, line);
+          toast(`Plugin “${plugin.name}” failed${line ? ` at line ${line}` : ""}: ${text}`, "error");
           stopPlugin();
           return;
-        case "warn":
+        }
+        case "warn": {
           // An un-awaited dt.tool() that failed: nothing else would show it.
-          toast(`Plugin “${plugin.name}”: ${String(m.args[0]).split("\n")[0]}`, "error");
+          const text = String(m.args[0]).split("\n")[0].slice(0, 500);
+          logPush("error", text, asLine(m.line));
+          toast(`Plugin “${plugin.name}”: ${text}`, "error");
           return;
+        }
         case "close":
+          logPush("info", "Closed");
           stopPlugin();
           return;
       }
@@ -286,4 +310,50 @@ export function stopPlugin() {
   const p = loadPlugins().find((x) => x.id === id);
   if (p) runPlugin(p);
   return !!p;
-}, plugin: () => usePlugins.getState().running?.plugin.id ?? null };
+}, plugin: () => usePlugins.getState().running?.plugin.id ?? null, pluginLog: () => (logFlush(), usePluginLog.getState().entries) };
+
+export type CheckResult = { ok: true } | { ok: false; message: string; line?: number; column?: number };
+
+/** Whether a plugin's code compiles, without running it. The frame (same page, sandbox and CSP as a
+ *  run) compiles it and answers over its own channel: that channel carries nothing but the
+ *  answer (the editor never replies on it, so the frame has no tools), and the frame is removed
+ *  whatever happens. A frame that doesn't answer within 2 seconds is replaced by a plain compile in
+ *  the editor, which can't say where the error is. */
+export function checkPluginCode(code: string): Promise<CheckResult> {
+  if (!code.trim()) return Promise.resolve({ ok: false, message: "The plugin has no code." });
+  return new Promise((resolve) => {
+    const frame = document.createElement("iframe");
+    frame.setAttribute("sandbox", PLUGIN_SANDBOX);
+    frame.referrerPolicy = "no-referrer";
+    frame.className = "plugin-frame hidden";
+    frame.title = "Plugin check";
+    const channel = new MessageChannel();
+    let timer = 0;
+    let done = false;
+    const finish = (r: CheckResult) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      channel.port1.close();
+      frame.remove();
+      resolve(r);
+    };
+    channel.port1.onmessage = (e) => {
+      const m = e.data;
+      if (m?.dtPlugin !== true || m.checked !== true) return;
+      if (m.ok === true) return finish({ ok: true });
+      finish({ ok: false, message: String(m.message ?? "invalid code").slice(0, 500), line: asLine(m.line), column: asLine(m.column) });
+    };
+    timer = window.setTimeout(() => {
+      try {
+        new Function("dt", "return (async () => {\n" + code + "\n})()");
+        finish({ ok: true });
+      } catch (err) {
+        finish({ ok: false, message: String(err instanceof Error ? err.message : err).slice(0, 500) });
+      }
+    }, 2000);
+    frame.addEventListener("load", () => frame.contentWindow?.postMessage({ dtHost: true, check: true, code }, "*", [channel.port2]));
+    frame.srcdoc = sandboxDocument();
+    document.body.appendChild(frame);
+  });
+}

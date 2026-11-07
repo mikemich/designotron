@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { EDITOR_FRAME_SRC, hasWebAddress } from "./pluginPolicy";
+import { EDITOR_FRAME_SRC, WEB_ADDRESS_REFUSAL, hasWebAddress } from "./pluginPolicy";
 
 describe("hasWebAddress", () => {
   it("accepts SVG markup with namespace declarations", () => {
@@ -41,6 +41,41 @@ describe("hasWebAddress", () => {
     expect(plain).toEqual({ a: "https://x", b: ["fine"] });
     expect(hasWebAddress(plain)).toBe(true);
     expect(hasWebAddress(JSON.parse(JSON.stringify(structuredClone({ b: [new String("fine")] }))))).toBe(false);
+  });
+});
+
+describe("plain text may hold web addresses", () => {
+  const url = "See https://example.com/docs for more";
+  it("allows them in text, characters, name, description, span text and comment text", () => {
+    expect(hasWebAddress({ nodes: [{ type: "text", text: url }] })).toBe(false);
+    expect(hasWebAddress({ updates: [{ id: "n_1", text: url }] })).toBe(false);
+    expect(hasWebAddress({ text: { characters: url } })).toBe(false);
+    expect(hasWebAddress({ nodes: [{ type: "rectangle", name: url }] })).toBe(false);
+    expect(hasWebAddress({ name: "Doc", description: url })).toBe(false);
+    expect(hasWebAddress({ nodes: [{ type: "text", spans: [{ text: url }, { text: "plain" }] }] })).toBe(false);
+    expect(hasWebAddress({ id: "n_1", text: url, kind: "comment" })).toBe(false);
+  });
+
+  it("still refuses them as image sources, links, urls, SVG content and variable values", () => {
+    expect(hasWebAddress({ nodes: [{ type: "image", imageUrl: "https://x.test/a.png" }] })).toBe(true);
+    expect(hasWebAddress({ nodes: [{ fills: [{ type: "image", src: "https://x.test/a.png" }] }] })).toBe(true);
+    expect(hasWebAddress({ nodes: [{ type: "text", spans: [{ text: "x", link: "https://x.test" }] }] })).toBe(true);
+    expect(hasWebAddress({ nodes: [{ type: "text", text: "x", href: "https://x.test" }] })).toBe(true);
+    expect(hasWebAddress({ prototype: { url: "https://x.test" } })).toBe(true);
+    expect(hasWebAddress({ nodes: [{ type: "svg", svg: '<svg xmlns="http://www.w3.org/2000/svg"><image href="https://x.test/a.png"/></svg>' }] })).toBe(true);
+    expect(hasWebAddress({ variables: [{ name: "v", values: { light: "https://x.test" } }] })).toBe(true);
+  });
+
+  it("walks objects under an exempt key and checks keys", () => {
+    expect(hasWebAddress({ text: { src: "https://x.test" } })).toBe(true);
+    expect(hasWebAddress({ text: ["https://x.test"] })).toBe(true); // only a direct string value is exempt
+    expect(hasWebAddress({ name: { link: "https://x.test" } })).toBe(true);
+    expect(hasWebAddress({ [url]: 1 })).toBe(true);
+  });
+
+  it("tells the plugin what is allowed", () => {
+    expect(WEB_ADDRESS_REFUSAL).toContain("outside text");
+    expect(WEB_ADDRESS_REFUSAL).toContain("links");
   });
 });
 
