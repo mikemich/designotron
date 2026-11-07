@@ -1783,23 +1783,40 @@ impl Engine {
     id
   }
 
-  /// Replaces layers (paint order) with one vector placed where the top one was.
   /// Boolean operations and flatten work on shapes; a frame, component or instance with layers
-  /// inside would be swallowed whole (its children vanish), so refuse it. Groups are fine.
+  /// inside would be swallowed whole (its children vanish), so refuse it, also when it sits inside
+  /// a selected group (a group's outline is its children's). Groups themselves are fine.
   fn refuse_filled_containers(&self, ids: &[NodeId], what: &str) -> Result<(), String> {
+    fn find<'a>(doc: &'a Document, id: &str) -> Option<&'a Node> {
+      let n = doc.get(id)?;
+      if n.kind == NodeType::Group {
+        return n.children.iter().find_map(|c| find(doc, c));
+      }
+      (n.kind.is_container() && !n.children.is_empty()).then_some(n)
+    }
     for id in ids {
-      let Some(n) = self.doc.get(id) else { continue };
-      if n.kind.is_container() && n.kind != NodeType::Group && !n.children.is_empty() {
+      if let Some(n) = find(&self.doc, id) {
+        let (article, kind) = match n.kind {
+          NodeType::Instance => ("an", "instance"),
+          k => ("a", if k == NodeType::Frame { "frame" } else { k.label() }),
+        };
+        let hint = if n.kind == NodeType::Instance {
+          "Detach it first (arrange detach_instance), or select the shapes inside it"
+        } else {
+          "Select the shapes inside it, or ungroup it first"
+        };
         return Err(format!(
-          "{} is a {} with layers inside; {what}. Select the shapes inside it, or ungroup it first",
+          "{} is {article} {} with layers inside; {what}. {}",
           n.name,
-          n.kind.label().to_lowercase()
+          kind.to_lowercase(),
+          hint
         ));
       }
     }
     Ok(())
   }
 
+  /// Replaces layers (paint order) with one vector placed where the top one was.
   fn replace_with_vector(&mut self, ids: &[NodeId], page_sps: Vec<SubPath>, name: &str) -> Result<NodeId, String> {
     let top = ids.last().ok_or("nothing selected")?;
     let parent = self.doc.get(top).and_then(|n| n.parent.clone());

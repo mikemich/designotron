@@ -351,10 +351,11 @@ pub const MAX_SIZE: f64 = 100_000.0;
 
 /// A size in px: 0 to 100,000.
 pub fn size_px(cx: &Ctx, key: &str, x: f64) -> Result<f64, String> {
+  let shown = if x.abs() >= 1e9 { format!("{x:e}") } else { x.to_string() };
   if x < 0.0 {
-    Err(cx.err(key, format!("{key} must be 0 or more (got {x})")))
+    Err(cx.err(key, format!("{key} must be 0 or more (got {shown})")))
   } else if x > MAX_SIZE {
-    Err(cx.err(key, format!("{key} must be at most {MAX_SIZE} px (got {x})")))
+    Err(cx.err(key, format!("{key} must be at most {MAX_SIZE} px (got {shown})")))
   } else {
     Ok(x)
   }

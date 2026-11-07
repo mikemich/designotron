@@ -335,7 +335,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "define_variables",
-      "description": "Create or update a variable collection with modes and colour/number/string/boolean variables. For a theme or dark mode, use modes [\"Light\", \"Dark\"] and give each colour `values` {Light, Dark}. Bind layer properties with bind: {fill: 'Theme/Background', cornerRadius: 'Radius/md'} in create_nodes/update_nodes (bindable: fill, stroke, cornerRadius, gap, counterGap, padding, paddingTop/Right/Bottom/Left, opacity, width, height, strokeWeight, fontSize, fontFamily, fontWeight, lineHeight, letterSpacing, paragraphSpacing, characters, visible); switch a frame (and its children) to a mode with variableModes: {Theme: 'Dark'}, e.g. on a duplicate of a screen, instead of recolouring it. Bound variables become CSS variables in exported code. A name may appear once per call. An existing variable is updated in place (a missing `type` keeps its type; a different type is refused, delete it first). To rename or delete, pass `rename: [{from, to}]` / `delete: [names]` for variables, `renameModes` / `deleteModes` for modes, `renameCollection: \"New\"` or `deleteCollection: true` for the collection itself: they run before `variables`, as one undo step, renames keep every binding and alias (they follow the id), and deleting a used variable unbinds its layers (they keep their current value) and the result says how many (`unbound`).",
+      "description": "Create or update a variable collection with modes and colour/number/string/boolean variables. For a theme or dark mode, use modes [\"Light\", \"Dark\"] and give each colour `values` {Light, Dark}. Bind layer properties with bind: {fill: 'Theme/Background', cornerRadius: 'Radius/md'} in create_nodes/update_nodes (bindable: fill, stroke, cornerRadius, gap, counterGap, padding, paddingTop/Right/Bottom/Left, opacity, width, height, strokeWeight, fontSize, fontFamily, fontWeight, lineHeight, letterSpacing, paragraphSpacing, characters, visible); switch a frame (and its children) to a mode with variableModes: {Theme: 'Dark'}, e.g. on a duplicate of a screen, instead of recolouring it. Bound variables become CSS variables in exported code. A name may appear once per call. An existing variable is updated in place (a missing `type` keeps its type; a different type is refused, delete it first). To rename or delete, pass `rename: [{from, to}]` / `delete: [names]` for variables, `renameModes` / `deleteModes` for modes, `renameCollection: \"New\"` or `deleteCollection: true` for the collection itself: they run before `variables`, as one undo step, renames keep every binding and alias (they follow the id), and deleting a used variable unbinds its layers (they keep their current value) and the result says how many (`unbound`). A call that renames or deletes returns an object {renamed, deleted, unbound, note?, collections} instead of the plain list of collections. Deleting a mode drops its values and unpins frames set to it.",
       "input_schema": { "type": "object", "properties": {
         "collection": { "type": "string" },
         "rename": { "type": "array", "description": "Rename variables of this collection: [{from, to}] (names or ids)", "items": { "type": "object", "properties": { "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["from", "to"] } },
@@ -413,7 +413,7 @@ pub fn tool_defs() -> Value {
   defs
 }
 
-/// `[{from, to}]` pairs of a rename list, validated; `what` names the field in errors.
+/// `[{from, to}]` pairs of a rename list, validated; `key` names the field in errors.
 fn rename_pairs(input: &Value, key: &str) -> Result<Vec<(String, String)>, String> {
   let Some(v) = input.get(key).filter(|v| !v.is_null()) else {
     return Ok(vec![]);
@@ -471,7 +471,11 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
         .ok_or("renameCollection must be the new name (text)")
     })
     .transpose()?;
-  let delete_coll = input.get("deleteCollection").and_then(|v| v.as_bool()).unwrap_or(false);
+  let delete_coll = match input.get("deleteCollection").filter(|v| !v.is_null()) {
+    None => false,
+    Some(Value::Bool(b)) => *b,
+    Some(_) => return Err("deleteCollection must be true or false".into()),
+  };
   let editing = !renames.is_empty()
     || !deletes.is_empty()
     || !rename_modes.is_empty()
@@ -491,6 +495,11 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
   let mut gone: Vec<String> = Vec::new();
   let mut summary_note = serde_json::Map::new();
   if delete_coll {
+    if !renames.is_empty() || !deletes.is_empty() || !rename_modes.is_empty() || !delete_modes.is_empty() || rename_coll.is_some() {
+      return Err(
+        "deleteCollection can't be combined with rename, delete, renameModes, deleteModes or renameCollection; it removes the whole collection".into(),
+      );
+    }
     if input.get("variables").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) {
       return Err(
         "deleteCollection can't be combined with variables; delete the collection in one call, define variables in another".into(),
@@ -515,11 +524,25 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
       all.len() - 1
     }
   };
-  // Renames and deletions come first; the variables of the same call are applied on top.
+  // Deletions, then renames (so rename B to C works beside delete C); the variables of the same
+  // call are applied on top.
   let mut renamed: Vec<Value> = Vec::new();
   let mut deleted_vars: Vec<String> = Vec::new();
   let mut deleted_modes: Vec<String> = Vec::new();
   let mut problems: Vec<String> = Vec::new();
+  for m in &delete_modes {
+    match all[idx].modes.iter().position(|x| &x.name == m || &x.id == m) {
+      Some(_) if all[idx].modes.len() == 1 => problems.push(format!(
+        "deleteModes: {m} is the only mode of {}; a collection needs one",
+        all[idx].name
+      )),
+      Some(i) => {
+        all[idx].modes.remove(i);
+        deleted_modes.push(m.clone());
+      }
+      None => problems.push(format!("deleteModes: no mode '{m}' in {}", all[idx].name)),
+    }
+  }
   for (from, to) in &rename_modes {
     match all[idx].modes.iter().position(|m| &m.name == from || &m.id == from) {
       Some(i) => {
@@ -533,17 +556,14 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
       None => problems.push(format!("renameModes: no mode '{from}' in {}", all[idx].name)),
     }
   }
-  for m in &delete_modes {
-    match all[idx].modes.iter().position(|x| &x.name == m || &x.id == m) {
-      Some(_) if all[idx].modes.len() == 1 => problems.push(format!(
-        "deleteModes: {m} is the only mode of {}; a collection needs one",
-        all[idx].name
-      )),
+  for d in &deletes {
+    let c = &mut all[idx];
+    match c.variables.iter().position(|v| &v.name == d || &v.id == d) {
       Some(i) => {
-        all[idx].modes.remove(i);
-        deleted_modes.push(m.clone());
+        gone.push(c.variables[i].id.clone());
+        deleted_vars.push(c.variables.remove(i).name.clone());
       }
-      None => problems.push(format!("deleteModes: no mode '{m}' in {}", all[idx].name)),
+      None => problems.push(format!("delete: no variable '{d}' in {}", c.name)),
     }
   }
   for (from, to) in &renames {
@@ -558,16 +578,6 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
         }
       }
       None => problems.push(format!("rename: no variable '{from}' in {}", c.name)),
-    }
-  }
-  for d in &deletes {
-    let c = &mut all[idx];
-    match c.variables.iter().position(|v| &v.name == d || &v.id == d) {
-      Some(i) => {
-        gone.push(c.variables[i].id.clone());
-        deleted_vars.push(c.variables.remove(i).name.clone());
-      }
-      None => problems.push(format!("delete: no variable '{d}' in {}", c.name)),
     }
   }
   if let Some(new) = &rename_coll {
@@ -624,8 +634,21 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
     // An existing variable keeps its type when none is given; a new one defaults to color.
     let old_kind = all[idx].variables.iter().find(|v| v.name == vname).map(|v| v.kind);
     let given = spec.get("type").filter(|v| !v.is_null());
+    let inferred = || {
+      let v = spec
+        .get("value")
+        .or_else(|| spec.get("values").and_then(|m| m.as_object()).and_then(|m| m.values().next()))?;
+      match v {
+        Value::Number(_) => Some(VarKind::Number),
+        Value::Bool(_) => Some(VarKind::Boolean),
+        // A colour string stays a colour; any other text is a string.
+        Value::String(t) if crate::color::parse_strict(t).is_none() => Some(VarKind::String),
+        _ => None,
+      }
+    };
     let kind: VarKind = match (given, old_kind) {
       (None, Some(k)) => k,
+      (None, None) if inferred().is_some() => inferred().unwrap_or(VarKind::Color),
       (g, _) => serde_json::from_value(g.cloned().unwrap_or(json!("color")))
         .map_err(|_| format!("{vname}: type must be color, number, string or boolean"))?,
     };
@@ -878,11 +901,12 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       if found.is_empty() {
         return Err(not_found(&ids, "delete"));
       }
-      // Instances of a deleted main component stay behind; count them.
+      // Main components anywhere in the deleted subtrees; their instances stay behind. Counted
+      // like the editor does: copies nested inside other instances follow their outer instance.
       let mains: Vec<NodeId> = found
         .iter()
+        .flat_map(|id| e.doc.subtree(id))
         .filter(|id| e.doc.get(id).is_some_and(|n| n.kind == NodeType::Component))
-        .cloned()
         .collect();
       ops::delete(&mut e.doc, &found);
       let detached = e
@@ -890,6 +914,12 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         .nodes
         .values()
         .filter(|n| n.instance.as_ref().is_some_and(|i| mains.contains(&i.component_id)))
+        .filter(|n| {
+          !e.doc
+            .ancestors(&n.id)
+            .iter()
+            .any(|a| e.doc.get(a).is_some_and(|a| a.kind == NodeType::Instance))
+        })
         .count();
       let mut r = json!({ "deleted": found });
       if detached > 0 {
@@ -912,13 +942,25 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       let (x, y) = (num(input.get("x")).unwrap_or(0.0), num(input.get("y")).unwrap_or(0.0));
       match e.doc.get(&comp) {
         Some(c) if c.kind == NodeType::Component => {}
+        Some(c) if c.kind == NodeType::ComponentSet => {
+          let variants: Vec<String> = c
+            .children
+            .iter()
+            .filter_map(|v| e.doc.get(v))
+            .map(|v| format!("{} ({})", v.id, v.name))
+            .collect();
+          return Err(format!(
+            "componentId {comp} is a component set; place one of its variants: {}",
+            variants.join(", ")
+          ));
+        }
         Some(c) => {
           return Err(format!(
-            "componentId {comp} is a {}, not a main component; pass the id of a component (find them with get_nodes type component)",
+            "componentId {comp} is a {}, not a main component; pass the id of a component (find them with find_nodes type component)",
             c.kind.label()
           ))
         }
-        None => return Err(format!("no component {comp}")),
+        None => return Err(format!("no component {comp}; find components with find_nodes type component")),
       }
       let mut page = e.page.clone();
       if let Some(p) = &parent {
@@ -926,8 +968,18 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         page = e.doc.get(p).map(|n| n.page.clone()).unwrap_or(page);
       }
       let id = crate::components::create_instance(&mut e.doc, &comp, parent.as_deref(), &page, x, y, &mut e.gen).ok_or_else(|| {
-        let name = e.doc.get(&comp).map(|c| c.name.clone()).unwrap_or_default();
-        format!("can't place an instance of {name} inside {name} itself (or inside one of its own instances)")
+        let name = |id: &str| e.doc.get(id).map(|c| c.name.clone()).unwrap_or_default();
+        let host = parent.as_deref().and_then(|p| crate::components::enclosing_component(&e.doc, p));
+        match host {
+          Some(h) if h != comp => format!(
+            "{} is used inside {}, so {} can't go inside {} (it would contain itself)",
+            name(&h),
+            name(&comp),
+            name(&comp),
+            name(&h)
+          ),
+          _ => format!("can't place an instance of {} inside {} itself", name(&comp), name(&comp)),
+        }
       })?;
       Ok(json!({ "id": id }))
     }
@@ -1657,7 +1709,6 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
   Ok(r)
 }
 
-/// Creates colour and text styles; a name that already exists is updated in place (its layers follow).
 /// The style a rename/delete entry names: by name or id, across colour, text, effect and grid
 /// styles. Returns (id, kind word). A name shared by two kinds is refused with the ids to use.
 fn find_style(e: &Engine, key: &str, what: &str) -> Result<(String, &'static str), String> {
@@ -1718,6 +1769,7 @@ fn style_name_of(e: &Engine, id: &str) -> String {
     .unwrap_or_default()
 }
 
+/// Creates colour and text styles; a name that already exists is updated in place (its layers follow).
 fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
   let mut cx = Ctx::new();
   let (mut created, mut updated) = (Vec::new(), Vec::new());
@@ -2065,7 +2117,13 @@ fn find_nodes(e: &Engine, input: &Value) -> Result<Value, String> {
     }
   }
   let limit_given = match input.get("limit").filter(|v| !v.is_null()) {
-    Some(v) => Some(parse::number(&cx, "limit", v)?.max(0.0) as usize),
+    Some(v) => {
+      let l = parse::number(&cx, "limit", v)?;
+      if l < 0.0 {
+        return Err(cx.err("limit", "must be 0 or more (0 returns only the total)"));
+      }
+      Some(l as usize)
+    }
     None => None,
   };
   let limit = limit_given.map_or(FIND_DEFAULT, |l| l.clamp(1, FIND_MAX));
@@ -2438,7 +2496,6 @@ pub fn insert_specs(e: &mut Engine, specs: &[Value], parent: Option<&str>) -> Re
   insert_specs_ex(e, specs, parent).map(|r| r.created)
 }
 
-/// `insert_specs` with the named descendants and the warnings about the input.
 /// A parent for new layers must exist, hold children and not be a device's system UI.
 fn check_parent(e: &Engine, p: &str) -> Result<(), String> {
   let pn = e.doc.get(p).ok_or_else(|| format!("no parent layer {p}"))?;
@@ -2454,6 +2511,7 @@ fn check_parent(e: &Engine, p: &str) -> Result<(), String> {
   Ok(())
 }
 
+/// `insert_specs` with the named descendants and the warnings about the input.
 pub fn insert_specs_ex(e: &mut Engine, specs: &[Value], parent: Option<&str>) -> Result<Inserted, String> {
   if let Some(p) = parent {
     check_parent(e, p)?;
@@ -2852,7 +2910,12 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
       };
     }
   }
+  // Only an axis this spec sets is judged: a layer that already has min > max (the design panel,
+  // an import or an old file) must stay editable.
   for (lo, hi, name) in [(n.min_width, n.max_width, "Width"), (n.min_height, n.max_height, "Height")] {
+    if s.get(format!("min{name}")).is_none() && s.get(format!("max{name}")).is_none() {
+      continue;
+    }
     if let (Some(lo), Some(hi)) = (lo, hi) {
       if lo > hi {
         return Err(cx.err(

@@ -123,6 +123,16 @@ try {
   const after = await pageLayers();
   check("frames and children are intact after the refusals", JSON.stringify(before) === JSON.stringify(after) && !!(await idOf("Heading")) && !!(await idOf("ModalText")), after.join(","));
   await shot("x01-frames-intact");
+  // A frame hidden inside a group is refused too, and a layer with min > max stays editable.
+  const grp = await tool("arrange", { action: "group", ids: [modal] });
+  const grpId = grp.obj?.id ?? (await doc()).nodes[modal].parent;
+  const gu = await tool("arrange", { action: "union", ids: [grpId, r1] });
+  check("union of a group holding a frame with layers is refused", !gu.ok && /Modal is a frame with layers inside/.test(gu.text) && !!(await idOf("ModalText")), gu.text);
+  await undo();
+  await dispatch({ op: "update", ids: [r2], patch: { minWidth: 200, maxWidth: 40 } });
+  const edit = await tool("update_nodes", { updates: [{ id: r2, fill: "#FF0000", name: "R2" }] });
+  check("a layer with min above max can still be edited", edit.ok, edit.text);
+  await dispatch({ op: "update", ids: [r2], patch: { minWidth: null, maxWidth: null } });
   const un = await tool("arrange", { action: "union", ids: [r1, r2] });
   check("union of two rectangles still works", un.ok && /Union/.test(JSON.stringify(await pageLayers())), un.text);
   await undo();

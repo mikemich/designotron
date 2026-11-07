@@ -2726,4 +2726,216 @@ mod r15b {
     let r = run(&mut e, "pages", json!({ "action": "delete", "id": pid }));
     assert_eq!(r["deleted"], json!(pid));
   }
+
+  #[test]
+  fn a_layer_that_already_has_min_above_max_stays_editable() {
+    let mut e = engine();
+    let id = one(&mut e, json!({ "type": "frame", "name": "Old", "width": "hug", "height": 50 }));
+    e.dispatch(Command::Update {
+      ids: vec![id.clone()],
+      patch: json!({ "minWidth": 200, "maxWidth": 40 }),
+    })
+    .unwrap();
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "fill": "#FF0000", "name": "Renamed" }] }),
+    );
+    assert_eq!(e.doc.get(&id).unwrap().name, "Renamed");
+    let m = err(&mut e, "update_nodes", json!({ "updates": [{ "id": id, "maxWidth": 30 }] }));
+    assert!(m.contains("minWidth 200 is larger than maxWidth 30"), "{m}");
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": id, "minWidth": 10 }] }));
+  }
+
+  #[test]
+  fn boolean_ops_refuse_a_frame_hidden_inside_a_group() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "frame", "name": "Home", "width": 100, "height": 100, "children": [{ "type": "rectangle", "name": "Kid", "width": 20, "height": 20 }] },
+        { "type": "rectangle", "name": "R1", "x": 50, "width": 100, "height": 100 },
+        { "type": "component", "name": "Btn", "x": 300, "width": 60, "height": 30, "children": [{ "type": "rectangle", "name": "Dot", "width": 5, "height": 5 }] }] }),
+    );
+    let ids = created(&r);
+    run(&mut e, "arrange", json!({ "action": "group", "ids": [ids[0]] }));
+    let group = e.doc.get(&ids[0]).unwrap().parent.clone().unwrap();
+    let nodes_before = e.doc.nodes.len();
+    for action in ["union", "flatten"] {
+      let m = err(&mut e, "arrange", json!({ "action": action, "ids": [group, ids[1]] }));
+      assert!(m.contains("Home is a frame with layers inside"), "{m}");
+    }
+    assert_eq!(e.doc.nodes.len(), nodes_before, "nothing was removed");
+    // An instance with layers: the article is right and the hint says to detach it.
+    let inst = run(&mut e, "create_instance", json!({ "componentId": ids[2] }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let m = err(&mut e, "arrange", json!({ "action": "union", "ids": [inst, ids[1]] }));
+    assert!(
+      m.contains("is an instance with layers inside") && m.contains("detach_instance"),
+      "{m}"
+    );
+  }
+
+  #[test]
+  fn instances_detached_counts_like_the_editor() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "component", "name": "Btn", "width": 40, "height": 20 },
+        { "type": "component", "name": "Card", "x": 200, "width": 100, "height": 60 }] }),
+    );
+    let ids = created(&r);
+    let (btn, card) = (ids[0].clone(), ids[1].clone());
+    run(&mut e, "create_instance", json!({ "componentId": btn, "parentId": card }));
+    run(&mut e, "create_instance", json!({ "componentId": card, "x": 400 }));
+    run(&mut e, "create_instance", json!({ "componentId": card, "x": 600 }));
+    run(&mut e, "create_instance", json!({ "componentId": btn, "x": 800 }));
+    let d = run(&mut e, "delete_nodes", json!({ "ids": [btn] }));
+    assert_eq!(
+      d["instancesDetached"], 2,
+      "copies inside Card instances follow their outer instance: {d}"
+    );
+    // A frame or component set holding a main counts too.
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Kit", "width": 300, "height": 100, "children": [
+        { "type": "component", "name": "Chip", "width": 40, "height": 20 }] }] }),
+    );
+    let kit = created(&r)[0].clone();
+    let chip = e.doc.get(&kit).unwrap().children[0].clone();
+    run(&mut e, "create_instance", json!({ "componentId": chip, "x": 500 }));
+    let d = run(&mut e, "delete_nodes", json!({ "ids": [kit] }));
+    assert_eq!(d["instancesDetached"], 1, "{d}");
+  }
+
+  #[test]
+  fn create_instance_names_the_real_problem() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [
+        { "type": "component", "name": "Button", "width": 40, "height": 20 },
+        { "type": "component", "name": "Card", "x": 200, "width": 100, "height": 60 }] }),
+    );
+    let ids = created(&r);
+    let (button, card) = (ids[0].clone(), ids[1].clone());
+    let inner = run(&mut e, "create_instance", json!({ "componentId": button, "parentId": card }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let m = err(&mut e, "create_instance", json!({ "componentId": card, "parentId": button }));
+    assert!(m.contains("Button is used inside Card, so Card can't go inside Button"), "{m}");
+    // Through an instance that sits inside the main.
+    let m = err(&mut e, "create_instance", json!({ "componentId": card, "parentId": inner }));
+    assert!(m.contains("can't place an instance of Card inside Card itself"), "{m}");
+    // A deeper frame inside the main.
+    let f = one(&mut e, json!({ "type": "frame", "width": 10, "height": 10 }));
+    run(&mut e, "move_nodes", json!({ "ids": [f], "parentId": card }));
+    let m = err(&mut e, "create_instance", json!({ "componentId": card, "parentId": f }));
+    assert!(m.contains("Card inside Card itself"), "{m}");
+    // On the canvas it is fine, also inside an instance of Card.
+    let outer = run(&mut e, "create_instance", json!({ "componentId": card, "x": 500 }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    assert!(e
+      .dispatch(ai("create_instance", json!({ "componentId": button, "parentId": outer })))
+      .is_ok());
+    // Pointers: a set lists its variants, other layers point at find_nodes.
+    let m = err(&mut e, "create_instance", json!({ "componentId": f }));
+    assert!(m.contains("find_nodes type component") && !m.contains("get_nodes"), "{m}");
+    let m = err(&mut e, "create_instance", json!({ "componentId": "n_nope" }));
+    assert!(m.contains("find_nodes"), "{m}");
+  }
+
+  #[test]
+  fn variable_edit_conflicts_and_inference() {
+    let mut e = engine();
+    let (_, _) = themed(&mut e);
+    let m = err(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "deleteCollection": true, "rename": [{ "from": "Brand", "to": "X" }] }),
+    );
+    assert!(m.contains("deleteCollection can't be combined"), "{m}");
+    let m = err(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "deleteCollection": "yes" }),
+    );
+    assert!(m.contains("true or false"), "{m}");
+    assert_eq!(e.doc.variables.len(), 1);
+    // rename B to C beside delete C.
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "rename": [{ "from": "Brand", "to": "Soft" }], "delete": ["Soft"] }),
+    );
+    let names: Vec<&str> = e.doc.variables[0].variables.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["Soft", "Gap"]);
+    // Types come from the value when none is given.
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Misc", "variables": [
+        { "name": "N", "value": 8 }, { "name": "B", "value": true }, { "name": "S", "value": "hello" }, { "name": "C", "value": "#112233" }] }),
+    );
+    let kinds: Vec<_> = e.doc.variables.last().unwrap().variables.iter().map(|v| v.kind).collect();
+    use crate::variables::VarKind::*;
+    assert_eq!(kinds, [Number, Boolean, String, Color]);
+  }
+
+  #[test]
+  fn huge_sizes_print_short_and_a_negative_limit_errors() {
+    let mut e = engine();
+    let m = err(&mut e, "create_nodes", json!({ "nodes": [{ "type": "frame", "width": 1e308 }] }));
+    assert!(m.len() < 200 && m.contains("e308"), "{m}");
+    let m = err(&mut e, "find_nodes", json!({ "limit": -1 }));
+    assert!(m.contains("limit"), "{m}");
+  }
+
+  #[test]
+  fn variable_and_style_edits_round_trip_through_collab_deltas() {
+    let mut e = engine();
+    let (id, _) = themed(&mut e);
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Ink", "color": "#111111" }] }),
+    );
+    let base = e.doc.clone();
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "rename": [{ "from": "Brand", "to": "Accent" }], "renameModes": [{ "from": "Dark", "to": "Night" }], "delete": ["Gap"] }),
+    );
+    run(&mut e, "define_styles", json!({ "rename": [{ "from": "Ink", "to": "Text" }] }));
+    let d = crate::collab::delta(&base, &e.doc, true, true);
+    let mut b = base.clone();
+    crate::collab::apply(&mut b, &d).unwrap();
+    assert_eq!(b.variables, e.doc.variables);
+    assert_eq!(b.styles.colors, e.doc.styles.colors);
+    assert_eq!(b.get(&id).unwrap().bindings, e.doc.get(&id).unwrap().bindings);
+    // And a deletion of the whole collection.
+    let base = e.doc.clone();
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "deleteCollection": true }),
+    );
+    run(&mut e, "define_styles", json!({ "delete": ["Text"] }));
+    let d = crate::collab::delta(&base, &e.doc, true, true);
+    let mut b = base.clone();
+    crate::collab::apply(&mut b, &d).unwrap();
+    assert!(b.variables.is_empty() && b.styles.colors.is_empty());
+    assert!(b.get(&id).unwrap().bindings.is_empty());
+  }
 }
