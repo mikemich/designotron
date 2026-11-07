@@ -501,6 +501,7 @@ export function TextEditor({ id }: { id: string }) {
       <textarea
         ref={ref}
         className="text-editor"
+        aria-label={"Edit text: " + (node.name || "Text")}
         data-live={live ? "" : undefined}
         spellCheck={false}
         defaultValue={t.characters}

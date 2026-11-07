@@ -164,6 +164,8 @@ interface Store {
   variablesOpen: boolean;
   /** "new": opened from the files dashboard for a new file, which is discarded if nothing is imported. */
   figmaOpen: boolean | "new";
+  /** A control on the dashboard to focus once it mounts (its `data-focus-key`), set by flows that end there. */
+  focusOnDashboard: string | null;
   /** Comment thread open in a popover. */
   openComment: string | null;
   /** New comment being written at a page position. */
@@ -238,6 +240,7 @@ export const useStore = create<Store>(() => ({
   showGrids: pref("dt:showGrids", true),
   variablesOpen: false,
   figmaOpen: false,
+  focusOnDashboard: null,
   openComment: null,
   draftComment: null,
   paintEdit: null,
@@ -260,8 +263,33 @@ export function toggleUi() {
   // Claude stays as it was: where it covers the Design panel, that panel just isn't shown.
   const chatOpen = st.chatOpen;
   const keep = keepCentre(st, r.panels, chatOpen);
+  // Focus inside a panel that is about to go: after the update it would drop to <body>.
+  const inPanel = !!document.activeElement?.closest?.(".main > .panel, .main > .chat");
   useStore.setState({ panels: r.panels, panelsStash: r.stash, chatOpen, ...keep });
   writePanels(st.compact, r.panels, storage());
+  if (inPanel) keepFocusVisible();
+}
+
+/** After a panel hides, puts focus on the canvas when it fell to <body> (or onto a node that is gone or hidden). */
+function keepFocusVisible() {
+  const fix = () => {
+    const a = document.activeElement;
+    const lost = !a || a === document.body || a === document.documentElement || !a.isConnected || ![...(a as HTMLElement).getClientRects()].some((c) => c.width > 0 && c.height > 0);
+    if (lost) document.getElementById("dt-canvas")?.focus({ preventScroll: true });
+  };
+  // The panel hides on a later render and the browser drops focus when it does: when exactly varies, so
+  // catch the blur itself (a focusout that lands on nothing), with a few timed passes as a backstop.
+  const onOut = (e: FocusEvent) => {
+    if (!e.relatedTarget) setTimeout(fix, 0);
+  };
+  document.addEventListener("focusout", onOut, true);
+  const stop = () => document.removeEventListener("focusout", onOut, true);
+  setTimeout(stop, 600);
+  for (const ms of [50, 150, 300]) setTimeout(fix, ms);
+  requestAnimationFrame(() => {
+    fix();
+    requestAnimationFrame(fix);
+  });
 }
 
 /** Column widths of the panels (px), as in the stylesheet. */

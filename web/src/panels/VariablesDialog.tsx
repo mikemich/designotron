@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Download, Hash, Link2, Palette, Plus, SlidersHorizontal, ToggleLeft, Trash2, Type as TypeIcon, Unlink, X } from "lucide-react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronRight, Download, Hash, Link2, Palette, Plus, Search, SlidersHorizontal, ToggleLeft, Trash2, Type as TypeIcon, Unlink, X } from "lucide-react";
 import { dispatch, toast, useDoc, useStore } from "../store";
 import type { VarKind, Variable, VariableCollection } from "../types";
-import { Menu, type MenuItem, Popover, useDialog } from "../ui/controls";
+import { Menu, MOD, type MenuItem, Popover, useDialog } from "../ui/controls";
 import { ConfirmDialog } from "../dashboard/ConfirmDialog";
 import { cssColor } from "../ui/color";
 import { exportTokensJson } from "../exporter";
@@ -22,11 +22,34 @@ export const KIND_ICON: Record<VarKind, JSX.Element> = {
 };
 
 function save(collections: VariableCollection[]) {
-  dispatch({ op: "setVariables", collections });
+  return dispatch({ op: "setVariables", collections });
+}
+
+/** What deleting these variables leaves behind: layers bound to them, and aliases of them in variables that stay. */
+export function deleteImpact(nodes: Record<string, { bindings?: Record<string, string> }>, collections: VariableCollection[], gone: Set<string>) {
+  const layers = Object.values(nodes).filter((n) => n.bindings && Object.values(n.bindings).some((id) => gone.has(id))).length;
+  let aliases = 0;
+  for (const c of collections)
+    for (const v of c.variables) {
+      if (gone.has(v.id)) continue;
+      for (const x of Object.values(v.values)) {
+        const a = aliasOf(x);
+        if (a !== null && gone.has(a)) aliases++;
+      }
+    }
+  return { layers, aliases };
+}
+
+/** "3 layers keep their current value; 2 aliases now show Missing variable." Empty when nothing depended on it. */
+export function impactMessage({ layers, aliases }: { layers: number; aliases: number }): string {
+  const parts: string[] = [];
+  if (layers) parts.push(layers === 1 ? "1 layer keeps its current value" : `${layers} layers keep their current value`);
+  if (aliases) parts.push(aliases === 1 ? "1 alias now shows Missing variable" : `${aliases} aliases now show Missing variable`);
+  return parts.length ? parts.join("; ") + "." : "";
 }
 
 /** Text input that commits on blur or Enter (one undo step per edit). A refused edit goes back to the stored text. */
-function Commit({ value, onCommit, className, type = "text" }: { value: string; onCommit: (v: string) => void; className?: string; type?: string }) {
+function Commit({ value, onCommit, className, type = "text", title, label }: { value: string; onCommit: (v: string) => void; className?: string; type?: string; title?: string; label?: string }) {
   const [v, setV] = useState(value);
   const latest = useRef(value);
   latest.current = value;
@@ -35,6 +58,8 @@ function Commit({ value, onCommit, className, type = "text" }: { value: string; 
     <input
       className={className ?? "textinput"}
       type={type}
+      title={title}
+      aria-label={label}
       value={v}
       onChange={(e) => setV(e.target.value)}
       onKeyDown={(e) => {
@@ -75,12 +100,14 @@ export function resolveValue(collections: VariableCollection[], id: string, mode
 function ValueCell({
   v,
   mode,
+  modeName,
   collections,
   onChange,
   onAlias,
 }: {
   v: Variable;
   mode: string;
+  modeName: string;
   collections: VariableCollection[];
   onChange: (val: unknown) => void;
   /** Opens the "Alias…" picker anchored at the button. */
@@ -125,19 +152,19 @@ function ValueCell({
             <input type="color" value={c.slice(0, 7)} onChange={(e) => onChange(e.target.value.toUpperCase())} style={{ position: "absolute", opacity: 0, width: 0, height: 0 }} />
           </label>
           {/* The engine checks the colour with its own parser (hex, rgb(), names) and the refusal is toasted. */}
-          <Commit value={c} onCommit={(x) => onChange(x.trim())} className="textinput mono" />
+          <Commit value={c} label={`${v.name}, ${modeName}`} onCommit={(x) => onChange(x.trim())} className="textinput mono" />
         </div>
       );
       break;
     }
     case "number":
-      cell = <Commit value={String(val ?? 0)} type="number" onCommit={(x) => onChange(Number(x) || 0)} />;
+      cell = <Commit value={String(val ?? 0)} label={`${v.name}, ${modeName}`} type="number" onCommit={(x) => onChange(Number(x) || 0)} />;
       break;
     case "boolean":
       cell = <input type="checkbox" checked={!!val} aria-label={v.name} onChange={(e) => onChange(e.target.checked)} />;
       break;
     default:
-      cell = <Commit value={String(val ?? "")} onCommit={onChange} />;
+      cell = <Commit value={String(val ?? "")} label={`${v.name}, ${modeName}`} onCommit={onChange} />;
   }
   return (
     <div className="row var-cell" style={{ gap: 2 }}>
@@ -156,10 +183,28 @@ export function VariablesDialog() {
   const [modeDelete, setModeDelete] = useState<{ id: string; message: string } | null>(null);
   const [scopeFor, setScopeFor] = useState<{ id: string; anchor: DOMRect } | null>(null);
   const coll = collections.find((c) => c.id === active) ?? collections[0];
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
   const close = () => useStore.setState({ variablesOpen: false });
-  const dialogRef = useDialog(close);
+  // Escape in the search field clears the search first; the next Escape closes the dialog.
+  const dialogRef = useDialog(() => {
+    if (query && document.activeElement === searchRef.current) return setQuery("");
+    close();
+  });
   const folders = useFolderState("variables:" + (coll?.id ?? ""));
   const colSpan = (coll?.modes.length ?? 0) + 2;
+  // Typing stays responsive with hundreds of rows: the filter follows a beat behind.
+  const deferred = useDeferredValue(query);
+  const q = deferred.trim().toLowerCase();
+  const matches = (v: Variable) => v.name.toLowerCase().includes(q);
+  const found = q && coll ? coll.variables.filter(matches) : [];
+  /** Deletes variables and says what keeps depending on them (Figma doesn't ask; one Ctrl+Z brings them back). */
+  const remove = (gone: Variable[], what: string, next: VariableCollection[]) => {
+    const impact = deleteImpact(doc.nodes, collections, new Set(gone.map((v) => v.id)));
+    if (save(next) === null) return;
+    const msg = impactMessage(impact);
+    if (msg) toast(`Deleted ${what}. ${msg} ${MOD}Z undoes.`);
+  };
 
   const variableRow = (v: Variable, label: string, folder: string, depth: number) => (
     <tr key={v.id} data-variable={v.name}>
@@ -167,6 +212,8 @@ export function VariablesDialog() {
         <div className="row" style={{ gap: 6, paddingLeft: depth * 12 }}>
           <span className="muted">{KIND_ICON[v.type]}</span>
           <Commit
+            title={v.name}
+            label={`Variable name`}
             value={label}
             onCommit={(name) => {
               const t = name.trim();
@@ -193,11 +240,16 @@ export function VariablesDialog() {
       </td>
       {coll!.modes.map((m) => (
         <td key={m.id}>
-          <ValueCell v={v} mode={m.id} collections={collections} onChange={(val) => setValue(v.id, m.id, val)} onAlias={(a) => pickAlias(v, m.id, a)} />
+          <ValueCell v={v} mode={m.id} modeName={m.name} collections={collections} onChange={(val) => setValue(v.id, m.id, val)} onAlias={(a) => pickAlias(v, m.id, a)} />
         </td>
       ))}
       <td>
-        <button className="ibtn" title="Delete variable" aria-label={`Delete ${v.name}`} onClick={() => update((c) => ({ ...c, variables: c.variables.filter((x) => x.id !== v.id) }))}>
+        <button
+          className="ibtn"
+          title="Delete variable"
+          aria-label={`Delete ${v.name}`}
+          onClick={() => remove([v], v.name, collections.map((c) => (c.id === coll!.id ? { ...c, variables: c.variables.filter((x) => x.id !== v.id) } : c)))}
+        >
           <Trash2 size={12} />
         </button>
       </td>
@@ -226,11 +278,15 @@ export function VariablesDialog() {
 
   const update = (fn: (c: VariableCollection) => VariableCollection) => save(collections.map((c) => (c.id === coll.id ? fn(c) : c)));
   const addCollection = () => {
-    const c: VariableCollection = { id: uid("vc_"), name: `Collection ${collections.length + 1}`, modes: [{ id: uid("vm_"), name: "Default" }], variables: [] };
+    let cn = collections.length + 1;
+    while (collections.some((x) => x.name === `Collection ${cn}`)) cn++;
+    const c: VariableCollection = { id: uid("vc_"), name: `Collection ${cn}`, modes: [{ id: uid("vm_"), name: "Default" }], variables: [] };
     save([...collections, c]);
     setActive(c.id);
   };
-  const addVariable = (type: VarKind) =>
+  const addVariable = (type: VarKind) => {
+    // A new variable must show up, whatever the search says.
+    setQuery("");
     update((c) => {
       // The first free "color 3": counting alone collides after a delete or rename.
       let n = c.variables.filter((v) => v.type === type).length + 1;
@@ -238,6 +294,7 @@ export function VariablesDialog() {
       const values = Object.fromEntries(c.modes.map((m) => [m.id, DEFAULTS[type]]));
       return { ...c, variables: [...c.variables, { id: uid("v_"), name: `${type} ${n}`, type, values, description: "" }] };
     });
+  };
   /** Removes a mode and its values; layers pinned to it follow the engine's prune (back to the default mode). */
   const deleteMode = (id: string) =>
     update((c) => ({
@@ -259,9 +316,12 @@ export function VariablesDialog() {
     update((c) => {
       const id = uid("vm_");
       const first = c.modes[0]?.id;
+      // The first free "Mode 3": counting alone collides after a delete or rename.
+      let n = c.modes.length + 1;
+      while (c.modes.some((m) => m.name === `Mode ${n}`)) n++;
       return {
         ...c,
-        modes: [...c.modes, { id, name: `Mode ${c.modes.length + 1}` }],
+        modes: [...c.modes, { id, name: `Mode ${n}` }],
         variables: c.variables.map((v) => ({ ...v, values: { ...v.values, [id]: first ? v.values[first] : DEFAULTS[v.type] } })),
       };
     });
@@ -295,7 +355,7 @@ export function VariablesDialog() {
 
   return (
     <div className="modal-bg" onPointerDown={(e) => e.target === e.currentTarget && close()}>
-      <div ref={dialogRef} className="modal variables-dialog" role="dialog" aria-modal="true" aria-label="Variables" onKeyDown={(e) => e.key === "Escape" && close()}>
+      <div ref={dialogRef} className="modal variables-dialog" role="dialog" aria-modal="true" aria-label="Variables">
         <div className="modal-head">
           <b>Local variables</b>
           <button className="ibtn" title="Export JSON (W3C design tokens)" aria-label="Export JSON" onClick={exportTokensJson} style={{ marginLeft: "auto" }}>
@@ -307,11 +367,19 @@ export function VariablesDialog() {
         </div>
         <div className="variables-body">
           <div className="var-collections">
-            {collections.map((c) => (
-              <button key={c.id} className={"var-coll" + (c.id === coll?.id ? " active" : "")} onClick={() => setActive(c.id)}>
-                {c.name}
-              </button>
-            ))}
+            {collections.map((c) => {
+              const n = q ? c.variables.filter(matches).length : 0;
+              return (
+                <button key={c.id} className={"var-coll" + (c.id === coll?.id ? " active" : "") + (q && !n ? " dim" : "")} onClick={() => setActive(c.id)} data-matches={q ? n : undefined}>
+                  <span className="var-coll-name">{c.name}</span>
+                  {q && (
+                    <span className="var-coll-count" aria-label={`${n} match${n === 1 ? "" : "es"}`}>
+                      {n}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
             <button className="var-coll muted" onClick={addCollection}>
               <Plus size={12} /> New collection
             </button>
@@ -319,19 +387,48 @@ export function VariablesDialog() {
           {coll ? (
             <div className="var-table-wrap">
               <div className="row" style={{ marginBottom: 8 }}>
-                <Commit value={coll.name} onCommit={(name) => name.trim() && update((c) => ({ ...c, name: name.trim() }))} />
-                <button className="ibtn" title="Delete collection" onClick={() => save(collections.filter((c) => c.id !== coll.id))}>
+                <Commit value={coll.name} label="Collection name" onCommit={(name) => name.trim() && update((c) => ({ ...c, name: name.trim() }))} />
+                <button
+                  className="ibtn"
+                  title="Delete collection"
+                  aria-label={`Delete collection ${coll.name}`}
+                  onClick={() => remove(coll.variables, `collection ${coll.name}`, collections.filter((c) => c.id !== coll.id))}
+                >
                   <Trash2 size={13} />
                 </button>
               </div>
-              <table className="var-table">
+              <div className="var-search">
+                <Search size={13} aria-hidden="true" />
+                <input
+                  ref={searchRef}
+                  type="search"
+                  className="textinput"
+                  aria-label="Search variables"
+                  placeholder="Search variables"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={(e) => e.stopPropagation()}
+                />
+              </div>
+              <div className="sr-only" role="status" aria-live="polite" data-var-live>
+                {q ? (found.length ? `${found.length} variable${found.length === 1 ? "" : "s"} match in ${coll.name}` : `0 variables match in ${coll.name}`) : ""}
+              </div>
+              <div className="var-table-scroll" tabIndex={-1}>
+              <table className="var-table" style={{ "--modes": coll.modes.length } as React.CSSProperties}>
+                <colgroup>
+                  <col className="var-col-name" />
+                  {coll.modes.map((m) => (
+                    <col key={m.id} className="var-col-mode" />
+                  ))}
+                  <col className="var-col-del" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th>Name</th>
                     {coll.modes.map((m) => (
                       <th key={m.id}>
                         <div className="row" style={{ gap: 2 }}>
-                          <Commit value={m.name} className="textinput head" onCommit={(name) => name.trim() && update((c) => ({ ...c, modes: c.modes.map((x) => (x.id === m.id ? { ...x, name: name.trim() } : x)) }))} />
+                          <Commit value={m.name} label="Mode name" className="textinput head" onCommit={(name) => name.trim() && update((c) => ({ ...c, modes: c.modes.map((x) => (x.id === m.id ? { ...x, name: name.trim() } : x)) }))} />
                           {coll.modes.length > 1 && (
                             <button className="ibtn" title="Delete mode" aria-label={`Delete mode ${m.name}`} onClick={() => askDeleteMode(m.id)}>
                               <X size={11} />
@@ -348,12 +445,27 @@ export function VariablesDialog() {
                   </tr>
                 </thead>
                 <tbody>
-                  {renderFolder(groupBySlash(coll.variables, (v) => v.name), 0)}
+                  {q ? (
+                    found.length ? (
+                      found.map((v) => variableRow(v, v.name, "", 0))
+                    ) : (
+                      <tr className="var-empty">
+                        <td colSpan={colSpan}>
+                          <div className="muted">
+                            No variables match “{deferred.trim()}” in {coll.name}.
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  ) : (
+                    renderFolder(groupBySlash(coll.variables, (v) => v.name), 0)
+                  )}
                 </tbody>
               </table>
+              </div>
               <button
                 className="btn"
-                style={{ marginTop: 8 }}
+                style={{ marginTop: 8, alignSelf: "flex-start" }}
                 onClick={(e) => {
                   const r = e.currentTarget.getBoundingClientRect();
                   setMenu({

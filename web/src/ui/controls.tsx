@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { dispatch } from "../store";
+import { dispatch, useStore } from "../store";
 
 import { MIXED, type Maybe } from "./mixed";
 
@@ -168,13 +168,16 @@ export function NumberField(props: {
 export function SelectField<T extends string | number>(props: {
   label?: ReactNode;
   value: Maybe<T>;
-  options: { value: T; label: string }[];
+  /** `group` puts an option under an `<optgroup>`; groups appear in the order they first occur and ungrouped options stay on top. */
+  options: { value: T; label: string; group?: string }[];
   onChange: (v: T) => void;
   title?: string;
   /** Accessible name; defaults to the title, or the label when that is text. */
   ariaLabel?: string;
   disabled?: boolean;
 }) {
+  const loose = props.options.filter((o) => !o.group);
+  const groups = [...new Set(props.options.filter((o) => o.group).map((o) => o.group!))];
   return (
     <label className="field" title={props.title}>
       {props.label !== undefined && (
@@ -190,10 +193,21 @@ export function SelectField<T extends string | number>(props: {
         }}
       >
         {props.value === MIXED && <option value="__mixed">Mixed</option>}
-        {props.options.map((o) => (
+        {loose.map((o) => (
           <option key={String(o.value)} value={String(o.value)}>
             {o.label}
           </option>
+        ))}
+        {groups.map((g) => (
+          <optgroup key={g} label={g}>
+            {props.options
+              .filter((o) => o.group === g)
+              .map((o) => (
+                <option key={String(o.value)} value={String(o.value)}>
+                  {o.label}
+                </option>
+              ))}
+          </optgroup>
         ))}
       </select>
     </label>
@@ -224,11 +238,48 @@ export function Section(props: { title: ReactNode; actions?: ReactNode; children
   return (
     <div className="section">
       <div className="section-head">
-        <span>{props.title}</span>
+        <span role="heading" aria-level={3}>
+          {props.title}
+        </span>
         {props.actions && <div className="actions">{props.actions}</div>}
       </div>
       {props.children}
     </div>
+  );
+}
+
+/**
+ * The toast: two live regions that are always mounted (a region inserted together with its text is
+ * often not announced), polite for information and assertive for errors, plus the visible toast,
+ * which is `aria-hidden` so the text isn't read twice.
+ */
+export function ToastLive() {
+  const toast = useStore((s) => s.toast);
+  const [said, setSaid] = useState<{ info: string; error: string }>({ info: "", error: "" });
+  useEffect(() => {
+    if (!toast) {
+      setSaid({ info: "", error: "" });
+      return;
+    }
+    // Clear first so the same text twice in a row is announced again.
+    setSaid({ info: "", error: "" });
+    const id = requestAnimationFrame(() => setSaid({ info: toast.kind === "info" ? toast.text : "", error: toast.kind === "error" ? toast.text : "" }));
+    return () => cancelAnimationFrame(id);
+  }, [toast]);
+  return (
+    <>
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-toast-live="info">
+        {said.info}
+      </div>
+      <div className="sr-only" role="alert" aria-live="assertive" aria-atomic="true" data-toast-live="error">
+        {said.error}
+      </div>
+      {toast && (
+        <div className={"toast " + toast.kind} aria-hidden="true">
+          {toast.text}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -467,7 +518,7 @@ export function useEscape(close: () => void, enabled = true) {
     if (!enabled) return;
     // Capture phase: dialogs stop key events from reaching the editor's shortcuts.
     const key = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || document.querySelector(".menu")) return;
+      if (e.key !== "Escape" || document.querySelector(".menu, .popover")) return;
       e.stopPropagation();
       ref.current();
     };
