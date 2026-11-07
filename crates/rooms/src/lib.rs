@@ -1989,12 +1989,12 @@ mod tests {
   async fn an_old_editors_whole_styles_do_not_wipe_effect_and_grid_styles() {
     let rooms = Rooms::new(Limits::default(), None);
     let mut doc = designotron_engine::doc::new_document(&mut designotron_engine::doc::IdGen::new(1), "t");
-    doc.styles.effects.push(designotron_engine::model::EffectStyle {
+    doc.styles_mut().effects.push(designotron_engine::model::EffectStyle {
       id: "e1".into(),
       name: "Shadow".into(),
       ..Default::default()
     });
-    doc.styles.grids.push(designotron_engine::model::GridStyle {
+    doc.styles_mut().grids.push(designotron_engine::model::GridStyle {
       id: "g1".into(),
       name: "Grid".into(),
       ..Default::default()
@@ -2261,7 +2261,7 @@ mod tests {
       x: 5.0,
       ..Default::default()
     };
-    doc.comments.insert("c1".into(), c);
+    doc.comments_mut().insert("c1".into(), c);
     let saved = Saved {
       doc: &doc,
       assets: &Map::new(),

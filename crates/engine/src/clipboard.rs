@@ -10,6 +10,7 @@
 //! a merge, and rewriting ids afterwards.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
@@ -199,7 +200,7 @@ pub fn attach(doc: &Document, nodes: &mut [Node], comps: &mut [Node]) -> Vec<(&'
       .filter(|c| used.colls.contains(&c.id) || c.variables.iter().any(|v| used.vars.contains(&v.id)))
       .map(|c| Collection {
         variables: c.variables.iter().filter(|v| used.vars.contains(&v.id)).cloned().collect(),
-        ..c.clone()
+        ..(**c).clone()
       })
       .collect();
     if !collections.is_empty() {
@@ -362,13 +363,13 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
       dest_vars: doc
         .variables
         .iter()
-        .flat_map(|c| c.variables.iter().map(move |v| (v.id.as_str(), (c, v))))
+        .flat_map(|c| c.variables.iter().map(move |v| (v.id.as_str(), (&**c, &**v))))
         .collect(),
-      dest_colls: doc.variables.iter().map(|c| (c.id.as_str(), c)).collect(),
+      dest_colls: doc.variables.iter().map(|c| (c.id.as_str(), &**c)).collect(),
       dest_styles,
       clip_vars: clip_colls
         .iter()
-        .flat_map(|c| c.variables.iter().map(move |v| (v.id.as_str(), (c.name.as_str(), v))))
+        .flat_map(|c| c.variables.iter().map(move |v| (v.id.as_str(), (c.name.as_str(), &**v))))
         .collect(),
       clip_colls: clip_colls.iter().map(|c| (c.id.as_str(), c)).collect(),
       clip_styles: [
@@ -432,12 +433,12 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
       None => {
         let id = free_id(&cc.id, "vc_", &taken_colls, gen);
         taken_colls.insert(id.clone());
-        doc.variables.push(Collection {
+        doc.variables.push(Arc::new(Collection {
           id,
           name: cc.name.trim().to_string(),
           modes: Vec::new(),
           variables: Vec::new(),
-        });
+        }));
         added.collections += 1;
         doc.variables.len() - 1
       }
@@ -456,14 +457,14 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
         None => {
           let taken: HashSet<String> = d.modes.iter().map(|m| m.id.clone()).collect();
           let id = free_id(&cm.id, "vm_", &taken, gen);
-          let c = &mut doc.variables[di];
+          let c = Arc::make_mut(&mut doc.variables[di]);
           let first = c.modes.first().map(|m| m.id.clone());
           c.modes.push(VarMode {
             id: id.clone(),
             name: cm.name.trim().to_string(),
           });
           // Like adding a mode in the dialog: every variable starts with its default mode's value.
-          for v in &mut c.variables {
+          for v in c.variables.iter_mut().map(Arc::make_mut) {
             let val = first
               .as_ref()
               .and_then(|f| v.values.get(f).cloned())
@@ -533,15 +534,15 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
         let id = free_id(&cv.id, "v_", &taken_vars, gen);
         taken_vars.insert(id.clone());
         let name = unused_name(&cv.name, |n| coll.variables.iter().any(|v| v.name == n));
-        let c = &mut doc.variables[di];
-        c.variables.push(Variable {
+        let c = Arc::make_mut(&mut doc.variables[di]);
+        c.variables.push(Arc::new(Variable {
           id: id.clone(),
           name,
           kind: cv.kind,
           values: BTreeMap::new(),
           description: cv.description.clone(),
           scopes: cv.scopes.clone(),
-        });
+        }));
         fresh.push((ci, vi, c.variables.len() - 1));
         added.variables += 1;
         queue.extend(
@@ -577,7 +578,7 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
         .unwrap_or_else(|| default_value(cv.kind));
       values.insert(dm, pasted_value(cv, raw, first.as_ref(), &map));
     }
-    doc.variables[di].variables[pos].values = values;
+    Arc::make_mut(&mut Arc::make_mut(&mut doc.variables[di]).variables[pos]).values = values;
   }
   // A mode the paste added takes the source's values for the variables that were already here too
   // (aliases included), so the pasted layers look the same in it. Variables the clipboard doesn't
@@ -619,7 +620,7 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
             taken_styles.insert(id.clone());
             let mut copy: $ty = s.clone();
             copy.id = id.clone();
-            doc.styles.$list.push(copy);
+            doc.styles_mut().$list.push(copy);
             added.styles += 1;
             id
           }
@@ -640,7 +641,7 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
 
 /// True when `id` isn't a collection of the destination before the paste: all its modes are new
 /// then, and adding them isn't a change to something the user had.
-fn d_is_new(before: &[Collection], id: &str) -> bool {
+fn d_is_new(before: &[Arc<Collection>], id: &str) -> bool {
   !before.iter().any(|c| c.id == id)
 }
 
@@ -1144,15 +1145,15 @@ mod tests_r10_review {
 
   fn old_file(vars: Vec<Variable>) -> Engine {
     let mut e = engine(7);
-    e.doc.variables = vec![Collection {
+    e.doc.variables = vec![Arc::new(Collection {
       id: "vc_old".into(),
       name: "Old".into(),
       modes: vec![VarMode {
         id: "vm_a".into(),
         name: "A".into(),
       }],
-      variables: vars,
-    }];
+      variables: vars.into_iter().map(Arc::new).collect(),
+    })];
     e
   }
 
@@ -1183,12 +1184,12 @@ mod tests_r10_review {
       var("v_bad", "Bad", VarKind::Color, json!("banana")),
       var("v_n", "N", VarKind::Number, json!("12")),
     ]);
-    let mut cs = e.doc.variables.clone();
+    let mut cs = crate::variables::plain(&e.doc.variables);
     cs[0].modes.push(VarMode {
       id: "vm_b".into(),
       name: "B".into(),
     });
-    for v in &mut cs[0].variables {
+    for v in cs[0].variables.iter_mut().map(Arc::make_mut) {
       let first = v.values["vm_a"].clone();
       v.values.insert("vm_b".into(), first);
     }
@@ -1197,8 +1198,8 @@ mod tests_r10_review {
     cs[0].modes.pop();
     e.dispatch(Command::SetVariables { collections: cs }).unwrap();
     // A new bad value is still refused.
-    let mut cs = e.doc.variables.clone();
-    cs[0].variables[0].values.insert("vm_a".into(), json!("kiwi"));
+    let mut cs = crate::variables::plain(&e.doc.variables);
+    Arc::make_mut(&mut cs[0].variables[0]).values.insert("vm_a".into(), json!("kiwi"));
     assert!(e.dispatch(Command::SetVariables { collections: cs }).is_err());
   }
 
@@ -1258,9 +1259,9 @@ mod tests_r10_review {
     );
     let frame = r["created"][0]["id"].as_str().unwrap().to_string();
     let data = a.copy(std::slice::from_ref(&frame));
-    let mut cs = a.doc.variables.clone();
+    let mut cs = crate::variables::plain(&a.doc.variables);
     cs[0].modes[1].name = "Night".into();
-    cs[0].variables[0].name = "Surface".into();
+    Arc::make_mut(&mut cs[0].variables[0]).name = "Surface".into();
     a.dispatch(Command::SetVariables { collections: cs }).unwrap();
     let r = a
       .dispatch(Command::Paste {

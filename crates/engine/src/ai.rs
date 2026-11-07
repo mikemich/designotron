@@ -408,7 +408,7 @@ pub fn tool_defs() -> Value {
 fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
   use crate::variables::{Collection, VarKind, VarMode, Variable};
   let name = input.get("collection").and_then(|v| v.as_str()).ok_or("collection is required")?;
-  let mut all = e.doc.variables.clone();
+  let mut all: Vec<Collection> = crate::variables::plain(&e.doc.variables);
   let idx = match all.iter().position(|c| c.name == name || c.id == name) {
     Some(i) => i,
     None => {
@@ -446,15 +446,15 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
     let pos = match coll.variables.iter().position(|v| v.name == vname) {
       Some(p) => p,
       None => {
-        coll.variables.push(Variable {
+        coll.variables.push(Arc::new(Variable {
           id: e.gen.next("v_"),
           name: vname.clone(),
           ..Default::default()
-        });
+        }));
         coll.variables.len() - 1
       }
     };
-    let var = &mut coll.variables[pos];
+    let var = Arc::make_mut(&mut coll.variables[pos]);
     var.kind = kind;
     if let Some(sc) = spec.get("scopes").filter(|v| !v.is_null()) {
       let list: Vec<String> = sc
@@ -493,6 +493,10 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
   // Aliases are written by name ("Collection/name"); store the variable id.
   let lookup = all.clone();
   for v in all.iter_mut().flat_map(|c| c.variables.iter_mut()) {
+    if !v.values.values().any(|x| x.get("alias").is_some()) {
+      continue;
+    }
+    let v = Arc::make_mut(v);
     for val in v.values.values_mut() {
       let Some(target) = val.get("alias").and_then(|a| a.as_str()).map(String::from) else {
         continue;
@@ -1424,7 +1428,7 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
       }
       None => {
         let id = e.gen.next("s_");
-        e.doc.styles.texts.push(TextStyle {
+        e.doc.styles_mut().texts.push(TextStyle {
           id: id.clone(),
           name,
           font_family: family.unwrap_or_else(|| "Inter".into()),
@@ -1482,7 +1486,7 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
           return Err(cx.err("", "give a shadow, blur or backgroundBlur"));
         }
         let id = e.gen.next("s_");
-        e.doc.styles.effects.push(EffectStyle {
+        e.doc.styles_mut().effects.push(EffectStyle {
           id: id.clone(),
           name,
           effects,
@@ -1520,7 +1524,7 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
       }
       None => {
         let id = e.gen.next("s_");
-        e.doc.styles.grids.push(GridStyle {
+        e.doc.styles_mut().grids.push(GridStyle {
           id: id.clone(),
           name,
           grids,
