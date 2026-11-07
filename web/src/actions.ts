@@ -1,6 +1,7 @@
 // User-level actions shared by menus, keyboard shortcuts and context menus.
 
-import { addAsset, imageSize, readFileAsDataUrl } from "./assets";
+import { addAsset, assetUrl, imageSize, knownImageSize, readFileAsDataUrl } from "./assets";
+import { fitNative } from "./imageAssets";
 import { exportPdf, exportProjectZip, fileSafe, pdfFrames } from "./exporter";
 import { download, getFileMeta, importDtron, pickFile, toDtron } from "./files";
 import {
@@ -513,16 +514,24 @@ export function isSvgText(text: string): boolean {
 export async function insertImageFile(file: File, x: number, y: number) {
   const url = await readFileAsDataUrl(file);
   const id = addAsset(url);
-  let { width, height } = await imageSize(url);
-  const max = 1200;
-  if (width > max || height > max) {
-    const k = max / Math.max(width, height);
-    width = Math.round(width * k);
-    height = Math.round(height * k);
-  }
+  // Its own size; only a side over 4096 px is scaled down.
+  const own = await imageSize(url);
+  const { width, height } = fitNative(own.width, own.height);
   // The frame under the drop point takes the image (the engine reads x and y as page coordinates).
   const parent = query<string | null>({ q: "frameAt", x, y, exclude: [] });
   dispatch({ op: "createImage", src: "asset:" + id, x: x - width / 2, y: y - height / 2, width, height, name: file.name.replace(/\.\w+$/, ""), parent });
+}
+
+/** An image the file already holds (`asset:<id>` or a URL) as a new layer at its own size, centred on a point (the view centre by default). */
+export async function placeImageSource(src: string, x?: number, y?: number, name = "Image"): Promise<void> {
+  const at = x === undefined || y === undefined ? viewportCenter() : { x, y };
+  const url = src.startsWith("asset:") ? assetUrl(src.slice(6)) : src;
+  if (!url) return;
+  const known = knownImageSize(src);
+  const own = known ? { width: known[0], height: known[1] } : await imageSize(url);
+  const { width, height } = fitNative(own.width, own.height);
+  const parent = query<string | null>({ q: "frameAt", x: at.x, y: at.y, exclude: [] });
+  dispatch({ op: "createImage", src, x: at.x - width / 2, y: at.y - height / 2, width, height, name, parent });
 }
 
 export async function placeImage() {

@@ -2961,4 +2961,131 @@ mod r15b {
     assert!(b.variables.is_empty() && b.styles.colors.is_empty());
     assert!(b.get(&id).unwrap().bindings.is_empty());
   }
+
+  #[test]
+  fn create_nodes_takes_effects_blend_mode_and_image_keys() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{
+        "type": "rectangle", "name": "Photo", "width": 200, "height": 100,
+        "imageUrl": "asset:a", "imageScaleMode": "tile", "imageScale": 0.5, "imageRotation": 270,
+        "imageFilters": { "saturation": -1, "exposure": 0.25 },
+        "blendMode": "multiply",
+        "effects": [
+          { "type": "dropShadow", "x": 0, "y": 8, "blur": 24, "spread": 2, "color": "#00000080" },
+          { "type": "layerBlur", "blur": 3, "visible": false }
+        ]
+      }, {
+        "type": "rectangle", "name": "Fit", "width": 50, "height": 50, "imageUrl": "asset:b", "scaleMode": "fit", "blendMode": "color_dodge"
+      }] }),
+    );
+    assert!(r.get("warnings").is_none_or(|w| w.as_array().unwrap().is_empty()), "{r}");
+    let ids = created(&r);
+    let n = e.doc.get(&ids[0]).unwrap();
+    assert_eq!(n.blend_mode, crate::model::BlendMode::Multiply);
+    assert_eq!(n.effects.len(), 2);
+    assert_eq!((n.effects[0].y, n.effects[0].blur, n.effects[0].spread), (8.0, 24.0, 2.0));
+    assert_eq!(n.effects[0].color, "#00000080");
+    assert!(!n.effects[1].visible && n.effects[1].kind == crate::model::EffectType::LayerBlur);
+    match &n.fills[0] {
+      crate::model::Paint::Image {
+        scale_mode,
+        scaling_factor,
+        rotation,
+        filters: Some(f),
+        ..
+      } => {
+        assert_eq!(
+          (*scale_mode, *scaling_factor, *rotation),
+          (crate::model::ScaleMode::Tile, 0.5, 270.0)
+        );
+        assert_eq!((f.saturation, f.exposure, f.tint), (-1.0, 0.25, 0.0));
+      }
+      other => panic!("{other:?}"),
+    }
+    let fit = e.doc.get(&ids[1]).unwrap();
+    assert_eq!(fit.blend_mode, crate::model::BlendMode::ColorDodge);
+    assert!(matches!(
+      &fit.fills[0],
+      crate::model::Paint::Image {
+        scale_mode: crate::model::ScaleMode::Fit,
+        ..
+      }
+    ));
+    // update_nodes changes them in place and keeps the image.
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": ids[0], "imageRotation": 0, "imageFilters": null, "imageScaleMode": "stretch" }] }),
+    );
+    match &e.doc.get(&ids[0]).unwrap().fills[0] {
+      crate::model::Paint::Image {
+        src,
+        rotation,
+        filters,
+        scale_mode,
+        ..
+      } => {
+        assert_eq!(src, "asset:a");
+        assert!(*rotation == 0.0 && filters.is_none() && *scale_mode == crate::model::ScaleMode::Stretch);
+      }
+      other => panic!("{other:?}"),
+    }
+  }
+
+  #[test]
+  fn effects_with_shadow_and_wrong_image_values_are_errors_naming_the_field() {
+    let mut e = engine();
+    let err = |e: &mut Engine, spec: Value| -> String { e.dispatch(ai("create_nodes", json!({ "nodes": [spec] }))).unwrap_err() };
+    let both = err(
+      &mut e,
+      json!({ "type": "rectangle", "effects": [{ "type": "layerBlur", "blur": 2 }], "shadow": { "y": 2 } }),
+    );
+    assert!(both.contains("effects") && both.contains("not both"), "{both}");
+    let blend = err(&mut e, json!({ "type": "rectangle", "blendMode": "multipy" }));
+    assert!(blend.contains("blendMode") && blend.contains("multiply"), "{blend}");
+    let kind = err(&mut e, json!({ "type": "rectangle", "effects": [{ "type": "glow" }] }));
+    assert!(kind.contains("effects[0].type"), "{kind}");
+    let rot = err(&mut e, json!({ "type": "rectangle", "imageUrl": "asset:a", "imageRotation": 45 }));
+    assert!(rot.contains("imageRotation") && rot.contains("90"), "{rot}");
+    let range = err(
+      &mut e,
+      json!({ "type": "rectangle", "imageUrl": "asset:a", "imageFilters": { "contrast": 50 } }),
+    );
+    assert!(range.contains("imageFilters.contrast"), "{range}");
+    let scale = err(&mut e, json!({ "type": "rectangle", "imageUrl": "asset:a", "imageScale": 0 }));
+    assert!(scale.contains("imageScale"), "{scale}");
+    // An image key without an image fill is a warning, not a silent drop.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle", "imageRotation": 90 }] }),
+    );
+    assert!(r["warnings"][0].as_str().unwrap().contains("no image fill"), "{r}");
+  }
+
+  #[test]
+  fn image_paint_objects_in_fill_are_normalised() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle", "width": 10, "height": 10,
+        "fill": { "type": "image", "src": "asset:a", "scaleMode": "tile", "scalingFactor": 500, "rotation": 450,
+                  "filters": { "contrast": 3, "tint": 0 } } }] }),
+    );
+    match &e.doc.get(&created(&r)[0]).unwrap().fills[0] {
+      crate::model::Paint::Image {
+        scaling_factor,
+        rotation,
+        filters: Some(f),
+        ..
+      } => {
+        assert_eq!((*scaling_factor, *rotation, f.contrast), (100.0, 90.0, 1.0));
+      }
+      other => panic!("{other:?}"),
+    }
+  }
 }

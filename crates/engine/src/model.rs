@@ -576,7 +576,60 @@ pub enum Paint {
     /// Where a stock photo came from and under which licence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credit: Option<Box<ImageCredit>>,
+    /// Tile only: the cell is the image's own size times this (JSON skipped at 1).
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    scaling_factor: f64,
+    /// Quarter turns in degrees: 0, 90, 180 or 270 (skipped at 0).
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    rotation: f64,
+    /// Exposure, contrast and friends (skipped when absent or all zero).
+    #[serde(default, skip_serializing_if = "filters_skipped")]
+    filters: Option<ImageFilters>,
   },
+}
+
+/// The seven image adjustments of an image fill, each -1..1.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImageFilters {
+  pub exposure: f64,
+  pub contrast: f64,
+  pub saturation: f64,
+  pub temperature: f64,
+  pub tint: f64,
+  pub highlights: f64,
+  pub shadows: f64,
+}
+
+impl ImageFilters {
+  pub fn is_identity(&self) -> bool {
+    *self == ImageFilters::default()
+  }
+
+  pub fn clamped(&self) -> ImageFilters {
+    let c = |v: f64| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
+    ImageFilters {
+      exposure: c(self.exposure),
+      contrast: c(self.contrast),
+      saturation: c(self.saturation),
+      temperature: c(self.temperature),
+      tint: c(self.tint),
+      highlights: c(self.highlights),
+      shadows: c(self.shadows),
+    }
+  }
+}
+
+fn is_one(v: &f64) -> bool {
+  *v == 1.0
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+  *v == 0.0
+}
+
+fn filters_skipped(f: &Option<ImageFilters>) -> bool {
+  f.is_none_or(|f| f.is_identity())
 }
 
 /// Provenance of a stock photo (see `web/src/photos`). Every field is optional so older files

@@ -14,6 +14,11 @@ pub struct FontSpec<'a> {
 pub trait TextMeasurer {
   /// Advance width of `text` in px, including letter spacing.
   fn measure(&self, text: &str, font: &FontSpec) -> f64;
+  /// The pixel size of an image source (`asset:<id>` or a URL), when the host knows it.
+  /// Tiled image fills use it; without it they fall back to a 64 px cell.
+  fn image_size(&self, _src: &str) -> Option<(f64, f64)> {
+    None
+  }
 }
 
 /// Approximate glyph widths for a typical sans-serif.

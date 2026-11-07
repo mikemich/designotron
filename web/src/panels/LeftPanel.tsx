@@ -41,6 +41,7 @@ import { FolderTree } from "./FolderTree";
 import { useThumb } from "./assetThumbs";
 import { swapGroups } from "../componentOps";
 import { PhotoSearch } from "./PhotoSearch";
+import { ImageAssets } from "./ImageAssets";
 import { useCollab } from "../collab";
 
 /** A mouse click on a row, page or tab leaves the keys with the canvas, as it did before these were
@@ -1320,6 +1321,7 @@ function Assets() {
         {groups.length === 0 && <div className="muted small">Select layers and press {ALT_MOD}K to create a component.</div>}
         <FolderTree scope="components" items={entries} name={entryName} forceOpen={!!q.trim()} row={(e, label) => entryRow(e, label)} />
       </div>
+      {!viewer && <ImageAssets filter={q} />}
       {!viewer && (
         <div className="section" data-testid="photos-section">
           <div className="section-head">

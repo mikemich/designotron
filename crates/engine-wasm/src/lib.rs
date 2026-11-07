@@ -45,6 +45,20 @@ impl TextMeasurer for CanvasMeasurer {
     });
     width + n * font.letter_spacing
   }
+
+  fn image_size(&self, src: &str) -> Option<(f64, f64)> {
+    // Remember who asked: only a change to one of these can alter what was painted.
+    IMAGE_ASKED.with(|a| a.borrow_mut().insert(src.to_string()));
+    IMAGE_SIZES.with(|m| m.borrow().get(src).copied())
+  }
+}
+
+// Pixel sizes of the images the editor has measured (`setImageSizes`), by paint source. Tiled
+// image fills use them; the engine never stores them in the document.
+thread_local! {
+  static IMAGE_SIZES: RefCell<HashMap<String, (f64, f64)>> = RefCell::new(HashMap::new());
+  // Sources a render has asked the size of (tiled fills), since the cache was last reset.
+  static IMAGE_ASKED: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
 }
 
 // Text widths already asked of the browser. Laying out a big file measures the same strings
@@ -99,6 +113,33 @@ impl WasmEngine {
     WasmEngine {
       inner: self.inner.fork(Box::new(CanvasMeasurer)),
       persist: Persist::default(),
+    }
+  }
+
+  /// Tells the engine the pixel sizes of images: JSON `{src: [w, h]}`. When one is new or
+  /// changed, everything is painted again (tiled fills depend on it).
+  #[wasm_bindgen(js_name = setImageSizes)]
+  pub fn set_image_sizes(&mut self, json: &str) {
+    let Ok(sizes) = serde_json::from_str::<HashMap<String, [f64; 2]>>(json) else {
+      return;
+    };
+    let changed = IMAGE_SIZES.with(|m| {
+      let mut m = m.borrow_mut();
+      let mut changed = false;
+      for (src, [w, h]) in sizes {
+        if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
+          continue;
+        }
+        if m.insert(src.clone(), (w, h)) != Some((w, h)) && IMAGE_ASKED.with(|a| a.borrow().contains(&src)) {
+          changed = true;
+        }
+      }
+      changed
+    });
+    if changed {
+      IMAGE_ASKED.with(|a| a.borrow_mut().clear());
+      self.inner.reset_render_cache();
+      self.inner.rev += 1;
     }
   }
 

@@ -2273,6 +2273,9 @@ impl Engine {
         n.height = height;
         n.fills = vec![Paint::Image {
           credit: None,
+          scaling_factor: 1.0,
+          rotation: 0.0,
+          filters: None,
           src,
           scale_mode: Default::default(),
           opacity: 1.0,
