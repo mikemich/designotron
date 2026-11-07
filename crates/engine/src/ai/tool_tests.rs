@@ -3089,3 +3089,119 @@ mod r15b {
     }
   }
 }
+
+mod placement {
+  use super::*;
+
+  fn create(e: &mut Engine, nodes: Value) -> Value {
+    e.dispatch(ai("create_nodes", json!({ "nodes": nodes }))).unwrap()
+  }
+
+  fn bounds(e: &Engine, id: &str) -> (f64, f64, f64, f64) {
+    let n = e.doc.get(id).unwrap();
+    (n.x, n.y, n.x + n.width, n.y + n.height)
+  }
+
+  fn id_of(r: &Value, i: usize) -> String {
+    r["created"][i]["id"].as_str().unwrap().to_string()
+  }
+
+  fn disjoint(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    a.2 <= b.0 || b.2 <= a.0 || a.3 <= b.1 || b.3 <= a.1
+  }
+
+  #[test]
+  fn components_made_without_positions_do_not_overlap() {
+    let mut e = engine();
+    let mut ids = Vec::new();
+    for i in 0..5 {
+      let r = create(
+        &mut e,
+        json!([{ "type": "component", "name": format!("C{i}"), "width": 120, "height": 40 }]),
+      );
+      ids.push(id_of(&r, 0));
+    }
+    for (i, a) in ids.iter().enumerate() {
+      for b in &ids[i + 1..] {
+        assert!(
+          disjoint(bounds(&e, a), bounds(&e, b)),
+          "{:?} overlaps {:?}",
+          bounds(&e, a),
+          bounds(&e, b)
+        );
+      }
+    }
+    // The first sits at the origin, the next ones to its right, 100 px apart, at the same top.
+    assert_eq!(bounds(&e, &ids[0]), (0.0, 0.0, 120.0, 40.0));
+    assert_eq!(bounds(&e, &ids[1]), (220.0, 0.0, 340.0, 40.0));
+    assert_eq!(bounds(&e, &ids[2]).0, 440.0);
+  }
+
+  #[test]
+  fn roots_of_one_call_go_left_to_right_and_a_spec_with_x_keeps_it() {
+    let mut e = engine();
+    let r = create(
+      &mut e,
+      json!([
+        { "type": "frame", "name": "A", "width": 100, "height": 50 },
+        { "type": "frame", "name": "B", "width": 100, "height": 50 },
+        { "type": "frame", "name": "Fixed", "x": 2000, "width": 100, "height": 50 },
+        { "type": "frame", "name": "C", "width": 100, "height": 50 }
+      ]),
+    );
+    assert_eq!(bounds(&e, &id_of(&r, 0)).0, 0.0);
+    // B goes right of all the content, the one with an x stays where it was put.
+    assert_eq!(bounds(&e, &id_of(&r, 1)).0, 2200.0);
+    assert_eq!(bounds(&e, &id_of(&r, 2)).0, 2000.0);
+    let c = bounds(&e, &id_of(&r, 3));
+    assert!(c.0 >= 2300.0 && disjoint(c, bounds(&e, &id_of(&r, 1))), "{c:?}");
+  }
+
+  #[test]
+  fn a_free_origin_is_used_even_when_other_content_is_far_away() {
+    let mut e = engine();
+    create(
+      &mut e,
+      json!([{ "type": "frame", "name": "Far", "x": 1000, "y": 500, "width": 100, "height": 100 }]),
+    );
+    let r = create(&mut e, json!([{ "type": "frame", "name": "Near", "width": 100, "height": 100 }]));
+    assert_eq!(bounds(&e, &id_of(&r, 0)), (0.0, 0.0, 100.0, 100.0));
+  }
+
+  #[test]
+  fn children_and_parented_layers_are_not_moved() {
+    let mut e = engine();
+    let r = create(&mut e, json!([{ "type": "frame", "name": "Screen", "width": 400, "height": 400 }]));
+    let screen = id_of(&r, 0);
+    let r = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "parentId": screen, "nodes": [{ "type": "rectangle", "width": 10, "height": 10 }] }),
+      ))
+      .unwrap();
+    assert_eq!(bounds(&e, &id_of(&r, 0)).0, 0.0);
+    let r = create(
+      &mut e,
+      json!([{ "type": "frame", "name": "Kids", "x": 900, "width": 300, "height": 100,
+      "children": [{ "type": "rectangle", "name": "k1", "width": 10, "height": 10 }, { "type": "rectangle", "name": "k2", "width": 10, "height": 10 }] }]),
+    );
+    let kids = e.doc.get(&id_of(&r, 0)).unwrap().children.clone();
+    assert_eq!(bounds(&e, &kids[0]), bounds(&e, &kids[1]));
+  }
+
+  #[test]
+  fn create_instance_without_x_and_y_goes_to_free_space() {
+    let mut e = engine();
+    let r = create(&mut e, json!([{ "type": "component", "name": "Btn", "width": 120, "height": 40 }]));
+    let comp = id_of(&r, 0);
+    let a = e.dispatch(ai("create_instance", json!({ "componentId": comp }))).unwrap();
+    let b = e.dispatch(ai("create_instance", json!({ "componentId": comp }))).unwrap();
+    let c = e
+      .dispatch(ai("create_instance", json!({ "componentId": comp, "x": 5, "y": 7 })))
+      .unwrap();
+    let (a, b, c) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap(), c["id"].as_str().unwrap());
+    assert!(disjoint(bounds(&e, &comp), bounds(&e, a)));
+    assert!(disjoint(bounds(&e, a), bounds(&e, b)));
+    assert_eq!((bounds(&e, c).0, bounds(&e, c).1), (5.0, 7.0));
+  }
+}

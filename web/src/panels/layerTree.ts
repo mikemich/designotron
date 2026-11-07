@@ -106,10 +106,11 @@ export type LayerSearch = { hits: LayerHit[]; total: number };
 
 /** Layers of one page matching a query and filters, in panel order (top layer first, depth first),
  * including layers inside instances. Names match case-insensitively as substrings, text layers also by
- * their content. Type filters combine with "or", Hidden and Locked with "or" among themselves, and
+ * their content (`opts.content`, on by default; off matches names only). Type filters combine with "or", Hidden and Locked with "or" among themselves, and
  * the two groups with "and". */
-export function searchLayers(doc: Doc, pageId: string, query: string, filters: ReadonlySet<LayerFilter>, limit: number): LayerSearch {
+export function searchLayers(doc: Doc, pageId: string, query: string, filters: ReadonlySet<LayerFilter>, limit: number, opts: { content?: boolean } = {}): LayerSearch {
   const q = query.trim().toLowerCase();
+  const content = opts.content !== false;
   const types = [...filters].filter((f) => !STATE_FILTERS.has(f));
   const states = [...filters].filter((f) => STATE_FILTERS.has(f));
   const hits: LayerHit[] = [];
@@ -123,7 +124,7 @@ export function searchLayers(doc: Doc, pageId: string, query: string, filters: R
     if (!n) continue;
     const name = n.name || n.type;
     if (
-      (!q || name.toLowerCase().includes(q) || (n.type === "text" && !!n.text?.characters && n.text.characters.toLowerCase().includes(q))) &&
+      (!q || name.toLowerCase().includes(q) || (content && n.type === "text" && !!n.text?.characters && n.text.characters.toLowerCase().includes(q))) &&
       (!types.length || types.includes(filterKind(n))) &&
       (!states.length || (states.includes("hidden") && !n.visible) || (states.includes("locked") && n.locked))
     ) {

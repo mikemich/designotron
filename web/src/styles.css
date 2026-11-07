@@ -706,6 +706,11 @@ textarea.textinput {
 .layer-filter-item:hover {
   background: var(--panel-2);
 }
+.layer-filter-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
 .layer-filter-clear,
 .layer-select-all {
   background: none;
@@ -1957,6 +1962,39 @@ body:has(.modal-bg) .hint-card {
 .variables-dialog {
   width: min(1080px, calc(100vw - 32px));
   height: 540px;
+}
+.var-import-report {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  font-size: 12px;
+}
+.var-import-report.error {
+  color: var(--danger, #f24822);
+}
+.var-import-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.var-import-skipped-btn {
+  background: none;
+  border: 0;
+  color: var(--select);
+  cursor: pointer;
+  padding: 0 2px;
+  font: inherit;
+}
+.var-import-skipped {
+  margin: 6px 0 0;
+  padding: 0 0 0 16px;
+  max-height: 120px;
+  overflow: auto;
+}
+.var-import-skipped code {
+  font-size: 11px;
 }
 .variables-body {
   display: flex;

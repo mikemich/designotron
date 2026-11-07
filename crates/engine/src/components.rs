@@ -1748,7 +1748,17 @@ pub fn combine_as_variants(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) 
   }
   // Properties come from the original names, before they are rewritten as "Prop=Value".
   let names: Vec<String> = comps.iter().filter_map(|c| doc.get(c)).map(|c| c.name.clone()).collect();
-  let (mut set_name, props) = variants_from_names(&names);
+  let (mut set_name, pairs) = variants_from_names(&names);
+  // One key order for every variant: the first name's, then keys in the order they first appear.
+  let mut order: Vec<String> = Vec::new();
+  for p in &pairs {
+    for (k, _) in p {
+      if !order.contains(k) {
+        order.push(k.clone());
+      }
+    }
+  }
+  let props: Vec<BTreeMap<String, String>> = pairs.into_iter().map(|p| p.into_iter().collect()).collect();
   if set_name == DEFAULT_SET {
     // Instances take their set's name: sets without a name of their own differ by number.
     let numbered = doc.next_name(DEFAULT_SET);
@@ -1764,7 +1774,11 @@ pub fn combine_as_variants(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) 
     if let Some(c) = doc.get_mut(cid) {
       c.x += pad;
       c.y += pad;
-      c.name = props.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ");
+      c.name = order
+        .iter()
+        .filter_map(|k| props.get(k).map(|v| format!("{k}={v}")))
+        .collect::<Vec<_>>()
+        .join(", ");
       c.component.get_or_insert_with(Default::default).variant_props = props;
     }
   }
@@ -1786,8 +1800,8 @@ pub fn combine_as_variants(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) 
 /// "Button/Primary" and "Button/Secondary" make set "Button" with Property 1 = Primary or
 /// Secondary; "Size=Large" names are used as they are; anything else falls back to the
 /// distinct names (or "Variant 1", "Variant 2" …) under "Property 1".
-fn variants_from_names(names: &[String]) -> (String, Vec<BTreeMap<String, String>>) {
-  if let Some(parsed) = names.iter().map(|n| parse_variant_name(n)).collect::<Option<Vec<_>>>() {
+fn variants_from_names(names: &[String]) -> (String, Vec<Vec<(String, String)>>) {
+  if let Some(parsed) = names.iter().map(|n| variant_pairs(n)).collect::<Option<Vec<_>>>() {
     // "Button/Size=Small": a path shared by every name before the pairs names the set.
     let prefix = |n: &str| {
       n.rsplit_once('/')
@@ -1796,10 +1810,7 @@ fn variants_from_names(names: &[String]) -> (String, Vec<BTreeMap<String, String
     };
     let shared = prefix(&names[0]).filter(|p| !p.is_empty() && names.iter().all(|n| prefix(n).as_deref() == Some(p.as_str())));
     return match shared {
-      Some(base) => (
-        base,
-        names.iter().filter_map(|n| parse_variant_name(n.rsplit_once('/')?.1)).collect(),
-      ),
+      Some(base) => (base, names.iter().filter_map(|n| variant_pairs(n.rsplit_once('/')?.1)).collect()),
       None => (DEFAULT_SET.into(), parsed),
     };
   }
@@ -1824,7 +1835,7 @@ fn variants_from_names(names: &[String]) -> (String, Vec<BTreeMap<String, String
     .first()
     .map(|p| p[..common].join(if slash { "/" } else { " " }))
     .unwrap_or_default();
-  let props: Vec<BTreeMap<String, String>> = parts
+  let props: Vec<Vec<(String, String)>> = parts
     .iter()
     .map(|p| {
       let rest = &p[common..];
@@ -1835,14 +1846,15 @@ fn variants_from_names(names: &[String]) -> (String, Vec<BTreeMap<String, String
           .map(|(i, v)| (format!("Property {}", i + 1), v.to_string()))
           .collect()
       } else {
-        BTreeMap::from([("Property 1".to_string(), rest.join(" "))])
+        vec![("Property 1".to_string(), rest.join(" "))]
       }
     })
     .collect();
-  let distinct = props
+  let maps: Vec<BTreeMap<&String, &String>> = props.iter().map(|p| p.iter().map(|(k, v)| (k, v)).collect()).collect();
+  let distinct = maps
     .iter()
     .enumerate()
-    .all(|(i, p)| !p.is_empty() && p.values().all(|v| !v.is_empty()) && !props[..i].contains(p));
+    .all(|(i, p)| !p.is_empty() && p.values().all(|v| !v.is_empty()) && !maps[..i].contains(p));
   let set_name = if !base.is_empty() {
     base
   } else if !names[0].is_empty() && names.iter().all(|n| *n == names[0]) {
@@ -1854,22 +1866,62 @@ fn variants_from_names(names: &[String]) -> (String, Vec<BTreeMap<String, String
     props
   } else {
     (1..=names.len())
-      .map(|i| BTreeMap::from([("Property 1".to_string(), format!("Variant {i}"))]))
+      .map(|i| vec![("Property 1".to_string(), format!("Variant {i}"))])
       .collect()
   };
   (set_name, props)
 }
 
-pub fn parse_variant_name(name: &str) -> Option<BTreeMap<String, String>> {
+/// "Size=S, State=Default" as ordered pairs. A key written twice keeps the last value at its
+/// first position.
+pub fn variant_pairs(name: &str) -> Option<Vec<(String, String)>> {
   if !name.contains('=') {
     return None;
   }
-  let mut m = BTreeMap::new();
+  let mut out: Vec<(String, String)> = Vec::new();
   for part in name.split(',') {
     let (k, v) = part.split_once('=')?;
-    m.insert(k.trim().to_string(), v.trim().to_string());
+    let (k, v) = (k.trim().to_string(), v.trim().to_string());
+    match out.iter_mut().find(|(ok, _)| *ok == k) {
+      Some(slot) => slot.1 = v,
+      None => out.push((k, v)),
+    }
   }
-  Some(m)
+  Some(out)
+}
+
+pub fn parse_variant_name(name: &str) -> Option<BTreeMap<String, String>> {
+  variant_pairs(name).map(|p| p.into_iter().collect())
+}
+
+/// The property keys of a component set in their written order: the first child's name, then any
+/// other keys (children with more properties) sorted.
+pub fn variant_order(doc: &Document, set: &str) -> Vec<String> {
+  let kids: Vec<&Node> = doc
+    .get(set)
+    .map(|s| {
+      s.children
+        .iter()
+        .filter_map(|c| doc.get(c))
+        .filter(|c| c.kind == NodeType::Component)
+        .collect()
+    })
+    .unwrap_or_default();
+  let mut order: Vec<String> = kids
+    .first()
+    .and_then(|c| variant_pairs(&c.name))
+    .map(|p| p.into_iter().map(|(k, _)| k).collect())
+    .unwrap_or_default();
+  let mut rest: Vec<String> = kids
+    .iter()
+    .filter_map(|c| c.component.as_ref())
+    .flat_map(|c| c.variant_props.keys().cloned())
+    .filter(|k| !order.contains(k))
+    .collect();
+  rest.sort();
+  rest.dedup();
+  order.extend(rest);
+  order
 }
 
 /// Finds the sibling variant matching `base` props with one property changed.
@@ -4425,6 +4477,85 @@ mod tests {
         other => format!("{other:?}"),
       }
     }
+  }
+
+  #[test]
+  fn combine_as_variants_keeps_the_written_property_order() {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let names = [
+      "Size=S, State=Default, Icon=None",
+      "Size=M, State=Hover, Icon=None",
+      "Size=L, State=Default, Icon=Left",
+      // Another property, in the middle of a name: it goes last.
+      "Size=S, Tone=Soft, State=Hover, Icon=None",
+    ];
+    let mut ids = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+      let id = format!("c{i}");
+      doc.insert(
+        Node {
+          id: id.clone(),
+          kind: NodeType::Component,
+          name: name.to_string(),
+          x: i as f64 * 120.0,
+          component: Some(ComponentInfo::default()),
+          ..Default::default()
+        },
+        None,
+        &page,
+        None,
+      );
+      ids.push(id);
+    }
+    let set = combine_as_variants(&mut doc, &ids, &mut gen).unwrap();
+    let written: Vec<String> = ids.iter().map(|i| doc.get(i).unwrap().name.clone()).collect();
+    assert_eq!(written[0], "Size=S, State=Default, Icon=None");
+    assert_eq!(written[2], "Size=L, State=Default, Icon=Left");
+    // Every name lists the keys in one order: the first name's, then new keys as first seen.
+    assert_eq!(written[3], "Size=S, State=Hover, Icon=None, Tone=Soft");
+    assert_eq!(variant_order(&doc, &set), ["Size", "State", "Icon", "Tone"]);
+    let props = &doc.get(&ids[3]).unwrap().component.as_ref().unwrap().variant_props;
+    assert_eq!(props["Tone"], "Soft");
+  }
+
+  #[test]
+  fn variant_order_follows_the_first_child_then_sorts_the_rest() {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut add = |id: &str, name: &str, props: &[(&str, &str)]| {
+      doc.insert(
+        Node {
+          id: id.into(),
+          kind: NodeType::Component,
+          name: name.into(),
+          component: Some(ComponentInfo {
+            variant_props: props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            ..Default::default()
+          }),
+          ..Default::default()
+        },
+        None,
+        &page,
+        None,
+      );
+    };
+    add("a", "State=Default, Size=S", &[("State", "Default"), ("Size", "S")]);
+    add(
+      "b",
+      "Zeta=1, Alpha=2, State=Hover, Size=M",
+      &[("Zeta", "1"), ("Alpha", "2"), ("State", "Hover"), ("Size", "M")],
+    );
+    let set = crate::ops::wrap_in_frame(&mut doc, &["a".to_string(), "b".to_string()], &mut gen, NodeType::ComponentSet).unwrap();
+    // The first child's keys in their written order, then the extra keys sorted.
+    assert_eq!(variant_order(&doc, &set), ["State", "Size", "Alpha", "Zeta"]);
+    assert_eq!(
+      variant_pairs("Size = S ,State= Hover, Size=L").unwrap(),
+      [("Size".to_string(), "L".to_string()), ("State".to_string(), "Hover".to_string())]
+    );
+    assert!(variant_pairs("Button").is_none());
   }
 }
 

@@ -262,7 +262,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "create_nodes",
-      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), svg (whole SVG markup as editable layers), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). Returns ids for the created layers.",
+      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), svg (whole SVG markup as editable layers), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). Top-level layers without x and y go to (0, 0) when that is free, else to the right of the page's content. Returns ids for the created layers.",
       "input_schema": { "type": "object", "properties": { "parentId": { "type": "string" }, "nodes": { "type": "array", "items": spec } }, "required": ["nodes"] }
     },
     {
@@ -287,7 +287,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "create_instance",
-      "description": "Place an instance of a main component. parentId must be an existing layer that can hold children (a frame, group, component or instance); it is refused otherwise, and an instance can't be placed inside its own component.",
+      "description": "Place an instance of a main component. parentId must be an existing layer that can hold children (a frame, group, component or instance); it is refused otherwise, and an instance can't be placed inside its own component. Without x and y a top-level instance goes to (0, 0) when free, else to the right of the page's content.",
       "input_schema": { "type": "object", "properties": { "componentId": { "type": "string" }, "parentId": { "type": "string" }, "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["componentId"] }
     },
     {
@@ -1155,6 +1155,7 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         .to_string();
       let parent = input.get("parentId").and_then(|v| v.as_str()).map(String::from);
       let (x, y) = (num(input.get("x")).unwrap_or(0.0), num(input.get("y")).unwrap_or(0.0));
+      let auto_place = parent.is_none() && input.get("x").is_none() && input.get("y").is_none();
       match e.doc.get(&comp) {
         Some(c) if c.kind == NodeType::Component => {}
         Some(c) if c.kind == NodeType::ComponentSet => {
@@ -1196,6 +1197,9 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
           _ => format!("can't place an instance of {} inside {} itself", name(&comp), name(&comp)),
         }
       })?;
+      if auto_place {
+        place_in_free_space(e, &page, &id, &[]);
+      }
       Ok(json!({ "id": id }))
     }
     "set_component_props" => {
@@ -2597,6 +2601,14 @@ fn outline_plan(e: &Engine, roots: &[NodeId], depth: usize) -> (HashSet<String>,
 
 fn component_summary(e: &Engine, c: &Node) -> Value {
   let mut m = json!({ "id": c.id, "name": c.name, "width": c.width, "height": c.height });
+  // Variants list their property keys in the written order (the saved props are alphabetical).
+  if let Some(set) = c
+    .parent
+    .as_deref()
+    .filter(|p| e.doc.get(p).is_some_and(|s| s.kind == NodeType::ComponentSet))
+  {
+    m["variantOrder"] = json!(crate::components::variant_order(&e.doc, set));
+  }
   let props = crate::props::props_of(&e.doc, &c.id);
   if !props.is_empty() {
     m["props"] = json!(props
@@ -2768,6 +2780,19 @@ pub fn insert_specs_ex(e: &mut Engine, specs: &[Value], parent: Option<&str>) ->
     settle_fill_in_hug(&mut e.doc, r);
   }
   crate::layout::relayout_all(&mut e.doc, e.measurer.as_ref());
+  if parent.is_none() {
+    // Layers still waiting for their spot sit at the origin and must not count as content.
+    let mut waiting: Vec<&str> = roots
+      .iter()
+      .zip(specs)
+      .filter(|(_, s)| s.get("x").is_none() && s.get("y").is_none())
+      .map(|(r, _)| r.as_str())
+      .collect();
+    while !waiting.is_empty() {
+      let r = waiting.remove(0);
+      place_in_free_space(e, &page, r, &waiting);
+    }
+  }
   let mut left = CREATED_LISTED;
   let created = roots.iter().map(|r| brief(e, r, &mut left)).collect();
   let mut names = Map::new();
@@ -2788,6 +2813,44 @@ pub fn insert_specs_ex(e: &mut Engine, specs: &[Value], parent: Option<&str>) ->
     names_truncated,
     warnings: cx.into_warnings(),
   })
+}
+
+/// Gap between a tool-made layer and the content it was placed beside.
+const PLACE_GAP: f64 = 100.0;
+
+/// Where a top-level layer of size `w` x `h` goes when the caller gave no position: (0, 0) if no
+/// other top-level layer of the page overlaps that box, else to the right of the page's content
+/// (`PLACE_GAP` apart, level with its top). `skip` are the layer itself and the ones still to place.
+fn free_spot(doc: &crate::model::Document, page: &str, skip: &[&str], w: f64, h: f64) -> (f64, f64) {
+  let others: Vec<crate::geom::Rect> = doc
+    .page(page)
+    .map(|p| {
+      p.children
+        .iter()
+        .filter(|c| !skip.contains(&c.as_str()))
+        .map(|c| doc.abs_bounds(c))
+        .collect()
+    })
+    .unwrap_or_default();
+  let origin = crate::geom::Rect::new(0.0, 0.0, w, h);
+  let overlaps = |o: &crate::geom::Rect| o.x < origin.right() && origin.x < o.right() && o.y < origin.bottom() && origin.y < o.bottom();
+  if !others.iter().any(overlaps) {
+    return (0.0, 0.0);
+  }
+  let right = others.iter().map(|o| o.right()).fold(f64::MIN, f64::max);
+  let top = others.iter().map(|o| o.y).fold(f64::MAX, f64::min);
+  (right + PLACE_GAP, top)
+}
+
+/// Moves a just-created top-level layer to `free_spot`.
+fn place_in_free_space(e: &mut Engine, page: &str, id: &str, waiting: &[&str]) {
+  let Some(n) = e.doc.get(id) else { return };
+  let skip: Vec<&str> = waiting.iter().copied().chain([id]).collect();
+  let (x, y) = free_spot(&e.doc, page, &skip, n.width, n.height);
+  if let Some(n) = e.doc.get_mut(id) {
+    n.x = x;
+    n.y = y;
+  }
 }
 
 /// A few lines about a layer: id, name, type, size, and its children and theirs (id, name, type
