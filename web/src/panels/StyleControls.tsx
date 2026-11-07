@@ -427,17 +427,17 @@ function EffectStyleRow({ s, label, depth, sel, editing, setEditing }: { s: Effe
                     <Trash2 size={12} />
                   </IconButton>
                 </div>
-                <div className="grid2">
+                <div className="grid2 effect-fields">
                   {shadow && <NumberField label="X" value={e.x} onChange={(x) => setE(i, { x })} onScrubStart={begin} onScrubEnd={end} />}
                   {shadow && <NumberField label="Y" value={e.y} onChange={(y) => setE(i, { y })} onScrubStart={begin} onScrubEnd={end} />}
                   <NumberField label="Blur" min={0} value={e.blur} onChange={(blur) => setE(i, { blur })} onScrubStart={begin} onScrubEnd={end} />
-                  {shadow && <NumberField label="Spr" value={e.spread} onChange={(spread) => setE(i, { spread })} onScrubStart={begin} onScrubEnd={end} />}
+                  {shadow && <NumberField label="Spread" value={e.spread} onChange={(spread) => setE(i, { spread })} onScrubStart={begin} onScrubEnd={end} />}
                 </div>
                 {shadow && <InlineInput label="Hex" value={e.color.replace("#", "")} title="Shadow colour (hex, 8 digits for opacity)" onCommit={(v) => (/^([0-9a-f]{6}|[0-9a-f]{8})$/i.test(v.trim().replace("#", "")) ? setE(i, { color: "#" + v.trim().replace("#", "").toUpperCase() }) : false)} />}
               </div>
             );
           })}
-          <button className="btn" onClick={() => setEffects([...s.effects, { type: "dropShadow", color: "#00000040", x: 0, y: 4, blur: 12, spread: 0, visible: true }])}>
+          <button className="btn" onClick={() => setEffects([...s.effects, { type: "dropShadow", color: "#00000040", x: 0, y: 4, blur: 4, spread: 0, visible: true }])}>
             <Plus size={13} /> Add effect
           </button>
         </div>

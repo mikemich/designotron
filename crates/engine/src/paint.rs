@@ -6,7 +6,7 @@ use std::f64::consts::TAU;
 
 use crate::color::{self, Rgba};
 use crate::geom::fmt;
-use crate::model::{GradientHandles, GradientStop, ImageCrop, StrokeAlign};
+use crate::model::{GradientHandles, GradientStop, ImageCrop, ImageFilters, ScaleMode, StrokeAlign};
 use crate::render::stops_svg;
 
 /// Whether an image source may be written into the SVG `href` (and so fetched by the editor):
@@ -278,17 +278,195 @@ impl Ring {
 /// Image pattern for `ScaleMode::Crop`: the whole image stretched over `crop`, which is given
 /// relative to the layer box and may reach outside it.
 pub fn crop_pattern(id: &str, src: &str, opacity: f64, crop: &ImageCrop, w: f64, h: f64) -> String {
-  format!(
-    "<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"{}\" height=\"{}\"><image href=\"{}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" opacity=\"{}\"/></pattern>",
-    fmt(w.max(1.0)),
-    fmt(h.max(1.0)),
-    crate::render::esc(image_href(src)),
-    fmt(crop.x * w),
-    fmt(crop.y * h),
-    fmt(crop.w * w),
-    fmt(crop.h * h),
-    fmt(opacity)
-  )
+  let p = ImagePaint {
+    src,
+    scale_mode: ScaleMode::Crop,
+    opacity,
+    crop: Some(crop),
+    scaling_factor: 1.0,
+    rotation: 0.0,
+    filters: None,
+    natural: None,
+  };
+  image_pattern(id, &p, w, h)
+}
+
+/// Everything the SVG of one image fill depends on.
+pub struct ImagePaint<'a> {
+  pub src: &'a str,
+  pub scale_mode: ScaleMode,
+  pub opacity: f64,
+  pub crop: Option<&'a ImageCrop>,
+  pub scaling_factor: f64,
+  pub rotation: f64,
+  pub filters: Option<&'a ImageFilters>,
+  /// The image's own size in px, when the measurer knows it.
+  pub natural: Option<(f64, f64)>,
+}
+
+/// Rotation as 0, 90, 180 or 270.
+pub fn quarter_turns(rotation: f64) -> u32 {
+  if !rotation.is_finite() {
+    return 0;
+  }
+  ((rotation / 90.0).round() as i64).rem_euclid(4) as u32 * 90
+}
+
+/// Cell of a tiled image: its own size times the factor, or the old 64 px cell without a size.
+pub fn tile_cell(natural: Option<(f64, f64)>, factor: f64, w: f64, h: f64) -> (f64, f64) {
+  let f = if factor.is_finite() && factor > 0.0 {
+    factor.clamp(0.01, 100.0)
+  } else {
+    1.0
+  };
+  match natural {
+    Some((nw, nh)) if nw > 0.0 && nh > 0.0 => (nw * f, nh * f),
+    _ => ((64.0 * f).min(w), (64.0 * f).min(h)),
+  }
+}
+
+/// The `<filter>` (when there are adjustments) and `<pattern>` of an image fill. The filter id
+/// is `{id}_f`; the pattern's `<image>` references it.
+pub fn image_pattern(id: &str, p: &ImagePaint, w: f64, h: f64) -> String {
+  let rot = quarter_turns(p.rotation);
+  let (w, h) = (w.max(1.0), h.max(1.0));
+  let filter = p.filters.filter(|f| !f.is_identity()).map(|f| image_filter(&format!("{id}_f"), f));
+  let fattr = if filter.is_some() {
+    format!(" filter=\"url(#{id}_f)\"")
+  } else {
+    String::new()
+  };
+  let src = crate::render::esc(image_href(p.src));
+  let op = fmt(p.opacity);
+  let image = |x: f64, y: f64, iw: f64, ih: f64, par: &str| {
+    format!(
+      "<image href=\"{src}\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"{par}\" opacity=\"{op}\"{fattr}/>",
+      fmt(x),
+      fmt(y),
+      fmt(iw),
+      fmt(ih)
+    )
+  };
+  // Draws the image in the box (x, y, bw, bh) turned about its centre; 90 and 270 swap the
+  // box so the turned image fills it.
+  let turned = |x: f64, y: f64, bw: f64, bh: f64, par: &str| {
+    if rot == 0 {
+      return image(x, y, bw, bh, par);
+    }
+    let (cx, cy) = (x + bw / 2.0, y + bh / 2.0);
+    let (iw, ih) = if rot == 90 || rot == 270 { (bh, bw) } else { (bw, bh) };
+    format!(
+      "<g transform=\"rotate({rot} {} {})\">{}</g>",
+      fmt(cx),
+      fmt(cy),
+      image(cx - iw / 2.0, cy - ih / 2.0, iw, ih, par)
+    )
+  };
+  let pattern = match (p.scale_mode, p.crop) {
+    (ScaleMode::Crop, Some(c)) => format!(
+      "<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"{}\" height=\"{}\">{}</pattern>",
+      fmt(w),
+      fmt(h),
+      turned(c.x * w, c.y * h, c.w * w, c.h * h, "none")
+    ),
+    (ScaleMode::Tile, _) => {
+      let (cw, ch) = tile_cell(p.natural, p.scaling_factor, w, h);
+      let (cw, ch) = (cw.max(1.0), ch.max(1.0));
+      let par = if p.natural.is_some() { "none" } else { "xMidYMid slice" };
+      let tf = if rot == 0 {
+        String::new()
+      } else {
+        format!(" patternTransform=\"rotate({rot})\"")
+      };
+      format!(
+        "<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"{}\" height=\"{}\"{tf}>{}</pattern>",
+        fmt(cw),
+        fmt(ch),
+        image(0.0, 0.0, cw, ch, par)
+      )
+    }
+    (mode, _) => {
+      let par = match mode {
+        ScaleMode::Fit => "xMidYMid meet",
+        ScaleMode::Stretch => "none",
+        _ => "xMidYMid slice",
+      };
+      format!(
+        "<pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"{}\" height=\"{}\">{}</pattern>",
+        fmt(w),
+        fmt(h),
+        turned(0.0, 0.0, w, h, par)
+      )
+    }
+  };
+  format!("{}{pattern}", filter.unwrap_or_default())
+}
+
+/// Nine samples of the shadows/highlights curve: `y = x + 0.12 s (27/4) x (1-x)^2 + 0.12 h (27/4) x^2 (1-x)`,
+/// clamped. Starting constants (Figma's exact curves are not known here); monotone for |s|, |h| <= 1.
+pub fn tone_table(shadows: f64, highlights: f64) -> [f64; 9] {
+  let mut out = [0.0; 9];
+  for (i, v) in out.iter_mut().enumerate() {
+    let x = i as f64 / 8.0;
+    let y = x + 0.12 * shadows * 6.75 * x * (1.0 - x) * (1.0 - x) + 0.12 * highlights * 6.75 * x * x * (1.0 - x);
+    *v = y.clamp(0.0, 1.0);
+  }
+  out
+}
+
+/// One SVG `<filter>` for the seven image adjustments, steps in a fixed order (exposure, contrast,
+/// shadows and highlights, temperature and tint, saturation). Identity steps are left out.
+pub fn image_filter(id: &str, f: &ImageFilters) -> String {
+  let f = f.clamped();
+  let mut out = format!("<filter id=\"{id}\" color-interpolation-filters=\"sRGB\">");
+  let linear = |slope: f64, intercept: f64| {
+    let one = |c: char| {
+      format!(
+        "<feFunc{c} type=\"linear\" slope=\"{}\" intercept=\"{}\"/>",
+        fmt(slope),
+        fmt(intercept)
+      )
+    };
+    format!("<feComponentTransfer>{}{}{}</feComponentTransfer>", one('R'), one('G'), one('B'))
+  };
+  if f.exposure != 0.0 {
+    out.push_str(&linear(2f64.powf(f.exposure), 0.0));
+  }
+  if f.contrast != 0.0 {
+    let k = 1.0 + f.contrast;
+    out.push_str(&linear(k, 0.5 * (1.0 - k)));
+  }
+  if f.shadows != 0.0 || f.highlights != 0.0 {
+    let t = tone_table(f.shadows, f.highlights)
+      .iter()
+      .map(|v| fmt(*v))
+      .collect::<Vec<_>>()
+      .join(" ");
+    let one = |c: char| format!("<feFunc{c} type=\"table\" tableValues=\"{t}\"/>");
+    out.push_str(&format!(
+      "<feComponentTransfer>{}{}{}</feComponentTransfer>",
+      one('R'),
+      one('G'),
+      one('B')
+    ));
+  }
+  if f.temperature != 0.0 || f.tint != 0.0 {
+    let (r, g, b) = (1.0 + 0.15 * f.temperature, 1.0 - 0.15 * f.tint, 1.0 - 0.15 * f.temperature);
+    out.push_str(&format!(
+      "<feColorMatrix type=\"matrix\" values=\"{} 0 0 0 0 0 {} 0 0 0 0 0 {} 0 0 0 0 0 1 0\"/>",
+      fmt(r),
+      fmt(g),
+      fmt(b)
+    ));
+  }
+  if f.saturation != 0.0 {
+    out.push_str(&format!(
+      "<feColorMatrix type=\"saturate\" values=\"{}\"/>",
+      fmt(1.0 + f.saturation)
+    ));
+  }
+  out.push_str("</filter>");
+  out
 }
 
 /// Outline of a stroke with one weight per side (top, right, bottom, left) as a ring to fill
@@ -553,6 +731,9 @@ mod tests {
       },
       Paint::Image {
         credit: None,
+        scaling_factor: 1.0,
+        rotation: 0.0,
+        filters: None,
         src: "asset:a".into(),
         scale_mode: ScaleMode::Crop,
         opacity: 1.0,
@@ -747,6 +928,9 @@ mod tests {
     let doc = doc_with(NodeType::Rectangle, 100.0, 50.0, |n| {
       n.fills = vec![Paint::Image {
         credit: None,
+        scaling_factor: 1.0,
+        rotation: 0.0,
+        filters: None,
         src: "asset:a".into(),
         scale_mode: ScaleMode::Crop,
         opacity: 1.0,
@@ -790,5 +974,91 @@ mod tests {
     assert_eq!(s.at(0.5).0.hex6(), "#800080");
     assert_eq!(handle_angle(&default_handles(true), 100.0, 100.0), 0.0);
     assert_eq!(handle_angle(&default_handles(false), 100.0, 100.0), 90.0);
+  }
+
+  #[test]
+  fn image_filter_steps_are_in_order_and_identity_steps_are_left_out() {
+    let none = image_filter("f", &ImageFilters::default());
+    assert_eq!(none, "<filter id=\"f\" color-interpolation-filters=\"sRGB\"></filter>");
+    let all = image_filter(
+      "f",
+      &ImageFilters {
+        exposure: 1.0,
+        contrast: 0.5,
+        saturation: 0.5,
+        temperature: 1.0,
+        tint: -1.0,
+        highlights: 0.5,
+        shadows: -0.5,
+      },
+    );
+    let at = |needle: &str| all.find(needle).unwrap_or_else(|| panic!("{needle} in {all}"));
+    assert!(at("slope=\"2\" intercept=\"0\"") < at("slope=\"1.5\" intercept=\"-0.25\""));
+    assert!(at("slope=\"1.5\"") < at("type=\"table\""));
+    assert!(at("type=\"table\"") < at("type=\"matrix\""));
+    assert!(at("type=\"matrix\"") < at("type=\"saturate\" values=\"1.5\""));
+    // Temperature +1 and tint -1: R 1.15, G 1.15, B 0.85.
+    assert!(all.contains("values=\"1.15 0 0 0 0 0 1.15 0 0 0 0 0 0.85 0 0 0 0 0 1 0\""), "{all}");
+    // Only the steps that move something.
+    let sat = image_filter(
+      "f",
+      &ImageFilters {
+        saturation: -1.0,
+        ..Default::default()
+      },
+    );
+    assert!(!sat.contains("feComponentTransfer") && sat.contains("saturate"), "{sat}");
+  }
+
+  #[test]
+  fn the_shadows_and_highlights_curve_stays_monotone_and_in_range() {
+    for (s, h) in [
+      (1.0, 0.0),
+      (-1.0, 0.0),
+      (0.0, 1.0),
+      (0.0, -1.0),
+      (1.0, 1.0),
+      (-1.0, -1.0),
+      (1.0, -1.0),
+      (-1.0, 1.0),
+    ] {
+      let t = tone_table(s, h);
+      assert!(t[0] == 0.0 && (t[8] - 1.0).abs() < 1e-12, "{t:?}");
+      for w in t.windows(2) {
+        assert!(w[1] >= w[0], "s {s} h {h}: {t:?}");
+      }
+      assert!(t.iter().all(|v| (0.0..=1.0).contains(v)));
+    }
+    // Shadows lift the dark half; highlights pull the bright half down.
+    assert!(tone_table(1.0, 0.0)[2] > 0.25);
+    assert!(tone_table(0.0, -1.0)[6] < 0.75);
+  }
+
+  #[test]
+  fn quarter_turns_normalise_and_cells_clamp() {
+    assert_eq!(
+      [0.0, 90.0, 450.0, -90.0, 180.0, 44.0, 46.0].map(quarter_turns),
+      [0, 90, 90, 270, 180, 0, 90]
+    );
+    assert_eq!(quarter_turns(f64::NAN), 0);
+    assert_eq!(tile_cell(Some((40.0, 20.0)), 2.0, 10.0, 10.0), (80.0, 40.0));
+    assert_eq!(tile_cell(Some((40.0, 20.0)), 1000.0, 10.0, 10.0), (4000.0, 2000.0));
+    assert_eq!(tile_cell(None, 1.0, 400.0, 30.0), (64.0, 30.0));
+  }
+
+  #[test]
+  fn the_new_image_fields_are_skipped_at_their_defaults() {
+    let plain = r##"{"type":"image","src":"asset:a","scaleMode":"tile","opacity":1.0,"visible":true}"##;
+    let p: Paint = serde_json::from_str(plain).unwrap();
+    assert_eq!(serde_json::to_string(&p).unwrap(), plain);
+    // All-zero filters are not written either.
+    let zero: Paint = serde_json::from_str(
+      r##"{"type":"image","src":"asset:a","scaleMode":"tile","opacity":1.0,"visible":true,"filters":{"exposure":0}}"##,
+    )
+    .unwrap();
+    assert_eq!(serde_json::to_string(&zero).unwrap(), plain);
+    let set = r##"{"type":"image","src":"asset:a","scaleMode":"tile","opacity":1.0,"visible":true,"scalingFactor":0.5,"rotation":90.0,"filters":{"exposure":0.0,"contrast":0.0,"saturation":-1.0,"temperature":0.0,"tint":0.0,"highlights":0.0,"shadows":0.0}}"##;
+    let p: Paint = serde_json::from_str(set).unwrap();
+    assert_eq!(serde_json::to_string(&p).unwrap(), set);
   }
 }

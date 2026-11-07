@@ -3150,6 +3150,89 @@ body:has(.phone-note) .toast {
   flex: 1;
   min-width: 7em;
 }
+/* r17c: image fill popover (rotate, adjust) and effect fields */
+.image-turn-row {
+  align-items: center;
+}
+.image-turn-row .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.image-adjust {
+  margin: 8px 0 4px;
+}
+.image-adjust-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: var(--text-2);
+  font-size: 11px;
+}
+.image-adjust-row {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.image-adjust-row input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--select);
+}
+.image-adjust-row output {
+  text-align: right;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+/* Spread, Blur, X and Y fields: equal widths, the whole label shown, values to the right. */
+.effect-fields .field .lbl {
+  width: auto;
+  min-width: 24px;
+  padding: 0 4px 0 8px;
+  white-space: nowrap;
+  overflow: visible;
+}
+.effect-fields .field input {
+  text-align: right;
+}
+/* Images in Assets */
+.image-assets .image-asset {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.image-assets .image-asset:hover {
+  background: var(--panel-2);
+}
+.image-assets .image-asset.on {
+  background: var(--panel-3);
+}
+.image-assets .image-thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: 4px;
+  background: var(--panel-2) center / cover no-repeat;
+  border: 1px solid var(--border, #3a3a3a);
+}
+.image-assets .image-meta {
+  min-width: 0;
+  font-size: 11px;
+}
+.image-assets .image-meta .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
 /* W3-F inspect */
 .insp-live {
   font-weight: 500;

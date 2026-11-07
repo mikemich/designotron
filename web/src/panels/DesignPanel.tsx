@@ -1316,7 +1316,7 @@ function EffectsSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         <>
         {nodes.length === 1 && <CreateStyleButton kind="effect" node={nodes[0]} />}
         <ApplyStyleButton kind="effect" ids={ids} />
-        <IconButton title="Add effect" onClick={() => set([...list, { type: "dropShadow", color: "#00000040", x: 0, y: 4, blur: 12, spread: 0, visible: true }])}>
+        <IconButton title="Add effect" onClick={() => set([...list, { type: "dropShadow", color: "#00000040", x: 0, y: 4, blur: 4, spread: 0, visible: true }])}>
           <Plus size={14} />
         </IconButton>
         </>
@@ -1352,11 +1352,11 @@ function EffectsSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
             </div>
             {open === i && (
               <>
-                <div className="grid2">
+                <div className="grid2 effect-fields">
                   {shadow && <NumberField label="X" value={e.x} onChange={(x) => setE({ x })} onScrubStart={begin} onScrubEnd={end} />}
                   {shadow && <NumberField label="Y" value={e.y} onChange={(y) => setE({ y })} onScrubStart={begin} onScrubEnd={end} />}
                   <NumberField label="Blur" min={0} value={e.blur} onChange={(blur) => setE({ blur })} onScrubStart={begin} onScrubEnd={end} />
-                  {shadow && <NumberField label="Spr" value={e.spread} onChange={(spread) => setE({ spread })} onScrubStart={begin} onScrubEnd={end} />}
+                  {shadow && <NumberField label="Spread" value={e.spread} onChange={(spread) => setE({ spread })} onScrubStart={begin} onScrubEnd={end} />}
                 </div>
                 {shadow && (
                   <div className="row">

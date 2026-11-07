@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Image as ImageIcon, Pipette, Plus, Trash2 } from "lucide-react";
-import type { GradientHandles, GradientPaintType, ImageCrop, Paint } from "../types";
+import { Image as ImageIcon, Pipette, Plus, RotateCw, Trash2 } from "lucide-react";
+import type { GradientHandles, GradientPaintType, ImageCrop, ImageFilters, Paint } from "../types";
+import { addStop } from "../gradient";
 import { NumberField, Popover, Seg, SelectField } from "./controls";
 import { addAsset, assetUrl, readFileAsDataUrl } from "../assets";
 import { safeImageSrc } from "../imageSrc";
@@ -287,11 +288,25 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
       {p.type === "solid" && <ColorPicker key="solid" color={p.color} onChange={(color) => props.onChange({ ...p, color })} />}
       {isGradient(p) && (
         <>
-          <div className="picker-bar" style={{ background: paintCss({ ...p, type: "linearGradient", angle: 90 } as Paint), height: 16, marginBottom: 12 }}>
+          <div
+            className="picker-bar"
+            data-gradient-bar=""
+            title="Click to add a stop"
+            style={{ background: paintCss({ ...p, type: "linearGradient", angle: 90 } as Paint), height: 16, marginBottom: 12 }}
+            onPointerDown={(e) => {
+              // A click on the bar itself (not on a stop) adds a stop there, coloured by the gradient.
+              if (e.target !== e.currentTarget || e.button !== 0) return;
+              const box = e.currentTarget.getBoundingClientRect();
+              const added = addStop(p.stops, (e.clientX - box.left) / box.width);
+              props.onChange({ ...p, stops: added.stops });
+              setStop(added.index);
+            }}
+          >
             {p.stops.map((s, i) => (
               <div
                 key={i}
                 className="dot"
+                data-stop={i}
                 style={{ left: `${s.position * 100}%`, background: s.color, outline: i === stop ? "2px solid #0d99ff" : undefined, pointerEvents: "all", cursor: "pointer" }}
                 onPointerDown={() => setStop(i)}
               />
@@ -307,7 +322,15 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
               max={100}
               onChange={(v) => props.onChange({ ...p, stops: p.stops.map((s, i) => (i === stop ? { ...s, position: v / 100 } : s)) })}
             />
-            <button className="ibtn" title="Add stop" onClick={() => props.onChange({ ...p, stops: [...p.stops, { color: "#FFFFFF", position: 0.5 }].sort((a, b) => a.position - b.position) })}>
+            <button
+              className="ibtn"
+              title="Add stop"
+              onClick={() => {
+                const added = addStop(p.stops);
+                props.onChange({ ...p, stops: added.stops });
+                setStop(added.index);
+              }}
+            >
               <Plus size={14} />
             </button>
             <button
@@ -365,7 +388,13 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
                 const whole = { x: 0, y: 0, w: 1, h: 1 };
                 if (!box || !url) return props.onChange({ ...p, scaleMode, crop: whole });
                 const img = new Image();
-                img.onload = () => props.onChange({ ...p, scaleMode, crop: cropRectFor(p.scaleMode, img.naturalWidth, img.naturalHeight, box.width, box.height) });
+                const turned = ((p.rotation ?? 0) / 90) % 2 !== 0;
+                img.onload = () =>
+                  props.onChange({
+                    ...p,
+                    scaleMode,
+                    crop: cropRectFor(p.scaleMode, turned ? img.naturalHeight : img.naturalWidth, turned ? img.naturalWidth : img.naturalHeight, box.width, box.height),
+                  });
                 img.onerror = () => props.onChange({ ...p, scaleMode, crop: whole });
                 img.src = url;
               }}
@@ -378,6 +407,26 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
               ]}
             />
           </div>
+          {p.scaleMode === "tile" && (
+            <div className="row effect-fields">
+              <NumberField
+                label="Scale"
+                ariaLabel="Tile scale"
+                value={Math.round((p.scalingFactor ?? 1) * 10000) / 100}
+                suffix="%"
+                min={1}
+                max={10000}
+                onChange={(v) => props.onChange({ ...p, scalingFactor: v === 100 ? undefined : v / 100 })}
+              />
+            </div>
+          )}
+          <div className="row image-turn-row">
+            <button className="btn" title="Rotate the image 90° clockwise" onClick={() => props.onChange({ ...p, rotation: (((p.rotation ?? 0) + 90) % 360) || undefined })}>
+              <RotateCw size={13} /> Rotate 90°
+            </button>
+            {(p.rotation ?? 0) !== 0 && <span className="muted small image-turn-value">{p.rotation}°</span>}
+          </div>
+          <ImageAdjust filters={p.filters} onChange={(filters) => props.onChange({ ...p, filters })} />
           {finding && (
             <div className="photo-pick">
               <PhotoSearch
@@ -395,6 +444,48 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
           )}
         </>
       )}
+    </div>
+  );
+}
+
+const ADJUSTMENTS: [keyof ImageFilters, string][] = [
+  ["exposure", "Exposure"],
+  ["contrast", "Contrast"],
+  ["saturation", "Saturation"],
+  ["temperature", "Temperature"],
+  ["tint", "Tint"],
+  ["highlights", "Highlights"],
+  ["shadows", "Shadows"],
+];
+
+/** The seven adjustments of an image fill, -100 to 100 (stored -1 to 1). Edits join the popover's
+ *  gesture, so closing it leaves one undo step. */
+function ImageAdjust(props: { filters: ImageFilters | undefined; onChange: (f: ImageFilters | undefined) => void }) {
+  const f = props.filters ?? {};
+  const any = ADJUSTMENTS.some(([k]) => (f[k] ?? 0) !== 0);
+  const set = (k: keyof ImageFilters, pct: number) => {
+    const next = { ...f, [k]: pct / 100 };
+    if (pct === 0) delete next[k];
+    props.onChange(Object.keys(next).length ? next : undefined);
+  };
+  return (
+    <div className="image-adjust" role="group" aria-label="Adjust">
+      <div className="image-adjust-head">
+        <span>Adjust</span>
+        <button className="btn" disabled={!any} onClick={() => props.onChange(undefined)}>
+          Reset
+        </button>
+      </div>
+      {ADJUSTMENTS.map(([k, label]) => {
+        const pct = Math.round((f[k] ?? 0) * 100);
+        return (
+          <label key={k} className="image-adjust-row">
+            <span>{label}</span>
+            <input type="range" min={-100} max={100} step={1} value={pct} aria-label={label} data-adjust={k} onChange={(e) => set(k, Number(e.target.value))} onDoubleClick={() => set(k, 0)} />
+            <output>{pct}</output>
+          </label>
+        );
+      })}
     </div>
   );
 }

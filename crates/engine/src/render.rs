@@ -5,8 +5,7 @@ use std::collections::HashMap;
 
 use crate::geom::{fmt, Mat, Point, Rect};
 use crate::model::{
-  Document, Effect, EffectType, Node, NodeId, NodeType, Paint, ScaleMode, StrokeAlign, StrokeCap, StrokeJoin, TextAlignH, TextAlignV,
-  TextDecoration,
+  Document, Effect, EffectType, Node, NodeId, NodeType, Paint, StrokeAlign, StrokeCap, StrokeJoin, TextAlignH, TextAlignV, TextDecoration,
 };
 use crate::text::{layout_of_node, SpanStyle, TextMeasurer};
 use crate::{color, model};
@@ -793,32 +792,26 @@ impl<'a> Renderer<'a> {
       }
       Paint::Image {
         src,
-        scale_mode: ScaleMode::Crop,
+        scale_mode,
         opacity,
-        crop: Some(crop),
+        crop,
+        scaling_factor,
+        rotation,
+        filters,
         ..
       } => {
         let pid = self.id("img");
-        self.defs.push_str(&paint::crop_pattern(&pid, src, *opacity, crop, w, h));
-        format!("url(#{pid})")
-      }
-      Paint::Image {
-        src, scale_mode, opacity, ..
-      } => {
-        let pid = self.id("img");
-        let (par, pw, ph) = match scale_mode {
-          ScaleMode::Fill | ScaleMode::Crop => ("xMidYMid slice", w, h),
-          ScaleMode::Fit => ("xMidYMid meet", w, h),
-          ScaleMode::Stretch => ("none", w, h),
-          ScaleMode::Tile => ("xMidYMid slice", 64.0_f64.min(w), 64.0_f64.min(h)),
+        let ip = paint::ImagePaint {
+          src,
+          scale_mode: *scale_mode,
+          opacity: *opacity,
+          crop: crop.as_ref(),
+          scaling_factor: *scaling_factor,
+          rotation: *rotation,
+          filters: filters.as_ref(),
+          natural: self.m.image_size(src),
         };
-        self.defs.push_str(&format!(
-          "<pattern id=\"{pid}\" patternUnits=\"userSpaceOnUse\" width=\"{pw}\" height=\"{ph}\"><image href=\"{src}\" width=\"{pw}\" height=\"{ph}\" preserveAspectRatio=\"{par}\" opacity=\"{op}\"/></pattern>",
-          pw = fmt(pw.max(1.0)),
-          ph = fmt(ph.max(1.0)),
-          src = esc(crate::paint::image_href(src)),
-          op = fmt(*opacity),
-        ));
+        self.defs.push_str(&paint::image_pattern(&pid, &ip, w, h));
         format!("url(#{pid})")
       }
     }
@@ -1873,5 +1866,145 @@ mod w3a_tests {
     assert!(export_svg(&doc, "f", &HeuristicMeasurer).to_lowercase().contains("00ff00"));
     // The crop is still what the whole layer paints.
     assert_eq!(c.bounds, render_bounds(&doc, "f", &HeuristicMeasurer));
+  }
+}
+
+#[cfg(test)]
+mod r17c_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::model::ScaleMode;
+  use crate::text::{FontSpec, HeuristicMeasurer};
+
+  /// Answers `image_size` like the editor does once an image has been measured.
+  struct Sized(f64, f64);
+
+  impl TextMeasurer for Sized {
+    fn measure(&self, text: &str, font: &FontSpec) -> f64 {
+      HeuristicMeasurer.measure(text, font)
+    }
+    fn image_size(&self, src: &str) -> Option<(f64, f64)> {
+      (src == "asset:a").then_some((self.0, self.1))
+    }
+  }
+
+  fn image_doc(mode: ScaleMode, f: impl FnOnce(&mut Paint)) -> Document {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut r = crate::ops::default_node(NodeType::Rectangle, "r".into(), "R".into());
+    r.width = 400.0;
+    r.height = 200.0;
+    let mut p = Paint::Image {
+      src: "asset:a".into(),
+      scale_mode: mode,
+      opacity: 1.0,
+      visible: true,
+      crop: None,
+      credit: None,
+      scaling_factor: 1.0,
+      rotation: 0.0,
+      filters: None,
+    };
+    f(&mut p);
+    r.fills = vec![p];
+    doc.insert(r, None, &page, None);
+    doc
+  }
+
+  fn pattern_of(svg: &str) -> String {
+    let at = svg.find("<pattern").expect("pattern");
+    svg[at..svg.find("</pattern>").unwrap()].to_string()
+  }
+
+  #[test]
+  fn a_tile_cell_is_the_images_own_size_times_the_scale() {
+    let doc = image_doc(ScaleMode::Tile, |_| {});
+    let known = pattern_of(&export_svg(&doc, "r", &Sized(40.0, 20.0)));
+    assert!(known.contains("width=\"40\" height=\"20\">"), "{known}");
+    assert!(known.contains("preserveAspectRatio=\"none\""), "{known}");
+    let half = image_doc(ScaleMode::Tile, |p| {
+      if let Paint::Image { scaling_factor, .. } = p {
+        *scaling_factor = 0.5;
+      }
+    });
+    let half = pattern_of(&export_svg(&half, "r", &Sized(40.0, 20.0)));
+    assert!(half.contains("width=\"20\" height=\"10\">"), "{half}");
+    // Without a size: the old 64 px slice cell, times the scale.
+    let unknown = pattern_of(&export_svg(&doc, "r", &HeuristicMeasurer));
+    assert!(
+      unknown.contains("width=\"64\" height=\"64\">") && unknown.contains("xMidYMid slice"),
+      "{unknown}"
+    );
+  }
+
+  #[test]
+  fn a_quarter_turn_swaps_the_box_the_image_fills() {
+    let doc = image_doc(ScaleMode::Fill, |p| {
+      if let Paint::Image { rotation, .. } = p {
+        *rotation = 90.0;
+      }
+    });
+    let pat = pattern_of(&export_svg(&doc, "r", &HeuristicMeasurer));
+    // The 400x200 box is filled by a 200x400 image turned about its centre (200, 100).
+    assert!(pat.contains("rotate(90 200 100)"), "{pat}");
+    assert!(pat.contains("x=\"100\" y=\"-100\" width=\"200\" height=\"400\""), "{pat}");
+    assert!(pat.contains("xMidYMid slice"), "{pat}");
+    // 180 keeps the box; tiles turn with patternTransform.
+    let flipped = image_doc(ScaleMode::Fill, |p| {
+      if let Paint::Image { rotation, .. } = p {
+        *rotation = 180.0;
+      }
+    });
+    assert!(pattern_of(&export_svg(&flipped, "r", &HeuristicMeasurer)).contains("x=\"0\" y=\"0\" width=\"400\" height=\"200\""));
+    let tile = image_doc(ScaleMode::Tile, |p| {
+      if let Paint::Image { rotation, .. } = p {
+        *rotation = 270.0;
+      }
+    });
+    assert!(pattern_of(&export_svg(&tile, "r", &Sized(40.0, 20.0))).contains("patternTransform=\"rotate(270)\""));
+  }
+
+  #[test]
+  fn a_rotated_crop_turns_about_the_crop_rectangle() {
+    let doc = image_doc(ScaleMode::Crop, |p| {
+      if let Paint::Image { rotation, crop, .. } = p {
+        *rotation = 90.0;
+        *crop = Some(crate::model::ImageCrop {
+          x: 0.0,
+          y: 0.0,
+          w: 0.5,
+          h: 1.0,
+        });
+      }
+    });
+    // The crop is 200x200: its centre is (100, 100).
+    let pat = pattern_of(&export_svg(&doc, "r", &HeuristicMeasurer));
+    assert!(pat.contains("rotate(90 100 100)"), "{pat}");
+  }
+
+  #[test]
+  fn adjustments_become_a_filter_the_image_uses_and_identity_ones_do_not() {
+    let adjusted = image_doc(ScaleMode::Fill, |p| {
+      if let Paint::Image { filters, .. } = p {
+        *filters = Some(crate::model::ImageFilters {
+          saturation: -1.0,
+          ..Default::default()
+        });
+      }
+    });
+    let svg = export_svg(&adjusted, "r", &HeuristicMeasurer);
+    assert!(
+      svg.contains("<filter id=\"xr_img1_f\" color-interpolation-filters=\"sRGB\""),
+      "{svg}"
+    );
+    assert!(svg.contains("type=\"saturate\" values=\"0\""), "{svg}");
+    assert!(svg.contains("filter=\"url(#xr_img1_f)\""), "{svg}");
+    let plain = image_doc(ScaleMode::Fill, |p| {
+      if let Paint::Image { filters, .. } = p {
+        *filters = Some(crate::model::ImageFilters::default());
+      }
+    });
+    assert!(!export_svg(&plain, "r", &HeuristicMeasurer).contains("<filter"));
   }
 }

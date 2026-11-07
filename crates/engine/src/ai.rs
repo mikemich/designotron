@@ -146,6 +146,12 @@ fn spec_schema() -> Value {
       "italic": { "type": "boolean" },
       "textCase": { "type": "string", "enum": ["original", "upper", "lower", "title"] },
       "imageUrl": { "type": "string", "description": "Image fill: http(s) URL, data:image/ URL or asset:<id>. For stock photos use search_photos + place_photo instead" },
+      "imageScaleMode": { "type": "string", "enum": ["fill", "fit", "stretch", "tile", "crop"], "description": "How the image fill sits in the layer (scaleMode also works). Set it with imageUrl, or on a layer that already has an image fill" },
+      "imageScale": { "type": "number", "description": "Tile only: cell size as a multiple of the image's own size (1 = 100%, 0.01 to 100)" },
+      "imageRotation": { "type": "number", "description": "Image fill rotation in 90 degree steps: 0, 90, 180 or 270" },
+      "imageFilters": { "type": ["object", "null"], "description": "Image adjustments, each -1 to 1 (0 = none): {exposure, contrast, saturation, temperature, tint, highlights, shadows}; null resets them" },
+      "effects": { "type": "array", "description": "Effects as stored: [{type: dropShadow|innerShadow|layerBlur|backgroundBlur, color, x, y, blur, spread, visible}]. Replaces all effects; don't combine with shadow, blur or backgroundBlur", "items": { "type": "object", "properties": { "type": { "type": "string", "enum": ["dropShadow", "innerShadow", "layerBlur", "backgroundBlur"] }, "color": { "type": "string" }, "x": { "type": "number" }, "y": { "type": "number" }, "blur": { "type": "number" }, "spread": { "type": "number" }, "visible": { "type": "boolean" } }, "required": ["type"] } },
+      "blendMode": { "type": "string", "enum": ["normal", "multiply", "screen", "overlay", "darken", "lighten", "colorDodge", "colorBurn", "hardLight", "softLight", "difference", "exclusion", "hue", "saturation", "color", "luminosity"], "description": "Layer blend mode" },
       "fillStyle": { "type": ["string", "null"], "description": "Colour style name or id (from define_styles): sets the fill (the text colour on text) and links the layer to it; null unlinks" },
       "strokeStyle": { "type": ["string", "null"], "description": "Colour style name or id: sets the stroke colour and links the stroke to it; null unlinks" },
       "effectStyle": { "type": ["string", "null"], "description": "Effect style name or id (from define_styles effects): sets the layer's effects and links it; null unlinks" },
@@ -803,6 +809,214 @@ fn editing_result(e: &Engine, mut note: serde_json::Map<String, Value>, layers: 
 
 fn kind_word(k: crate::variables::VarKind) -> String {
   format!("{k:?}").to_lowercase()
+}
+
+fn parse_blend_mode(cx: &Ctx, v: &Value) -> Result<crate::model::BlendMode, String> {
+  use crate::model::BlendMode as B;
+  parse::choice(
+    cx,
+    "blendMode",
+    v,
+    &[
+      (&["normal", "pass-through"], B::Normal),
+      (&["multiply"], B::Multiply),
+      (&["screen"], B::Screen),
+      (&["overlay"], B::Overlay),
+      (&["darken"], B::Darken),
+      (&["lighten"], B::Lighten),
+      (&["color-dodge", "colordodge"], B::ColorDodge),
+      (&["color-burn", "colorburn"], B::ColorBurn),
+      (&["hard-light", "hardlight"], B::HardLight),
+      (&["soft-light", "softlight"], B::SoftLight),
+      (&["difference"], B::Difference),
+      (&["exclusion"], B::Exclusion),
+      (&["hue"], B::Hue),
+      (&["saturation"], B::Saturation),
+      (&["color"], B::Color),
+      (&["luminosity"], B::Luminosity),
+    ],
+    &parse::no_hint,
+  )
+}
+
+/// `effects` input: the model's own effect objects, checked like `shadow` and `blur` are.
+fn parse_effects(cx: &mut Ctx, v: &Value) -> Result<Vec<Effect>, String> {
+  let Some(list) = v.as_array() else {
+    return Err(cx.err("effects", format!("must be an array of effects, got {}", parse::kind_of(v))));
+  };
+  let mut out = Vec::new();
+  for (i, item) in list.iter().enumerate() {
+    let mark = cx.enter(&format!("effects[{i}]"));
+    if !item.is_object() {
+      return Err(cx.err(
+        "",
+        format!(
+          "must be an object like {{type: 'dropShadow', y: 4, blur: 8}}, got {}",
+          parse::kind_of(item)
+        ),
+      ));
+    }
+    let kind = match item.get("type") {
+      None | Some(Value::Null) => return Err(cx.err("type", "is required: dropShadow, innerShadow, layerBlur or backgroundBlur")),
+      Some(t) => parse::exact(
+        cx,
+        "type",
+        Some(t),
+        EffectType::DropShadow,
+        &[
+          ("dropshadow", EffectType::DropShadow),
+          ("innershadow", EffectType::InnerShadow),
+          ("layerblur", EffectType::LayerBlur),
+          ("backgroundblur", EffectType::BackgroundBlur),
+        ],
+      )?,
+    };
+    let d = Effect::default();
+    let num = |cx: &Ctx, k: &str, dflt: f64| -> Result<f64, String> { Ok(parse::opt_number(cx, item, k)?.unwrap_or(dflt)) };
+    let blur = num(cx, "blur", d.blur)?;
+    if blur < 0.0 {
+      return Err(cx.err("blur", "must be 0 or more"));
+    }
+    out.push(Effect {
+      kind,
+      color: match item.get("color") {
+        Some(c) if !c.is_null() => parse::color(cx, "color", c)?,
+        _ => d.color.clone(),
+      },
+      x: num(cx, "x", d.x)?,
+      y: num(cx, "y", d.y)?,
+      blur,
+      spread: num(cx, "spread", d.spread)?,
+      visible: parse::opt_bool(cx, item, "visible")?.unwrap_or(true),
+    });
+    cx.leave(mark);
+  }
+  Ok(out)
+}
+
+/// `imageScaleMode`, `imageScale`, `imageRotation` and `imageFilters` on the layer's first image fill.
+fn apply_image_keys(cx: &mut Ctx, n: &mut Node, s: &Value) -> Result<(), String> {
+  let mode_key = if s.get("imageScaleMode").is_some() {
+    "imageScaleMode"
+  } else {
+    "scaleMode"
+  };
+  let keys = [mode_key, "imageScale", "imageRotation", "imageFilters"];
+  let given: Vec<&str> = keys
+    .iter()
+    .copied()
+    .filter(|k| s.get(*k).is_some_and(|v| !v.is_null() || *k == "imageFilters"))
+    .collect();
+  if given.is_empty() {
+    return Ok(());
+  }
+  let Some(at) = n.fills.iter().position(|p| matches!(p, Paint::Image { .. })) else {
+    cx.warn(format!("{} ignored: the layer has no image fill (give imageUrl)", given.join(", ")));
+    return Ok(());
+  };
+  let mode = match s.get(mode_key).filter(|v| !v.is_null()) {
+    Some(v) => Some(parse::choice(
+      cx,
+      mode_key,
+      v,
+      &[
+        (&["fill"], ScaleMode::Fill),
+        (&["fit"], ScaleMode::Fit),
+        (&["stretch"], ScaleMode::Stretch),
+        (&["tile"], ScaleMode::Tile),
+        (&["crop"], ScaleMode::Crop),
+      ],
+      &parse::no_hint,
+    )?),
+    None => None,
+  };
+  let scale = match parse::opt_number(cx, s, "imageScale")? {
+    Some(v) if !(0.01..=100.0).contains(&v) => return Err(cx.err("imageScale", "must be between 0.01 and 100 (1 = the image's own size)")),
+    v => v,
+  };
+  let rotation = match parse::opt_number(cx, s, "imageRotation")? {
+    Some(v) if v.rem_euclid(90.0) != 0.0 => return Err(cx.err("imageRotation", "must be a multiple of 90 (0, 90, 180 or 270)")),
+    Some(v) => Some(crate::paint::quarter_turns(v) as f64),
+    None => None,
+  };
+  let filters = match s.get("imageFilters") {
+    None => None,
+    Some(Value::Null) => Some(None),
+    Some(Value::Object(m)) => {
+      let mut f = crate::model::ImageFilters::default();
+      for (k, v) in m {
+        let mark = cx.enter(&format!("imageFilters.{k}"));
+        let x = parse::number(cx, "", v)?;
+        if !(-1.0..=1.0).contains(&x) {
+          return Err(cx.err("", "must be between -1 and 1"));
+        }
+        cx.leave(mark);
+        match k.as_str() {
+          "exposure" => f.exposure = x,
+          "contrast" => f.contrast = x,
+          "saturation" => f.saturation = x,
+          "temperature" => f.temperature = x,
+          "tint" => f.tint = x,
+          "highlights" => f.highlights = x,
+          "shadows" => f.shadows = x,
+          other => {
+            return Err(cx.err(
+              &format!("imageFilters.{other}"),
+              "unknown adjustment; use exposure, contrast, saturation, temperature, tint, highlights or shadows",
+            ))
+          }
+        }
+      }
+      Some((!f.is_identity()).then_some(f))
+    }
+    Some(other) => {
+      return Err(cx.err(
+        "imageFilters",
+        format!("must be an object like {{saturation: -1}} or null, got {}", parse::kind_of(other)),
+      ))
+    }
+  };
+  if let Paint::Image {
+    scale_mode,
+    scaling_factor,
+    rotation: rot,
+    filters: fl,
+    ..
+  } = &mut n.fills[at]
+  {
+    if let Some(m) = mode {
+      *scale_mode = m;
+    }
+    if let Some(v) = scale {
+      *scaling_factor = v;
+    }
+    if let Some(v) = rotation {
+      *rot = v;
+    }
+    if let Some(f) = filters {
+      *fl = f;
+    }
+  }
+  Ok(())
+}
+
+/// Image paints written as objects get the same limits as the dedicated keys.
+fn normalize_image_paint(p: &mut Paint) {
+  if let Paint::Image {
+    scaling_factor,
+    rotation,
+    filters,
+    ..
+  } = p
+  {
+    *scaling_factor = if scaling_factor.is_finite() && *scaling_factor > 0.0 {
+      scaling_factor.clamp(0.01, 100.0)
+    } else {
+      1.0
+    };
+    *rotation = crate::paint::quarter_turns(*rotation) as f64;
+    *filters = filters.map(|f| f.clamped()).filter(|f| !f.is_identity());
+  }
 }
 
 /// `shadow` input (an object, an array of them, a CSS box-shadow string, null or "none") to effects.
@@ -3036,6 +3250,9 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
     parse::image_url(cx, if s.get("imageUrl").is_some() { "imageUrl" } else { "src" }, url)?;
     n.fills = vec![Paint::Image {
       credit: None,
+      scaling_factor: 1.0,
+      rotation: 0.0,
+      filters: None,
       src: url.to_string(),
       scale_mode: ScaleMode::Fill,
       opacity: 1.0,
@@ -3043,6 +3260,7 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
       crop: None,
     }];
   }
+  apply_image_keys(cx, n, s)?;
   match s.get("fillStyle") {
     None => {}
     Some(Value::Null) => n.fill_style = None,
@@ -3135,6 +3353,15 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
       }
       Radius::Each(r) => n.corner_radii = Some(r),
     }
+  }
+  if let Some(v) = s.get("blendMode").filter(|v| !v.is_null()) {
+    n.blend_mode = parse_blend_mode(cx, v)?;
+  }
+  if let Some(v) = s.get("effects").filter(|v| !v.is_null()) {
+    if ["shadow", "blur", "backgroundBlur"].iter().any(|k| s.get(*k).is_some()) {
+      return Err(cx.err("effects", "give effects or shadow/blur/backgroundBlur, not both"));
+    }
+    n.effects = parse_effects(cx, v)?;
   }
   if let Some(sh) = s.get("shadow") {
     let effects = parse_shadows(cx, sh)?;
@@ -3795,7 +4022,8 @@ pub fn parse_fills(v: &Value) -> Result<Vec<Paint>, String> {
       Ok(out)
     }
     Value::Object(_) => {
-      let p = serde_json::from_value::<Paint>(v.clone()).map_err(|e| format!("invalid paint: {e}"))?;
+      let mut p = serde_json::from_value::<Paint>(v.clone()).map_err(|e| format!("invalid paint: {e}"))?;
+      normalize_image_paint(&mut p);
       check_paint_sources(std::slice::from_ref(&p))?;
       Ok(vec![p])
     }
