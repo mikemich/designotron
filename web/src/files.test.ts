@@ -119,3 +119,20 @@ describe("falling back to memory", () => {
     expect(await raw("dt:file:b")).toBeTruthy();
   });
 });
+
+describe("duplicating a file", () => {
+  it("gives the copy a new document id and keeps the folder", async () => {
+    const files = await fresh();
+    const doc = JSON.stringify({ id: "d_orig", name: "One", pages: [{ id: "p", name: "Page 1", children: [] }], nodes: {} });
+    await files.saveFile("f1", "One", doc, { folder: "fo1" });
+    const nid = await files.duplicateFile("f1");
+    expect(nid).toBeTruthy();
+    const copy = JSON.parse((await files.loadFile(nid!))!);
+    expect(copy.id).toMatch(/^d_/);
+    expect(copy.id).not.toBe("d_orig");
+    expect(copy.name).toBe("One (copy)");
+    expect((await files.getFileMeta(nid!))?.folder).toBe("fo1");
+    // The original is untouched.
+    expect(JSON.parse((await files.loadFile("f1"))!).id).toBe("d_orig");
+  });
+});

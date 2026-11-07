@@ -29,8 +29,15 @@ function dataUrlToBlob(dataUrl: string): Blob {
 export function addAsset(dataUrl: string): string {
   const id = hash(dataUrl);
   if (!dataUrls.has(id)) {
+    let blob: Blob;
+    try {
+      blob = dataUrlToBlob(dataUrl);
+    } catch {
+      throw new Error("image data URL is not valid base64");
+    }
+    // Both maps only once the image decoded: a bad one leaves nothing behind.
+    objectUrls.set(id, URL.createObjectURL(blob));
     dataUrls.set(id, dataUrl);
-    objectUrls.set(id, URL.createObjectURL(dataUrlToBlob(dataUrl)));
   }
   return id;
 }

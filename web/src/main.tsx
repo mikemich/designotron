@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import "./styles.css";
-import { bootEngine } from "./store";
+import { bootEngine, useStore } from "./store";
 import { Editor, leaveGuard } from "./Editor";
 import { Dashboard } from "./Dashboard";
 import { bridge } from "./ai/bridgeClient";
@@ -43,6 +43,9 @@ function App() {
     if (isCopyLink()) openCopy();
     let at = location.hash;
     const on = () => {
+      // A stopped engine is never reused: going anywhere else reloads the page (the close guard
+      // still asks while there are unsaved changes).
+      if (useStore.getState().engineFailed) return void location.reload();
       // An editor holding changes that are kept only on screen asks first: put the address back.
       const next = location.hash;
       if (next !== at && leaveGuard.ask?.(() => (location.hash = next))) {
