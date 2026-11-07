@@ -835,10 +835,12 @@ fn css_value(doc: &Document, c: &Collection, v: &Variable, mode: &str) -> Option
 /// CSS name of the first number variable in the document, for the examples in the exported
 /// docs (`None` when there isn't one).
 pub fn first_number_token(doc: &Document) -> Option<String> {
-  doc
-    .variables
-    .iter()
-    .find_map(|c| c.variables.iter().find(|v| v.kind == VarKind::Number).map(|v| css_name(c, v)))
+  doc.variables.iter().find_map(|c| {
+    c.variables
+      .iter()
+      .find(|v| v.kind == VarKind::Number && !slug(&v.name).is_empty())
+      .map(|v| css_name(c, v))
+  })
 }
 
 /// `:root` block for default modes and a `[data-<collection>="<mode>"]` block per other mode.

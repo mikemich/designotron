@@ -293,6 +293,10 @@ pub fn rotated_box(w: f64, h: f64, rotation: f64) -> (f64, f64) {
   if !is_tilted(rotation) {
     return (w, h);
   }
+  // A quarter turn swaps the sides exactly (no float noise in stored positions and sizes).
+  if (rotation.rem_euclid(180.0) - 90.0).abs() < 1e-6 {
+    return (h, w);
+  }
   let (s, c) = rotation.to_radians().sin_cos();
   let (s, c) = (s.abs(), c.abs());
   (w * c + h * s, w * s + h * c)
@@ -461,6 +465,11 @@ fn baseline_of(doc: &Document, id: &str, m: &dyn TextMeasurer, depth: usize) -> 
       .filter_map(|c| doc.get(c))
       .find(|c| c.visible && !c.absolute_position);
     if let Some(c) = first {
+      // A tilted first child counts as its bounding box: its bottom edge.
+      if is_tilted(c.rotation) {
+        let (_, bh) = rotated_box(c.width, c.height, c.rotation);
+        return c.y - (bh - c.height) / 2.0 + bh;
+      }
       return c.y + baseline_of(doc, &c.id, m, depth + 1);
     }
   }
@@ -1387,5 +1396,24 @@ mod tests {
     let b = doc.get("b").unwrap();
     assert_eq!((b.x, b.y, b.rotation), (123.0, 45.0, 33.0));
     assert!(near(doc.get("f").unwrap().width, 80.0), "only the flow child counts");
+  }
+
+  #[test]
+  fn quarter_turns_swap_the_sides_exactly() {
+    for r in [90.0, 270.0, -90.0, 450.0] {
+      assert_eq!(rotated_box(0.3, 1000.0, r), (1000.0, 0.3), "{r}");
+      assert_eq!(rotated_box(12.5, 7.25, r), (7.25, 12.5), "{r}");
+    }
+    let doc = flow(true, true, 0.0, 0.0, &[("a", 12.5, 7.25, 90.0)]);
+    let a = doc.get("a").unwrap();
+    assert_eq!((a.x, a.y), (-2.625, 2.625));
+    assert_eq!(doc.get("f").unwrap().width, 7.25);
+  }
+
+  #[test]
+  fn a_tilted_first_child_gives_its_bounding_box_bottom_as_the_baseline() {
+    let doc = flow(true, true, 0.0, 0.0, &[("a", 40.0, 80.0, 90.0)]);
+    // The frame's first flowing child is tilted: 80 wide, 40 tall box, bottom edge at 40.
+    assert!(near(baseline_of(&doc, "f", &HeuristicMeasurer, 0), 40.0));
   }
 }

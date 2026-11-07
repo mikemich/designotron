@@ -53,6 +53,12 @@ function update(ids: string[], patch: Record<string, unknown>) {
   if (ids.length) dispatch({ op: "update", ids, patch });
 }
 
+/** Rotated off a multiple of 180 degrees (the engine's `layout::is_tilted`, same 1e-6 tolerance). */
+function isTilted(rotation: number): boolean {
+  const r = (((rotation % 180) + 180) % 180);
+  return r > 1e-6 && r < 180 - 1e-6;
+}
+
 export function DesignPanel() {
   const nodes = useSelection();
   const framing = useStore((s) => s.tool) === "frame";
@@ -377,7 +383,7 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           />
         </div>
       )}
-      {inFlow && nodes.some((n) => (n.sizingH === "fill" || n.sizingV === "fill") && n.rotation % 180 !== 0) && (
+      {inFlow && nodes.some((n) => (n.sizingH === "fill" || n.sizingV === "fill") && isTilted(n.rotation)) && (
         <div className="muted small" data-testid="fill-rotated-hint">
           Fill doesn't apply while rotated; it acts as Fixed.
         </div>

@@ -176,6 +176,14 @@ pub fn export_svg_local(doc: &Document, id: &str, m: &dyn TextMeasurer) -> Strin
   export_svg_with(doc, id, m, b, Mat::translate(-b.x, -b.y), &[])
 }
 
+/// A layer drawn in its own space (box 0,0,w,h, its own rotation and flip left out) for code
+/// export, where the element's CSS transform applies them.
+pub fn export_svg_own(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
+  let Some(n) = doc.get(id) else { return String::new() };
+  let b = Rect::new(0.0, 0.0, n.width, n.height);
+  export_svg_with(doc, id, m, b, doc.local_matrix(n).invert(), &[])
+}
+
 fn export_svg_in(doc: &Document, id: &str, m: &dyn TextMeasurer, b: Rect, hidden: &[NodeId]) -> String {
   export_svg_with(doc, id, m, b, Mat::translate(-b.x, -b.y).mul(&doc.parent_matrix(id)), hidden)
 }

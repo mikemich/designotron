@@ -14,7 +14,7 @@ use crate::model::{
 };
 use crate::paint;
 use crate::props;
-use crate::render::{css_string, esc, export_svg_geometry, font_stack};
+use crate::render::{css_string, esc, font_stack};
 use crate::text::TextMeasurer;
 
 const PX: &str = "px";
@@ -409,7 +409,7 @@ impl<'a> Ctx<'a> {
       sets: BTreeMap::new(),
       screen_names: BTreeMap::new(),
       screen_order: Vec::new(),
-      used_names: TAKEN_IDENTS.iter().map(|s| s.to_string()).collect(),
+      used_names: TAKEN_IDENTS.iter().map(|s| s.to_lowercase()).collect(),
       reuse_components,
       h1_used: false,
       cur_comp: None,
@@ -485,11 +485,12 @@ impl<'a> Ctx<'a> {
   fn unique(&mut self, base: &str) -> String {
     let mut name = base.to_string();
     let mut i = 2;
-    while self.used_names.contains(&name) {
+    // Compared without case: CONScreen and ConScreen would be one file on Windows and macOS.
+    while self.used_names.contains(&name.to_lowercase()) {
       name = format!("{base}{i}");
       i += 1;
     }
-    self.used_names.insert(name.clone());
+    self.used_names.insert(name.to_lowercase());
     name
   }
 
@@ -719,7 +720,8 @@ impl<'a> Ctx<'a> {
     let mut el = match n.kind {
       _ if has_mask => {
         let mut e = El::new("div");
-        e.raw = Some(export_svg_geometry(self.doc, &n.id, self.m));
+        // Drawn in its own space: the CSS transform on the element does its rotation and flip.
+        e.raw = Some(crate::render::export_svg_own(self.doc, &n.id, self.m));
         e
       }
       NodeType::Text => {
@@ -1460,8 +1462,21 @@ impl<'a> Ctx<'a> {
     if !fill_h && !hug_h && !text_auto_w && !text_auto_h && n.kind != NodeType::Line && !sized.1 {
       el.s("height", px(n.height));
     }
-    if n.rotation != 0.0 && !vectorish {
-      el.s("transform", format!("rotate({}deg)", fmt(n.rotation)));
+    let flipped = n.flip_x || n.flip_y;
+    if (n.rotation != 0.0 || flipped) && !vectorish {
+      // Same order as `local_matrix`: scale (flip), then rotate, about the centre.
+      let mut t = Vec::new();
+      if n.rotation != 0.0 {
+        t.push(format!("rotate({}deg)", fmt(n.rotation)));
+      }
+      if flipped {
+        t.push(format!(
+          "scale({}, {})",
+          if n.flip_x { -1 } else { 1 },
+          if n.flip_y { -1 } else { 1 }
+        ));
+      }
+      el.s("transform", t.join(" "));
       // The layout places a tilted child by its bounding box, but a CSS transform leaves the
       // layout box alone: margins of half the difference make the margin box the bounding box.
       if matches!(place, Place::Flow { .. }) {
@@ -1469,6 +1484,18 @@ impl<'a> Ctx<'a> {
         let (my, mx) = ((bh - n.height) / 2.0, (bw - n.width) / 2.0);
         if my.abs() > 0.0005 || mx.abs() > 0.0005 {
           el.s("margin", format!("{} {}", px(my), px(mx)));
+        }
+        // A baseline row lines the straight items up; a tilted one stays at the top, as in the layout.
+        if crate::layout::is_tilted(n.rotation) {
+          let baseline = n
+            .parent
+            .as_ref()
+            .and_then(|p| self.doc.get(p))
+            .and_then(|p| p.layout.as_ref())
+            .is_some_and(|l| l.counter_align == Align::Baseline);
+          if baseline {
+            el.s("align-self", "flex-start");
+          }
         }
       }
     }
@@ -1726,10 +1753,12 @@ impl<'a> Ctx<'a> {
           el.s("font-weight", var.clone())
         }
         "fontFamily" if n.kind == NodeType::Text => {
-          let stack = crate::render::font_stack(&n.text.as_ref().map(|t| t.font_family.clone()).unwrap_or_default());
+          let family = n.text.as_ref().map(|t| t.font_family.clone()).unwrap_or_default();
+          let stack = crate::render::font_stack(&family);
           let generic = stack.rsplit(", ").next().unwrap_or("sans-serif").to_string();
           if self.fallbacks {
-            set(el, "font-family", &format!("var({name}, {stack})"))
+            // Escaped like every other family written into CSS (a crafted name can't leave var()).
+            set(el, "font-family", &format!("var({name}, {})", css_family(&family)))
           } else {
             set(el, "font-family", &format!("{var}, {generic}"))
           }
@@ -2789,6 +2818,17 @@ const TAKEN_IDENTS: &[&str] = &[
   "JSX",
   "HTMLElement",
   "HTMLDivElement",
+  "Boolean",
+  "JSON",
+  "Math",
+  "Array",
+  "String",
+  "Map",
+  "Promise",
+  "Error",
+  "Date",
+  "Symbol",
+  "Element",
 ];
 
 /// True for the names Windows reserves as devices (any case, `COM0`-`COM9`, `LPT0`-`LPT9`, also
@@ -2860,6 +2900,7 @@ fn tw_class_raw(k: &str, v: &str) -> String {
     ("min-width", "0") => "min-w-0".into(),
     ("min-height", "0") => "min-h-0".into(),
     ("align-self", "stretch") => "self-stretch".into(),
+    ("align-self", "flex-start") => "self-start".into(),
     ("justify-content", "center") => "justify-center".into(),
     ("justify-content", "flex-end") => "justify-end".into(),
     ("justify-content", "space-between") => "justify-between".into(),
@@ -2912,6 +2953,16 @@ fn tw_class_raw(k: &str, v: &str) -> String {
     ("-webkit-line-clamp", n) => format!("line-clamp-[{n}]"),
     ("color", "inherit") => "text-inherit".into(),
     ("display", "block") => "block".into(),
+    // `var(--x, 'Family', generic)`: the fallback keeps only family-name characters, so a crafted
+    // name can't end the arbitrary value or add a property.
+    ("font-family", _) if tw_var_fallback(v).is_some() => {
+      let (name, fb) = tw_var_fallback(v).unwrap_or_default();
+      let bare: String = fb
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | ',' | '-'))
+        .collect();
+      format!("[font-family:var({name},{})]", tw_value(bare.trim()).replace(",_", ","))
+    }
     ("margin-top", _) => format!("mt-[{a}]"),
     ("margin", _) => match split_top(v).as_slice() {
       [y, x] => format!("my-[{}] mx-[{}]", tw_value(y), tw_value(x)),
@@ -2952,6 +3003,14 @@ fn tw_class_raw(k: &str, v: &str) -> String {
     }
     _ => format!("[{k}:{a}]"),
   }
+}
+
+/// `var(--x, fallback)` split into the name and the fallback (none for a bare `var(--x)` or a
+/// value with more after the closing parenthesis).
+fn tw_var_fallback(v: &str) -> Option<(&str, &str)> {
+  let inner = v.strip_prefix("var(")?.strip_suffix(')')?;
+  let (name, fb) = inner.split_once(',')?;
+  (name.starts_with("--") && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then_some((name, fb))
 }
 
 fn tw_border_side(side: &str, v: &str) -> String {
@@ -3792,7 +3851,7 @@ fn readme_tokens(doc: &Document) -> String {
   format!("{base}{note}")
 }
 
-fn readme_themes(doc: &Document, themed: &[(String, Vec<String>)]) -> String {
+fn readme_themes(themed: &[(String, Vec<String>)]) -> String {
   if themed.is_empty() {
     return String::new();
   }
@@ -3801,13 +3860,8 @@ fn readme_themes(doc: &Document, themed: &[(String, Vec<String>)]) -> String {
     out.push_str(&format!("setMode({c:?}, {:?});\n", modes.last().cloned().unwrap_or_default()));
   }
   out.push_str(
-    "```\n\nA frame that sets a mode in the design keeps its `data-<collection>` attribute, so that screen stays in that mode.\n\nNumber tokens are unitless, like Figma's, because one variable can feed both an opacity and a padding.",
+    "```\n\nA frame that sets a mode in the design keeps its `data-<collection>` attribute, so that screen stays in that mode.\n\nNumber tokens are unitless, like Figma's, because one variable can feed both an opacity and a padding.\n",
   );
-  // The example names a number token the document really has; without one it is left out.
-  match crate::variables::first_number_token(doc) {
-    Some(name) => out.push_str(&format!(" Use them as lengths with `calc(var({name}) * 1px)`.\n")),
-    None => out.push('\n'),
-  }
   out
 }
 
@@ -3990,7 +4044,7 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
       "# {md_title}\n\nGenerated with [Designotron](https://github.com/mikemich/designotron).\n\n```bash\nnpm install\nnpm run dev\n```\n{}{}{}{}{}",
       readme_flows(doc, &ctx),
       readme_limits(doc),
-      readme_themes(doc, &themed),
+      readme_themes(&themed),
       readme_tokens(doc),
       if credits.is_empty() {
         ""
@@ -6742,7 +6796,7 @@ mod r14_tests {
     assert!(r.contains("[font-weight:var(--weight)]"), "{r}");
     // A family keeps its own stack as the fallback (single-layer code has no tokens file).
     let raw = export_react(&doc, "f", &HeuristicMeasurer);
-    assert!(raw.contains("[font-family:var(--family,_") && raw.contains("sans-serif)]"), "{raw}");
+    assert!(raw.contains("[font-family:var(--family,") && raw.contains("sans-serif)]"), "{raw}");
     assert!(html(&doc).contains("font-family: var(--family)"));
   }
 
@@ -7060,6 +7114,9 @@ mod r15_tests {
       description: h.into(),
       ..Default::default()
     };
+    // The text's family follows the string variable below: single-layer code writes it as a
+    // var() fallback and must escape it.
+    doc.get_mut("t").unwrap().bindings.insert("fontFamily".into(), "v1".into());
     doc.variables = vec![Arc::new(Collection {
       id: "c".into(),
       name: h.into(),
@@ -7127,6 +7184,12 @@ mod r15_tests {
         let style = html.split("<style>").nth(1).unwrap().split("</style>").next().unwrap();
         check_css(style, &what);
         comment_lines_ok(&export_react(&doc, id, &m), &what);
+        // The bound family's `var(--x, fallback)` keeps its string closed in the inline style.
+        for l in html.lines().filter(|l| l.contains("font-family: var(--")) {
+          let style = l.split("style=\"").nth(1).and_then(|r| r.split_once('"')).map_or("", |(a, _)| a);
+          let style = style.replace("&#39;", "'").replace("&amp;", "&");
+          check_css(&format!("x{{{style}}}"), &what);
+        }
       }
       check_css(&crate::variables::tokens_css(&doc), &format!("{h:?} in tokens.css"));
     }
@@ -7345,7 +7408,7 @@ mod r16c_tests {
     let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
     for want in [
       "src/screens/CONScreen.tsx",
-      "src/screens/ConScreen.tsx",
+      "src/screens/ConScreen2.tsx",
       "src/screens/NulScreen.tsx",
       "src/screens/COM1Screen.tsx",
       "src/screens/Lpt9Screen.tsx",
@@ -7513,5 +7576,180 @@ mod r16c_tests {
       h.contains("<svg") && h.contains("width=\"40\"") && h.contains("height=\"80\""),
       "{h}"
     );
+  }
+
+  #[test]
+  fn device_and_clashing_names_are_unique_without_case() {
+    let doc = named_frames(&["CON", "con", "Boolean", "JSON", "Math"]);
+    let paths: Vec<String> = export_project(&doc, &HeuristicMeasurer).into_iter().map(|f| f.path).collect();
+    for want in [
+      "src/screens/CONScreen.tsx",
+      "src/screens/ConScreen2.tsx",
+      "src/screens/BooleanScreen.tsx",
+      "src/screens/JSONScreen.tsx",
+      "src/screens/MathScreen.tsx",
+    ] {
+      assert!(paths.contains(&want.to_string()), "{want} in {paths:?}");
+    }
+    let lower: std::collections::BTreeSet<String> = paths.iter().map(|p| p.to_lowercase()).collect();
+    assert_eq!(lower.len(), paths.len(), "no two files differ only by case: {paths:?}");
+  }
+
+  #[test]
+  fn a_crafted_family_cannot_leave_var_in_html_or_tailwind() {
+    let hostile = "Inter'; background: url(//evil.example/x); x: '";
+    let mut doc = tokens_doc(false);
+    {
+      let c = Arc::make_mut(&mut doc.variables[0]);
+      c.variables.push(Arc::new(Variable {
+        id: "ff".into(),
+        name: "Family".into(),
+        kind: VarKind::String,
+        values: [("m".to_string(), json!(hostile))].into(),
+        ..Default::default()
+      }));
+    }
+    let page = doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Text, "t".into(), "T".into());
+    {
+      let tx = t.text.as_mut().unwrap();
+      tx.characters = "Hi".into();
+      tx.font_family = hostile.into();
+    }
+    t.bindings.insert("fontFamily".into(), "ff".into());
+    doc.insert(t, Some("f0"), &page, None);
+    let h = export_html(&doc, "f0", &HeuristicMeasurer);
+    let line = h
+      .lines()
+      .find(|l| l.contains("font-family: var(--family"))
+      .unwrap_or_else(|| panic!("{h}"));
+    // The quote in the name is escaped, so the string never ends inside var().
+    assert!(line.contains("'Inter\\'; background: url(//evil.example/x); x: \\''"), "{line}");
+    let r = export_react(&doc, "f0", &HeuristicMeasurer);
+    let cls = r
+      .lines()
+      .find(|l| l.contains("[font-family:var(--family"))
+      .unwrap_or_else(|| panic!("{r}"));
+    assert!(!cls.contains("url(") && !cls.contains(';') && !cls.contains('\''), "{cls}");
+    let token = cls
+      .split("[font-family:")
+      .nth(1)
+      .and_then(|t| t.split_once(")]"))
+      .map_or("", |(a, _)| a);
+    assert!(!token.contains(':') && !token.contains(']'), "one property only: {token}");
+    assert!(cls.contains("[font-family:var(--family,Inter"), "{cls}");
+    // An ordinary family is still carried.
+    assert_eq!(
+      tw_class("font-family", "var(--f, 'Open Sans', sans-serif)"),
+      "[font-family:var(--f,Open_Sans,sans-serif)]"
+    );
+    assert_eq!(
+      tw_class("font-family", "var(--family), sans-serif"),
+      "[font-family:var(--family),_sans-serif]"
+    );
+  }
+
+  /// A frame "g" (40x80) holding an asymmetric polygon, flipped / rotated, then wrapped in a row.
+  fn flip_doc(flip_x: bool, flip_y: bool, rotation: f64) -> Document {
+    let mut doc = row_doc(0.0, NodeType::Frame);
+    let page = doc.pages[0].id.clone();
+    {
+      let r = doc.get_mut("r").unwrap();
+      r.flip_x = flip_x;
+      r.flip_y = flip_y;
+      r.rotation = rotation;
+    }
+    let mut v = crate::ops::default_node(NodeType::Polygon, "v".into(), "V".into());
+    v.width = 40.0;
+    v.height = 80.0;
+    doc.insert(v, Some("r"), &page, None);
+    doc
+  }
+
+  #[test]
+  fn flips_are_written_in_css_and_vectors_inside_are_not_flipped_again() {
+    let doc = flip_doc(true, false, 0.0);
+    let h = export_html(&doc, "row", &HeuristicMeasurer);
+    assert_eq!(h.matches("transform: scale(-1, 1)").count(), 1, "{h}");
+    let r = export_react(&doc, "row", &HeuristicMeasurer);
+    assert!(r.contains("[transform:scale(-1,_1)]"), "{r}");
+    // Rotation first, then the flip, like `local_matrix`.
+    let h = export_html(&flip_doc(true, true, 90.0), "row", &HeuristicMeasurer);
+    assert!(h.contains("transform: rotate(90deg) scale(-1, -1)"), "{h}");
+    // The polygon is drawn in the frame's own space: 40 x 80, no matrix of its own.
+    assert!(h.contains("width=\"40\"") && h.contains("height=\"80\""), "{h}");
+  }
+
+  #[test]
+  fn a_flipped_instance_is_flipped_in_css() {
+    let mut doc = flip_doc(false, false, 0.0);
+    let page = doc.pages[0].id.clone();
+    let mut idg = IdGen::new(77);
+    let comp = crate::components::create_component(&mut doc, &["r".to_string()], &mut idg).unwrap();
+    let inst = crate::components::create_instance(&mut doc, &comp, Some("row"), &page, 0.0, 0.0, &mut idg).unwrap();
+    doc.get_mut(&inst).unwrap().flip_x = true;
+    let h = export_html(&doc, "row", &HeuristicMeasurer);
+    assert!(h.contains("transform: scale(-1, 1)"), "{h}");
+    let r = export_react(&doc, "row", &HeuristicMeasurer);
+    assert!(r.contains("[transform:scale(-1,_1)]"), "{r}");
+  }
+
+  #[test]
+  fn a_masked_container_is_drawn_in_its_own_space_and_turned_by_css() {
+    let mut doc = row_doc(90.0, NodeType::Frame);
+    let page = doc.pages[0].id.clone();
+    let mut g = crate::ops::default_node(NodeType::Frame, "g".into(), "G".into());
+    g.width = 40.0;
+    g.height = 80.0;
+    doc.insert(g, Some("r"), &page, None);
+    let mut mk = crate::ops::default_node(NodeType::Ellipse, "mk".into(), "Mask".into());
+    mk.width = 40.0;
+    mk.height = 80.0;
+    mk.is_mask = true;
+    doc.insert(mk, Some("g"), &page, None);
+    let mut fill = crate::ops::default_node(NodeType::Rectangle, "fr".into(), "Fill".into());
+    fill.width = 40.0;
+    fill.height = 80.0;
+    doc.insert(fill, Some("g"), &page, None);
+    // The masked frame itself turned: the svg is 40 x 80 and the element rotates it.
+    doc.get_mut("g").unwrap().rotation = 90.0;
+    doc.get_mut("g").unwrap().absolute_position = true;
+    crate::layout::relayout_all(&mut doc, &HeuristicMeasurer);
+    let h = export_html(&doc, "row", &HeuristicMeasurer);
+    assert!(h.contains("<svg") && h.contains("width=\"40\" height=\"80\""), "{h}");
+    assert_eq!(
+      h.matches("rotate(90deg)").count(),
+      2,
+      "the frame r and the masked frame g, once each\n{h}"
+    );
+  }
+
+  #[test]
+  fn a_tilted_item_in_a_baseline_row_stays_at_the_top_in_css() {
+    let mut doc = row_doc(90.0, NodeType::Rectangle);
+    doc.get_mut("row").unwrap().layout.as_mut().unwrap().counter_align = Align::Baseline;
+    crate::layout::relayout_all(&mut doc, &HeuristicMeasurer);
+    let h = export_html(&doc, "row", &HeuristicMeasurer);
+    assert!(h.contains("align-self: flex-start"), "{h}");
+    assert!(export_react(&doc, "row", &HeuristicMeasurer).contains("self-start"));
+  }
+
+  #[test]
+  fn the_token_example_skips_unnamed_variables_and_appears_once() {
+    let mut doc = tokens_doc(true);
+    {
+      let c = Arc::make_mut(&mut doc.variables[0]);
+      let blank = Variable {
+        id: "n0".into(),
+        name: "///".into(),
+        kind: VarKind::Number,
+        values: [("m".to_string(), json!(1.0))].into(),
+        ..Default::default()
+      };
+      c.variables.insert(0, Arc::new(blank));
+    }
+    assert_eq!(crate::variables::first_number_token(&doc).as_deref(), Some("--gutter-wide"));
+    let readme = project_file(&doc, "README.md");
+    assert_eq!(readme.matches("calc(var(--gutter-wide) * 1px)").count(), 1, "{readme}");
   }
 }
