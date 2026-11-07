@@ -1256,8 +1256,8 @@ function SearchResults({
   );
 }
 
-/** Layer row height (`.layer` in styles.css) and the list length where windowing starts. */
-const ROW = 30;
+/** Layer row height (`.layer` in styles.css, 36 on a touch screen) and the list length where windowing starts. */
+const ROW = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches ? 36 : 30;
 const WINDOW_FROM = 200;
 /** Levels indented a full step before deeper ones get a narrow one, so names stay readable. */
 const FULL_INDENT_LEVELS = 8;

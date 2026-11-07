@@ -51,14 +51,16 @@ import { claudeReady, useChat } from "../ai/chatState";
 import { NAME_CUT_NOTICE, nameWasCut, normalizeName } from "../folders";
 import { FileLocation } from "./FileLocation";
 import { focusPanel } from "./PanelChrome";
-import { panelShown } from "../panelState";
+import { isPhone, panelShown } from "../panelState";
 import { useShortcuts } from "./ShortcutsDialog";
 import { useImport } from "./ImportDialog";
 import { startFrame } from "../prototype";
 import { pasteOverSelection, SAME_PROPS, TIDY_KBD } from "../canvas/contextMenu";
 
 /** Below this width the top bar drops the rarer tool buttons (they move into the Shape tools menu). */
-const NARROW_QUERY = "(max-width: 1000px)";
+// Where the pencil, scale, eyedropper and image buttons give way (the shape menu lists them). A touch screen
+// up to 1280 px needs the room: its buttons are 40 px.
+const NARROW_QUERY = "(max-width: 1000px), (max-width: 1280px) and (pointer: coarse)";
 
 const SHAPES: { tool: Tool; label: string; key: string; icon: JSX.Element }[] =
   [
@@ -259,13 +261,18 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     const label = side === "left" ? "Layers panel" : "Design panel";
     return (
       <button
-        className={"tbtn desk-only panel-toggle" + (on ? " active" : "")}
+        className={"tbtn panel-toggle" + (on ? " active" : "")}
         id={`panel-toggle-${side}`}
         title={`${on ? "Hide" : "Show"} ${label.toLowerCase()} (${MOD}\\ for both)`}
         aria-label={label}
         aria-expanded={on}
         aria-controls={`panel-${side}`}
         onClick={() => {
+          // A phone has room for one sheet: Layers, Design and Claude replace each other.
+          if (!on && isPhone()) {
+            togglePanel(side === "left" ? "right" : "left", false);
+            useStore.setState({ chatOpen: false });
+          }
           togglePanel(side);
           if (!on) focusPanel(side);
         }}
@@ -304,8 +311,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
             {shape.icon}
           </button>
           <button
-            className="tbtn"
-            style={{ minWidth: 24, padding: 0 }}
+            className="tbtn chevron-btn"
             title="Shape tools"
             {...opens("Shape tools")}
             onClick={(e) =>
@@ -414,8 +420,9 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         />
         {/* A viewer already has the "View only" pill; don't say it twice. */}
         {!viewing && (
-          <span className="small save-state" role="status" title={saveTitle}>
-            {saveLabel}
+          <span className="small save-state" role="status" title={saveTitle ?? saveLabel} data-state={saveLabel === "Not saved" ? "failed" : saveLabel === "Saving…" ? "saving" : "saved"}>
+            <span className="save-dot" aria-hidden="true" />
+            <span className="save-text">{saveLabel}</span>
             {saveTitle && <span className="sr-only">{saveTitle.slice(saveLabel.length)}</span>}
           </span>
         )}
@@ -440,7 +447,8 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           <Redo2 size={16} />
         </button>
         <button
-          className="tbtn"
+          className="tbtn zoom-btn"
+          data-phone="hide"
           title="Zoom"
           {...opens("Zoom")}
           onClick={(e) =>
@@ -476,7 +484,13 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           id="claude-toggle"
           aria-pressed={chatOpen}
           title={`Claude (${MOD}/)`}
-          onClick={() => useStore.setState({ chatOpen: !chatOpen })}
+          onClick={() => {
+            if (!chatOpen && isPhone()) {
+              togglePanel("left", false);
+              togglePanel("right", false);
+            }
+            useStore.setState({ chatOpen: !chatOpen });
+          }}
         >
           <Sparkles size={16} /> <span className="label">Claude</span>
           <span
