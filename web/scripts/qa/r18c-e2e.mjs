@@ -204,6 +204,20 @@ try {
     await page.keyboard.press("Escape");
     await sleep(150);
 
+    // A fill changed while editing: undoing it keeps the red and bold of "world".
+    const fid = await createText(page, "hello world", 100, 760);
+    await run(page, { op: "styleText", id: fid, start: 6, end: 11, style: { fontWeight: 700, color: "#ff0000" }, clear: [] });
+    const fillRuns = JSON.stringify((await node(page, fid)).text.runs);
+    await openEditor(page, 110, 768);
+    await run(page, { op: "update", ids: [fid], patch: { fills: [{ type: "solid", color: "#0000ff" }] } });
+    await sleep(200);
+    await page.keyboard.press("Control+z");
+    await sleep(200);
+    const fn = await node(page, fid);
+    check("undoing a fill change keeps the run colours", JSON.stringify(fn.text.runs) === fillRuns && fn.fills[0].color.toLowerCase() !== "#0000ff" && fn.text.runs.some((r) => r.color), JSON.stringify([fn.text.runs, fn.fills]));
+    await page.keyboard.press("Escape");
+    await sleep(150);
+
     // Rich paste next to a bold run, typing, then undo past the paste (and redo).
     const pid = await createText(page, "xxyy", 400, 800);
     await run(page, { op: "styleText", id: pid, start: 0, end: 2, style: { fontWeight: 700 }, clear: [] });

@@ -233,9 +233,9 @@ export function TextEditor({ id }: { id: string }) {
     const runs = getDoc().nodes[id]?.text?.runs ?? [];
     return { characters: ta.value, runs: runs.map((r) => ({ ...r })), look: readLook(id), selStart: ta.selectionStart, selEnd: ta.selectionEnd };
   };
-  const remember = (s: Snapshot) => {
+  const remember = (s: Snapshot, seen = true) => {
     known.current = { characters: s.characters, runs: s.runs, look: s.look as Look };
-    foreignSeen.current = foreignChangeCount();
+    if (seen) foreignSeen.current = foreignChangeCount();
   };
   /** Drops the history when something other than this editor changed the text since it last
    * looked (a collaborator, a reload): `now` is the text as it stands before the next edit. */
@@ -266,12 +266,14 @@ export function TextEditor({ id }: { id: string }) {
     const now = readLook(id);
     const diff = look ? Object.fromEntries(Object.entries(look.text).filter(([k, v]) => v !== now.text[k])) : {};
     const lookChanged = Object.keys(diff).length > 0 || (!!look && JSON.stringify(look.fills) !== JSON.stringify(now.fills));
-    if (!lookChanged || getDoc().nodes[id]?.text?.characters !== s.characters) dispatch({ op: "setText", id, characters: s.characters, runs: s.runs }, { quiet: true });
     if (look && lookChanged) {
-      const patch: Record<string, unknown> = { text: { ...diff, runs: s.runs } };
+      // The look first (the engine clears the keys it changes, and a changed fill, from the runs)...
+      const patch: Record<string, unknown> = { text: diff };
       if (JSON.stringify(look.fills) !== JSON.stringify(now.fills)) patch.fills = look.fills;
       dispatch({ op: "update", ids: [id], patch }, { quiet: true });
     }
+    // ... then the text and runs exactly as they were.
+    dispatch({ op: "setText", id, characters: s.characters, runs: s.runs }, { quiet: true });
     // The engine normalises runs: what is remembered is what the document holds.
     remember(snapshot());
     goalX.current = null;
@@ -682,7 +684,8 @@ export function TextEditor({ id }: { id: string }) {
           dispatch({ op: "setText", id, characters: e.target.value }, { quiet: true });
           const p = pending.current;
           pending.current = null;
-          if (suppress.current || composing.current) remember(snapshot());
+          // While composing, a foreign change must stay noticeable: it is checked at the commit.
+          if (suppress.current || composing.current) remember(snapshot(), !composing.current);
           // An edit with no `beforeinput` (a browser that skips it) is a run of its own.
           else if (p?.kind) note(p.before, p.kind);
           else note({ ...known.current, selStart: e.target.selectionStart, selEnd: e.target.selectionStart }, "paste");
@@ -711,6 +714,11 @@ export function TextEditor({ id }: { id: string }) {
           // The committed text is one run, however many keys made it.
           const before = composeBefore.current;
           composeBefore.current = null;
+          // A collaborator or a reload changed things during the composition: the runs are stale.
+          if (foreignChangeCount() !== foreignSeen.current) {
+            history.current.clear();
+            foreignSeen.current = foreignChangeCount();
+          }
           if (before) note(before, "ime");
         }}
         onFocus={() => setFocused(true)}

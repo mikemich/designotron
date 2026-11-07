@@ -232,7 +232,11 @@ pub fn layout_limited(props: &TextProps, max_width: Option<f64>, limit: Option<u
                 start: piece.start + char_i,
               };
               let w = measure(&p);
-              if !cur.is_empty() && cur_w + w > mw && c != ' ' && !(cjk && is_attached(c)) {
+              if !cur.is_empty()
+                && cur_w + w > mw
+                && c != ' '
+                && !(cjk && glued(cur.last().and_then(|p| p.text.chars().last()), c, trailing_regional(&cur)))
+              {
                 // Kinsoku: a line never starts with a closing mark or ends with an opening one;
                 // the previous characters move down with it (oidashi), unless that empties the line.
                 // When even the whole line would move, nothing is carried: the line breaks here and the
@@ -403,7 +407,27 @@ fn is_attached(c: char) -> bool {
   matches!(c as u32,
     0x0300..=0x036F | 0x0483..=0x0489 | 0x0591..=0x05BD | 0x064B..=0x065F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF
     | 0x1160..=0x11FF | 0x200D | 0x20D0..=0x20FF | 0x3099..=0x309A | 0xFE00..=0xFE0F | 0xFE20..=0xFE2F
-    | 0xFF9E..=0xFF9F | 0xE0100..=0xE01EF)
+    | 0xFF9E..=0xFF9F | 0x1F3FB..=0x1F3FF | 0xE0020..=0xE007F | 0xE0100..=0xE01EF)
+}
+
+fn is_regional(c: char) -> bool {
+  matches!(c as u32, 0x1F1E6..=0x1F1FF)
+}
+
+/// Number of regional indicators that end the pieces (a flag is a pair of them).
+fn trailing_regional(cur: &[Piece]) -> usize {
+  cur
+    .iter()
+    .rev()
+    .flat_map(|p| p.text.chars().rev())
+    .take_while(|c| is_regional(*c))
+    .count()
+}
+
+/// Whether `c` can't be split from what comes before it even in a box too narrow for both: an
+/// attached mark, anything after a zero-width joiner, the second half of a flag.
+fn glued(prev: Option<char>, c: char, regional_run: usize) -> bool {
+  is_attached(c) || prev == Some('\u{200D}') || (is_regional(c) && regional_run % 2 == 1)
 }
 
 /// May not start a line.
@@ -507,7 +531,14 @@ fn split_words(chars: &[char], styles: &[usize], base: usize, cjk: bool) -> Vec<
   let mut cur: Vec<Piece> = Vec::new();
   let mut prev_space = false;
   for (i, c) in chars.iter().enumerate() {
-    if (prev_space && *c != ' ') || (cjk && i > 0 && *c != ' ' && !prev_space && cjk_break_between(chars[i - 1], *c)) {
+    if (prev_space && *c != ' ')
+      || (cjk
+        && i > 0
+        && *c != ' '
+        && !prev_space
+        && cjk_break_between(chars[i - 1], *c)
+        && !(is_regional(*c) && chars[..i].iter().rev().take_while(|x| is_regional(**x)).count() % 2 == 1))
+    {
       words.push(std::mem::take(&mut cur));
     }
     push_piece(
@@ -1417,6 +1448,36 @@ mod tests {
       let l = layout_text(&props, Some(100.0), &Em);
       assert_eq!(l.lines.iter().map(|x| x.text.as_str()).collect::<String>(), JA);
     }
+  }
+
+  #[test]
+  fn emoji_clusters_stay_whole_in_a_box_narrower_than_a_glyph() {
+    let lay = |text: &str| -> Vec<String> {
+      let props = TextProps {
+        characters: text.into(),
+        auto_resize: TextAutoResize::Height,
+        ..Default::default()
+      };
+      layout_text(&props, Some(12.0), &HeuristicMeasurer)
+        .lines
+        .into_iter()
+        .map(|l| l.text)
+        .collect()
+    };
+    let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+    let tone = "\u{1F44D}\u{1F3FD}";
+    let flag = "\u{1F1EF}\u{1F1F5}";
+    for cluster in [family, tone, flag] {
+      let lines = lay(&format!("日{cluster}日"));
+      assert_eq!(lines.concat(), format!("日{cluster}日"));
+      assert!(lines.iter().any(|l| l == cluster), "{cluster:?} split: {lines:?}");
+    }
+    // Two flags in a row break between them, not inside one.
+    let lines = lay(&format!("日{flag}{flag}日"));
+    assert!(lines.iter().filter(|l| *l == flag).count() == 2, "{lines:?}");
+    // A tag sequence (subdivision flag) stays with its base.
+    let tags = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+    assert!(lay(&format!("日{tags}日")).iter().any(|l| l == tags));
   }
 
   #[test]
