@@ -347,6 +347,44 @@ await dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: "From plugin"
   await page.close();
 }
 
+// ---------- An ordinary render error is not an engine failure: pending edits are still saved ----------
+{
+  const page = await openNew();
+  const id = await fileIdOf(page);
+  await addRect(page, "Base");
+  check("Base is stored first", await waitSaved(page));
+  await page.evaluate(() => {
+    window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [{ type: "rectangle", name: "PendingEdit", x: 200, y: 0, width: 60, height: 60 }] } });
+    const doc = window.__dt.doc();
+    const nid = Object.keys(doc.nodes).find((k) => doc.nodes[k].name === "PendingEdit");
+    window.__nid = nid;
+    // Corrupt only the screen's copy of the layer (a panel bug): the engine is fine.
+    doc.nodes[nid].fills = null;
+    doc.nodes[nid].strokes = null;
+    doc.nodes[nid].effects = null;
+    window.__dt.dispatch({ op: "select", ids: [nid] });
+  });
+  check("the healthy fallback shows", await waitFor(() => page.locator(".engine-fallback").isVisible(), 4000));
+  const ftext = await page.locator(".engine-fallback").innerText();
+  check("it says something went wrong and the changes are saved, not that the engine stopped", /Something went wrong showing the editor\. Your changes are saved\./.test(ftext) && !/ran out of memory/.test(ftext), ftext.replace(/\n/g, " ").slice(0, 120));
+  check("engineFailed stays false: Reload, download and Try again are offered", (await page.getByRole("button", { name: "Try again" }).count()) === 1 && (await page.getByRole("button", { name: "Download a .dtron copy" }).count()) === 1);
+  check("the pending edit reaches storage", await waitFor(async () => (await storedDoc(page, id)).includes('"PendingEdit"'), 8000));
+  const [dl2] = await Promise.all([page.waitForEvent("download", { timeout: 5000 }).catch(() => null), page.getByRole("button", { name: "Download a .dtron copy" }).click()]);
+  check("the download works", !!dl2 && /\.dtron$/.test(dl2.suggestedFilename()));
+  await shot(page, "r-render-error-fallback");
+  // Fix the screen's copy, then Try again brings the editor back.
+  await page.evaluate(() => {
+    const n = window.__dt.doc().nodes[window.__nid];
+    n.fills = [];
+    n.strokes = [];
+    n.effects = [];
+  });
+  await page.getByRole("button", { name: "Try again" }).click();
+  check("Try again recovers the editor", await waitFor(async () => (await page.locator("#dt-canvas").count()) === 1 && (await page.locator(".engine-fallback").count()) === 0, 6000));
+  check("and the edit is still there", await page.evaluate(() => Object.values(window.__dt.doc().nodes).some((n) => n.name === "PendingEdit")));
+  await page.close();
+}
+
 // ---------- P-1: a duplicate gets a new document id ----------
 let dupSourceId;
 {

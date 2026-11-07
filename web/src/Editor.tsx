@@ -149,8 +149,10 @@ interface Snapshot {
   rev: number;
 }
 
-/** Whatever throws while the editor draws (a stopped engine makes every read throw) shows the
- *  engine-stopped bar instead of an empty page. */
+/** Whatever throws while the editor draws shows a fallback instead of an empty page. Only a
+ *  stopped engine (`engineFailed`, set by the call that trapped) counts as a failure of the
+ *  engine: an ordinary render error leaves it healthy, so the editor's cleanup still saves what
+ *  is pending. */
 class EditorBoundary extends Component<{ fileId: string; children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
   static getDerivedStateFromError() {
@@ -159,17 +161,48 @@ class EditorBoundary extends Component<{ fileId: string; children: ReactNode }, 
   componentDidCatch(err: unknown) {
     console.error(err);
     noteEngineError(err);
-    useStore.setState({ engineFailed: true });
   }
   render() {
     if (!this.state.failed) return this.props.children;
+    return <EditorFallback fileId={this.props.fileId} retry={() => this.setState({ failed: false })} />;
+  }
+}
+
+function EditorFallback({ fileId, retry }: { fileId: string; retry: () => void }) {
+  const engineFailed = useStore((s) => s.engineFailed);
+  if (engineFailed)
     return (
       <div className="engine-fallback" role="main">
-        <EngineFailedBar fileId={this.props.fileId} />
+        <EngineFailedBar fileId={fileId} />
         <p>The editor stopped, so this page can't be shown. Reload to reopen the file at its last save.</p>
       </div>
     );
-  }
+  return (
+    <div className="engine-fallback" role="main">
+      <div className="stale-bar engine-bar" role="alert">
+        <span>Something went wrong showing the editor. Your changes are saved.</span>
+        <button className="btn primary small" onClick={() => location.reload()}>
+          Reload
+        </button>
+        <button
+          className="btn small"
+          onClick={() => {
+            try {
+              saveDtron();
+            } catch {
+              showToast("Couldn't make a copy. Reload to reopen the last save.", "error");
+            }
+          }}
+        >
+          Download a .dtron copy
+        </button>
+        <button className="btn small" onClick={retry}>
+          Try again
+        </button>
+      </div>
+      <p>The editor hit a problem drawing this file.</p>
+    </div>
+  );
 }
 
 export function Editor(props: { fileId: string; onHome: () => void }) {
