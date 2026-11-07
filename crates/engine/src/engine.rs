@@ -43,6 +43,8 @@ struct Step {
   /// Steps of one AI chat turn share a group (see `Command::SetHistoryGroup`); undo and redo
   /// move through the whole group at once.
   group: Option<String>,
+  /// The layers the step's commands moved on purpose (`collab::revert_hinted`).
+  moved: Vec<NodeId>,
 }
 
 #[derive(Clone)]
@@ -204,7 +206,8 @@ pub enum Command {
     #[serde(default)]
     local: bool,
   },
-  /// The relay ordered this editor's oldest unacknowledged delta (or `rejected` it).
+  /// The relay ordered this editor's oldest unacknowledged delta (or `rejected` it). Callers send
+  /// their own unsent changes first (`collab_delta`), so the oldest pending delta is the one acked.
   CollabAck {
     #[serde(default)]
     rejected: bool,
@@ -888,6 +891,18 @@ pub struct Engine {
   /// The room also understands child orders as moves and comments per message, and every
   /// copy of the document drops references to deleted tokens (`collab::DeltaOpts`, `prune_refs`).
   pub(crate) collab_lists: bool,
+  /// Layers moved on purpose by commands since the last `collab_delta` (`collab::moved_hinted`).
+  moved_hint: std::collections::HashSet<NodeId>,
+  /// Layers moved by the commands of the step being made (a gesture's drags add up).
+  step_moved: Vec<NodeId>,
+}
+
+/// The layers a command moves in their parent's order on purpose (reorder, move, drop).
+fn moved_by(cmd: &Command) -> Vec<NodeId> {
+  match cmd {
+    Command::Reorder { ids, .. } | Command::MoveToParent { ids, .. } | Command::DropInto { ids, .. } => ids.clone(),
+    _ => vec![],
+  }
 }
 
 /// Per-root SVG from the last canvas render, and the document it was made from.
@@ -930,6 +945,8 @@ impl Engine {
       collab_pending: Default::default(),
       collab_granular: false,
       collab_lists: false,
+      moved_hint: Default::default(),
+      step_moved: Vec::new(),
     }
   }
 
@@ -1071,9 +1088,10 @@ impl Engine {
   pub fn collab_delta(&mut self) -> Value {
     let ordered = self.collab_confirmed.is_some();
     let out = match &self.collab_synced {
-      Some(base) => crate::collab::delta_with(base, &self.doc, self.delta_opts(ordered)),
+      Some(base) => crate::collab::delta_hinted(base, &self.doc, self.delta_opts(ordered), &self.moved_hint),
       None => json!({ "full": self.doc }),
     };
+    self.moved_hint.clear();
     self.collab_synced = Some(self.doc.clone());
     if ordered && out.get("full").is_none() && !crate::collab::is_empty(&out) {
       self.collab_pending.push_back(out.clone());
@@ -1099,7 +1117,7 @@ impl Engine {
   pub fn collab_unsent(&mut self) -> Value {
     let mut out: Vec<Value> = self.collab_pending.drain(..).collect();
     if let Some(base) = &self.collab_synced {
-      let d = crate::collab::delta_with(base, &self.doc, self.delta_opts(self.collab_confirmed.is_some()));
+      let d = crate::collab::delta_hinted(base, &self.doc, self.delta_opts(self.collab_confirmed.is_some()), &self.moved_hint);
       if !crate::collab::is_empty(&d) {
         out.push(d);
       }
@@ -1497,6 +1515,13 @@ impl Engine {
       _ => {}
     }
 
+    // Layers the command moves on purpose, for the delta's `moves` and for undoing the step.
+    if self.gesture.is_none() {
+      self.step_moved.clear();
+    }
+    let moved = moved_by(&cmd);
+    self.moved_hint.extend(moved.iter().cloned());
+    self.step_moved.extend(moved);
     // O(1) with the persistent node map; diffed later to find what needs layout.
     let prev = self.doc.clone();
     let group = if matches!(cmd, Command::Ai { .. }) {
@@ -1551,6 +1576,7 @@ impl Engine {
           last.after = self.doc.clone();
           last.after_page = self.page.clone();
           last.after_selection = self.selection.clone();
+          last.moved.extend(std::mem::take(&mut self.step_moved));
           self.future.clear();
           return;
         }
@@ -1562,6 +1588,7 @@ impl Engine {
       after_page: self.page.clone(),
       after_selection: self.selection.clone(),
       group,
+      moved: std::mem::take(&mut self.step_moved),
     });
     if self.past.len() > MAX_HISTORY {
       self.past.remove(0);
@@ -1578,7 +1605,7 @@ impl Engine {
     self.doc = if exact {
       step.before.doc.clone()
     } else {
-      crate::collab::revert(&self.doc, &step.after, &step.before.doc)
+      crate::collab::revert_hinted(&self.doc, &step.after, &step.before.doc, &step.moved)
     };
     self.selection = step
       .before
@@ -1606,7 +1633,7 @@ impl Engine {
     self.doc = if exact {
       step.after.clone()
     } else {
-      crate::collab::revert(&self.doc, &step.before.doc, &step.after)
+      crate::collab::revert_hinted(&self.doc, &step.before.doc, &step.after, &step.moved)
     };
     self.selection = step
       .after_selection

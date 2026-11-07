@@ -439,7 +439,7 @@ function onMessage(m: any) {
           );
         }
       }
-      else getEngine().dispatch(JSON.stringify({ op: "collabAck", rejected: false }));
+      else dispatch({ op: "collabAck", rejected: false }, { quiet: true });
       break;
     case "reload":
       joinedDoc = true;

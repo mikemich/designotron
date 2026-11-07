@@ -822,7 +822,7 @@ fn last_steps() -> String {
 }
 
 /// A problem in the tree of `d` (a layer its parent or page doesn't list, a child that points
-/// elsewhere), if any. Layers on a page that is gone are left out (see `local_op`).
+/// elsewhere, one on a page that is gone), if any.
 fn unsound(d: &Document) -> Option<String> {
   for n in d.nodes.values() {
     for c in &n.children {
@@ -831,7 +831,9 @@ fn unsound(d: &Document) -> Option<String> {
       }
     }
     if d.page(&n.page).is_none() {
-      continue;
+      // A layer on a page that is gone (a peer deleted the page while another added to it) is
+      // the older orphan problem: such a tree is not sound, and nothing is compared from it.
+      return Some(format!("{} is on a page that is gone", n.id));
     }
     match &n.parent {
       Some(p) => {

@@ -106,16 +106,24 @@ async function person(name) {
   page.on("console", (m) => {
     if (m.type() === "error" && !/bridge\/ws|Failed to load resource|ERR_INTERNET_DISCONNECTED|WebSocket connection/.test(m.text())) p.errors.push("console: " + m.text().slice(0, 300));
   });
-  page.on("websocket", (ws) =>
+  p.frames = [];
+  const keep = (dir) => (f) => {
+    const t = String(f.payload);
+    if (!t.includes('"presence"') && !t.includes('"ping"') && !t.includes('"pong"')) p.frames.push(`${dir} ${t.slice(0, 400)}`);
+    if (p.frames.length > 12) p.frames.shift();
+  };
+  page.on("websocket", (ws) => {
+    ws.on("framesent", keep(">>"));
     ws.on("framereceived", (f) => {
+      keep("<<")(f);
       try {
         const m = JSON.parse(f.payload);
         if (m.type === "welcome") p.welcome = m;
       } catch {
         /* binary or partial */
       }
-    }),
-  );
+    });
+  });
   everyone.push(p);
   return p;
 }
@@ -225,6 +233,12 @@ const order = async (R, p) => label(R)((await docOf(p)).nodes[R.frame].children)
 // Puts the four layers back in A,B,C,T for everyone.
 async function resetOrder(R) {
   for (const [i, id] of [R.a, R.b, R.c, R.t].entries()) await dispatch(R.ana, { op: "moveToParent", ids: [id], parent: R.frame, index: i });
+  // Everyone shows A,B,C,T and nothing of the reset is still on its way (a late reset delta would
+  // land in the middle of the race that follows).
+  for (let k = 0; k < 2; k++) {
+    await waitUntil(async () => (await Promise.all(R.peers.map((p) => order(R, p)))).every((o) => o === "A,B,C,T"), 15000, 100);
+    await sleep(600);
+  }
   await converge(R.peers);
 }
 const texts = async (p, cid) => (await docOf(p)).comments[cid]?.messages.map((m) => m.text);
@@ -297,6 +311,25 @@ async function repliesAndOrders(R, tag, { oldOwner = false } = {}) {
     // Both moves apply; an old editor's own list is whole-list, last writer wins (see the header).
     const ok = oldOwner ? same.same && os.every((o) => o === os[0]) : same.same && os.every((o) => o === "C,B,T,A");
     check(`${tag} B-2 (rep ${rep}): concurrent front and back${oldOwner ? " (an old editor's list may win)" : " both apply: C,B,T,A"}`, ok, JSON.stringify(os));
+    if (!ok) for (const p of [ana, ben]) console.log(p.name, p.frames.join("\n"));
+  }
+  // Bring forward one step races a send to back: the layer moved is B, not its neighbour C.
+  if (!oldOwner) {
+    await resetOrder(R);
+    await Promise.all([dispatch(ana, { op: "reorder", ids: [R.b], to: "forward" }), dispatch(ben, { op: "reorder", ids: [R.t], to: "back" })]);
+    const same = await converge(peers);
+    const os = await Promise.all(peers.map((p) => order(R, p)));
+    check(`${tag} bring forward (B) and send to back (T) at once: both apply (T,A,C,B)`, same.same && os.every((o) => o === "T,A,C,B"), JSON.stringify(os));
+    if (!os.every((o) => o === "T,A,C,B")) for (const p of [ana, ben]) console.log(p.name, p.frames.join("\n"));
+    await resetOrder(R);
+    await dispatch(ana, { op: "reorder", ids: [R.c], to: "backward" }); // A,C,B,T
+    await converge(peers);
+    await dispatch(ben, { op: "reorder", ids: [R.b], to: "front" }); // A,C,T,B
+    await converge(peers);
+    await dispatch(ana, { op: "undo" });
+    const su = await converge(peers);
+    const ou = await Promise.all(peers.map((p) => order(R, p)));
+    check(`${tag} undo of send backward after Ben moved B: C goes back, B stays (A,T,B,C)`, su.same && ou.every((o) => o === "A,T,B,C"), JSON.stringify(ou));
   }
   // B-3: Ana's undo keeps Ben's later reorder.
   if (!oldOwner) {
@@ -355,7 +388,7 @@ async function danglingCases(R, tag, { binder, deleter }) {
 // 1. The new relay, new editors
 // ====================================================================================
 note("1. new relay, new editors (this build)");
-for (let rep = 1; rep <= 2; rep++) {
+for (let rep = 1; rep <= Number(process.env.E2E_REPS ?? 2); rep++) {
   let R = null;
   try {
     R = await openRoom({ ownerBase: NEW, relay: NEW, joinBase: NEW });
@@ -422,7 +455,7 @@ for (let rep = 1; rep <= 2; rep++) {
 // ====================================================================================
 // 2. An old relay (round 16), new editors: behaviour as before, nothing breaks
 // ====================================================================================
-if (!haveOldRelay) {
+if (!haveOldRelay || process.env.E2E_ONLY_NEW) {
   skip("2. old relay", `E2E_OLD_RELAY_BIN not set or missing`);
 } else {
   note("2. old relay (round 16), new editors");
@@ -463,7 +496,7 @@ if (!haveOldRelay) {
 // ====================================================================================
 // 3. The new relay, an old editor (round 16) with two new ones
 // ====================================================================================
-if (!haveOldEditor) {
+if (!haveOldEditor || process.env.E2E_ONLY_NEW) {
   skip("3. old editor", `E2E_OLD_DIST not set or missing`);
 } else {
   note("3. new relay, an old editor with two new ones");

@@ -56,6 +56,11 @@ pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> 
 /// the receiver places those relative to its own list), and a comment that exists on both sides
 /// travels as the messages added and removed and the fields changed (`commentChanges`).
 pub fn delta_with(base: &Document, doc: &Document, opts: DeltaOpts) -> Value {
+  delta_hinted(base, doc, opts, &HashSet::new())
+}
+
+/// `delta_with`, with the layers the person moved on purpose (see `moved_hinted`).
+pub fn delta_hinted(base: &Document, doc: &Document, opts: DeltaOpts, hint: &HashSet<NodeId>) -> Value {
   let DeltaOpts { patches, granular, lists } = opts;
   let mut nodes = Map::new();
   let mut patch = Map::new();
@@ -66,7 +71,7 @@ pub fn delta_with(base: &Document, doc: &Document, opts: DeltaOpts) -> Value {
       imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, v) } if patches => {
         let p = node_patch(o, v);
         if lists && o.children != v.children {
-          moves.insert(k.clone(), json!(moved(&o.children, &v.children)));
+          moves.insert(k.clone(), json!(moved_hinted(&o.children, &v.children, hint)));
         }
         patch.insert(k.clone(), Value::Object(p));
       }
@@ -110,7 +115,7 @@ pub fn delta_with(base: &Document, doc: &Document, opts: DeltaOpts) -> Value {
       let mut page_moves = Map::new();
       for p in doc.pages.iter() {
         if let Some(b) = base.page(&p.id).filter(|b| b.children != p.children) {
-          page_moves.insert(p.id.clone(), json!(moved(&b.children, &p.children)));
+          page_moves.insert(p.id.clone(), json!(moved_hinted(&b.children, &p.children, hint)));
         }
       }
       if !page_moves.is_empty() {
@@ -270,8 +275,19 @@ pub const LISTS: bool = true;
 
 /// The ids of `new` that moved relative to `base`: the ones `base` lacks, and the ones not on a
 /// longest run of ids that kept their relative order. In `new` order. Taking one layer to the
-/// back gives just that layer; a swap gives one of the two.
+/// back gives just that layer. Which of two equally long runs stays is arbitrary, so the editor
+/// says which layers the person moved (`moved_hinted`).
 pub fn moved(base: &[NodeId], new: &[NodeId]) -> Vec<NodeId> {
+  moved_hinted(base, new, &HashSet::new())
+}
+
+/// `moved`, with the layers a command or drag moved (`hint`: Bring forward, Send backward, a drop
+/// in Layers) as the tie-break between runs of equal length. Moving one layer a step is also a
+/// neighbour "moving" the other way round, and which of the two counts is arbitrary without it:
+/// with the hint the run that stays keeps the most layers nobody moved on purpose. The set is
+/// still the smallest there is (the longest run stays), so nothing a command didn't move is
+/// re-placed, and `place(base, new, M)` is `new` for it.
+pub fn moved_hinted(base: &[NodeId], new: &[NodeId], hint: &HashSet<NodeId>) -> Vec<NodeId> {
   let pos: HashMap<&str, usize> = base.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
   // (index in `new`, position in `base`) of the ids both lists hold.
   let seq: Vec<(usize, usize)> = new
@@ -279,22 +295,59 @@ pub fn moved(base: &[NodeId], new: &[NodeId]) -> Vec<NodeId> {
     .enumerate()
     .filter_map(|(i, id)| pos.get(id.as_str()).map(|&p| (i, p)))
     .collect();
-  // Longest increasing run of base positions (patience sorting, O(n log n)).
-  let mut tails: Vec<usize> = Vec::new();
   let mut prev: Vec<Option<usize>> = vec![None; seq.len()];
-  for (k, &(_, p)) in seq.iter().enumerate() {
-    let at = tails.partition_point(|&t| seq[t].1 < p);
-    if at > 0 {
-      prev[k] = Some(tails[at - 1]);
+  let last;
+  if hint.is_empty() {
+    // Longest increasing run of base positions (patience sorting, O(n log n)).
+    let mut tails: Vec<usize> = Vec::new();
+    for (k, &(_, p)) in seq.iter().enumerate() {
+      let at = tails.partition_point(|&t| seq[t].1 < p);
+      if at > 0 {
+        prev[k] = Some(tails[at - 1]);
+      }
+      if at == tails.len() {
+        tails.push(k);
+      } else {
+        tails[at] = k;
+      }
     }
-    if at == tails.len() {
-      tails.push(k);
-    } else {
-      tails[at] = k;
+    last = tails.last().copied();
+  } else {
+    // The same run, weighted: length first, then the number of layers nobody moved on purpose
+    // (a Fenwick tree of the best chain ending at or before each base position).
+    let big = seq.len() as u64 + 1;
+    let weight = |k: usize| big + u64::from(!hint.contains(&new[seq[k].0]));
+    let m = base.len();
+    let mut tree: Vec<(u64, usize)> = vec![(0, usize::MAX); m + 1];
+    let mut best: Vec<u64> = vec![0; seq.len()];
+    let mut top: Option<usize> = None;
+    for (k, &(_, p)) in seq.iter().enumerate() {
+      // Best chain among base positions below `p`.
+      let (mut w, mut from) = (0, usize::MAX);
+      let mut i = p;
+      while i > 0 {
+        if tree[i].0 > w {
+          (w, from) = tree[i];
+        }
+        i -= i & i.wrapping_neg();
+      }
+      prev[k] = (from != usize::MAX).then_some(from);
+      best[k] = w + weight(k);
+      let mut i = p + 1;
+      while i <= m {
+        if best[k] > tree[i].0 {
+          tree[i] = (best[k], k);
+        }
+        i += i & i.wrapping_neg();
+      }
+      if top.is_none_or(|t| best[k] > best[t]) {
+        top = Some(k);
+      }
     }
+    last = top;
   }
   let mut stay: HashSet<usize> = HashSet::new();
-  let mut at = tails.last().copied();
+  let mut at = last;
   while let Some(k) = at {
     stay.insert(seq[k].0);
     at = prev[k];
@@ -319,6 +372,82 @@ pub fn moved(base: &[NodeId], new: &[NodeId]) -> Vec<NodeId> {
 /// order. With `cur` equal to the mover's base and `reference` its new list the result is
 /// exactly `reference`.
 pub fn place(cur: &[NodeId], reference: &[NodeId], moved: &[NodeId]) -> Vec<NodeId> {
+  let in_ref: HashSet<&str> = reference.iter().map(String::as_str).collect();
+  let mset: HashSet<&str> = moved.iter().map(String::as_str).filter(|m| in_ref.contains(m)).collect();
+  let mut seen: HashSet<&str> = HashSet::new();
+  let working: Vec<&NodeId> = cur
+    .iter()
+    .filter(|c| !mset.contains(c.as_str()) && seen.insert(c.as_str()))
+    .collect();
+  if mset.is_empty() {
+    return working.into_iter().cloned().collect();
+  }
+  let n = reference.len();
+  let is_moved = |i: usize| mset.contains(reference[i].as_str());
+  let lead = (0..n).take_while(|&i| is_moved(i)).count();
+  let tail = if lead == n {
+    0
+  } else {
+    (0..n).rev().take_while(|&i| is_moved(i)).count()
+  };
+  // Nothing is inserted into a vector: each moved id is hung on the id it follows (or precedes),
+  // and the result is written out once, in O(n + moved).
+  let mut present: HashSet<&str> = working.iter().map(|w| w.as_str()).collect();
+  let mut placed: HashSet<&str> = HashSet::new();
+  let mut after: HashMap<&str, Vec<&NodeId>> = HashMap::new();
+  let mut before: HashMap<&str, Vec<&NodeId>> = HashMap::new();
+  let mut front: Vec<&NodeId> = Vec::new();
+  let mut end: Vec<&NodeId> = Vec::new();
+  for r in &reference[..lead] {
+    if placed.insert(r.as_str()) {
+      present.insert(r.as_str());
+      front.push(r);
+    }
+  }
+  for i in lead..n - tail {
+    if !is_moved(i) || !placed.insert(reference[i].as_str()) {
+      continue;
+    }
+    let id = &reference[i];
+    let anchor = (0..i).rev().find(|&j| present.contains(reference[j].as_str()));
+    match anchor {
+      Some(j) => after.entry(reference[j].as_str()).or_default().insert(0, id),
+      None => match (i + 1..n).find(|&k| present.contains(reference[k].as_str())) {
+        Some(k) => before.entry(reference[k].as_str()).or_default().push(id),
+        None => end.push(id),
+      },
+    }
+    present.insert(id.as_str());
+  }
+  let mut tail_ids: Vec<&NodeId> = Vec::new();
+  for r in &reference[n - tail..] {
+    if placed.insert(r.as_str()) {
+      tail_ids.push(r);
+    }
+  }
+  enum Todo<'a> {
+    Expand(&'a NodeId),
+    Out(&'a NodeId),
+  }
+  let mut out: Vec<NodeId> = Vec::with_capacity(working.len() + front.len() + end.len() + tail_ids.len());
+  let roots: Vec<&NodeId> = front.into_iter().chain(working).chain(end).chain(tail_ids).collect();
+  let mut stack: Vec<Todo> = roots.into_iter().rev().map(Todo::Expand).collect();
+  while let Some(t) = stack.pop() {
+    match t {
+      Todo::Out(id) => out.push(id.clone()),
+      Todo::Expand(id) => {
+        stack.extend(after.get(id.as_str()).into_iter().flatten().rev().map(|x| Todo::Expand(x)));
+        stack.push(Todo::Out(id));
+        stack.extend(before.get(id.as_str()).into_iter().flatten().rev().map(|x| Todo::Expand(x)));
+      }
+    }
+  }
+  out
+}
+
+/// The first, slower `place` (a vector with inserts); the tests compare the two.
+#[cfg(test)]
+fn place_slow(cur: &[NodeId], reference: &[NodeId], moved: &[NodeId]) -> Vec<NodeId> {
   let in_ref: HashSet<&str> = reference.iter().map(String::as_str).collect();
   let mset: HashSet<&str> = moved.iter().map(String::as_str).filter(|m| in_ref.contains(m)).collect();
   let mut seen: HashSet<&str> = HashSet::new();
@@ -435,9 +564,10 @@ fn apply_comment_changes(doc: &mut Document, changes: &Map<String, Value>) -> Re
       }
     }
     if let Some(del) = ch.get("del").and_then(|d| d.as_array()) {
+      // A malformed key fails the delta, as a malformed message in `add` does.
       let gone: HashSet<MsgKey> = del
         .iter()
-        .filter_map(|k| {
+        .map(|k| {
           let k = k.as_array()?;
           Some((
             k.first()?.as_str()?.to_string(),
@@ -445,7 +575,8 @@ fn apply_comment_changes(doc: &mut Document, changes: &Map<String, Value>) -> Re
             k.get(2)?.as_str()?.to_string(),
           ))
         })
-        .collect();
+        .collect::<Option<_>>()
+        .ok_or_else(|| format!("bad comment key in {id}"))?;
       c.messages.retain(|m| !gone.contains(&msg_key(m)));
     }
     if let Some(add) = ch.get("add").and_then(|a| a.as_array()) {
@@ -1031,6 +1162,17 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
 
 /// `apply`, with the options; returns the layers `prune_refs` changed.
 pub fn apply_opts(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<NodeId>, String> {
+  // All or nothing: a delta that fails half way leaves the document as it was (the room acks it as
+  // rejected, so no peer may hold any of it).
+  let start = doc.clone();
+  let out = apply_inner(doc, d, opts);
+  if out.is_err() {
+    *doc = start;
+  }
+  out
+}
+
+fn apply_inner(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<NodeId>, String> {
   let before = doc.clone();
   let mut touched: Vec<NodeId> = Vec::new();
   if let Some(nodes) = d.get("nodes").and_then(|v| v.as_object()) {
@@ -1202,6 +1344,20 @@ fn apply_granular(doc: &mut Document, d: &Value) -> Result<(), String> {
 pub fn revert(doc: &Document, from: &Document, to: &Document) -> Document {
   let mut out = revert_inner(doc, from, to);
   keep_a_page(&mut out, doc);
+  out
+}
+
+thread_local! {
+  /// The layers the step being reverted moved on purpose (see `revert_hinted`).
+  static REVERT_HINT: std::cell::RefCell<HashSet<NodeId>> = std::cell::RefCell::new(HashSet::new());
+}
+
+/// `revert`, for a step whose command moved the layers in `hint` (the engine records them with
+/// the step): undoing "Send backward" of one layer puts that layer back, not its neighbour.
+pub fn revert_hinted(doc: &Document, from: &Document, to: &Document, hint: &[NodeId]) -> Document {
+  REVERT_HINT.with(|h| *h.borrow_mut() = hint.iter().cloned().collect());
+  let out = revert(doc, from, to);
+  REVERT_HINT.with(|h| h.borrow_mut().clear());
   out
 }
 
@@ -1447,7 +1603,8 @@ fn merge_order(cur: Option<&Value>, from: Option<&Value>, to: Option<&Value>) ->
   let cur: Vec<NodeId> = cur.iter().filter(|c| !in_from.contains(c) || in_to.contains(c)).cloned().collect();
   let at_from: HashMap<&String, usize> = from.iter().enumerate().map(|(i, id)| (id, i)).collect();
   let at_cur: HashMap<&String, usize> = cur.iter().enumerate().map(|(i, id)| (id, i)).collect();
-  let kept: Vec<NodeId> = moved(&from, &to)
+  let hint = REVERT_HINT.with(|h| h.borrow().clone());
+  let kept: Vec<NodeId> = moved_hinted(&from, &to, &hint)
     .into_iter()
     .filter(|id| {
       let Some(&f) = at_from.get(id) else { return true }; // the step took it out: it returns
@@ -3687,6 +3844,152 @@ mod tests {
         assert_eq!(h.order(i, &frame), o);
       }
     });
+  }
+
+  #[test]
+  fn bring_forward_and_a_peers_send_to_back_both_apply_in_either_relay_order() {
+    // C1: B one step forward is B moving, not its neighbour C.
+    {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let (frame, b) = (h.frame(), h.id('B'));
+      reorder(&mut h.eds[0], &b, ReorderTo::Forward);
+      let d = h.eds[0].collab_delta();
+      assert_eq!(d["moves"][&frame], json!([b]), "the layer the person moved is the one named");
+    }
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let (frame, b, t) = (h.frame(), h.id('B'), h.id('T'));
+      reorder(&mut h.eds[0], &b, ReorderTo::Forward);
+      reorder(&mut h.eds[1], &t, ReorderTo::Back);
+      h.race(x, y);
+      for i in 0..3 {
+        assert_eq!(h.order(i, &frame), "T,A,C,B", "editor {i}, relay order {x},{y}");
+      }
+    });
+  }
+
+  #[test]
+  fn undoing_a_send_backward_after_a_peer_moved_another_layer_puts_the_layer_back() {
+    let mut h = Hub::new(&[Lists, Lists]);
+    let (frame, b, c) = (h.frame(), h.id('B'), h.id('C'));
+    reorder(&mut h.eds[0], &c, ReorderTo::Backward); // A,C,B,T
+    h.sync(0);
+    reorder(&mut h.eds[1], &b, ReorderTo::Front); // A,C,T,B
+    h.sync(1);
+    assert_eq!(h.order(0, &frame), "A,C,T,B");
+    h.eds[0].dispatch(Command::Undo).unwrap();
+    h.sync(0);
+    h.assert_converged();
+    assert_eq!(h.order(1, &frame), "A,T,B,C", "C goes back behind B, Ben's move of B stays");
+    h.eds[0].dispatch(Command::Redo).unwrap();
+    h.sync(0);
+    h.assert_converged();
+  }
+
+  #[test]
+  fn a_hint_only_breaks_ties_between_equally_long_runs() {
+    let base = ids(&["a", "b", "x", "c"]);
+    let new = ids(&["a", "b", "c", "x"]);
+    assert_eq!(moved(&base, &new), ["c"], "alone, the neighbour is what stays out of the run");
+    let hint: HashSet<String> = ["x".to_string()].into();
+    assert_eq!(moved_hinted(&base, &new, &hint), ["x"]);
+    for h in [vec!["x"], vec!["c"], vec!["a", "b", "x", "c"], vec![]] {
+      let hint: HashSet<String> = h.iter().map(|s| s.to_string()).collect();
+      let m = moved_hinted(&base, &new, &hint);
+      assert_eq!(m.len(), 1, "the smallest set, whatever the hint: {h:?}");
+      assert_eq!(place(&base, &new, &m), new, "{h:?}");
+    }
+  }
+
+  /// A small deterministic generator for the property tests.
+  fn lcg(seed: &mut u64) -> usize {
+    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    (*seed >> 33) as usize
+  }
+
+  #[test]
+  fn hinted_moves_are_as_small_as_unhinted_ones_and_exact() {
+    let mut seed = 99;
+    for _ in 0..2000 {
+      let n = 2 + lcg(&mut seed) % 9;
+      let base: Vec<String> = (0..n).map(|i| format!("n{i}")).collect();
+      let mut new = base.clone();
+      for i in (1..n).rev() {
+        new.swap(i, lcg(&mut seed) % (i + 1));
+      }
+      if lcg(&mut seed).is_multiple_of(3) {
+        new.push("added".into());
+      }
+      let hint: HashSet<String> = base.iter().filter(|_| lcg(&mut seed).is_multiple_of(2)).cloned().collect();
+      let m = moved_hinted(&base, &new, &hint);
+      assert_eq!(m.len(), moved(&base, &new).len(), "{base:?} {new:?} {hint:?}");
+      assert_eq!(place(&base, &new, &m), new, "{base:?} {new:?} {hint:?}");
+    }
+  }
+
+  #[test]
+  fn the_indexed_place_matches_the_plain_one() {
+    let mut seed = 7;
+    for _ in 0..3000 {
+      let n = lcg(&mut seed) % 9;
+      let pool: Vec<String> = (0..12).map(|i| format!("n{i}")).collect();
+      let pick = |seed: &mut u64, k: usize| -> Vec<String> {
+        let mut v: Vec<String> = pool.iter().filter(|_| lcg(seed) % 12 < k).cloned().collect();
+        for i in (1..v.len()).rev() {
+          v.swap(i, lcg(seed) % (i + 1));
+        }
+        v
+      };
+      let cur = pick(&mut seed, 3 + n % 6);
+      let reference = pick(&mut seed, 3 + n % 6);
+      let moved: Vec<String> = pool.iter().filter(|_| lcg(&mut seed).is_multiple_of(3)).cloned().collect();
+      assert_eq!(
+        place(&cur, &reference, &moved),
+        place_slow(&cur, &reference, &moved),
+        "{cur:?} {reference:?} {moved:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn place_stays_fast_when_everything_interleaves() {
+    let n = 10_000;
+    let cur: Vec<String> = (0..n).map(|i| format!("n{i}")).collect();
+    let mut reference: Vec<String> = Vec::new();
+    for i in 0..n / 2 {
+      reference.push(cur[i].clone());
+      reference.push(cur[n - 1 - i].clone());
+    }
+    let m = moved(&cur, &reference);
+    let t = std::time::Instant::now();
+    assert_eq!(place(&cur, &reference, &m), reference);
+    assert!(t.elapsed() < std::time::Duration::from_millis(150), "{:?}", t.elapsed());
+  }
+
+  #[test]
+  fn a_malformed_comment_change_applies_nothing() {
+    let (mut h, _) = (Hub::new(&[Lists]), 0);
+    let a = h.id('A');
+    let cid = add_comment(&mut h.eds[0], &a, "Q1", "Ana", 1.0);
+    h.sync(0);
+    let before = h.doc.clone();
+    let node = serde_json::to_value(h.doc.get(&a).unwrap()).unwrap();
+    for bad in [
+      json!({ cid.clone(): { "add": [5] } }),
+      json!({ cid.clone(): { "del": [["x"]] } }),
+      json!({ cid.clone(): { "del": [5] } }),
+    ] {
+      let mut doc = before.clone();
+      let mut n2 = node.clone();
+      n2["x"] = json!(321.0);
+      let d = json!({ "nodes": {}, "patch": { a.clone(): { "x": 321.0 } }, "commentChanges": bad });
+      assert!(apply_opts(&mut doc, &d, ApplyOpts { prune: true }).is_err(), "{bad}");
+      assert!(doc == before, "a failed delta leaves the document as it was: {bad}");
+    }
+    // The same delta without the bad part applies.
+    let mut doc = before.clone();
+    apply(&mut doc, &json!({ "patch": { a.clone(): { "x": 321.0 } } })).unwrap();
+    assert_eq!(doc.get(&a).unwrap().x, 321.0);
   }
 
   fn add_comment(e: &mut Engine, node: &str, text: &str, author: &str, time: f64) -> String {
