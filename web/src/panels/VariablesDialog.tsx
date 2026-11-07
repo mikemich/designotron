@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Hash, Link2, Palette, Plus, SlidersHorizontal, ToggleLeft, Trash2, Type as TypeIcon, Unlink, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Download, Hash, Link2, Palette, Plus, SlidersHorizontal, ToggleLeft, Trash2, Type as TypeIcon, Unlink, X } from "lucide-react";
 import { dispatch, toast, useDoc, useStore } from "../store";
 import type { VarKind, Variable, VariableCollection } from "../types";
 import { Menu, type MenuItem, Popover, useDialog } from "../ui/controls";
 import { ConfirmDialog } from "../dashboard/ConfirmDialog";
 import { cssColor } from "../ui/color";
+import { exportTokensJson } from "../exporter";
 import { useFolderState } from "./FolderTree";
 import { folderSize, groupBySlash, type Folder } from "./groupBySlash";
 import { aliasCycle, SCOPES, SCOPES_FOR_KIND } from "./variableScopes";
@@ -297,7 +298,10 @@ export function VariablesDialog() {
       <div ref={dialogRef} className="modal variables-dialog" role="dialog" aria-modal="true" aria-label="Variables" onKeyDown={(e) => e.key === "Escape" && close()}>
         <div className="modal-head">
           <b>Local variables</b>
-          <button className="ibtn" title="Close" onClick={close} style={{ marginLeft: "auto" }}>
+          <button className="ibtn" title="Export JSON (W3C design tokens)" aria-label="Export JSON" onClick={exportTokensJson} style={{ marginLeft: "auto" }}>
+            <Download size={14} />
+          </button>
+          <button className="ibtn" title="Close" onClick={close}>
             <X size={14} />
           </button>
         </div>

@@ -674,13 +674,187 @@ pub fn mode_attr(doc: &Document, c: &Collection) -> String {
 }
 
 /// A mode's value in that attribute: its slug, or `mode-N` when the name has no ASCII letters.
+/// A name that slugs like an earlier mode of the collection gets `-2`, `-3` (by position), so two
+/// modes called "Dark" don't write the same selector.
 pub fn mode_slug(c: &Collection, m: &VarMode) -> String {
-  let name = slug(&m.name);
-  if name.is_empty() {
-    format!("mode-{}", c.modes.iter().position(|x| x.id == m.id).unwrap_or(0) + 1)
-  } else {
-    name
+  let base = |i: usize, x: &VarMode| {
+    let name = slug(&x.name);
+    if name.is_empty() {
+      format!("mode-{}", i + 1)
+    } else {
+      name
+    }
+  };
+  let mut taken: Vec<String> = Vec::new();
+  for (i, x) in c.modes.iter().enumerate() {
+    let out = unique_name(&base(i, x), &taken);
+    if x.id == m.id {
+      return out;
+    }
+    taken.push(out);
   }
+  base(0, m)
+}
+
+/// A DTCG name part: no `.`, braces or leading `$` (they mean something in references and keys).
+fn dtcg_part(part: &str) -> String {
+  let p: String = part
+    .chars()
+    .filter(|c| !matches!(c, '{' | '}'))
+    .map(|c| if c == '.' { '_' } else { c })
+    .collect();
+  let p = p.trim().trim_start_matches('$').to_string();
+  if p.is_empty() {
+    "_".into()
+  } else {
+    p
+  }
+}
+
+/// `base`, or `base-2`, `base-3` ... until `taken` doesn't hold it.
+fn unique_name(base: &str, taken: &[String]) -> String {
+  let mut out = base.to_string();
+  let mut k = 2;
+  while taken.contains(&out) {
+    out = format!("{base}-{k}");
+    k += 1;
+  }
+  out
+}
+
+/// The variables as a W3C design tokens file: one group per collection, `/` in a name nesting
+/// groups, `$type` and `$value` from the default mode, aliases as `{group.token}` references. The
+/// other modes' values (and what the DTCG format has no field for) sit in a `com.designotron`
+/// extension: `modes` on the token, mode names on the collection group.
+pub fn tokens_json(doc: &Document) -> Value {
+  use serde_json::Map;
+  const EXT: &str = "com.designotron";
+  // Every token's path first, so aliases can point at tokens defined later.
+  let mut paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
+  let mut taken: Vec<Vec<String>> = Vec::new();
+  let mut coll_names: Vec<String> = Vec::new();
+  for c in &doc.variables {
+    let cname = unique_name(&dtcg_part(&c.name), &coll_names);
+    coll_names.push(cname.clone());
+    for v in &c.variables {
+      let mut path = vec![cname.clone()];
+      path.extend(v.name.split('/').map(str::trim).filter(|p| !p.is_empty()).map(dtcg_part));
+      let base = path.clone();
+      let mut k = 2;
+      while taken.contains(&path) {
+        path = base.clone();
+        if let Some(last) = path.last_mut() {
+          *last = format!("{last}-{k}");
+        }
+        k += 1;
+      }
+      taken.push(path.clone());
+      paths.insert(v.id.clone(), path);
+    }
+  }
+  // A token whose path is also a group (`Space` next to `Space/2`) moves under `$root`.
+  let groups: Vec<Vec<String>> = taken.iter().flat_map(|p| (1..p.len()).map(|n| p[..n].to_vec())).collect();
+  for p in paths.values_mut() {
+    if groups.contains(p) {
+      p.push("$root".into());
+    }
+  }
+  let value = |kind: VarKind, raw: &Value| -> Option<Value> {
+    if let Some(a) = raw.get("alias").and_then(|a| a.as_str()) {
+      let target = paths.get(&find(doc, a)?.1.id)?;
+      return Some(Value::String(format!("{{{}}}", target.join("."))));
+    }
+    Some(match kind {
+      VarKind::Color => json!(crate::color::normalize(raw.as_str()?)),
+      VarKind::Number => json!(raw.as_f64()?),
+      VarKind::String => json!(raw.as_str()?),
+      VarKind::Boolean => json!(raw.as_bool()?),
+    })
+  };
+  let mut root = Map::new();
+  for (c, cname) in doc.variables.iter().zip(&coll_names) {
+    let mut mode_names: Vec<String> = Vec::new();
+    for m in &c.modes {
+      let name = unique_name(&m.name, &mode_names);
+      mode_names.push(name);
+    }
+    let mut group = Map::new();
+    group.insert(
+      "$extensions".into(),
+      json!({ EXT: { "id": c.id, "name": c.name, "modes": mode_names } }),
+    );
+    let Some(default) = c.modes.first() else {
+      root.insert(cname.clone(), Value::Object(group));
+      continue;
+    };
+    for v in &c.variables {
+      let raw = v
+        .values
+        .get(&default.id)
+        .or_else(|| c.modes.iter().find_map(|m| v.values.get(&m.id)));
+      let Some(val) = raw.and_then(|r| value(v.kind, r)) else { continue };
+      let path = &paths[&v.id];
+      let mut tok = Map::new();
+      match v.kind {
+        VarKind::Color => tok.insert("$type".into(), json!("color")),
+        VarKind::Number => tok.insert("$type".into(), json!("number")),
+        _ => None,
+      };
+      tok.insert("$value".into(), val);
+      if !v.description.is_empty() {
+        tok.insert("$description".into(), json!(v.description));
+      }
+      let mut ext = Map::new();
+      ext.insert("id".into(), json!(v.id));
+      let shown: Vec<&str> = path[1..].iter().filter(|p| *p != "$root").map(String::as_str).collect();
+      if shown.join("/") != v.name {
+        ext.insert("name".into(), json!(v.name));
+      }
+      match v.kind {
+        VarKind::String => ext.insert("type".into(), json!("string")),
+        VarKind::Boolean => ext.insert("type".into(), json!("boolean")),
+        _ => None,
+      };
+      let mut modes = Map::new();
+      for (m, name) in c.modes.iter().zip(&mode_names).skip(1) {
+        if let Some(mv) = v.values.get(&m.id).and_then(|r| value(v.kind, r)) {
+          modes.insert(name.clone(), mv);
+        }
+      }
+      if !modes.is_empty() {
+        ext.insert("modes".into(), Value::Object(modes));
+      }
+      if !v.scopes.is_empty() {
+        ext.insert("scopes".into(), json!(v.scopes));
+      }
+      tok.insert("$extensions".into(), json!({ EXT: Value::Object(ext) }));
+      let Some((leaf, dirs)) = path[1..].split_last() else { continue };
+      insert_token(&mut group, dirs, leaf, tok);
+    }
+    root.insert(cname.clone(), Value::Object(group));
+  }
+  Value::Object(root)
+}
+
+/// Puts a token at `dirs/leaf`, creating the groups on the way.
+fn insert_token(group: &mut serde_json::Map<String, Value>, dirs: &[String], leaf: &str, tok: serde_json::Map<String, Value>) {
+  match dirs.split_first() {
+    None => {
+      group.insert(leaf.to_string(), Value::Object(tok));
+    }
+    Some((d, rest)) => {
+      if let Value::Object(g) = group.entry(d.clone()).or_insert_with(|| Value::Object(serde_json::Map::new())) {
+        insert_token(g, rest, leaf, tok);
+      }
+    }
+  }
+}
+
+/// `tokens_json` as the text of a `tokens.json` file.
+pub fn tokens_json_text(doc: &Document) -> String {
+  let mut s = serde_json::to_string_pretty(&tokens_json(doc)).unwrap_or_else(|_| "{}".into());
+  s.push('\n');
+  s
 }
 
 /// Summary for Claude: collections, modes and variables with their values by mode name.
@@ -1095,5 +1269,118 @@ mod tests {
       })
       .unwrap_err();
     assert!(err.contains("needs a color variable") && err.contains(", v is number"), "{err}");
+  }
+
+  fn named(id: &str, name: &str, kind: VarKind, vals: &[(&str, Value)]) -> Variable {
+    Variable {
+      id: id.into(),
+      name: name.into(),
+      kind,
+      values: vals.iter().map(|(m, v)| ((*m).to_string(), v.clone())).collect(),
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn modes_with_the_same_name_get_distinct_slugs() {
+    let c = Collection {
+      id: "c".into(),
+      name: "Theme".into(),
+      modes: ["Dark", "Light", "Dark"]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| VarMode {
+          id: format!("m{i}"),
+          name: (*n).into(),
+        })
+        .collect(),
+      variables: vec![],
+    };
+    let slugs: Vec<String> = c.modes.iter().map(|m| mode_slug(&c, m)).collect();
+    assert_eq!(slugs, ["dark", "light", "dark-2"]);
+  }
+
+  #[test]
+  fn tokens_json_is_dtcg_with_modes_in_an_extension() {
+    let mut doc = crate::doc::new_document(&mut crate::doc::IdGen::new(1), "T");
+    doc.variables = vec![
+      Collection {
+        id: "c1".into(),
+        name: "Primitives".into(),
+        modes: vec![VarMode {
+          id: "m".into(),
+          name: "Base".into(),
+        }],
+        variables: vec![
+          named("black", "Black", VarKind::Color, &[("m", json!("#000"))]),
+          named("space", "Space", VarKind::Number, &[("m", json!(4))]),
+          named("space2", "Space/2", VarKind::Number, &[("m", json!(8))]),
+          named("half", "Space/0.5", VarKind::Number, &[("m", json!(2))]),
+          named("flag", "Flags/On", VarKind::Boolean, &[("m", json!(true))]),
+        ],
+      },
+      Collection {
+        id: "c2".into(),
+        name: "Theme".into(),
+        modes: vec![
+          VarMode {
+            id: "l".into(),
+            name: "Light".into(),
+          },
+          VarMode {
+            id: "d".into(),
+            name: "Dark".into(),
+          },
+        ],
+        variables: vec![
+          named(
+            "bg",
+            "Surface/Bg",
+            VarKind::Color,
+            &[("l", json!("#FFFFFF")), ("d", json!({ "alias": "black" }))],
+          ),
+          named(
+            "glass",
+            "Surface/Glass",
+            VarKind::Color,
+            &[("l", json!("#11223380")), ("d", json!("#112233"))],
+          ),
+          named("font", "Font", VarKind::String, &[("l", json!("Inter")), ("d", json!("Georgia"))]),
+        ],
+      },
+    ];
+    let v = tokens_json(&doc);
+    assert_eq!(
+      v["Primitives"]["Black"],
+      json!({
+        "$type": "color",
+        "$value": "#000000",
+        "$extensions": { "com.designotron": { "id": "black" } }
+      })
+    );
+    // A token that is also a group goes under $root, and an alias to it follows.
+    assert_eq!(v["Primitives"]["Space"]["$root"]["$value"], 4.0);
+    assert_eq!(v["Primitives"]["Space"]["2"]["$type"], "number");
+    // A dot in a name becomes an underscore, the original is kept.
+    assert_eq!(
+      v["Primitives"]["Space"]["0_5"]["$extensions"]["com.designotron"]["name"],
+      "Space/0.5"
+    );
+    // Nested groups, the default mode's value, an alias in another mode, the mode names.
+    let bg = &v["Theme"]["Surface"]["Bg"];
+    assert_eq!(bg["$value"], "#FFFFFF");
+    assert_eq!(bg["$extensions"]["com.designotron"]["modes"]["Dark"], "{Primitives.Black}");
+    assert_eq!(v["Theme"]["$extensions"]["com.designotron"]["modes"], json!(["Light", "Dark"]));
+    // Translucent colours are 8-digit hex.
+    assert_eq!(v["Theme"]["Surface"]["Glass"]["$value"], "#11223380");
+    // Strings and booleans have no $type; the extension says what they are.
+    assert!(v["Theme"]["Font"].get("$type").is_none());
+    assert_eq!(v["Theme"]["Font"]["$extensions"]["com.designotron"]["type"], "string");
+    assert_eq!(v["Primitives"]["Flags"]["On"]["$value"], true);
+    // An alias as the default value is a reference too.
+    doc.variables[1].variables[0]
+      .values
+      .insert("l".into(), json!({ "alias": "space2" }));
+    assert_eq!(tokens_json(&doc)["Theme"]["Surface"]["Bg"]["$value"], "{Primitives.Space.2}");
   }
 }

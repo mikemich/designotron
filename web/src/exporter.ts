@@ -484,6 +484,12 @@ export async function downloadLayerAsset(id: string) {
   download(f.name.replace(/\//g, "-"), f.data, f.mime);
 }
 
+/** Downloads the variables as a W3C design tokens file (`<name>-tokens.json`). */
+export function exportTokensJson() {
+  const text = query<string>({ q: "tokensJson" });
+  download(`${fileSafe(getDoc().name)}-tokens.json`, text, "application/json");
+}
+
 export async function exportProjectZip() {
   const { files, binaries } = projectFiles();
   const zip = new JSZip();
