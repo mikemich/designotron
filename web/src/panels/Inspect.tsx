@@ -11,11 +11,13 @@ import { framePosition } from "./groupOffset";
 import { formatColor, parseColor, toHex, type ColorFormat } from "../ui/color";
 import type { Doc, Effect, ImageCredit, Node, Paint, TextRun } from "../types";
 
-const FORMATS: { value: ColorFormat; label: string }[] = [
+// The stored value stays "css" (saved in localStorage); the label says what it is, so it can't be
+// mistaken for the code language's "CSS".
+const FORMATS: { value: ColorFormat; label: string; title?: string }[] = [
   { value: "hex", label: "Hex" },
   { value: "rgb", label: "RGB" },
   { value: "hsl", label: "HSL" },
-  { value: "css", label: "CSS" },
+  { value: "css", label: "Token", title: "CSS custom property when the colour comes from a style or variable, else CSS colour" },
 ];
 const FORMAT_KEY = "dt:inspect-color-format";
 /** Most assets listed for one selection. */

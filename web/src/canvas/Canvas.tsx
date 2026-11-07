@@ -280,6 +280,8 @@ export function Canvas() {
   useLayoutEffect(() => {
     const host = contentRef.current;
     if (!host) return;
+    // A stopped engine can't draw: the canvas keeps what it has on screen.
+    if (useStore.getState().engineFailed) return;
     const fresh = rootEls.current.size === 0;
     // The text being edited is drawn live (all its lines, mixed styles); its textarea is only the input.
     const r = renderPageIncremental(page, demoHidden, fresh, editingText ?? "");
@@ -1456,7 +1458,7 @@ export function Canvas() {
       <FollowFrame />
       {showRulers && <Rulers v={v} width={size.w} height={size.h} selection={selItems.union} />}
       {editingText && <TextEditor id={editingText} />}
-      {empty && !figmaOpen && (tool === "move" || tool === "hand") && <EmptyPrompt pageId={pageObj?.id ?? ""} />}
+      {empty && !figmaOpen && (tool === "move" || tool === "hand") && <EmptyPrompt pageId={pageObj?.id ?? ""} forceCompact={doc.pages.some((p) => p.id !== pageObj?.id && p.children.length > 0)} />}
       <ZoomFlash zoom={v.zoom} />
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>

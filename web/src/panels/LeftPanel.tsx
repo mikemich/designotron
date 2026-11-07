@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { HistoryPanel } from "./HistoryPanel";
 import { CommentsPanel } from "./CommentsPanel";
 import {
@@ -17,17 +17,22 @@ import {
   Lock,
   Minus,
   PenTool,
+  ListFilter,
   Plus,
+  Search,
   Square,
   Star,
   Triangle,
   Type,
   Unlock,
+  X as XIcon,
   Group as GroupIcon,
 } from "lucide-react";
 import { dispatch, useDoc, useStore, zoomToSelection } from "../store";
 import type { Doc, Node } from "../types";
-import { ALT_MOD, IconButton, Menu, type MenuItem } from "../ui/controls";
+import { ALT, ALT_MOD, IconButton, Menu, SHIFT, type MenuItem } from "../ui/controls";
+import { canvasMenu } from "../canvas/contextMenu";
+import { LAYER_FILTERS, LAYER_FILTER_LABELS, collapseAllLayers, descendantContainers, rangeIds, searchLayers, setLayerExpanded, useLayerTree, type LayerFilter, type LayerSearch } from "./layerTree";
 import { PanelClose } from "./PanelChrome";
 import * as A from "../actions";
 import { viewportCenter } from "../actions";
@@ -291,10 +296,10 @@ function Pages() {
               <RenameInput
                 value={p.name}
                 label="Page name"
-                onDone={(name, byKey) => {
+                onDone={(name, how) => {
                   setRenaming(null);
                   if (name && name !== p.name) dispatch({ op: "renamePage", id: p.id, name });
-                  if (byKey) requestAnimationFrame(() => focusPage(p.id));
+                  if (how !== "blur") requestAnimationFrame(() => focusPage(p.id));
                 }}
               />
             ) : (
@@ -313,15 +318,18 @@ function Pages() {
   );
 }
 
-/** Rename field for a layer or page. `onDone` runs once: with `byKey` true when Enter or Escape
- * ended it (the caller returns focus to its row), false when focus left. */
-function RenameInput({ value, label, onDone }: { value: string; label: string; onDone: (v: string, byKey: boolean) => void }) {
+/** How a rename ended: Enter or Escape ("key", the caller returns focus to its row), focus leaving
+ * ("blur"), or Tab / Shift+Tab ("next" / "prev", only when `tabs` is set). */
+type RenameEnd = "key" | "blur" | "next" | "prev";
+
+/** Rename field for a layer or page. `onDone` runs once. */
+function RenameInput({ value, label, tabs, onDone }: { value: string; label: string; tabs?: boolean; onDone: (v: string, how: RenameEnd) => void }) {
   const ref = useRef<HTMLInputElement>(null);
   const done = useRef(false);
-  const finish = (v: string, byKey: boolean) => {
+  const finish = (v: string, how: RenameEnd) => {
     if (done.current) return;
     done.current = true;
-    onDone(v, byKey);
+    onDone(v, how);
   };
   useEffect(() => {
     ref.current?.focus();
@@ -335,11 +343,15 @@ function RenameInput({ value, label, onDone }: { value: string; label: string; o
       aria-label={label}
       style={{ padding: "2px 4px" }}
       onClick={(e) => e.stopPropagation()}
-      onBlur={(e) => finish(e.target.value.trim(), false)}
+      onBlur={(e) => finish(e.target.value.trim(), "blur")}
       onKeyDown={(e) => {
         e.stopPropagation();
-        if (e.key === "Enter") finish((e.target as HTMLInputElement).value.trim(), true);
-        if (e.key === "Escape") finish(value, true);
+        if (e.key === "Enter") finish((e.target as HTMLInputElement).value.trim(), "key");
+        if (e.key === "Escape") finish(value, "key");
+        if (e.key === "Tab" && tabs) {
+          e.preventDefault();
+          finish((e.target as HTMLInputElement).value.trim(), e.shiftKey ? "prev" : "next");
+        }
       }}
     />
   );
@@ -380,7 +392,11 @@ function Layers() {
   const doc = useDoc();
   const page = useStore((s) => s.es.page);
   const sel = useStore((s) => s.es.selection);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const expanded = useLayerTree((s) => s.expanded);
+  const viewer = useCollab((s) => s.viewer);
+  const engineReadOnly = useStore((s) => !!s.es.readOnly);
+  /** A read-only tab or a view-only visitor can look through the layers but not rename or move them. */
+  const viewOnly = engineReadOnly || viewer;
   const [renaming, setRenaming] = useState<string | null>(null);
   const [drop, setDrop] = useState<DropPos>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
@@ -391,19 +407,44 @@ function Layers() {
   const pendingFocus = useRef<string | null>(null);
   /** Where Shift+Arrow ranges start. */
   const anchor = useRef<string | null>(null);
+  /** The selection key (ids joined) this panel itself last made: it is already in view, so it isn't revealed,
+   * and it keeps the anchor. Any other selection (canvas, Claude, a collaborator) resets the anchor. */
+  const fromPanel = useRef<string | null>(null);
+  const panelSelect = (ids: string[], mode?: "toggle") => {
+    dispatch(mode ? { op: "select", ids, mode } : { op: "select", ids });
+    fromPanel.current = useStore.getState().es.selection.join(",");
+  };
+  /** Whether the search results are showing, and what they hold (set below, read by callbacks). */
+  const searchingRef = useRef(false);
+  const foundRef = useRef<LayerSearch | null>(null);
 
-  // F2 on the canvas: start renaming once the row is revealed and drawn.
+  // F2 on the canvas: start renaming once the row is revealed and drawn. While searching, only a layer
+  // that is in the results has a row to hold the field.
   const renameRequest = useStore((s) => s.renameRequest);
   useEffect(() => {
     if (!renameRequest) return;
     useStore.setState({ renameRequest: null });
-    setTimeout(() => requestAnimationFrame(() => doc.nodes[renameRequest] && setRenaming(renameRequest)), 0);
+    setTimeout(
+      () =>
+        requestAnimationFrame(() => {
+          if (!doc.nodes[renameRequest] || viewOnly) return;
+          if (searchingRef.current && !foundRef.current?.hits.some((h) => h.id === renameRequest)) return;
+          setRenaming(renameRequest);
+        }),
+      0,
+    );
   }, [renameRequest]);
 
-  // Reveal selected layers.
-  useEffect(() => {
+  // Reveal selected layers: open their ancestors, then scroll once the rows exist (the expanded set
+  // takes a render to show up in `rows`).
+  const reveal = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (sel.join(",") === fromPanel.current) return;
+    fromPanel.current = null;
+    anchor.current = null;
     if (!sel.length) return;
-    setExpanded((prev) => {
+    reveal.current = sel[0];
+    setLayerExpanded((prev) => {
       const next = new Set(prev);
       let changed = false;
       for (const id of sel) {
@@ -417,14 +458,6 @@ function Layers() {
         }
       }
       return changed ? next : prev;
-    });
-    requestAnimationFrame(() => {
-      // By index, since the row may not be rendered (long lists are windowed).
-      const el = scrollRef.current;
-      const i = rowsRef.current.findIndex((r) => r.n.id === sel[0]);
-      if (!el || i < 0) return;
-      if (i * ROW < el.scrollTop) el.scrollTop = i * ROW;
-      else if ((i + 1) * ROW > el.scrollTop + el.clientHeight) el.scrollTop = (i + 1) * ROW - el.clientHeight;
     });
   }, [sel.join(",")]);
 
@@ -443,6 +476,59 @@ function Layers() {
   }, [doc, page, expanded]);
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
+
+  // Search and filter (current page). The query is kept per page for the session.
+  const [searches, setSearches] = useState<Record<string, { q: string; f: LayerFilter[] }>>({});
+  const search = searches[page] ?? { q: "", f: [] };
+  const setSearch = (patch: Partial<{ q: string; f: LayerFilter[] }>) => setSearches((m) => ({ ...m, [page]: { ...(m[page] ?? { q: "", f: [] }), ...patch } }));
+  // The debounced query belongs to a page: after a page switch the new page's own query counts at once.
+  const [deb, setDeb] = useState({ page, q: "" });
+  useEffect(() => {
+    const t = setTimeout(() => setDeb({ page, q: search.q }), 120);
+    return () => clearTimeout(t);
+  }, [search.q, page]);
+  const debounced = deb.page === page ? deb.q : search.q;
+  // Emptying the field shows the tree at once; typing waits for the debounce.
+  const activeQuery = search.q.trim() ? debounced : "";
+  const filters = useMemo(() => new Set(search.f), [search.f]);
+  const searching = activeQuery.trim() !== "" || filters.size > 0;
+  const found = useMemo(() => (searching ? searchLayers(doc, page, activeQuery, filters, 500) : null), [searching, doc, page, activeQuery, filters]);
+  searchingRef.current = searching;
+  foundRef.current = found;
+
+  // Scroll the selected row into view once it is in `rows`. By index, since rows are windowed.
+  useLayoutEffect(() => {
+    const id = reveal.current;
+    const el = scrollRef.current;
+    if (!id || !el || searching) return;
+    if (renaming || dragId.current) {
+      reveal.current = null;
+      return;
+    }
+    const i = rows.findIndex((r) => r.n.id === id);
+    if (i < 0) {
+      // Still waiting for an ancestor to open? Otherwise the layer is not on this page.
+      let p = doc.nodes[id]?.parent;
+      while (p && expanded.has(p)) p = doc.nodes[p]?.parent ?? null;
+      if (!p) reveal.current = null;
+      return;
+    }
+    reveal.current = null;
+    const nearest = () => {
+      if (i * ROW < el.scrollTop) el.scrollTop = i * ROW;
+      else if ((i + 1) * ROW > el.scrollTop + el.clientHeight) el.scrollTop = (i + 1) * ROW - el.clientHeight;
+    };
+    nearest();
+    // Once more after layout settles: the panel's height can still change in the frame that drew the rows.
+    requestAnimationFrame(nearest);
+  }, [rows, sel, searching]);
+  // Leaving the search shows the tree again with the selection in view.
+  const wasSearching = useRef(false);
+  useLayoutEffect(() => {
+    if (wasSearching.current !== searching) setRenaming(null);
+    if (wasSearching.current && !searching && sel.length) reveal.current = sel[0];
+    wasSearching.current = searching;
+  }, [searching]);
 
   // The tree has one tab stop: the row that has focus, else the first selected row, else the first row.
   const lastFocus = useRef<string | null>(null);
@@ -491,26 +577,90 @@ function Layers() {
     return () => document.removeEventListener("focusin", onFocusIn);
   }, []);
 
-  const select = (ids: string[], extend: boolean) => {
-    if (extend) {
-      const a = rows.findIndex((r) => r.n.id === (anchor.current ?? sel[0]));
-      const b = rows.findIndex((r) => r.n.id === ids[0]);
-      if (a >= 0 && b >= 0) {
-        const [lo, hi] = a < b ? [a, b] : [b, a];
-        return dispatch({ op: "select", ids: rows.slice(lo, hi + 1).map((r) => r.n.id) });
-      }
-    }
+  /** Selects `ids`, or with `extend` the rows between the anchor and `ids[0]` (top-most only). `list` is
+   * the visible rows: the tree, or the search results. */
+  const select = (ids: string[], extend: boolean, list: { n: Node }[] = rows, flat = false) => {
+    const seen = (id: string | null | undefined) => !!id && list.some((r) => r.n.id === id);
+    // With nothing selected a Shift-click selects just the row, whatever the anchor was.
+    const a = !sel.length ? null : seen(anchor.current) ? anchor.current : sel.find(seen);
+    if (extend && a) return panelSelect(rangeIds(list, a, ids[0], !flat));
     anchor.current = ids[0];
-    dispatch({ op: "select", ids });
+    panelSelect(ids);
+  };
+
+  /** Click on a row of the tree or of the search results: Shift selects the range from the anchor,
+   * ⌘/Ctrl toggles one row and becomes the anchor, a plain click selects it. */
+  const clickRow = (e: React.MouseEvent, id: string, list: { n: Node }[], flat = false) => {
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey) {
+      anchor.current = id;
+      panelSelect([id], "toggle");
+    } else select([id], e.shiftKey, list, flat);
+    returnFocusToCanvas(e);
   };
 
   const toggleExpanded = (id: string, open?: boolean) =>
-    setExpanded((prev) => {
+    setLayerExpanded((prev) => {
       const next = new Set(prev);
       if (open ?? !next.has(id)) next.add(id);
       else next.delete(id);
       return next;
     });
+
+  /** Alt-click on a twisty: the row and everything below it opens, or closes. */
+  const toggleAll = (id: string) => {
+    const open = !expanded.has(id);
+    const all = [id, ...descendantContainers(doc, id)];
+    setLayerExpanded((prev) => {
+      const next = new Set(prev);
+      for (const x of all) open ? next.add(x) : next.delete(x);
+      return next;
+    });
+  };
+
+  /** Right-click menu for a row: the layer commands of the canvas menu, with the panel's own on top. */
+  const rowMenu = (e: React.MouseEvent, n: Node) => {
+    e.preventDefault();
+    if (!selSet.has(n.id)) panelSelect([n.id]);
+    const panel: MenuItem[] = [
+      ...(viewOnly ? [] : [{ label: "Rename", kbd: "F2", onClick: () => setRenaming(n.id) }]),
+      { label: "Zoom to layer", kbd: `${SHIFT}2`, onClick: zoomToSelection },
+      { label: "Collapse all layers", kbd: `${ALT}L`, onClick: collapseAllLayers },
+      { sep: true },
+    ];
+    setMenu({ x: e.clientX, y: e.clientY, items: [...panel, ...canvasMenu(null)] });
+  };
+
+  /** Focus back on a layer's row (or its search hit) once its rename is over. */
+  const focusAfterRename = (id: string) => {
+    if (!searchingRef.current) return focusRow(id);
+    document.querySelector<HTMLElement>(`[data-layer-hit="${CSS.escape(id)}"]`)?.focus();
+  };
+
+  /** Tab / Shift+Tab in a rename: the next (previous) row down the panel (or hit in the results) is renamed,
+   * and it stops at the ends. */
+  const renameNeighbour = (id: string, dir: 1 | -1) => {
+    const ids = searchingRef.current && foundRef.current ? foundRef.current.hits.map((h) => h.id) : rowsRef.current.map((r) => r.n.id);
+    const at = ids.indexOf(id);
+    const to = ids[at + dir];
+    if (at < 0 || !to) return focusAfterRename(id);
+    anchor.current = to;
+    panelSelect([to]);
+    requestAnimationFrame(() => {
+      setRenaming(to);
+      // Out of the drawn window: scroll it in first so its row exists to hold the field.
+      const el = scrollRef.current;
+      const i = rowsRef.current.findIndex((r) => r.n.id === to);
+      if (!searchingRef.current && el && i >= 0 && (i * ROW < el.scrollTop || (i + 1) * ROW > el.scrollTop + el.clientHeight)) el.scrollTop = Math.max(0, i * ROW - el.clientHeight / 2);
+    });
+  };
+
+  /** A rename ended in the tree or in the search results. */
+  const renameDone = (n: Node, name: string, how: RenameEnd) => {
+    setRenaming(null);
+    if (name && name !== n.name) dispatch({ op: "update", ids: [n.id], patch: { name } });
+    if (how === "next" || how === "prev") renameNeighbour(n.id, how === "next" ? 1 : -1);
+    else if (how === "key") requestAnimationFrame(() => focusAfterRename(n.id));
+  };
 
   /** WAI-ARIA tree keys on a row. Keys not handled here (tool letters, Escape, ⌘ combos) go on to the global shortcuts. */
   const onRowKey = (e: React.KeyboardEvent, i: number) => {
@@ -563,10 +713,10 @@ function Layers() {
         anchor.current = n.id;
         // Arrow keys already select the row: Space on a lone selection must not deselect it.
         if (sel.length === 1 && sel[0] === n.id) return;
-        return dispatch({ op: "select", ids: [n.id], mode: "toggle" });
+        return panelSelect([n.id], "toggle");
       case "F2":
         handled();
-        return setRenaming(n.id);
+        return viewOnly ? undefined : setRenaming(n.id);
       case "Delete":
       case "Backspace": {
         handled();
@@ -618,9 +768,12 @@ function Layers() {
   const onDrop = () => {
     const id = dragId.current;
     dragId.current = null;
-    if (!id || !drop || drop.id === id) return setDrop(null);
+    if (viewOnly || !id || !drop || drop.id === id) return setDrop(null);
     const target = doc.nodes[drop.id];
     const ids = sel.includes(id) ? sel : [id];
+    // Onto one of the moved layers, or into one of their descendants: nothing to do.
+    if (ids.includes(drop.id)) return setDrop(null);
+    for (let p = target.parent; p; p = doc.nodes[p]?.parent ?? null) if (ids.includes(p)) return setDrop(null);
     if (drop.where === "into") dispatch({ op: "moveToParent", ids, parent: target.id, index: null });
     else {
       const siblings = target.parent ? doc.nodes[target.parent].children : doc.pages.find((p) => p.id === target.page)!.children;
@@ -630,16 +783,58 @@ function Layers() {
     setDrop(null);
   };
 
+  const searchBar = (
+    <LayerSearchBar
+      query={search.q}
+      filters={search.f}
+      count={found ? found.total : null}
+      onQuery={(q) => setSearch({ q })}
+      onFilters={(f) => setSearch({ f })}
+      onSelectAll={() => {
+        // The field's own text, not the debounced copy: Enter right after typing counts.
+        if (!search.q.trim() && !search.f.length) return;
+        setDeb({ page, q: search.q });
+        const ids = searchLayers(doc, page, search.q, filters, Infinity).hits.map((h) => h.id);
+        if (ids.length) {
+          anchor.current = ids[0];
+          panelSelect(ids);
+        }
+      }}
+      onToResults={() => document.querySelector<HTMLElement>("[data-layer-hit]")?.focus()}
+    />
+  );
+
   return (
-    <div
-      className="scroll"
-      ref={scrollRef}
-      onDragOver={(e) => e.preventDefault()}
-      onDrop={onDrop}
-      onScroll={(e) => windowed && setView({ top: e.currentTarget.scrollTop, height: e.currentTarget.clientHeight })}
-    >
-      {rows.length === 0 && <div className="muted" style={{ padding: 16 }}>No layers on this page yet.</div>}
-      {rows.length > 0 && (
+    <>
+      {searchBar}
+      <div
+        className="scroll"
+        ref={scrollRef}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={onDrop}
+        onScroll={(e) => windowed && setView({ top: e.currentTarget.scrollTop, height: e.currentTarget.clientHeight })}
+      >
+      {found && (
+        <SearchResults
+          doc={doc}
+          found={found}
+          query={activeQuery}
+          selSet={selSet}
+          renaming={renaming}
+          viewOnly={viewOnly}
+          onRename={setRenaming}
+          onRenameDone={renameDone}
+          onPick={(id) => {
+            anchor.current = id;
+            panelSelect([id]);
+          }}
+          onClick={(e, id) => clickRow(e, id, found.hits.map((h) => ({ n: doc.nodes[h.id] })), true)}
+          onMenu={rowMenu}
+          onEscape={() => document.getElementById("layer-search")?.focus()}
+        />
+      )}
+      {!searching && rows.length === 0 && <div className="muted" style={{ padding: 16 }}>No layers on this page yet.</div>}
+      {!searching && rows.length > 0 && (
         <div
           role="tree"
           aria-label="Layers"
@@ -699,7 +894,7 @@ function Layers() {
                     (drop?.id === n.id && drop.where === "into" ? " drop-into" : "")
                   }
                   style={{ paddingLeft: 8 + indent(depth) }}
-                  draggable={!inInstance && renaming !== n.id}
+                  draggable={!viewOnly && !inInstance && renaming !== n.id}
                   onDragEnd={() => document.getElementById("dt-canvas")?.focus({ preventScroll: true })}
                   onKeyDown={(e) => onRowKey(e, at)}
                   onDragStart={(e) => {
@@ -715,25 +910,9 @@ function Layers() {
                     const where = container && y > 0.3 && y < 0.7 ? "into" : y < 0.5 ? "before" : "after";
                     if (drop?.id !== n.id || drop.where !== where) setDrop({ id: n.id, where });
                   }}
-                  onClick={(e) => {
-                    if (e.shiftKey || e.metaKey || e.ctrlKey) dispatch({ op: "select", ids: [n.id], mode: "toggle" });
-                    else select([n.id], false);
-                    returnFocusToCanvas(e);
-                  }}
-                  onDoubleClick={() => setRenaming(n.id)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    if (!isSel) dispatch({ op: "select", ids: [n.id] });
-                    setMenu({
-                      x: e.clientX,
-                      y: e.clientY,
-                      items: [
-                        { label: "Rename", onClick: () => setRenaming(n.id) },
-                        { label: "Zoom to layer", kbd: "⇧2", onClick: zoomToSelection },
-                        { label: "Delete", onClick: A.deleteSelection },
-                      ],
-                    });
-                  }}
+                  onClick={(e) => clickRow(e, n.id, rows)}
+                  onDoubleClick={() => !viewOnly && setRenaming(n.id)}
+                  onContextMenu={(e) => rowMenu(e, n)}
                 >
                   {drop?.id === n.id && drop.where !== "into" && <div className="drop-line" style={{ top: drop.where === "before" ? -1 : undefined, bottom: drop.where === "after" ? -1 : undefined, left: 8 + indent(depth) }} />}
                   <span
@@ -741,7 +920,8 @@ function Layers() {
                     aria-hidden="true"
                     onClick={(e) => {
                       e.stopPropagation();
-                      toggleExpanded(n.id);
+                      if (e.altKey) toggleAll(n.id);
+                      else toggleExpanded(n.id);
                     }}
                   >
                     {n.children.length > 0 && (open ? <ChevronDown size={12} /> : <ChevronRight size={12} />)}
@@ -753,11 +933,8 @@ function Layers() {
                     <RenameInput
                       value={n.name}
                       label="Layer name"
-                      onDone={(name, byKey) => {
-                        setRenaming(null);
-                        if (name && name !== n.name) dispatch({ op: "update", ids: [n.id], patch: { name } });
-                        if (byKey) requestAnimationFrame(() => focusRow(n.id));
-                      }}
+                      tabs
+                      onDone={(name, how) => renameDone(n, name, how)}
                     />
                   ) : (
                     <span className={"name" + (comp ? " component" : "")}>{n.name || n.type}</span>
@@ -794,6 +971,251 @@ function Layers() {
         </div>
       )}
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
+      </div>
+    </>
+  );
+}
+
+/** The search field and filter menu above the layer list. */
+function LayerSearchBar({
+  query,
+  filters,
+  count,
+  onQuery,
+  onFilters,
+  onSelectAll,
+  onToResults,
+}: {
+  query: string;
+  filters: LayerFilter[];
+  /** Matches while a search is active, else null. */
+  count: number | null;
+  onQuery: (q: string) => void;
+  onFilters: (f: LayerFilter[]) => void;
+  onSelectAll: () => void;
+  onToResults: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const down = (e: PointerEvent) => {
+      if (!boxRef.current?.contains(e.target as globalThis.Node)) setOpen(false);
+    };
+    window.addEventListener("pointerdown", down);
+    return () => window.removeEventListener("pointerdown", down);
+  }, [open]);
+  const toggle = (f: LayerFilter) => onFilters(filters.includes(f) ? filters.filter((x) => x !== f) : [...filters, f]);
+  return (
+    <div
+      className="layer-search"
+      ref={boxRef}
+      onKeyDown={(e) => {
+        // Escape closes the filter popover first, and is not the canvas's "clear the selection".
+        if (e.key === "Escape" && open) {
+          e.preventDefault();
+          e.stopPropagation();
+          setOpen(false);
+          boxRef.current?.querySelector<HTMLElement>(".layer-filter-btn")?.focus();
+        }
+      }}
+      // Tab out of the popover closes it.
+      onBlur={(e) => {
+        if (open && !boxRef.current?.contains(e.relatedTarget as globalThis.Node | null)) setOpen(false);
+      }}
+    >
+      <div className="layer-search-row">
+        <div className="layer-search-field">
+          <Search size={13} aria-hidden="true" />
+          <input
+            id="layer-search"
+            type="text"
+            value={query}
+            placeholder="Search layers"
+            aria-label="Search layers"
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(e) => onQuery(e.target.value)}
+            onKeyDown={(e) => {
+              // Typing here is not a canvas shortcut.
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                e.preventDefault();
+                onSelectAll();
+              } else if (e.key === "ArrowDown" && count !== null) {
+                e.preventDefault();
+                onToResults();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                if (query) onQuery("");
+                else document.getElementById("dt-canvas")?.focus({ preventScroll: true });
+              }
+            }}
+          />
+          {query && (
+            <button className="ibtn" aria-label="Clear search" title="Clear search" onClick={() => onQuery("")}>
+              <XIcon size={12} />
+            </button>
+          )}
+        </div>
+        <button
+          className={"ibtn layer-filter-btn" + (filters.length ? " active" : "")}
+          aria-label="Filter layers"
+          aria-haspopup="dialog"
+          aria-controls="layer-filter-menu"
+          aria-expanded={open}
+          title="Filter layers"
+          onClick={() => setOpen(!open)}
+        >
+          <ListFilter size={14} />
+          {filters.length > 0 && <span className="layer-filter-count">{filters.length}</span>}
+        </button>
+      </div>
+      {open && (
+        <div className="layer-filter-menu" id="layer-filter-menu" role="group" aria-label="Layer filters">
+          {LAYER_FILTERS.map((f) => (
+            <label key={f} className="layer-filter-item">
+              <input type="checkbox" checked={filters.includes(f)} onChange={() => toggle(f)} />
+              <span>{LAYER_FILTER_LABELS[f]}</span>
+            </label>
+          ))}
+          {filters.length > 0 && (
+            <button className="layer-filter-clear" onClick={() => onFilters([])}>
+              Clear filters
+            </button>
+          )}
+        </div>
+      )}
+      {count !== null && (
+        <div className="layer-search-count muted small" role="status">
+          <span>
+            {count} {count === 1 ? "match" : "matches"}
+          </span>
+          {count > 1 && (
+            <button className="layer-select-all" onClick={onSelectAll}>
+              Select all {count}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Flat list of search matches: icon, name with the match marked, and where the layer lives. */
+function SearchResults({
+  doc,
+  found,
+  query,
+  selSet,
+  renaming,
+  viewOnly,
+  onRename,
+  onRenameDone,
+  onPick,
+  onClick,
+  onMenu,
+  onEscape,
+}: {
+  doc: Doc;
+  found: LayerSearch;
+  query: string;
+  selSet: Set<string>;
+  renaming: string | null;
+  viewOnly: boolean;
+  onRename: (id: string) => void;
+  onRenameDone: (n: Node, name: string, how: RenameEnd) => void;
+  /** Enter or Space on a hit: selects it and makes it the anchor. */
+  onPick: (id: string) => void;
+  onClick: (e: React.MouseEvent, id: string) => void;
+  onMenu: (e: React.MouseEvent, n: Node) => void;
+  onEscape: () => void;
+}) {
+  const q = query.trim().toLowerCase();
+  // One tab stop in the list: the hit that has focus, else the first.
+  const [focusHit, setFocusHit] = useState<string | null>(null);
+  const tabHit = found.hits.some((h) => h.id === focusHit) ? focusHit : found.hits[0]?.id;
+  const mark = (name: string) => {
+    const at = q ? name.toLowerCase().indexOf(q) : -1;
+    if (at < 0) return name;
+    return (
+      <>
+        {name.slice(0, at)}
+        <mark>{name.slice(at, at + q.length)}</mark>
+        {name.slice(at + q.length)}
+      </>
+    );
+  };
+  const onKey = (e: React.KeyboardEvent, id: string) => {
+    if (e.target !== e.currentTarget) return;
+    const items = [...(e.currentTarget.parentElement?.querySelectorAll<HTMLElement>("[data-layer-hit]") ?? [])];
+    const at = items.indexOf(e.currentTarget as HTMLElement);
+    const go = (i: number) => {
+      e.preventDefault();
+      e.stopPropagation();
+      items[Math.max(0, Math.min(items.length - 1, i))]?.focus();
+    };
+    if (e.key === "ArrowDown") go(at + 1);
+    else if (e.key === "ArrowUp") go(at - 1);
+    else if (e.key === "Home") go(0);
+    else if (e.key === "End") go(items.length - 1);
+    else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      onEscape();
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      e.stopPropagation();
+      onPick(id);
+    } else if (e.key === "F2" && !viewOnly) {
+      e.preventDefault();
+      e.stopPropagation();
+      onRename(id);
+    }
+  };
+  if (!found.hits.length) return <div className="muted" style={{ padding: 16 }}>No layers match.</div>;
+  return (
+    <div role="listbox" aria-label="Layer search results" aria-multiselectable="true">
+      {found.hits.map((h, i) => {
+        const n = doc.nodes[h.id];
+        if (!n) return null;
+        const comp = n.type === "component" || n.type === "componentSet" || n.type === "instance";
+        const isSel = selSet.has(n.id);
+        const name = n.name || n.type;
+        return (
+          <div
+            key={n.id}
+            data-layer-hit={n.id}
+            role="option"
+            aria-selected={isSel}
+            aria-label={name + (h.path.length ? `, in ${h.path.join(" / ")}` : "")}
+            tabIndex={n.id === tabHit ? 0 : -1}
+            className={"layer layer-hit" + (isSel ? " selected" : "") + (!n.visible ? " hidden-layer" : "")}
+            title={[...h.path, name].join(" / ")}
+            style={{ paddingLeft: 12 }}
+            onKeyDown={(e) => onKey(e, n.id)}
+            onFocus={(e) => e.target === e.currentTarget && setFocusHit(n.id)}
+            onClick={(e) => onClick(e, n.id)}
+            onDoubleClick={() => !viewOnly && onRename(n.id)}
+            onContextMenu={(e) => onMenu(e, n)}
+          >
+            <span className={"icon" + (comp ? " component" : "")} aria-hidden="true">
+              {nodeIcon(n)}
+            </span>
+            {renaming === n.id ? (
+              <RenameInput value={n.name} label="Layer name" tabs onDone={(v, how) => onRenameDone(n, v, how)} />
+            ) : (
+              <span className={"name" + (comp ? " component" : "")}>{mark(name)}</span>
+            )}
+            {renaming !== n.id && h.path.length > 0 && <span className="hit-path muted small">{h.path.join(" / ")}</span>}
+          </div>
+        );
+      })}
+      {found.total > found.hits.length && (
+        <div className="muted small" style={{ padding: "8px 12px" }}>
+          {found.total - found.hits.length} more, refine the search
+        </div>
+      )}
     </div>
   );
 }

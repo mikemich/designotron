@@ -120,6 +120,12 @@ struct Item {
   counter: f64,
   fill_main: bool,
   fill_counter: bool,
+  /// Rotated off a multiple of 180 degrees: sized by its bounding box, top-aligned on baselines.
+  rotated: bool,
+  /// Offset from the slot's corner to the child's own (unrotated) box: the rotation pivots on
+  /// the centre, so the box sits half the bounding box's excess inside the slot.
+  dx: f64,
+  dy: f64,
 }
 
 /// Geometry shared by the passes of one `arrange`.
@@ -230,13 +236,12 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
       _ => pad_cross_start,
     };
     doc.modify(&it.id, |c| {
-      c.rotation = 0.0;
       if horizontal {
-        c.x = cursor;
-        c.y = cross;
+        c.x = cursor + it.dx;
+        c.y = cross + it.dy;
       } else {
-        c.y = cursor;
-        c.x = cross;
+        c.y = cursor + it.dy;
+        c.x = cross + it.dx;
       }
     });
     cursor += it.main + gap;
@@ -255,7 +260,9 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
 
 fn item_of(doc: &Document, cid: &str, horizontal: bool) -> Item {
   let c = doc.get(cid).unwrap();
-  let (main, counter) = if horizontal { (c.width, c.height) } else { (c.height, c.width) };
+  let rotated = is_tilted(c.rotation);
+  let (bw, bh) = rotated_box(c.width, c.height, c.rotation);
+  let (main, counter) = if horizontal { (bw, bh) } else { (bh, bw) };
   let (sm, sc) = if horizontal {
     (c.sizing_h, c.sizing_v)
   } else {
@@ -265,9 +272,34 @@ fn item_of(doc: &Document, cid: &str, horizontal: bool) -> Item {
     id: cid.to_string(),
     main,
     counter,
-    fill_main: sm == Sizing::Fill,
-    fill_counter: sc == Sizing::Fill,
+    // Fill can't stretch a tilted box: stored sizing stays, so turning it back restores Fill.
+    fill_main: sm == Sizing::Fill && !rotated,
+    fill_counter: sc == Sizing::Fill && !rotated,
+    rotated,
+    dx: (bw - c.width) / 2.0,
+    dy: (bh - c.height) / 2.0,
   }
+}
+
+/// True when a rotation (degrees) isn't a multiple of 180: the bounding box then differs from
+/// the box (at 180 it is the same).
+pub fn is_tilted(rotation: f64) -> bool {
+  let r = rotation.rem_euclid(180.0);
+  r > 1e-6 && r < 180.0 - 1e-6
+}
+
+/// Size of the axis-aligned box around a `w` x `h` box rotated by `rotation` degrees.
+pub fn rotated_box(w: f64, h: f64, rotation: f64) -> (f64, f64) {
+  if !is_tilted(rotation) {
+    return (w, h);
+  }
+  // A quarter turn swaps the sides exactly (no float noise in stored positions and sizes).
+  if (rotation.rem_euclid(180.0) - 90.0).abs() < 1e-6 {
+    return (h, w);
+  }
+  let (s, c) = rotation.to_radians().sin_cos();
+  let (s, c) = (s.abs(), c.abs());
+  (w * c + h * s, w * s + h * c)
 }
 
 /// Resolves the frame's size along the main axis and the main size of its fill children.
@@ -408,7 +440,7 @@ fn baseline_offsets(doc: &Document, m: &dyn TextMeasurer, items: &[Item]) -> Vec
   let bases: Vec<Option<f64>> = items
     .iter()
     .map(|i| {
-      if i.fill_counter {
+      if i.fill_counter || i.rotated {
         None
       } else {
         Some(baseline_of(doc, &i.id, m, 0))
@@ -433,6 +465,11 @@ fn baseline_of(doc: &Document, id: &str, m: &dyn TextMeasurer, depth: usize) -> 
       .filter_map(|c| doc.get(c))
       .find(|c| c.visible && !c.absolute_position);
     if let Some(c) = first {
+      // A tilted first child counts as its bounding box: its bottom edge.
+      if is_tilted(c.rotation) {
+        let (_, bh) = rotated_box(c.width, c.height, c.rotation);
+        return c.y - (bh - c.height) / 2.0 + bh;
+      }
       return c.y + baseline_of(doc, &c.id, m, depth + 1);
     }
   }
@@ -522,9 +559,8 @@ fn arrange_wrapped(doc: &mut Document, id: &str, items: &[Item], width: f64, hug
         _ => y,
       };
       doc.modify(&it.id, |c| {
-        c.x = x;
-        c.y = cy;
-        c.rotation = 0.0;
+        c.x = x + it.dx;
+        c.y = cy + it.dy;
       });
       x += it.main + al.gap;
     }
@@ -1138,5 +1174,246 @@ mod tests {
     assert_eq!((scale.x, scale.y, scale.width, scale.height), (300.0, 225.0, 80.0, 60.0));
     let flow = doc.get("flow").unwrap();
     assert_eq!((flow.x, flow.y), (150.0, 150.0), "a child in the flow is left to the layout");
+  }
+
+  /// A frame "f" with auto layout and plain children `(id, w, h, rotation)`.
+  fn flow(horizontal: bool, hug: bool, pad: f64, gap: f64, kids: &[(&str, f64, f64, f64)]) -> Document {
+    let (mut doc, page) = setup();
+    let sizing = if hug { Sizing::Hug } else { Sizing::Fixed };
+    let frame = Node {
+      id: "f".into(),
+      kind: NodeType::Frame,
+      width: 400.0,
+      height: 300.0,
+      layout: Some(AutoLayout {
+        direction: if horizontal {
+          LayoutDirection::Horizontal
+        } else {
+          LayoutDirection::Vertical
+        },
+        gap,
+        padding_left: pad,
+        padding_right: pad,
+        padding_top: pad,
+        padding_bottom: pad,
+        ..Default::default()
+      }),
+      sizing_h: sizing,
+      sizing_v: sizing,
+      ..Default::default()
+    };
+    doc.insert(frame, None, &page, None);
+    for (id, w, h, r) in kids {
+      let n = Node {
+        id: (*id).into(),
+        width: *w,
+        height: *h,
+        rotation: *r,
+        ..Default::default()
+      };
+      doc.insert(n, Some("f"), &page, None);
+    }
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    doc
+  }
+
+  /// Bounding box of a child of "f" in the frame's space.
+  fn bbox(doc: &Document, id: &str) -> Rect {
+    let c = doc.get(id).unwrap();
+    doc.local_matrix(c).bounds_of(c.width, c.height)
+  }
+
+  fn near(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-6
+  }
+
+  #[test]
+  fn a_quarter_turn_takes_its_bounding_box_in_a_horizontal_hug_frame() {
+    // 40x80 turned 90 degrees is 80 wide and 40 tall: the frame grows by 80, not 40.
+    let doc = flow(true, true, 10.0, 10.0, &[("a", 40.0, 80.0, 90.0), ("b", 30.0, 20.0, 0.0)]);
+    let f = doc.get("f").unwrap();
+    assert!(near(f.width, 10.0 + 80.0 + 10.0 + 30.0 + 10.0), "{}", f.width);
+    assert!(near(f.height, 10.0 + 40.0 + 10.0), "{}", f.height);
+    assert_eq!(doc.get("a").unwrap().rotation, 90.0);
+    let b = bbox(&doc, "a");
+    assert!(
+      near(b.x, 10.0) && near(b.y, 10.0) && near(b.width, 80.0) && near(b.height, 40.0),
+      "{b:?}"
+    );
+    assert!(near(doc.get("b").unwrap().x, 10.0 + 80.0 + 10.0));
+  }
+
+  #[test]
+  fn a_quarter_turn_in_a_vertical_frame_and_a_half_turn_in_a_row() {
+    let doc = flow(false, true, 0.0, 5.0, &[("a", 40.0, 80.0, 90.0), ("b", 30.0, 20.0, 0.0)]);
+    let f = doc.get("f").unwrap();
+    assert!(near(f.width, 80.0) && near(f.height, 40.0 + 5.0 + 20.0), "{}x{}", f.width, f.height);
+    let b = bbox(&doc, "a");
+    assert!(near(b.x, 0.0) && near(b.y, 0.0), "{b:?}");
+    assert!(near(doc.get("b").unwrap().y, 45.0));
+    // At 180 degrees the box is the same: it sits in its slot untouched and keeps the turn.
+    let doc = flow(true, true, 10.0, 10.0, &[("a", 40.0, 80.0, 180.0), ("b", 30.0, 20.0, 0.0)]);
+    let a = doc.get("a").unwrap();
+    assert_eq!((a.x, a.y, a.rotation), (10.0, 10.0, 180.0));
+    assert!(near(doc.get("f").unwrap().width, 10.0 + 40.0 + 10.0 + 30.0 + 10.0));
+  }
+
+  #[test]
+  fn a_45_degree_child_is_laid_out_by_its_diagonal() {
+    let doc = flow(true, true, 0.0, 0.0, &[("a", 40.0, 40.0, 45.0), ("b", 10.0, 10.0, 0.0)]);
+    let side = 40.0 * 2f64.sqrt();
+    let b = bbox(&doc, "a");
+    assert!(
+      near(b.x, 0.0) && near(b.y, 0.0) && near(b.width, side) && near(b.height, side),
+      "{b:?}"
+    );
+    assert!(near(doc.get("f").unwrap().width, side + 10.0));
+    assert!(near(doc.get("f").unwrap().height, side));
+    assert!(near(doc.get("b").unwrap().x, side));
+  }
+
+  #[test]
+  fn rotation_survives_every_layout_pass() {
+    let mut doc = flow(true, true, 10.0, 10.0, &[("a", 40.0, 80.0, 90.0), ("b", 30.0, 20.0, 0.0)]);
+    let before = (doc.get("a").unwrap().x, doc.get("a").unwrap().y);
+    // A sibling grows: the rotated child is laid out again, in its new slot.
+    doc.get_mut("b").unwrap().width = 100.0;
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    let a = doc.get("a").unwrap();
+    assert_eq!(a.rotation, 90.0);
+    assert_eq!((a.x, a.y), before, "idempotent and unmoved");
+    assert!(near(doc.get("f").unwrap().width, 10.0 + 80.0 + 10.0 + 100.0 + 10.0));
+    // It also survives a save and reload.
+    let json = serde_json::to_string(&doc).unwrap();
+    let mut back: Document = serde_json::from_str(&json).unwrap();
+    relayout_all(&mut back, &HeuristicMeasurer);
+    assert_eq!(back.get("a").unwrap().rotation, 90.0);
+    assert!(near(back.get("a").unwrap().x, before.0));
+  }
+
+  #[test]
+  fn a_tilted_fill_child_acts_as_fixed_and_fills_again_once_straight() {
+    let mut doc = flow(true, false, 0.0, 0.0, &[("a", 50.0, 20.0, 0.0), ("b", 50.0, 20.0, 30.0)]);
+    for id in ["a", "b"] {
+      let n = doc.get_mut(id).unwrap();
+      n.sizing_h = Sizing::Fill;
+      n.sizing_v = Sizing::Fill;
+    }
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    // The straight one takes everything the tilted one's bounding box leaves.
+    let (bw, _) = rotated_box(50.0, 20.0, 30.0);
+    assert!(near(doc.get("a").unwrap().width, 400.0 - bw), "{}", doc.get("a").unwrap().width);
+    assert!(near(doc.get("a").unwrap().height, 300.0));
+    let b = doc.get("b").unwrap();
+    assert_eq!((b.width, b.height), (50.0, 20.0), "acts as Fixed");
+    assert_eq!((b.sizing_h, b.sizing_v), (Sizing::Fill, Sizing::Fill), "stored sizing is untouched");
+    // Straight again, Fill is back: they share the width.
+    doc.get_mut("b").unwrap().rotation = 0.0;
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert!(near(doc.get("a").unwrap().width, 200.0) && near(doc.get("b").unwrap().width, 200.0));
+    // At 180 degrees Fill still works.
+    doc.get_mut("b").unwrap().rotation = 180.0;
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert!(near(doc.get("b").unwrap().width, 200.0));
+    assert_eq!(doc.get("b").unwrap().rotation, 180.0);
+  }
+
+  #[test]
+  fn wrap_rows_use_bounding_boxes() {
+    let kids = [("a", 60.0, 20.0, 90.0), ("b", 60.0, 20.0, 0.0), ("c", 60.0, 20.0, 0.0)];
+    let mut doc = flow(true, false, 0.0, 10.0, &kids);
+    {
+      let f = doc.get_mut("f").unwrap();
+      f.width = 150.0;
+      f.layout.as_mut().unwrap().wrap = true;
+    }
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    // a is 20 wide and 60 tall as a box: a and b share row one (20 + 10 + 60), c wraps.
+    let a = bbox(&doc, "a");
+    assert!(
+      near(a.x, 0.0) && near(a.y, 0.0) && near(a.width, 20.0) && near(a.height, 60.0),
+      "{a:?}"
+    );
+    let (b, c) = (doc.get("b").unwrap(), doc.get("c").unwrap());
+    assert!(near(b.x, 30.0) && near(b.y, 0.0), "{} {}", b.x, b.y);
+    assert!(
+      near(c.x, 0.0) && near(c.y, 70.0),
+      "row two sits under the 60 tall row: {} {}",
+      c.x,
+      c.y
+    );
+    assert_eq!(doc.get("a").unwrap().rotation, 90.0);
+  }
+
+  #[test]
+  fn a_rotated_item_sits_on_the_top_of_a_baseline_row() {
+    let (mut doc, page) = setup();
+    let frame = Node {
+      id: "f".into(),
+      kind: NodeType::Frame,
+      layout: Some(AutoLayout {
+        direction: LayoutDirection::Horizontal,
+        counter_align: Align::Baseline,
+        ..Default::default()
+      }),
+      sizing_h: Sizing::Hug,
+      sizing_v: Sizing::Hug,
+      ..Default::default()
+    };
+    doc.insert(frame, None, &page, None);
+    for (id, h, r) in [("a", 30.0, 90.0), ("b", 20.0, 0.0)] {
+      let n = Node {
+        id: id.into(),
+        width: 30.0,
+        height: h,
+        rotation: r,
+        ..Default::default()
+      };
+      doc.insert(n, Some("f"), &page, None);
+    }
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    let a = bbox(&doc, "a");
+    // (default padding is 10)
+    assert!(near(a.y, 10.0), "top aligned: {a:?}");
+    assert!(near(doc.get("f").unwrap().height, 50.0));
+    assert!(
+      near(doc.get("b").unwrap().y, 10.0),
+      "baseline offset of the straight one ignores the tilted one"
+    );
+  }
+
+  #[test]
+  fn absolute_children_keep_their_own_rotation_and_position() {
+    let mut doc = flow(true, true, 0.0, 0.0, &[("a", 40.0, 80.0, 90.0), ("b", 30.0, 20.0, 33.0)]);
+    {
+      let b = doc.get_mut("b").unwrap();
+      b.absolute_position = true;
+      b.x = 123.0;
+      b.y = 45.0;
+    }
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    let b = doc.get("b").unwrap();
+    assert_eq!((b.x, b.y, b.rotation), (123.0, 45.0, 33.0));
+    assert!(near(doc.get("f").unwrap().width, 80.0), "only the flow child counts");
+  }
+
+  #[test]
+  fn quarter_turns_swap_the_sides_exactly() {
+    for r in [90.0, 270.0, -90.0, 450.0] {
+      assert_eq!(rotated_box(0.3, 1000.0, r), (1000.0, 0.3), "{r}");
+      assert_eq!(rotated_box(12.5, 7.25, r), (7.25, 12.5), "{r}");
+    }
+    let doc = flow(true, true, 0.0, 0.0, &[("a", 12.5, 7.25, 90.0)]);
+    let a = doc.get("a").unwrap();
+    assert_eq!((a.x, a.y), (-2.625, 2.625));
+    assert_eq!(doc.get("f").unwrap().width, 7.25);
+  }
+
+  #[test]
+  fn a_tilted_first_child_gives_its_bounding_box_bottom_as_the_baseline() {
+    let doc = flow(true, true, 0.0, 0.0, &[("a", 40.0, 80.0, 90.0)]);
+    // The frame's first flowing child is tilted: 80 wide, 40 tall box, bottom edge at 40.
+    assert!(near(baseline_of(&doc, "f", &HeuristicMeasurer, 0), 40.0));
   }
 }

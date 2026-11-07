@@ -2504,8 +2504,16 @@ impl Engine {
         if components::would_nest_under(&self.doc, &ids, parent.as_deref()) {
           return Err("a component can't contain an instance of itself".into());
         }
-        let mut idx = index;
+        // No index means "on top": resolve it up front, once per destination list, so each layer
+        // lands below the one moved before it and the group keeps its stacking order. Layers
+        // moved to the page root stay on their own page, so each page has its own list.
+        let mut next: HashMap<Option<String>, Option<usize>> = HashMap::new();
         for id in ids.iter().rev() {
+          let page = self.doc.get(id).map(|n| n.page.clone()).unwrap_or_else(|| self.page.clone());
+          let key = parent.is_none().then_some(page.clone());
+          let idx = *next
+            .entry(key.clone())
+            .or_insert_with(|| index.or_else(|| Some(self.doc.child_ids(parent.as_deref(), &page).len())));
           let same_parent = self.doc.get(id).map(|n| n.parent == parent).unwrap_or(false);
           let cur_index = self.doc.index_in_parent(id);
           let target = match (idx, same_parent, cur_index) {
@@ -2513,10 +2521,7 @@ impl Engine {
             (i, _, _) => i,
           };
           self.doc.reparent(id, parent.as_deref(), target, true);
-          if let Some(i) = idx.as_mut() {
-            let _ = i;
-          }
-          idx = target;
+          next.insert(key, target);
         }
         Ok(json!({}))
       }
@@ -7162,6 +7167,79 @@ mod tests {
     .unwrap();
     drag(&mut e, &c, 80.0, 0.0);
     assert_eq!(e.doc.get(&list).unwrap().children, vec![d, c]);
+  }
+
+  #[test]
+  fn moving_several_layers_without_an_index_keeps_their_stacking_order() {
+    let mut e = engine();
+    let frame = |e: &mut Engine, x: f64| {
+      id_of(
+        &e.dispatch(Command::CreateShape {
+          kind: NodeType::Frame,
+          x,
+          y: 0.0,
+          width: 200.0,
+          height: 200.0,
+          parent: None,
+        })
+        .unwrap(),
+      )
+    };
+    let (src, dst, other) = (frame(&mut e, 0.0), frame(&mut e, 400.0), frame(&mut e, 800.0));
+    let a = rect(&mut e, 10.0, 10.0, 20.0, 20.0, Some(src.clone()));
+    let b = rect(&mut e, 40.0, 10.0, 20.0, 20.0, Some(src.clone()));
+    let c = rect(&mut e, 70.0, 10.0, 20.0, 20.0, Some(src.clone()));
+    let d = rect(&mut e, 410.0, 10.0, 20.0, 20.0, Some(dst.clone()));
+    let x = rect(&mut e, 810.0, 10.0, 20.0, 20.0, Some(other.clone()));
+    let mv = |e: &mut Engine, ids: Vec<String>, parent: &str, index: Option<usize>| {
+      e.dispatch(Command::MoveToParent {
+        ids,
+        parent: Some(parent.to_string()),
+        index,
+      })
+      .unwrap();
+    };
+    let kids = |e: &Engine, id: &str| e.doc.get(id).unwrap().children.clone();
+    // Selection order is reversed on purpose: paint order decides.
+    mv(&mut e, vec![b.clone(), a.clone()], &dst, None);
+    assert_eq!(kids(&e, &dst), vec![d.clone(), a.clone(), b.clone()]);
+    assert_eq!(kids(&e, &src), vec![c.clone()]);
+    // Layers from different parents keep global paint order.
+    mv(&mut e, vec![c.clone(), x.clone()], &dst, None);
+    assert_eq!(kids(&e, &dst), vec![d.clone(), a.clone(), b.clone(), c.clone(), x.clone()]);
+    // With an index it is unchanged: both land at the index, in order.
+    mv(&mut e, vec![x.clone(), c.clone()], &src, Some(0));
+    assert_eq!(kids(&e, &src), vec![c.clone(), x.clone()]);
+    // Into the same parent they move to the top, in order.
+    mv(&mut e, vec![d.clone(), a.clone()], &dst, None);
+    assert_eq!(kids(&e, &dst), vec![b.clone(), d.clone(), a.clone()]);
+    // One undo restores both.
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(kids(&e, &dst), vec![d.clone(), a.clone(), b.clone()]);
+  }
+
+  #[test]
+  fn moving_to_the_page_root_puts_each_page_layer_on_top_of_its_own_page() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 10.0, 10.0, None);
+    let b = rect(&mut e, 20.0, 0.0, 10.0, 10.0, None);
+    let p1 = e.page.clone();
+    e.dispatch(Command::AddPage { name: None }).unwrap();
+    let p2 = e.doc.pages.iter().find(|p| p.id != p1).unwrap().id.clone();
+    e.page = p2.clone();
+    let d = rect(&mut e, 0.0, 0.0, 10.0, 10.0, None);
+    let f = rect(&mut e, 20.0, 0.0, 10.0, 10.0, None);
+    let g = rect(&mut e, 40.0, 0.0, 10.0, 10.0, None);
+    let h = rect(&mut e, 60.0, 0.0, 10.0, 10.0, None);
+    e.dispatch(Command::MoveToParent {
+      ids: vec![a.clone(), d.clone()],
+      parent: None,
+      index: None,
+    })
+    .unwrap();
+    let kids = |e: &Engine, p: &str| e.doc.page(p).unwrap().children.clone();
+    assert_eq!(kids(&e, &p1), vec![b, a]);
+    assert_eq!(kids(&e, &p2), vec![f, g, h, d]);
   }
 
   mod vector_editing {

@@ -48,6 +48,7 @@ import { startSpotlight, stopSpotlight, toggleFollow, useFollow } from "../follo
 import { userName } from "../canvas/Comments";
 import { persistentStorage } from "../files";
 import { claudeReady, useChat } from "../ai/chatState";
+import { NAME_CUT_NOTICE, nameWasCut, normalizeName } from "../folders";
 import { FileLocation } from "./FileLocation";
 import { focusPanel } from "./PanelChrome";
 import { panelShown } from "../panelState";
@@ -98,6 +99,26 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
   const doc = useDoc();
   const viewing = useCollab((s) => s.viewer);
   const readOnly = !!es.readOnly || viewing;
+  const tabView = useStore((s) => s.tabView);
+  const engineFailed = useStore((s) => s.engineFailed);
+  // A tab that only shows the file, or a viewer, saves nothing: say that, never "Saved locally".
+  const saveLabel = tabView
+    ? "Read-only: open in another tab"
+    : viewing
+      ? "View only"
+      : saveFailed || !persistentStorage() || (engineFailed && dirty)
+        ? "Not saved"
+        : dirty
+          ? "Saving…"
+          : "Saved locally";
+  const saveTitle =
+    saveLabel === "Not saved"
+      ? engineFailed && !saveFailed
+        ? "Not saved: the editor stopped. Reload to reopen the last save"
+        : "Not saved: browser storage is full or blocked"
+      : tabView
+        ? "Read-only: open in another tab. This tab only shows the file; another tab edits it."
+        : undefined;
   const [menu, setMenu] = useState<{
     x: number;
     y: number;
@@ -368,20 +389,22 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
             e.stopPropagation();
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
-          onBlur={(e) =>
-            !readOnly &&
-            e.target.value.trim() &&
-            e.target.value !== doc.name &&
-            dispatch({ op: "setDocName", name: e.target.value.trim() })
-          }
+          onBlur={(e) => {
+            if (readOnly || e.target.value === doc.name) return;
+            const clean = normalizeName(e.target.value);
+            if (!clean) return void (e.target.value = doc.name);
+            if (nameWasCut(e.target.value)) toast(NAME_CUT_NOTICE);
+            if (clean !== doc.name) dispatch({ op: "setDocName", name: clean });
+            else e.target.value = clean;
+          }}
         />
-        <span className="small save-state" role="status">
-          {saveFailed || !persistentStorage()
-            ? "Not saved: browser storage is full or blocked"
-            : dirty
-                ? "Saving…"
-                : "Saved locally"}
-        </span>
+        {/* A viewer already has the "View only" pill; don't say it twice. */}
+        {!viewing && (
+          <span className="small save-state" role="status" title={saveTitle}>
+            {saveLabel}
+            {saveTitle && <span className="sr-only">{saveTitle.slice(saveLabel.length)}</span>}
+          </span>
+        )}
       </div>
       <div className="group">
         <button

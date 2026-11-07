@@ -848,7 +848,7 @@ try {
       await O.newFile(RELAY);
       await O.tool("create_nodes", { nodes: [frame("A", 0), frame("B", 400), frame("C", 800)] });
       await O.settle();
-      await O.pg.click(".tbtn[title='Share for live editing']");
+      await Promise.all([O.pg.waitForResponse((r) => r.url().endsWith("/health"), { timeout: 3000 }).catch(() => {}), O.pg.click(".tbtn[title='Share for live editing']")]); // the dialog asks /health whether this page is a relay
       await O.pg.fill(".share-dialog input.textinput >> nth=0", "Owner");
       if (await O.pg.locator(".share-dialog input.mono").count()) await O.pg.fill(".share-dialog input.mono", RELAY);
       else if (await O.pg.locator("text=Use a different relay").count()) {

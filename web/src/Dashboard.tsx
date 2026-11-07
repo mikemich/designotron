@@ -24,7 +24,7 @@ import {
   type FileMeta,
   type Folder,
 } from "./files";
-import { ancestors, canMoveFolder, childrenOf, compareNames, contents, deleteSummary, normalizeName, pathLabel, resolveFolder } from "./folders";
+import { ancestors, canMoveFolder, childrenOf, compareNames, contents, deleteSummary, NAME_CUT_NOTICE, nameWasCut, normalizeName, pathLabel, resolveFolder } from "./folders";
 import { bootEngine, getEngine, newEngine, dispatch, toast, useBoot, useStore } from "./store";
 import { TEMPLATES, type Template } from "./templates";
 import { isEmptyFile, persistentStorage } from "./files";
@@ -392,6 +392,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
     const clean = normalizeName(name);
     const old = target.kind === "folder" ? folderOf(target.id)?.name : all.find((f) => f.id === target.id)?.name;
     if (!clean) return toast(`A ${target.kind === "folder" ? "folder" : "file"} needs a name`, "error");
+    if (nameWasCut(name)) toast(NAME_CUT_NOTICE);
     if (clean === old) return;
     if (target.kind === "folder") await attempt("rename the folder", () => renameFolder(target.id, clean));
     else await attempt("rename the file", () => renameFile(target.id, clean));

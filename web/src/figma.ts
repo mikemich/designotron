@@ -114,7 +114,7 @@ export async function importFigmaUrl(url: string, token: string, progress: (s: s
 /** The name a fetched Figma file carries, if any (cleaned and capped like any file name). */
 export function figmaFileName(file: unknown): string | undefined {
   const n = (file as { name?: unknown } | null)?.name;
-  return typeof n === "string" ? normalizeName(n).slice(0, 200) || undefined : undefined;
+  return typeof n === "string" ? normalizeName(n) || undefined : undefined;
 }
 
 /** What `importFigma` needs: a file's `document.children`, or a `/nodes` response's `nodes`. Checked before a

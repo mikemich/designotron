@@ -1,26 +1,173 @@
-import { useState } from "react";
-import { Loader2, Play, Plus, Sparkles, Trash2, X } from "lucide-react";
-import { deletePlugin, runPlugin, savePlugin, usePlugins, type Plugin } from "../plugins";
+import { useEffect, useRef, useState } from "react";
+import { Loader2, Play, Plus, Sparkles, Terminal, Trash2, X } from "lucide-react";
+import { checkPluginCode, deletePlugin, runPlugin, savePlugin, usePlugins, type Plugin } from "../plugins";
+import { logClear, usePluginLog, type LogEntry } from "../pluginLog";
 import { askClaude } from "../ai/chatState";
 import { useDialog } from "../ui/controls";
 
 const TEMPLATE = `// Plugins use the same tools as Claude: await dt.tool(name, input).
-// dt.selection(), dt.getDocument(), dt.getNodes(ids), dt.notify(text),
-// dt.ui.show(html, { width, height }) for a panel, dt.close() when done.
+// Everything you can call is listed under "API reference" below the code.
+// console.log(...) shows in the console under the code; Ctrl/Cmd+Enter runs.
 const nodes = await dt.selection();
 dt.notify(\`\${nodes.length} layer(s) selected\`);
 `;
 
+const API_ROWS: [string, string][] = [
+  ["await dt.tool(name, input)", "Calls any tool Claude uses (create_nodes, update_nodes, find_nodes, arrange, …) and returns its result (create_nodes: { created: [{ id, name, type, w, h }] }; update_nodes: { updated: [ids], warnings? }). A failure throws, with the tool's message and the line of your call. One run is one undo step."],
+  ["await dt.selection()", "The selected layers as an array of full nodes (fills, width, height, …)."],
+  ["await dt.getDocument(depth = 2)", "A compact overview of the open file (shape below), to the given depth."],
+  ["await dt.getNodes(ids)", "An array of full nodes for the ids, with fills, width, height, text, layout and everything else."],
+  ["dt.notify(text)", "Shows a message at the bottom of the editor (one at a time) and in the console."],
+  ["dt.close()", "Ends the run. A plugin without a panel ends by itself once its code and its calls are done."],
+  ["dt.commitUndo()", "Ends the current undo step; the next call starts a new one. From a panel, a pause of 1 s or more between calls also starts a new step."],
+  ['dt.on("selectionchange", fn)', "fn(ids) runs when the selection changes (while the plugin is alive, i.e. while its panel is open)."],
+  ["dt.ui.show(html, { width, height })", "Shows a panel (at most 640 × 720) from the HTML. Set .onclick from code: inline on*= attributes don't run. The run stays alive until dt.close() or the panel's close button."],
+  ["console.log / info / warn / error", "Show in the plugin console. Up to 200 lines per 100 ms; the console keeps the last 500."],
+];
+
+const DOC_SHAPE = `{
+  document: "File name",
+  pages: [{ id, name, current, layers }],
+  currentPage: "page id",
+  selection: [{ id, type, name }],
+  layers: [{                 // the current page, compact
+    id, type, name, x, y, w, h,
+    fill,                    // first visible solid fill, "#rrggbb"
+    text, font,              // text layers
+    layout, hidden, componentId, props,
+    children: [...],         // to the depth asked
+    childCount               // when children are left out
+  }],
+  components: [{ id, name, width, height, props }],
+  colorStyles, textStyles, effectStyles, gridStyles,
+  variables: [{ id, name, modes: [...],
+    variables: [{ id, name, type, scopes, values: { modeName: value } }] }],
+  openComments: 0,
+  nextFreeX: 1240            // x to place a new top-level layer beside the page's content
+}`;
+
+/** The plugin console: every line the current or last run said. A line with a number can be clicked. */
+export function PluginConsole({ onJump, maxHeight }: { onJump?: (line: number) => void; maxHeight?: number }) {
+  const entries = usePluginLog((s) => s.entries);
+  const dropped = usePluginLog((s) => s.dropped);
+  const start = usePluginLog((s) => s.start);
+  const running = usePlugins((s) => s.running);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = box.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [entries]);
+  return (
+    <div className="plugin-console" aria-label="Plugin console">
+      <div className="plugin-console-head">
+        <Terminal size={12} /> <b>Console</b>
+        {running && <Loader2 size={11} className="spin" aria-label="Running" />}
+        <button className="btn small" onClick={logClear} disabled={!entries.length && !dropped} style={{ marginLeft: "auto" }}>
+          Clear
+        </button>
+      </div>
+      <div className="plugin-console-body" ref={box} style={maxHeight ? { maxHeight } : undefined} role="log">
+        {!entries.length && !dropped && <div className="muted small plugin-console-empty">console.log output, notifications and errors from a run show here.</div>}
+        {dropped > 0 && <div className="plugin-log dropped">{dropped} earlier lines dropped</div>}
+        {entries.map((e, i) => (
+          <LogRow key={i} e={e} start={start} onJump={onJump} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LogRow({ e, start, onJump }: { e: LogEntry; start: number; onJump?: (line: number) => void }) {
+  const secs = Math.max(0, (e.t - start) / 1000);
+  return (
+    <div className={`plugin-log ${e.level}`}>
+      <span className="plugin-log-t">+{secs.toFixed(secs < 10 ? 2 : 1)}s</span>
+      <span className="plugin-log-kind">{e.level === "notify" ? "notify" : e.level === "tool" ? "tool" : e.level}</span>
+      <span className="plugin-log-text">{e.text}</span>
+      {e.line !== undefined &&
+        (onJump ? (
+          <button className="plugin-log-line" title={`Go to line ${e.line}`} onClick={() => onJump(e.line!)}>
+            line {e.line}
+          </button>
+        ) : (
+          <span className="plugin-log-line">line {e.line}</span>
+        ))}
+    </div>
+  );
+}
+
 /** Plugins → Manage: run, write, edit and delete plugins. */
 export function PluginsDialog() {
   const list = usePlugins((s) => s.list);
+  const running = usePlugins((s) => s.running);
   const [editing, setEditing] = useState<Plugin | null>(null);
+  const [problem, setProblem] = useState<{ message: string; line?: number; column?: number } | null>(null);
+  const [checking, setChecking] = useState(false);
+  const area = useRef<HTMLTextAreaElement>(null);
+  const gutter = useRef<HTMLDivElement>(null);
+  // Set when Run was pressed in the editor: a plugin that then shows a panel closes the dialog.
+  const launched = useRef(false);
   const close = () => usePlugins.setState({ dialogOpen: false });
   const dialogRef = useDialog(close);
-  const run = (p: Plugin) => {
+  const runFromList = (p: Plugin) => {
     close();
     runPlugin(p);
   };
+  useEffect(() => {
+    if (launched.current && running?.ui) close();
+  }, [running?.ui]);
+
+  /** Puts the caret on a line (and column) of the code and scrolls it into view. */
+  const jumpTo = (line: number, column = 1) => {
+    const ta = area.current;
+    if (!ta) return;
+    const rows = ta.value.split("\n");
+    const at = Math.min(Math.max(line, 1), rows.length);
+    let pos = 0;
+    for (let i = 0; i < at - 1; i++) pos += rows[i].length + 1;
+    pos += Math.min(Math.max(column - 1, 0), rows[at - 1].length);
+    ta.focus();
+    ta.setSelectionRange(pos, pos);
+    const lh = parseFloat(getComputedStyle(ta).lineHeight) || 18;
+    ta.scrollTop = Math.max(0, (at - 3) * lh);
+    if (gutter.current) gutter.current.scrollTop = ta.scrollTop;
+  };
+  /** Compiles the code in the plugin frame; shows what is wrong, and where, when it isn't valid. */
+  const valid = async (p: Plugin): Promise<boolean> => {
+    setChecking(true);
+    const r = await checkPluginCode(p.code);
+    setChecking(false);
+    if (r.ok) {
+      setProblem(null);
+      return true;
+    }
+    setProblem(r);
+    if (r.line) requestAnimationFrame(() => jumpTo(r.line!, r.column));
+    else area.current?.focus();
+    return false;
+  };
+  const save = async (p: Plugin) => {
+    if (checking || !(await valid(p))) return;
+    savePlugin(p);
+    setEditing(null);
+  };
+  const runEditing = async (p: Plugin) => {
+    if (checking) return;
+    // A built-in is known good; anything else is checked and saved first, as before.
+    if (!p.builtin) {
+      if (!(await valid(p))) return;
+      savePlugin(p);
+    }
+    launched.current = true;
+    runPlugin(p);
+  };
+  const edit = (p: Plugin | null) => {
+    setEditing(p);
+    setProblem(null);
+    launched.current = false;
+    logClear();
+  };
+  const lines = (editing?.code ?? "").split("\n").length;
   return (
     <div className="modal-bg" onPointerDown={(e) => e.target === e.currentTarget && close()}>
       <div ref={dialogRef} className="modal plugins-dialog" role="dialog" aria-modal="true" aria-label="Plugins" onKeyDown={(e) => e.stopPropagation()}>
@@ -40,25 +187,87 @@ export function PluginsDialog() {
               disabled={editing.builtin}
               onChange={(e) => setEditing({ ...editing, description: e.target.value })}
             />
-            <textarea className="textinput code" spellCheck={false} value={editing.code} readOnly={editing.builtin} onChange={(e) => setEditing({ ...editing, code: e.target.value })} />
+            <div className={`code-box${problem ? " bad" : ""}`}>
+              <div className="code-gutter" ref={gutter} aria-hidden="true">
+                {Array.from({ length: lines }, (_, i) => i + 1).join("\n")}
+              </div>
+              <textarea
+                ref={area}
+                className="textinput code"
+                aria-label="Plugin code"
+                aria-invalid={!!problem}
+                spellCheck={false}
+                wrap="off"
+                value={editing.code}
+                readOnly={editing.builtin}
+                onScroll={(e) => gutter.current && (gutter.current.scrollTop = e.currentTarget.scrollTop)}
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                    e.preventDefault();
+                    void runEditing(editing);
+                  }
+                }}
+                onChange={(e) => {
+                  setEditing({ ...editing, code: e.target.value });
+                  setProblem(null);
+                }}
+              />
+            </div>
+            {problem && (
+              <div className="plugin-problem" role="alert">
+                {problem.line ? (
+                  <button className="plugin-log-line" onClick={() => jumpTo(problem.line!, problem.column)}>
+                    Line {problem.line}
+                    {problem.column ? `, column ${problem.column}` : ""}
+                  </button>
+                ) : null}
+                <span>
+                  {problem.line ? ": " : ""}
+                  {problem.message.replace(/^SyntaxError: /, "")}
+                </span>
+              </div>
+            )}
+            <PluginConsole onJump={(l) => jumpTo(l)} />
+            <details className="plugin-api">
+              <summary>API reference</summary>
+              <div className="plugin-api-body">
+                {API_ROWS.map(([sig, text]) => (
+                  <div key={sig} className="plugin-api-row">
+                    <code>{sig}</code>
+                    <span>{text}</span>
+                  </div>
+                ))}
+                <div className="plugin-api-row">
+                  <code>What dt.getDocument() returns</code>
+                  <span>
+                    Layers are compact (fill, w, h); use dt.getNodes(ids) or dt.selection() for full nodes.
+                  </span>
+                </div>
+                <pre className="plugin-api-shape">{DOC_SHAPE}</pre>
+                <div className="plugin-api-row">
+                  <code>Web addresses</code>
+                  <span>
+                    Plain text may hold them: text, characters, name, description, span text and comment text. Image sources, links, prototype URLs, SVG content, variable values and the fetching tools (import_url, import_html, search_photos, place_photo) are refused, and so is save_plugin. The frame has no network.
+                  </span>
+                </div>
+                <div className="plugin-api-row">
+                  <code>Undo</code>
+                  <span>A run is one undo step however long it takes. dt.commitUndo() starts a new one; from a panel, each click after a pause of 1 s or more is its own step.</span>
+                </div>
+              </div>
+            </details>
             <div className="row" style={{ justifyContent: "space-between" }}>
-              <button className="btn" onClick={() => setEditing(null)}>
+              <button className="btn" onClick={() => edit(null)}>
                 Back
               </button>
               <div className="row">
                 {!editing.builtin && (
-                  <button className="btn" onClick={() => (savePlugin(editing), setEditing(null))} disabled={!editing.name.trim()}>
+                  <button className="btn" onClick={() => void save(editing)} disabled={!editing.name.trim() || checking}>
                     Save
                   </button>
                 )}
-                <button
-                  className="btn primary"
-                  onClick={() => {
-                    if (!editing.builtin) savePlugin(editing);
-                    run(editing);
-                  }}
-                >
-                  <Play size={13} /> Run
+                <button className="btn primary" onClick={() => void runEditing(editing)} disabled={checking} title="Run (Ctrl/Cmd+Enter)">
+                  {checking ? <Loader2 size={13} className="spin" /> : <Play size={13} />} Run
                 </button>
               </div>
             </div>
@@ -67,11 +276,11 @@ export function PluginsDialog() {
           <div className="plugin-list">
             {list.map((p) => (
               <div key={p.id} className="plugin-row">
-                <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => setEditing(p)}>
+                <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => edit(p)}>
                   <div style={{ fontWeight: 600 }}>{p.name}</div>
                   <div className="muted small">{p.description || (p.builtin ? "Built in" : "")}</div>
                 </div>
-                <button className="ibtn" title="Run" onClick={() => run(p)}>
+                <button className="ibtn" title="Run" onClick={() => runFromList(p)}>
                   <Play size={13} />
                 </button>
                 {!p.builtin && (
@@ -82,7 +291,7 @@ export function PluginsDialog() {
               </div>
             ))}
             <div className="row" style={{ marginTop: 10 }}>
-              <button className="btn" onClick={() => setEditing({ id: "p_" + Date.now().toString(36), name: "", description: "", code: TEMPLATE })}>
+              <button className="btn" onClick={() => edit({ id: "p_" + Date.now().toString(36), name: "", description: "", code: TEMPLATE })}>
                 <Plus size={13} /> New plugin
               </button>
               <button
@@ -97,7 +306,7 @@ export function PluginsDialog() {
               </button>
             </div>
             <div className="muted small" style={{ marginTop: 10, lineHeight: 1.6 }}>
-              Plugins run in a sandbox with no access to your files or keys, and call the same tools Claude uses. They can't load anything from the web (web addresses are refused), but a malicious plugin could still send data out by navigating its frame, so only run plugins you trust. A run is one undo step, however long it takes; a plugin can start a new step with dt.commitUndo(), and from a plugin's panel each click is its own step. Inline on*= attributes in a plugin's panel HTML don't run; set .onclick from the plugin's code.
+              Plugins run in a sandbox with no access to your files or keys, and call the same tools Claude uses. In Chromium the frame can't make web requests or navigate to the web (web addresses are refused in tool inputs except as plain text); Firefox and Safari haven't been verified, so only run plugins you trust. A run is one undo step, however long it takes; a plugin can start a new step with dt.commitUndo(), and from a plugin's panel each click is its own step. Inline on*= attributes in a plugin's panel HTML don't run; set .onclick from the plugin's code.
             </div>
           </div>
         )}
@@ -109,6 +318,7 @@ export function PluginsDialog() {
 /** Title bar for a plugin that shows UI (the sandboxed iframe sits right below it). */
 export function PluginWindow() {
   const running = usePlugins((s) => s.running);
+  const panelOpen = usePluginLog((s) => s.panelOpen);
   if (running && (running.stuck || (running.slow && !running.ui)))
     return (
       <div className="plugin-running" role="status">
@@ -120,11 +330,23 @@ export function PluginWindow() {
     );
   if (!running?.ui) return null;
   return (
-    <div className="plugin-header" style={{ width: running.ui.width }}>
-      <span>{running.plugin.name}</span>
-      <button className="ibtn" title="Close plugin" onClick={() => import("../plugins").then((m) => m.stopPlugin())}>
-        <X size={13} />
-      </button>
-    </div>
+    <>
+      <div className="plugin-header" style={{ width: running.ui.width }}>
+        <span>{running.plugin.name}</span>
+        <span style={{ display: "flex", gap: 2 }}>
+          <button className={`ibtn${panelOpen ? " active" : ""}`} title="Console" aria-pressed={panelOpen} aria-label="Console" onClick={() => usePluginLog.setState({ panelOpen: !panelOpen })}>
+            <Terminal size={13} />
+          </button>
+          <button className="ibtn" title="Close plugin" onClick={() => import("../plugins").then((m) => m.stopPlugin())}>
+            <X size={13} />
+          </button>
+        </span>
+      </div>
+      {panelOpen && (
+        <div className="plugin-console-float" style={{ width: Math.max(running.ui.width, 300), top: 88 + running.ui.height + 8 }}>
+          <PluginConsole maxHeight={180} />
+        </div>
+      )}
+    </>
   );
 }
