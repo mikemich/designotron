@@ -276,7 +276,8 @@ pub fn sync_instance(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
 /// records the value it shows as an override and drops the dead binding from the overrides, so
 /// the sync that follows keeps the painted value instead of falling back to the main's.
 pub fn keep_values_of_removed(doc: &mut Document, removed: &HashSet<String>) {
-  let patches: Vec<(NodeId, Value)> = doc
+  // (layer, patch to record, override keys that repeat the main's value once the binding is gone)
+  let patches: Vec<(NodeId, Value, Vec<&'static str>)> = doc
     .nodes
     .iter()
     .filter_map(|(id, n)| {
@@ -299,30 +300,34 @@ pub fn keep_values_of_removed(doc: &mut Document, removed: &HashSet<String>) {
       };
       // "Unbound here" stays only where the main binds the property to a variable that stays.
       let main_keeps = |p: &str| master.and_then(|mn| mn.bindings.get(p)).is_some_and(|v| !removed.contains(v));
-      // A colour the main shows too needs no override: the main keeps its own value.
+      // Colours the main shows too (and doesn't bind to a variable that stays): the layer's own
+      // override of them, if any, only repeats the main once the binding is gone.
+      let mut repeats: Vec<&'static str> = Vec::new();
       if let Some(mn) = master {
-        let same = props.iter().all(|p| {
-          !main_keeps(p)
-            && match p.as_str() {
-              "fill" => mn.fills == n.fills,
-              "stroke" => mn.strokes == n.strokes,
-              _ => false,
-            }
-        });
-        if same {
-          return None;
+        for p in &props {
+          match p.as_str() {
+            "fill" if !main_keeps(p) && mn.fills == n.fills => repeats.push("fills"),
+            "stroke" if !main_keeps(p) && mn.strokes == n.strokes => repeats.push("strokes"),
+            _ => {}
+          }
+        }
+        // Nothing to record or remove unless the layer has an override of that colour itself.
+        if repeats.len() == props.len() {
+          let own = match scope_chain(doc, id).as_slice() {
+            [scope] => n
+              .master_id
+              .as_ref()
+              .and_then(|m| doc.get(scope)?.instance.as_ref()?.overrides.get(m))
+              .is_some_and(|o| repeats.iter().any(|k| o.get(*k).is_some())),
+            _ => true,
+          };
+          if !own {
+            return None;
+          }
         }
       }
       let mut p = crate::variables::detach_patch(n, &props);
       if let Value::Object(m) = &mut p {
-        if let Some(mn) = master {
-          if mn.fills == n.fills {
-            m.remove("fills");
-          }
-          if mn.strokes == n.strokes {
-            m.remove("strokes");
-          }
-        }
         if let Some(Value::Object(b)) = m.get_mut("bindings") {
           b.retain(|k, _| main_keeps(k));
           if b.is_empty() {
@@ -330,7 +335,7 @@ pub fn keep_values_of_removed(doc: &mut Document, removed: &HashSet<String>) {
           }
         }
       }
-      Some((id.clone(), p))
+      Some((id.clone(), p, repeats))
     })
     .collect();
   let holders: Vec<NodeId> = doc
@@ -351,9 +356,9 @@ pub fn keep_values_of_removed(doc: &mut Document, removed: &HashSet<String>) {
       info.overrides.retain(|_, o| o.as_object().is_none_or(|m| !m.is_empty()));
     }
   }
-  for (id, p) in patches {
+  for (id, p, repeats) in patches {
     // The common case (a colour or border on a layer of a plain instance, no component property
-    // behind it) goes straight into the override: the value is known to differ from the main's.
+    // behind it) goes straight into the override.
     let plain = p
       .as_object()
       .is_some_and(|m| m.keys().all(|k| matches!(k.as_str(), "fills" | "strokes" | "bindings")));
@@ -365,9 +370,20 @@ pub fn keep_values_of_removed(doc: &mut Document, removed: &HashSet<String>) {
     match fast {
       Some((scope, mid)) => {
         if let Some(info) = doc.get_mut(&scope).and_then(|n| n.instance.as_mut()) {
-          merge_override(info.overrides.entry(mid).or_insert_with(empty), &patch::sanitize(&p));
+          let entry = info.overrides.entry(mid.clone()).or_insert_with(empty);
+          merge_override(entry, &patch::sanitize(&p));
+          // The value equals the main's: an override of it would only pin a copy of it.
+          if let Value::Object(m) = entry {
+            for k in &repeats {
+              m.remove(*k);
+            }
+            if m.is_empty() {
+              info.overrides.remove(&mid);
+            }
+          }
         }
       }
+      // `record_override` drops what equals the main's value.
       None => record_override(doc, &id, &p),
     }
   }
@@ -5185,5 +5201,32 @@ mod r19a_tests {
     assert!(!n.contains(&main_label), "nested mirror keeps the dangling key: {n}");
     e.dispatch(Command::Undo).unwrap();
     assert!(overrides(&e, &top).to_string().contains(&main_label));
+  }
+
+  /// An instance layer had its own fill (red), then was bound to a variable whose colour equals
+  /// the main's literal fill. After the delete it keeps showing that colour after main edits.
+  #[test]
+  fn a_stale_own_fill_under_a_binding_equal_to_the_main_does_not_come_back() {
+    let mut e = engine();
+    two_vars(&mut e);
+    let comp = one(
+      &mut e,
+      json!({ "type": "component", "name": "Card", "width": 200, "height": 100, "children": [
+        { "type": "rectangle", "name": "Body", "width": 50, "height": 10, "fill": "#222222" } ] }),
+    );
+    let inst = instance_of(&mut e, &comp, 400.0);
+    let body = child_named(&e, &inst, "Body");
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": body, "fill": "#FF0000" }] }));
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": body, "bind": { "fill": "Theme/text" } }] }),
+    );
+    assert_eq!(fill_of(&e, &body), "#222222");
+    delete_text(&mut e);
+    assert_eq!(fill_of(&e, &body), "#222222");
+    assert!(!overrides(&e, &inst).to_string().contains("FF0000"), "{}", overrides(&e, &inst));
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": comp, "cornerRadius": 4 }] }));
+    assert_eq!(fill_of(&e, &body), "#222222", "the value it showed stays");
   }
 }
