@@ -1293,6 +1293,10 @@ a.btn {
 }
 .presenter .stage {
   position: relative;
+}
+/* The shadow sits on the viewport, not on each stage: during Push and Move in/out two stages are on
+   screen and the entering one's shadow used to fall on the leaving one as a dark strip. */
+.presenter .presenter-viewport {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
 }
 .presenter .hotspot {
@@ -1323,15 +1327,57 @@ a.btn {
 .presenter .overlay-frame {
   position: absolute;
 }
+/* An overlay bigger than the screen is limited to it and scrolls inside (scrollbars hidden like the scrollers). */
+.presenter .overlay-frame.overlay-scrolls {
+  scrollbar-width: none;
+}
+.presenter .overlay-frame.overlay-scrolls::-webkit-scrollbar {
+  display: none;
+}
 .presenter .hint-flash {
   background: rgba(13, 153, 255, 0.25);
   outline: 2px solid var(--select);
+}
+/* "Always show hotspots": every clickable area is outlined, without the flash. */
+.presenter.hints-always .hotspot {
+  background: rgba(13, 153, 255, 0.15);
+  outline: 2px solid var(--select);
+  outline-offset: -1px;
+}
+.presenter .bar-menu {
+  position: relative;
+}
+.presenter .bar-menu-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 230px;
+  background: rgba(30, 30, 30, 0.97);
+  border-radius: 8px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 10;
+}
+.presenter .bar-menu-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.presenter .bar-menu-list label:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 .presenter .bar {
   position: fixed;
   top: 12px;
   left: 50%;
   transform: translateX(-50%);
+  z-index: 20;
   background: rgba(30, 30, 30, 0.9);
   border-radius: 8px;
   padding: 4px;

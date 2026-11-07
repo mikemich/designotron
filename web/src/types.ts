@@ -150,6 +150,8 @@ export interface Interaction {
   easing?: Easing;
   /** Placement and behaviour for openOverlay / swapOverlay. */
   overlay: OverlaySettings;
+  /** Navigate to, Swap overlay and Change to: the screen that opens keeps the scroll position of the one it replaces. The engine leaves the key out when off. */
+  preserveScroll?: boolean;
 }
 
 export type Direction = "left" | "right" | "up" | "down";

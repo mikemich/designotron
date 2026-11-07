@@ -1,13 +1,15 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, RotateCcw, Settings2, X } from "lucide-react";
 import { toast, useStore } from "./store";
 import type { Interaction, OverlaySettings, Rect } from "./types";
 import { REPO_URL } from "./panels/GuestBar";
-import { DEFAULT_OVERLAY, overlayDim, overlayOrigin } from "./prototype";
+import { DEFAULT_OVERLAY, overlayBox, overlayDim, TRIGGER_LABELS } from "./prototype";
+import { loadPrefs, savePrefs } from "./presenterPrefs";
 import { inlineAssets } from "./assets";
 import { focusedByPointer } from "./ui/controls";
 import {
   buildScene,
+  carryScroll,
   changeTarget,
   closePlayer,
   INSTANT,
@@ -44,7 +46,8 @@ interface Entry {
   via: Motion;
 }
 
-/** An open overlay; `x`/`y` place it on the base frame. */
+/** An open overlay; `x`/`y` place it on the base frame and `w`/`h` are its box there (an overlay
+ *  bigger than the screen is limited to it and scrolls inside). */
 interface OpenOverlay {
   key: number;
   id: string;
@@ -52,6 +55,8 @@ interface OpenOverlay {
   motion: Motion;
   x: number;
   y: number;
+  w: number;
+  h: number;
 }
 
 /** A change of screen in progress: the screen that is leaving and how it plays. */
@@ -88,6 +93,8 @@ interface Tap {
   x: number;
   y: number;
 }
+/** The pointer id a key press uses (real pointers are never negative). */
+const KEY_POINTER = -1;
 const within = (b: DOMRect, x: number, y: number) => x >= b.left && x <= b.right && y >= b.top && y <= b.bottom;
 
 /** Prototype player: renders a frame and turns interactions into hotspots, with overlays
@@ -99,6 +106,11 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   const [overlays, setOverlays] = useState<OpenOverlay[]>([]);
   const overlayKey = useRef(0);
   const [flash, setFlash] = useState(false);
+  // Options (remembered per browser) and the menu that sets them.
+  const [prefs, setPrefs] = useState(loadPrefs);
+  const [menu, setMenu] = useState(false);
+  // Moves on every restart (R): screens, scrollers and timers start over even on the same frame.
+  const [restarts, setRestarts] = useState(0);
   const [leaving, setLeaving] = useState<Leaving | null>(null);
   const [smart, setSmart] = useState<Smart | null>(null);
   const motionKey = useRef(0);
@@ -127,8 +139,13 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   // Scroll positions survive a rebuilt scene (Change to) and are dropped with the screen.
   const scrolls = useRef({ key: "", pos: new Map<string, { left: number; top: number }>() });
   const scrollEls = useRef(new Map<string, HTMLElement>());
-  const scrollKey = `${history.length}`;
-  if (scrolls.current.key !== scrollKey) scrolls.current = { key: scrollKey, pos: new Map() };
+  // Preserve scroll position: where the next screen starts, set by the navigation that opens it.
+  const carried = useRef<Map<string, { left: number; top: number }> | null>(null);
+  const scrollKey = `${history.length}:${restarts}`;
+  if (scrolls.current.key !== scrollKey) {
+    scrolls.current = { key: scrollKey, pos: carried.current ?? new Map() };
+    carried.current = null;
+  }
 
   const [scale, setScale] = useState(1);
   useEffect(() => {
@@ -159,10 +176,25 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     setLeaving({ key, id: from, motion, pos: new Map(scrolls.current.pos) });
   };
 
-  const navigate = (id: string, m: Motion) => {
+  const navigate = (id: string, m: Motion, keepScroll = false) => {
+    // The new screen starts where this one is scrolled (a destination without scrollers ignores it).
+    if (keepScroll && doc.nodes[id]) carried.current = carryScroll(sceneFor(current.id), sceneFor(id), scrolls.current.pos);
     setOverlays([]);
     startMotion(current.id, id, m);
     setHistory((h) => [...h, { id, via: m }]);
+  };
+  /** R: back to the start screen with nothing open, as if the prototype had just been opened. */
+  const restart = () => {
+    hovering.current?.();
+    pressing.current?.();
+    carried.current = null;
+    closePlayer();
+    setLeaving(null);
+    setSmart(null);
+    setOverlays([]);
+    setHistory([{ id: start, via: INSTANT }]);
+    setRestarts((r) => r + 1);
+    setRevision((r) => r + 1);
   };
   // Back closes the topmost overlay before leaving the frame, and plays the way in reversed.
   const back = () => {
@@ -227,15 +259,22 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       return changeVariant(it, source, inFrame);
     } else if (it.action === "navigate" && it.destination && doc.nodes[it.destination]) {
       const undo = snapshot();
-      navigate(it.destination, motionOf(it));
+      navigate(it.destination, motionOf(it), it.preserveScroll);
       return undo;
     } else if (it.action === "closeOverlay") setOverlays((o) => o.slice(0, -1));
     else if ((it.action === "openOverlay" || it.action === "swapOverlay") && it.destination && frame) {
       const dest = doc.nodes[it.destination];
       if (!dest) return null;
       const settings = it.overlay ?? DEFAULT_OVERLAY;
-      const at = overlayOrigin(settings, frame, dest, from);
-      const next: OpenOverlay = { key: ++overlayKey.current, id: dest.id, settings, motion: playable(motionOf(it)), x: at.x, y: at.y };
+      const box = overlayBox(settings, frame, dest, from);
+      const next: OpenOverlay = { key: ++overlayKey.current, id: dest.id, settings, motion: playable(motionOf(it)), x: box.x, y: box.y, w: box.width, h: box.height };
+      if (it.action === "swapOverlay" && it.preserveScroll && overlays.length) {
+        // The overlay that replaces the top one starts scrolled where it was.
+        const old = overlays[overlays.length - 1];
+        for (const [id, at] of carryScroll(sceneFor(old.id), sceneFor(dest.id), scrolls.current.pos)) scrolls.current.pos.set(id, at);
+        const own = scrolls.current.pos.get(`ov:${old.key}`);
+        if (own) scrolls.current.pos.set(`ov:${next.key}`, own);
+      }
       const undo = snapshot();
       setOverlays((o) => (it.action === "swapOverlay" ? [...o.slice(0, -1), next] : [...o, next]));
       return undo;
@@ -257,6 +296,8 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       pieces = piecesOf(instance, inFrame);
     }
     if (!swapVariant(instance, it.destination!)) return null;
+    // Preserve scroll position: the variant's scrollers start where the old ones were.
+    if (it.preserveScroll) for (const [id, at] of carryScroll(sc, sceneFor(inFrame), scrolls.current.pos)) scrolls.current.pos.set(id, at);
     if (pieces) {
       const kids = pdoc().nodes[instance].children;
       const bg = inlineAssets(pq<string>({ q: "exportSvg", id: inFrame, hide: kids }));
@@ -361,7 +402,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     if (!n || !delayed) return;
     const t = setTimeout(() => goRef.current(delayed, { x: 0, y: 0, width: n.width, height: n.height }, n.id, n.id), delayed.delayMs || 800);
     return () => clearTimeout(t);
-  }, [history.length, current.id]);
+  }, [history.length, current.id, restarts]);
 
   // Focus moves into the player (Tab stays inside) and goes back to the opener on exit.
   useEffect(() => {
@@ -410,6 +451,12 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         return;
       }
       if (run(k.scene, null)) return;
+      // R starts over (after the screens' own Key triggers, so a frame can keep R for itself).
+      if (name === "R" && !t?.closest('[role="menu"]')) {
+        e.preventDefault();
+        restartRef.current();
+        return;
+      }
       if (e.key === "Escape") {
         if (k.overlays.length) setOverlays((o) => o.slice(0, -1));
         else if (!remixUrl) useStore.setState({ presenting: null });
@@ -423,6 +470,8 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   }, []);
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
+  const restartRef = useRef(restart);
+  restartRef.current = restart;
 
   if (!frame || !scene) return null;
   const hasHotspots = scene.all.size > 0;
@@ -443,7 +492,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   // the stage itself without dropping it.
   const curStage = (
     <div
-      key={"s" + history.length}
+      key={"s" + history.length + ":" + restarts}
       style={{ position: "absolute", left: 0, top: 0, width: frame.width, height: frame.height, transform: `scale(${scale})`, transformOrigin: "0 0", zIndex: m?.kind === "moveOut" ? 0 : 1 }}
     >
       <div
@@ -488,13 +537,19 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   return (
     <div
       ref={rootRef}
-      className="presenter"
+      className={"presenter" + (prefs.always ? " hints-always" : "")}
       role="dialog"
       aria-modal="true"
       aria-label={`Prototype: ${frame.name}`}
       tabIndex={-1}
       onKeyDown={trapTab}
-      onClick={() => hasHotspots || (setFlash(true), setTimeout(() => setFlash(false), 400))}
+      onClick={() => {
+        // A click that lands on nothing flashes the clickable areas (when hints are on).
+        setMenu(false);
+        if (!hasHotspots || !prefs.hints) return;
+        setFlash(true);
+        setTimeout(() => setFlash(false), 400);
+      }}
     >
       <div className="bar" onClick={(e) => e.stopPropagation()}>
         <button className="tbtn" title="Back" onClick={back}>
@@ -513,6 +568,52 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         >
           <ChevronRight size={16} />
         </button>
+        <button className="tbtn" title="Restart (R)" aria-label="Restart (R)" onClick={restart}>
+          <RotateCcw size={16} />
+        </button>
+        <div
+          className="bar-menu"
+          onKeyDown={(e) => {
+            // Escape closes the menu (and only it) while it is open.
+            if (!menu || e.key !== "Escape") return;
+            e.preventDefault();
+            e.stopPropagation();
+            setMenu(false);
+            e.currentTarget.querySelector("button")?.focus();
+          }}
+        >
+          <button className="tbtn" title="Presenter options" aria-label="Presenter options" aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu((m) => !m)}>
+            <Settings2 size={16} />
+          </button>
+          {menu && (
+            <div
+              className="bar-menu-list"
+              role="menu"
+              aria-label="Presenter options"
+            >
+              <label>
+                <input
+                  type="checkbox"
+                  role="menuitemcheckbox"
+                  aria-checked={prefs.hints}
+                  checked={prefs.hints}
+                  onChange={(e) => (setPrefs((p) => ({ ...p, hints: e.target.checked })), savePrefs({ hints: e.target.checked }))}
+                />
+                Show hotspot hints on click
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  role="menuitemcheckbox"
+                  aria-checked={prefs.always}
+                  checked={prefs.always}
+                  onChange={(e) => (setPrefs((p) => ({ ...p, always: e.target.checked })), savePrefs({ always: e.target.checked }))}
+                />
+                Always show hotspots
+              </label>
+            </div>
+          )}
+        </div>
         {remixUrl ? (
           <>
             <a className="btn primary remix" href={remixUrl} target="_blank" rel="noopener" title="Open your own editable copy in Designotron">
@@ -528,7 +629,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
           </button>
         )}
       </div>
-      <div style={{ position: "relative", overflow: "hidden", width: frame.width * scale, height: frame.height * scale }}>
+      <div className="presenter-viewport" style={{ position: "relative", overflow: "hidden", width: frame.width * scale, height: frame.height * scale }}>
         {old && m?.kind !== "moveOut" && oldStage}
         {curStage}
         {old && m?.kind === "moveOut" && oldStage}
@@ -644,6 +745,9 @@ function OverlayLayer({
     return () => clearTimeout(t);
   }, []);
   if (!n) return null;
+  // Bigger than the screen on an axis: the frame is limited to the screen and scrolls there.
+  const clipX = n.width > o.w + 0.5;
+  const clipY = n.height > o.h + 0.5;
   const m = o.motion;
   const a = m.kind === "instant" ? undefined : m.kind === "dissolve" || m.kind === "smart" ? motionAnimation(m, true) : `dt-in-${m.dir} ${m.ms}ms ${m.easing} both`;
   return (
@@ -656,8 +760,25 @@ function OverlayLayer({
         if (isTop && o.settings.closeOnClickOutside) onClose();
       }}
     >
-      <div className="overlay-frame" style={{ left: o.x, top: o.y, width: n.width, height: n.height, animation: a }} onClick={(e) => e.stopPropagation()}>
-        <SceneView scene={scene} flash={false} interactive tabbable={isTop} scrolls={scrolls} scrollEls={scrollEls} onAct={onAct} onHover={onHover} onPress={onPress} />
+      <div
+        className={"overlay-frame" + (clipX || clipY ? " overlay-scrolls" : "")}
+        data-overlay-frame={o.id}
+        style={{ left: o.x, top: o.y, width: o.w, height: o.h, animation: a, overflowX: clipX ? "auto" : undefined, overflowY: clipY ? "auto" : undefined }}
+        ref={(el) => {
+          // An overlay swapped in with Preserve scroll position starts where the one it replaces was.
+          const at = el && scrolls.current.pos.get(`ov:${o.key}`);
+          if (el && at && !el.dataset.restored) {
+            el.dataset.restored = "1";
+            el.scrollLeft = at.left;
+            el.scrollTop = at.top;
+          }
+        }}
+        onScroll={(e) => scrolls.current.pos.set(`ov:${o.key}`, { left: e.currentTarget.scrollLeft, top: e.currentTarget.scrollTop })}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ position: "relative", width: n.width, height: n.height }}>
+          <SceneView scene={scene} flash={false} interactive tabbable={isTop} scrolls={scrolls} scrollEls={scrollEls} onAct={onAct} onHover={onHover} onPress={onPress} />
+        </div>
       </div>
     </div>
   );
@@ -743,12 +864,47 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
     // Only the layer that owns the click is a stop (a child inside it shares that stop).
     const hit = found && found.o.id === h.id ? found : null;
     const dest = hit?.c.destination ? pdoc().nodes[hit.c.destination]?.name : null;
+    const name = pdoc().nodes[h.id]?.name;
+    // A layer that only reacts to the press (On press, Mouse down, Mouse up) is a stop too: the
+    // key goes down as the press and up as the release.
+    const pressers = h.interactions.filter((i) => i.trigger === "onPress" || i.trigger === "mouseDown" || i.trigger === "mouseUp");
+    const presser = !hit && tabbable && pressers.length ? pressers[0] : null;
+    // Everything else (hover-only layers, layers that share an ancestor's click, anything under an
+    // overlay) is pointer-only and hidden from assistive technology.
+    const a11y = hit
+      ? { tabIndex: 0, role: "button", "aria-label": name || (dest ? `Go to ${dest}` : "Button") }
+      : presser
+        ? { tabIndex: 0, role: "button", "aria-label": `${name || "Button"}, ${TRIGGER_LABELS[presser.trigger].toLowerCase()}` }
+        : { "aria-hidden": true as const };
+    const pressKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (e.target !== e.currentTarget || e.repeat || (e.key !== "Enter" && e.key !== " ")) return;
+      if (focusedByPointer(e.currentTarget)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const key = e.key;
+      const down = h.interactions.find(is("mouseDown"));
+      if (down) onAct?.(h, down);
+      const p = h.interactions.find(is("onPress"));
+      if (p) onPress?.(h, p, KEY_POINTER);
+      // The release is the key coming up, wherever focus is by then (a press that opens an overlay
+      // moves it).
+      const release = (k: KeyboardEvent | FocusEvent) => {
+        if (k instanceof KeyboardEvent && k.key !== key) return;
+        window.removeEventListener("keyup", release, true);
+        window.removeEventListener("blur", release);
+        const up = h.interactions.find(is("mouseUp"));
+        if (up) onAct?.(h, up);
+        if (p) window.dispatchEvent(new PointerEvent("pointerup", { pointerId: KEY_POINTER, button: 0 }));
+      };
+      window.addEventListener("keyup", release, true);
+      window.addEventListener("blur", release);
+    };
     return (
       <div
         key={h.id}
         className={"hotspot" + (flash ? " hint-flash" : "")}
         data-hotspot={h.id}
-        {...(hit ? { tabIndex: 0, role: "button", "aria-label": pdoc().nodes[hit.o.id]?.name || (dest ? `Go to ${dest}` : "Button") } : {})}
+        {...a11y}
         onKeyDown={
           hit
             ? (e) => {
@@ -760,7 +916,9 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
                 e.stopPropagation();
                 click(h.chain);
               }
-            : undefined
+            : presser
+              ? pressKey
+              : undefined
         }
         style={{ left: h.rect.x - origin.x, top: h.rect.y - origin.y, width: h.rect.width, height: h.rect.height }}
         onClick={(e) => {

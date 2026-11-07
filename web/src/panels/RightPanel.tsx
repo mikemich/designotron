@@ -390,6 +390,12 @@ function InteractionEditor({ node, index, frames }: { node: Node; index: number;
           <SelectField ariaLabel="Easing" value={it.easing ?? "easeOut"} options={EASINGS} onChange={(easing) => set({ easing })} />
         </div>
       )}
+      {(it.action === "navigate" || it.action === "swapOverlay" || it.action === "changeTo") && (
+        <label className="row" style={{ cursor: "pointer" }} title="The screen that opens starts scrolled where this one is (scrolling frames are matched by layer name)">
+          <input type="checkbox" checked={!!it.preserveScroll} onChange={(e) => set({ preserveScroll: e.target.checked })} />
+          Preserve scroll position
+        </label>
+      )}
       {overlay && <OverlayEditor value={it.overlay ?? DEFAULT_OVERLAY} onChange={(o) => set({ overlay: o })} />}
     </div>
   );

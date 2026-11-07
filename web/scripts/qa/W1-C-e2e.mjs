@@ -123,10 +123,10 @@ try {
   await share.waitForSelector("#dt-canvas");
   await share.click(".tbtn[title='Share for live editing']");
   const note = await share.locator(".share-destination").first().innerText();
-  check("share dialog names the hosted editor", /mikemich\.github\.io\/designotron/.test(note) && /Preview here/.test(note), note);
-  const [preview] = await Promise.all([share.context().waitForEvent("page", { timeout: 8000 }), share.click(".share-destination .link-btn:has-text('Preview here')")]);
+  check("share dialog names the hosted editor", /mikemich\.github\.io\/designotron/.test(note) && /Open here in a new tab/.test(note), note);
+  const [preview] = await Promise.all([share.context().waitForEvent("page", { timeout: 8000 }), share.click(".share-destination .link-btn:has-text('Open here in a new tab')")]);
   await preview.waitForURL(/#\/(copy|file)\//, { timeout: 8000 }).catch(() => {});
-  check("Preview here opens the link on this editor", preview.url().startsWith(RELAY + "/#/"), preview.url().slice(0, 60));
+  check("Open here in a new tab opens the link on this editor", preview.url().startsWith(RELAY + "/#/"), preview.url().slice(0, 60));
   await preview.close();
 
   const mine2 = await newPage("Kim", { editorUrl: RELAY });

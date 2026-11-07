@@ -1302,6 +1302,10 @@ pub struct Interaction {
   pub easing: Easing,
   /// Placement and behaviour of the overlay for `OpenOverlay` / `SwapOverlay`.
   pub overlay: OverlaySettings,
+  /// Navigate to, Swap overlay and Change to: the screen that opens starts scrolled where the
+  /// one it replaces was (scrollers matched by layer name). Off by default and then not saved.
+  #[serde(skip_serializing_if = "is_false")]
+  pub preserve_scroll: bool,
 }
 
 /// Where an overlay sits on the frame underneath it.

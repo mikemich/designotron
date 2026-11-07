@@ -35,7 +35,7 @@ const hereBase = () => location.origin + location.pathname;
 export const linkBase = () => (isLocalPage() ? editorBase() : hereBase());
 
 /** The editor links open in, as shown to the person sharing ("mikemich.github.io/designotron"),
- *  and whether that is somewhere other than this editor (so "Preview here" is useful). */
+ *  and whether that is somewhere other than this editor (so "Open here in a new tab" is useful). */
 export function linkDestination(): { host: string; elsewhere: boolean } {
   const base = linkBase();
   let host = base;
