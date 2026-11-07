@@ -1,12 +1,17 @@
 // Plugins: user JavaScript run in a sandboxed iframe (opaque origin: no access to the
 // editor's DOM, storage or API key). They call the same tool layer Claude uses through
 // a small promise API over postMessage. A run is one undo step (see runPlugin). They have no
-// network: a CSP in the frame, web addresses and fetching tools refused.
+// network: a CSP in the frame, web addresses and fetching tools refused, and the editor page's
+// frame-src (index.html) refuses the frame's navigation to the web. Every message the frame sends
+// carries a per-run secret token that only the bootstrap holds (pluginSandbox.ts), so a document
+// that replaces the plugin in the frame can't call tools or keep the run alive.
 
 import { create } from "zustand";
 import { selection, toast, useStore } from "./store";
 import { DRAG_BUSY, executeTool, whenCanvasIdle } from "./ai/tools";
-import { sandboxDocument } from "./pluginSandbox";
+import { PLUGIN_SANDBOX, sandboxDocument } from "./pluginSandbox";
+import { hasWebAddress } from "./pluginPolicy";
+import { userName } from "./canvas/Comments";
 
 export interface Plugin {
   id: string;
@@ -126,7 +131,8 @@ let runSeq = 0;
 export function runPlugin(plugin: Plugin) {
   stopPlugin();
   const frame = document.createElement("iframe");
-  frame.setAttribute("sandbox", "allow-scripts");
+  frame.setAttribute("sandbox", PLUGIN_SANDBOX);
+  frame.referrerPolicy = "no-referrer";
   frame.className = "plugin-frame hidden";
   frame.title = plugin.name;
   const running: Running = { plugin, frame, ui: null };
@@ -134,13 +140,29 @@ export function runPlugin(plugin: Plugin) {
   const runId = ++runSeq;
   let step = 0;
   let lastCall = 0;
-  const reply = (id: number, result?: unknown, error?: string) =>
-    frame.contentWindow?.postMessage({ dtHost: true, id, result: result ?? null, error: error ?? null }, "*");
+  // Secret of this run: from the CSPRNG (crypto.randomUUID needs a secure context, and the LAN
+  // share is plain http). Sent once with the code; the frame's own bootstrap is the only holder.
+  const token = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+  const author = `${userName() || "You"} via ${plugin.name}`.slice(0, 80);
+  // Nothing is posted to the frame once it is gone or navigated: a replacing document would read it.
+  let navigated = false;
+  const post = (msg: object) => {
+    if (!navigated && usePlugins.getState().running?.frame === frame) frame.contentWindow?.postMessage({ dtHost: true, ...msg }, "*");
+  };
+  const reply = (id: number, result?: unknown, error?: string) => post({ id, result: result ?? null, error: error ?? null });
+  const navigatedAway = () => {
+    if (navigated) return;
+    navigated = true;
+    toast(`Plugin “${plugin.name}” was stopped: it tried to navigate its frame`, "error");
+    stopPlugin();
+  };
   const onMessage = async (e: MessageEvent) => {
-    if (e.source !== frame.contentWindow) return;
+    // Only the bootstrap holds the token; a document that replaced it (or a frame inside it) doesn't.
+    if (e.source !== frame.contentWindow || e.origin !== "null") return;
     const m = e.data;
-    if (!m?.dtPlugin) return;
+    if (m?.dtPlugin !== true || m.token !== token) return;
     lastPong = Date.now();
+    if (m.navigating) return navigatedAway();
     if (m.pong) {
       if (usePlugins.getState().running?.stuck) usePlugins.setState({ running: { ...running, stuck: false } });
       return;
@@ -150,12 +172,12 @@ export function runPlugin(plugin: Plugin) {
         case "tool": {
           const [name, input] = m.args;
           if (PLUGIN_REFUSED_TOOLS.has(String(name))) throw new Error(`plugins can't use ${name}`);
-          if (/https?:\/\//i.test(JSON.stringify(input ?? null))) throw new Error("plugins can't use web addresses yet");
+          if (hasWebAddress(input ?? null)) throw new Error("plugins can't use web addresses yet");
           // The pause is measured from the previous call, before waiting for the canvas.
           if (running.ui && lastCall && Date.now() - lastCall > 1000) step++;
           if (!(await whenCanvasIdle())) throw new Error(DRAG_BUSY);
           if (usePlugins.getState().running?.frame !== frame) throw new Error("plugin stopped");
-          const out = await executeTool(String(name), input, { group: `plugin:${runId}:${step}` });
+          const out = await executeTool(String(name), input, { group: `plugin:${runId}:${step}`, author });
           lastCall = Date.now();
           if (!out.ok) throw new Error(String(out.result));
           return reply(m.id, out.result);
@@ -186,6 +208,10 @@ export function runPlugin(plugin: Plugin) {
           toast(`Plugin “${plugin.name}” failed: ${String(m.args[0]).split("\n")[0]}`, "error");
           stopPlugin();
           return;
+        case "warn":
+          // An un-awaited dt.tool() that failed: nothing else would show it.
+          toast(`Plugin “${plugin.name}”: ${String(m.args[0]).split("\n")[0]}`, "error");
+          return;
         case "close":
           stopPlugin();
           return;
@@ -199,7 +225,7 @@ export function runPlugin(plugin: Plugin) {
   // Watchdog: a plugin that stops answering is flagged so the person can stop it.
   let lastPong = Date.now();
   const watchdog = setInterval(() => {
-    frame.contentWindow?.postMessage({ dtHost: true, ping: true }, "*");
+    post({ ping: true });
     const cur = usePlugins.getState().running;
     if (cur?.frame === frame && !cur.stuck && Date.now() - lastPong > 6000) {
       usePlugins.setState({ running: { ...cur, stuck: true } });
@@ -215,14 +241,13 @@ export function runPlugin(plugin: Plugin) {
   frame.addEventListener("load", () => {
     if (loads++ === 0) {
       // The page is constant (see pluginSandbox.ts); the code is sent in once it is ready.
-      frame.contentWindow?.postMessage({ dtHost: true, code: plugin.code }, "*");
+      post({ code: plugin.code, token });
     } else {
-      toast(`Plugin “${plugin.name}” was stopped: it tried to navigate its frame`, "error");
-      stopPlugin();
+      navigatedAway();
     }
   });
   const unsub = useStore.subscribe((s, prev) => {
-    if (s.es.selection !== prev.es.selection) frame.contentWindow?.postMessage({ dtHost: true, event: "selectionchange", data: s.es.selection }, "*");
+    if (s.es.selection !== prev.es.selection) post({ event: "selectionchange", data: s.es.selection });
   });
   cleanup = () => {
     clearTimeout(slow);

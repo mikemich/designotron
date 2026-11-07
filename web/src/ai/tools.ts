@@ -95,8 +95,10 @@ export function setToolFile(id: string | null) {
 
 /** `opts.group`: undo group of the chat turn the call belongs to (see `aiDispatch`).
  *  `opts.fileId`: the file the calling chat turn belongs to; the call is refused when that
- *  isn't the open file (the turn is over, and its calls would land in an unrelated file). */
-export async function executeTool(name: string, input: any, opts: { group?: string; fileId?: string | null } = {}): Promise<ToolOutcome> {
+ *  isn't the open file (the turn is over, and its calls would land in an unrelated file).
+ *  `opts.author`: who a `reply_comment` is signed as (a plugin passes "<person> via <plugin>");
+ *  Claude's calls leave it out and sign as "Claude". Whatever the tool input says is overwritten. */
+export async function executeTool(name: string, input: any, opts: { group?: string; fileId?: string | null; author?: string } = {}): Promise<ToolOutcome> {
   if (opts.fileId !== undefined && opts.fileId !== openFile) return { ok: false, result: LEFT_FILE };
   const epoch = fileEpoch;
   const stillOpen = () => fileEpoch === epoch;
@@ -111,16 +113,24 @@ export async function executeTool(name: string, input: any, opts: { group?: stri
     }
     if (name === "save_plugin") {
       const { savePlugin } = await import("../plugins");
+      const code = input?.code;
+      if (typeof code !== "string" || !code.trim()) throw new Error("code is required: the plugin's JavaScript body");
+      try {
+        // Compiled, never run: the same wrapper as the plugin frame's bootstrap.
+        new Function("dt", "return (async () => {\n" + code + "\n})()");
+      } catch (err) {
+        throw new Error(`code doesn't parse: ${err instanceof Error ? err.message : err}`);
+      }
       const id = "p_" + Date.now().toString(36);
-      savePlugin({ id, name: String(input?.name ?? "Plugin"), description: String(input?.description ?? ""), code: String(input?.code ?? "") });
+      savePlugin({ id, name: String(input?.name ?? "Plugin"), description: String(input?.description ?? ""), code });
       return { ok: true, result: { id, saved: true, note: "The user can run it from the main menu > Plugins." } };
     }
     if (name === "import_url") {
       return { ok: true, result: await importUrl({ ...(input ?? {}), group: opts.group, stillOpen }) };
     }
     if (name === "search_photos" || name === "place_photo") return await (await import("../photos/tool")).run(name, input, opts.group, stillOpen);
-    // The engine has no clock; stamp Claude's comment replies here.
-    if (name === "reply_comment") input = { ...input, time: Date.now() };
+    // The engine has no clock and doesn't know who is calling: stamp comment replies here.
+    if (name === "reply_comment") input = { ...input, time: Date.now(), author: opts.author ?? "Claude" };
     const result = aiDispatch(name, input ?? {}, opts.group);
     if (name === "select") setTimeout(zoomToSelection, 0);
     return { ok: true, result };
