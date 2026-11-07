@@ -8,6 +8,10 @@ import { safeImageSrc } from "../imageSrc";
 import { pickFile } from "../files";
 import { getDoc, useStore } from "../store";
 import { PhotoSearch } from "../panels/PhotoSearch";
+import { paintAriaLabel, paintLabel } from "./paintText";
+import { sliderKey, type SliderKind } from "./sliderKeys";
+
+export { paintLabel };
 import { photoPaint } from "../photos/place";
 
 export interface Rgba {
@@ -93,27 +97,14 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
   const hueRgb = hsvToRgb(hsv.h, 1, 1);
   const styles = getDoc().styles.colors;
   const pct = (v: number) => Math.round(v * 100);
-  /** Arrow keys step by 1 (Shift 10), Home/End jump to the ends. `step` gets the signed amount for the key. */
-  const sliderKeys = (e: React.KeyboardEvent, kind: "sv" | "hue" | "alpha", axes: Partial<Record<string, [number, number]>>, ends: (end: boolean) => void) => {
+  /** A key on one of the sliders: the new colour from `sliderKey`, emitted like a drag. */
+  const sliderKeys = (e: React.KeyboardEvent, kind: SliderKind) => {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const a = axes[e.key];
-    if (a) {
-      e.preventDefault();
-      e.stopPropagation();
-      const k = e.shiftKey ? 10 : 1;
-      emitAxis(kind, a[0] * k, a[1] * k);
-    } else if (e.key === "Home" || e.key === "End") {
-      e.preventDefault();
-      e.stopPropagation();
-      ends(e.key === "End");
-    }
-  };
-  const emitAxis = (kind: "sv" | "hue" | "alpha", dx: number, dy: number) => {
-    const clamp = (v: number, hi: number) => Math.max(0, Math.min(hi, v));
-    // Whole percent (hue: whole degree) steps, like the arrow keys of a native slider.
-    if (kind === "sv") emit(hsv.h, clamp(Math.round(hsv.s * 100) + dx, 100) / 100, clamp(Math.round(hsv.v * 100) + dy, 100) / 100, c.a);
-    else if (kind === "hue") emit(clamp(Math.round(hsv.h) + dx, 359.9), hsv.s, hsv.v, c.a);
-    else emit(hsv.h, hsv.s, hsv.v, clamp(Math.round(c.a * 100) + dx, 100) / 100);
+    const next = sliderKey(kind, e.key, e.shiftKey, { ...hsv, a: c.a });
+    if (!next) return;
+    e.preventDefault();
+    e.stopPropagation();
+    emit(next.h, next.s, next.v, next.a);
   };
   return (
     <div>
@@ -129,16 +120,7 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
         aria-valuetext={`Saturation ${pct(hsv.s)}%, brightness ${pct(hsv.v)}%`}
         style={{ background: `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, rgb(${hueRgb.r},${hueRgb.g},${hueRgb.b}))` }}
         onPointerDown={(e) => drag(svRef.current, (x, y) => emit(hsv.h, x, 1 - y, c.a))(e)}
-        onKeyDown={(e) => {
-          // Left/Right: saturation; Up/Down: brightness; Home/End: no saturation / full; PageUp/PageDown: full / no brightness.
-          if (e.key === "PageUp" || e.key === "PageDown") {
-            e.preventDefault();
-            e.stopPropagation();
-            emit(hsv.h, hsv.s, e.key === "PageUp" ? 1 : 0, c.a);
-            return;
-          }
-          sliderKeys(e, "sv", { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }, (end) => emit(hsv.h, end ? 1 : 0, hsv.v, c.a));
-        }}
+        onKeyDown={(e) => sliderKeys(e, "sv")}
       >
         <div className="dot" style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%` }} />
       </div>
@@ -152,9 +134,7 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
         aria-valuenow={Math.round(hsv.h)}
         aria-valuetext={`Hue ${Math.round(hsv.h)}°`}
         onPointerDown={(e) => drag(e.currentTarget.firstElementChild as HTMLElement, (x) => emit(x * 359.9, hsv.s, hsv.v, c.a))(e)}
-        onKeyDown={(e) => {
-          sliderKeys(e, "hue", { ArrowLeft: [-1, 0], ArrowDown: [-1, 0], ArrowRight: [1, 0], ArrowUp: [1, 0] }, (end) => emit(end ? 359.9 : 0, hsv.s, hsv.v, c.a));
-        }}
+        onKeyDown={(e) => sliderKeys(e, "hue")}
       >
         <div className="picker-bar" style={{ background: "linear-gradient(to right, red, yellow, lime, cyan, blue, magenta, red)" }}>
           <div className="dot" style={{ left: `${(hsv.h / 360) * 100}%` }} />
@@ -170,9 +150,7 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
         aria-valuenow={pct(c.a)}
         aria-valuetext={`Alpha ${pct(c.a)}%`}
         onPointerDown={(e) => drag(e.currentTarget.firstElementChild as HTMLElement, (x) => emit(hsv.h, hsv.s, hsv.v, x))(e)}
-        onKeyDown={(e) => {
-          sliderKeys(e, "alpha", { ArrowLeft: [-1, 0], ArrowDown: [-1, 0], ArrowRight: [1, 0], ArrowUp: [1, 0] }, (end) => emit(hsv.h, hsv.s, hsv.v, end ? 1 : 0));
-        }}
+        onKeyDown={(e) => sliderKeys(e, "alpha")}
       >
         <div className="picker-bar swatch" style={{ width: "100%", height: 12, borderRadius: 6 }}>
           <i style={{ background: `linear-gradient(to right, transparent, ${toHex(c)})` }} />
@@ -298,23 +276,6 @@ export function cropRectFor(mode: string, nw: number, nh: number, w: number, h: 
   const k = mode === "fit" ? Math.min(w / nw, h / nh) : Math.max(w / nw, h / nh);
   const [iw, ih] = [nw * k, nh * k];
   return { x: (w - iw) / 2 / w, y: (h - ih) / 2 / h, w: iw / w, h: ih / h };
-}
-
-export function paintLabel(p: Paint): string {
-  switch (p.type) {
-    case "solid":
-      return p.color.replace("#", "").slice(0, 6);
-    case "linearGradient":
-      return "Linear";
-    case "radialGradient":
-      return "Radial";
-    case "angularGradient":
-      return "Angular";
-    case "diamondGradient":
-      return "Diamond";
-    case "image":
-      return "Image";
-  }
 }
 
 /** Edits one paint (solid, gradient or image) in a popover. */
@@ -606,20 +567,6 @@ function ImageAdjust(props: { filters: ImageFilters | undefined; onChange: (f: I
   );
 }
 
-/** What a screen reader says for a paint: "Solid #3366FF, 100%", "Linear gradient", "Image (Fill)". */
-export function paintAriaLabel(p: Paint): string {
-  const pct = `${Math.round(p.opacity * 100)}%`;
-  const hidden = p.visible === false ? ", hidden" : "";
-  switch (p.type) {
-    case "solid":
-      return `Solid ${p.color.slice(0, 7).toUpperCase()}, ${pct}${hidden}`;
-    case "image":
-      return `Image (${p.scaleMode.charAt(0).toUpperCase() + p.scaleMode.slice(1)})${hidden}`;
-    default:
-      return `${paintLabel(p)} gradient${hidden}`;
-  }
-}
-
 /** Button that opens a paint editor popover. Its name comes from the paint unless `label` says more. */
 export function PaintSwatch(props: { paint: Paint; onChange: (p: Paint) => void; onOpen?: () => void; onClose?: () => void; label?: string }) {
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
@@ -636,6 +583,21 @@ export function PaintSwatch(props: { paint: Paint; onChange: (p: Paint) => void;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing, anchor]);
+  // While text is being edited the keyboard stays in the text, so Escape would end the editing and leave
+  // the popover open. It closes the popover first (a field inside the popover keeps its own Escape).
+  useEffect(() => {
+    if (!anchor || !useStore.getState().editingText) return;
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || (e.target as Element | null)?.closest?.(".popover")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setAnchor(null);
+      props.onClose?.();
+    };
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!!anchor]);
   const name = paintAriaLabel(props.paint);
   return (
     <>
@@ -645,9 +607,13 @@ export function PaintSwatch(props: { paint: Paint; onChange: (p: Paint) => void;
         aria-label={props.label ? `${props.label}: ${name}` : name}
         aria-haspopup="dialog"
         aria-expanded={!!anchor}
+        // While text is being edited the click must not take focus off the text: a swatch holding it would
+        // hand the next Backspace to the canvas, which deletes the layer.
+        onMouseDown={(e) => useStore.getState().editingText && e.preventDefault()}
         onClick={(e) => {
           setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect());
           props.onOpen?.();
+          if (useStore.getState().editingText) requestAnimationFrame(() => window.dispatchEvent(new Event("dt-refocus-text")));
         }}
       >
         <i style={{ background: paintCss(props.paint) }} />

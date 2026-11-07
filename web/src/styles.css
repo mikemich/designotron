@@ -1559,7 +1559,9 @@ a.btn {
 }
 /* Tablets: the Layers and Design panels (and Claude) are overlays on a full-width canvas. They
  * start closed and open from the toolbar's two panel buttons. */
-@media (min-width: 821px) and (max-width: 1100px) {
+/* The tablet layout also covers 640-820 px for a mouse (a desktop at 200% zoom): the phone rule starts
+ * under 640 px, or up to 820 px with a touch screen. */
+@media (min-width: 821px) and (max-width: 1100px), (min-width: 640px) and (max-width: 820px) and (pointer: fine), (min-width: 640px) and (max-width: 820px) and (pointer: none) {
   .main,
   .main.with-chat {
     grid-template-columns: 1fr;

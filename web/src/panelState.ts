@@ -6,6 +6,9 @@
  *  desktop at 200% zoom (720 px) keeps the tablet layout. The CSS phone queries must say the same. */
 export const PHONE_QUERY = "(max-width: 639px), (max-width: 820px) and (pointer: coarse)";
 
+/** Whether the window is a phone by the rule above (false where matchMedia is missing). */
+export const isPhone = () => typeof window !== "undefined" && !!window.matchMedia?.(PHONE_QUERY).matches;
+
 /** Tablet widths: the panels are overlays on the canvas. */
 export const COMPACT_QUERY = "(max-width: 1100px)";
 /** Up to here Claude's chat takes the Design panel's place (it has no room beside it). */

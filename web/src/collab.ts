@@ -2,7 +2,7 @@
 // shared link (guest). Local changes go out as engine deltas; peers' deltas come in
 // through `applyRemote` (never part of local undo). Presence: cursors and selections.
 
-import { isLocalHost, isLoopbackHost } from "./relayHost";
+import { linkFor } from "./relayHost";
 import { create } from "zustand";
 import { allAssets, loadAssets, referencedAssets } from "./assets";
 import { bridgeChecked, bridgeHttpBase } from "./ai/bridgeClient";
@@ -660,18 +660,8 @@ export async function startOnline(relay: string): Promise<void> {
   // pointed at the relay: never the relay's bundled editor, which can be older than this one.
   // A relay on this computer or the local network that serves an editor is the exception: its link
   // opens that relay's own editor, which can reach it (the hosted one can't).
-  const here = location.origin + location.pathname;
-  const own = base === location.origin; // this page is served by the relay itself
-  const query = own ? `?room=${room}` : `?room=${room}&relay=${encodeURIComponent(base)}`;
-  const relayLocal = isLocalHost(new URL(base).hostname);
-  const link = relayLocal && info.editor && !own ? `${base}/?room=${room}` : `${own || !isLocalPage() || relayLocal ? here : editorBase()}${query}`;
-  useCollab.setState({
-    role: "owner",
-    mode: "online",
-    link,
-    previewLink: link === `${here}${query}` ? null : `${here}${query}`,
-    linkLocalOnly: isLoopbackHost(new URL(link).hostname),
-  });
+  const r = linkFor({ relay: base, room, here: location.origin + location.pathname, pageLocal: isLocalPage(), own: base === location.origin, editor: info.editor, hosted: editorBase() });
+  useCollab.setState({ role: "owner", mode: "online", link: r.link, previewLink: r.previewLink, linkLocalOnly: r.localOnly });
   shareCurrentFile();
 }
 

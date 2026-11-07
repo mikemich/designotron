@@ -151,11 +151,20 @@ export function NumberField(props: {
             e.preventDefault();
             dispatch({ op: e.key.toLowerCase() === "y" || e.shiftKey ? "redo" : "undo" });
           } else if (e.key === "Escape") {
+            const input = e.target as HTMLInputElement;
+            const typed = edited.current;
             setText(fmt(value));
             edited.current = false;
-            const input = e.target as HTMLInputElement;
-            input.blur();
-            focusCanvas();
+            if (input.closest(".popover, [role=dialog]")) {
+              // In a popover or dialog the number goes back and focus stays here, selected. With nothing
+              // typed, Escape goes on to the popover: it closes and focus returns to its opener.
+              if (!typed) return;
+              e.preventDefault();
+              requestAnimationFrame(() => input.select());
+            } else {
+              input.blur();
+              focusCanvas();
+            }
           } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && value !== MIXED && (value ?? props.autoValue) !== undefined) {
             e.preventDefault();
             const d = (e.key === "ArrowUp" ? 1 : -1) * step * (e.shiftKey ? 10 : 1);
@@ -390,6 +399,9 @@ export function Popover(props: {
             els[e.shiftKey ? els.length - 1 : 0].focus();
           }
         }
+        // Plain keys belong to the popover. Ctrl/Cmd chords (Save, Undo, Duplicate ...) go on to the app's
+        // shortcuts, which still leave a field that is being typed in alone.
+        if ((e.ctrlKey || e.metaKey) && e.key !== "Tab" && e.key !== "Escape") return;
         e.stopPropagation();
       }}
     >

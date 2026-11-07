@@ -50,9 +50,10 @@ const REGIONS: { root: string; focus: () => HTMLElement | null }[] = [
 /** F6 / Shift+F6: moves focus to the next (previous) region that is on screen. */
 function cycleRegion(dir: 1 | -1) {
   // A closed panel keeps a zero-width column (desktop) or is not rendered (tablet).
-  const shown = REGIONS.map((r) => ({ r, el: document.querySelector<HTMLElement>(r.root) })).filter((x) => x.el && [...x.el.getClientRects()].some((c) => c.width > 0));
+  // `els` holds every match: several alert bars share one region, and focus may be in any of them.
+  const shown = REGIONS.map((r) => ({ r, els: [...document.querySelectorAll<HTMLElement>(r.root)].filter((el) => [...el.getClientRects()].some((c) => c.width > 0)) })).filter((x) => x.els.length);
   if (!shown.length) return;
-  const at = shown.findIndex((x) => x.el!.contains(document.activeElement));
+  const at = shown.findIndex((x) => x.els.some((el) => el.contains(document.activeElement)));
   for (let step = 1; step <= shown.length; step++) {
     const target = shown[(((at < 0 ? (dir > 0 ? -1 : 0) : at) + dir * step) % shown.length + shown.length) % shown.length].r.focus();
     if (target) return target.focus();

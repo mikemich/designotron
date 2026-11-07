@@ -160,6 +160,33 @@ try {
     await sleep(300);
     const panels = await p.evaluate(() => !!document.querySelector(".main > .panel"));
     check("at 720 px Ctrl+\\ brings the panels back", panels);
+    await p.keyboard.press("Control+\\");
+    await sleep(300);
+    // The tablet layout: a panel opened from the toolbar floats over a full-width canvas, with its close button.
+    const widthOf = (page) => page.locator("#dt-canvas").evaluate((e) => e.getBoundingClientRect().width);
+    const overlay = async (page, label, width) => {
+      await page.locator("#panel-toggle-left").click();
+      await sleep(300);
+      const lay = await page.evaluate(() => {
+        const el = document.querySelector(".main > .panel:not(.right)");
+        const close = el?.querySelector(".panel-close");
+        const cr = close?.getBoundingClientRect();
+        return { pos: el ? getComputedStyle(el).position : null, closeVisible: !!cr && cr.width > 0 && cr.height > 0, canvas: document.getElementById("dt-canvas").getBoundingClientRect().width };
+      });
+      check(`${label}: an open panel is an overlay (position absolute) with a visible close button`, lay.pos === "absolute" && lay.closeVisible, JSON.stringify(lay));
+      check(`${label}: opening it leaves the canvas its full width`, Math.abs(lay.canvas - width) <= 1, `${lay.canvas} vs ${width}`);
+    };
+    const w0 = await widthOf(p);
+    await overlay(p, "at 720 px", w0);
+    await p.locator("#panel-toggle-left").click();
+    await sleep(200);
+    for (const w of [640, 820]) {
+      const q = await openPage({ viewport: { width: w, height: 450 } });
+      await newFile(q);
+      const before = await widthOf(q);
+      await overlay(q, `at ${w} px (mouse)`, before);
+      await q.context().close();
+    }
     const overlap = await p.evaluate(() => {
       const boxes = [...document.querySelectorAll(".topbar button, .topbar .filename, .toolbar button, .toolbar [role=button]")]
         .map((e) => [e, e.getBoundingClientRect()])
@@ -177,6 +204,22 @@ try {
     check("the 720 px top bar and toolbar buttons don't overlap", overlap.bad === 0 && overlap.scrollW <= 720, JSON.stringify(overlap));
     await shot(p, "r18b-720.png");
     await axe(p, "the editor at 720 px");
+    // The file name has no room in the bar at this width: the main menu renames the file.
+    check("the file name field is hidden at 720 px", (await p.locator(".topbar .filename").evaluate((e) => e.getClientRects().length)) === 0);
+    await p.keyboard.press("Tab");
+    await p.evaluate(() => document.querySelector("[title='Main menu']").focus());
+    await p.keyboard.press("Enter");
+    await sleep(150);
+    for (let i = 0; i < 12; i++) {
+      if (/^Rename file/.test((await active(p))?.text ?? "")) break;
+      await p.keyboard.press("ArrowDown");
+    }
+    await p.keyboard.press("Enter");
+    await p.waitForSelector(".popover input[name=name]");
+    await p.keyboard.type("Renamed at 720");
+    await p.keyboard.press("Enter");
+    await sleep(300);
+    check("Rename file… in the main menu renames the file", (await p.evaluate(() => window.__dt.doc().name)) === "Renamed at 720" && (await p.locator(".popover").count()) === 0, await p.evaluate(() => window.__dt.doc().name));
     await p.context().close();
   }
 
@@ -275,6 +318,98 @@ try {
     check("the next Escape closes it", (await p.locator(".popover").count()) === 0);
   }
 
+  // ===== K-01: Escape in a number field of a popover, and Ctrl chords from inside one =====
+  {
+    const swatch = p.locator(".panel.right button.swatch").first();
+    await kfocus(p, swatch);
+    await p.keyboard.press("Enter");
+    await p.waitForSelector(".popover");
+    const alpha = p.locator(".popover input[aria-label='Alpha']");
+    const shownBefore = await alpha.inputValue();
+    await kfocus(p, alpha);
+    await p.keyboard.type("5");
+    await p.keyboard.press("Escape");
+    await sleep(150);
+    let a = await active(p);
+    check("Escape in a typed-in number field of a popover reverts it, keeps focus there and keeps the popover", (await p.locator(".popover").count()) === 1 && a.label === "Alpha" && (await alpha.inputValue()) === shownBefore, JSON.stringify([a, await alpha.inputValue(), shownBefore]));
+    await p.keyboard.press("Escape");
+    await sleep(200);
+    a = await active(p);
+    check("Escape with nothing typed closes the popover and focus returns to the swatch", (await p.locator(".popover").count()) === 0 && a.cls.includes("swatch"), JSON.stringify(a));
+    // Ctrl chords with focus inside an open popover reach the app's shortcuts (and are prevented there).
+    await kfocus(p, swatch);
+    await p.keyboard.press("Enter");
+    await p.waitForSelector(".popover");
+    await p.evaluate(() => {
+      window.__r18keys = [];
+      window.addEventListener("keydown", (e) => e.ctrlKey && window.__r18keys.push([e.key.toLowerCase(), e.defaultPrevented]));
+    });
+    const ids0 = new Set(Object.keys(await nodes(p)));
+    await kfocus(p, p.locator(".popover [role=slider][aria-label='Hue']"));
+    await p.keyboard.press("Control+s");
+    await p.keyboard.press("Control+d");
+    await sleep(200);
+    const duplicated = Object.keys(await nodes(p)).length === ids0.size + 1;
+    await p.keyboard.press("Control+z");
+    await sleep(200);
+    const seen = await p.evaluate(() => window.__r18keys);
+    check("Ctrl+S, Ctrl+D and Ctrl+Z inside an open popover reach the app and are prevented", ["s", "d", "z"].every((k) => seen.some(([key, prevented]) => key === k && prevented)), JSON.stringify(seen));
+    check("Ctrl+D inside the popover duplicated the layer", duplicated);
+    await p.keyboard.press("Escape");
+    await sleep(200);
+    for (const id of Object.keys(await nodes(p))) if (!ids0.has(id)) await run(p, { op: "delete", ids: [id] });
+    await run(p, { op: "select", ids: [rect.id] });
+    await sleep(150);
+  }
+
+  // ===== K-01: the Fill swatch while editing text =====
+  {
+    const t = await run(p, { op: "createText", x: 400, y: 400, characters: "Hello world", parent: null });
+    await run(p, { op: "update", ids: [t.id], patch: { name: "Greeting" } });
+    await run(p, { op: "select", ids: [t.id] });
+    await sleep(200);
+    const textOf = async () => (await nodes(p))[t.id]?.text?.characters ?? null;
+    const startEditing = async () => {
+      await p.locator("#dt-canvas").focus();
+      await p.keyboard.press("Enter");
+      await p.waitForSelector("textarea.text-editor");
+      await sleep(200);
+      await p.keyboard.press("Home");
+      for (let i = 0; i < 5; i++) await p.keyboard.press("Shift+ArrowRight");
+    };
+    await startEditing();
+    await p.locator(".panel.right button.swatch").first().click();
+    await p.waitForSelector(".popover");
+    await sleep(250);
+    let a = await active(p);
+    check("clicking the Fill swatch while editing keeps focus in the text", a.tag === "TEXTAREA", JSON.stringify(a));
+    // Colour the selected characters through the popover.
+    const hex = p.locator(".popover input").first();
+    await hex.fill("FF0000");
+    await hex.press("Enter");
+    await sleep(250);
+    check("colouring the selected range through the popover still works", JSON.stringify((await nodes(p))[t.id].text).toUpperCase().includes("FF0000"), JSON.stringify((await nodes(p))[t.id].text).slice(0, 300));
+    await p.locator("textarea.text-editor").focus();
+    await p.keyboard.press("Home");
+    for (let i = 0; i < 5; i++) await p.keyboard.press("Shift+ArrowRight");
+    await p.keyboard.press("Backspace");
+    await sleep(250);
+    check("Backspace with the popover open removes only the selected text; the layer survives", (await textOf()) === " world", String(await textOf()));
+    // Escape closes the popover first and leaves the text being edited; Backspace then edits the text.
+    await p.keyboard.press("Escape");
+    await sleep(250);
+    check("Escape closes the popover and the text is still being edited", (await p.locator(".popover").count()) === 0 && (await p.locator("textarea.text-editor").count()) === 1);
+    await p.keyboard.press("End");
+    await p.keyboard.press("Backspace");
+    await sleep(250);
+    check("Backspace after that deletes a character, not the layer", !!(await nodes(p))[t.id] && (await textOf()) !== " world", String(await textOf()));
+    await p.keyboard.press("Escape");
+    await sleep(250);
+    await run(p, { op: "delete", ids: [t.id] });
+    await run(p, { op: "select", ids: [rect.id] });
+    await sleep(200);
+  }
+
   // ===== K-01: gradient stops =====
   {
     await run(p, { op: "update", ids: [rect.id], patch: { fills: [{ type: "linearGradient", angle: 90, stops: [{ color: "#000000", position: 0 }, { color: "#FFFFFF", position: 1 }], opacity: 1, visible: true }] } });
@@ -370,6 +505,11 @@ try {
     const name = await row.locator(".name").innerText();
     check("its name starts with 'Insert instance of' for readers and keeps the visible text inside", /^Insert instance of /.test(name.trim()) || /Insert instance of/.test(await row.evaluate((e) => e.textContent)), name);
     await axe(p, "Assets with a component row", ".main > .panel:not(.right)");
+    await run(p, { op: "setReadOnly", on: true });
+    await sleep(300);
+    check("in a read-only tab the component rows are not insert buttons", (await p.locator("button.asset-row").count()) === 0 && (await p.locator(".layer.asset-row").count()) > 0);
+    await run(p, { op: "setReadOnly", on: false });
+    await sleep(300);
     await kfocus(p, row);
     await p.keyboard.press("Enter");
     await sleep(400);

@@ -318,6 +318,11 @@ export function ShareDialog() {
                       </a>
                     </div>
                   )}
+                  {mode === "lan" && (
+                    <div className="muted small share-lan-note" style={{ marginTop: 8 }}>
+                      This link works for people on your network.
+                    </div>
+                  )}
                   {linkLocalOnly && mode === "online" && (
                     <div className="muted small share-local-only" style={{ marginTop: 8 }}>
                       This link works on this computer only (it names localhost).

@@ -4,6 +4,7 @@ import { checkPluginCode, deletePlugin, runPlugin, savePlugin, usePlugins, type 
 import { logClear, usePluginLog, type LogEntry } from "../pluginLog";
 import { askClaude } from "../ai/chatState";
 import { useDialog } from "../ui/controls";
+import { pluginDirty } from "./pluginDirty";
 
 const TEMPLATE = `// Plugins use the same tools as Claude: await dt.tool(name, input).
 // Everything you can call is listed under "API reference" below the code.
@@ -119,13 +120,7 @@ export function PluginsDialog() {
   const opened = useRef<string | null>(null);
   const caret = useRef<[number, number]>([0, 0]);
   const saved = editing ? list.find((p) => p.id === editing.id) : undefined;
-  // Unsaved changes: anything different from the saved plugin, or any text in a new one. A built-in is read-only.
-  const dirty =
-    !!editing &&
-    !editing.builtin &&
-    (saved
-      ? saved.name !== editing.name || saved.description !== editing.description || saved.code !== editing.code
-      : !!editing.name.trim() || !!editing.description.trim() || editing.code !== TEMPLATE);
+  const dirty = pluginDirty(editing, saved, TEMPLATE);
   const keepEditing = () => {
     setDiscard(null);
     requestAnimationFrame(() => {

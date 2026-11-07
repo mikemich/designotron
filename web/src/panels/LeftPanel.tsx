@@ -1287,6 +1287,9 @@ type AssetEntry = { set: Node | null; items: Node[] };
 function Assets() {
   const doc = useDoc();
   const viewer = useCollab((s) => s.viewer);
+  // A read-only tab (view link, or this tab does not hold the file) can look at components, not place them.
+  const readOnly = useStore((s) => s.es.readOnly);
+  const noInsert = viewer || readOnly;
   const [q, setQ] = useState("");
   const match = (s: string) => s.toLowerCase().includes(q.toLowerCase());
   // Variants are listed under their set (in the set's order), other components on their own.
@@ -1311,7 +1314,7 @@ function Assets() {
       x,
       y,
       items: [
-        ...(viewer ? [] : [{ label: "Insert instance", onClick: () => place(c) }]),
+        ...(noInsert ? [] : [{ label: "Insert instance", onClick: () => place(c) }]),
         { label: "Go to main component", onClick: () => dispatch({ op: "select", ids: [c.id] }) && zoomToSelection() },
       ],
     });
@@ -1327,7 +1330,7 @@ function Assets() {
         </span>
         <span className="asset-text">
           <span className="name component">
-            {!viewer && <span className="sr-only">Insert instance of {spoken}</span>}
+            {!noInsert && <span className="sr-only">Insert instance of {spoken}</span>}
             {label}
           </span>
           {description && <span className="asset-desc muted small">{description}</span>}
@@ -1338,7 +1341,7 @@ function Assets() {
       </>
     );
     // A person who can only look (a view link) gets plain rows, not buttons that would do nothing.
-    if (viewer)
+    if (noInsert)
       return (
         <div key={c.id} className="layer asset-row" title={description}>
           {inner}
