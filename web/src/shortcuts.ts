@@ -5,6 +5,7 @@ import { useShortcuts } from "./panels/ShortcutsDialog";
 import { focusedByPointer, isMac } from "./ui/controls";
 import { canOpenCursorChat, openCursorChat } from "./follow";
 import { useCollab } from "./collab";
+import { collapseAllLayers } from "./panels/layerTree";
 import { nextOpacity, type PendingDigit } from "./opacityKeys";
 
 function isTyping(e: KeyboardEvent): boolean {
@@ -163,6 +164,9 @@ export function installShortcuts(): () => void {
       const code = e.code.replace("Key", "").toLowerCase();
       if (map[code]) return run(map[code]);
     }
+
+    // Collapse layers (Figma's Alt+L). By physical key: Alt types another letter on a Mac.
+    if (e.altKey && !e.shiftKey && e.code === "KeyL") return run(collapseAllLayers);
 
     if (e.key === "F2" && has && !e.altKey && !e.shiftKey) return run(A.renameSelection);
     if (e.key === "?") return run(() => useShortcuts.setState({ open: true }));
