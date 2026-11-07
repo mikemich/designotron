@@ -268,7 +268,7 @@ try {
     const get = (p) => built.files.find((f) => f.path === p)?.content ?? "";
     const app = get("src/App.tsx");
     const login = get("src/screens/Login.tsx");
-    check("the Enter key trigger is a keys entry, not a click on the root", /"Login":\[\{"key":"Enter","to":"Settings"\}\]/.test(app) && !/^\s*<div className="relative[^\n]*onClick/m.test(login), app.match(/const keys[^\n]*/)?.[0]);
+    check("the Enter key trigger is a keys entry, not a click on the root", /"Login":\[\{"key":"Enter","to":"Settings"\}\]/.test(app) && !/^\s*<div className="relative w-full[^\n]*onClick/m.test(login), login.slice(0, 200));
     check("the README lists both flows", /`\/#Login`/.test(get("README.md")) && /`\/#MOnboarding`/.test(get("README.md")), get("README.md").slice(-700));
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r8b-project-"));
@@ -325,7 +325,7 @@ try {
         }
         check(
           "Tab reaches the buttons and the card; the row holding a button is no control itself",
-          stops[0].startsWith("BUTTON:") && stops[1].startsWith("BUTTON::Delete") && stops[2].startsWith("A::Pro plan") && !stops.some((s) => s === "DIV:button:"),
+          stops[0].startsWith("A::Continue") && stops[1].startsWith("A::Delete") && stops[2].startsWith("A::Pro plan") && !stops.some((s) => s === "DIV:button:"),
           stops.join(" | "),
         );
         await shot(p, "export-tab-focus");

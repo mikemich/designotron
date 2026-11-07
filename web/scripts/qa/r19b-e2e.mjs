@@ -143,6 +143,10 @@ async function buildDesign(page) {
   const features = nodes.find((n) => n.characters === "Features");
   const pr = await tool(page, "set_prototype", { nodeId: features.id, action: "navigate", destinationId: ids.Detail });
   if (!pr.ok) throw new Error("set_prototype: " + JSON.stringify(pr).slice(0, 300));
+  for (const row of nodes.filter((n) => n.name === "Nav/Item")) {
+    const r2 = await tool(page, "set_prototype", { nodeId: row.id, action: "navigate", destinationId: ids.Detail });
+    if (!r2.ok) throw new Error("set_prototype row: " + JSON.stringify(r2).slice(0, 300));
+  }
   const start = await page.evaluate((id) => {
     const d = window.__dt.doc();
     const pg = Object.values(d.pages).find((p) => p.children.includes(id));
@@ -213,6 +217,8 @@ try {
   check("Dashboard: four Nav/Item rows give no nav landmark; one aside", D.nav === 0 && D.aside === 1, JSON.stringify(D));
   check("Dashboard: exactly one h1 (the 32px title), then an h2", D.h1 === 1 && D.heads.join() === "H1,H2", D.heads.join());
   await shot(ctx, "dashboard-1440");
+  const items = await ctx.evaluate(() => [...document.querySelectorAll("aside a, aside button")].map((e) => e.tagName));
+  check("Dashboard: the four Nav/Item rows that navigate are <a> elements, not buttons", items.join() === "A,A,A,A", items.join());
 
   if (AXE && fs.existsSync(AXE)) {
     for (const name of ["landing", "dashboard"]) {
@@ -290,7 +296,7 @@ try {
       await p.goto(`http://127.0.0.1:${EXPORT_PORT}/app/#Dashboard`);
       await p.reload();
       await p.waitForSelector("text=Recent activity");
-      check("loading #Dashboard opens the Dashboard directly", true);
+      check("loading #Dashboard opens the Dashboard directly", await p.getByText("Recent activity").isVisible() && !(await p.getByText("Ship designs faster").count()));
       await p.evaluate(() => {
         location.hash = "#Nowhere";
       });
