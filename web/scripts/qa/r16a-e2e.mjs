@@ -389,7 +389,7 @@ const pos = { x: 70, y: 15 };
   check("Escape clears the query and restores the tree", (await field.inputValue()) === "" && (await page.locator("[role=tree]").count()) === 1 && (await page.getByRole("listbox", { name: "Layer search results" }).count()) === 0);
   // Filter: Text alone.
   await page.getByRole("button", { name: "Filter layers" }).click();
-  await page.getByRole("checkbox", { name: "Text" }).check();
+  await page.getByRole("checkbox", { name: "Text", exact: true }).check();
   await page.waitForTimeout(250);
   const allText = await page.evaluate(() => {
     const d = window.__dt.doc();

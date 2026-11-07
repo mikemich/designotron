@@ -62,7 +62,7 @@ try {
   await owner.click("button:has-text('New design file')");
   await owner.waitForSelector("#dt-canvas");
   const rect = await owner.evaluate(() => window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [{ type: "rectangle", name: "Shared box", x: 0, y: 0, width: 120, height: 80, fill: "#6D4AFF" }] } }).created[0].id);
-  await owner.click(".tbtn[title='Share for live editing']");
+  await Promise.all([owner.waitForResponse((r) => r.url().endsWith("/health"), { timeout: 3000 }).catch(() => {}), owner.click(".tbtn[title='Share for live editing']")]); // the dialog asks /health whether this page is a relay
   await owner.fill(".share-dialog input.textinput >> nth=0", "Olga");
   if (RELAY) {
     // The relay field sits behind "Use a different relay" when one is built in.

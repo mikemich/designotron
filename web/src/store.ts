@@ -7,7 +7,7 @@ import { create } from "zustand";
 import init, { clearMeasureCache, WasmEngine } from "./wasm/pkg/designotron_engine_wasm";
 import wasmUrl from "./wasm/pkg/designotron_engine_wasm_bg.wasm?url";
 import type { Doc, EngineState, Gap, Guide, Node, Rect, Tool } from "./types";
-import { assetUrl } from "./assets";
+import { assetUrl, setSizeSink } from "./assets";
 import { COMPACT_QUERY, TIGHT_QUERY, panelShown, readPanels, setPanel, toggleUi as toggleUiPanels, writePanels, type Panels } from "./panelState";
 
 export const FONTS = [
@@ -67,6 +67,12 @@ async function loadEngine(): Promise<void> {
     new Promise((r) => setTimeout(r, 2500)),
   ]);
   engine = new WasmEngine(Math.floor(Math.random() * 2 ** 48));
+  // Image sizes (the engine lays tiled fills out by them) arrive as the browser measures them.
+  setSizeSink((json) => {
+    if (!engine) return;
+    engine.setImageSizes(json);
+    sync();
+  });
   document.fonts.addEventListener("loadingdone", () => {
     measureCache.clear();
     clearMeasureCache();

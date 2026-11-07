@@ -34,7 +34,9 @@ function Crop({ v, t, paint }: { v: Viewport; t: PaintTarget; paint: ImagePaint 
   useEffect(() => {
     if (paint.crop || !src) return;
     const img = new Image();
-    img.onload = () => sendPaint(t.edit, { ...paint, crop: cropRectFor("fill", img.naturalWidth, img.naturalHeight, w, h) });
+    const turned = ((paint.rotation ?? 0) / 90) % 2 !== 0;
+    img.onload = () =>
+      sendPaint(t.edit, { ...paint, crop: cropRectFor("fill", turned ? img.naturalHeight : img.naturalWidth, turned ? img.naturalWidth : img.naturalHeight, w, h) });
     img.onerror = () => sendPaint(t.edit, { ...paint, crop: { x: 0, y: 0, w: 1, h: 1 } });
     img.src = src;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -45,6 +47,10 @@ function Crop({ v, t, paint }: { v: Viewport; t: PaintTarget; paint: ImagePaint 
   const rect = { x: crop.x * w, y: crop.y * h, w: crop.w * w, h: crop.h * h };
   const corner = ([cx, cy]: [number, number]) => toScreen(v, apply(m, { x: rect.x + cx * rect.w, y: rect.y + cy * rect.h }));
   const toScreenMatrix = `matrix(${m.a * v.zoom} ${m.b * v.zoom} ${m.c * v.zoom} ${m.d * v.zoom} ${m.e * v.zoom + v.x} ${m.f * v.zoom + v.y})`;
+  // A turned image is drawn about the crop rectangle's centre, its width and height swapped at 90 and 270.
+  const turns = ((((Math.round((paint.rotation ?? 0) / 90) % 4) + 4) % 4) * 90) as 0 | 90 | 180 | 270;
+  const [cx, cy] = [rect.x + rect.w / 2, rect.y + rect.h / 2];
+  const [gw, gh] = turns === 90 || turns === 270 ? [rect.h, rect.w] : [rect.w, rect.h];
   const clipId = "crop-outside-" + t.edit.id.replace(/[^\w-]/g, "");
   const big = 1e5;
 
@@ -81,7 +87,7 @@ function Crop({ v, t, paint }: { v: Viewport; t: PaintTarget; paint: ImagePaint 
           <clipPath id={clipId}>
             <path clipRule="evenodd" d={`M${-big} ${-big}H${big}V${big}H${-big}ZM0 0H${w}V${h}H0Z`} />
           </clipPath>
-          <image data-crop-ghost="" href={src} x={rect.x} y={rect.y} width={rect.w} height={rect.h} preserveAspectRatio="none" opacity={0.4} clipPath={`url(#${clipId})`} pointerEvents="none" />
+          <image data-crop-ghost="" href={src} x={cx - gw / 2} y={cy - gh / 2} width={gw} height={gh} transform={turns ? `rotate(${turns} ${cx} ${cy})` : undefined} preserveAspectRatio="none" opacity={0.4} clipPath={`url(#${clipId})`} pointerEvents="none" />
           <rect x={0} y={0} width={w} height={h} className="paint-line" vectorEffect="non-scaling-stroke" pointerEvents="none" />
           <rect data-crop-body="" className="paint-handle crop-body" x={rect.x} y={rect.y} width={rect.w} height={rect.h} onPointerDown={(ev) => grab(ev, null)} />
         </g>

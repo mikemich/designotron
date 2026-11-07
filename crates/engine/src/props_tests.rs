@@ -1307,8 +1307,8 @@ mod review {
     let mut b = Engine::new(Box::new(crate::text::HeuristicMeasurer), 9);
     b.load(&k.e.to_json()).unwrap();
     let mut relay = k.e.doc.clone();
-    k.e.collab_reset(true, true);
-    b.collab_reset(true, true);
+    k.e.collab_reset(true, true, false);
+    b.collab_reset(true, true, false);
     set_prop(&mut k, &inst, &label, Some(json!("Mine")));
     b.dispatch(Command::ComponentProps {
       edit: PropsOp::Set {

@@ -476,6 +476,55 @@ export function scrollersOf(scene: Scene, layer: string): ScrollerScene[] {
   return out;
 }
 
+/** How far a scroller can scroll, as ScrollerView lays it out. */
+export function scrollRange(s: ScrollerScene): { left: number; top: number } {
+  const ox = s.content.x - s.rect.x;
+  const oy = s.content.y - s.rect.y;
+  return {
+    left: Math.max(0, ox + s.content.width - s.rect.width),
+    top: Math.max(0, oy + s.content.height - s.rect.height),
+  };
+}
+
+/** Preserve scroll position: the scroll positions `pos` of the scrollers of `from`, mapped onto
+ *  the scrollers of `to`. The screen's own scroller pairs with the other screen's; nested ones
+ *  pair by the layer names below the screen (a name used twice pairs in order, as `matchPieces`
+ *  does). Each value is clamped to the destination's range, and an axis the destination doesn't
+ *  scroll stays 0. Keyed by the destination's scroller ids. */
+export function carryScroll(from: Pick<Scene, "id" | "scrollers">, to: Pick<Scene, "id" | "scrollers">, pos: Map<string, { left: number; top: number }>, doc: Doc = pdoc()): Map<string, { left: number; top: number }> {
+  const keyed = (scene: Pick<Scene, "id" | "scrollers">) => {
+    const seen = new Map<string, number>();
+    const out = new Map<string, ScrollerScene>();
+    const visit = (list: ScrollerScene[]) => {
+      for (const s of list) {
+        const names: string[] = [];
+        for (let id: string | null | undefined = s.id; id && id !== scene.id; id = doc.nodes[id]?.parent) names.unshift(doc.nodes[id]?.name ?? "");
+        const base = s.id === scene.id ? "\u0002" : names.join("\u0000");
+        const n = seen.get(base) ?? 0;
+        seen.set(base, n + 1);
+        out.set(`${base}\u0001${n}`, s);
+        visit(s.scrollers);
+      }
+    };
+    visit(scene.scrollers);
+    return out;
+  };
+  const dest = keyed(to);
+  const result = new Map<string, { left: number; top: number }>();
+  for (const [key, s] of keyed(from)) {
+    const at = pos.get(s.id);
+    const d = dest.get(key);
+    if (!at || !d) continue;
+    const r = scrollRange(d);
+    const h = d.overflow === "horizontal" || d.overflow === "both";
+    const v = d.overflow === "vertical" || d.overflow === "both";
+    const left = h ? Math.min(Math.max(0, at.left), r.left) : 0;
+    const top = v ? Math.min(Math.max(0, at.top), r.top) : 0;
+    if (left || top) result.set(d.id, { left, top });
+  }
+  return result;
+}
+
 // ---------- smart animate (stage 1: direct children matched by name) ----------
 
 /** One direct child of a container, drawn on its own. */

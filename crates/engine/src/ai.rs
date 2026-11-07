@@ -146,6 +146,12 @@ fn spec_schema() -> Value {
       "italic": { "type": "boolean" },
       "textCase": { "type": "string", "enum": ["original", "upper", "lower", "title"] },
       "imageUrl": { "type": "string", "description": "Image fill: http(s) URL, data:image/ URL or asset:<id>. For stock photos use search_photos + place_photo instead" },
+      "imageScaleMode": { "type": "string", "enum": ["fill", "fit", "stretch", "tile", "crop"], "description": "How the image fill sits in the layer (scaleMode also works). Set it with imageUrl, or on a layer that already has an image fill" },
+      "imageScale": { "type": "number", "description": "Tile only: cell size as a multiple of the image's own size (1 = 100%, 0.01 to 100)" },
+      "imageRotation": { "type": "number", "description": "Image fill rotation in 90 degree steps: 0, 90, 180 or 270" },
+      "imageFilters": { "type": ["object", "null"], "description": "Image adjustments, each -1 to 1 (0 = none): {exposure, contrast, saturation, temperature, tint, highlights, shadows}; null resets them" },
+      "effects": { "type": "array", "description": "Effects as stored: [{type: dropShadow|innerShadow|layerBlur|backgroundBlur, color, x, y, blur, spread, visible}]. Replaces all effects; don't combine with shadow, blur or backgroundBlur", "items": { "type": "object", "properties": { "type": { "type": "string", "enum": ["dropShadow", "innerShadow", "layerBlur", "backgroundBlur"] }, "color": { "type": "string" }, "x": { "type": "number" }, "y": { "type": "number" }, "blur": { "type": "number" }, "spread": { "type": "number" }, "visible": { "type": "boolean" } }, "required": ["type"] } },
+      "blendMode": { "type": "string", "enum": ["normal", "multiply", "screen", "overlay", "darken", "lighten", "colorDodge", "colorBurn", "hardLight", "softLight", "difference", "exclusion", "hue", "saturation", "color", "luminosity"], "description": "Layer blend mode" },
       "fillStyle": { "type": ["string", "null"], "description": "Colour style name or id (from define_styles): sets the fill (the text colour on text) and links the layer to it; null unlinks" },
       "strokeStyle": { "type": ["string", "null"], "description": "Colour style name or id: sets the stroke colour and links the stroke to it; null unlinks" },
       "effectStyle": { "type": ["string", "null"], "description": "Effect style name or id (from define_styles effects): sets the layer's effects and links it; null unlinks" },
@@ -256,7 +262,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "create_nodes",
-      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), svg (whole SVG markup as editable layers), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). Returns ids for the created layers.",
+      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), svg (whole SVG markup as editable layers), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). Top-level layers without x and y go to (0, 0) when that is free, else to the right of the page's content. Returns ids for the created layers.",
       "input_schema": { "type": "object", "properties": { "parentId": { "type": "string" }, "nodes": { "type": "array", "items": spec } }, "required": ["nodes"] }
     },
     {
@@ -281,7 +287,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "create_instance",
-      "description": "Place an instance of a main component. parentId must be an existing layer that can hold children (a frame, group, component or instance); it is refused otherwise, and an instance can't be placed inside its own component.",
+      "description": "Place an instance of a main component. parentId must be an existing layer that can hold children (a frame, group, component or instance); it is refused otherwise, and an instance can't be placed inside its own component. Without x and y a top-level instance goes to (0, 0) when free, else to the right of the page's content.",
       "input_schema": { "type": "object", "properties": { "componentId": { "type": "string" }, "parentId": { "type": "string" }, "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["componentId"] }
     },
     {
@@ -303,6 +309,7 @@ pub fn tool_defs() -> Value {
           "background": { "type": ["string", "null"], "description": "Dim colour behind the overlay (hex, default #000000); null or \"none\" for no dimming" },
           "backgroundOpacity": { "type": "number", "description": "0-1, default 0.3" }
         } },
+        "preserveScroll": { "type": "boolean", "description": "For navigate, swap_overlay and change_to: the screen that opens keeps the scroll position of the one it replaces (scrolling frames matched by layer name). Default false" },
         "trigger": { "type": "string", "enum": ["click", "hover", "press", "delay", "mouse_enter", "mouse_leave", "mouse_down", "mouse_up", "key"], "description": "hover and press revert when the pointer leaves or lets go; key needs `key`" },
         "key": { "type": "string", "description": "For trigger key: a key or combination such as 'Enter', 'ArrowRight' or 'Shift+K'" },
         "transition": { "type": "string", "enum": ["instant", "dissolve", "smart_animate", "slide_left", "slide_right", "slide_up", "slide_down", "move_in", "move_out", "push"], "description": "smart_animate matches the direct children of both screens by name" },
@@ -805,6 +812,214 @@ fn kind_word(k: crate::variables::VarKind) -> String {
   format!("{k:?}").to_lowercase()
 }
 
+fn parse_blend_mode(cx: &Ctx, v: &Value) -> Result<crate::model::BlendMode, String> {
+  use crate::model::BlendMode as B;
+  parse::choice(
+    cx,
+    "blendMode",
+    v,
+    &[
+      (&["normal", "pass-through"], B::Normal),
+      (&["multiply"], B::Multiply),
+      (&["screen"], B::Screen),
+      (&["overlay"], B::Overlay),
+      (&["darken"], B::Darken),
+      (&["lighten"], B::Lighten),
+      (&["color-dodge", "colordodge"], B::ColorDodge),
+      (&["color-burn", "colorburn"], B::ColorBurn),
+      (&["hard-light", "hardlight"], B::HardLight),
+      (&["soft-light", "softlight"], B::SoftLight),
+      (&["difference"], B::Difference),
+      (&["exclusion"], B::Exclusion),
+      (&["hue"], B::Hue),
+      (&["saturation"], B::Saturation),
+      (&["color"], B::Color),
+      (&["luminosity"], B::Luminosity),
+    ],
+    &parse::no_hint,
+  )
+}
+
+/// `effects` input: the model's own effect objects, checked like `shadow` and `blur` are.
+fn parse_effects(cx: &mut Ctx, v: &Value) -> Result<Vec<Effect>, String> {
+  let Some(list) = v.as_array() else {
+    return Err(cx.err("effects", format!("must be an array of effects, got {}", parse::kind_of(v))));
+  };
+  let mut out = Vec::new();
+  for (i, item) in list.iter().enumerate() {
+    let mark = cx.enter(&format!("effects[{i}]"));
+    if !item.is_object() {
+      return Err(cx.err(
+        "",
+        format!(
+          "must be an object like {{type: 'dropShadow', y: 4, blur: 8}}, got {}",
+          parse::kind_of(item)
+        ),
+      ));
+    }
+    let kind = match item.get("type") {
+      None | Some(Value::Null) => return Err(cx.err("type", "is required: dropShadow, innerShadow, layerBlur or backgroundBlur")),
+      Some(t) => parse::exact(
+        cx,
+        "type",
+        Some(t),
+        EffectType::DropShadow,
+        &[
+          ("dropshadow", EffectType::DropShadow),
+          ("innershadow", EffectType::InnerShadow),
+          ("layerblur", EffectType::LayerBlur),
+          ("backgroundblur", EffectType::BackgroundBlur),
+        ],
+      )?,
+    };
+    let d = Effect::default();
+    let num = |cx: &Ctx, k: &str, dflt: f64| -> Result<f64, String> { Ok(parse::opt_number(cx, item, k)?.unwrap_or(dflt)) };
+    let blur = num(cx, "blur", d.blur)?;
+    if blur < 0.0 {
+      return Err(cx.err("blur", "must be 0 or more"));
+    }
+    out.push(Effect {
+      kind,
+      color: match item.get("color") {
+        Some(c) if !c.is_null() => parse::color(cx, "color", c)?,
+        _ => d.color.clone(),
+      },
+      x: num(cx, "x", d.x)?,
+      y: num(cx, "y", d.y)?,
+      blur,
+      spread: num(cx, "spread", d.spread)?,
+      visible: parse::opt_bool(cx, item, "visible")?.unwrap_or(true),
+    });
+    cx.leave(mark);
+  }
+  Ok(out)
+}
+
+/// `imageScaleMode`, `imageScale`, `imageRotation` and `imageFilters` on the layer's first image fill.
+fn apply_image_keys(cx: &mut Ctx, n: &mut Node, s: &Value) -> Result<(), String> {
+  let mode_key = if s.get("imageScaleMode").is_some() {
+    "imageScaleMode"
+  } else {
+    "scaleMode"
+  };
+  let keys = [mode_key, "imageScale", "imageRotation", "imageFilters"];
+  let given: Vec<&str> = keys
+    .iter()
+    .copied()
+    .filter(|k| s.get(*k).is_some_and(|v| !v.is_null() || *k == "imageFilters"))
+    .collect();
+  if given.is_empty() {
+    return Ok(());
+  }
+  let Some(at) = n.fills.iter().position(|p| matches!(p, Paint::Image { .. })) else {
+    cx.warn(format!("{} ignored: the layer has no image fill (give imageUrl)", given.join(", ")));
+    return Ok(());
+  };
+  let mode = match s.get(mode_key).filter(|v| !v.is_null()) {
+    Some(v) => Some(parse::choice(
+      cx,
+      mode_key,
+      v,
+      &[
+        (&["fill"], ScaleMode::Fill),
+        (&["fit"], ScaleMode::Fit),
+        (&["stretch"], ScaleMode::Stretch),
+        (&["tile"], ScaleMode::Tile),
+        (&["crop"], ScaleMode::Crop),
+      ],
+      &parse::no_hint,
+    )?),
+    None => None,
+  };
+  let scale = match parse::opt_number(cx, s, "imageScale")? {
+    Some(v) if !(0.01..=100.0).contains(&v) => return Err(cx.err("imageScale", "must be between 0.01 and 100 (1 = the image's own size)")),
+    v => v,
+  };
+  let rotation = match parse::opt_number(cx, s, "imageRotation")? {
+    Some(v) if v.rem_euclid(90.0) != 0.0 => return Err(cx.err("imageRotation", "must be a multiple of 90 (0, 90, 180 or 270)")),
+    Some(v) => Some(crate::paint::quarter_turns(v) as f64),
+    None => None,
+  };
+  let filters = match s.get("imageFilters") {
+    None => None,
+    Some(Value::Null) => Some(None),
+    Some(Value::Object(m)) => {
+      let mut f = crate::model::ImageFilters::default();
+      for (k, v) in m {
+        let mark = cx.enter(&format!("imageFilters.{k}"));
+        let x = parse::number(cx, "", v)?;
+        if !(-1.0..=1.0).contains(&x) {
+          return Err(cx.err("", "must be between -1 and 1"));
+        }
+        cx.leave(mark);
+        match k.as_str() {
+          "exposure" => f.exposure = x,
+          "contrast" => f.contrast = x,
+          "saturation" => f.saturation = x,
+          "temperature" => f.temperature = x,
+          "tint" => f.tint = x,
+          "highlights" => f.highlights = x,
+          "shadows" => f.shadows = x,
+          other => {
+            return Err(cx.err(
+              &format!("imageFilters.{other}"),
+              "unknown adjustment; use exposure, contrast, saturation, temperature, tint, highlights or shadows",
+            ))
+          }
+        }
+      }
+      Some((!f.is_identity()).then_some(f))
+    }
+    Some(other) => {
+      return Err(cx.err(
+        "imageFilters",
+        format!("must be an object like {{saturation: -1}} or null, got {}", parse::kind_of(other)),
+      ))
+    }
+  };
+  if let Paint::Image {
+    scale_mode,
+    scaling_factor,
+    rotation: rot,
+    filters: fl,
+    ..
+  } = &mut n.fills[at]
+  {
+    if let Some(m) = mode {
+      *scale_mode = m;
+    }
+    if let Some(v) = scale {
+      *scaling_factor = v;
+    }
+    if let Some(v) = rotation {
+      *rot = v;
+    }
+    if let Some(f) = filters {
+      *fl = f;
+    }
+  }
+  Ok(())
+}
+
+/// Image paints written as objects get the same limits as the dedicated keys.
+fn normalize_image_paint(p: &mut Paint) {
+  if let Paint::Image {
+    scaling_factor,
+    rotation,
+    filters,
+    ..
+  } = p
+  {
+    *scaling_factor = if scaling_factor.is_finite() && *scaling_factor > 0.0 {
+      scaling_factor.clamp(0.01, 100.0)
+    } else {
+      1.0
+    };
+    *rotation = crate::paint::quarter_turns(*rotation) as f64;
+    *filters = filters.map(|f| f.clamped()).filter(|f| !f.is_identity());
+  }
+}
+
 /// `shadow` input (an object, an array of them, a CSS box-shadow string, null or "none") to effects.
 fn parse_shadows(cx: &mut Ctx, sh: &Value) -> Result<Vec<Effect>, String> {
   let list: Vec<Value> = match sh {
@@ -940,6 +1155,7 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         .to_string();
       let parent = input.get("parentId").and_then(|v| v.as_str()).map(String::from);
       let (x, y) = (num(input.get("x")).unwrap_or(0.0), num(input.get("y")).unwrap_or(0.0));
+      let auto_place = parent.is_none() && input.get("x").is_none() && input.get("y").is_none();
       match e.doc.get(&comp) {
         Some(c) if c.kind == NodeType::Component => {}
         Some(c) if c.kind == NodeType::ComponentSet => {
@@ -981,6 +1197,9 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
           _ => format!("can't place an instance of {} inside {} itself", name(&comp), name(&comp)),
         }
       })?;
+      if auto_place {
+        place_in_free_space(e, &page, &id, &[]);
+      }
       Ok(json!({ "id": id }))
     }
     "set_component_props" => {
@@ -1500,7 +1719,7 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
     return Err(format!("no layer {id}"));
   }
   // `clear: true` alone removes the interactions without adding one.
-  let wants_new = ["action", "destinationId", "url", "trigger", "overlay"]
+  let wants_new = ["action", "destinationId", "url", "trigger", "overlay", "preserveScroll"]
     .iter()
     .any(|k| input.get(*k).is_some_and(|v| !v.is_null()));
   if input.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) && !wants_new {
@@ -1683,6 +1902,10 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
     _ => {}
   }
   let overlay = overlay_settings(input.get("overlay"))?;
+  let preserve_scroll = match input.get("preserveScroll").filter(|v| !v.is_null()) {
+    None => false,
+    Some(v) => v.as_bool().ok_or_else(|| cx.err("preserveScroll", "must be true or false"))?,
+  };
   let delay_ms = match input.get("delay").filter(|v| !v.is_null()) {
     Some(v) => parse::number(&cx, "delay", v).and_then(|d| {
       if d >= 0.0 {
@@ -1715,6 +1938,7 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
     direction,
     easing,
     overlay,
+    preserve_scroll,
   });
   let mut r = json!({ "ok": true });
   if !replaced.is_empty() {
@@ -2377,6 +2601,14 @@ fn outline_plan(e: &Engine, roots: &[NodeId], depth: usize) -> (HashSet<String>,
 
 fn component_summary(e: &Engine, c: &Node) -> Value {
   let mut m = json!({ "id": c.id, "name": c.name, "width": c.width, "height": c.height });
+  // Variants list their property keys in the written order (the saved props are alphabetical).
+  if let Some(set) = c
+    .parent
+    .as_deref()
+    .filter(|p| e.doc.get(p).is_some_and(|s| s.kind == NodeType::ComponentSet))
+  {
+    m["variantOrder"] = json!(crate::components::variant_order(&e.doc, set));
+  }
   let props = crate::props::props_of(&e.doc, &c.id);
   if !props.is_empty() {
     m["props"] = json!(props
@@ -2548,6 +2780,19 @@ pub fn insert_specs_ex(e: &mut Engine, specs: &[Value], parent: Option<&str>) ->
     settle_fill_in_hug(&mut e.doc, r);
   }
   crate::layout::relayout_all(&mut e.doc, e.measurer.as_ref());
+  if parent.is_none() {
+    // Layers still waiting for their spot sit at the origin and must not count as content.
+    let mut waiting: Vec<&str> = roots
+      .iter()
+      .zip(specs)
+      .filter(|(_, s)| s.get("x").is_none() && s.get("y").is_none())
+      .map(|(r, _)| r.as_str())
+      .collect();
+    while !waiting.is_empty() {
+      let r = waiting.remove(0);
+      place_in_free_space(e, &page, r, &waiting);
+    }
+  }
   let mut left = CREATED_LISTED;
   let created = roots.iter().map(|r| brief(e, r, &mut left)).collect();
   let mut names = Map::new();
@@ -2568,6 +2813,44 @@ pub fn insert_specs_ex(e: &mut Engine, specs: &[Value], parent: Option<&str>) ->
     names_truncated,
     warnings: cx.into_warnings(),
   })
+}
+
+/// Gap between a tool-made layer and the content it was placed beside.
+const PLACE_GAP: f64 = 100.0;
+
+/// Where a top-level layer of size `w` x `h` goes when the caller gave no position: (0, 0) if no
+/// other top-level layer of the page overlaps that box, else to the right of the page's content
+/// (`PLACE_GAP` apart, level with its top). `skip` are the layer itself and the ones still to place.
+fn free_spot(doc: &crate::model::Document, page: &str, skip: &[&str], w: f64, h: f64) -> (f64, f64) {
+  let others: Vec<crate::geom::Rect> = doc
+    .page(page)
+    .map(|p| {
+      p.children
+        .iter()
+        .filter(|c| !skip.contains(&c.as_str()))
+        .map(|c| doc.abs_bounds(c))
+        .collect()
+    })
+    .unwrap_or_default();
+  let origin = crate::geom::Rect::new(0.0, 0.0, w, h);
+  let overlaps = |o: &crate::geom::Rect| o.x < origin.right() && origin.x < o.right() && o.y < origin.bottom() && origin.y < o.bottom();
+  if !others.iter().any(overlaps) {
+    return (0.0, 0.0);
+  }
+  let right = others.iter().map(|o| o.right()).fold(f64::MIN, f64::max);
+  let top = others.iter().map(|o| o.y).fold(f64::MAX, f64::min);
+  (right + PLACE_GAP, top)
+}
+
+/// Moves a just-created top-level layer to `free_spot`.
+fn place_in_free_space(e: &mut Engine, page: &str, id: &str, waiting: &[&str]) {
+  let Some(n) = e.doc.get(id) else { return };
+  let skip: Vec<&str> = waiting.iter().copied().chain([id]).collect();
+  let (x, y) = free_spot(&e.doc, page, &skip, n.width, n.height);
+  if let Some(n) = e.doc.get_mut(id) {
+    n.x = x;
+    n.y = y;
+  }
 }
 
 /// A few lines about a layer: id, name, type, size, and its children and theirs (id, name, type
@@ -3036,6 +3319,9 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
     parse::image_url(cx, if s.get("imageUrl").is_some() { "imageUrl" } else { "src" }, url)?;
     n.fills = vec![Paint::Image {
       credit: None,
+      scaling_factor: 1.0,
+      rotation: 0.0,
+      filters: None,
       src: url.to_string(),
       scale_mode: ScaleMode::Fill,
       opacity: 1.0,
@@ -3043,6 +3329,7 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
       crop: None,
     }];
   }
+  apply_image_keys(cx, n, s)?;
   match s.get("fillStyle") {
     None => {}
     Some(Value::Null) => n.fill_style = None,
@@ -3135,6 +3422,15 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
       }
       Radius::Each(r) => n.corner_radii = Some(r),
     }
+  }
+  if let Some(v) = s.get("blendMode").filter(|v| !v.is_null()) {
+    n.blend_mode = parse_blend_mode(cx, v)?;
+  }
+  if let Some(v) = s.get("effects").filter(|v| !v.is_null()) {
+    if ["shadow", "blur", "backgroundBlur"].iter().any(|k| s.get(*k).is_some()) {
+      return Err(cx.err("effects", "give effects or shadow/blur/backgroundBlur, not both"));
+    }
+    n.effects = parse_effects(cx, v)?;
   }
   if let Some(sh) = s.get("shadow") {
     let effects = parse_shadows(cx, sh)?;
@@ -3795,7 +4091,8 @@ pub fn parse_fills(v: &Value) -> Result<Vec<Paint>, String> {
       Ok(out)
     }
     Value::Object(_) => {
-      let p = serde_json::from_value::<Paint>(v.clone()).map_err(|e| format!("invalid paint: {e}"))?;
+      let mut p = serde_json::from_value::<Paint>(v.clone()).map_err(|e| format!("invalid paint: {e}"))?;
+      normalize_image_paint(&mut p);
       check_paint_sources(std::slice::from_ref(&p))?;
       Ok(vec![p])
     }
@@ -4485,6 +4782,35 @@ mod tests {
       let bg = swap.overlay.background.as_ref().unwrap();
       assert_eq!((bg.color.as_str(), bg.opacity), ("#1E293B", 0.6));
       assert_eq!(e.doc.get(modal).unwrap().interactions[0].action, Action::CloseOverlay);
+    }
+
+    #[test]
+    fn preserve_scroll_is_set_cleared_and_not_saved_when_off() {
+      let (mut e, ids) = screens();
+      let (other, btn) = (&ids[1], &ids[3]);
+      let run = |e: &mut Engine, v: serde_json::Value| {
+        e.dispatch(Command::Ai {
+          tool: "set_prototype".into(),
+          input: v,
+        })
+        .unwrap();
+      };
+      run(&mut e, json!({ "nodeId": btn, "destinationId": other, "preserveScroll": true }));
+      let i = &e.doc.get(btn).unwrap().interactions[0];
+      assert!(i.preserve_scroll);
+      assert_eq!(serde_json::to_value(i).unwrap()["preserveScroll"], json!(true));
+      // The same trigger replaces the interaction; leaving the flag out turns it off again.
+      run(&mut e, json!({ "nodeId": btn, "destinationId": other }));
+      let i = &e.doc.get(btn).unwrap().interactions[0];
+      assert!(!i.preserve_scroll);
+      assert!(serde_json::to_value(i).unwrap().get("preserveScroll").is_none());
+      run(&mut e, json!({ "nodeId": btn, "destinationId": other, "preserveScroll": false }));
+      assert!(!e.doc.get(btn).unwrap().interactions[0].preserve_scroll);
+      let bad = e.dispatch(Command::Ai {
+        tool: "set_prototype".into(),
+        input: json!({ "nodeId": btn, "destinationId": other, "preserveScroll": "yes" }),
+      });
+      assert!(bad.is_err());
     }
 
     #[test]

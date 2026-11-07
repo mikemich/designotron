@@ -1,0 +1,41 @@
+{
+  "global": {
+    "color": {
+      "primary": { "value": "#6D4AFF", "type": "color" },
+      "bg": { "value": "#FFFFFF", "type": "color" }
+    },
+    "space": {
+      "sm": { "value": "8", "type": "spacing" },
+      "half": { "value": "50%", "type": "opacity" },
+      "radius": { "value": "{space.sm}", "type": "borderRadius" },
+      "tall": { "value": "{space.sm} * 2", "type": "sizing" }
+    },
+    "elevation": { "value": { "x": 0, "y": 4, "blur": 8, "spread": 0, "color": "#00000040", "type": "dropShadow" }, "type": "boxShadow" },
+    "weight": { "value": "bold", "type": "fontWeights" },
+    "family": { "value": "Inter", "type": "fontFamilies" }
+  },
+  "light": {
+    "color": {
+      "bg": { "value": "#F8F8FA", "type": "color" },
+      "text": { "value": "{color.primary}", "type": "color" }
+    }
+  },
+  "dark": {
+    "color": {
+      "bg": { "value": "#111111", "type": "color" },
+      "text": { "value": "#FFFFFF", "type": "color" }
+    }
+  },
+  "brand": {
+    "color": {
+      "accent": { "value": "#FF3366", "type": "color" },
+      "onAccent": { "value": "{color.primary}", "type": "color" }
+    }
+  },
+  "$themes": [
+    { "id": "t1", "name": "Light", "selectedTokenSets": { "global": "enabled", "light": "enabled" } },
+    { "id": "t2", "name": "Dark", "selectedTokenSets": { "global": "enabled", "dark": "enabled" } },
+    { "id": "t3", "name": "Brand", "group": "Brand", "selectedTokenSets": { "global": "source", "brand": "enabled" } }
+  ],
+  "$metadata": { "tokenSetOrder": ["global", "light", "dark", "brand"] }
+}

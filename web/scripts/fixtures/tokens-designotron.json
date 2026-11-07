@@ -1,0 +1,130 @@
+{
+  "Primitives": {
+    "$extensions": {
+      "com.designotron": {
+        "id": "c1",
+        "index": 0,
+        "modes": [
+          "Base"
+        ],
+        "name": "Primitives"
+      }
+    },
+    "Black": {
+      "$extensions": {
+        "com.designotron": {
+          "id": "black",
+          "index": 0
+        }
+      },
+      "$type": "color",
+      "$value": "#000000"
+    },
+    "Flags": {
+      "On": {
+        "$extensions": {
+          "com.designotron": {
+            "id": "flag",
+            "index": 3,
+            "type": "boolean"
+          }
+        },
+        "$value": true
+      }
+    },
+    "Space": {
+      "$root": {
+        "$extensions": {
+          "com.designotron": {
+            "id": "space",
+            "index": 1
+          }
+        },
+        "$type": "number",
+        "$value": 4
+      },
+      "2": {
+        "$extensions": {
+          "com.designotron": {
+            "id": "space2",
+            "index": 2
+          }
+        },
+        "$type": "number",
+        "$value": 8.5
+      }
+    }
+  },
+  "Theme": {
+    "$extensions": {
+      "com.designotron": {
+        "id": "c2",
+        "index": 1,
+        "modes": [
+          "Light",
+          "Dark"
+        ],
+        "name": "Theme"
+      }
+    },
+    "Font": {
+      "$extensions": {
+        "com.designotron": {
+          "id": "font",
+          "index": 2,
+          "modes": {
+            "Dark": "Georgia"
+          },
+          "type": "string"
+        }
+      },
+      "$value": "Inter"
+    },
+    "Pad": {
+      "$extensions": {
+        "com.designotron": {
+          "id": "pad",
+          "index": 3,
+          "modes": {
+            "Dark": 16
+          }
+        }
+      },
+      "$type": "number",
+      "$value": "{Primitives.Space.2}"
+    },
+    "Surface": {
+      "Bg": {
+        "$extensions": {
+          "com.designotron": {
+            "id": "bg",
+            "index": 0,
+            "modes": {
+              "Dark": "{Primitives.Black}"
+            }
+          }
+        },
+        "$type": "color",
+        "$value": "#FFFFFF"
+      },
+      "Glass": {
+        "$description": "Frosted",
+        "$extensions": {
+          "com.designotron": {
+            "id": "glass",
+            "index": 1,
+            "modes": {
+              "Dark": "#112233"
+            },
+            "scopes": [
+              "fill",
+              "stroke"
+            ]
+          }
+        },
+        "$type": "color",
+        "$value": "#11223380"
+      }
+    }
+  }
+}

@@ -39,6 +39,9 @@ mod rotated_flow_tests;
 pub mod shapes;
 pub mod svg_import;
 pub mod text;
+pub mod tokens_import;
+#[cfg(test)]
+mod tokens_import_tests;
 pub mod variables;
 pub mod vector_edit;
 

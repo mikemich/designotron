@@ -25,6 +25,56 @@ function dataUrlToBlob(dataUrl: string): Blob {
   return new Blob([bytes], { type: mime });
 }
 
+// Pixel sizes of the images the file uses, handed to the engine (tiled fills are laid out by them).
+// `src` is the paint source: `asset:<id>` or an http(s) URL.
+const sizes = new Map<string, [number, number]>();
+let queued: Record<string, [number, number]> = {};
+let sizeSink: ((json: string) => void) | null = null;
+let flushTimer: number | null = null;
+
+function flushSizes() {
+  flushTimer = null;
+  if (!sizeSink || !Object.keys(queued).length) return;
+  const batch = queued;
+  queued = {};
+  sizeSink(JSON.stringify(batch));
+}
+
+function noteSize(src: string, w: number, h: number) {
+  const old = sizes.get(src);
+  if (old && old[0] === w && old[1] === h) return;
+  sizes.set(src, [w, h]);
+  queued[src] = [w, h];
+  // One call per frame however many images were measured in it.
+  if (flushTimer === null) flushTimer = (typeof requestAnimationFrame === "function" ? requestAnimationFrame(flushSizes) : setTimeout(flushSizes, 0)) as unknown as number;
+}
+
+/** Where measured sizes go (the engine). Everything measured so far is sent at once. */
+export function setSizeSink(sink: (json: string) => void) {
+  sizeSink = sink;
+  queued = Object.fromEntries(sizes);
+  flushSizes();
+}
+
+/** The size measured for a paint source, if any. */
+export function knownImageSize(src: string): [number, number] | undefined {
+  return sizes.get(src);
+}
+
+const remoteSeen = new Set<string>();
+
+/** Measures an image (an asset, or an http(s) source the canvas has just loaded) once; failures leave no size. */
+function measureSrc(src: string, url: string) {
+  void tryImageSize(url).then((s) => s && noteSize(src, s.width, s.height));
+}
+
+/** An http(s) image that has loaded: its size is read from the browser's cached copy. */
+export function noteRemoteImage(src: string) {
+  if (!/^https?:\/\//i.test(src) || remoteSeen.has(src)) return;
+  remoteSeen.add(src);
+  measureSrc(src, src);
+}
+
 /** Registers a data URL and returns its asset id. */
 export function addAsset(dataUrl: string): string {
   const id = hash(dataUrl);
@@ -38,6 +88,7 @@ export function addAsset(dataUrl: string): string {
     // Both maps only once the image decoded: a bad one leaves nothing behind.
     objectUrls.set(id, URL.createObjectURL(blob));
     dataUrls.set(id, dataUrl);
+    measureSrc("asset:" + id, dataUrl);
   }
   return id;
 }
@@ -59,6 +110,7 @@ export function loadAssets(map: Record<string, string> | undefined) {
     if (!dataUrls.has(id)) {
       dataUrls.set(id, url);
       objectUrls.set(id, URL.createObjectURL(dataUrlToBlob(url)));
+      measureSrc("asset:" + id, url);
     }
   }
 }
@@ -131,18 +183,24 @@ function dataUrlText(url: string): string | null {
   }
 }
 
-export function imageSize(url: string): Promise<{ width: number; height: number }> {
+/** The image's own size, or null when it can't be read or decoded. */
+export function tryImageSize(url: string): Promise<{ width: number; height: number } | null> {
   if (/^data:image\/svg\+xml/i.test(url)) {
     const text = dataUrlText(url);
     const size = text ? svgSize(text) : null;
     if (size) return Promise.resolve({ width: Math.max(1, Math.round(size.width)), height: Math.max(1, Math.round(size.height)) });
   }
+  if (typeof Image === "undefined") return Promise.resolve(null);
   return new Promise((resolve) => {
     const img = new Image();
-    img.onload = () => resolve({ width: img.naturalWidth || 200, height: img.naturalHeight || 200 });
-    img.onerror = () => resolve({ width: 200, height: 200 });
+    img.onload = () => resolve(img.naturalWidth && img.naturalHeight ? { width: img.naturalWidth, height: img.naturalHeight } : null);
+    img.onerror = () => resolve(null);
     img.src = url;
   });
+}
+
+export async function imageSize(url: string): Promise<{ width: number; height: number }> {
+  return (await tryImageSize(url)) ?? { width: 200, height: 200 };
 }
 
 /** File extension of an asset's image type. */

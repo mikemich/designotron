@@ -29,7 +29,9 @@ import { FollowFrame } from "./FollowFrame";
 import { CursorChat } from "./CursorChat";
 import { GuestBar } from "../panels/GuestBar";
 import { reportCursor, useCollab } from "../collab";
-import { insertImageFile, insertSvgFile, openDtronFile, pasteData, toggleVectorPointSmooth, vectorPoints } from "../actions";
+import { assetUrl, noteRemoteImage } from "../assets";
+import { imagesIn } from "../imageAssets";
+import { insertImageFile, insertSvgFile, openDtronFile, pasteData, placeImageSource, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu, insideInstance } from "./contextMenu";
 import { pickColorAt } from "./eyedropper";
 import { useDemo } from "../Demo";
@@ -244,6 +246,18 @@ export function Canvas() {
   const pageObj = doc.pages.find((p) => p.id === page) ?? doc.pages[0];
   // Canvas content is patched per top-level layer: only changed roots are re-rendered and replaced.
   const contentRef = useRef<SVGGElement>(null);
+  // `load` doesn't bubble, so the canvas listens in the capture phase: an http(s) image that has loaded
+  // tells the engine its size (tiled fills lay out by it).
+  useEffect(() => {
+    const host = contentRef.current;
+    if (!host) return;
+    const onLoad = (e: Event) => {
+      const href = (e.target as Element | null)?.getAttribute?.("href");
+      if (href) noteRemoteImage(href);
+    };
+    host.addEventListener("load", onLoad, true);
+    return () => host.removeEventListener("load", onLoad, true);
+  }, []);
   const rootEls = useRef(new Map<string, SVGGElement>());
   // What each root paints (page space) and how many text layers it has, from the engine, so
   // roots far outside the view can be left out of the layout and painting.
@@ -1229,9 +1243,13 @@ export function Canvas() {
     if (main) {
       dispatch({ op: "createInstance", componentId: comp, x: p.x - main.width / 2, y: p.y - main.height / 2, parent: null, anchor: p, intoComponents: true });
     }
+    // A picture from the Images list in Assets: a new layer at its own size.
+    const picture = e.dataTransfer.getData("application/x-designotron-image");
+    // Only a source the file already holds: an asset it has or an http(s) link one of its layers uses (never raw data).
+    if (picture && droppableImage(picture)) await placeImageSource(picture, p.x, p.y);
     // A stock photo from the Assets panel: a new image layer at the pointer.
     const photo = e.dataTransfer.getData("application/x-designotron-photo");
-    if (photo) {
+    if (photo && /^[\w:.\-/]{1,200}$/.test(photo)) {
       try {
         const [{ photoDetails }, { placeNewLayer }, { photoEnv }] = await Promise.all([import("../photos/providers"), import("../photos/place"), import("../photos/settings")]);
         await placeNewLayer(await photoDetails(photoEnv(), photo), { x: p.x, y: p.y });
@@ -1676,4 +1694,10 @@ function ZoomFlash({ zoom }: { zoom: number }) {
     return () => clearTimeout(t);
   }, [zoom]);
   return <div className={"zoom-indicator" + (shown ? " shown" : "")}>{Math.round(zoom * 100)}%</div>;
+}
+
+/** Whether a dragged image source is one the file holds: an `asset:` id that exists, or an http(s) URL some layer uses. */
+function droppableImage(src: string): boolean {
+  if (src.startsWith("asset:")) return !!assetUrl(src.slice(6));
+  return /^https?:\/\//i.test(src) && imagesIn(getDoc(), null).some((e) => e.src === src);
 }

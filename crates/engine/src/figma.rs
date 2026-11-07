@@ -235,6 +235,26 @@ impl Import<'_> {
               None => image["scaleMode"] = json!("fill"),
             }
           }
+          if let Some(f) = num(&p, "scalingFactor").filter(|f| *f > 0.0 && (*f - 1.0).abs() > 1e-9) {
+            image["scalingFactor"] = json!(f.clamp(0.01, 100.0));
+          }
+          if let Some(r) = num(&p, "rotation") {
+            let turns = crate::paint::quarter_turns(r);
+            if turns != 0 {
+              image["rotation"] = json!(turns);
+            }
+          }
+          if let Some(f) = p.get("filters").filter(|f| f.is_object()) {
+            let mut filters = serde_json::Map::new();
+            for k in ["exposure", "contrast", "saturation", "temperature", "tint", "highlights", "shadows"] {
+              if let Some(v) = num(f, k).filter(|v| *v != 0.0) {
+                filters.insert(k.into(), json!(v.clamp(-1.0, 1.0)));
+              }
+            }
+            if !filters.is_empty() {
+              image["filters"] = filters.into();
+            }
+          }
           image
         }
         _ => continue,
@@ -910,6 +930,12 @@ impl Import<'_> {
             }
           };
           pending.json.insert("action".into(), json!(action));
+          // Figma's "Preserve scroll position" (Navigate to, Swap overlay and Change to).
+          if a.get("preserveScrollPosition").and_then(|v| v.as_bool()) == Some(true)
+            && matches!(action, "navigate" | "swapOverlay" | "changeTo")
+          {
+            pending.json.insert("preserveScroll".into(), json!(true));
+          }
           // A NODE action can arrive without its destination; the layer's own field has it.
           pending.destination = str_of(a, "destinationId").or(legacy).map(str::to_string);
           if let Some(o) = a.get("overlayRelativePosition") {
@@ -1424,6 +1450,38 @@ mod tests {
   }
 
   #[test]
+  fn image_paints_keep_scale_rotation_and_filters() {
+    let file = json!({
+      "name": "Img",
+      "document": { "id": "0:0", "type": "DOCUMENT", "children": [{
+        "id": "0:1", "type": "CANVAS", "name": "P", "children": [
+          { "id": "1:1", "type": "RECTANGLE", "name": "Pic",
+            "absoluteBoundingBox": { "x": 0, "y": 0, "width": 100, "height": 60 }, "size": { "x": 100, "y": 60 },
+            "relativeTransform": [[1, 0, 0], [0, 1, 0]],
+            "fills": [{ "type": "IMAGE", "imageRef": "a", "scaleMode": "TILE", "scalingFactor": 0.5,
+              "rotation": 450, "filters": { "exposure": 0.25, "shadows": -2, "tint": 0 } }] }
+        ] }] }
+    });
+    let mut gen = IdGen::new(7);
+    let mut doc = new_document(&mut gen, "x");
+    let images = BTreeMap::from([("a".to_string(), "asset:a".to_string())]);
+    import(&mut doc, &mut gen, &file, &images).unwrap();
+    let n = doc.nodes.values().find(|n| n.name == "Pic").unwrap();
+    match &n.fills[0] {
+      crate::model::Paint::Image {
+        scaling_factor,
+        rotation,
+        filters: Some(f),
+        ..
+      } => {
+        assert_eq!((*scaling_factor, *rotation), (0.5, 90.0));
+        assert_eq!((f.exposure, f.shadows, f.tint), (0.25, -1.0, 0.0));
+      }
+      other => panic!("{other:?}"),
+    }
+  }
+
+  #[test]
   fn crop_transforms_invert_into_image_rectangles() {
     let p = json!({ "imageTransform": [[0.5, 0, 0.25], [0, 0.5, 0.1]] });
     let c = crop_rect(&p).unwrap();
@@ -1518,7 +1576,7 @@ mod tests {
             "1:3",
             "Hover",
             json!({ "interactions": [{ "trigger": { "type": "ON_HOVER" }, "actions": [{
-          "type": "NODE", "destinationId": "2:1", "navigation": "NAVIGATE",
+          "type": "NODE", "destinationId": "2:1", "navigation": "NAVIGATE", "preserveScrollPosition": true,
           "transition": { "type": "SMART_ANIMATE", "duration": 300, "easing": { "type": "EASE_IN_AND_OUT" } }
         }] }] }),
           ),
@@ -1538,7 +1596,7 @@ mod tests {
             "1:8",
             "Variant",
             click(
-              json!([{ "type": "NODE", "destinationId": "7:2", "navigation": "CHANGE_TO", "transition": { "type": "DISSOLVE", "duration": 200 } }]),
+              json!([{ "type": "NODE", "destinationId": "7:2", "navigation": "CHANGE_TO", "preserveScrollPosition": true, "transition": { "type": "DISSOLVE", "duration": 200 } }]),
             ),
           ),
           rect("1:9", "Close", click(json!([{ "type": "CLOSE" }]))),
@@ -1603,6 +1661,10 @@ mod tests {
       (hover.transition, hover.duration_ms, hover.easing),
       (Transition::SmartAnimate, 300.0, Easing::EaseInOut)
     );
+
+    // "Preserve scroll position" comes across where Designotron has it, and stays off elsewhere.
+    assert!(hover.preserve_scroll && only("Variant").preserve_scroll);
+    assert!(!open.preserve_scroll && !only("Wait").preserve_scroll);
 
     let wait = only("Wait");
     assert_eq!(

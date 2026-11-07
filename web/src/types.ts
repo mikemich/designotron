@@ -36,6 +36,17 @@ export interface ImageCrop {
   h: number;
 }
 
+/** The seven image adjustments of an image fill, each -1..1 (mirrors `ImageFilters` in model.rs). */
+export interface ImageFilters {
+  exposure?: number;
+  contrast?: number;
+  saturation?: number;
+  temperature?: number;
+  tint?: number;
+  highlights?: number;
+  shadows?: number;
+}
+
 /** Where a stock photo came from and under which licence (mirrors `ImageCredit` in model.rs). */
 export interface ImageCredit {
   provider: "openverse" | "unsplash" | "pexels" | string;
@@ -60,7 +71,7 @@ export type Paint =
   | { type: "radialGradient"; stops: GradientStop[]; opacity: number; visible: boolean; handles?: GradientHandles }
   | { type: "angularGradient"; stops: GradientStop[]; opacity: number; visible: boolean; handles?: GradientHandles }
   | { type: "diamondGradient"; stops: GradientStop[]; opacity: number; visible: boolean; handles?: GradientHandles }
-  | { type: "image"; src: string; scaleMode: "fill" | "fit" | "stretch" | "tile" | "crop"; opacity: number; visible: boolean; crop?: ImageCrop; credit?: ImageCredit };
+  | { type: "image"; src: string; scaleMode: "fill" | "fit" | "stretch" | "tile" | "crop"; opacity: number; visible: boolean; crop?: ImageCrop; credit?: ImageCredit; scalingFactor?: number; rotation?: number; filters?: ImageFilters };
 
 export type EffectType = "dropShadow" | "innerShadow" | "layerBlur" | "backgroundBlur";
 
@@ -150,6 +161,8 @@ export interface Interaction {
   easing?: Easing;
   /** Placement and behaviour for openOverlay / swapOverlay. */
   overlay: OverlaySettings;
+  /** Navigate to, Swap overlay and Change to: the screen that opens keeps the scroll position of the one it replaces. The engine leaves the key out when off. */
+  preserveScroll?: boolean;
 }
 
 export type Direction = "left" | "right" | "up" | "down";

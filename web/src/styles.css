@@ -706,6 +706,11 @@ textarea.textinput {
 .layer-filter-item:hover {
   background: var(--panel-2);
 }
+.layer-filter-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
 .layer-filter-clear,
 .layer-select-all {
   background: none;
@@ -1293,6 +1298,10 @@ a.btn {
 }
 .presenter .stage {
   position: relative;
+}
+/* The shadow sits on the viewport, not on each stage: during Push and Move in/out two stages are on
+   screen and the entering one's shadow used to fall on the leaving one as a dark strip. */
+.presenter .presenter-viewport {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
 }
 .presenter .hotspot {
@@ -1323,15 +1332,64 @@ a.btn {
 .presenter .overlay-frame {
   position: absolute;
 }
+/* An overlay bigger than the screen is limited to it and scrolls inside (scrollbars hidden like the scrollers). */
+.presenter .overlay-frame.overlay-scrolls {
+  scrollbar-width: none;
+}
+.presenter .overlay-frame.overlay-scrolls::-webkit-scrollbar {
+  display: none;
+}
 .presenter .hint-flash {
   background: rgba(13, 153, 255, 0.25);
   outline: 2px solid var(--select);
+}
+/* "Always show hotspots": every clickable area is outlined, without the flash. */
+.presenter.hints-always .hotspot {
+  background: rgba(13, 153, 255, 0.15);
+  outline: 2px solid var(--select);
+  outline-offset: -1px;
+}
+/* The focus ring must stay visible when every hotspot is outlined. */
+.presenter.hints-always .hotspot:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 5px var(--select);
+  background: rgba(13, 153, 255, 0.3);
+}
+.presenter .bar-menu {
+  position: relative;
+}
+.presenter .bar-menu-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 230px;
+  background: rgba(30, 30, 30, 0.97);
+  border-radius: 8px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 10;
+}
+.presenter .bar-menu-list label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.presenter .bar-menu-list label:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 .presenter .bar {
   position: fixed;
   top: 12px;
   left: 50%;
   transform: translateX(-50%);
+  z-index: 20;
   background: rgba(30, 30, 30, 0.9);
   border-radius: 8px;
   padding: 4px;
@@ -1904,6 +1962,39 @@ body:has(.modal-bg) .hint-card {
 .variables-dialog {
   width: min(1080px, calc(100vw - 32px));
   height: 540px;
+}
+.var-import-report {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  font-size: 12px;
+}
+.var-import-report.error {
+  color: var(--danger, #f24822);
+}
+.var-import-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.var-import-skipped-btn {
+  background: none;
+  border: 0;
+  color: var(--select);
+  cursor: pointer;
+  padding: 0 2px;
+  font: inherit;
+}
+.var-import-skipped {
+  margin: 6px 0 0;
+  padding: 0 0 0 16px;
+  max-height: 120px;
+  overflow: auto;
+}
+.var-import-skipped code {
+  font-size: 11px;
 }
 .variables-body {
   display: flex;
@@ -3149,6 +3240,102 @@ body:has(.phone-note) .toast {
 .scale-mode-row .field {
   flex: 1;
   min-width: 7em;
+}
+/* r17c: image fill popover (rotate, adjust) and effect fields */
+.image-turn-row {
+  align-items: center;
+}
+.image-turn-row .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.image-adjust {
+  margin: 8px 0 4px;
+}
+.image-adjust-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: var(--text-2);
+  font-size: 11px;
+}
+.image-adjust-row {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  font-size: 11px;
+  color: var(--text-2);
+}
+.image-adjust-row input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--select);
+}
+.image-adjust-row output {
+  text-align: right;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+/* Spread, Blur, X and Y fields: equal widths, the whole label shown, values to the right. */
+.effect-fields .field .lbl {
+  width: auto;
+  min-width: 24px;
+  padding: 0 4px 0 8px;
+  white-space: nowrap;
+  overflow: visible;
+}
+.effect-fields .field input {
+  text-align: right;
+}
+/* Images in Assets */
+.image-assets .image-asset {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 5px;
+}
+.image-assets .image-main {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+.image-assets .image-asset:hover {
+  background: var(--panel-2);
+}
+.image-assets .image-asset.on {
+  background: var(--panel-3);
+}
+.image-assets .image-thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: 4px;
+  background: var(--panel-2) center / cover no-repeat;
+  border: 1px solid var(--border, #3a3a3a);
+}
+.image-assets .image-meta {
+  display: grid;
+  min-width: 0;
+  font-size: 11px;
+}
+.image-assets .image-meta .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
 }
 /* W3-F inspect */
 .insp-live {

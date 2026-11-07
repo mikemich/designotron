@@ -2961,4 +2961,247 @@ mod r15b {
     assert!(b.variables.is_empty() && b.styles.colors.is_empty());
     assert!(b.get(&id).unwrap().bindings.is_empty());
   }
+
+  #[test]
+  fn create_nodes_takes_effects_blend_mode_and_image_keys() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{
+        "type": "rectangle", "name": "Photo", "width": 200, "height": 100,
+        "imageUrl": "asset:a", "imageScaleMode": "tile", "imageScale": 0.5, "imageRotation": 270,
+        "imageFilters": { "saturation": -1, "exposure": 0.25 },
+        "blendMode": "multiply",
+        "effects": [
+          { "type": "dropShadow", "x": 0, "y": 8, "blur": 24, "spread": 2, "color": "#00000080" },
+          { "type": "layerBlur", "blur": 3, "visible": false }
+        ]
+      }, {
+        "type": "rectangle", "name": "Fit", "width": 50, "height": 50, "imageUrl": "asset:b", "scaleMode": "fit", "blendMode": "color_dodge"
+      }] }),
+    );
+    assert!(r.get("warnings").is_none_or(|w| w.as_array().unwrap().is_empty()), "{r}");
+    let ids = created(&r);
+    let n = e.doc.get(&ids[0]).unwrap();
+    assert_eq!(n.blend_mode, crate::model::BlendMode::Multiply);
+    assert_eq!(n.effects.len(), 2);
+    assert_eq!((n.effects[0].y, n.effects[0].blur, n.effects[0].spread), (8.0, 24.0, 2.0));
+    assert_eq!(n.effects[0].color, "#00000080");
+    assert!(!n.effects[1].visible && n.effects[1].kind == crate::model::EffectType::LayerBlur);
+    match &n.fills[0] {
+      crate::model::Paint::Image {
+        scale_mode,
+        scaling_factor,
+        rotation,
+        filters: Some(f),
+        ..
+      } => {
+        assert_eq!(
+          (*scale_mode, *scaling_factor, *rotation),
+          (crate::model::ScaleMode::Tile, 0.5, 270.0)
+        );
+        assert_eq!((f.saturation, f.exposure, f.tint), (-1.0, 0.25, 0.0));
+      }
+      other => panic!("{other:?}"),
+    }
+    let fit = e.doc.get(&ids[1]).unwrap();
+    assert_eq!(fit.blend_mode, crate::model::BlendMode::ColorDodge);
+    assert!(matches!(
+      &fit.fills[0],
+      crate::model::Paint::Image {
+        scale_mode: crate::model::ScaleMode::Fit,
+        ..
+      }
+    ));
+    // update_nodes changes them in place and keeps the image.
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": ids[0], "imageRotation": 0, "imageFilters": null, "imageScaleMode": "stretch" }] }),
+    );
+    match &e.doc.get(&ids[0]).unwrap().fills[0] {
+      crate::model::Paint::Image {
+        src,
+        rotation,
+        filters,
+        scale_mode,
+        ..
+      } => {
+        assert_eq!(src, "asset:a");
+        assert!(*rotation == 0.0 && filters.is_none() && *scale_mode == crate::model::ScaleMode::Stretch);
+      }
+      other => panic!("{other:?}"),
+    }
+  }
+
+  #[test]
+  fn effects_with_shadow_and_wrong_image_values_are_errors_naming_the_field() {
+    let mut e = engine();
+    let err = |e: &mut Engine, spec: Value| -> String { e.dispatch(ai("create_nodes", json!({ "nodes": [spec] }))).unwrap_err() };
+    let both = err(
+      &mut e,
+      json!({ "type": "rectangle", "effects": [{ "type": "layerBlur", "blur": 2 }], "shadow": { "y": 2 } }),
+    );
+    assert!(both.contains("effects") && both.contains("not both"), "{both}");
+    let blend = err(&mut e, json!({ "type": "rectangle", "blendMode": "multipy" }));
+    assert!(blend.contains("blendMode") && blend.contains("multiply"), "{blend}");
+    let kind = err(&mut e, json!({ "type": "rectangle", "effects": [{ "type": "glow" }] }));
+    assert!(kind.contains("effects[0].type"), "{kind}");
+    let rot = err(&mut e, json!({ "type": "rectangle", "imageUrl": "asset:a", "imageRotation": 45 }));
+    assert!(rot.contains("imageRotation") && rot.contains("90"), "{rot}");
+    let range = err(
+      &mut e,
+      json!({ "type": "rectangle", "imageUrl": "asset:a", "imageFilters": { "contrast": 50 } }),
+    );
+    assert!(range.contains("imageFilters.contrast"), "{range}");
+    let scale = err(&mut e, json!({ "type": "rectangle", "imageUrl": "asset:a", "imageScale": 0 }));
+    assert!(scale.contains("imageScale"), "{scale}");
+    // An image key without an image fill is a warning, not a silent drop.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle", "imageRotation": 90 }] }),
+    );
+    assert!(r["warnings"][0].as_str().unwrap().contains("no image fill"), "{r}");
+  }
+
+  #[test]
+  fn image_paint_objects_in_fill_are_normalised() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "rectangle", "width": 10, "height": 10,
+        "fill": { "type": "image", "src": "asset:a", "scaleMode": "tile", "scalingFactor": 500, "rotation": 450,
+                  "filters": { "contrast": 3, "tint": 0 } } }] }),
+    );
+    match &e.doc.get(&created(&r)[0]).unwrap().fills[0] {
+      crate::model::Paint::Image {
+        scaling_factor,
+        rotation,
+        filters: Some(f),
+        ..
+      } => {
+        assert_eq!((*scaling_factor, *rotation, f.contrast), (100.0, 90.0, 1.0));
+      }
+      other => panic!("{other:?}"),
+    }
+  }
+}
+
+mod placement {
+  use super::*;
+
+  fn create(e: &mut Engine, nodes: Value) -> Value {
+    e.dispatch(ai("create_nodes", json!({ "nodes": nodes }))).unwrap()
+  }
+
+  fn bounds(e: &Engine, id: &str) -> (f64, f64, f64, f64) {
+    let n = e.doc.get(id).unwrap();
+    (n.x, n.y, n.x + n.width, n.y + n.height)
+  }
+
+  fn id_of(r: &Value, i: usize) -> String {
+    r["created"][i]["id"].as_str().unwrap().to_string()
+  }
+
+  fn disjoint(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    a.2 <= b.0 || b.2 <= a.0 || a.3 <= b.1 || b.3 <= a.1
+  }
+
+  #[test]
+  fn components_made_without_positions_do_not_overlap() {
+    let mut e = engine();
+    let mut ids = Vec::new();
+    for i in 0..5 {
+      let r = create(
+        &mut e,
+        json!([{ "type": "component", "name": format!("C{i}"), "width": 120, "height": 40 }]),
+      );
+      ids.push(id_of(&r, 0));
+    }
+    for (i, a) in ids.iter().enumerate() {
+      for b in &ids[i + 1..] {
+        assert!(
+          disjoint(bounds(&e, a), bounds(&e, b)),
+          "{:?} overlaps {:?}",
+          bounds(&e, a),
+          bounds(&e, b)
+        );
+      }
+    }
+    // The first sits at the origin, the next ones to its right, 100 px apart, at the same top.
+    assert_eq!(bounds(&e, &ids[0]), (0.0, 0.0, 120.0, 40.0));
+    assert_eq!(bounds(&e, &ids[1]), (220.0, 0.0, 340.0, 40.0));
+    assert_eq!(bounds(&e, &ids[2]).0, 440.0);
+  }
+
+  #[test]
+  fn roots_of_one_call_go_left_to_right_and_a_spec_with_x_keeps_it() {
+    let mut e = engine();
+    let r = create(
+      &mut e,
+      json!([
+        { "type": "frame", "name": "A", "width": 100, "height": 50 },
+        { "type": "frame", "name": "B", "width": 100, "height": 50 },
+        { "type": "frame", "name": "Fixed", "x": 2000, "width": 100, "height": 50 },
+        { "type": "frame", "name": "C", "width": 100, "height": 50 }
+      ]),
+    );
+    assert_eq!(bounds(&e, &id_of(&r, 0)).0, 0.0);
+    // B goes right of all the content, the one with an x stays where it was put.
+    assert_eq!(bounds(&e, &id_of(&r, 1)).0, 2200.0);
+    assert_eq!(bounds(&e, &id_of(&r, 2)).0, 2000.0);
+    let c = bounds(&e, &id_of(&r, 3));
+    assert!(c.0 >= 2300.0 && disjoint(c, bounds(&e, &id_of(&r, 1))), "{c:?}");
+  }
+
+  #[test]
+  fn a_free_origin_is_used_even_when_other_content_is_far_away() {
+    let mut e = engine();
+    create(
+      &mut e,
+      json!([{ "type": "frame", "name": "Far", "x": 1000, "y": 500, "width": 100, "height": 100 }]),
+    );
+    let r = create(&mut e, json!([{ "type": "frame", "name": "Near", "width": 100, "height": 100 }]));
+    assert_eq!(bounds(&e, &id_of(&r, 0)), (0.0, 0.0, 100.0, 100.0));
+  }
+
+  #[test]
+  fn children_and_parented_layers_are_not_moved() {
+    let mut e = engine();
+    let r = create(&mut e, json!([{ "type": "frame", "name": "Screen", "width": 400, "height": 400 }]));
+    let screen = id_of(&r, 0);
+    let r = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "parentId": screen, "nodes": [{ "type": "rectangle", "width": 10, "height": 10 }] }),
+      ))
+      .unwrap();
+    assert_eq!(bounds(&e, &id_of(&r, 0)).0, 0.0);
+    let r = create(
+      &mut e,
+      json!([{ "type": "frame", "name": "Kids", "x": 900, "width": 300, "height": 100,
+      "children": [{ "type": "rectangle", "name": "k1", "width": 10, "height": 10 }, { "type": "rectangle", "name": "k2", "width": 10, "height": 10 }] }]),
+    );
+    let kids = e.doc.get(&id_of(&r, 0)).unwrap().children.clone();
+    assert_eq!(bounds(&e, &kids[0]), bounds(&e, &kids[1]));
+  }
+
+  #[test]
+  fn create_instance_without_x_and_y_goes_to_free_space() {
+    let mut e = engine();
+    let r = create(&mut e, json!([{ "type": "component", "name": "Btn", "width": 120, "height": 40 }]));
+    let comp = id_of(&r, 0);
+    let a = e.dispatch(ai("create_instance", json!({ "componentId": comp }))).unwrap();
+    let b = e.dispatch(ai("create_instance", json!({ "componentId": comp }))).unwrap();
+    let c = e
+      .dispatch(ai("create_instance", json!({ "componentId": comp, "x": 5, "y": 7 })))
+      .unwrap();
+    let (a, b, c) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap(), c["id"].as_str().unwrap());
+    assert!(disjoint(bounds(&e, &comp), bounds(&e, a)));
+    assert!(disjoint(bounds(&e, a), bounds(&e, b)));
+    assert_eq!((bounds(&e, c).0, bounds(&e, c).1), (5.0, 7.0));
+  }
 }

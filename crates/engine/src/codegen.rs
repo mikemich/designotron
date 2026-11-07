@@ -785,10 +785,10 @@ impl<'a> Ctx<'a> {
       self.apply_styles(&mut el, &n);
     }
     if el.tag == "img" {
-      let fit = if el.styles.iter().any(|(k, v)| k == "background-size" && v == "contain") {
-        "contain"
-      } else {
-        "cover"
+      let fit = match el.styles.iter().find(|(k, _)| k == "background-size").map(|(_, v)| v.as_str()) {
+        Some("contain") => "contain",
+        Some("100% 100%") => "fill",
+        _ => "cover",
       };
       el.styles.retain(|(k, _)| !k.starts_with("background"));
       el.s("object-fit", fit);
@@ -956,6 +956,33 @@ impl<'a> Ctx<'a> {
         }
       }
       self.interactive_depth -= usize::from(interactive);
+    }
+    if needs_layers(&n) && el.tag != "img" {
+      let layers = self.fill_layers(&n);
+      if !el.styles.iter().any(|(k, _)| k == "position") {
+        el.s("position", "relative");
+      }
+      el.s("isolation", "isolate");
+      let mut layers = layers;
+      // The fills sit below the children (z-index -1), and an inset shadow on the layer itself
+      // would be painted under them: it moves to a last layer inside the fills.
+      if let Some((_, v)) = el.styles.iter().find(|(k, _)| k == "box-shadow").cloned() {
+        let (inset, rest): (Vec<String>, Vec<String>) = split_commas(&v).into_iter().partition(|p| p.starts_with("inset "));
+        if !inset.is_empty() {
+          if rest.is_empty() {
+            el.styles.retain(|(k, _)| k != "box-shadow");
+          } else {
+            el.s("box-shadow", rest.join(", "));
+          }
+          let mut shade = El::new("span");
+          for (k, val) in [("position", "absolute"), ("inset", "0"), ("border-radius", "inherit")] {
+            shade.s(k, val);
+          }
+          shade.s("box-shadow", inset.join(", "));
+          layers.children.push(shade);
+        }
+      }
+      el.children.insert(0, layers);
     }
     self.interactions(&mut el, &n);
     if el.navigate.is_some() || el.url.is_some() {
@@ -1843,6 +1870,151 @@ impl<'a> Ctx<'a> {
     }
   }
 
+  /// The fills of a layer with a rotated or adjusted image, as stacked layers (bottom first)
+  /// inside one clipped box under the children: a background can't turn or filter one image on
+  /// its own, and the paint order of the other fills must hold.
+  fn fill_layers(&self, n: &Node) -> El {
+    let mut host = El::new("span");
+    host.attrs.push(("aria-hidden".into(), "true".into()));
+    for (k, v) in [
+      ("position", "absolute"),
+      ("inset", "0"),
+      ("overflow", "hidden"),
+      ("border-radius", "inherit"),
+      ("pointer-events", "none"),
+      ("z-index", "-1"),
+    ] {
+      host.s(k, v);
+    }
+    let (w, h) = (n.width, n.height);
+    let mut uses_cq = false;
+    for p in n.fills.iter().filter(|p| p.visible()) {
+      let mut l = El::new("span");
+      l.s("position", "absolute");
+      let Paint::Image {
+        src,
+        scale_mode,
+        opacity,
+        crop,
+        scaling_factor,
+        rotation,
+        filters,
+        ..
+      } = p
+      else {
+        l.s("inset", "0");
+        l.s("background", css_paint(p, w, h));
+        host.children.push(l);
+        continue;
+      };
+      let rot = paint::quarter_turns(*rotation);
+      let natural = if *scale_mode == ScaleMode::Tile {
+        self.m.image_size(src)
+      } else {
+        None
+      };
+      l.s("background-image", format!("url('{}')", css_url(src)));
+      if *opacity < 1.0 {
+        l.s("opacity", fmt(*opacity));
+      }
+      // Geometry in percentages (and container units for the swapped box of a quarter turn), so the
+      // layers follow the layer's box when its size changes (Fill-width heroes, responsive pages).
+      let swap = rot == 90 || rot == 270;
+      let pc = |v: f64| format!("{}%", fmt(v * 100.0));
+      match scale_mode {
+        ScaleMode::Tile => {
+          let (cw, ch) = tile_size(natural, *scaling_factor);
+          l.s("background-size", format!("{} {}", px(cw), px(ch)));
+          l.s("background-repeat", "repeat");
+          // The tiles turn about the layer's corner (an SVG patternTransform): the layer is the
+          // visible box in the turned pattern space, so its sides swap at 90 and 270, and the
+          // translate is a whole side of the layer itself.
+          l.s("left", "0");
+          l.s("top", "0");
+          match rot {
+            0 => {
+              l.s("width", "100%");
+              l.s("height", "100%");
+              l.s("background-position", "0 0");
+            }
+            _ => {
+              let (lw, lh, pos, tr) = match rot {
+                90 => ("100cqh", "100cqw", "0 100cqw", "0, -100%"),
+                180 => ("100%", "100%", "100cqw 100cqh", "-100%, -100%"),
+                _ => ("100cqh", "100cqw", "100cqh 0", "-100%, 0"),
+              };
+              uses_cq = true;
+              l.s("width", lw);
+              l.s("height", lh);
+              l.s("background-position", pos);
+              l.s("transform-origin", "0 0");
+              l.s("transform", format!("rotate({rot}deg) translate({tr})"));
+            }
+          }
+        }
+        _ => {
+          l.s(
+            "background-size",
+            match scale_mode {
+              ScaleMode::Fill => "cover",
+              ScaleMode::Fit => "contain",
+              _ => "100% 100%",
+            },
+          );
+          l.s("background-position", "center");
+          l.s("background-repeat", "no-repeat");
+          // Where the box sits, as fractions of the layer: the whole layer, or a crop rectangle.
+          let (fx, fy, fw, fh) = match (scale_mode, crop) {
+            (ScaleMode::Crop, Some(c)) => (c.x, c.y, c.w, c.h),
+            _ => (0.0, 0.0, 1.0, 1.0),
+          };
+          if swap {
+            uses_cq = true;
+            l.s("left", pc(fx + fw / 2.0));
+            l.s("top", pc(fy + fh / 2.0));
+            l.s("width", format!("{}cqh", fmt(fh * 100.0)));
+            l.s("height", format!("{}cqw", fmt(fw * 100.0)));
+            l.s("transform", format!("translate(-50%, -50%) rotate({rot}deg)"));
+          } else {
+            if (fx, fy, fw, fh) == (0.0, 0.0, 1.0, 1.0) {
+              l.s("inset", "0");
+            } else {
+              l.s("left", pc(fx));
+              l.s("top", pc(fy));
+              l.s("width", pc(fw));
+              l.s("height", pc(fh));
+            }
+            if rot != 0 {
+              l.s("transform", format!("rotate({rot}deg)"));
+            }
+          }
+        }
+      }
+      if let Some(f) = filters.as_ref().filter(|f| !f.is_identity()) {
+        // A hash of the filter markup names it: equal adjustments share an id (each layer still repeats the definition).
+        let markup = paint::image_filter("x", f);
+        let id = format!("dt-img-{:08x}", fnv(&markup));
+        l.s("filter", format!("url(#{id})"));
+        // A span, so it is valid inside a button or link.
+        let mut defs = El::new("span");
+        defs.attrs.push(("aria-hidden".into(), "true".into()));
+        for (k, v) in [("position", "absolute"), ("width", "0"), ("height", "0"), ("overflow", "hidden")] {
+          defs.s(k, v);
+        }
+        defs.raw = Some(format!(
+          "<svg width=\"0\" height=\"0\" style=\"position:absolute\" aria-hidden=\"true\">{}</svg>",
+          paint::image_filter(&id, f)
+        ));
+        host.children.push(defs);
+      }
+      host.children.push(l);
+    }
+    if uses_cq {
+      host.s("container-type", "size");
+    }
+    host
+  }
+
   fn visual(&self, el: &mut El, n: &Node) {
     if n.opacity < 1.0 {
       el.s("opacity", fmt(n.opacity));
@@ -1864,11 +2036,13 @@ impl<'a> Ctx<'a> {
       return;
     }
     if n.kind != NodeType::Text {
+      // Rotated or adjusted images, and the fills around them, are stacked layers (`fill_layers`).
+      let layered = needs_layers(n);
       let bgs: Vec<String> = n
         .fills
         .iter()
         .rev()
-        .filter(|p| p.visible())
+        .filter(|p| p.visible() && !layered)
         .map(|p| css_paint(p, n.width, n.height))
         .collect();
       if bgs.len() == 1 && !bgs[0].contains('(') {
@@ -1889,7 +2063,15 @@ impl<'a> Ctx<'a> {
       if has_diamond(n) {
         el.approx = Some(DIAMOND_NOTE.into());
       }
-      if let Some(Paint::Image { scale_mode, crop, .. }) = n.fills.iter().find(|p| matches!(p, Paint::Image { .. }) && p.visible()) {
+      if let Some(Paint::Image {
+        scale_mode,
+        crop,
+        scaling_factor,
+        src,
+        ..
+      }) = n.fills.iter().find(|p| matches!(p, Paint::Image { .. }) && p.visible() && !layered)
+      {
+        let tile_css: String;
         match (scale_mode, crop) {
           // The whole image sits at `crop` in the layer's box; what pokes out is clipped by the box.
           (ScaleMode::Crop, Some(c)) => {
@@ -1903,15 +2085,21 @@ impl<'a> Ctx<'a> {
                 ScaleMode::Fill | ScaleMode::Crop => "cover",
                 ScaleMode::Fit => "contain",
                 ScaleMode::Stretch => "100% 100%",
-                ScaleMode::Tile => "64px 64px",
+                ScaleMode::Tile => {
+                  let (cw, ch) = tile_size(self.m.image_size(src), *scaling_factor);
+                  tile_css = format!("{} {}", px(cw), px(ch));
+                  &tile_css
+                }
               },
             );
-            el.s("background-position", "center");
+            // Tiles start at the layer's corner, like the pattern on the canvas.
+            el.s("background-position", if *scale_mode == ScaleMode::Tile { "0 0" } else { "center" });
           }
         }
-        if *scale_mode != ScaleMode::Tile {
-          el.s("background-repeat", "no-repeat");
-        }
+        el.s(
+          "background-repeat",
+          if *scale_mode == ScaleMode::Tile { "repeat" } else { "no-repeat" },
+        );
       }
       if let (Some(weights), Some(Paint::Solid { color, opacity, .. })) = (side_weights(n), n.strokes.iter().find(|p| p.visible())) {
         side_strokes(el, n, weights, &color::css_with_opacity(color, *opacity));
@@ -2501,17 +2689,56 @@ fn credits_comment(doc: &Document, root: &str) -> String {
   format!("<!-- Photo credits:\n{}\n-->\n", lines.join("\n"))
 }
 
+/// Whether a layer's image fills need `fill_layers`: one is turned or adjusted. (Text, vectors and
+/// lines don't draw fills as backgrounds.)
+fn needs_layers(n: &Node) -> bool {
+  if n.kind == NodeType::Text || n.kind == NodeType::Line || matches!(n.kind, NodeType::Vector | NodeType::Polygon | NodeType::Star) {
+    return false;
+  }
+  n.fills.iter().any(|p| match p {
+    Paint::Image { rotation, filters, .. } => {
+      p.visible() && (paint::quarter_turns(*rotation) != 0 || filters.as_ref().is_some_and(|f| !f.is_identity()))
+    }
+    _ => false,
+  })
+}
+
+/// The tile cell in CSS px: the image's own size times the factor (64 px when it is unknown).
+fn tile_size(natural: Option<(f64, f64)>, factor: f64) -> (f64, f64) {
+  let f = if factor.is_finite() && factor > 0.0 {
+    factor.clamp(0.01, 100.0)
+  } else {
+    1.0
+  };
+  match natural {
+    Some((w, h)) if w > 0.0 && h > 0.0 => ((w * f).min(16384.0), (h * f).min(16384.0)),
+    _ => ((64.0 * f).min(16384.0), (64.0 * f).min(16384.0)),
+  }
+}
+
+fn fnv(s: &str) -> u32 {
+  s.bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(16777619))
+}
+
 /// The image URL when a rectangle is just an image (one visible image fill).
 fn image_only(n: &Node) -> Option<String> {
   if n.kind != NodeType::Rectangle || !n.children.is_empty() {
     return None;
   }
   let visible: Vec<&Paint> = n.fills.iter().filter(|p| p.visible()).collect();
+  if needs_layers(n) {
+    return None;
+  }
   match visible.as_slice() {
     // A cropped image needs its background offset, which `<img>` can't express.
     [Paint::Image {
       scale_mode: ScaleMode::Crop,
       crop: Some(_),
+      ..
+    }] => None,
+    // A tile repeats at its own size: only a background does that.
+    [Paint::Image {
+      scale_mode: ScaleMode::Tile,
       ..
     }] => None,
     [Paint::Image { src, .. }] => Some(src.clone()),
@@ -3022,6 +3249,24 @@ fn tw_border_side(side: &str, v: &str) -> String {
 }
 
 /// Splits a padding value at the spaces outside parentheses (`calc(1px + 2px)` stays whole).
+/// `v` split at its top-level commas (not those inside `rgba(...)`), each part trimmed.
+fn split_commas(v: &str) -> Vec<String> {
+  let (mut depth, mut start, mut out) = (0usize, 0usize, Vec::new());
+  for (i, c) in v.char_indices() {
+    match c {
+      '(' => depth += 1,
+      ')' => depth = depth.saturating_sub(1),
+      ',' if depth == 0 => {
+        out.push(v[start..i].trim().to_string());
+        start = i + 1;
+      }
+      _ => {}
+    }
+  }
+  out.push(v[start..].trim().to_string());
+  out
+}
+
 fn split_top(v: &str) -> Vec<&str> {
   let (mut depth, mut start, mut out) = (0usize, 0usize, Vec::new());
   for (i, c) in v.char_indices() {
@@ -3175,7 +3420,8 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
   }
   if let Some(svg) = &el.raw {
     out.push_str(&format!(
-      "{pad}<div className={class_attr}{handler} dangerouslySetInnerHTML={{{{ __html: {} }}}} />\n",
+      "{pad}<{} className={class_attr}{handler} dangerouslySetInnerHTML={{{{ __html: {} }}}} />\n",
+      el.tag,
       serde_json::to_string(svg).unwrap_or_default()
     ));
     return;
@@ -3263,7 +3509,7 @@ fn html(el: &El, depth: usize, out: &mut String) {
   if el.tag == "img" {
     out.push_str(&format!("{pad}<img style=\"{style}\"{link} />\n"));
   } else if let Some(svg) = &el.raw {
-    out.push_str(&format!("{pad}<div style=\"{style}\"{link}>{svg}</div>\n"));
+    out.push_str(&format!("{pad}<{tag} style=\"{style}\"{link}>{svg}</{tag}>\n", tag = el.tag));
   } else if !el.spans.is_empty() {
     let inner: String = el
       .spans
@@ -4217,6 +4463,9 @@ mod tests {
     let mut img = crate::ops::default_node(NodeType::Rectangle, "img".into(), "Product photo".into());
     img.fills = vec![Paint::Image {
       credit: None,
+      scaling_factor: 1.0,
+      rotation: 0.0,
+      filters: None,
       src: "https://example.com/p.png".into(),
       scale_mode: ScaleMode::Fill,
       opacity: 1.0,
@@ -4513,6 +4762,9 @@ mod tests {
     r.height = 100.0;
     r.fills = vec![Paint::Image {
       credit: None,
+      scaling_factor: 1.0,
+      rotation: 0.0,
+      filters: None,
       src: "https://example.com/c.png".into(),
       scale_mode: ScaleMode::Crop,
       opacity: 1.0,
@@ -4540,6 +4792,9 @@ mod tests {
     let mut r = crate::ops::default_node(NodeType::Rectangle, "pic2".into(), "Pic2".into());
     r.fills = vec![Paint::Image {
       credit: None,
+      scaling_factor: 1.0,
+      rotation: 0.0,
+      filters: None,
       src: "https://example.com/it's \"q\".png".into(),
       scale_mode: ScaleMode::Crop,
       opacity: 1.0,
@@ -5026,6 +5281,9 @@ mod tests {
     let mut img = crate::ops::default_node(NodeType::Rectangle, "pic".into(), "Product photo".into());
     img.fills = vec![Paint::Image {
       credit: Some(Box::new(credit)),
+      scaling_factor: 1.0,
+      rotation: 0.0,
+      filters: None,
       src: "asset:abc".into(),
       scale_mode: ScaleMode::Fill,
       opacity: 1.0,
@@ -5094,6 +5352,9 @@ mod tests {
     let mut f = crate::ops::default_node(NodeType::Frame, "ph".into(), "Photo".into());
     f.fills = vec![Paint::Image {
       credit: None,
+      scaling_factor: 1.0,
+      rotation: 0.0,
+      filters: None,
       src: "asset:abc".into(),
       scale_mode: ScaleMode::Fill,
       opacity: 1.0,
@@ -5971,6 +6232,9 @@ mod r10_tests {
       visible: true,
       crop: None,
       credit: None,
+      scaling_factor: 1.0,
+      rotation: 0.0,
+      filters: None,
     }];
     let src = export_react(&doc, "r", &HeuristicMeasurer);
     assert!(src.contains("%2300ff00") && !src.contains("#00ff00"), "{src}");
@@ -7751,5 +8015,279 @@ mod r16c_tests {
     assert_eq!(crate::variables::first_number_token(&doc).as_deref(), Some("--gutter-wide"));
     let readme = project_file(&doc, "README.md");
     assert_eq!(readme.matches("calc(var(--gutter-wide) * 1px)").count(), 1, "{readme}");
+  }
+}
+
+#[cfg(test)]
+mod r17c_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::text::{FontSpec, HeuristicMeasurer};
+
+  fn sample() -> Document {
+    let mut gen = IdGen::new(11);
+    let mut doc = new_document(&mut gen, "Shop");
+    let page = doc.pages[0].id.clone();
+    let mut home = crate::ops::default_node(NodeType::Frame, "home".into(), "Home".into());
+    home.width = 390.0;
+    home.height = 844.0;
+    doc.insert(home, None, &page, None);
+    doc
+  }
+
+  struct SizedImages;
+
+  impl TextMeasurer for SizedImages {
+    fn measure(&self, text: &str, font: &FontSpec) -> f64 {
+      HeuristicMeasurer.measure(text, font)
+    }
+    fn image_size(&self, src: &str) -> Option<(f64, f64)> {
+      (src == "asset:a").then_some((40.0, 20.0))
+    }
+  }
+
+  fn image_layer(mode: ScaleMode, edit: impl FnOnce(&mut Paint)) -> Document {
+    let mut doc = sample();
+    let page = doc.get("home").unwrap().page.clone();
+    let mut r = crate::ops::default_node(NodeType::Rectangle, "pic".into(), "Pic".into());
+    r.width = 400.0;
+    r.height = 200.0;
+    let mut p = Paint::Image {
+      src: "asset:a".into(),
+      scale_mode: mode,
+      opacity: 1.0,
+      visible: true,
+      crop: None,
+      credit: None,
+      scaling_factor: 1.0,
+      rotation: 0.0,
+      filters: None,
+    };
+    edit(&mut p);
+    r.fills = vec![p];
+    doc.insert(r, Some("home"), &page, None);
+    doc
+  }
+
+  #[test]
+  fn a_tiled_image_repeats_at_its_own_size_times_the_scale() {
+    let doc = image_layer(ScaleMode::Tile, |_| {});
+    let html = export_html(&doc, "home", &SizedImages);
+    assert!(
+      html.contains("background-size: 40px 20px") && html.contains("background-repeat: repeat"),
+      "{html}"
+    );
+    assert!(html.contains("background-position: 0 0"), "{html}");
+    let half = image_layer(ScaleMode::Tile, |p| {
+      if let Paint::Image { scaling_factor, .. } = p {
+        *scaling_factor = 0.5;
+      }
+    });
+    assert!(export_html(&half, "home", &SizedImages).contains("background-size: 20px 10px"));
+    // Without a size: the old 64 px cell.
+    assert!(export_html(&doc, "home", &HeuristicMeasurer).contains("background-size: 64px 64px"));
+  }
+
+  #[test]
+  fn an_untouched_image_layer_exports_as_before() {
+    let doc = image_layer(ScaleMode::Fill, |_| {});
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(html.contains("<img "), "{html}");
+    assert!(
+      !html.contains("<svg") && !html.contains("isolation") && !html.contains("filter"),
+      "{html}"
+    );
+    let fill = image_layer(ScaleMode::Stretch, |_| {});
+    let react = export_react(&fill, "home", &HeuristicMeasurer);
+    assert!(!react.contains("isolation") && !react.contains("dt-img"), "{react}");
+  }
+
+  #[test]
+  fn a_rotated_fill_is_an_inner_layer_with_the_box_swapped() {
+    let doc = image_layer(ScaleMode::Fill, |p| {
+      if let Paint::Image { rotation, .. } = p {
+        *rotation = 90.0;
+      }
+    });
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(!html.contains("<img"), "{html}");
+    assert!(html.contains("isolation: isolate"), "{html}");
+    assert!(html.contains("z-index: -1"), "{html}");
+    // The box swaps in container units, centred and turned: it follows the layer's size.
+    assert!(html.contains("width: 100cqh; height: 100cqw"), "{html}");
+    assert!(html.contains("container-type: size"), "{html}");
+    assert!(html.contains("transform: translate(-50%, -50%) rotate(90deg)"), "{html}");
+    assert!(html.contains("left: 50%; top: 50%"), "{html}");
+    // A turned tile pattern: the layer is the box in the turned pattern space.
+    let tile = image_layer(ScaleMode::Tile, |p| {
+      if let Paint::Image { rotation, .. } = p {
+        *rotation = 90.0;
+      }
+    });
+    let html = export_html(&tile, "home", &SizedImages);
+    assert!(
+      html.contains("transform-origin: 0 0; transform: rotate(90deg) translate(0, -100%)"),
+      "{html}"
+    );
+    assert!(html.contains("background-position: 0 100cqw"), "{html}");
+  }
+
+  #[test]
+  fn an_adjusted_fill_gets_an_inline_filter_and_a_reference() {
+    let doc = image_layer(ScaleMode::Fill, |p| {
+      if let Paint::Image { filters, .. } = p {
+        *filters = Some(crate::model::ImageFilters {
+          exposure: 1.0,
+          ..Default::default()
+        });
+      }
+    });
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(html.contains("<svg width=\"0\" height=\"0\""), "{html}");
+    let at = html.find("filter: url(#dt-img-").expect("reference");
+    let id = &html[at + 13..at + 13 + "dt-img-".len() + 8];
+    assert!(html.contains(&format!("<filter id=\"{id}\"")), "{html}");
+    let react = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(
+      react.contains("[filter:url(#dt-img-") && react.contains("[isolation:isolate]"),
+      "{react}"
+    );
+  }
+
+  #[test]
+  fn other_fills_of_an_adjusted_layer_keep_their_order() {
+    let mut doc = image_layer(ScaleMode::Fill, |p| {
+      if let Paint::Image { filters, .. } = p {
+        *filters = Some(crate::model::ImageFilters {
+          contrast: 0.5,
+          ..Default::default()
+        });
+      }
+    });
+    let top = Paint::solid("#ff0000");
+    doc.get_mut("pic").unwrap().fills.push(top);
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    let img = html.find("background-image").expect("image layer");
+    let red = html.find("background: #FF0000").expect("solid layer");
+    assert!(img < red, "{html}");
+  }
+
+  #[test]
+  fn inset_shadows_stay_above_the_fills_of_a_layered_image() {
+    let mut doc = image_layer(ScaleMode::Fill, |p| {
+      if let Paint::Image { rotation, .. } = p {
+        *rotation = 90.0;
+      }
+    });
+    doc.get_mut("pic").unwrap().effects = vec![
+      crate::model::Effect {
+        kind: crate::model::EffectType::InnerShadow,
+        color: "#000000".into(),
+        x: 0.0,
+        y: 4.0,
+        blur: 8.0,
+        spread: 0.0,
+        visible: true,
+      },
+      crate::model::Effect {
+        kind: crate::model::EffectType::DropShadow,
+        color: "#00000080".into(),
+        x: 0.0,
+        y: 2.0,
+        blur: 6.0,
+        spread: 0.0,
+        visible: true,
+      },
+    ];
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    // The drop shadow stays on the layer; the inset one is the last layer inside the fills.
+    let shade = html.find("box-shadow: inset 0 4px 8px 0 ").expect("inset layer");
+    let fills = html.find("z-index: -1").expect("fills host");
+    assert!(shade > fills, "{html}");
+    assert_eq!(html.matches("inset 0 4px").count(), 1, "{html}");
+    assert!(html.contains("box-shadow: 0 2px 6px 0 rgba(0, 0, 0, 0.502)"), "{html}");
+  }
+
+  #[test]
+  fn fill_layers_follow_the_layers_size() {
+    // Not turned: the whole box, no pixel sizes.
+    let plain = image_layer(ScaleMode::Fill, |p| {
+      if let Paint::Image { filters, .. } = p {
+        *filters = Some(crate::model::ImageFilters {
+          exposure: 0.5,
+          ..Default::default()
+        });
+      }
+    });
+    let html = export_html(&plain, "home", &HeuristicMeasurer);
+    assert!(html.contains("inset: 0") && html.contains("background-size: cover"), "{html}");
+    let host = &html[html.find("z-index: -1").unwrap()..];
+    assert!(!host.contains("400px") && !host.contains("200px"), "{html}");
+    assert!(!html.contains("container-type"), "{html}");
+    // A crop: percentages of the layer, also when turned (container units).
+    let crop = image_layer(ScaleMode::Crop, |p| {
+      if let Paint::Image { crop, rotation, .. } = p {
+        *rotation = 180.0;
+        *crop = Some(crate::model::ImageCrop {
+          x: -0.25,
+          y: 0.5,
+          w: 1.5,
+          h: 0.5,
+        });
+      }
+    });
+    let html = export_html(&crop, "home", &HeuristicMeasurer);
+    assert!(html.contains("left: -25%; top: 50%; width: 150%; height: 50%"), "{html}");
+    assert!(html.contains("rotate(180deg)"), "{html}");
+    let quarter = image_layer(ScaleMode::Crop, |p| {
+      if let Paint::Image { crop, rotation, .. } = p {
+        *rotation = 270.0;
+        *crop = Some(crate::model::ImageCrop {
+          x: 0.0,
+          y: 0.0,
+          w: 0.5,
+          h: 1.0,
+        });
+      }
+    });
+    let html = export_html(&quarter, "home", &HeuristicMeasurer);
+    assert!(html.contains("left: 25%; top: 50%; width: 100cqh; height: 50cqw"), "{html}");
+    // An upright tile fills the box too.
+    let tile = image_layer(ScaleMode::Tile, |p| {
+      if let Paint::Image { filters, .. } = p {
+        *filters = Some(crate::model::ImageFilters {
+          tint: 0.5,
+          ..Default::default()
+        });
+      }
+    });
+    let html = export_html(&tile, "home", &SizedImages);
+    assert!(
+      html.contains("width: 100%; height: 100%") && html.contains("background-size: 40px 20px"),
+      "{html}"
+    );
+  }
+
+  #[test]
+  fn the_filter_definition_is_a_span_and_a_tile_cell_is_capped() {
+    let doc = image_layer(ScaleMode::Fill, |p| {
+      if let Paint::Image { filters, .. } = p {
+        *filters = Some(crate::model::ImageFilters {
+          exposure: 1.0,
+          ..Default::default()
+        });
+      }
+    });
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(
+      html.contains("overflow: hidden;\" aria-hidden=\"true\"><svg width=\"0\""),
+      "{html}"
+    );
+    let react = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(
+      react.contains("<span className=") && react.contains("dangerouslySetInnerHTML"),
+      "{react}"
+    );
+    assert_eq!(tile_size(Some((40000.0, 20.0)), 100.0), (16384.0, 2000.0));
   }
 }

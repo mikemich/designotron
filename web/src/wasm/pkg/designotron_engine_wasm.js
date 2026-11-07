@@ -128,14 +128,25 @@ export class WasmEngine {
         }
     }
     /**
+     * Whether this engine reads and writes child orders as moves and comments per message in
+     * deltas (what an editor tells the room it can do when joining).
+     * @returns {boolean}
+     */
+    collabLists() {
+        const ret = wasm.wasmengine_collabGranular(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * Starts the collaboration baseline at the current document; `ordered` when the relay
      * acknowledges changes in order, `granular` when it also takes pages, styles and variables
-     * per id (see `Engine::collab_reset`).
+     * per id, `lists` when it also takes child orders as moves and comments per message (see
+     * `Engine::collab_reset`).
      * @param {boolean} ordered
      * @param {boolean} granular
+     * @param {boolean} lists
      */
-    collabReset(ordered, granular) {
-        wasm.wasmengine_collabReset(this.__wbg_ptr, ordered, granular);
+    collabReset(ordered, granular, lists) {
+        wasm.wasmengine_collabReset(this.__wbg_ptr, ordered, granular, lists);
     }
     /**
      * What to write to storage so it matches the document: JSON
@@ -214,6 +225,16 @@ export class WasmEngine {
     collabGranular() {
         const ret = wasm.wasmengine_collabGranular(this.__wbg_ptr);
         return ret !== 0;
+    }
+    /**
+     * Tells the engine the pixel sizes of images: JSON `{src: [w, h]}`. When one is new or
+     * changed, everything is painted again (tiled fills depend on it).
+     * @param {string} json
+     */
+    setImageSizes(json) {
+        const ptr0 = passStringToWasm0(json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmengine_setImageSizes(this.__wbg_ptr, ptr0, len0);
     }
     /**
      * `json` (a delta or document) as a relay that knows only model `relay_model` can store it

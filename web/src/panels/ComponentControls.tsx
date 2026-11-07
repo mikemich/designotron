@@ -15,6 +15,9 @@ import {
   renameVariantProperty,
   renameVariantValue,
   setProperties,
+  orderFor,
+  orderedEntries,
+  propertyOrder,
   setVariantValue,
   swapGroups,
   swapInstances,
@@ -31,7 +34,7 @@ const PURPLE = "#c4a5ff";
 export function MainComponentSection({ n }: { n: Node }) {
   const doc = useDoc();
   const set = variantSet(doc, n);
-  const props = Object.entries(n.component?.variantProps ?? {});
+  const props = orderedEntries(n.component?.variantProps ?? {}, orderFor(doc, n));
   return (
     <>
       <MainComponentBody n={n} set={set} props={props} />
@@ -222,6 +225,7 @@ export function InstanceSection({ n }: { n: Node }) {
       for (const [k, val] of Object.entries(v.component?.variantProps ?? {})) (variantProps[k] ??= new Set()).add(val);
     }
   }
+  const propRows = set ? orderedEntries(Object.fromEntries(Object.keys(variantProps).map((k) => [k, k])), propertyOrder(doc, set)).map(([k]) => k) : Object.keys(variantProps);
   return (
     <Section
       title={
@@ -268,7 +272,7 @@ export function InstanceSection({ n }: { n: Node }) {
         </div>
       )}
       {comp && anchor && <SwapPicker ids={[n.id]} anchor={anchor} onClose={() => setAnchor(null)} />}
-      {Object.entries(variantProps).map(([k, values]) => (
+      {propRows.map((k) => [k, variantProps[k]] as const).map(([k, values]) => (
         <div className="row" key={k}>
           <span className="muted wf-prop-label" title={k}>
             {k}
