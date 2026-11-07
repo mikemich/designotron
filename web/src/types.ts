@@ -402,7 +402,20 @@ export interface Doc {
   nodes: Record<string, Node>;
   styles: {
     colors: { id: string; name: string; color: string }[];
-    texts: { id: string; name: string; fontFamily: string; fontSize: number; fontWeight: number; lineHeight: number | null; letterSpacing: number }[];
+    texts: {
+      id: string;
+      name: string;
+      fontFamily: string;
+      fontSize: number;
+      fontWeight: number;
+      lineHeight: number | null;
+      letterSpacing: number;
+      /** Optional: a style that doesn't set one leaves a linked layer's own value. */
+      italic?: boolean;
+      paragraphSpacing?: number;
+      case?: "original" | "upper" | "lower" | "title";
+      decoration?: "none" | "underline" | "strikethrough";
+    }[];
     /** Left out of files that have none. */
     effects?: EffectStyle[];
     grids?: GridStyle[];

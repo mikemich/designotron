@@ -60,7 +60,7 @@ pub fn scalable(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
 /// an instance a bound property keeps following its variable instead (an override can't unbind it).
 /// Only layers that need that bookkeeping are snapshotted, so a drag over thousands of plain layers
 /// stays cheap.
-pub fn scale_nodes(doc: &mut Document, ids: &[NodeId], k: f64, anchor: Point) {
+pub fn scale_nodes(doc: &mut Document, ids: &[NodeId], k: f64, anchor: Point, strokes: bool) {
   for id in scalable(doc, ids) {
     let Some(n) = doc.get(&id) else { continue };
     let local_center = Point::new(n.x + n.width / 2.0, n.y + n.height / 2.0);
@@ -69,7 +69,7 @@ pub fn scale_nodes(doc: &mut Document, ids: &[NodeId], k: f64, anchor: Point) {
     let nc = Point::new(anchor.x + (c.x - anchor.x) * k, anchor.y + (c.y - anchor.y) * k);
     let nc = pm.invert().apply(nc);
     let watched = watch(doc, &id);
-    scale_subtree(doc, &id, k);
+    scale_subtree(doc, &id, k, strokes);
     if let Some(n) = doc.get_mut(&id) {
       n.x = tidy(nc.x - n.width / 2.0);
       n.y = tidy(nc.y - n.height / 2.0);
@@ -205,16 +205,16 @@ fn diff(a: &Value, b: &Value) -> Option<Value> {
 
 /// Scales a layer's own size and lengths and its descendants' positions, sizes and lengths by
 /// `k` (the layer's own position is left to the caller). Instance contents scale too.
-fn scale_subtree(doc: &mut Document, id: &str, k: f64) {
+fn scale_subtree(doc: &mut Document, id: &str, k: f64, strokes: bool) {
   let kids = match doc.get(id) {
     Some(n) => n.children.clone(),
     None => return,
   };
   if let Some(n) = doc.get_mut(id) {
-    scale_own(n, k);
+    scale_own(n, k, strokes);
   }
   for c in kids {
-    scale_subtree(doc, &c, k);
+    scale_subtree(doc, &c, k, strokes);
     if let Some(n) = doc.get_mut(&c) {
       n.x = tidy(n.x * k);
       n.y = tidy(n.y * k);
@@ -222,11 +222,12 @@ fn scale_subtree(doc: &mut Document, id: &str, k: f64) {
   }
 }
 
-/// Every length a layer has is scaled here: add new length fields to this list.
-fn scale_own(n: &mut Node, k: f64) {
+/// Every length a layer has is scaled here: add new length fields to this list. With `strokes`
+/// off the stroke weights stay as they are (effects and dashes still scale).
+fn scale_own(n: &mut Node, k: f64, strokes: bool) {
   n.width = tidy(n.width * k).max(if n.kind == NodeType::Line { 0.0 } else { 0.01 });
   n.height = tidy(n.height * k).max(if n.kind == NodeType::Line { 0.0 } else { 0.01 });
-  if n.strokes.iter().any(|p| p.visible()) {
+  if strokes && n.strokes.iter().any(|p| p.visible()) {
     n.stroke_weight = tidy(n.stroke_weight * k);
     if let Some(w) = n.stroke_weights.as_mut() {
       w.iter_mut().for_each(|v| *v = tidy(*v * k));

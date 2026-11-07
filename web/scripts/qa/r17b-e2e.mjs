@@ -196,7 +196,7 @@ try {
   await c.getByRole("tab", { name: /Assets/i }).first().click().catch(async () => c.getByText("Assets", { exact: true }).first().click());
   await c.waitForTimeout(500);
   const assetText = await c.locator(".asset-set, .layer").allTextContents();
-  check("the Assets variant label lists values in property order", assetText.some((t) => /^S, Default, None/.test(t.trim())), JSON.stringify(assetText.slice(0, 12)));
+  check("the Assets variant label lists values in property order", assetText.some((t) => /^(Insert instance of [^/]*\/ )?S, Default, None/.test(t.trim())), JSON.stringify(assetText.slice(0, 12)));
   await shot(c, "c2-assets");
   await c.close();
 

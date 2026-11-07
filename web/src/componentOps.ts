@@ -350,7 +350,7 @@ export function updateGridStyle(id: string, change: { name?: string; description
 }
 
 /** Edits the text style at `index` in place (its id stays) and updates the layers using it. */
-export function updateTextStyle(index: number, change: Partial<Omit<TextStyle, "id">>): boolean {
+export function updateTextStyle(index: number, change: Partial<Omit<TextStyle, "id">>, clear: ("italic" | "paragraphSpacing" | "case" | "decoration")[] = []): boolean {
   const target = getDoc().styles.texts[index];
   if (!target) return false;
   if (change.name !== undefined) {
@@ -370,6 +370,11 @@ export function updateTextStyle(index: number, change: Partial<Omit<TextStyle, "
       lineHeight: change.lineHeight ?? null,
       autoLineHeight: "lineHeight" in change && change.lineHeight == null,
       letterSpacing: change.letterSpacing ?? null,
+      italic: change.italic ?? null,
+      paragraphSpacing: change.paragraphSpacing ?? null,
+      case: change.case ?? null,
+      decoration: change.decoration ?? null,
+      clear,
     }) !== null
   );
 }

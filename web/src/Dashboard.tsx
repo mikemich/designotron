@@ -34,6 +34,7 @@ import { ProjectTree, NameInput, dragState } from "./dashboard/ProjectTree";
 import { ConfirmDialog } from "./dashboard/ConfirmDialog";
 import { MoveDialog, type MoveTarget } from "./dashboard/MoveDialog";
 import { isPhone } from "./panels/PhoneNote";
+import { PHONE_QUERY } from "./panelState";
 
 /** "just now", "5 minutes ago", "yesterday", or a date. */
 function edited(t: number): string {
@@ -170,7 +171,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       setQuery("");
       setSheet(false);
     };
-    const mq = window.matchMedia("(max-width: 820px)");
+    const mq = window.matchMedia(PHONE_QUERY);
     const mqChange = () => setPhone(mq.matches);
     document.addEventListener("visibilitychange", vis);
     window.addEventListener("hashchange", hash);

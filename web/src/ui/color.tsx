@@ -8,6 +8,10 @@ import { safeImageSrc } from "../imageSrc";
 import { pickFile } from "../files";
 import { getDoc, useStore } from "../store";
 import { PhotoSearch } from "../panels/PhotoSearch";
+import { paintAriaLabel, paintLabel } from "./paintText";
+import { sliderKey, type SliderKind } from "./sliderKeys";
+
+export { paintLabel };
 import { photoPaint } from "../photos/place";
 
 export interface Rgba {
@@ -92,30 +96,66 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
   };
   const hueRgb = hsvToRgb(hsv.h, 1, 1);
   const styles = getDoc().styles.colors;
+  const pct = (v: number) => Math.round(v * 100);
+  /** A key on one of the sliders: the new colour from `sliderKey`, emitted like a drag. */
+  const sliderKeys = (e: React.KeyboardEvent, kind: SliderKind) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const next = sliderKey(kind, e.key, e.shiftKey, { ...hsv, a: c.a });
+    if (!next) return;
+    e.preventDefault();
+    e.stopPropagation();
+    emit(next.h, next.s, next.v, next.a);
+  };
   return (
     <div>
       <div
         ref={svRef}
         className="picker-sv"
+        role="slider"
+        tabIndex={0}
+        aria-label="Saturation and brightness"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={pct(hsv.s)}
+        aria-valuetext={`Saturation ${pct(hsv.s)}%, brightness ${pct(hsv.v)}%`}
         style={{ background: `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, rgb(${hueRgb.r},${hueRgb.g},${hueRgb.b}))` }}
         onPointerDown={(e) => drag(svRef.current, (x, y) => emit(hsv.h, x, 1 - y, c.a))(e)}
+        onKeyDown={(e) => sliderKeys(e, "sv")}
       >
         <div className="dot" style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%` }} />
       </div>
       <div
-        className="picker-bar"
-        style={{ background: "linear-gradient(to right, red, yellow, lime, cyan, blue, magenta, red)" }}
-        onPointerDown={(e) => drag(e.currentTarget as HTMLElement, (x) => emit(x * 359.9, hsv.s, hsv.v, c.a))(e)}
+        className="picker-slider"
+        role="slider"
+        tabIndex={0}
+        aria-label="Hue"
+        aria-valuemin={0}
+        aria-valuemax={360}
+        aria-valuenow={Math.round(hsv.h)}
+        aria-valuetext={`Hue ${Math.round(hsv.h)}°`}
+        onPointerDown={(e) => drag(e.currentTarget.firstElementChild as HTMLElement, (x) => emit(x * 359.9, hsv.s, hsv.v, c.a))(e)}
+        onKeyDown={(e) => sliderKeys(e, "hue")}
       >
-        <div className="dot" style={{ left: `${(hsv.h / 360) * 100}%` }} />
+        <div className="picker-bar" style={{ background: "linear-gradient(to right, red, yellow, lime, cyan, blue, magenta, red)" }}>
+          <div className="dot" style={{ left: `${(hsv.h / 360) * 100}%` }} />
+        </div>
       </div>
       <div
-        className="picker-bar swatch"
-        style={{ width: "100%", height: 12, borderRadius: 6 }}
-        onPointerDown={(e) => drag(e.currentTarget as HTMLElement, (x) => emit(hsv.h, hsv.s, hsv.v, x))(e)}
+        className="picker-slider"
+        role="slider"
+        tabIndex={0}
+        aria-label="Alpha"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={pct(c.a)}
+        aria-valuetext={`Alpha ${pct(c.a)}%`}
+        onPointerDown={(e) => drag(e.currentTarget.firstElementChild as HTMLElement, (x) => emit(hsv.h, hsv.s, hsv.v, x))(e)}
+        onKeyDown={(e) => sliderKeys(e, "alpha")}
       >
-        <i style={{ background: `linear-gradient(to right, transparent, ${toHex(c)})` }} />
-        <div className="dot" style={{ left: `${c.a * 100}%` }} />
+        <div className="picker-bar swatch" style={{ width: "100%", height: 12, borderRadius: 6 }}>
+          <i style={{ background: `linear-gradient(to right, transparent, ${toHex(c)})` }} />
+          <div className="dot" style={{ left: `${c.a * 100}%` }} />
+        </div>
       </div>
       <div className="row">
         <label className="field">
@@ -124,7 +164,10 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
             value={hexText.replace("#", "")}
             onChange={(e) => setHexText(e.target.value)}
             onKeyDown={(e) => {
+              // Escape first puts back the colour; with nothing typed it reaches the popover and closes it.
+              if (e.key === "Escape" && hexText.replace("#", "").toUpperCase() === toHex(c).slice(1)) return;
               e.stopPropagation();
+              if (e.key === "Escape") setHexText(toHex(c));
               if (e.key === "Enter") (e.target as HTMLInputElement).blur();
             }}
             onBlur={() => {
@@ -168,10 +211,12 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
           </div>
           <div className="picker-swatches">
             {styles.map((s) => (
-              <div
+              <button
                 key={s.id}
+                type="button"
                 className="swatch"
                 title={s.name}
+                aria-label={`Colour style ${s.name}, ${s.color}`}
                 onClick={() => {
                   const nc = parseColor(s.color);
                   setHsv(rgbToHsv(nc));
@@ -180,7 +225,7 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
                 }}
               >
                 <i style={{ background: cssColor(s.color) }} />
-              </div>
+              </button>
             ))}
           </div>
         </>
@@ -233,28 +278,12 @@ export function cropRectFor(mode: string, nw: number, nh: number, w: number, h: 
   return { x: (w - iw) / 2 / w, y: (h - ih) / 2 / h, w: iw / w, h: ih / h };
 }
 
-export function paintLabel(p: Paint): string {
-  switch (p.type) {
-    case "solid":
-      return p.color.replace("#", "").slice(0, 6);
-    case "linearGradient":
-      return "Linear";
-    case "radialGradient":
-      return "Radial";
-    case "angularGradient":
-      return "Angular";
-    case "diamondGradient":
-      return "Diamond";
-    case "image":
-      return "Image";
-  }
-}
-
 /** Edits one paint (solid, gradient or image) in a popover. */
 export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void }) {
   const p = props.paint;
   const [stop, setStop] = useState(0);
   const [finding, setFinding] = useState(false);
+  const [turnSaid, setTurnSaid] = useState("");
   const toType = (t: Paint["type"]) => {
     const base = p.type === "solid" ? p.color : p.type === "image" ? "#D9D9D9" : p.stops[0]?.color ?? "#000000";
     if (t === "solid") props.onChange({ type: "solid", color: base, opacity: p.opacity, visible: p.visible });
@@ -302,15 +331,41 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
               setStop(added.index);
             }}
           >
-            {p.stops.map((s, i) => (
-              <div
-                key={i}
-                className="dot"
-                data-stop={i}
-                style={{ left: `${s.position * 100}%`, background: s.color, outline: i === stop ? "2px solid #0d99ff" : undefined, pointerEvents: "all", cursor: "pointer" }}
-                onPointerDown={() => setStop(i)}
-              />
-            ))}
+            {p.stops.map((s, i) => {
+              const move = (to: number) => props.onChange({ ...p, stops: p.stops.map((x, j) => (j === i ? { ...x, position: Math.max(0, Math.min(1, to)) } : x)) });
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  className="dot stop-dot"
+                  data-stop={i}
+                  aria-label={`Stop ${i + 1} at ${Math.round(s.position * 100)}%, ${s.color}`}
+                  aria-pressed={i === stop}
+                  style={{ left: `${s.position * 100}%`, background: s.color, outline: i === stop ? "2px solid #0d99ff" : undefined, pointerEvents: "all", cursor: "pointer" }}
+                  onPointerDown={() => setStop(i)}
+                  onKeyDown={(e) => {
+                    if (e.ctrlKey || e.metaKey || e.altKey) return;
+                    const k = e.shiftKey ? 0.1 : 0.01;
+                    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setStop(i);
+                      move(Math.round((s.position + (e.key === "ArrowLeft" ? -k : k)) * 100) / 100);
+                    } else if (e.key === "Delete" || e.key === "Backspace") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (p.stops.length <= 2) return;
+                      props.onChange({ ...p, stops: p.stops.filter((_, j) => j !== i) });
+                      setStop(0);
+                    } else if (e.key === "Enter") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setStop(i);
+                    }
+                  }}
+                />
+              );
+            })}
           </div>
           <div className="row">
             {p.type === "linearGradient" && <NumberField label="∠" value={p.angle} suffix="°" onChange={(angle) => props.onChange({ ...p, angle })} />}
@@ -421,10 +476,21 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
             </div>
           )}
           <div className="row image-turn-row">
-            <button className="btn" title="Rotate the image 90° clockwise" onClick={() => props.onChange({ ...p, rotation: (((p.rotation ?? 0) + 90) % 360) || undefined })}>
+            <button
+              className="btn"
+              title="Rotate the image 90° clockwise"
+              onClick={() => {
+                const turned = (((p.rotation ?? 0) + 90) % 360) || undefined;
+                setTurnSaid(`Rotated to ${turned ?? 0}°`);
+                props.onChange({ ...p, rotation: turned });
+              }}
+            >
               <RotateCw size={13} /> Rotate 90°
             </button>
             {(p.rotation ?? 0) !== 0 && <span className="muted small image-turn-value">{p.rotation}°</span>}
+            <span className="sr-only" role="status" aria-live="polite">
+              {turnSaid}
+            </span>
           </div>
           <ImageAdjust filters={p.filters} onChange={(filters) => props.onChange({ ...p, filters })} />
           {finding && (
@@ -481,8 +547,19 @@ function ImageAdjust(props: { filters: ImageFilters | undefined; onChange: (f: I
         return (
           <label key={k} className="image-adjust-row">
             <span>{label}</span>
-            <input type="range" min={-100} max={100} step={1} value={pct} aria-label={label} data-adjust={k} onChange={(e) => set(k, Number(e.target.value))} onDoubleClick={() => set(k, 0)} />
-            <output>{pct}</output>
+            <input
+              type="range"
+              min={-100}
+              max={100}
+              step={1}
+              value={pct}
+              aria-label={label}
+              aria-valuetext={String(pct)}
+              data-adjust={k}
+              onChange={(e) => set(k, Number(e.target.value))}
+              onDoubleClick={() => set(k, 0)}
+            />
+            <output aria-hidden="true">{pct}</output>
           </label>
         );
       })}
@@ -490,8 +567,8 @@ function ImageAdjust(props: { filters: ImageFilters | undefined; onChange: (f: I
   );
 }
 
-/** Swatch that opens a paint editor popover. */
-export function PaintSwatch(props: { paint: Paint; onChange: (p: Paint) => void; onOpen?: () => void; onClose?: () => void }) {
+/** Button that opens a paint editor popover. Its name comes from the paint unless `label` says more. */
+export function PaintSwatch(props: { paint: Paint; onChange: (p: Paint) => void; onOpen?: () => void; onClose?: () => void; label?: string }) {
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
   // Enter or Escape on the canvas (see PaintHandles) clears `paintEdit`: that closes the popover too.
   const editing = useStore((s) => s.paintEdit !== null);
@@ -506,21 +583,48 @@ export function PaintSwatch(props: { paint: Paint; onChange: (p: Paint) => void;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing, anchor]);
+  // While text is being edited the keyboard stays in the text, so Escape would end the editing and leave
+  // the popover open. It closes the popover first (a field inside the popover keeps its own Escape).
+  useEffect(() => {
+    if (!anchor || !useStore.getState().editingText) return;
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || (e.target as Element | null)?.closest?.(".popover")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setAnchor(null);
+      props.onClose?.();
+    };
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [!!anchor]);
+  const name = paintAriaLabel(props.paint);
   return (
     <>
-      <div
+      <button
+        type="button"
         className="swatch"
+        aria-label={props.label ? `${props.label}: ${name}` : name}
+        aria-haspopup="dialog"
+        aria-expanded={!!anchor}
+        // While text is being edited the click must not take focus off the text: a swatch holding it would
+        // hand the next Backspace to the canvas, which deletes the layer.
+        onMouseDown={(e) => useStore.getState().editingText && e.preventDefault()}
         onClick={(e) => {
           setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect());
           props.onOpen?.();
+          if (useStore.getState().editingText) requestAnimationFrame(() => window.dispatchEvent(new Event("dt-refocus-text")));
         }}
       >
         <i style={{ background: paintCss(props.paint) }} />
-      </div>
+      </button>
       {anchor && (
         <Popover
           width={300}
           anchor={anchor}
+          label={props.label ?? "Edit " + (props.paint.type === "solid" ? "colour" : props.paint.type === "image" ? "image" : "gradient")}
+          // Text being edited keeps the keyboard: the swatch for the selected characters must not take it.
+          focusOnOpen={!useStore.getState().editingText}
           onClose={() => {
             setAnchor(null);
             props.onClose?.();

@@ -59,7 +59,7 @@ export function PropertiesSection({ n }: { n: Node }) {
         <MainPropRow key={p.id} owner={n.id} p={p} options={options} />
       ))}
       {anchor && (
-        <Popover anchor={anchor} onClose={() => setAnchor(null)} width={250}>
+        <Popover anchor={anchor} onClose={() => setAnchor(null)} width={250} label="Create component property">
           <CreateForm
             title="Create component property"
             taken={info.props.map((p) => p.name)}
@@ -253,7 +253,7 @@ function LayerPropRow(props: {
         </button>
       )}
       {anchor && (
-        <Popover anchor={anchor} onClose={() => setAnchor(null)} width={240}>
+        <Popover anchor={anchor} onClose={() => setAnchor(null)} width={240} label="Apply component property">
           <div className="wf-picker" data-testid="apply-prop">
             {mine.length > 0 && <div className="wf-pick-head muted small">{KIND_LABEL[kind]} properties</div>}
             {mine.map((p) => (

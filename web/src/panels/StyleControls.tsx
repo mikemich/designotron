@@ -2,7 +2,8 @@
 // menus, and the editable style lists in the Assets tab.
 
 import { useState } from "react";
-import { Grid3x3, LayoutGrid, Pencil, Plus, Sparkles, Trash2, Unlink, Variable as VariableIcon } from "lucide-react";
+import { Grid3x3, LayoutGrid, Pencil, Pilcrow, Plus, Sparkles, Trash2, Unlink, Variable as VariableIcon } from "lucide-react";
+import { fontLabel, fontStatus, useFontEpoch } from "../fontStatus";
 import { dispatch, dispatchOrThrow, FONTS, getDoc, toast, useDoc, useStore } from "../store";
 import type { Doc, Effect, EffectType, LayoutGrid as GridSpec, Node } from "../types";
 import { common, IconButton, Menu, MIXED, NumberField, Popover, SelectField, type MenuItem } from "../ui/controls";
@@ -262,6 +263,7 @@ function ColorStyleRow({ s, label, depth, sel, editing, setEditing }: { s: Color
       {anchor && (
         <Popover
           anchor={anchor}
+          label="Edit colour style"
           onClose={() => {
             setAnchor(null);
             end();
@@ -314,7 +316,10 @@ export function TextStylesSection({ filter = "" }: { filter?: string }) {
 
 function TextStyleRow({ s, label, depth, index, sel, editing, setEditing }: { s: TextStyle; label: string; depth: number; index: number; sel: string[]; editing: boolean; setEditing: (on: boolean) => void }) {
   const set = (change: Partial<Omit<TextStyle, "id">>) => updateTextStyle(index, change);
+  useFontEpoch();
   const fonts = FONTS.includes(s.fontFamily) ? FONTS : [s.fontFamily, ...FONTS];
+  const fontOptions = fonts.map((f) => ({ value: f, label: fontLabel(f, fontStatus(f, FONTS)) }));
+  const clear = (key: "italic" | "paragraphSpacing" | "case" | "decoration") => updateTextStyle(index, {}, [key]);
   const weights = WEIGHTS.some((w) => w.value === s.fontWeight) ? WEIGHTS : [...WEIGHTS, { value: s.fontWeight, label: String(s.fontWeight) }];
   return (
     <div className={"wf-style" + (editing ? " editing" : "")} style={depthStyle(depth)}>
@@ -331,7 +336,7 @@ function TextStyleRow({ s, label, depth, index, sel, editing, setEditing }: { s:
       {editing && (
         <div className="wf-style-edit">
           <InlineInput label="Name" value={s.name} autoFocus title="Style name" onCommit={(name) => set({ name })} />
-          <SelectField value={s.fontFamily} options={fonts.map((f) => ({ value: f, label: f }))} onChange={(fontFamily) => set({ fontFamily })} title="Font" />
+          <SelectField value={s.fontFamily} options={fontOptions} onChange={(fontFamily) => set({ fontFamily })} title="Font" />
           <div className="grid2">
             <SelectField value={s.fontWeight} options={weights} onChange={(fontWeight) => set({ fontWeight })} title="Weight" />
             <NumberField label="Aa" title="Font size" value={s.fontSize} min={1} onChange={(fontSize) => set({ fontSize })} onScrubStart={begin} onScrubEnd={end} />
@@ -350,6 +355,56 @@ function TextStyleRow({ s, label, depth, index, sel, editing, setEditing }: { s:
               onScrubEnd={end}
             />
             <NumberField label="|A|" title="Letter spacing (px or %)" value={s.letterSpacing} step={0.1} parse={(raw) => parseLetterSpacing(raw, s.fontSize)} onChange={(letterSpacing) => set({ letterSpacing })} onScrubStart={begin} onScrubEnd={end} />
+          </div>
+          {/* Optional: a style that doesn't set one leaves the layer's own value. */}
+          <div className="grid2">
+            <SelectField
+              value={s.italic === undefined ? "unset" : s.italic ? "italic" : "upright"}
+              options={[
+                { value: "unset", label: "Italic: not set" },
+                { value: "upright", label: "Upright" },
+                { value: "italic", label: "Italic" },
+              ]}
+              onChange={(v) => (v === "unset" ? clear("italic") : set({ italic: v === "italic" }))}
+              title="Italic"
+            />
+            <NumberField
+              label={<Pilcrow size={11} />}
+              title="Paragraph spacing (empty: the style doesn't set it)"
+              ariaLabel="Paragraph spacing"
+              value={s.paragraphSpacing ?? null}
+              autoText="Not set"
+              min={0}
+              onAuto={() => clear("paragraphSpacing")}
+              onChange={(paragraphSpacing) => set({ paragraphSpacing })}
+              onScrubStart={begin}
+              onScrubEnd={end}
+            />
+          </div>
+          <div className="grid2">
+            <SelectField
+              value={s.case ?? "unset"}
+              options={[
+                { value: "unset", label: "Case: not set" },
+                { value: "original", label: "Original case" },
+                { value: "upper", label: "UPPER CASE" },
+                { value: "lower", label: "lower case" },
+                { value: "title", label: "Title Case" },
+              ]}
+              onChange={(v) => (v === "unset" ? clear("case") : set({ case: v }))}
+              title="Letter case"
+            />
+            <SelectField
+              value={s.decoration ?? "unset"}
+              options={[
+                { value: "unset", label: "Decoration: not set" },
+                { value: "none", label: "No decoration" },
+                { value: "underline", label: "Underline" },
+                { value: "strikethrough", label: "Strikethrough" },
+              ]}
+              onChange={(v) => (v === "unset" ? clear("decoration") : set({ decoration: v }))}
+              title="Text decoration"
+            />
           </div>
         </div>
       )}

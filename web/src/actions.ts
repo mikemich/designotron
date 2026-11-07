@@ -23,7 +23,7 @@ import {
 import { useCollab } from "./collab";
 import { ALT_MOD, MOD } from "./ui/controls";
 import { openTextGesture } from "./canvas/TextEditor";
-import type { DeviceFrame, Rect, Tool } from "./types";
+import type { DeviceFrame, Node, Rect, Tool } from "./types";
 import { hasDeviceUi, type DevicePreset } from "./panels/presetList";
 
 const CLIPBOARD_TAG = "designotron/nodes";
@@ -153,6 +153,69 @@ export function deleteVectorPoints() {
   if (r?.deleted) toast("Path deleted: it needs at least two points");
 }
 
+const SCALE_STROKES_KEY = "dt:scale-strokes";
+
+/** The Scale tool's "Scale strokes" option (on unless turned off), remembered per browser. */
+export function getScaleStrokes(): boolean {
+  try {
+    return localStorage.getItem(SCALE_STROKES_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+export function setScaleStrokes(on: boolean) {
+  try {
+    localStorage.setItem(SCALE_STROKES_KEY, on ? "1" : "0");
+  } catch {
+    /* the option just isn't remembered */
+  }
+}
+
+/** Splits the path at the selected anchors (a closed path opens, an open one is cut). */
+export function splitVectorAtPoints() {
+  const id = useStore.getState().editingVector;
+  const points = vectorPoints();
+  if (!id || !points.length) return;
+  const r = dispatch<{ points: [number, number][] }>({ op: "splitVectorAt", id, points });
+  if (r) useStore.setState({ vectorPoints: r.points });
+}
+
+/** Joins two selected ends of open paths (the same path closes). */
+export function joinVectorEnds() {
+  const id = useStore.getState().editingVector;
+  const points = vectorPoints();
+  if (!id || points.length !== 2) return;
+  const r = dispatch<{ points: [number, number][] }>({ op: "joinVectorEnds", id, a: points[0], b: points[1] });
+  if (r) useStore.setState({ vectorPoints: r.points });
+}
+
+/** Whether the selected anchors can be split (any anchor that is not an end of an open path). */
+export function canSplitVectorPoints(): boolean {
+  const st = useStore.getState();
+  const sps = st.editingVector ? getDoc().nodes[st.editingVector]?.vector?.subpaths : null;
+  if (!sps) return false;
+  return vectorPoints().some(([s, i]) => {
+    const sp = sps[s];
+    return !!sp && sp.points.length >= 2 && (sp.closed || (i > 0 && i < sp.points.length - 1));
+  });
+}
+
+/** Whether exactly two anchors are selected and both are ends of open paths. */
+export function canJoinVectorEnds(): boolean {
+  const st = useStore.getState();
+  const sps = st.editingVector ? getDoc().nodes[st.editingVector]?.vector?.subpaths : null;
+  const pts = vectorPoints();
+  if (!sps || pts.length !== 2) return false;
+  if (pts[0][0] === pts[1][0] && pts[0][1] === pts[1][1]) return false;
+  const isEnd = ([s, i]: [number, number]) => {
+    const sp = sps[s];
+    return !!sp && !sp.closed && sp.points.length >= 2 && (i === 0 || i === sp.points.length - 1);
+  };
+  if (!pts.every(isEnd)) return false;
+  return pts[0][0] !== pts[1][0] || sps[pts[0][0]].points.length >= 3;
+}
+
 export function nudgeVectorPoints(dx: number, dy: number) {
   const id = useStore.getState().editingVector;
   const points = vectorPoints();
@@ -211,14 +274,20 @@ export function selectParent() {
 }
 
 export function selectChildren() {
+  // Enter in vector edit leaves it, as Enter on the layer entered it.
+  if (useStore.getState().editingVector) return useStore.setState({ editingVector: null });
   const doc = getDoc();
   const kids = selection().flatMap((id) => doc.nodes[id]?.children ?? []);
   if (kids.length) dispatch({ op: "select", ids: kids });
   else {
     const only = selection().length === 1 ? doc.nodes[selection()[0]] : null;
     if (only?.type === "text") useStore.setState({ editingText: only.id });
+    else if (only && useStore.getState().tool === "move" && canEditVector(only)) useStore.setState({ editingVector: only.id, vectorPoints: [] });
   }
 }
+
+/** A vector with anchors of its own (not an imported raw path), which vector edit can open. */
+export const canEditVector = (n: Node | undefined) => !!n && n.type === "vector" && !!n.vector && !n.vector.raw && !n.locked;
 
 // ---------- Keyboard insert ----------
 
@@ -273,6 +342,36 @@ export function insertDefaultLayer(inSelected = false): boolean {
   }
   setTool("move");
   return true;
+}
+
+/** Places an instance of a main component (or of a component set's first variant) and selects it.
+ *  `"center"` puts it at the viewport centre (the Assets panel); `"beside"` puts it 40 px right of the
+ *  main's top-level frame, or at the viewport centre when that spot is taken (the canvas menu).
+ *  Never inside a main. Returns the new instance's id. */
+export function insertInstance(componentId: string, where: "center" | "beside" = "center"): string | null {
+  const doc = getDoc();
+  let main = doc.nodes[componentId];
+  if (main?.type === "componentSet") main = doc.nodes[main.children[0]];
+  if (!main || main.type !== "component") return null;
+  const c = viewportCenter();
+  let at = { x: c.x - main.width / 2, y: c.y - main.height / 2 };
+  if (where === "beside") {
+    let top = main;
+    while (top.parent && doc.nodes[top.parent]) top = doc.nodes[top.parent];
+    const roots = doc.pages.find((pg) => pg.id === useStore.getState().es.page)?.children ?? [];
+    const box = query<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids: [...new Set([top.id, ...roots])] }).items;
+    const own = box.find((b) => b.id === top.id)?.bounds;
+    if (own) {
+      const spot = { x: own.x + own.width + 40, y: own.y };
+      const w = main.width;
+      const h = main.height;
+      const taken = box.some((b) => b.bounds.x < spot.x + w && b.bounds.x + b.bounds.width > spot.x && b.bounds.y < spot.y + h && b.bounds.y + b.bounds.height > spot.y);
+      if (!taken) at = spot;
+    }
+  }
+  // `anchor` is the page point that picks the parent frame: inside whichever frame is there, never a main.
+  const r = dispatch<{ id: string }>({ op: "createInstance", componentId: main.id, x: at.x, y: at.y, parent: null, anchor: { x: at.x + main.width / 2, y: at.y + main.height / 2 } });
+  return r?.id ?? null;
 }
 
 // ---------- Copy / paste properties (Figma ⌥⌘C / ⌥⌘V) ----------

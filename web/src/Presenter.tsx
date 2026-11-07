@@ -104,6 +104,17 @@ function cancelKeyPresses() {
 const KEY_POINTER = -1;
 const within = (b: DOMRect, x: number, y: number) => x >= b.left && x <= b.right && y >= b.top && y <= b.bottom;
 
+/** The presenter's polite live region; `setter.current` sets what it says. */
+function LiveRegion({ setter }: { setter: { current: (text: string) => void } }) {
+  const [said, setSaid] = useState("");
+  setter.current = setSaid;
+  return (
+    <div className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-presenter-live="">
+      {said}
+    </div>
+  );
+}
+
 /** Prototype player: renders a frame and turns interactions into hotspots, with overlays
  *  (modals, menus) stacked on top. With `remixUrl` it is the view-only player for view links
  *  and embeds: no close, a Remix button instead. */
@@ -130,6 +141,26 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   const current = history[history.length - 1];
   const doc = pdoc();
   const frame = doc.nodes[current.id];
+  // What a screen reader is told: the frame's name whenever the frame changes (Navigate, Back, Swap,
+  // Restart), "<overlay> opened" and "Changed to <variant>". Not on scroll. Emptied first so the same
+  // words twice in a row (a restart on the start frame) are still spoken.
+  // The words live in their own component: a state change here would re-render the whole player, and
+  // a re-render restores every scroller to its stored position, which stops a smooth scroll half way.
+  const setSaid = useRef<(text: string) => void>(() => {});
+  const saidTimer = useRef(0);
+  const say = (text: string, wait = 60) => {
+    setSaid.current("");
+    clearTimeout(saidTimer.current);
+    saidTimer.current = window.setTimeout(() => setSaid.current(text), wait);
+  };
+  useEffect(() => () => clearTimeout(saidTimer.current), []);
+  // The first run is the start frame, once the dialog has taken focus (which announces the dialog itself).
+  const firstSay = useRef(true);
+  useEffect(() => {
+    const name = pdoc().nodes[current.id]?.name;
+    if (name) say(name, firstSay.current ? 400 : 60);
+    firstSay.current = false;
+  }, [current.id, restarts]);
   const frames = useMemo(() => {
     const page = doc.pages.find((p) => p.id === frame?.page);
     return (page?.children ?? []).filter((id) => ["frame", "component"].includes(doc.nodes[id]?.type));
@@ -288,6 +319,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       }
       const undo = snapshot();
       setOverlays((o) => (it.action === "swapOverlay" ? [...o.slice(0, -1), next] : [...o, next]));
+      say(`${dest.name} opened`);
       return undo;
     }
     return null;
@@ -317,6 +349,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       setLeaving({ key, id: inFrame, motion: { ...m, kind: "dissolve" }, pos: new Map() });
     }
     setRevision((r) => r + 1);
+    say(`Changed to ${pdoc().nodes[it.destination!]?.name ?? "another variant"}`);
     return () => {
       if (swapVariant(instance, before)) setRevision((r) => r + 1);
     };
@@ -580,6 +613,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         setTimeout(() => setFlash(false), 400);
       }}
     >
+      <LiveRegion setter={setSaid} />
       <div
         className="bar"
         onClick={(e) => {

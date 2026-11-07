@@ -28,6 +28,7 @@
 }
 .photo-sources-toggle {
   align-self: flex-start;
+  min-height: 24px;
   padding: 2px 0;
   color: var(--accent-2);
   font-size: 11px;
@@ -183,6 +184,9 @@
   margin: 0;
 }
 .photo-credit a {
+  display: inline-block;
+  min-height: 24px;
+  line-height: 24px;
   color: var(--accent-2);
 }
 .photo-pick {

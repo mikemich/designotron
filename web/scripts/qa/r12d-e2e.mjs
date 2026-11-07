@@ -370,7 +370,9 @@ try {
   const lineNode = (await doc()).nodes[line.id];
   check("line: the Line end menu has Square and sets it", lineNode.shape?.endCap === "square");
   const lsvg = await dt((id) => window.__dt.query({ q: "exportSvg", id }), line.id);
-  check("line: the Square end renders stroke-linecap square", /stroke-linecap="square"/.test(lsvg), (lsvg.match(/<path[^>]*>|<line[^>]*>/) ?? [""])[0]);
+  // Since r18d the start and end caps are separate: a Square end with a flat (None) start draws a butt
+  // body plus a square end marker; both ends Square use the plain square linecap.
+  check("line: the Square end renders square (linecap or end marker)", /stroke-linecap="square"/.test(lsvg) || (/marker-end=/.test(lsvg) && /<marker/.test(lsvg)), (lsvg.match(/<path[^>]*>|<line[^>]*>/) ?? [""])[0]);
   await select("Tri");
   check("closed triangle: no Line end select", (await page.locator('select[aria-label="Line end"]').count()) === 0);
   await select("Open");

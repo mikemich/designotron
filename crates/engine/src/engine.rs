@@ -24,6 +24,15 @@ use crate::text::TextMeasurer;
 use crate::{ai, arrange, codegen, patch, svg_import, vector_edit};
 
 const MAX_HISTORY: usize = 300;
+/// Typography properties both a text style and a variable can set: one source wins.
+pub(crate) const TEXT_STYLE_PROPS: [&str; 6] = [
+  "fontSize",
+  "fontFamily",
+  "fontWeight",
+  "lineHeight",
+  "letterSpacing",
+  "paragraphSpacing",
+];
 pub const CLIPBOARD_TAG: &str = "designotron/nodes";
 /// Screen pixels from a path within which vector edit mode offers to add a point.
 const VECTOR_SEGMENT_TOLERANCE: f64 = 6.0;
@@ -52,6 +61,9 @@ struct Snapshot {
   doc: Document,
   selection: Vec<NodeId>,
   page: String,
+  /// Whether `doc` was a fixed point of the variable passes when the snapshot was taken (false
+  /// for a file just loaded, until the first change has run them over everything).
+  settled: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -135,6 +147,9 @@ pub enum Command {
     factor: f64,
     #[serde(default)]
     anchor: Option<Point>,
+    /// Stroke weights scale too (default); off keeps them, like Figma's "Scale stroke" option.
+    #[serde(default = "yes")]
+    strokes: bool,
   },
   SetPageBackground {
     id: String,
@@ -288,6 +303,18 @@ pub enum Command {
     #[serde(default)]
     close: bool,
   },
+  /// Splits a path at anchors: a closed one opens there, an open one is cut in two. Returns
+  /// the anchors that are now ends.
+  SplitVectorAt {
+    id: NodeId,
+    points: Vec<[usize; 2]>,
+  },
+  /// Joins two ends of open paths of one layer: the same path closes, two paths connect.
+  JoinVectorEnds {
+    id: NodeId,
+    a: [usize; 2],
+    b: [usize; 2],
+  },
   /// Refits a vector's box to its path without moving it on the page (after point drags).
   FitVectorBounds {
     id: NodeId,
@@ -330,6 +357,10 @@ pub enum Command {
   SetText {
     id: NodeId,
     characters: String,
+    /// Stores these runs exactly (the editor's undo restores a snapshot) instead of remapping
+    /// the old ones across the edit.
+    #[serde(default)]
+    runs: Option<Vec<crate::model::TextRun>>,
   },
   /// Applies style overrides to characters `start..end` of a text layer.
   /// `style` uses TextRun field names; `clear` lists overrides to remove.
@@ -393,6 +424,9 @@ pub enum Command {
     /// proportionally (the aspect is always locked).
     #[serde(default)]
     scale: bool,
+    /// With `scale`: stroke weights scale too (default).
+    #[serde(default = "yes")]
+    scale_strokes: bool,
   },
   /// Gesture-relative rotation in degrees around a page-space pivot.
   Rotate {
@@ -548,6 +582,14 @@ pub enum Command {
     #[serde(default)]
     auto_line_height: bool,
     letter_spacing: Option<f64>,
+    italic: Option<bool>,
+    paragraph_spacing: Option<f64>,
+    case: Option<crate::model::TextCase>,
+    decoration: Option<crate::model::TextDecoration>,
+    /// Fields the style stops setting (`italic`, `paragraphSpacing`, `case`, `decoration`):
+    /// linked layers keep the value they have.
+    #[serde(default)]
+    clear: Vec<String>,
   },
   /// Saves a layer's effects as a named effect style and links the layer to it.
   AddEffectStyle {
@@ -792,6 +834,10 @@ fn one() -> f64 {
   1.0
 }
 
+fn yes() -> bool {
+  true
+}
+
 fn three() -> usize {
   3
 }
@@ -902,6 +948,26 @@ pub struct Engine {
   moved_hint: std::collections::HashSet<NodeId>,
   /// Layers moved by the commands of the step being made (a gesture's drags add up).
   step_moved: Vec<NodeId>,
+  /// True once the document is a fixed point of `variables::normalize` + `apply`: every change
+  /// ends in `after_mutation`, which leaves it so, and an exact undo returns to such a state. A
+  /// freshly loaded file is not touched until its first change (so every copy of a shared file
+  /// stays identical after a join), whose passes then cover the whole file; only a settled
+  /// document may use the incremental passes (`variables::apply_since`).
+  vars_settled: bool,
+  /// Mains whose fingerprint was recomputed since the last `after_mutation` finished (it takes
+  /// them again once its own changes are in).
+  fp_touched: HashSet<NodeId>,
+  /// Test oracle: the whole-document passes. When on, `after_mutation` runs `normalize` + `apply`
+  /// over every layer, layout ignores the neutral-change skip, `render_incremental` re-renders
+  /// every changed root, `paint_order`/`top_most` use the quadratic functions and fingerprints
+  /// refresh in full, as before round 18.
+  pub reference: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+  /// How often `after_mutation` ran on this thread (tests count passes).
+  pub(crate) static AFTER_MUTATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The layers a command moves in their parent's order on purpose (reorder, move, drop).
@@ -909,6 +975,87 @@ fn moved_by(cmd: &Command) -> Vec<NodeId> {
   match cmd {
     Command::Reorder { ids, .. } | Command::MoveToParent { ids, .. } | Command::DropInto { ids, .. } => ids.clone(),
     _ => vec![],
+  }
+}
+
+/// Changed node ids between two documents, grouped by the top-level layer they belong to.
+fn changed_roots(prev: &Document, doc: &Document) -> HashMap<NodeId, Vec<NodeId>> {
+  let mut out: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+  // Top-level layer per layer met on the way up (one map for each document), so a thousand
+  // changed layers in one screen share their ancestors' answers.
+  let mut now: HashMap<&str, &str> = HashMap::new();
+  let mut before: HashMap<&str, &str> = HashMap::new();
+  fn root_in<'a>(doc: &'a Document, id: &'a str, memo: &mut HashMap<&'a str, &'a str>) -> &'a str {
+    let mut walked: Vec<&'a str> = Vec::new();
+    let mut cur = id;
+    let root = loop {
+      if let Some(r) = memo.get(cur) {
+        break *r;
+      }
+      walked.push(cur);
+      match doc.get(cur).and_then(|n| n.parent.as_deref()) {
+        // A parent cycle (a damaged document) ends at the layer it came back to, like `ancestors`.
+        Some(p) if !walked.contains(&p) => cur = p,
+        _ => break cur,
+      }
+    };
+    for w in walked {
+      memo.insert(w, root);
+    }
+    root
+  }
+  for item in prev.nodes.diff(&doc.nodes) {
+    let (root, id) = match item {
+      imbl::ordmap::DiffItem::Add(k, _) => (root_in(doc, k, &mut now), k),
+      imbl::ordmap::DiffItem::Update { new: (k, _), .. } => (root_in(doc, k, &mut now), k),
+      imbl::ordmap::DiffItem::Remove(k, _) => (root_in(prev, k, &mut before), k),
+    };
+    out.entry(root.to_string()).or_default().push(id.clone());
+  }
+  out
+}
+
+/// The clipboard text `copy` writes (`variables` and `styles` ride along as `tokens`).
+#[derive(Serialize)]
+struct ClipOut<'a> {
+  #[serde(rename = "type")]
+  kind: &'static str,
+  roots: &'a [NodeId],
+  nodes: &'a [Node],
+  components: &'a [Node],
+  #[serde(flatten)]
+  tokens: std::collections::BTreeMap<&'static str, Value>,
+}
+
+/// The clipboard text `paste` reads. Everything but the layers is kept as it came (`rest` holds
+/// `variables` and `styles`, which `clipboard::merge_tokens` looks for by key).
+#[derive(Deserialize)]
+struct ClipIn {
+  #[serde(rename = "type", default)]
+  kind: Option<String>,
+  roots: Vec<NodeId>,
+  nodes: Vec<Node>,
+  #[serde(default)]
+  components: Option<Value>,
+  #[serde(flatten)]
+  rest: serde_json::Map<String, Value>,
+}
+
+/// Why a clipboard text isn't pasteable, worded as before the clipboard was parsed in one go.
+fn clipboard_error(data: &str) -> String {
+  const NOT_OURS: &str = "clipboard does not contain Designotron layers";
+  let Ok(v) = serde_json::from_str::<Value>(data) else {
+    return NOT_OURS.into();
+  };
+  if v.get("type").and_then(|t| t.as_str()) != Some(CLIPBOARD_TAG) {
+    return NOT_OURS.into();
+  }
+  if let Err(e) = serde_json::from_value::<Vec<Node>>(v["nodes"].clone()) {
+    return e.to_string();
+  }
+  match serde_json::from_value::<Vec<NodeId>>(v["roots"].clone()) {
+    Err(e) => e.to_string(),
+    Ok(_) => NOT_OURS.into(),
   }
 }
 
@@ -954,6 +1101,9 @@ impl Engine {
       collab_lists: false,
       moved_hint: Default::default(),
       step_moved: Vec::new(),
+      vars_settled: false,
+      fp_touched: HashSet::new(),
+      reference: false,
     }
   }
 
@@ -967,6 +1117,8 @@ impl Engine {
     e.page = self.page.clone();
     e.gen = self.gen.clone();
     e.fingerprints = self.fingerprints.clone();
+    e.vars_settled = self.vars_settled;
+    e.reference = self.reference;
     e.synced = Some(self.doc.clone());
     e
   }
@@ -996,9 +1148,11 @@ impl Engine {
     self.moved_hint.clear();
     self.step_moved.clear();
     self.fingerprints.clear();
+    self.fp_touched.clear();
     self.refresh_fingerprints();
     layout::relayout_all(&mut self.doc, self.measurer.as_ref());
     self.render_cache = RenderCache::default();
+    self.vars_settled = false;
     self.rev += 1;
     self.doc_rev += 1;
     Ok(())
@@ -1227,6 +1381,15 @@ impl Engine {
                 bounds.insert(root.clone(), json!(rect_array(b)));
               }
             }
+          } else if !self.reference
+            && cache.roots.contains_key(&root)
+            && ids.iter().all(|id| match (prev.get(id), self.doc.get(id)) {
+              (Some(old), Some(new)) => ops::render_neutral(old, new),
+              _ => false,
+            })
+          {
+            // Only bindings, pins, style links, export rows or notes changed: nothing is drawn
+            // differently (the paints a binding writes are changes of their own).
           } else {
             dirty.push(root);
           }
@@ -1305,10 +1468,12 @@ impl Engine {
       doc: self.doc.clone(),
       selection: self.selection.clone(),
       page: self.page.clone(),
+      settled: self.vars_settled,
     }
   }
 
   fn restore(&mut self, s: Snapshot) {
+    self.vars_settled = s.settled;
     self.doc = s.doc;
     self.selection = s.selection;
     self.page = s.page;
@@ -1316,6 +1481,7 @@ impl Engine {
 
   /// Executes a command. Mutations become one undo step (or join the open gesture).
   pub fn dispatch(&mut self, cmd: Command) -> Result<Value, String> {
+    ops::set_reference(self.reference);
     if let Command::SetReadOnly { on } = cmd {
       if self.read_only != on {
         self.read_only = on;
@@ -1394,15 +1560,24 @@ impl Engine {
         }
         let ids = delta_ids(&delta);
         let lists = self.collab_lists;
-        if let Some(g) = self.gesture.as_mut() {
+        // The gesture's base documents (what cancelling or undoing returns to) take the delta too,
+        // with the variable passes and layout that `after_mutation` gives the live one, so a
+        // document restored from them is as settled as any other.
+        for slot in [0, 1] {
+          let Some(mut g) = (if slot == 0 { self.gesture.take() } else { self.gesture_undo.take() }) else {
+            continue;
+          };
+          let old = g.doc.clone();
           let _ = Self::collab_apply(lists, &mut g.doc, &delta);
           sanitize_links(&mut g.doc, Some(&ids));
+          self.settle_base(&mut g.doc, &old, g.settled);
+          if slot == 0 {
+            self.gesture = Some(g);
+          } else {
+            self.gesture_undo = Some(g);
+          }
         }
-        if let Some(g) = self.gesture_undo.as_mut() {
-          let _ = Self::collab_apply(lists, &mut g.doc, &delta);
-          sanitize_links(&mut g.doc, Some(&ids));
-        }
-        self.refresh_fingerprints();
+        self.refresh_fingerprints_since(&prev);
         self.after_mutation(&prev);
         self.collab_synced = Some(self.doc.clone());
         self.rev += 1;
@@ -1427,7 +1602,7 @@ impl Engine {
         // The relay didn't take it: everyone else's copy lacks it, so this one drops it too.
         let Some(doc) = self.collab_rebuild() else { return Ok(json!({})) };
         let prev = std::mem::replace(&mut self.doc, doc);
-        self.refresh_fingerprints();
+        self.refresh_fingerprints_since(&prev);
         self.after_mutation(&prev);
         self.collab_synced = Some(self.doc.clone());
         self.rev += 1;
@@ -1463,6 +1638,8 @@ impl Engine {
         if let Some(base) = self.gesture_undo.take().or(gesture) {
           let prev = self.doc.clone();
           self.restore(base);
+          // (The gesture's changes to main components are gone, and their fingerprints with them.)
+          self.refresh_fingerprints_since(&prev);
           if prev != self.doc {
             self.doc_rev += 1;
           }
@@ -1632,7 +1809,11 @@ impl Engine {
     if self.doc.page(&step.before.page).is_some() {
       self.page = step.before.page.clone();
     }
-    self.refresh_fingerprints();
+    if exact {
+      // The snapshot is as settled as it was when it was taken.
+      self.vars_settled = step.before.settled;
+    }
+    self.refresh_fingerprints_since(&prev);
     if !exact {
       self.after_mutation(&prev);
       self.prune_local(&prev);
@@ -1659,7 +1840,11 @@ impl Engine {
     if self.doc.page(&step.after_page).is_some() {
       self.page = step.after_page.clone();
     }
-    self.refresh_fingerprints();
+    if exact {
+      // (A step's `after` is what `after_mutation` left.)
+      self.vars_settled = true;
+    }
+    self.refresh_fingerprints_since(&prev);
     if !exact {
       self.after_mutation(&prev);
       self.prune_local(&prev);
@@ -1670,17 +1855,32 @@ impl Engine {
   /// Keeps derived state consistent: instances, layout, selection.
   /// Changed node ids grouped by the top-level layer they belong to.
   fn changed_by_root(&self, prev: &Document) -> HashMap<NodeId, Vec<NodeId>> {
-    let mut out: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    let root_in = |doc: &Document, id: &str| doc.ancestors(id).last().cloned().unwrap_or_else(|| id.to_string());
-    for item in prev.nodes.diff(&self.doc.nodes) {
-      let (root, id) = match item {
-        imbl::ordmap::DiffItem::Add(k, _) => (root_in(&self.doc, k), k),
-        imbl::ordmap::DiffItem::Update { new: (k, _), .. } => (root_in(&self.doc, k), k),
-        imbl::ordmap::DiffItem::Remove(k, _) => (root_in(prev, k), k),
-      };
-      out.entry(root).or_default().push(id.clone());
+    changed_roots(prev, &self.doc)
+  }
+
+  /// Variable passes and layout over what changed from `old` to `doc` (a snapshot that took a
+  /// remote delta), the same ones `after_mutation` runs, without instance syncing.
+  fn settle_base(&self, doc: &mut Document, old: &Document, settled: bool) {
+    if self.reference || !settled {
+      crate::variables::normalize(doc);
+      crate::variables::apply(doc);
+    } else {
+      crate::variables::normalize_since(doc, old);
+      crate::variables::apply_since(doc, old);
     }
-    out
+    for root in changed_roots(old, doc).into_keys() {
+      layout::layout_node(doc, &root, self.measurer.as_ref());
+    }
+  }
+
+  /// True when a change inside the tree of `root` can alter its layout: a layer was added or
+  /// removed, or one changed in a field `layout_node` reads (`ops::layout_neutral`).
+  fn needs_layout(&self, prev: &Document, changed: &[NodeId]) -> bool {
+    self.reference
+      || changed.iter().any(|id| match (prev.get(id), self.doc.get(id)) {
+        (Some(old), Some(new)) => !ops::layout_neutral(old, new),
+        _ => true,
+      })
   }
 
   /// True when the only difference in `root`'s tree is the root's own position.
@@ -1699,21 +1899,33 @@ impl Engine {
   }
 
   fn after_mutation(&mut self, prev: &Document) {
+    #[cfg(test)]
+    AFTER_MUTATIONS.with(|c| c.set(c.get() + 1));
     // Layers added to or reordered in a device frame stay below its system UI (before instances
     // of a main device frame sync from it).
-    let device_frames: Vec<NodeId> = self
-      .changed_by_root(prev)
-      .values()
-      .flatten()
-      .filter(|id| self.doc.get(id).is_some_and(|n| n.device.is_some()))
-      .cloned()
+    let device_frames: Vec<NodeId> = prev
+      .nodes
+      .diff(&self.doc.nodes)
+      .filter_map(|item| match item {
+        imbl::ordmap::DiffItem::Add(k, n) | imbl::ordmap::DiffItem::Update { new: (k, n), .. } => n.device.is_some().then(|| k.clone()),
+        imbl::ordmap::DiffItem::Remove(..) => None,
+      })
       .collect();
     for id in &device_frames {
       devices::raise_chrome(&mut self.doc, id);
     }
     crate::props::follow_variants(&mut self.doc, prev);
-    crate::variables::normalize(&mut self.doc);
-    crate::variables::apply(&mut self.doc);
+    // `prev` is a fixed point of the variable passes unless the file was just loaded (or this is
+    // the oracle): then only what changed since can differ. See `variables::apply_since`.
+    let whole = self.reference || !self.vars_settled;
+    if whole {
+      crate::variables::normalize(&mut self.doc);
+      crate::variables::apply(&mut self.doc);
+    } else {
+      crate::variables::normalize_since(&mut self.doc, prev);
+      crate::variables::apply_since(&mut self.doc, prev);
+    }
+    let mid = self.doc.clone();
     for _ in 0..4 {
       let changed = self.changed_components(prev);
       if changed.is_empty() {
@@ -1749,16 +1961,39 @@ impl Engine {
         components::sync_instance(&mut self.doc, &id, &mut self.gen);
       }
     }
+    // What changes from here on (instances resolved in their own mode context, layout) can reach
+    // layers inside a main component after it was fingerprinted: its fingerprint follows below.
+    let fp_base = self.doc.clone();
     // Instances just synced from their mains resolve variables in their own mode context.
-    crate::variables::apply(&mut self.doc);
+    if whole {
+      crate::variables::apply(&mut self.doc);
+    } else {
+      crate::variables::apply_since(&mut self.doc, &mid);
+    }
     // Only trees that changed need layout (layout never reaches across top-level layers),
-    // and moving a whole top-level layer changes nothing inside it.
+    // moving a whole top-level layer changes nothing inside it, and neither do edits to
+    // what layout never reads (paints, bindings, names, ...).
     let by_root = self.changed_by_root(prev);
     for (root, changed) in by_root {
-      if !self.only_moved(prev, &root, &changed) {
+      if !self.only_moved(prev, &root, &changed) && self.needs_layout(prev, &changed) {
         layout::layout_node(&mut self.doc, &root, self.measurer.as_ref());
       }
     }
+    if self.reference {
+      self.refresh_fingerprints();
+    } else {
+      // The mains touched since the last fingerprints were taken (before this pass, from a
+      // remote delta or an undo) and by the passes above.
+      let mut comps = std::mem::take(&mut self.fp_touched);
+      match self.touched_components(&fp_base) {
+        Some(t) => {
+          comps.extend(t);
+          self.refresh_fingerprints_of(comps);
+        }
+        None => self.refresh_fingerprints(),
+      }
+    }
+    self.vars_settled = true;
     self.selection.retain(|i| self.doc.nodes.contains_key(i));
     if self.doc.page(&self.page).is_none() {
       if let Some(p) = self.doc.pages.first() {
@@ -1771,6 +2006,9 @@ impl Engine {
   /// are fingerprinted, so unrelated edits in big files stay cheap).
   fn changed_components(&mut self, prev: &Document) -> Vec<NodeId> {
     let mut comps: Vec<NodeId> = Vec::new();
+    let mut in_comps: HashSet<NodeId> = HashSet::new();
+    // Layers whose chain to the top is already known to hold no (further) main component.
+    let mut walked: HashSet<NodeId> = HashSet::new();
     for item in prev.nodes.diff(&self.doc.nodes) {
       // A set's properties belong to every variant: only a change of those reaches them (moving
       // or renaming the set leaves the variants alone).
@@ -1779,26 +2017,34 @@ impl Engine {
         imbl::ordmap::DiffItem::Add(k, _) | imbl::ordmap::DiffItem::Update { new: (k, _), .. } => (&self.doc, k),
         imbl::ordmap::DiffItem::Remove(k, _) => (prev, k),
       };
-      for id in std::iter::once(k.clone()).chain(doc.ancestors(k)) {
+      // The layer itself, then up its chain until a layer an earlier one already covered.
+      let mut cur = Some(k.clone());
+      let mut first = true;
+      while let Some(id) = cur {
+        if !first && !walked.insert(id.clone()) {
+          break;
+        }
         match self.doc.get(&id) {
           Some(n) if n.kind == NodeType::Component => {
-            if !comps.contains(&id) {
-              comps.push(id);
+            if in_comps.insert(id.clone()) {
+              comps.push(id.clone());
             }
           }
-          Some(n) if n.kind == NodeType::ComponentSet && id == *k && props_changed => {
+          Some(n) if n.kind == NodeType::ComponentSet && first && props_changed => {
             for c in n
               .children
               .iter()
               .filter(|c| self.doc.get(c).map(|c| c.kind == NodeType::Component).unwrap_or(false))
             {
-              if !comps.contains(c) {
+              if in_comps.insert(c.clone()) {
                 comps.push(c.clone());
               }
             }
           }
           _ => {}
         }
+        first = false;
+        cur = doc.get(&id).and_then(|n| n.parent.clone());
       }
     }
     // Instances copy their main's size, so the mains settle (text re-measured, hug applied)
@@ -1809,8 +2055,16 @@ impl Engine {
         roots.push(r);
       }
     }
+    // (Not for a tree whose changes layout never reads.)
+    let by_root = if self.reference || roots.is_empty() {
+      HashMap::new()
+    } else {
+      self.changed_by_root(prev)
+    };
     for r in &roots {
-      layout::layout_node(&mut self.doc, r, self.measurer.as_ref());
+      if self.reference || by_root.get(r).is_none_or(|ids| self.needs_layout(prev, ids)) {
+        layout::layout_node(&mut self.doc, r, self.measurer.as_ref());
+      }
     }
     let mut changed = Vec::new();
     for c in comps {
@@ -1825,7 +2079,97 @@ impl Engine {
     changed
   }
 
+  /// `refresh_fingerprints` for a document that follows `prev` (whose fingerprints are held): a
+  /// main's depends only on its subtree and its set's properties, so only the mains with a changed
+  /// layer in them (and the variants of a changed set) are recomputed, and gone ones dropped.
+  /// (`after_mutation` recomputes them once more when it is done: it may change them again.)
+  fn refresh_fingerprints_since(&mut self, prev: &Document) {
+    if self.reference {
+      return self.refresh_fingerprints();
+    }
+    match self.touched_components(prev) {
+      Some(touched) => {
+        self.fp_touched.extend(touched.iter().cloned());
+        self.refresh_fingerprints_of(touched);
+      }
+      // A change bigger than the mains themselves: hashing them all is cheaper than finding which
+      // (and `after_mutation` hashes them again when it is done).
+      None => {
+        self.refresh_fingerprints();
+        self.fp_touched.extend(self.fingerprints.keys().cloned());
+      }
+    }
+  }
+
+  /// The main components with a layer in the difference between `prev` and the document, and the
+  /// variants of a set that is in it.
+  fn touched_components(&self, prev: &Document) -> Option<Vec<NodeId>> {
+    // More changed layers than the mains hold between them: not worth finding which ones.
+    let mut limit: Option<usize> = None;
+    let mut seen_items = 0usize;
+    let mut touched: Vec<NodeId> = Vec::new();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    for item in prev.nodes.diff(&self.doc.nodes) {
+      seen_items += 1;
+      if seen_items > 256 && seen_items > *limit.get_or_insert_with(|| self.fingerprints.keys().map(|c| self.doc.subtree(c).len()).sum()) {
+        return None;
+      }
+      let (doc, k, old_kind) = match item {
+        imbl::ordmap::DiffItem::Add(k, _) => (&self.doc, k, None),
+        imbl::ordmap::DiffItem::Update { old, new: (k, _) } => (&self.doc, k, Some(old.1.kind)),
+        imbl::ordmap::DiffItem::Remove(k, n) => (prev, k, Some(n.kind)),
+      };
+      if old_kind == Some(NodeType::Component) && seen.insert(k.clone()) {
+        touched.push(k.clone());
+      }
+      let mut cur = Some(k.clone());
+      let mut first = true;
+      while let Some(id) = cur {
+        if !first && seen.contains(&id) {
+          break;
+        }
+        match doc.get(&id) {
+          Some(n) if n.kind == NodeType::Component => {
+            if seen.insert(id.clone()) {
+              touched.push(id.clone());
+            }
+          }
+          // A set's properties belong to every variant.
+          Some(n) if n.kind == NodeType::ComponentSet && first => {
+            for c in &n.children {
+              if self.doc.get(c).is_some_and(|c| c.kind == NodeType::Component) && seen.insert(c.clone()) {
+                touched.push(c.clone());
+              }
+            }
+          }
+          _ => {}
+        }
+        first = false;
+        cur = doc.get(&id).and_then(|n| n.parent.clone());
+      }
+    }
+    Some(touched)
+  }
+
+  /// Recomputes the fingerprint of each of these components (dropping those that are gone).
+  fn refresh_fingerprints_of(&mut self, comps: impl IntoIterator<Item = NodeId>) {
+    for c in comps {
+      if self.doc.get(&c).is_some_and(|n| n.kind == NodeType::Component) {
+        let fp = components::fingerprint(&self.doc, &c);
+        self.fingerprints.insert(c, fp);
+      } else {
+        self.fingerprints.remove(&c);
+      }
+    }
+    // A main that was deleted leaves no fingerprint behind (nothing in a diff names it twice).
+    let doc = &self.doc;
+    self
+      .fingerprints
+      .retain(|k, _| doc.get(k).is_some_and(|n| n.kind == NodeType::Component));
+  }
+
   fn refresh_fingerprints(&mut self) {
+    self.fp_touched.clear();
     self.fingerprints = self
       .doc
       .components()
@@ -2052,7 +2396,12 @@ impl Engine {
         arrange::tidy_up(&mut self.doc, &ids, spacing)?;
         Ok(json!({}))
       }
-      Command::ScaleNodes { ids, factor, anchor } => {
+      Command::ScaleNodes {
+        ids,
+        factor,
+        anchor,
+        strokes,
+      } => {
         if !(factor.is_finite() && factor > 0.0) {
           return Err("the scale factor must be above zero".into());
         }
@@ -2064,7 +2413,7 @@ impl Engine {
             Point::new(b.x, b.y)
           }
         };
-        arrange::scale_nodes(&mut self.doc, &ids, factor, anchor);
+        arrange::scale_nodes(&mut self.doc, &ids, factor, anchor, strokes);
         Ok(json!({}))
       }
       Command::SetPageBackground { id, color } => {
@@ -2118,6 +2467,21 @@ impl Engine {
         };
         for id in &ids {
           crate::variables::set_binding(&mut self.doc, id, &property, var_id.as_deref())?;
+          // One source per property: binding a typography property lets go of the text style
+          // (the values stay).
+          if var_id.is_some() && TEXT_STYLE_PROPS.contains(&property.as_str()) {
+            let sets = |n: &Node, styles: &[TextStyle]| {
+              n.text_style
+                .as_ref()
+                .and_then(|sid| styles.iter().find(|s| &s.id == sid))
+                .is_some_and(|s| s.sets(&property))
+            };
+            let styles = self.doc.styles.texts.clone();
+            if let Some(n) = self.doc.get_mut(id).filter(|n| sets(n, &styles)) {
+              n.text_style = None;
+              components::record_override(&mut self.doc, id, &json!({ "textStyle": null }));
+            }
+          }
         }
         Ok(json!({}))
       }
@@ -2353,6 +2717,14 @@ impl Engine {
         self.selection = vec![id];
         Ok(json!({}))
       }
+      Command::SplitVectorAt { id, points } => {
+        let ends = self.edit_vector(&id, true, |v| vector_edit::split_at(v, &points))?;
+        Ok(json!({ "points": ends }))
+      }
+      Command::JoinVectorEnds { id, a, b } => {
+        let at = self.edit_vector(&id, true, |v| vector_edit::join_ends(v, a, b))?;
+        Ok(json!({ "points": at }))
+      }
       Command::FitVectorBounds { id } => {
         self.edit_vector(&id, true, |_| Ok(()))?;
         Ok(json!({}))
@@ -2400,7 +2772,8 @@ impl Engine {
       Command::Paste { data, parent, x, y } => self.paste(&data, parent, x, y),
       Command::Update { ids, patch: p } => {
         // Before anything records the patch (as an instance override, say).
-        let p = without_unsafe_links(p);
+        let mut p = without_unsafe_links(p);
+        crate::variables::resolve_names_in_patch(&self.doc, &mut p);
         let detached = crate::variables::unbind_for_patch(&mut self.doc, &ids, &p);
         for id in &ids {
           let before = self.doc.get(id).cloned().ok_or_else(|| format!("no node {id}"))?;
@@ -2460,7 +2833,11 @@ impl Engine {
         }
         Ok(json!({}))
       }
-      Command::SetText { id, characters } => {
+      Command::SetText {
+        id,
+        characters,
+        runs: given,
+      } => {
         // A textarea reads line breaks as "\n": keep the stored text in the same form so the
         // editor's indices and the engine's agree.
         let characters = characters.replace("\r\n", "\n").replace('\r', "\n");
@@ -2470,10 +2847,17 @@ impl Engine {
           .and_then(|n| n.text.as_ref())
           .map(|t| (t.characters.clone(), t.runs.clone()))
           .unwrap_or_default();
-        let runs = crate::text::remap_runs(&old, &characters, &runs);
+        let runs = match given {
+          Some(mut r) => {
+            crate::text::normalize_runs(&mut r, characters.chars().count());
+            r
+          }
+          None => crate::text::remap_runs(&old, &characters, &runs),
+        };
         let p = json!({ "text": { "characters": characters, "runs": runs } });
         let n = self.doc.get_mut(&id).ok_or("no such node")?;
         patch::apply(n, &p)?;
+        drop_unsafe_links(n);
         // The name follows the text until the user renames the layer.
         let auto_name = |s: &str| -> String { s.trim_start().chars().take(40).collect() };
         let old_name: String = old.chars().take(40).collect();
@@ -2640,9 +3024,10 @@ impl Engine {
         snap,
         zoom,
         scale,
+        scale_strokes,
       } => {
         if scale {
-          self.resize_scale(&ids, handle, dx, dy, from_center)
+          self.resize_scale(&ids, handle, dx, dy, from_center, scale_strokes)
         } else {
           self.resize(&ids, handle, dx, dy, keep_aspect, from_center, snap, zoom)
         }
@@ -3030,6 +3415,10 @@ impl Engine {
           font_weight: t.font_weight,
           line_height: t.line_height,
           letter_spacing: t.letter_spacing,
+          italic: Some(t.italic),
+          paragraph_spacing: Some(t.paragraph_spacing),
+          case: Some(t.case),
+          decoration: Some(t.decoration),
         });
         if let Some(n) = self.doc.get_mut(&from) {
           n.text_style = Some(id.clone());
@@ -3142,32 +3531,34 @@ impl Engine {
       }
       Command::DeleteStyle { id } => {
         let st = &self.doc.styles;
-        if st.colors.iter().any(|s| s.id == id)
+        let existed = st.colors.iter().any(|s| s.id == id)
           || st.texts.iter().any(|s| s.id == id)
           || st.effects.iter().any(|s| s.id == id)
-          || st.grids.iter().any(|s| s.id == id)
-        {
+          || st.grids.iter().any(|s| s.id == id);
+        if existed {
           let st = self.doc.styles_mut();
           st.colors.retain(|s| s.id != id);
           st.texts.retain(|s| s.id != id);
           st.effects.retain(|s| s.id != id);
           st.grids.retain(|s| s.id != id);
         }
-        let is = |l: &Option<String>| l.as_deref() == Some(id.as_str());
-        let uses = |n: &Node| is(&n.fill_style) || is(&n.text_style) || is(&n.stroke_style) || is(&n.effect_style) || is(&n.grid_style);
-        self.doc.update_where(uses, |n| {
-          for l in [
-            &mut n.fill_style,
-            &mut n.text_style,
-            &mut n.stroke_style,
-            &mut n.effect_style,
-            &mut n.grid_style,
-          ] {
-            if l.as_deref() == Some(id.as_str()) {
-              *l = None;
+        {
+          let is = |l: &Option<String>| l.as_deref() == Some(id.as_str());
+          let uses = |n: &Node| is(&n.fill_style) || is(&n.text_style) || is(&n.stroke_style) || is(&n.effect_style) || is(&n.grid_style);
+          self.doc.update_where(uses, |n| {
+            for l in [
+              &mut n.fill_style,
+              &mut n.text_style,
+              &mut n.stroke_style,
+              &mut n.effect_style,
+              &mut n.grid_style,
+            ] {
+              if l.as_deref() == Some(id.as_str()) {
+                *l = None;
+              }
             }
-          }
-        });
+          });
+        }
         Ok(json!({}))
       }
       Command::DetachStyle { ids, style_id, kind } => {
@@ -3198,6 +3589,11 @@ impl Engine {
         line_height,
         auto_line_height,
         letter_spacing,
+        italic,
+        paragraph_spacing,
+        case,
+        decoration,
+        clear,
       } => {
         let style = self.doc.styles_mut().texts.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
         if let Some(v) = name {
@@ -3220,16 +3616,33 @@ impl Engine {
         if let Some(v) = letter_spacing {
           style.letter_spacing = v;
         }
+        if let Some(v) = italic {
+          style.italic = Some(v);
+        }
+        if let Some(v) = paragraph_spacing {
+          style.paragraph_spacing = Some(v.max(0.0));
+        }
+        if let Some(v) = case {
+          style.case = Some(v);
+        }
+        if let Some(v) = decoration {
+          style.decoration = Some(v);
+        }
+        for key in &clear {
+          match key.as_str() {
+            "italic" => style.italic = None,
+            "paragraphSpacing" => style.paragraph_spacing = None,
+            "case" => style.case = None,
+            "decoration" => style.decoration = None,
+            _ => {}
+          }
+        }
         let t = style.clone();
         self.doc.update_where(
           |n| n.text_style.as_deref() == Some(id.as_str()),
           |n| {
             if let Some(tp) = n.text.as_mut() {
-              tp.font_family = t.font_family.clone();
-              tp.font_size = t.font_size;
-              tp.font_weight = t.font_weight;
-              tp.line_height = t.line_height;
-              tp.letter_spacing = t.letter_spacing;
+              t.apply_to(tp);
             }
           },
         );
@@ -3278,20 +3691,24 @@ impl Engine {
           }
         } else if let Some(t) = self.doc.styles.texts.iter().find(|s| s.id == style_id).cloned() {
           for id in &ids {
-            if let Some(tp) = self.doc.get_mut(id).and_then(|n| n.text.as_mut()) {
-              tp.font_family = t.font_family.clone();
-              tp.font_size = t.font_size;
-              tp.font_weight = t.font_weight;
-              tp.line_height = t.line_height;
-              tp.letter_spacing = t.letter_spacing;
+            let Some(n) = self.doc.get_mut(id) else { continue };
+            let Some(tp) = n.text.as_mut() else { continue };
+            t.apply_to(tp);
+            // One source per property: the style replaces the typography variables bound on
+            // the layer.
+            let unbound: Vec<&str> = TEXT_STYLE_PROPS
+              .iter()
+              .copied()
+              .filter(|p| t.sets(p) && n.bindings.remove(*p).is_some())
+              .collect();
+            n.text_style = Some(style_id.clone());
+            let tp = n.text.as_ref().unwrap();
+            let text = json!({ "fontFamily": tp.font_family, "fontSize": tp.font_size, "fontWeight": tp.font_weight, "lineHeight": tp.line_height, "letterSpacing": tp.letter_spacing, "italic": tp.italic, "paragraphSpacing": tp.paragraph_spacing, "case": tp.case, "decoration": tp.decoration });
+            let mut rec = json!({ "text": text, "textStyle": style_id });
+            if !unbound.is_empty() {
+              rec["bindings"] = Value::Object(unbound.iter().map(|p| (p.to_string(), Value::Null)).collect());
             }
-            if let Some(n) = self.doc.get_mut(id) {
-              n.text_style = Some(style_id.clone());
-              if let Some(tp) = &n.text {
-                let text = json!({ "fontFamily": tp.font_family, "fontSize": tp.font_size, "fontWeight": tp.font_weight, "lineHeight": tp.line_height, "letterSpacing": tp.letter_spacing });
-                applied.push((id.clone(), json!({ "text": text, "textStyle": style_id })));
-              }
-            }
+            applied.push((id.clone(), rec));
           }
         } else {
           return Err("no such style".into());
@@ -3668,7 +4085,7 @@ impl Engine {
 
   /// The Scale tool's handle drag: proportional (the larger change wins at a corner), around
   /// the opposite handle, or the centre.
-  fn resize_scale(&mut self, ids: &[NodeId], handle: Handle, dx: f64, dy: f64, from_center: bool) -> Result<Value, String> {
+  fn resize_scale(&mut self, ids: &[NodeId], handle: Handle, dx: f64, dy: f64, from_center: bool, strokes: bool) -> Result<Value, String> {
     let ids = arrange::scalable(&self.doc, ids);
     let from = self.doc.bounds_of_many(&ids).ok_or("nothing to scale")?;
     let (fx, fy) = handle.factors();
@@ -3716,7 +4133,7 @@ impl Engine {
         },
       )
     };
-    arrange::scale_nodes(&mut self.doc, &ids, k, anchor);
+    arrange::scale_nodes(&mut self.doc, &ids, k, anchor, strokes);
     Ok(json!({ "guides": [], "gaps": [], "scale": k }))
   }
 
@@ -3747,16 +4164,21 @@ impl Engine {
   }
 
   fn paste(&mut self, data: &str, parent: Option<NodeId>, x: Option<f64>, y: Option<f64>) -> Result<Value, String> {
-    let v: Value = serde_json::from_str(data).map_err(|_| "clipboard does not contain Designotron layers")?;
-    if v.get("type").and_then(|t| t.as_str()) != Some(CLIPBOARD_TAG) {
-      return Err("clipboard does not contain Designotron layers".into());
-    }
-    let mut nodes: Vec<Node> = serde_json::from_value(v["nodes"].clone()).map_err(|e| e.to_string())?;
-    let roots: Vec<NodeId> = serde_json::from_value(v["roots"].clone()).map_err(|e| e.to_string())?;
-    let mut comps: Vec<Node> = v
-      .get("components")
-      .and_then(|c| serde_json::from_value(c.clone()).ok())
-      .unwrap_or_default();
+    // Parsed once, straight into layers (no `Value` tree of the whole clipboard to clone from).
+    let clip = match serde_json::from_str::<ClipIn>(data) {
+      Ok(c) if c.kind.as_deref() == Some(CLIPBOARD_TAG) => c,
+      _ => return Err(clipboard_error(data)),
+    };
+    let ClipIn {
+      mut nodes,
+      roots,
+      components,
+      rest,
+      ..
+    } = clip;
+    let roots_set: HashSet<&NodeId> = roots.iter().collect();
+    let v = Value::Object(rest);
+    let mut comps: Vec<Node> = components.and_then(|c| serde_json::from_value(c).ok()).unwrap_or_default();
     // Variables and styles the layers use but this file lacks come along (and the layers follow
     // their new ids), before anything is inserted.
     nodes
@@ -3783,7 +4205,7 @@ impl Engine {
     let bounds = Rect::union_all(
       nodes
         .iter()
-        .filter(|n| roots.contains(&n.id))
+        .filter(|n| roots_set.contains(&n.id))
         .map(|n| Rect::new(n.x, n.y, n.width, n.height)),
     );
     let (ox, oy) = match (x, y, bounds) {
@@ -3797,7 +4219,7 @@ impl Engine {
       c.id = map[&n.id].clone();
       c.children = n.children.iter().filter_map(|ch| map.get(ch).cloned()).collect();
       c.page = page.clone();
-      if roots.contains(&n.id) {
+      if roots_set.contains(&n.id) {
         // Roots carry page-space positions in the clipboard.
         c.x += ox;
         c.y += oy;
@@ -3896,6 +4318,7 @@ impl Engine {
 
   /// Read-only queries.
   pub fn query(&self, q: Query) -> Result<Value, String> {
+    ops::set_reference(self.reference);
     let m = self.measurer.as_ref();
     Ok(match q {
       Query::Pick { x, y, zoom, deep } => json!(interact::pick(&self.doc, &self.page, Point::new(x, y), zoom, &self.selection, deep)),
@@ -4059,11 +4482,15 @@ impl Engine {
       components.extend(sub);
     }
     let tokens = crate::clipboard::attach(&self.doc, &mut nodes, &mut components);
-    let mut out = json!({ "type": CLIPBOARD_TAG, "roots": roots, "nodes": nodes, "components": components });
-    for (key, value) in tokens {
-      out[key] = value;
-    }
-    out.to_string()
+    // Written straight to the string: no `Value` tree of every layer in between.
+    let out = ClipOut {
+      kind: CLIPBOARD_TAG,
+      roots: &roots,
+      nodes: &nodes,
+      components: &components,
+      tokens: tokens.into_iter().collect(),
+    };
+    serde_json::to_string(&out).unwrap_or_default()
   }
 
   /// A subtree for the clipboard: the root detached, at its page-space position.
@@ -5255,6 +5682,7 @@ mod tests {
     e.dispatch(Command::BeginGesture).unwrap();
     let r = e
       .dispatch(Command::Resize {
+        scale_strokes: true,
         ids: vec![id.to_string()],
         handle: Handle::E,
         dx,
@@ -5889,6 +6317,7 @@ mod tests {
       font_weight: 700,
       line_height: None,
       letter_spacing: 0.0,
+      ..Default::default()
     });
     e.dispatch(Command::ApplyStyle {
       ids: vec![t.clone()],
@@ -5905,6 +6334,11 @@ mod tests {
       line_height: Some(56.0),
       auto_line_height: false,
       letter_spacing: None,
+      italic: None,
+      paragraph_spacing: None,
+      case: None,
+      decoration: None,
+      clear: vec![],
     })
     .unwrap();
     let s = &e.doc.styles.texts[0];
@@ -6278,6 +6712,260 @@ mod tests {
     assert_eq!(i.x, 300.0);
   }
 
+  fn text_layer(e: &mut Engine, chars: &str) -> NodeId {
+    id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: chars.into(),
+        parent: None,
+      })
+      .unwrap(),
+    )
+  }
+
+  fn text_of(e: &Engine, id: &str) -> crate::model::TextProps {
+    e.doc.get(id).unwrap().text.clone().unwrap()
+  }
+
+  #[test]
+  fn set_text_with_runs_stores_them_exactly_in_one_gesture_step() {
+    let mut e = engine();
+    let t = text_layer(&mut e, "Hello world");
+    e.dispatch(Command::StyleText {
+      id: t.clone(),
+      start: 6,
+      end: 11,
+      style: json!({ "fontWeight": 700 }),
+      clear: vec![],
+    })
+    .unwrap();
+    let styled = text_of(&e, &t).runs;
+    assert_eq!(styled.len(), 1);
+    e.dispatch(Command::BeginGesture).unwrap();
+    // Typing a word remaps the run; an undo snapshot then puts the old text and runs back.
+    e.dispatch(Command::SetText {
+      id: t.clone(),
+      characters: "Hello brave world".into(),
+      runs: None,
+    })
+    .unwrap();
+    assert_eq!((text_of(&e, &t).runs[0].start, text_of(&e, &t).runs[0].end), (6, 17));
+    e.dispatch(Command::SetText {
+      id: t.clone(),
+      characters: "Hello world".into(),
+      runs: Some(styled.clone()),
+    })
+    .unwrap();
+    assert_eq!(text_of(&e, &t).runs, styled);
+    // A run past the end is clamped, plain and empty runs are dropped.
+    e.dispatch(Command::SetText {
+      id: t.clone(),
+      characters: "Hi".into(),
+      runs: Some(vec![
+        crate::model::TextRun {
+          start: 0,
+          end: 99,
+          font_weight: Some(700),
+          ..Default::default()
+        },
+        crate::model::TextRun {
+          start: 1,
+          end: 2,
+          ..Default::default()
+        },
+      ]),
+    })
+    .unwrap();
+    let r = text_of(&e, &t).runs;
+    assert_eq!(r.len(), 1);
+    assert_eq!((r[0].start, r[0].end, r[0].font_weight), (0, 2, Some(700)));
+    e.dispatch(Command::EndGesture).unwrap();
+    // The whole session is one undo step.
+    e.dispatch(Command::Undo).unwrap();
+    let back = text_of(&e, &t);
+    assert_eq!(back.characters, "Hello world");
+    assert_eq!(back.runs, styled);
+  }
+
+  #[test]
+  fn set_text_with_runs_drops_unsafe_links() {
+    let mut e = engine();
+    let t = text_layer(&mut e, "Click");
+    e.dispatch(Command::SetText {
+      id: t.clone(),
+      characters: "Click".into(),
+      runs: Some(vec![crate::model::TextRun {
+        start: 0,
+        end: 5,
+        link: Some("javascript:alert(1)".into()),
+        font_weight: Some(700),
+        ..Default::default()
+      }]),
+    })
+    .unwrap();
+    let runs = text_of(&e, &t).runs;
+    assert!(runs.iter().all(|r| r.link.is_none()), "{runs:?}");
+    assert_eq!(runs[0].font_weight, Some(700));
+  }
+
+  #[test]
+  fn text_styles_carry_italic_paragraph_spacing_case_and_decoration() {
+    use crate::model::{TextCase, TextDecoration};
+    let mut e = engine();
+    let a = text_layer(&mut e, "One");
+    let b = text_layer(&mut e, "Two");
+    e.dispatch(Command::Update {
+      ids: vec![a.clone()],
+      patch: json!({ "text": { "italic": true, "paragraphSpacing": 12, "case": "upper", "decoration": "underline" } }),
+    })
+    .unwrap();
+    let sid = id_of(
+      &e.dispatch(Command::AddTextStyle {
+        name: "Caption".into(),
+        from: a.clone(),
+      })
+      .unwrap(),
+    );
+    let st = e.doc.styles.texts[0].clone();
+    assert_eq!(
+      (st.italic, st.paragraph_spacing, st.case, st.decoration),
+      (Some(true), Some(12.0), Some(TextCase::Upper), Some(TextDecoration::Underline))
+    );
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![b.clone()],
+      style_id: sid.clone(),
+      kind: None,
+    })
+    .unwrap();
+    let tb = text_of(&e, &b);
+    assert!(tb.italic && tb.paragraph_spacing == 12.0 && tb.case == TextCase::Upper && tb.decoration == TextDecoration::Underline);
+    // Editing the style updates both layers.
+    e.dispatch(Command::UpdateTextStyle {
+      id: sid.clone(),
+      name: None,
+      font_family: None,
+      font_size: None,
+      font_weight: None,
+      line_height: None,
+      auto_line_height: false,
+      letter_spacing: None,
+      italic: None,
+      paragraph_spacing: Some(30.0),
+      case: Some(TextCase::Lower),
+      decoration: None,
+      clear: vec![],
+    })
+    .unwrap();
+    for n in [&a, &b] {
+      let t = text_of(&e, n);
+      assert_eq!((t.paragraph_spacing, t.case), (30.0, TextCase::Lower));
+    }
+    // A field the style stops setting is left alone on the layers: they keep what they have.
+    e.dispatch(Command::UpdateTextStyle {
+      id: sid.clone(),
+      name: None,
+      font_family: None,
+      font_size: None,
+      font_weight: None,
+      line_height: None,
+      auto_line_height: false,
+      letter_spacing: None,
+      italic: None,
+      paragraph_spacing: None,
+      case: None,
+      decoration: None,
+      clear: vec!["case".into(), "italic".into()],
+    })
+    .unwrap();
+    let st = e.doc.styles.texts[0].clone();
+    assert!(st.case.is_none() && st.italic.is_none());
+    assert_eq!(text_of(&e, &b).case, TextCase::Lower);
+    assert!(text_of(&e, &b).italic);
+    // JSON: skipped at None, present when set, and an old style without them loads unchanged.
+    let j = serde_json::to_value(&st).unwrap();
+    assert!(j.get("case").is_none() && j.get("italic").is_none());
+    assert_eq!(j["paragraphSpacing"], 30.0);
+    assert_eq!(j["decoration"], "underline");
+    let old_json = json!({ "id": "x", "name": "Old", "fontFamily": "Inter", "fontSize": 12.0, "fontWeight": 400, "lineHeight": null, "letterSpacing": 0.0 });
+    let old: crate::model::TextStyle = serde_json::from_value(old_json.clone()).unwrap();
+    assert_eq!(
+      (old.italic, old.paragraph_spacing, old.case, old.decoration),
+      (None, None, None, None)
+    );
+    assert_eq!(serde_json::to_value(&old).unwrap(), old_json);
+    // Undo goes back to the style before the clear.
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.styles.texts[0].case, Some(TextCase::Lower));
+  }
+
+  #[test]
+  fn applying_a_text_style_unbinds_typography_variables_and_binding_detaches_the_style() {
+    let mut e = engine();
+    e.doc.variables = serde_json::from_value(json!([
+      { "id": "c_t", "name": "Type", "modes": [{ "id": "m_l", "name": "Base" }],
+        "variables": [
+          { "id": "v_s", "name": "Size", "type": "number", "values": { "m_l": 40 } },
+          { "id": "v_f", "name": "Family", "type": "string", "values": { "m_l": "Georgia" } } ] }
+    ]))
+    .unwrap();
+    let t = text_layer(&mut e, "Title");
+    let bind = |e: &mut Engine, prop: &str, var: Option<&str>| {
+      e.dispatch(Command::BindVariable {
+        ids: vec![t.clone()],
+        property: prop.into(),
+        variable: var.map(String::from),
+      })
+      .unwrap();
+    };
+    bind(&mut e, "fontSize", Some("v_s"));
+    bind(&mut e, "fontFamily", Some("v_f"));
+    assert_eq!(text_of(&e, &t).font_size, 40.0);
+    e.doc.styles_mut().texts.push(crate::model::TextStyle {
+      id: "ts".into(),
+      name: "Body".into(),
+      font_family: "Inter".into(),
+      font_size: 18.0,
+      font_weight: 400,
+      ..Default::default()
+    });
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![t.clone()],
+      style_id: "ts".into(),
+      kind: None,
+    })
+    .unwrap();
+    let n = e.doc.get(&t).unwrap();
+    assert!(n.bindings.is_empty(), "the style wins: {:?}", n.bindings);
+    assert_eq!(n.text_style.as_deref(), Some("ts"));
+    assert_eq!(
+      (n.text.as_ref().unwrap().font_size, n.text.as_ref().unwrap().font_family.as_str()),
+      (18.0, "Inter")
+    );
+    // The size stays what the style says through later edits.
+    e.dispatch(Command::Update {
+      ids: vec![t.clone()],
+      patch: json!({ "opacity": 0.9 }),
+    })
+    .unwrap();
+    assert_eq!(text_of(&e, &t).font_size, 18.0);
+    // Binding a typography property lets go of the style and keeps the other values.
+    bind(&mut e, "fontSize", Some("v_s"));
+    let n = e.doc.get(&t).unwrap();
+    assert!(n.text_style.is_none());
+    assert_eq!(n.text.as_ref().unwrap().font_size, 40.0);
+    assert_eq!(n.text.as_ref().unwrap().font_family, "Inter");
+    // Applying again and unbinding doesn't touch the link.
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![t.clone()],
+      style_id: "ts".into(),
+      kind: None,
+    })
+    .unwrap();
+    bind(&mut e, "fontSize", None);
+    assert_eq!(e.doc.get(&t).unwrap().text_style.as_deref(), Some("ts"));
+  }
+
   #[test]
   fn styled_text_survives_typing() {
     let mut e = engine();
@@ -6302,11 +6990,13 @@ mod tests {
     e.dispatch(Command::SetText {
       id: id.clone(),
       characters: "Oh, Hello world".into(),
+      runs: None,
     })
     .unwrap();
     e.dispatch(Command::SetText {
       id: id.clone(),
       characters: "Oh, Hello world!".into(),
+      runs: None,
     })
     .unwrap();
     let t = e.doc.get(&id).unwrap().text.clone().unwrap();
@@ -6337,6 +7027,7 @@ mod tests {
     let a = rect(&mut e, 0.0, 0.0, 50.0, 50.0, None);
     let b = rect(&mut e, 100.0, 0.0, 50.0, 50.0, None);
     e.dispatch(Command::Resize {
+      scale_strokes: true,
       ids: vec![a.clone(), b.clone()],
       handle: Handle::E,
       dx: -200.0,
@@ -6836,6 +7527,7 @@ mod tests {
     e.dispatch(Command::SetText {
       id: id.clone(),
       characters: "ab\r\ncd\ref".into(),
+      runs: None,
     })
     .unwrap();
     assert_eq!(e.doc.get(&id).unwrap().text.as_ref().unwrap().characters, "ab\ncd\nef");
@@ -6856,6 +7548,7 @@ mod tests {
     e.dispatch(Command::SetText {
       id: id.clone(),
       characters: " plus".into(),
+      runs: None,
     })
     .unwrap();
     assert_eq!(e.doc.get(&id).unwrap().name, "plus");
@@ -7690,6 +8383,72 @@ mod tests {
       assert!(e.dispatch(Command::DeleteVectorPoints { id, points: vec![[0, 0]] }).is_err());
     }
 
+    #[test]
+    fn split_and_join_are_one_undo_step_each() {
+      let mut e = engine();
+      let id = path(&mut e, true);
+      let subs = |e: &Engine| e.doc.get(&id).unwrap().vector.as_ref().unwrap().subpaths.clone();
+      let r = e
+        .dispatch(Command::SplitVectorAt {
+          id: id.clone(),
+          points: vec![[0, 1]],
+        })
+        .unwrap();
+      assert_eq!(r["points"], json!([[0, 0], [0, 3]]));
+      let opened = subs(&e);
+      assert!(!opened[0].closed && opened[0].points.len() == 4);
+      let r = e
+        .dispatch(Command::JoinVectorEnds {
+          id: id.clone(),
+          a: [0, 0],
+          b: [0, 3],
+        })
+        .unwrap();
+      assert_eq!(r["points"], json!([[0, 0]]));
+      let rejoined = subs(&e);
+      assert!(
+        rejoined[0].closed && rejoined[0].points.len() == 3,
+        "the same point count as at the start"
+      );
+      e.dispatch(Command::Undo).unwrap();
+      assert_eq!(subs(&e), opened);
+      e.dispatch(Command::Undo).unwrap();
+      let orig = subs(&e);
+      assert!(orig[0].closed && orig[0].points.len() == 3);
+      e.dispatch(Command::Redo).unwrap();
+      assert_eq!(subs(&e), opened);
+      // Nothing to split, or to join: an error and no undo step.
+      let mut e = engine();
+      let id = path(&mut e, false);
+      assert!(e
+        .dispatch(Command::SplitVectorAt {
+          id: id.clone(),
+          points: vec![[0, 0], [0, 2]]
+        })
+        .is_err());
+      assert!(e
+        .dispatch(Command::JoinVectorEnds {
+          id: id.clone(),
+          a: [0, 0],
+          b: [0, 1]
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn splitting_keeps_the_path_where_it_is_on_the_page() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      e.dispatch(Command::SplitVectorAt {
+        id: id.clone(),
+        points: vec![[0, 1]],
+      })
+      .unwrap();
+      let n = e.doc.get(&id).unwrap();
+      assert_eq!((n.x, n.y, n.width, n.height), (100.0, 100.0, 100.0, 50.0));
+      assert_eq!(n.vector.as_ref().unwrap().subpaths.len(), 2);
+    }
+
     /// A V-shaped path through (100,100), (150,150), (200,100), optionally closed.
     fn path(e: &mut Engine, closed: bool) -> String {
       let r = e
@@ -7711,6 +8470,10 @@ mod tests {
     }
   }
 }
+
+#[cfg(test)]
+#[path = "lockstep_tests.rs"]
+mod lockstep_tests;
 
 #[cfg(test)]
 mod r15_link_tests {

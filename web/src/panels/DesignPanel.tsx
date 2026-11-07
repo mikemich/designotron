@@ -43,7 +43,9 @@ import { PresetPicker } from "./PresetPicker";
 import { ApplyStyleButton, BoundChip, CreateStyleButton, StyleChip } from "./StyleControls";
 import { inScope } from "./variableScopes";
 import { framePosition, ownCoordinate } from "./groupOffset";
+import { isOpenPath } from "../canvas/vectorSnap";
 import { rangeValue } from "./textRange";
+import { familiesIn, fontLabel, fontNote, fontStatus, useFontEpoch } from "../fontStatus";
 import { parseLetterSpacing, parseLineHeight } from "./textUnits";
 
 const begin = () => dispatch({ op: "beginGesture" });
@@ -106,16 +108,23 @@ function PagePanel() {
     <div className="scroll">
       <Section title="Page">
         <div className="row">
-          <div className="swatch" onClick={(e) => setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect())}>
+          <button
+            type="button"
+            className="swatch"
+            aria-label={`Page colour ${page.background}`}
+            aria-haspopup="dialog"
+            aria-expanded={!!anchor}
+            onClick={(e) => setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect())}
+          >
             <i style={{ background: page.background }} />
-          </div>
+          </button>
           <span>{page.background}</span>
           <span className="muted small" style={{ marginLeft: "auto" }}>
             Background
           </span>
         </div>
         {anchor && (
-          <Popover anchor={anchor} onClose={() => setAnchor(null)}>
+          <Popover anchor={anchor} label="Page colour" onClose={() => setAnchor(null)}>
             <ColorPicker color={page.background} onChange={(color) => dispatch({ op: "setPageBackground", id: page.id, color })} />
           </Popover>
         )}
@@ -247,6 +256,7 @@ function FramePresets() {
 function ScaleField({ ids }: { ids: string[] }) {
   // The field always reads 100%: a scale applies to the layers as they are, then the field starts over.
   const [again, setAgain] = useState(0);
+  const [strokes, setStrokes] = useState(A.getScaleStrokes);
   return (
     <div className="row scale-row">
       <span className="muted small">Scale</span>
@@ -259,10 +269,21 @@ function ScaleField({ ids }: { ids: string[] }) {
         max={10000}
         suffix="%"
         onChange={(pct) => {
-          dispatch({ op: "scaleNodes", ids, factor: pct / 100, anchor: null });
+          dispatch({ op: "scaleNodes", ids, factor: pct / 100, anchor: null, strokes: A.getScaleStrokes() });
           setAgain((n) => n + 1);
         }}
       />
+      <label className="scale-strokes" title="Scale stroke weights along with the layers (K tool and this field)">
+        <input
+          type="checkbox"
+          checked={strokes}
+          onChange={(e) => {
+            A.setScaleStrokes(e.target.checked);
+            setStrokes(e.target.checked);
+          }}
+        />
+        <span className="muted small">Scale strokes</span>
+      </label>
     </div>
   );
 }
@@ -283,7 +304,7 @@ function FrameSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         </button>
       </div>
       {anchor && (
-        <Popover anchor={anchor} width={280} onClose={close}>
+        <Popover anchor={anchor} width={280} label="Size presets" onClose={close}>
           <PresetPicker
             autoFocus
             label="Search size presets"
@@ -839,12 +860,25 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const isItalic = r("italic") === true;
   const isDecorated = (d: "underline" | "strikethrough") => r("decoration") === d;
   const truncating = nodes.every((n) => !!n.text!.truncate || n.text!.maxLines != null);
+  // A family the browser can't draw keeps its name in the field, with a warning, instead of the
+  // picker showing its first font.
+  useFontEpoch();
+  const family = r("fontFamily") as Maybe<string>;
+  const familyOptions = FONTS.map((f) => ({ value: f, label: f }));
+  if (family !== MIXED && !FONTS.includes(family)) familyOptions.unshift({ value: family, label: fontLabel(family, fontStatus(family, FONTS)) });
+  const usedFamilies = [...new Set(nodes.flatMap((n) => (partial ? familiesIn(n.text!, sel!.start, sel!.end) : familiesIn(n.text!))))];
+  const familyNote = fontNote(usedFamilies.map((f) => ({ family: f, status: fontStatus(f, FONTS) })));
   return (
     <Section title={partial ? `Text · ${sel!.end - sel!.start} characters selected` : "Text"} actions={<ApplyStyleButton kind="text" ids={ids} />}>
       <StyleChip kind="text" nodes={nodes} ids={ids} />
       <div className="row">
-        <SelectField ariaLabel="Font family" value={r("fontFamily") as Maybe<string>} options={FONTS.map((f) => ({ value: f, label: f }))} onChange={(fontFamily) => set({ fontFamily })} />
+        <SelectField ariaLabel="Font family" value={family} options={familyOptions} onChange={(fontFamily) => set({ fontFamily })} />
       </div>
+      {familyNote && (
+        <div className="font-note" role="note">
+          {familyNote}
+        </div>
+      )}
       <div className="grid2">
         <SelectField ariaLabel="Font weight" value={r("fontWeight") as Maybe<number>} options={weightOptions(r("fontWeight") as Maybe<number>)} onChange={(fontWeight) => set({ fontWeight })} />
         <NumberField value={r("fontSize") as Maybe<number>} min={1} onChange={(fontSize) => set({ fontSize })} onScrubStart={begin} onScrubEnd={end} label="Aa" title="Font size" />
@@ -1095,6 +1129,15 @@ function defaultJoin(n: Node): "miter" | "round" {
   return "round";
 }
 
+/** Line end choices; the same list for the start and the end. */
+const CAP_OPTIONS = [
+  { value: "none", label: "None" },
+  { value: "round", label: "Round" },
+  { value: "square", label: "Square" },
+  { value: "arrow", label: "Arrow" },
+  { value: "circle", label: "Circle" },
+];
+
 /** A vector whose paths are all closed: line ends do nothing there (open paths and lines have them). */
 function isClosedVector(n: Node): boolean {
   if (n.type !== "vector" || !n.vector) return false;
@@ -1172,7 +1215,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
         };
         return (
           <div className="row" key={i}>
-            <label className="field" style={{ paddingLeft: 5, gap: 6 }}>
+            <div className="field" style={{ paddingLeft: 5, gap: 6 }}>
               <PaintSwatch
                 paint={p}
                 onChange={setP}
@@ -1191,7 +1234,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
               ) : (
                 <span style={{ flex: 1 }}>{paintLabel(p)}</span>
               )}
-            </label>
+            </div>
             <div style={{ width: 62 }}>
               <NumberField ariaLabel="Opacity" value={Math.round(p.opacity * 100)} suffix="%" min={0} max={100} onChange={(v) => setP({ ...p, opacity: v / 100 })} />
             </div>
@@ -1216,16 +1259,19 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
               onScrubStart={begin}
               onScrubEnd={end}
             />
-            <SelectField
-              ariaLabel="Stroke position"
-              value={common(nodes, (n) => n.strokeAlign)}
-              options={[
-                { value: "inside", label: "Inside" },
-                { value: "center", label: "Center" },
-                { value: "outside", label: "Outside" },
-              ]}
-              onChange={(strokeAlign) => update(ids, { strokeAlign })}
-            />
+            {/* Position is meaningless on an open path (it has no inside), so it is left out there. */}
+            {!nodes.every(isOpenPath) && (
+              <SelectField
+                ariaLabel="Stroke position"
+                value={common(nodes, (n) => n.strokeAlign)}
+                options={[
+                  { value: "inside", label: "Inside" },
+                  { value: "center", label: "Center" },
+                  { value: "outside", label: "Outside" },
+                ]}
+                onChange={(strokeAlign) => update(ids, { strokeAlign })}
+              />
+            )}
           </div>
           <div className="grid2">
             <SelectField
@@ -1239,21 +1285,13 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
               disabled={individual}
               title={individual ? "Dashes don't apply to individual strokes" : undefined}
             />
-            {isLineish && (
-              <SelectField
-                ariaLabel="Line end"
-                value={common(nodes, (n) => n.shape?.endCap ?? "none")}
-                options={[
-                  { value: "none", label: "No end cap" },
-                  { value: "round", label: "Round" },
-                  { value: "square", label: "Square" },
-                  { value: "arrow", label: "Arrow" },
-                  { value: "circle", label: "Circle" },
-                ]}
-                onChange={(endCap) => update(ids, { shape: { endCap } })}
-              />
-            )}
           </div>
+          {isLineish && (
+            <div className="grid2">
+              <SelectField label="Start" ariaLabel="Line start" title="Cap at the start of the line" value={common(nodes, (n) => n.shape?.startCap ?? "none")} options={CAP_OPTIONS} onChange={(startCap) => update(ids, { shape: { startCap } })} />
+              <SelectField label="End" ariaLabel="Line end" title="Cap at the end of the line" value={common(nodes, (n) => n.shape?.endCap ?? "none")} options={CAP_OPTIONS} onChange={(endCap) => update(ids, { shape: { endCap } })} />
+            </div>
+          )}
           {dashed && !individual && (
             <div className="grid2">
               <NumberField label="Dash" ariaLabel="Dash length" min={0} value={dash[0] ?? 0} onChange={(d) => update(ids, { strokeDash: [d, dash[1] ?? d] })} />

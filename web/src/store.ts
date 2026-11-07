@@ -515,13 +515,21 @@ export function noteEngineError(err: unknown): boolean {
   return trapped;
 }
 
+/** Counts changes that arrive from outside this editor (a collaborator's delta, a document load):
+ * the text editor drops its undo runs when one of them changed the text it is editing. */
+let foreignChanges = 0;
+export const foreignChangeCount = () => foreignChanges;
+export const noteForeignChange = () => void foreignChanges++;
+
 export function dispatch<T = any>(cmd: Record<string, unknown>, opts: { quiet?: boolean } = {}): T | null {
   if (useStore.getState().tabView && TAB_VIEW_REFUSED.has(cmd.op as string)) return null;
   if (useStore.getState().engineFailed) return null;
   try {
     const r = JSON.parse(getEngine().dispatch(JSON.stringify(cmd)));
+    if (cmd.op === "applyRemote" || cmd.op === "replaceDocument") foreignChanges++;
     sync();
-    if ((cmd.op === "undo" || cmd.op === "redo") && useStore.getState().vectorPoints.length) useStore.setState({ vectorPoints: [] });
+    // Redo keeps the anchor selection while the path has the same shape (dropStalePoints clears it otherwise).
+    if (cmd.op === "undo" && useStore.getState().vectorPoints.length) useStore.setState({ vectorPoints: [] });
     return r;
   } catch (err) {
     if (noteEngineError(err)) return null;

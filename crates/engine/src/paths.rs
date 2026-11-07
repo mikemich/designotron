@@ -551,12 +551,14 @@ pub fn stroke_outline(n: &Node, sps: &[SubPath]) -> Vec<Contour> {
     return vec![];
   }
   let (closed, open) = to_contours(sps);
-  let round_caps = n
-    .shape
-    .as_ref()
-    .map(|s| s.start_cap == crate::model::StrokeCap::Round)
-    .unwrap_or(false);
-  let cap = || if round_caps { LineCap::Round(0.25) } else { LineCap::Butt };
+  // Each end has its own cap; "None" (and the arrow/circle ends, drawn as markers) is flat.
+  let cap_of = |c: Option<crate::model::StrokeCap>| match c {
+    Some(crate::model::StrokeCap::Round) => LineCap::Round(0.25),
+    Some(crate::model::StrokeCap::Square) => LineCap::Square,
+    _ => LineCap::Butt,
+  };
+  let start_cap = || cap_of(n.shape.as_ref().map(|s| s.start_cap));
+  let end_cap = || cap_of(n.shape.as_ref().map(|s| s.end_cap));
   let width = match n.stroke_align {
     StrokeAlign::Center => sw,
     _ => sw * 2.0,
@@ -568,8 +570,8 @@ pub fn stroke_outline(n: &Node, sps: &[SubPath]) -> Vec<Contour> {
       } else {
         LineJoin::Miter(0.2)
       })
-      .start_cap(cap())
-      .end_cap(cap())
+      .start_cap(start_cap())
+      .end_cap(end_cap())
   };
   let mut out: Vec<Contour> = Vec::new();
   if !closed.is_empty() {
@@ -583,8 +585,8 @@ pub fn stroke_outline(n: &Node, sps: &[SubPath]) -> Vec<Contour> {
   for line in &open {
     let s = StrokeStyle::new(sw)
       .line_join(LineJoin::Round(0.25))
-      .start_cap(cap())
-      .end_cap(cap());
+      .start_cap(start_cap())
+      .end_cap(end_cap());
     out.extend(shapes_to_contours(line.stroke(s, false)));
   }
   out
@@ -661,6 +663,35 @@ mod tests {
     let (closed, _) = to_contours(&local_outline(&n).unwrap());
     let a = total_area(&closed);
     assert!((a - std::f64::consts::PI * 2500.0).abs() < 30.0, "{a}");
+  }
+
+  #[test]
+  fn outline_caps_follow_each_end() {
+    use crate::model::{ShapeProps, StrokeCap};
+    let line = vec![SubPath {
+      points: vec![VectorPoint::at(0.0, 0.0), VectorPoint::at(100.0, 0.0)],
+      closed: false,
+    }];
+    let area_with = |start_cap, end_cap| {
+      let n = Node {
+        kind: NodeType::Vector,
+        stroke_weight: 10.0,
+        shape: Some(ShapeProps {
+          start_cap,
+          end_cap,
+          ..Default::default()
+        }),
+        ..Default::default()
+      };
+      total_area(&stroke_outline(&n, &line))
+    };
+    assert!((area_with(StrokeCap::None, StrokeCap::None) - 1000.0).abs() < 1.0);
+    assert!((area_with(StrokeCap::Square, StrokeCap::None) - 1050.0).abs() < 1.0);
+    assert!((area_with(StrokeCap::Square, StrokeCap::Square) - 1100.0).abs() < 1.0);
+    let round = area_with(StrokeCap::None, StrokeCap::Round);
+    assert!((round - (1000.0 + std::f64::consts::PI * 25.0 / 2.0)).abs() < 2.0, "{round}");
+    // An arrow end is drawn as a marker, so the outline is flat there.
+    assert!((area_with(StrokeCap::Arrow, StrokeCap::Circle) - 1000.0).abs() < 1.0);
   }
 
   #[test]

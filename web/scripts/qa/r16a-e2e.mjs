@@ -368,7 +368,8 @@ const pos = { x: 70, y: 15 };
   await page.keyboard.type("card 1", { delay: 180 });
   await page.waitForTimeout(400);
   const hits = await page.locator("[role=option][data-layer-hit]").count();
-  const first = await page.locator("[role=option][data-layer-hit]").first().getAttribute("aria-label");
+  // r18b: the name is the visible text ("Card 10" then ", in" and the path), not an aria-label.
+  const first = await page.locator("[role=option][data-layer-hit]").first().evaluate((e) => e.textContent.replace(/\s+/g, " ").trim());
   check('search "card 1" lists Card 10 to Card 19 on every screen (60) with paths', hits === 60 && /^Card 1\d, in Screen \d \/ \w+ \/ List$/.test(first ?? ""), `${hits} rows, first: ${first}`);
   const ks = await page.evaluate(() => window.__ks);
   check("each keystroke stays under 50 ms (no long task, event duration)", ks.max < 50 && ks.long < 50, JSON.stringify(ks));
@@ -625,7 +626,7 @@ await ctx.context.close();
   const fb = fp.getByRole("button", { name: "Filter layers" });
   await fp.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), c30);
   await fb.click();
-  check("nice 2: the filter button names the popover it controls", (await fb.getAttribute("aria-controls")) === "layer-filter-menu" && (await fb.getAttribute("aria-haspopup")) === "dialog");
+  check("nice 2: the filter button names the popover it controls", (await fb.getAttribute("aria-controls")) === "layer-filter-menu" && (await fb.getAttribute("aria-expanded")) === "true");
   await fb.focus();
   await fp.keyboard.press("Escape");
   await fp.waitForTimeout(150);

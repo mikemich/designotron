@@ -151,11 +151,20 @@ export function NumberField(props: {
             e.preventDefault();
             dispatch({ op: e.key.toLowerCase() === "y" || e.shiftKey ? "redo" : "undo" });
           } else if (e.key === "Escape") {
+            const input = e.target as HTMLInputElement;
+            const typed = edited.current;
             setText(fmt(value));
             edited.current = false;
-            const input = e.target as HTMLInputElement;
-            input.blur();
-            focusCanvas();
+            if (input.closest(".popover, [role=dialog]")) {
+              // In a popover or dialog the number goes back and focus stays here, selected. With nothing
+              // typed, Escape goes on to the popover: it closes and focus returns to its opener.
+              if (!typed) return;
+              e.preventDefault();
+              requestAnimationFrame(() => input.select());
+            } else {
+              input.blur();
+              focusCanvas();
+            }
           } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && value !== MIXED && (value ?? props.autoValue) !== undefined) {
             e.preventDefault();
             const d = (e.key === "ArrowUp" ? 1 : -1) * step * (e.shiftKey ? 10 : 1);
@@ -286,9 +295,34 @@ export function ToastLive() {
   );
 }
 
-/** Floating panel anchored near a DOM rect; closes on outside click / Escape. */
-export function Popover(props: { anchor: DOMRect; onClose: () => void; children: ReactNode; width?: number }) {
+/** Everything in `root` that Tab can reach. */
+export function tabbables(root: HTMLElement | null): HTMLElement[] {
+  return [...(root?.querySelectorAll<HTMLElement>("input, textarea, select, button, a[href], [tabindex]") ?? [])].filter(
+    (el) => !el.hasAttribute("disabled") && el.getAttribute("tabindex") !== "-1" && el.getAttribute("type") !== "hidden" && el.getClientRects().length > 0,
+  );
+}
+
+/** Floating panel anchored near a DOM rect; closes on outside click / Escape. It is a dialog: it takes
+ *  focus when it opens (unless `focusOnOpen` is false, for a popover opened from a field that keeps
+ *  typing), Tab cycles inside it, and closing from inside returns focus to `returnFocus` (default:
+ *  whatever had focus when it opened, the button that opened it). */
+export function Popover(props: {
+  anchor: DOMRect;
+  onClose: () => void;
+  children: ReactNode;
+  width?: number;
+  label?: string;
+  returnFocus?: HTMLElement | null;
+  focusOnOpen?: boolean;
+}) {
   const ref = useRef<HTMLDivElement>(null);
+  // Read while rendering: a child's autoFocus has already moved focus by the time effects run.
+  const [opener] = useState(() => {
+    const a = typeof document === "undefined" ? null : (document.activeElement as HTMLElement | null);
+    return a && a !== document.body ? a : null;
+  });
+  const back = useRef(props.returnFocus);
+  back.current = props.returnFocus;
   const [pos, setPos] = useState({ left: props.anchor.left, top: props.anchor.bottom + 6 });
   useLayoutEffect(() => {
     const el = ref.current;
@@ -307,6 +341,27 @@ export function Popover(props: { anchor: DOMRect; onClose: () => void; children:
     ro?.observe(el);
     return () => ro?.disconnect();
   }, [props.anchor]);
+  // Focus in on open, and back out on close when focus was inside.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    const active = document.activeElement as HTMLElement | null;
+    if (el && props.focusOnOpen !== false && !el.contains(active)) {
+      // Opened by keyboard: the first control. Opened by pointer: the dialog itself, so Enter still
+      // reaches whatever the opener wants it for (a crop frame leaves crop mode on Enter) and Tab goes in.
+      const first = keyboardModality ? tabbables(el)[0] : undefined;
+      if (first) first.focus({ preventScroll: true });
+      else {
+        el.tabIndex = -1;
+        el.focus({ preventScroll: true });
+      }
+    }
+    return () => {
+      const a = document.activeElement;
+      if (!el || !(a === document.body || el.contains(a))) return;
+      const to = back.current ?? opener;
+      if (to?.isConnected && !to.hasAttribute("disabled")) to.focus({ preventScroll: true });
+    };
+  }, []);
   useEffect(() => {
     const down = (e: PointerEvent) => {
       // Canvas overlays that edit what the popover edits (gradient handles, crop) keep it open.
@@ -324,7 +379,32 @@ export function Popover(props: { anchor: DOMRect; onClose: () => void; children:
     };
   }, []);
   return createPortal(
-    <div ref={ref} className="popover" style={{ ...pos, width: props.width ?? 240 }} onKeyDown={(e) => e.stopPropagation()}>
+    <div
+      ref={ref}
+      className="popover"
+      role="dialog"
+      aria-label={props.label ?? "Options"}
+      style={{ ...pos, width: props.width ?? 240 }}
+      onKeyDown={(e) => {
+        // A field that handled Escape (reverting its text) stops it before it gets here.
+        if (e.key === "Escape") {
+          e.preventDefault();
+          props.onClose();
+        } else if (e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          // The popover sits at the end of <body>: Tab would leave the page. Cycle instead.
+          const els = tabbables(ref.current);
+          const i = els.indexOf(document.activeElement as HTMLElement);
+          if (els.length && (i < 0 || (e.shiftKey ? i === 0 : i === els.length - 1))) {
+            e.preventDefault();
+            els[e.shiftKey ? els.length - 1 : 0].focus();
+          }
+        }
+        // Plain keys belong to the popover. Ctrl/Cmd chords (Save, Undo, Duplicate ...) go on to the app's
+        // shortcuts, which still leave a field that is being typed in alone.
+        if ((e.ctrlKey || e.metaKey) && e.key !== "Tab" && e.key !== "Escape") return;
+        e.stopPropagation();
+      }}
+    >
       {props.children}
     </div>,
     document.body,
@@ -580,6 +660,8 @@ export function useDialog(close: () => void, active = true) {
     }, 0);
     const trap = (e: KeyboardEvent) => {
       if (e.key !== "Tab" || !ref.current) return;
+      // A popover opened from the dialog cycles its own Tab stops.
+      if ((document.activeElement as Element | null)?.closest?.(".popover")) return;
       const els = focusable();
       if (!els.length) return;
       const first = els[0];

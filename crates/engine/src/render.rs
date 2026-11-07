@@ -499,11 +499,36 @@ impl<'a> Renderer<'a> {
       }
       _ => {
         let geo = self.geometry(n);
+        if let Some(fill) = self.single_fill_stroke(n, &geo) {
+          return self.strokes_with(n, &geo, Some(&fill));
+        }
         let mut out = self.fills(n, &geo);
         out.push_str(&self.strokes(n, &geo));
         out
       }
     }
+  }
+
+  /// The fill paint when `n` has exactly one visible fill and one visible centred stroke, so
+  /// both can be written as one element (an SVG paints fill, then stroke: same pixels).
+  fn single_fill_stroke(&mut self, n: &Node, geo: &Geo) -> Option<String> {
+    if n.stroke_weight <= 0.0 || per_side_weights(n).is_some() {
+      return None;
+    }
+    let mut fills = n.fills.iter().filter(|p| p.visible());
+    let mut strokes = n.strokes.iter().filter(|p| p.visible());
+    let fill = fills.next()?;
+    strokes.next()?;
+    if fills.next().is_some() || strokes.next().is_some() {
+      return None;
+    }
+    let open_vector = n.kind == NodeType::Vector && !is_closed(n);
+    let centred = match geo {
+      Geo::Rect { .. } | Geo::Ellipse { .. } => n.stroke_align == StrokeAlign::Center,
+      Geo::Path { .. } => n.stroke_align == StrokeAlign::Center || open_vector,
+      _ => false,
+    };
+    centred.then(|| self.paint(fill, n.width, n.height, 0.0))
   }
 
   fn children(&mut self, n: &Node) -> String {
@@ -585,6 +610,11 @@ impl<'a> Renderer<'a> {
   }
 
   fn strokes(&mut self, n: &Node, geo: &Geo) -> String {
+    self.strokes_with(n, geo, None)
+  }
+
+  /// `merged_fill` is the fill paint drawn by the same element (see `single_fill_stroke`).
+  fn strokes_with(&mut self, n: &Node, geo: &Geo, merged_fill: Option<&str>) -> String {
     if let (Some(weights), Geo::Rect { w, h, r }) = (per_side_weights(n), geo) {
       return self.side_strokes(n, weights, paint::ring_path(*w, *h, weights, n.stroke_align, *r));
     }
@@ -607,7 +637,7 @@ impl<'a> Renderer<'a> {
     let caps = self.line_caps(n);
     for p in n.strokes.iter().filter(|p| p.visible()) {
       let paint = self.paint(p, n.width, n.height, sw);
-      let stroke = format!(" fill=\"none\" stroke=\"{paint}\"{dash}");
+      let stroke = format!(" fill=\"{}\" stroke=\"{paint}\"{dash}", merged_fill.unwrap_or("none"));
       let el = match (geo, n.stroke_align) {
         (Geo::Rect { w, h, r }, StrokeAlign::Inside) => {
           format!(
@@ -675,17 +705,31 @@ impl<'a> Renderer<'a> {
 
   fn line_caps(&mut self, n: &Node) -> String {
     let Some(shape) = n.shape.as_ref() else { return String::new() };
-    if !matches!(n.kind, NodeType::Line | NodeType::Vector) {
+    // Closed and imported raw paths have no ends to mark.
+    if !matches!(n.kind, NodeType::Line | NodeType::Vector) || is_closed(n) {
       return String::new();
     }
-    let color = n.strokes.iter().find_map(|p| match p {
-      Paint::Solid { color, .. } => Some(color.clone()),
-      _ => None,
-    });
-    let color = color.unwrap_or_else(|| "#000000".into());
+    let (color, opacity) = marker_paint(n);
     let mut out = String::new();
     for (cap, attr) in [(shape.start_cap, "marker-start"), (shape.end_cap, "marker-end")] {
+      let flat = body_cap(n);
       let shape_el = match cap {
+        StrokeCap::Round | StrokeCap::Square if cap != flat => {
+          // One unit is the stroke width (markerUnits), so the end is sized to the stroke.
+          let mid = self.id("mk");
+          let fill = color::css_with_opacity(&color, opacity);
+          // Only the half beyond the end (+x in the marker), so the stroke is not painted twice.
+          let shape = if cap == StrokeCap::Round {
+            format!("<path d=\"M0 0A0.5 0.5 0 0 1 0 1Z\" fill=\"{fill}\"/>")
+          } else {
+            format!("<rect width=\"0.5\" height=\"1\" fill=\"{fill}\"/>")
+          };
+          self.defs.push_str(&format!(
+            "<marker id=\"{mid}\" viewBox=\"0 0 0.5 1\" refX=\"0\" refY=\"0.5\" markerWidth=\"0.5\" markerHeight=\"1\" markerUnits=\"strokeWidth\" orient=\"auto-start-reverse\">{shape}</marker>"
+          ));
+          out.push_str(&format!(" {attr}=\"url(#{mid})\""));
+          continue;
+        }
         StrokeCap::Arrow => {
           "<path d=\"M0 0L10 5L0 10\" fill=\"none\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>"
         }
@@ -697,9 +741,9 @@ impl<'a> Renderer<'a> {
         "/>",
         &format!(
           " stroke=\"{}\" {}/>",
-          color::css_with_opacity(&color, 1.0),
+          color::css_with_opacity(&color, opacity),
           if cap == StrokeCap::Circle {
-            format!("fill=\"{}\"", color::css_with_opacity(&color, 1.0))
+            format!("fill=\"{}\"", color::css_with_opacity(&color, opacity))
           } else {
             String::new()
           }
@@ -1137,11 +1181,35 @@ fn join_name(j: StrokeJoin) -> &'static str {
   }
 }
 
+/// The cap of the stroke's body. "None" is flat. When the two ends differ, the body is flat and
+/// a round or square end is drawn as a marker (`line_caps`).
 fn linecap(n: &Node) -> &'static str {
-  match n.shape.as_ref().map(|s| s.end_cap) {
-    Some(StrokeCap::Round) => "round",
-    Some(StrokeCap::Square) => "square",
-    _ => "round",
+  match body_cap(n) {
+    StrokeCap::Round => "round",
+    StrokeCap::Square => "square",
+    _ => "butt",
+  }
+}
+
+/// The colour and opacity line-end markers are drawn in: the first visible stroke paint (a
+/// gradient's first stop, an image as black).
+fn marker_paint(n: &Node) -> (String, f64) {
+  match n.strokes.iter().find(|p| p.visible()) {
+    Some(Paint::Solid { color, opacity, .. }) => (color.clone(), *opacity),
+    Some(
+      Paint::LinearGradient { stops, opacity, .. }
+      | Paint::RadialGradient { stops, opacity, .. }
+      | Paint::AngularGradient { stops, opacity, .. }
+      | Paint::DiamondGradient { stops, opacity, .. },
+    ) => (stops.first().map_or("#000000".to_string(), |s| s.color.clone()), *opacity),
+    _ => ("#000000".into(), 1.0),
+  }
+}
+
+fn body_cap(n: &Node) -> StrokeCap {
+  match n.shape.as_ref() {
+    Some(s) if s.start_cap == s.end_cap && matches!(s.end_cap, StrokeCap::Round | StrokeCap::Square) => s.end_cap,
+    _ => StrokeCap::None,
   }
 }
 
@@ -2011,5 +2079,226 @@ mod r17c_tests {
       }
     });
     assert!(!export_svg(&plain, "r", &HeuristicMeasurer).contains("<filter"));
+  }
+}
+
+#[cfg(test)]
+mod r18d_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::model::{ShapeProps, SubPath, VectorData, VectorPoint};
+  use crate::text::HeuristicMeasurer;
+
+  fn doc_with(f: impl FnOnce(&mut Node)) -> Document {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut n = crate::ops::default_node(NodeType::Rectangle, "n".into(), "N".into());
+    n.width = 60.0;
+    n.height = 40.0;
+    n.fills = vec![Paint::solid("#3366FF")];
+    n.strokes = vec![Paint::solid("#112233")];
+    n.stroke_weight = 4.0;
+    n.stroke_align = StrokeAlign::Center;
+    f(&mut n);
+    doc.insert(n, None, &page, None);
+    doc
+  }
+
+  fn open_path(start_cap: StrokeCap, end_cap: StrokeCap) -> Document {
+    doc_with(|n| {
+      n.kind = NodeType::Vector;
+      n.fills.clear();
+      n.vector = Some(VectorData {
+        subpaths: vec![SubPath {
+          points: vec![VectorPoint::at(0.0, 0.0), VectorPoint::at(60.0, 0.0)],
+          closed: false,
+        }],
+        raw: None,
+      });
+      n.shape = Some(ShapeProps {
+        start_cap,
+        end_cap,
+        ..Default::default()
+      });
+    })
+  }
+
+  fn svg(doc: &Document) -> String {
+    export_svg(doc, "n", &HeuristicMeasurer)
+  }
+
+  #[test]
+  fn none_caps_draw_flat_round_and_square_follow() {
+    assert!(svg(&open_path(StrokeCap::None, StrokeCap::None)).contains("stroke-linecap=\"butt\""));
+    assert!(svg(&open_path(StrokeCap::Round, StrokeCap::Round)).contains("stroke-linecap=\"round\""));
+    assert!(svg(&open_path(StrokeCap::Square, StrokeCap::Square)).contains("stroke-linecap=\"square\""));
+    // A line with no shape settings is flat too.
+    let line = doc_with(|n| {
+      n.kind = NodeType::Line;
+      n.shape = None;
+    });
+    assert!(svg(&line).contains("stroke-linecap=\"butt\""));
+    let same = svg(&open_path(StrokeCap::Round, StrokeCap::Round));
+    assert!(!same.contains("<marker"), "equal round ends need no marker: {same}");
+  }
+
+  #[test]
+  fn different_ends_use_a_flat_body_and_a_marker_for_the_round_or_square_one() {
+    let s = svg(&open_path(StrokeCap::Round, StrokeCap::Arrow));
+    assert!(s.contains("stroke-linecap=\"butt\""), "{s}");
+    assert_eq!(s.matches("<marker").count(), 2, "{s}");
+    assert!(s.contains("marker-start=") && s.contains("marker-end="), "{s}");
+    assert!(
+      s.contains("markerUnits=\"strokeWidth\"") && s.contains("M0 0A0.5 0.5 0 0 1 0 1Z"),
+      "{s}"
+    );
+    let sq = svg(&open_path(StrokeCap::None, StrokeCap::Square));
+    assert!(sq.contains("stroke-linecap=\"butt\""), "{sq}");
+    assert_eq!(sq.matches("<marker").count(), 1, "{sq}");
+    assert!(sq.contains("marker-end=") && !sq.contains("marker-start="), "{sq}");
+    assert!(sq.contains("<rect width=\"0.5\" height=\"1\""), "{sq}");
+  }
+
+  #[test]
+  fn closed_and_raw_paths_have_no_end_markers() {
+    let mut closed = open_path(StrokeCap::Round, StrokeCap::Arrow);
+    let id = closed.pages[0].children[0].clone();
+    closed.get_mut(&id).unwrap().vector.as_mut().unwrap().subpaths[0].closed = true;
+    let s = svg(&closed);
+    assert!(!s.contains("<marker") && !s.contains("marker-end"), "{s}");
+    let raw = doc_with(|n| {
+      n.kind = NodeType::Vector;
+      n.vector = Some(VectorData {
+        subpaths: vec![],
+        raw: Some(crate::model::RawPath {
+          d: "M0 0L60 0L30 40".into(),
+          view_box: [0.0, 0.0, 60.0, 40.0],
+          fill_rule: String::new(),
+        }),
+      });
+      n.shape = Some(ShapeProps {
+        start_cap: StrokeCap::Round,
+        end_cap: StrokeCap::Circle,
+        ..Default::default()
+      });
+    });
+    let s = svg(&raw);
+    assert!(!s.contains("<marker"), "{s}");
+  }
+
+  #[test]
+  fn round_and_square_markers_use_the_stroke_opacity_and_a_half_disk() {
+    let s = svg(&doc_with(|n| {
+      n.kind = NodeType::Line;
+      n.fills.clear();
+      n.strokes = vec![Paint::Solid {
+        color: "#112233".into(),
+        opacity: 0.5,
+        visible: true,
+      }];
+      n.shape = Some(ShapeProps {
+        start_cap: StrokeCap::Round,
+        end_cap: StrokeCap::Square,
+        ..Default::default()
+      });
+    }));
+    assert_eq!(s.matches("<marker").count(), 2, "{s}");
+    assert!(s.contains("M0 0A0.5 0.5 0 0 1 0 1Z") && !s.contains("<circle"), "{s}");
+    assert_eq!(s.matches("fill=\"rgba(17, 34, 51, 0.5)\"").count(), 2, "{s}");
+    // A gradient stroke uses its first stop.
+    let g = svg(&doc_with(|n| {
+      n.kind = NodeType::Line;
+      n.fills.clear();
+      n.strokes = vec![Paint::LinearGradient {
+        stops: vec![
+          crate::model::GradientStop {
+            position: 0.0,
+            color: "#FF0000".into(),
+          },
+          crate::model::GradientStop {
+            position: 1.0,
+            color: "#0000FF".into(),
+          },
+        ],
+        angle: 90.0,
+        opacity: 1.0,
+        handles: None,
+        visible: true,
+      }];
+      n.shape = Some(ShapeProps {
+        start_cap: StrokeCap::None,
+        end_cap: StrokeCap::Round,
+        ..Default::default()
+      });
+    }));
+    assert!(g.contains("<marker") && g.to_lowercase().contains("#ff0000"), "{g}");
+  }
+
+  #[test]
+  fn a_centre_stroke_with_one_fill_is_one_element() {
+    let s = svg(&doc_with(|_| {}));
+    assert_eq!(s.matches("<rect").count(), 1, "{s}");
+    assert!(
+      s.contains("fill=\"#3366FF\"") && s.contains("stroke=\"#112233\"") && s.contains("stroke-width=\"4\""),
+      "{s}"
+    );
+    // The same for an ellipse and a closed path.
+    let e = svg(&doc_with(|n| n.kind = NodeType::Ellipse));
+    assert_eq!(e.matches("<ellipse").count(), 1, "{e}");
+    let star = svg(&doc_with(|n| n.kind = NodeType::Star));
+    assert_eq!(star.matches("<path").count(), 1, "{star}");
+  }
+
+  #[test]
+  fn an_open_path_with_a_fill_and_a_stroke_is_one_element() {
+    let doc = doc_with(|n| {
+      n.kind = NodeType::Vector;
+      n.stroke_align = StrokeAlign::Inside;
+      n.vector = Some(VectorData {
+        subpaths: vec![SubPath {
+          points: vec![VectorPoint::at(0.0, 0.0), VectorPoint::at(60.0, 0.0), VectorPoint::at(30.0, 40.0)],
+          closed: false,
+        }],
+        raw: None,
+      });
+    });
+    let s = svg(&doc);
+    assert_eq!(s.matches("<path").count(), 1, "{s}");
+    assert!(!s.contains("clipPath"), "{s}");
+  }
+
+  #[test]
+  fn inside_outside_several_paints_and_per_side_weights_keep_two_elements() {
+    for align in [StrokeAlign::Inside, StrokeAlign::Outside] {
+      let s = svg(&doc_with(|n| n.stroke_align = align));
+      assert_eq!(s.matches("<rect").count() + s.matches("<path").count(), 2, "{align:?}: {s}");
+    }
+    let two_strokes = svg(&doc_with(|n| n.strokes.push(Paint::solid("#ff0000"))));
+    assert_eq!(two_strokes.matches("<rect").count(), 3, "{two_strokes}");
+    let sides = svg(&doc_with(|n| n.stroke_weights = Some([4.0, 0.0, 4.0, 0.0])));
+    assert_eq!(sides.matches("<rect").count(), 1, "{sides}");
+    assert!(sides.contains("evenodd"), "{sides}");
+    let no_fill = svg(&doc_with(|n| n.fills.clear()));
+    assert_eq!(no_fill.matches("<rect").count(), 1);
+    assert!(no_fill.contains("fill=\"none\""), "{no_fill}");
+  }
+
+  #[test]
+  fn the_merged_element_carries_the_same_attributes_as_the_two_it_replaces() {
+    let s = svg(&doc_with(|n| {
+      n.stroke_dash = vec![4.0, 2.0];
+      n.stroke_join = Some(StrokeJoin::Bevel);
+    }));
+    let el = s.split("<rect").nth(1).unwrap().split("/>").next().unwrap();
+    for want in [
+      "fill=\"#3366FF\"",
+      "stroke=\"#112233\"",
+      "stroke-dasharray=\"4 2\"",
+      "stroke-linejoin=\"bevel\"",
+      "stroke-width=\"4\"",
+    ] {
+      assert!(el.contains(want), "{want} in {el}");
+    }
   }
 }
