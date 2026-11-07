@@ -425,8 +425,8 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
     let cc = &clip_colls[ci];
     // The same id and name: this file is where the layers came from (or a copy of it), so modes
     // match by id even when they were renamed since.
-    let origin = doc.variables.iter().position(|d| d.id == cc.id && d.name == cc.name);
-    let found = origin.or_else(|| doc.variables.iter().position(|d| d.name == cc.name));
+    let origin = doc.variables.iter().position(|d| d.id == cc.id && d.name.trim() == cc.name.trim());
+    let found = origin.or_else(|| doc.variables.iter().position(|d| d.name.trim() == cc.name.trim()));
     let di = match found {
       Some(i) => i,
       None => {
@@ -434,7 +434,7 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
         taken_colls.insert(id.clone());
         doc.variables.push(Collection {
           id,
-          name: cc.name.clone(),
+          name: cc.name.trim().to_string(),
           modes: Vec::new(),
           variables: Vec::new(),
         });
@@ -448,8 +448,8 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
       let hit = d
         .modes
         .iter()
-        .find(|m| m.id == cm.id && (origin.is_some() || m.name == cm.name))
-        .or_else(|| d.modes.iter().find(|m| m.name == cm.name))
+        .find(|m| m.id == cm.id && (origin.is_some() || m.name.trim() == cm.name.trim()))
+        .or_else(|| d.modes.iter().find(|m| m.name.trim() == cm.name.trim()))
         .map(|m| m.id.clone());
       let dest_mode = match hit {
         Some(id) => id,
@@ -460,7 +460,7 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
           let first = c.modes.first().map(|m| m.id.clone());
           c.modes.push(VarMode {
             id: id.clone(),
-            name: cm.name.clone(),
+            name: cm.name.trim().to_string(),
           });
           // Like adding a mode in the dialog: every variable starts with its default mode's value.
           for v in &mut c.variables {
@@ -1275,6 +1275,27 @@ mod tests_r10_review {
     assert_eq!(a.doc.variables[0].variables.len(), 1);
     let pasted = a.doc.get(r["created"][0].as_str().unwrap()).unwrap();
     assert_eq!(pasted.variable_modes.values().next(), Some(&a.doc.variables[0].modes[1].id));
+  }
+
+  #[test]
+  fn a_paste_matches_collection_and_mode_names_ignoring_surrounding_spaces() {
+    let mut a = old_file(vec![var("v_n", "N", VarKind::Number, json!(3))]);
+    a.doc.variables[0].name = "Theme ".into();
+    a.doc.variables[0].modes[0].name = "Dark ".into();
+    let rect = rect_bound_to(&mut a, "v_n");
+    let mut b = old_file(vec![var("v_m", "M", VarKind::Number, json!(1))]);
+    b.doc.variables[0].id = "vc_other".into();
+    b.doc.variables[0].name = "Theme".into();
+    b.doc.variables[0].modes[0].name = "Dark".into();
+    b.dispatch(Command::Paste {
+      data: a.copy(&[rect]),
+      parent: None,
+      x: None,
+      y: None,
+    })
+    .unwrap();
+    assert_eq!(b.doc.variables.len(), 1);
+    assert_eq!(b.doc.variables[0].modes.len(), 1);
   }
 
   #[test]

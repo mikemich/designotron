@@ -210,13 +210,30 @@ fn instance_name(doc: &Document, comp_id: &str) -> String {
 
 /// The deleted main's name, as far as the instances remember it. Instances start out named after
 /// their main, so a source whose name ends in an auto " <number>" (a duplicate) gets the name most
-/// of the instances share, else its own without the number; any other name is kept (the user chose
+/// of the instances share, else its own without the number, provided another instance is named the
+/// plain name or the name and another number (else the number may be part of the name); any other name is kept (the user chose
 /// it). Limit: a main whose name really ends in a number, restored from a lone instance, loses it.
 fn restored_name(doc: &Document, users: &[NodeId], source_name: &str) -> String {
   let stripped = match source_name.rsplit_once(' ') {
     Some((head, tail)) if !head.is_empty() && !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => head,
     _ => return source_name.to_string(),
   };
+  // Only when another instance carries the plain name (or the name and another number) is the
+  // number an auto-suffix; a lone instance keeps the name it has.
+  let numbered = |name: &str| {
+    name == stripped
+      || name
+        .strip_prefix(stripped)
+        .and_then(|r| r.strip_prefix(' '))
+        .is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+  };
+  if !users
+    .iter()
+    .filter_map(|u| doc.get(u))
+    .any(|n| n.name != source_name && numbered(&n.name))
+  {
+    return source_name.to_string();
+  }
   let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
   for n in users.iter().filter_map(|u| doc.get(u)) {
     *counts.entry(n.name.as_str()).or_default() += 1;
@@ -441,6 +458,22 @@ fn group_of(key: &str, sub: Option<&str>) -> &'static str {
   }
 }
 
+/// The property group a binding key (`fill`, `gap`, ...) belongs to besides "variables".
+fn binding_group(prop: &str) -> &'static str {
+  match prop {
+    "fill" => "fill",
+    "stroke" | "strokeWeight" => "stroke",
+    "cornerRadius" => "radius",
+    "width" | "height" => "size",
+    "gap" | "counterGap" | "padding" | "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft" => "layout",
+    "opacity" => "appearance",
+    "visible" => "visibility",
+    "characters" => "text",
+    "fontSize" | "fontFamily" | "fontWeight" | "lineHeight" | "letterSpacing" | "paragraphSpacing" => "typography",
+    _ => "variables",
+  }
+}
+
 /// The group of a key inside a `text` override. A change of the runs alone (bolding a word) is
 /// typography; with new characters the runs belong to the text.
 fn text_group(t: &serde_json::Map<String, Value>, sub: &str) -> &'static str {
@@ -488,6 +521,11 @@ pub fn override_groups(doc: &Document, id: &str) -> Vec<(&'static str, &'static 
       // The name a swap brings along isn't a change of its own.
       ("name", _) if m.contains_key(SWAP_KEY) => {}
       ("text", Value::Object(t)) => present.extend(t.keys().map(|s| text_group(t, s))),
+      // A binding belongs to its property's group and to Variables.
+      ("bindings", Value::Object(b)) => {
+        present.insert("variables");
+        present.extend(b.keys().map(|s| binding_group(s)));
+      }
       (k, _) => {
         present.insert(group_of(k, None));
       }
@@ -506,7 +544,21 @@ pub fn overridden_layers(doc: &Document, id: &str, cap: usize) -> (Vec<Overridde
   if doc.get(id).is_none_or(|n| n.kind != NodeType::Instance) {
     return (out, false);
   }
-  for lid in doc.subtree(id).into_iter().skip(1) {
+  let tree = doc.subtree(id);
+  // Nothing is recorded anywhere in this instance (nested ones keep their own maps): done.
+  let has_overrides = |i: &String| {
+    doc
+      .get(i)
+      .and_then(|n| n.instance.as_ref())
+      .is_some_and(|x| !x.overrides.is_empty())
+  };
+  if !tree.iter().any(has_overrides) {
+    return (out, false);
+  }
+  for lid in tree.into_iter().skip(1) {
+    if doc.get(&lid).is_none_or(|n| n.master_id.is_none()) {
+      continue;
+    }
     let groups = override_groups(doc, &lid);
     if groups.is_empty() {
       continue;
@@ -532,6 +584,10 @@ fn strip_groups(patch: &mut Value, groups: &[String]) {
       let keep: Vec<String> = t.keys().filter(|s| !hit(text_group(t, s))).cloned().collect();
       t.retain(|s, _| keep.contains(s));
       !t.is_empty()
+    }
+    ("bindings", Value::Object(b)) => {
+      b.retain(|p, _| !hit("variables") && !hit(binding_group(p)));
+      !b.is_empty()
     }
     (k, _) => !hit(group_of(k, None)),
   });
@@ -4228,6 +4284,116 @@ mod tests {
 
     fn font_size(e: &Engine, id: &str) -> f64 {
       e.doc.get(id).unwrap().text.as_ref().unwrap().font_size
+    }
+
+    fn remote_noise(e: &mut Engine, frame: &str) {
+      let mut peer = e.doc.clone();
+      peer.get_mut(frame).unwrap().name = format!("{} x", peer.get(frame).unwrap().name);
+      let d = crate::collab::delta(&e.doc, &peer, true, true);
+      e.dispatch(Command::ApplyRemote { delta: d, local: false }).unwrap();
+    }
+
+    #[test]
+    fn an_update_that_types_a_colour_and_binds_keeps_the_binding_inside_an_instance() {
+      let (mut k, _, inst, label) = bound_kit();
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![label.clone()],
+          patch: json!({ "fills": [{ "type": "solid", "color": "#00FF00" }], "bindings": { "fill": "v_q" } }),
+        })
+        .unwrap();
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_q"));
+      assert_eq!(override_of(&k.e, &inst, &named_master(&k.e, &label))["bindings"]["fill"], "v_q");
+      let main_label = named(&k.e, &k.default, "Label");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![main_label],
+          patch: json!({ "opacity": 0.5 }),
+        })
+        .unwrap();
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_q"));
+    }
+
+    #[test]
+    fn reset_fill_also_clears_the_detach_of_the_fill() {
+      let (mut k, frame, _, label) = bound_kit();
+      fill(&mut k.e, &label, "#00FF00");
+      let g = k.e.query(crate::engine::Query::OverrideGroups { id: label.clone() }).unwrap();
+      let g = g.to_string();
+      assert!(g.contains("fill") && g.contains("variables"), "{g}");
+      reset(&mut k.e, &label, &["fill"]);
+      mode(&mut k.e, &frame, Some("Dark"));
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_p"));
+      assert_eq!(fill_of(&k.e, &label), "#EEEEEE");
+    }
+
+    #[test]
+    fn reset_fill_after_applying_a_style_to_a_bound_instance_layer() {
+      let (mut k, frame, _, label) = bound_kit();
+      k.e
+        .dispatch(Command::AddColorStyle {
+          name: "Brand".into(),
+          color: "#FF00FF".into(),
+        })
+        .unwrap();
+      let sid = k.e.doc.styles.colors[0].id.clone();
+      k.e
+        .dispatch(Command::ApplyStyle {
+          ids: vec![label.clone()],
+          style_id: sid,
+          kind: None,
+        })
+        .unwrap();
+      assert_eq!(fill_of(&k.e, &label), "#FF00FF");
+      reset(&mut k.e, &label, &["fill"]);
+      mode(&mut k.e, &frame, Some("Dark"));
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_p"));
+      assert_eq!(fill_of(&k.e, &label), "#EEEEEE");
+    }
+
+    #[test]
+    fn a_style_only_update_drops_the_binding() {
+      let (mut k, _, _, label) = bound_kit();
+      k.e
+        .dispatch(Command::AddColorStyle {
+          name: "Brand".into(),
+          color: "#FF00FF".into(),
+        })
+        .unwrap();
+      let sid = k.e.doc.styles.colors[0].id.clone();
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![label.clone()],
+          patch: json!({ "fillStyle": sid }),
+        })
+        .unwrap();
+      assert!(bound(&k.e, &label, "fill").is_none());
+    }
+
+    #[test]
+    fn undo_and_redo_keep_the_unbound_record_after_remote_changes() {
+      let (mut k, frame, inst, label) = bound_kit();
+      bind(&mut k.e, &label, "stroke", Some("v_q"));
+      fill(&mut k.e, &label, "#00FF00");
+      let key = named_master(&k.e, &label);
+      remote_noise(&mut k.e, &frame);
+      k.e.dispatch(Command::Undo).unwrap();
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_p"));
+      assert!(override_of(&k.e, &inst, &key)["bindings"].get("fill").is_none());
+      assert_eq!(override_of(&k.e, &inst, &key)["bindings"]["stroke"], "v_q");
+      remote_noise(&mut k.e, &frame);
+      k.e.dispatch(Command::Redo).unwrap();
+      assert_eq!(override_of(&k.e, &inst, &key)["bindings"]["fill"], Value::Null);
+      assert!(bound(&k.e, &label, "fill").is_none());
+      assert_eq!(fill_of(&k.e, &label), "#00FF00");
+      let main_label = named(&k.e, &k.default, "Label");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![main_label],
+          patch: json!({ "opacity": 0.5 }),
+        })
+        .unwrap();
+      assert!(bound(&k.e, &label, "fill").is_none());
     }
 
     fn fill_of(e: &Engine, id: &str) -> String {

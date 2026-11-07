@@ -225,10 +225,9 @@ pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(
   // Mode and collection names are unique too (two "Dark" modes would export two blocks, the
   // later one winning). Judged against `previous` by id, so files that already hold duplicates
   // can still be edited.
-  let old_modes: BTreeMap<&str, &str> = previous
+  let old_modes: BTreeMap<(&str, &str), &str> = previous
     .iter()
-    .flat_map(|c| c.modes.iter())
-    .map(|m| (m.id.as_str(), m.name.as_str()))
+    .flat_map(|c| c.modes.iter().map(move |m| ((c.id.as_str(), m.id.as_str()), m.name.as_str())))
     .collect();
   let old_colls: BTreeMap<&str, &str> = previous.iter().map(|c| (c.id.as_str(), c.name.as_str())).collect();
   for (i, c) in collections.iter().enumerate() {
@@ -240,7 +239,7 @@ pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(
     }
     for (k, m) in c.modes.iter().enumerate() {
       let name = m.name.trim();
-      if old_modes.get(m.id.as_str()).is_none_or(|o| o.trim() != name)
+      if old_modes.get(&(c.id.as_str(), m.id.as_str())).is_none_or(|o| o.trim() != name)
         && c.modes.iter().enumerate().any(|(l, n)| l != k && n.name.trim() == name)
       {
         return Err(format!("{name} already exists in {}", c.name));
@@ -557,6 +556,9 @@ pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) -> Ve
       "height" => props.push("height"),
       "strokeWeight" => props.push("strokeWeight"),
       "visible" => props.push("visible"),
+      // A style replaces the variable too (binding one drops the style).
+      "fillStyle" if v.is_string() => props.push("fill"),
+      "strokeStyle" if v.is_string() => props.push("stroke"),
       "layout" => {
         if v.get("gap").is_some() {
           props.push("gap");
@@ -587,6 +589,8 @@ pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) -> Ve
       _ => {}
     }
   }
+  // A prop the patch itself binds keeps that binding.
+  props.retain(|p| !patch["bindings"][*p].is_string());
   if props.is_empty() {
     return removed;
   }
