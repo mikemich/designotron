@@ -24,6 +24,15 @@ const DEPTH: usize = 8;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 /// Modes per collection and themes per file that are read; more are skipped with a note.
 const MAX_MODES: usize = 100;
+/// Longest group or token key, and longest path, that are read. A token copies its whole path,
+/// so one long key above many tokens would be copied into every one of them.
+const MAX_KEY: usize = 256;
+const MAX_PATH: usize = 1024;
+/// Variables x modes an import may create. Every one is a value kept in memory (and in the undo
+/// history), and a small file can ask for hundreds of millions.
+const MAX_VALUES: usize = 1_000_000;
+/// Collections one import may add or touch.
+const MAX_COLLECTIONS: usize = 1000;
 
 // ---------- Ordered JSON ----------
 
@@ -358,7 +367,15 @@ struct Tok {
 
 /// Collects the tokens under a group. A token is an object with `$value` (DTCG) or, for Tokens
 /// Studio, `value`. `$type` on a group is inherited.
-fn flatten(group: &J, inherited: Option<&str>, path: &mut Vec<String>, ts: bool, out: &mut Vec<Tok>, depth: usize) {
+fn flatten(
+  group: &J,
+  inherited: Option<&str>,
+  path: &mut Vec<String>,
+  ts: bool,
+  out: &mut Vec<Tok>,
+  skipped: &mut Vec<String>,
+  depth: usize,
+) {
   let Some(entries) = group.obj() else { return };
   if depth > 32 {
     return;
@@ -366,6 +383,10 @@ fn flatten(group: &J, inherited: Option<&str>, path: &mut Vec<String>, ts: bool,
   let ty = group.get("$type").and_then(J::str).or(inherited);
   for (k, child) in entries {
     if (k.starts_with('$') && k != "$root") || child.obj().is_none() {
+      continue;
+    }
+    if k.len() > MAX_KEY || path.iter().map(String::len).sum::<usize>() + k.len() > MAX_PATH {
+      skipped.push(short(k));
       continue;
     }
     path.push(k.clone());
@@ -388,7 +409,7 @@ fn flatten(group: &J, inherited: Option<&str>, path: &mut Vec<String>, ts: bool,
           ext: child.get("$extensions").cloned(),
         });
       }
-      None => flatten(child, ty, path, ts, out, depth + 1),
+      None => flatten(child, ty, path, ts, out, skipped, depth + 1),
     }
     path.pop();
   }
@@ -396,6 +417,13 @@ fn flatten(group: &J, inherited: Option<&str>, path: &mut Vec<String>, ts: bool,
 
 fn leaf_value(v: &J, ts: bool) -> Option<&J> {
   v.get("$value").or_else(|| if ts { v.get("value") } else { None })
+}
+
+/// Reports the keys `flatten` left out (too long).
+fn note_long_keys(skipped: Vec<String>, report: &mut Report) {
+  for k in skipped {
+    report.skip(k, format!("its key or path is longer than {MAX_KEY} characters"));
+  }
 }
 
 /// `{a.b.c}` as the whole value: the path inside.
@@ -717,7 +745,7 @@ fn ext_of(t: &Tok) -> Option<&J> {
   t.ext.as_ref().and_then(|e| e.get(EXT))
 }
 
-fn import_dtcg(root: &J, file_name: &str, report: &mut Report) -> Vec<IColl> {
+fn import_dtcg(root: &J, file_name: &str, report: &mut Report) -> Result<Vec<IColl>, String> {
   let entries = root.obj().unwrap_or(&[]);
   let designotron = entries.iter().any(|(_, g)| {
     g.get("$extensions")
@@ -738,7 +766,7 @@ fn import_dtcg(root: &J, file_name: &str, report: &mut Report) -> Vec<IColl> {
     // Collections in the order the export wrote down (older exports have none: file order).
     let mut groups: Vec<(&String, &J)> = entries
       .iter()
-      .filter(|(k, g)| !k.starts_with('$') && g.obj().is_some())
+      .filter(|(k, g)| !k.starts_with('$') && g.obj().is_some() && k.len() <= MAX_KEY)
       .map(|(k, g)| (k, g))
       .collect();
     groups.sort_by_key(|(_, g)| index_of(g.get("$extensions").and_then(|e| e.get(EXT))).unwrap_or(usize::MAX));
@@ -759,7 +787,17 @@ fn import_dtcg(root: &J, file_name: &str, report: &mut Report) -> Vec<IColl> {
         synthetic: false,
       });
       let mut toks = Vec::new();
-      flatten(group, group.get("$type").and_then(J::str), &mut Vec::new(), false, &mut toks, 0);
+      let mut long = Vec::new();
+      flatten(
+        group,
+        group.get("$type").and_then(J::str),
+        &mut Vec::new(),
+        false,
+        &mut toks,
+        &mut long,
+        0,
+      );
+      note_long_keys(long, report);
       for t in toks {
         let full = format!("{key}.{}", t.path.join("."));
         let pinned = ext_of(&t).and_then(|e| e.get("type")).and_then(J::str).map(String::from);
@@ -787,7 +825,17 @@ fn import_dtcg(root: &J, file_name: &str, report: &mut Report) -> Vec<IColl> {
       synthetic: true,
     });
     let mut toks = Vec::new();
-    flatten(root, root.get("$type").and_then(J::str), &mut Vec::new(), false, &mut toks, 0);
+    let mut long = Vec::new();
+    flatten(
+      root,
+      root.get("$type").and_then(J::str),
+      &mut Vec::new(),
+      false,
+      &mut toks,
+      &mut long,
+      0,
+    );
+    note_long_keys(long, report);
     for t in toks {
       ptoks.push(PTok {
         coll: 0,
@@ -797,6 +845,11 @@ fn import_dtcg(root: &J, file_name: &str, report: &mut Report) -> Vec<IColl> {
         pinned: None,
       });
     }
+  }
+  // Values are tokens x modes at most; refuse before anything per mode is built.
+  let modes = colls.iter().map(|c| c.modes.len()).max().unwrap_or(1);
+  if ptoks.len().saturating_mul(modes) > MAX_VALUES {
+    return Err(too_many(ptoks.len(), modes));
   }
   for (i, p) in ptoks.iter().enumerate() {
     index.insert(p.full.clone(), i);
@@ -926,7 +979,11 @@ fn import_dtcg(root: &J, file_name: &str, report: &mut Report) -> Vec<IColl> {
       }
     }
   }
-  colls
+  Ok(colls)
+}
+
+fn too_many(tokens: usize, modes: usize) -> String {
+  format!("too many values to import ({tokens} tokens × {modes} modes)")
 }
 
 fn pinned_or(p: &PTok) -> Option<String> {
@@ -977,14 +1034,27 @@ fn unique(base: &str, taken: &[String]) -> String {
 struct TsSet {
   name: String,
   toks: Vec<Tok>,
+  /// `dotted(path)` of each token, made once.
+  keys: Vec<String>,
+}
+
+impl TsSet {
+  fn new(name: String, toks: Vec<Tok>) -> Self {
+    let keys = toks.iter().map(|t| dotted(&t.path)).collect();
+    TsSet { name, toks, keys }
+  }
 }
 
 /// The token sets of the file in order: `$metadata.tokenSetOrder`, then the rest in file order.
-fn ts_sets(root: &J) -> Vec<TsSet> {
+fn ts_sets(root: &J, report: &mut Report) -> Vec<TsSet> {
   let mut sets: Vec<TsSet> = Vec::new();
   let mut loose: Vec<Tok> = Vec::new();
   for (k, v) in root.obj().unwrap_or(&[]) {
     if k.starts_with('$') || v.obj().is_none() {
+      continue;
+    }
+    if k.len() > MAX_KEY {
+      report.skip(short(k), format!("its key or path is longer than {MAX_KEY} characters"));
       continue;
     }
     if let Some(value) = leaf_value(v, true) {
@@ -1003,14 +1073,13 @@ fn ts_sets(root: &J) -> Vec<TsSet> {
       continue;
     }
     let mut toks = Vec::new();
-    flatten(v, v.get("$type").and_then(J::str), &mut Vec::new(), true, &mut toks, 0);
-    sets.push(TsSet { name: k.clone(), toks });
+    let mut long = Vec::new();
+    flatten(v, v.get("$type").and_then(J::str), &mut Vec::new(), true, &mut toks, &mut long, 0);
+    note_long_keys(long, report);
+    sets.push(TsSet::new(k.clone(), toks));
   }
   if !loose.is_empty() {
-    sets.push(TsSet {
-      name: "Tokens".into(),
-      toks: loose,
-    });
+    sets.push(TsSet::new("Tokens".into(), loose));
   }
   if let Some(order) = root.get("$metadata").and_then(|m| m.get("tokenSetOrder")).and_then(J::arr) {
     let mut want: HashMap<&str, usize> = HashMap::new();
@@ -1038,19 +1107,24 @@ fn ts_literal<'a>(tok: &'a Tok, find: &dyn Fn(&str) -> Option<&'a Tok>, depth: u
   convert(tok.ty.as_deref(), &tok.value, true)
 }
 
-fn import_ts(root: &J, report: &mut Report) -> Vec<IColl> {
-  let sets = ts_sets(root);
+fn import_ts(root: &J, report: &mut Report) -> Result<Vec<IColl>, String> {
+  let sets = ts_sets(root, report);
+  let tokens: usize = sets.iter().map(|s| s.toks.len()).sum();
   let mut all: Vec<&J> = root
     .get("$themes")
     .and_then(J::arr)
     .map(|a| a.iter().filter(|t| t.obj().is_some()).collect())
     .unwrap_or_default();
   if all.is_empty() {
-    return ts_without_themes(&sets, report);
+    return Ok(ts_without_themes(&sets, report));
   }
   if all.len() > MAX_MODES {
     report.skip("$themes", format!("only the first {MAX_MODES} themes are imported"));
     all.truncate(MAX_MODES);
+  }
+  // Every theme sees every token: refuse before the per-theme tables are built.
+  if tokens.saturating_mul(all.len()) > MAX_VALUES {
+    return Err(too_many(tokens, all.len()));
   }
   // Each theme with its sets' states looked up by name.
   type Theme<'a> = (&'a J, HashMap<&'a str, &'a str>);
@@ -1103,8 +1177,8 @@ fn import_ts(root: &J, report: &mut Report) -> Vec<IColl> {
         if st != "enabled" && st != "source" {
           continue;
         }
-        for tok in &s.toks {
-          let p = dotted(&tok.path);
+        for (tok, p) in s.toks.iter().zip(&s.keys) {
+          let p = p.clone();
           if st == "enabled" {
             en.insert(p.clone(), tok);
             if seen.insert(p.clone()) {
@@ -1195,15 +1269,15 @@ fn import_ts(root: &J, report: &mut Report) -> Vec<IColl> {
       synthetic: false,
     });
   }
-  colls
+  Ok(colls)
 }
 
 fn ts_without_themes(sets: &[TsSet], report: &mut Report) -> Vec<IColl> {
   // The token each path means: the last set that has it.
   let mut table: HashMap<String, (usize, &Tok)> = HashMap::new();
   for (si, s) in sets.iter().enumerate() {
-    for t in &s.toks {
-      table.insert(dotted(&t.path), (si, t));
+    for (t, k) in s.toks.iter().zip(&s.keys) {
+      table.insert(k.clone(), (si, t));
     }
   }
   let find = |r: &str| table.get(r).map(|(_, t)| *t);
@@ -1223,7 +1297,7 @@ fn ts_without_themes(sets: &[TsSet], report: &mut Report) -> Vec<IColl> {
   let mut taken: HashSet<(usize, String)> = HashSet::new();
   for (si, s) in sets.iter().enumerate() {
     for (ti, t) in s.toks.iter().enumerate() {
-      let p = dotted(&t.path);
+      let p = s.keys[ti].clone();
       match ts_literal(t, &find, 0) {
         Ok(_) if !taken.insert((si, path_name(&t.path))) => {
           report.skip(format!("{}/{}", s.name, path_name(&t.path)), "another token has the same name")
@@ -1278,11 +1352,15 @@ pub fn import(doc: &Document, text: &str, file_name: &str, gen: &mut IdGen) -> R
       // `$type`, `$value` and the other `$` keys of a DTCG token are not tokens themselves.
       plain(g) || g.obj().is_some_and(|m| m.iter().any(|(k, c)| !k.starts_with('$') && plain(c)))
     });
-  let imported = if ts {
-    import_ts(&root, &mut report)
+  let mut imported = if ts {
+    import_ts(&root, &mut report)?
   } else {
-    import_dtcg(&root, file_name, &mut report)
+    import_dtcg(&root, file_name, &mut report)?
   };
+  if imported.len() > MAX_COLLECTIONS {
+    report.skip("collections", format!("only the first {MAX_COLLECTIONS} collections are imported"));
+    imported.truncate(MAX_COLLECTIONS);
+  }
   if imported.iter().all(|c| c.vars.is_empty()) {
     let why = if report.skipped_count > 0 {
       " (every token was skipped)"
@@ -1470,7 +1548,11 @@ fn merge(doc: &Document, imported: Vec<IColl>, gen: &mut IdGen, report: &mut Rep
         let mode = plans[ci].modes[*mi].clone();
         let v = match val {
           IVal::Lit(v) => check_value(iv.kind, v).ok(),
-          IVal::Alias(tc, tv) => plans[*tc].vars[*tv].as_ref().map(|t| json!({ "alias": t })),
+          IVal::Alias(tc, tv) => plans
+            .get(*tc)
+            .and_then(|p| p.vars.get(*tv))
+            .and_then(|t| t.as_ref())
+            .map(|t| json!({ "alias": t })),
         };
         match v {
           Some(v) => {

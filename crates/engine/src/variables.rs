@@ -823,12 +823,12 @@ pub fn prune(doc: &mut Document) {
     .iter()
     .flat_map(|c| c.variables.iter().map(|v| v.id.clone()))
     .collect();
-  let modes: Vec<(String, Vec<String>)> = doc
+  let modes: HashMap<String, HashSet<String>> = doc
     .variables
     .iter()
     .map(|c| (c.id.clone(), c.modes.iter().map(|m| m.id.clone()).collect()))
     .collect();
-  let mode_ok = |c: &String, m: &String| modes.iter().any(|(cid, ms)| cid == c && ms.contains(m));
+  let mode_ok = |c: &String, m: &String| modes.get(c).is_some_and(|ms| ms.contains(m));
   let stale = |n: &crate::model::Node| {
     n.bindings.values().any(|v| !vars.contains(v.as_str())) || n.variable_modes.iter().any(|(c, m)| !mode_ok(c, m))
   };

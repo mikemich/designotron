@@ -682,6 +682,91 @@ fn hostile_tokens_studio_files_stay_bounded() {
   sets.insert("$metadata".into(), json!({ "tokenSetOrder": order }));
   let t = std::time::Instant::now();
   let r = import(&mut engine(1), &Value::Object(sets).to_string(), "t.json");
-  assert_eq!(r["collectionsAdded"], 5000);
+  // At most 1000 collections per import; the rest are reported.
+  assert_eq!(r["collectionsAdded"], 1000);
+  assert!(r["skipped"].as_array().unwrap().iter().any(|x| x["path"] == "collections"));
   assert!(t.elapsed().as_secs() < 20, "{:?}", t.elapsed());
+}
+
+#[test]
+fn a_long_group_key_is_skipped_instead_of_copied_into_every_token() {
+  let key = "k".repeat(100_000);
+  let mut group = serde_json::Map::new();
+  for i in 0..10_000 {
+    group.insert(format!("t{i}"), json!({ "$type": "number", "$value": i }));
+  }
+  let file = json!({ key.clone(): group.clone(), "ok": { "$type": "number", "$value": 1 } });
+  let t = std::time::Instant::now();
+  let mut e = engine(1);
+  let r = import(&mut e, &file.to_string(), "k.json");
+  assert!(t.elapsed().as_secs() < 2, "{:?}", t.elapsed());
+  assert_eq!(r["variablesAdded"], 1);
+  assert_eq!(r["skippedCount"], 1);
+  let path = r["skipped"][0]["path"].as_str().unwrap();
+  assert!(path.starts_with("kkkk") && path.len() < 100, "{path}");
+  assert!(r["skipped"][0]["reason"].as_str().unwrap().contains("longer than"));
+  // Nested one level down, and in Tokens Studio sets, the same.
+  let nested = json!({ "g": { key.clone(): group.clone(), "a": { "$type": "number", "$value": 2 } } });
+  let r = import(&mut engine(1), &nested.to_string(), "k.json");
+  assert_eq!((r["variablesAdded"].as_u64(), r["skippedCount"].as_u64()), (Some(1), Some(1)));
+  let ts = json!({ "s": { key.clone(): group, "a": { "value": "#fff", "type": "color" } }, "$metadata": { "tokenSetOrder": ["s"] } });
+  let r = import(&mut engine(1), &ts.to_string(), "k.json");
+  assert_eq!((r["variablesAdded"].as_u64(), r["skippedCount"].as_u64()), (Some(1), Some(1)));
+  // A path made of keys that are each fine but together too long.
+  let mut deep = json!({ "$type": "number", "$value": 1 });
+  for _ in 0..8 {
+    deep = json!({ "k".repeat(200): deep });
+  }
+  let file = json!({ "n": { "$type": "number", "$value": 0 }, "deep": deep });
+  let r = import(&mut engine(1), &file.to_string(), "k.json");
+  assert_eq!(r["skippedCount"], 1);
+}
+
+#[test]
+fn tokens_times_modes_is_budgeted_before_anything_per_mode_is_built() {
+  // Tokens Studio: 100 themes x 20,000 tokens.
+  let mut set = serde_json::Map::new();
+  for i in 0..20_000 {
+    set.insert(format!("t{i}"), json!({ "value": "#fff", "type": "color" }));
+  }
+  let themes: Vec<Value> = (0..100)
+    .map(|i| json!({ "name": format!("T{i}"), "selectedTokenSets": { "s": "enabled" } }))
+    .collect();
+  let file = json!({ "s": set.clone(), "$themes": themes });
+  let t = std::time::Instant::now();
+  let err = engine(1)
+    .dispatch(Command::ImportVariables {
+      json: file.to_string(),
+      name: "t.json".into(),
+    })
+    .unwrap_err();
+  assert_eq!(err, "too many values to import (20000 tokens × 100 modes)");
+  assert!(t.elapsed().as_secs() < 2, "{:?}", t.elapsed());
+  // Designotron: 100 modes x 15,000 tokens.
+  let modes: Vec<String> = (0..100).map(|i| format!("M{i}")).collect();
+  let mut coll = serde_json::Map::new();
+  coll.insert(
+    "$extensions".into(),
+    json!({ "com.designotron": { "id": "c", "name": "C", "modes": modes } }),
+  );
+  for i in 0..15_000 {
+    coll.insert(format!("t{i}"), json!({ "$type": "number", "$value": i }));
+  }
+  let err = engine(1)
+    .dispatch(Command::ImportVariables {
+      json: json!({ "C": coll }).to_string(),
+      name: "d.json".into(),
+    })
+    .unwrap_err();
+  assert_eq!(err, "too many values to import (15000 tokens × 100 modes)");
+  // Within the budget the same shapes still import: 100 themes x 5,000 tokens.
+  let mut small = serde_json::Map::new();
+  for i in 0..5_000 {
+    small.insert(format!("t{i}"), json!({ "value": "#fff", "type": "color" }));
+  }
+  let themes: Vec<Value> = (0..100)
+    .map(|i| json!({ "name": format!("T{i}"), "selectedTokenSets": { "s": "enabled" } }))
+    .collect();
+  let r = import(&mut engine(1), &json!({ "s": small, "$themes": themes }).to_string(), "t.json");
+  assert_eq!(r["variablesAdded"], 5000);
 }
