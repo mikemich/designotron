@@ -22,6 +22,7 @@ export const wasmengine_render: (a: number, b: number, c: number, d: number, e: 
 export const wasmengine_renderIncremental: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const wasmengine_rev: (a: number) => number;
 export const wasmengine_save: (a: number) => [number, number];
+export const wasmengine_setImageSizes: (a: number, b: number, c: number) => void;
 export const wasmengine_state: (a: number) => [number, number];
 export const __wbindgen_export_0: WebAssembly.Table;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;

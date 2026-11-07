@@ -45,6 +45,11 @@ export class WasmEngine {
    */
   collabGranular(): boolean;
   /**
+   * Tells the engine the pixel sizes of images: JSON `{src: [w, h]}`. When one is new or
+   * changed, everything is painted again (tiled fills depend on it).
+   */
+  setImageSizes(json: string): void;
+  /**
    * `json` (a delta or document) as a relay that knows only model `relay_model` can store it
    * (see `collab::downgrade`). Applied to what is sent, never to the editor's own copy.
    */
@@ -102,6 +107,7 @@ export interface InitOutput {
   readonly wasmengine_renderIncremental: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
   readonly wasmengine_rev: (a: number) => number;
   readonly wasmengine_save: (a: number) => [number, number];
+  readonly wasmengine_setImageSizes: (a: number, b: number, c: number) => void;
   readonly wasmengine_state: (a: number) => [number, number];
   readonly __wbindgen_export_0: WebAssembly.Table;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;

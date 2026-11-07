@@ -216,6 +216,16 @@ export class WasmEngine {
         return ret !== 0;
     }
     /**
+     * Tells the engine the pixel sizes of images: JSON `{src: [w, h]}`. When one is new or
+     * changed, everything is painted again (tiled fills depend on it).
+     * @param {string} json
+     */
+    setImageSizes(json) {
+        const ptr0 = passStringToWasm0(json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmengine_setImageSizes(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
      * `json` (a delta or document) as a relay that knows only model `relay_model` can store it
      * (see `collab::downgrade`). Applied to what is sent, never to the editor's own copy.
      * @param {string} json
