@@ -1319,11 +1319,14 @@ impl Engine {
           crate::collab::apply(&mut self.doc, &delta)?;
           sanitize_links(&mut self.doc, Some(&delta_ids(&delta)));
         }
+        let ids = delta_ids(&delta);
         if let Some(g) = self.gesture.as_mut() {
           let _ = crate::collab::apply(&mut g.doc, &delta);
+          sanitize_links(&mut g.doc, Some(&ids));
         }
         if let Some(g) = self.gesture_undo.as_mut() {
           let _ = crate::collab::apply(&mut g.doc, &delta);
+          sanitize_links(&mut g.doc, Some(&ids));
         }
         self.refresh_fingerprints();
         self.after_mutation(&prev);
@@ -2086,6 +2089,7 @@ impl Engine {
         if doc.pages.is_empty() {
           return Err("document has no pages".into());
         }
+        sanitize_links(&mut doc, None);
         if keep_comments {
           doc.comments = carry_comments(&self.doc, &doc);
         }
@@ -3610,6 +3614,11 @@ impl Engine {
       .unwrap_or_default();
     // Variables and styles the layers use but this file lacks come along (and the layers follow
     // their new ids), before anything is inserted.
+    nodes
+      .iter_mut()
+      .chain(comps.iter_mut())
+      .filter(|n| has_unsafe_link(n))
+      .for_each(fix_links);
     let added = crate::clipboard::merge_tokens(&mut self.doc, &v, &mut self.gen, &mut nodes, &mut comps)?;
     let mut map: HashMap<NodeId, NodeId> = HashMap::new();
     for n in &nodes {
@@ -3983,8 +3992,6 @@ fn recolor_stroke(n: &mut Node, color: &str) {
   }
 }
 
-/// Removes links a text's runs may not carry (anything but http(s), mailto and tel), so a
-/// patch from an AI tool, a plugin or a peer can't plant a `javascript:` link.
 /// Ids of the nodes a peer's delta adds or patches.
 fn delta_ids(d: &Value) -> Vec<NodeId> {
   ["nodes", "patch"]
@@ -3992,6 +3999,24 @@ fn delta_ids(d: &Value) -> Vec<NodeId> {
     .filter_map(|k| d.get(*k).and_then(|v| v.as_object()))
     .flat_map(|m| m.keys().cloned())
     .collect()
+}
+
+/// An instance override (or any patch) with unsafe text links and prototype URLs removed.
+fn clean_patch(p: Value) -> Value {
+  let mut p = without_unsafe_links(p);
+  if let Some(list) = p.get_mut("interactions").and_then(|i| i.as_array_mut()) {
+    for i in list.iter_mut() {
+      let bad = i
+        .get("url")
+        .is_some_and(|u| u.as_str().is_none_or(|u| crate::model::safe_link(u).is_none()));
+      if bad {
+        if let Some(o) = i.as_object_mut() {
+          o.remove("url");
+        }
+      }
+    }
+  }
+  p
 }
 
 fn has_unsafe_link(n: &Node) -> bool {
@@ -4003,26 +4028,37 @@ fn has_unsafe_link(n: &Node) -> bool {
         .iter()
         .any(|r| r.link.as_deref().is_some_and(|l| crate::model::safe_link(l).is_none()))
     })
+    || n
+      .instance
+      .as_ref()
+      .is_some_and(|i| i.overrides.values().any(|v| clean_patch(v.clone()) != *v))
 }
 
-/// Drops links with unsafe schemes (`javascript:`, `data:`) from text runs and prototype
-/// URLs: all nodes, or only the given ids.
-fn sanitize_links(doc: &mut Document, ids: Option<&[NodeId]>) {
-  let fix = |n: &mut Node| {
-    for i in n.interactions.iter_mut() {
-      if i.url.as_deref().is_some_and(|u| crate::model::safe_link(u).is_none()) {
-        i.url = None;
-      }
+/// Drops the unsafe links of one node: text runs, prototype URLs and instance overrides.
+fn fix_links(n: &mut Node) {
+  for i in n.interactions.iter_mut() {
+    if i.url.as_deref().is_some_and(|u| crate::model::safe_link(u).is_none()) {
+      i.url = None;
     }
-    drop_unsafe_links(n);
-  };
+  }
+  drop_unsafe_links(n);
+  if let Some(inst) = n.instance.as_mut() {
+    for v in inst.overrides.values_mut() {
+      *v = clean_patch(std::mem::take(v));
+    }
+  }
+}
+
+/// Drops links with unsafe schemes (`javascript:`, `data:`) from text runs, prototype URLs and
+/// instance overrides: all nodes, or only the given ids.
+fn sanitize_links(doc: &mut Document, ids: Option<&[NodeId]>) {
   match ids {
-    None => doc.update_where(has_unsafe_link, fix),
+    None => doc.update_where(has_unsafe_link, fix_links),
     Some(ids) => {
       for id in ids {
         if doc.get(id).is_some_and(has_unsafe_link) {
           if let Some(n) = doc.get_mut(id) {
-            fix(n);
+            fix_links(n);
           }
         }
       }
@@ -4030,6 +4066,8 @@ fn sanitize_links(doc: &mut Document, ids: Option<&[NodeId]>) {
   }
 }
 
+/// Removes links a text's runs may not carry (anything but http(s), mailto and tel), so a
+/// patch from an AI tool, a plugin or a peer can't plant a `javascript:` link.
 fn drop_unsafe_links(n: &mut Node) {
   let Some(t) = n.text.as_mut() else { return };
   if t
@@ -7512,5 +7550,155 @@ mod r15_link_tests {
     let d = crate::collab::delta(&clean, &bad, false, false);
     e.dispatch(Command::ApplyRemote { delta: d, local: false }).unwrap();
     check(&e.doc);
+  }
+}
+
+#[cfg(test)]
+mod r15_link_fix_tests {
+  use super::*;
+  use crate::model::{Action, Interaction};
+  use crate::text::HeuristicMeasurer;
+
+  fn engine() -> Engine {
+    Engine::new(Box::new(HeuristicMeasurer), 42)
+  }
+
+  fn unsafe_ids(doc: &Document) -> Vec<String> {
+    doc.nodes.values().filter(|n| has_unsafe_link(n)).map(|n| n.id.clone()).collect()
+  }
+
+  /// A main "card" with a text "lbl" and an instance whose override for "lbl" carries unsafe links.
+  fn with_bad_override() -> (Engine, String) {
+    let mut e = engine();
+    let page = e.doc.pages[0].id.clone();
+    let mut f = crate::ops::default_node(NodeType::Frame, "card".into(), "Card".into());
+    f.width = 100.0;
+    f.height = 50.0;
+    e.doc.insert(f, None, &page, None);
+    let mut t = crate::ops::default_node(NodeType::Text, "lbl".into(), "L".into());
+    t.text.as_mut().unwrap().characters = "abcdef".into();
+    e.doc.insert(t, Some("card"), &page, None);
+    let comp = crate::components::create_component(&mut e.doc, &["card".to_string()], &mut e.gen).unwrap();
+    let inst = crate::components::create_instance(&mut e.doc, &comp, None, &page, 300.0, 0.0, &mut e.gen).unwrap();
+    let master_lbl = e.doc.get(&comp).unwrap().children[0].clone();
+    e.doc.get_mut(&inst).unwrap().instance.as_mut().unwrap().overrides.insert(
+      master_lbl,
+      json!({
+        "text": { "runs": [{ "start": 0, "end": 3, "link": "javascript:alert(9)" }, { "start": 3, "end": 6, "link": "https://ok.example/" }] },
+        "interactions": [{ "action": "openUrl", "url": "javascript:alert(8)" }]
+      }),
+    );
+    (e, comp)
+  }
+
+  fn no_js(doc: &Document) {
+    let all = serde_json::to_string(doc).unwrap();
+    assert!(!all.contains("javascript:"), "{all}");
+    assert!(unsafe_ids(doc).is_empty());
+  }
+
+  #[test]
+  fn instance_overrides_lose_unsafe_links_on_load_and_survive_main_edits() {
+    let (e, comp) = with_bad_override();
+    let json = serde_json::to_string(&e.doc).unwrap();
+    assert!(json.contains("javascript:alert(9)"));
+    let mut e2 = engine();
+    e2.load(&json).unwrap();
+    no_js(&e2.doc);
+    assert!(serde_json::to_string(&e2.doc).unwrap().contains("https://ok.example/"));
+    let main_lbl = e2.doc.get(&comp).unwrap().children[0].clone();
+    e2.dispatch(Command::Update {
+      ids: vec![main_lbl],
+      patch: json!({ "opacity": 0.5 }),
+    })
+    .unwrap();
+    no_js(&e2.doc);
+  }
+
+  #[test]
+  fn a_remote_override_patch_is_cleaned() {
+    let (bad, _) = with_bad_override();
+    let mut clean = bad.doc.clone();
+    let inst = clean.nodes.values().find(|n| n.instance.is_some()).unwrap().id.clone();
+    clean.get_mut(&inst).unwrap().instance.as_mut().unwrap().overrides.clear();
+    let mut e = engine();
+    e.doc = clean.clone();
+    let d = crate::collab::delta(&clean, &bad.doc, false, false);
+    e.dispatch(Command::ApplyRemote { delta: d, local: false }).unwrap();
+    no_js(&e.doc);
+  }
+
+  #[test]
+  fn a_remote_delta_during_a_gesture_is_not_restored_or_rebroadcast() {
+    let mut e = engine();
+    let page = e.doc.pages[0].id.clone();
+    for id in ["r", "b"] {
+      e.doc.insert(
+        crate::ops::default_node(NodeType::Rectangle, id.into(), id.into()),
+        None,
+        &page,
+        None,
+      );
+    }
+    e.collab_reset(true, true);
+    let base = e.doc.clone();
+    let mut bad = base.clone();
+    bad.get_mut("b").unwrap().interactions.push(Interaction {
+      action: Action::OpenUrl,
+      url: Some("javascript:alert(1)".into()),
+      ..Default::default()
+    });
+    let d = crate::collab::delta(&base, &bad, true, true);
+    e.selection = vec!["r".into()];
+    e.dispatch(Command::BeginGesture).unwrap();
+    e.dispatch(Command::ApplyRemote { delta: d, local: false }).unwrap();
+    let cmd: Command = serde_json::from_value(json!({ "op": "translate", "ids": ["r"], "dx": 5.0, "dy": 0.0 })).unwrap();
+    e.dispatch(cmd).unwrap();
+    assert!(unsafe_ids(&e.doc).is_empty(), "restored by the gesture");
+    e.dispatch(Command::EndGesture).unwrap();
+    assert!(unsafe_ids(&e.doc).is_empty());
+    assert!(!e.collab_delta().to_string().contains("javascript:"));
+  }
+
+  #[test]
+  fn replace_document_and_paste_drop_unsafe_links() {
+    let (bad, _) = with_bad_override();
+    let mut e = engine();
+    e.dispatch(Command::ReplaceDocument {
+      doc: serde_json::to_value(&bad.doc).unwrap(),
+      keep_comments: false,
+    })
+    .unwrap();
+    no_js(&e.doc);
+
+    // Clipboard JSON from another page: a text with a link and a rectangle with an open-URL.
+    let mut src = engine();
+    let page = src.doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Text, "t".into(), "T".into());
+    t.text.as_mut().unwrap().characters = "abc".into();
+    src.doc.insert(t, None, &page, None);
+    let mut r = crate::ops::default_node(NodeType::Rectangle, "r".into(), "R".into());
+    r.interactions.push(Interaction {
+      action: Action::OpenUrl,
+      url: Some("data:text/html,x".into()),
+      ..Default::default()
+    });
+    src.doc.insert(r, None, &page, None);
+    let mut data: Value = serde_json::from_str(&src.copy(&["t".to_string(), "r".to_string()])).unwrap();
+    data["nodes"][0]["text"]["runs"] = json!([{ "start": 0, "end": 3, "link": "javascript:alert(1)" }]);
+    let text = data.to_string();
+    assert!(text.contains("javascript:") && text.contains("data:text/html"));
+    let mut dst = engine();
+    dst
+      .dispatch(Command::Paste {
+        data: text,
+        parent: None,
+        x: None,
+        y: None,
+      })
+      .unwrap();
+    assert!(dst.doc.nodes.len() >= 2);
+    no_js(&dst.doc);
+    assert!(!serde_json::to_string(&dst.doc).unwrap().contains("data:text/html"));
   }
 }
