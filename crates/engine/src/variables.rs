@@ -827,7 +827,7 @@ fn css_value(doc: &Document, c: &Collection, v: &Variable, mode: &str) -> Option
   Some(match v.kind {
     VarKind::Color => crate::color::css_with_opacity(&crate::color::normalize(val.as_str()?), 1.0),
     VarKind::Number => crate::geom::fmt(val.as_f64()?),
-    VarKind::String => format!("\"{}\"", val.as_str()?.replace('"', "\\\"")),
+    VarKind::String => format!("\"{}\"", crate::render::css_string(val.as_str()?, '"')),
     VarKind::Boolean => (if val.as_bool()? { "1" } else { "0" }).to_string(),
   })
 }

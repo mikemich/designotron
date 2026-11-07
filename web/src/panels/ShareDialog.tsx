@@ -208,6 +208,9 @@ export function ShareDialog() {
                     </a>
                   </div>
                 )}
+                <div className="muted small" style={{ lineHeight: 1.5 }}>
+                  Anyone with the link sees every page and the comments.
+                </div>
                 <button className="btn primary" disabled={!!busy || !relay.trim()} onClick={() => start("online")}>
                   {busy === "online" ? <Loader2 size={13} className="spin" /> : <Globe size={13} />} Share online
                 </button>
@@ -250,6 +253,9 @@ export function ShareDialog() {
                     </button>
                   ))}
                 </div>
+                <div className="muted small share-carries" style={{ lineHeight: 1.5 }}>
+                  Links carry the whole file: every page, and comments with their authors' names.
+                </div>
                 {manual && (
                   <>
                     <div className="small">Your browser blocked copying. Select this and copy it:</div>
@@ -266,6 +272,9 @@ export function ShareDialog() {
                 </div>
                 <div className="muted small" style={{ lineHeight: 1.5 }}>
                   Your computer hosts the session through the Designotron bridge, behind a secret link.
+                </div>
+                <div className="muted small" style={{ lineHeight: 1.5 }}>
+                  Anyone with the link sees every page and the comments.
                 </div>
                 <button className="btn" disabled={!!busy || bridgeStatus !== "connected"} onClick={() => start("lan")} title={bridgeStatus !== "connected" ? "Needs the Designotron bridge (setup steps in the Claude panel)" : ""}>
                   {busy === "lan" ? <Loader2 size={13} className="spin" /> : <Users size={13} />} Share on this network

@@ -654,7 +654,11 @@ impl Import<'_> {
         {
           o.insert("color".into(), json!(color_hex(c)));
         }
-        if let Some(url) = s.pointer("/hyperlink/url").and_then(|v| v.as_str()) {
+        if let Some(url) = s
+          .pointer("/hyperlink/url")
+          .and_then(|v| v.as_str())
+          .and_then(crate::model::safe_link)
+        {
           o.insert("link".into(), json!(url));
         }
         if o.len() > 2 {
@@ -1885,5 +1889,22 @@ mod tests {
     assert_eq!(named(&doc, "B").interactions.len(), 0);
     assert!(warnings(&r).iter().any(|w| w.contains("aren't http")), "{:?}", warnings(&r));
     assert_eq!(named(&doc, "C").interactions[0].url.as_deref(), Some("https://example.com"));
+  }
+
+  #[test]
+  fn javascript_hyperlinks_are_not_imported() {
+    let mut f = file();
+    let label = &mut f["document"]["children"][0]["children"][0]["children"][0];
+    label["styleOverrideTable"]["1"]["hyperlink"] = json!({ "type": "URL", "url": "javascript:alert(1)" });
+    let mut gen = IdGen::new(7);
+    let mut doc = new_document(&mut gen, "x");
+    import(&mut doc, &mut gen, &f, &BTreeMap::new()).unwrap();
+    assert!(!serde_json::to_string(&doc).unwrap().contains("javascript:"));
+    let mut g = file();
+    let label = &mut g["document"]["children"][0]["children"][0]["children"][0];
+    label["styleOverrideTable"]["1"]["hyperlink"] = json!({ "type": "URL", "url": "https://ok.example/" });
+    let mut doc = new_document(&mut gen, "y");
+    import(&mut doc, &mut gen, &g, &BTreeMap::new()).unwrap();
+    assert!(serde_json::to_string(&doc).unwrap().contains("https://ok.example/"));
   }
 }
