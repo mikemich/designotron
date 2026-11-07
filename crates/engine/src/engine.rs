@@ -148,6 +148,13 @@ pub enum Command {
   SetVariables {
     collections: Vec<crate::variables::Collection>,
   },
+  /// Merges a tokens file (Designotron tokens.json, W3C design tokens or Tokens Studio) into the
+  /// variables, as one undo step. `name` is the file's name; returns the report.
+  ImportVariables {
+    json: String,
+    #[serde(default)]
+    name: String,
+  },
   /// Binds a layer property to a variable (None unbinds).
   BindVariable {
     ids: Vec<NodeId>,
@@ -1996,6 +2003,13 @@ impl Engine {
         self.doc.variables = crate::variables::intern(collections, &self.doc.variables);
         crate::variables::prune(&mut self.doc);
         Ok(json!({}))
+      }
+      Command::ImportVariables { json, name } => {
+        let (collections, report) = crate::tokens_import::import(&self.doc, &json, &name, &mut self.gen)?;
+        crate::variables::validate(&collections, &self.doc.variables)?;
+        self.doc.variables = crate::variables::intern(collections, &self.doc.variables);
+        crate::variables::prune(&mut self.doc);
+        Ok(report.to_json())
       }
       Command::BindVariable { ids, property, variable } => {
         let want = crate::variables::property_kind(&property).ok_or_else(|| format!("{property} can't be bound to a variable"))?;

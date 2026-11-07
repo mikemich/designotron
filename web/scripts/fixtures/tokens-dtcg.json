@@ -1,0 +1,37 @@
+{
+  "$description": "A small W3C design tokens file",
+  "color": {
+    "$type": "color",
+    "brand": {
+      "primary": { "$value": "#6D4AFF", "$description": "Brand colour" },
+      "soft": { "$value": { "colorSpace": "srgb", "components": [1, 0.5, 0], "alpha": 0.5 } }
+    },
+    "text": { "$value": "{color.brand.primary}" },
+    "raw": { "$value": "rgb(10, 20, 30)" }
+  },
+  "size": {
+    "$type": "dimension",
+    "sm": { "$value": "8px" },
+    "md": { "$value": { "value": 1, "unit": "rem" } },
+    "lg": { "$value": "2em" },
+    "double": { "$value": "{size.sm} * 2" }
+  },
+  "weight": {
+    "$type": "fontWeight",
+    "regular": { "$value": "regular" },
+    "bold": { "$value": 700 }
+  },
+  "motion": {
+    "fast": { "$type": "duration", "$value": "0.2s" },
+    "lift": {
+      "$type": "shadow",
+      "$value": { "color": "#00000040", "offsetX": "0px", "offsetY": "4px", "blur": "8px", "spread": "0px" }
+    }
+  },
+  "font": {
+    "body": { "$type": "fontFamily", "$value": ["Inter", "sans-serif"] },
+    "label": { "$type": "string", "$value": "Hello" }
+  },
+  "flag": { "$type": "boolean", "$value": true },
+  "count": { "$type": "number", "$value": 3 }
+}

@@ -113,3 +113,20 @@ describe("searchLayers", () => {
     expect(searchLayers(d, "other", "card", none, 50).total).toBe(0);
   });
 });
+
+describe("searchLayers names only", () => {
+  const d = docOf([
+    ["s1", null, { name: "Screen 1" }],
+    ["t1", "s1", { type: "text", name: "Title", text: { characters: "Hello World" } as never }],
+    ["t2", "s1", { type: "text", name: "Hello label", text: { characters: "Other words" } as never }],
+  ]);
+  const none = new Set<LayerFilter>();
+  it("content: false matches names only", () => {
+    expect(searchLayers(d, "p1", "hello", none, 50).hits.map((h) => h.id)).toEqual(["t2", "t1"]);
+    expect(searchLayers(d, "p1", "hello", none, 50, { content: false }).hits.map((h) => h.id)).toEqual(["t2"]);
+    expect(searchLayers(d, "p1", "hello", none, 50, { content: true }).total).toBe(2);
+  });
+  it("names still match with the filters", () => {
+    expect(searchLayers(d, "p1", "title", new Set<LayerFilter>(["text"]), 50, { content: false }).hits.map((h) => h.id)).toEqual(["t1"]);
+  });
+});

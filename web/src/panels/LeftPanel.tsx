@@ -39,7 +39,7 @@ import { viewportCenter } from "../actions";
 import { ColorStylesSection, EffectStylesSection, GridStylesSection, TextStylesSection } from "./StyleControls";
 import { FolderTree } from "./FolderTree";
 import { useThumb } from "./assetThumbs";
-import { swapGroups } from "../componentOps";
+import { orderedEntries, propertyOrder, swapGroups } from "../componentOps";
 import { PhotoSearch } from "./PhotoSearch";
 import { useCollab } from "../collab";
 
@@ -491,8 +491,24 @@ function Layers() {
   // Emptying the field shows the tree at once; typing waits for the debounce.
   const activeQuery = search.q.trim() ? debounced : "";
   const filters = useMemo(() => new Set(search.f), [search.f]);
+  // "Match text content" (the Filter menu): off searches layer names only. Kept per browser.
+  const [content, setContentState] = useState(() => {
+    try {
+      return localStorage.getItem("dt:layer-search-content") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const setContent = (on: boolean) => {
+    setContentState(on);
+    try {
+      localStorage.setItem("dt:layer-search-content", on ? "1" : "0");
+    } catch {
+      /* private mode: the choice lasts until reload */
+    }
+  };
   const searching = activeQuery.trim() !== "" || filters.size > 0;
-  const found = useMemo(() => (searching ? searchLayers(doc, page, activeQuery, filters, 500) : null), [searching, doc, page, activeQuery, filters]);
+  const found = useMemo(() => (searching ? searchLayers(doc, page, activeQuery, filters, 500, { content }) : null), [searching, doc, page, activeQuery, filters, content]);
   searchingRef.current = searching;
   foundRef.current = found;
 
@@ -788,13 +804,15 @@ function Layers() {
       query={search.q}
       filters={search.f}
       count={found ? found.total : null}
+      content={content}
+      onContent={setContent}
       onQuery={(q) => setSearch({ q })}
       onFilters={(f) => setSearch({ f })}
       onSelectAll={() => {
         // The field's own text, not the debounced copy: Enter right after typing counts.
         if (!search.q.trim() && !search.f.length) return;
         setDeb({ page, q: search.q });
-        const ids = searchLayers(doc, page, search.q, filters, Infinity).hits.map((h) => h.id);
+        const ids = searchLayers(doc, page, search.q, filters, Infinity, { content }).hits.map((h) => h.id);
         if (ids.length) {
           anchor.current = ids[0];
           panelSelect(ids);
@@ -983,11 +1001,16 @@ function LayerSearchBar({
   count,
   onQuery,
   onFilters,
+  content,
+  onContent,
   onSelectAll,
   onToResults,
 }: {
   query: string;
   filters: LayerFilter[];
+  /** Whether text layers also match by their content. */
+  content: boolean;
+  onContent: (on: boolean) => void;
   /** Matches while a search is active, else null. */
   count: number | null;
   onQuery: (q: string) => void;
@@ -1031,7 +1054,7 @@ function LayerSearchBar({
             id="layer-search"
             type="text"
             value={query}
-            placeholder="Search layers"
+            placeholder={content ? "Search layers" : "Search layer names"}
             aria-label="Search layers"
             autoComplete="off"
             spellCheck={false}
@@ -1073,6 +1096,11 @@ function LayerSearchBar({
       </div>
       {open && (
         <div className="layer-filter-menu" id="layer-filter-menu" role="group" aria-label="Layer filters">
+          <label className="layer-filter-item" title="Also search the words inside text layers">
+            <input type="checkbox" aria-label="Match text content" checked={content} onChange={(e) => onContent(e.target.checked)} />
+            <span>Match text content</span>
+          </label>
+          <div className="layer-filter-sep" role="separator" />
           {LAYER_FILTERS.map((f) => (
             <label key={f} className="layer-filter-item">
               <input type="checkbox" checked={filters.includes(f)} onChange={() => toggle(f)} />
@@ -1303,7 +1331,7 @@ function Assets() {
             ))}
           </span>
         </div>
-        {e.items.map((c) => row(c, Object.values(c.component?.variantProps ?? {}).join(", ") || c.name, true))}
+        {e.items.map((c) => row(c, orderedEntries(c.component?.variantProps ?? {}, propertyOrder(doc, e.set!)).map(([, v]) => v).join(", ") || c.name, true))}
       </div>
     ) : (
       row(e.items[0], label, false)

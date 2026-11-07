@@ -1,11 +1,12 @@
 import { useDeferredValue, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Download, Hash, Link2, Palette, Plus, Search, SlidersHorizontal, ToggleLeft, Trash2, Type as TypeIcon, Unlink, X } from "lucide-react";
-import { dispatch, toast, useDoc, useStore } from "../store";
+import { ChevronDown, ChevronRight, Download, Hash, Link2, Palette, Plus, Search, SlidersHorizontal, ToggleLeft, Trash2, Type as TypeIcon, Unlink, Upload, X } from "lucide-react";
+import { dispatch, dispatchOrThrow, toast, useDoc, useStore } from "../store";
 import type { VarKind, Variable, VariableCollection } from "../types";
 import { Menu, MOD, type MenuItem, Popover, useDialog } from "../ui/controls";
 import { ConfirmDialog } from "../dashboard/ConfirmDialog";
 import { cssColor } from "../ui/color";
 import { exportTokensJson } from "../exporter";
+import { useCollab } from "../collab";
 import { useFolderState } from "./FolderTree";
 import { folderSize, groupBySlash, type Folder } from "./groupBySlash";
 import { aliasCycle, SCOPES, SCOPES_FOR_KIND } from "./variableScopes";
@@ -174,9 +175,62 @@ function ValueCell({
   );
 }
 
+/** What `importVariables` reports. */
+interface ImportReport {
+  collectionsAdded: number;
+  modesAdded: number;
+  variablesAdded: number;
+  variablesUpdated: number;
+  skipped: { path: string; reason: string }[];
+  skippedCount: number;
+}
+
+const IMPORT_MAX_BYTES = 5 * 1024 * 1024;
+
+function plural(n: number, one: string, many = one + "s") {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/** One line for the report, and for the toast. */
+export function importSummary(r: ImportReport): string {
+  const parts = [
+    r.collectionsAdded && plural(r.collectionsAdded, "collection") + " added",
+    r.variablesAdded && plural(r.variablesAdded, "variable") + " added",
+    r.variablesUpdated && plural(r.variablesUpdated, "variable") + " updated",
+    r.modesAdded && plural(r.modesAdded, "mode") + " added",
+  ].filter(Boolean);
+  return parts.length ? parts.join(", ") : "Nothing changed";
+}
+
 /** Figma-style local variables editor: collections, modes as columns, variables as rows. */
 export function VariablesDialog() {
   const doc = useDoc();
+  const viewer = useCollab((s) => s.viewer);
+  const tabView = useStore((s) => s.tabView);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [imported, setImported] = useState<{ file: string; report?: ImportReport; error?: string } | null>(null);
+  const [showSkipped, setShowSkipped] = useState(false);
+  const importFile = async (file: File) => {
+    setShowSkipped(false);
+    if (file.size > IMPORT_MAX_BYTES) {
+      setImported({ file: file.name, error: "That file is over 5 MB." });
+      return;
+    }
+    let text: string;
+    try {
+      text = await file.text();
+    } catch {
+      setImported({ file: file.name, error: "Couldn't read that file." });
+      return;
+    }
+    try {
+      const report = dispatchOrThrow<ImportReport>({ op: "importVariables", json: text, name: file.name });
+      setImported({ file: file.name, report });
+      toast(`Imported ${file.name}: ${importSummary(report)}${report.skippedCount ? `, ${report.skippedCount} skipped` : ""}`);
+    } catch (err) {
+      setImported({ file: file.name, error: String(err) });
+    }
+  };
   const collections = doc.variables ?? [];
   const [active, setActive] = useState<string | null>(collections[0]?.id ?? null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
@@ -358,13 +412,70 @@ export function VariablesDialog() {
       <div ref={dialogRef} className="modal variables-dialog" role="dialog" aria-modal="true" aria-label="Variables">
         <div className="modal-head">
           <b>Local variables</b>
-          <button className="ibtn" title="Export JSON (W3C design tokens)" aria-label="Export JSON" onClick={exportTokensJson} style={{ marginLeft: "auto" }}>
+          {!viewer && !tabView && (
+            <>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".json,application/json"
+                hidden
+                aria-label="Import JSON file"
+                data-var-import-input
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = "";
+                  if (f) void importFile(f);
+                }}
+              />
+              <button
+                className="ibtn"
+                title="Import JSON (design tokens, Tokens Studio or Designotron variables)"
+                aria-label="Import JSON"
+                onClick={() => fileRef.current?.click()}
+                style={{ marginLeft: "auto" }}
+              >
+                <Upload size={14} />
+              </button>
+            </>
+          )}
+          <button className="ibtn" title="Export JSON (W3C design tokens)" aria-label="Export JSON" onClick={exportTokensJson} style={viewer || tabView ? { marginLeft: "auto" } : undefined}>
             <Download size={14} />
           </button>
           <button className="ibtn" title="Close" onClick={close}>
             <X size={14} />
           </button>
         </div>
+        {imported && (
+          <div className={"var-import-report" + (imported.error ? " error" : "")} role="status" data-var-import-report>
+            <div className="var-import-line">
+              <span>
+                <b>{imported.file}</b>: {imported.error ?? importSummary(imported.report!)}
+                {imported.report && imported.report.skippedCount > 0 && (
+                  <>
+                    {", "}
+                    <button className="layer-select-all" aria-expanded={showSkipped} onClick={() => setShowSkipped(!showSkipped)}>
+                      {imported.report.skippedCount} skipped {showSkipped ? "▾" : "▸"}
+                    </button>
+                  </>
+                )}
+                {imported.report && importSummary(imported.report) !== "Nothing changed" && " · Ctrl+Z removes the import"}
+              </span>
+              <button className="ibtn" title="Dismiss" aria-label="Dismiss import report" onClick={() => setImported(null)}>
+                <X size={12} />
+              </button>
+            </div>
+            {showSkipped && imported.report && (
+              <ul className="var-import-skipped">
+                {imported.report.skipped.map((s, i) => (
+                  <li key={i}>
+                    <code>{s.path}</code> <span className="muted">{s.reason}</span>
+                  </li>
+                ))}
+                {imported.report.skippedCount > imported.report.skipped.length && <li className="muted">and {imported.report.skippedCount - imported.report.skipped.length} more</li>}
+              </ul>
+            )}
+          </div>
+        )}
         <div className="variables-body">
           <div className="var-collections">
             {collections.map((c) => {

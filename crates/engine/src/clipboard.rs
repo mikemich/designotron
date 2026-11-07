@@ -258,14 +258,14 @@ impl Visit for Remap {
 /// Decides whether every token the layers reference is already in the destination: the same id
 /// with the same name (ids alone can collide between unrelated files). Inside a collection that
 /// has the same id and name as the clipboard's (same origin), modes and variables match by id
-/// alone, so renaming one doesn't make the paste add it again.
+/// alone, so renaming one doesn't make the paste add it again. Styles match by id within the
+/// same kind, whatever either side calls them now.
 struct Present<'a> {
   dest_vars: HashMap<&'a str, (&'a Collection, &'a Variable)>,
   dest_colls: HashMap<&'a str, &'a Collection>,
   dest_styles: HashMap<(Kind, &'a str), &'a str>,
   clip_vars: HashMap<&'a str, (&'a str, &'a Variable)>,
   clip_colls: HashMap<&'a str, &'a Collection>,
-  clip_styles: HashMap<&'a str, &'a str>,
   all_present: bool,
 }
 
@@ -290,12 +290,8 @@ impl Visit for Present<'_> {
     self.all_present &= ok;
   }
   fn style(&mut self, kind: Kind, id: &mut String) {
-    let ok = match (self.dest_styles.get(&(kind, id.as_str())), self.clip_styles.get(id.as_str())) {
-      (None, _) => false,
-      (Some(d), Some(c)) => d == c,
-      (Some(_), None) => true,
-    };
-    self.all_present &= ok;
+    // An id the destination has for the same kind is present whatever it is called there.
+    self.all_present &= self.dest_styles.contains_key(&(kind, id.as_str()));
   }
 }
 
@@ -372,19 +368,6 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
         .flat_map(|c| c.variables.iter().map(move |v| (v.id.as_str(), (c.name.as_str(), &**v))))
         .collect(),
       clip_colls: clip_colls.iter().map(|c| (c.id.as_str(), c)).collect(),
-      clip_styles: [
-        clip_styles
-          .colors
-          .iter()
-          .map(|s| (s.id.as_str(), s.name.as_str()))
-          .collect::<Vec<_>>(),
-        clip_styles.texts.iter().map(|s| (s.id.as_str(), s.name.as_str())).collect(),
-        clip_styles.effects.iter().map(|s| (s.id.as_str(), s.name.as_str())).collect(),
-        clip_styles.grids.iter().map(|s| (s.id.as_str(), s.name.as_str())).collect(),
-      ]
-      .into_iter()
-      .flatten()
-      .collect(),
       all_present: true,
     };
     visit_all(nodes, comps, &mut present);
@@ -610,7 +593,7 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
           .styles
           .$list
           .iter()
-          .find(|d| d.id == s.id && d.name == s.name)
+          .find(|d| d.id == s.id)
           .or_else(|| doc.styles.$list.iter().find(|d| d.name == s.name))
           .map(|d| d.id.clone());
         let id = match found {
@@ -1125,6 +1108,88 @@ mod tests {
       .iter()
       .any(|id| b.doc.get(id).unwrap().bindings.get("fill") == Some(&surface)));
     assert_eq!(r["created"].as_array().unwrap().len(), 1);
+  }
+
+  #[test]
+  fn renamed_styles_match_by_id_and_the_destination_keeps_its_name() {
+    let mut a = engine(7);
+    let ids = scene(&mut a);
+    let mut b = engine(8);
+    paste(&mut b, a.copy(&[ids["Screen"].clone()]));
+    assert_eq!((b.doc.styles.colors.len(), b.doc.styles.texts.len()), (1, 1));
+    let (bc, bt) = (b.doc.styles.colors[0].id.clone(), b.doc.styles.texts[0].id.clone());
+    // Rename a colour style and a text style in the source and copy again.
+    a.doc.styles_mut().colors[0].name = "Brand 2".into();
+    a.doc.styles_mut().texts[0].name = "Body copy".into();
+    a.doc.styles_mut().texts[0].font_size = 18.0;
+    let r = paste(&mut b, a.copy(&[ids["Screen"].clone()]));
+    assert_eq!(r["added"]["styles"], 0, "{}", r["added"]);
+    assert_eq!((b.doc.styles.colors.len(), b.doc.styles.texts.len()), (1, 1));
+    // The destination keeps its own name and values.
+    assert_eq!(b.doc.styles.colors[0].name, "Brand");
+    assert_eq!(b.doc.styles.texts[0].name, "Body");
+    assert_eq!(b.doc.styles.texts[0].font_size, 14.0);
+    // The pasted layers link to the destination's styles.
+    let screen = b.doc.get(r["created"][0].as_str().unwrap()).unwrap();
+    let kids: Vec<&Node> = screen.children.iter().map(|c| b.doc.get(c).unwrap()).collect();
+    assert_eq!(
+      kids.iter().find(|n| n.name == "Brand box").unwrap().fill_style.as_deref(),
+      Some(bc.as_str())
+    );
+    assert_eq!(
+      kids.iter().find(|n| n.name == "Label").unwrap().text_style.as_deref(),
+      Some(bt.as_str())
+    );
+  }
+
+  #[test]
+  fn an_unrelated_style_with_the_same_name_still_matches_by_name() {
+    let mut a = engine(7);
+    let ids = scene(&mut a);
+    let mut b = engine(99);
+    run(
+      &mut b,
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand", "color": "#00FF00" }] }),
+    );
+    assert_ne!(b.doc.styles.colors[0].id, a.doc.styles.colors[0].id);
+    let mine = b.doc.styles.colors[0].id.clone();
+    let r = paste(&mut b, a.copy(&[ids["Screen"].clone()]));
+    assert_eq!(b.doc.styles.colors.len(), 1);
+    assert_eq!(b.doc.styles.colors[0].color, "#00FF00");
+    let screen = b.doc.get(r["created"][0].as_str().unwrap()).unwrap();
+    let boxed = screen
+      .children
+      .iter()
+      .map(|c| b.doc.get(c).unwrap())
+      .find(|n| n.name == "Brand box")
+      .unwrap();
+    assert_eq!(boxed.fill_style.as_deref(), Some(mine.as_str()));
+  }
+
+  #[test]
+  fn the_same_style_id_of_another_kind_gets_a_fresh_id() {
+    let mut a = engine(7);
+    let ids = scene(&mut a);
+    let body = a.doc.styles.texts[0].id.clone();
+    let mut b = engine(8);
+    run(
+      &mut b,
+      "define_styles",
+      json!({ "effects": [{ "name": "Other", "shadow": { "y": 2, "blur": 2 } }] }),
+    );
+    b.doc.styles_mut().effects[0].id = body.clone();
+    let r = paste(&mut b, a.copy(&[ids["Screen"].clone()]));
+    assert_eq!(b.doc.styles.texts.len(), 1);
+    assert_ne!(b.doc.styles.texts[0].id, body, "the text style can't reuse an effect style's id");
+    let screen = b.doc.get(r["created"][0].as_str().unwrap()).unwrap();
+    let label = screen
+      .children
+      .iter()
+      .map(|c| b.doc.get(c).unwrap())
+      .find(|n| n.name == "Label")
+      .unwrap();
+    assert_eq!(label.text_style.as_deref(), Some(b.doc.styles.texts[0].id.as_str()));
   }
 }
 

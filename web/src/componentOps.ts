@@ -47,9 +47,46 @@ export function variantsOf(doc: Doc, set: Node): Node[] {
   return set.children.map((id) => doc.nodes[id]).filter((n): n is Node => !!n && n.type === "component");
 }
 
-/** Variant properties of a set with their values, in first-seen order. */
+/** The keys of "Size=S, State=Default" in the order they are written. */
+function nameKeys(name: string): string[] {
+  if (!name.includes("=")) return [];
+  const keys: string[] = [];
+  for (const part of name.split(",")) {
+    const k = part.split("=")[0].trim();
+    if (k && !keys.includes(k)) keys.push(k);
+  }
+  return keys;
+}
+
+/** A set's property keys in their written order: the first variant's name, then any other keys
+ *  sorted. The order lives in the names (the saved props are an alphabetical map). */
+export function propertyOrder(doc: Doc, set: Node): string[] {
+  const vs = variantsOf(doc, set);
+  const order = vs.length ? nameKeys(vs[0].name).filter((k) => k in (vs[0].component?.variantProps ?? {})) : [];
+  const rest = new Set<string>();
+  for (const v of vs) for (const k of Object.keys(v.component?.variantProps ?? {})) if (!order.includes(k)) rest.add(k);
+  return [...order, ...[...rest].sort()];
+}
+
+/** The property order for a main component: its set's, else its own name's. */
+export function orderFor(doc: Doc, comp: Node): string[] {
+  const set = variantSet(doc, comp);
+  if (set) return propertyOrder(doc, set);
+  const props = comp.component?.variantProps ?? {};
+  const own = nameKeys(comp.name).filter((k) => k in props);
+  return [...own, ...Object.keys(props).filter((k) => !own.includes(k)).sort()];
+}
+
+/** `props` as entries in `order` (keys the order doesn't know follow, sorted). */
+export function orderedEntries(props: Props, order: string[]): [string, string][] {
+  const keys = [...order.filter((k) => k in props), ...Object.keys(props).filter((k) => !order.includes(k)).sort()];
+  return keys.map((k) => [k, props[k]]);
+}
+
+/** Variant properties of a set with their values, in the set's property order. */
 export function setProperties(doc: Doc, set: Node): { name: string; values: string[] }[] {
   const out = new Map<string, string[]>();
+  for (const k of propertyOrder(doc, set)) out.set(k, []);
   for (const v of variantsOf(doc, set)) {
     for (const [k, val] of Object.entries(v.component?.variantProps ?? {})) {
       const vals = out.get(k) ?? [];
@@ -85,13 +122,14 @@ export function renameVariantProperty(set: Node, from: string, to: string): bool
     (setProperties(doc, set).some((p) => p.name === to) ? `“${to}” already exists` : null) ??
     clashesWithComponentProp(set, to);
   if (bad) return toast(bad, "error"), false;
+  const order = propertyOrder(doc, set).map((k) => (k === from ? to : k));
   return batch(() => {
     for (const v of variantsOf(doc, set)) {
       const props = v.component?.variantProps ?? {};
       if (!(from in props)) continue;
       const next: Props = {};
       for (const [k, val] of Object.entries(props)) next[k === from ? to : k] = val;
-      writeVariantProps(v, next);
+      writeVariantProps(v, next, order);
     }
   });
 }
@@ -100,9 +138,10 @@ export function renameVariantProperty(set: Node, from: string, to: string): bool
  *  picked reliably), or null. `next` maps variant id → its new props. */
 function duplicateVariant(doc: Doc, set: Node, next: Map<string, Props>): string | null {
   const seen = new Set<string>();
+  const order = propertyOrder(doc, set);
   for (const v of variantsOf(doc, set)) {
     const props = next.get(v.id) ?? v.component?.variantProps ?? {};
-    const key = variantName(props);
+    const key = variantName(props, order);
     if (seen.has(key)) return `A variant with ${key} already exists`;
     seen.add(key);
   }
@@ -123,10 +162,11 @@ export function renameVariantValue(set: Node, prop: string, from: string, to: st
   }
   const clash = duplicateVariant(doc, set, next);
   if (clash) return toast(clash, "error"), false;
+  const order = propertyOrder(doc, set);
   return batch(() => {
     for (const v of variantsOf(doc, set)) {
       const props = v.component?.variantProps ?? {};
-      if (props[prop] === from) writeVariantProps(v, { ...props, [prop]: to });
+      if (props[prop] === from) writeVariantProps(v, { ...props, [prop]: to }, order);
     }
   });
 }
@@ -142,7 +182,8 @@ export function setVariantValue(comp: Node, prop: string, value: string): boolea
   const set = variantSet(doc, comp);
   const clash = set && duplicateVariant(doc, set, new Map([[comp.id, { ...props, [prop]: value }]]));
   if (clash) return toast(clash, "error"), false;
-  return batch(() => writeVariantProps(comp, { ...props, [prop]: value }));
+  const order = orderFor(doc, comp);
+  return batch(() => writeVariantProps(comp, { ...props, [prop]: value }, order));
 }
 
 /** Adds a property to every variant in the set, with a default value. */
@@ -152,8 +193,9 @@ export function addVariantProperty(set: Node): boolean {
   let i = names.size + 1;
   while (names.has(`Property ${i}`) || clashesWithComponentProp(set, `Property ${i}`)) i++;
   const name = `Property ${i}`;
+  const order = [...propertyOrder(doc, set), name];
   return batch(() => {
-    for (const v of variantsOf(doc, set)) writeVariantProps(v, { ...(v.component?.variantProps ?? {}), [name]: "Default" });
+    for (const v of variantsOf(doc, set)) writeVariantProps(v, { ...(v.component?.variantProps ?? {}), [name]: "Default" }, order);
   });
 }
 
@@ -186,14 +228,15 @@ function addToSet(set: Node, source: Node): boolean {
   const doc = getDoc();
   const vs = variantsOf(doc, set);
   const props: Props = { ...(source.component?.variantProps ?? {}) };
-  const key = Object.keys(props)[0] ?? "Property 1";
+  const order = propertyOrder(doc, set);
+  const key = order[0] ?? "Property 1";
   const used = new Set(vs.map((v) => v.component?.variantProps[key]));
   let i = vs.length + 1;
   while (used.has(`Variant ${i}`)) i++;
   props[key] = `Variant ${i}`;
   return batch(() => {
     const dup = dispatchOrThrow<{ created: string[] }>({ op: "duplicate", ids: [source.id] }).created[0];
-    const patch: Record<string, unknown> = { name: variantName(props), component: { description: source.component?.description ?? "", variantProps: props } };
+    const patch: Record<string, unknown> = { name: variantName(props, order), component: { description: source.component?.description ?? "", variantProps: props } };
     if (!set.layout) {
       // Free-form set: place it after the right-most variant and grow the set to fit.
       const right = Math.max(...vs.map((v) => v.x + v.width));
@@ -210,19 +253,19 @@ function addToSet(set: Node, source: Node): boolean {
 }
 
 /** Writes variant props and the matching "Prop=Value, …" name. Must run inside `batch`. */
-function writeVariantProps(n: Node, props: Props) {
+function writeVariantProps(n: Node, props: Props, order: string[]) {
   const old = n.component?.variantProps ?? {};
   const component = { description: n.component?.description ?? "", variantProps: props };
   // A merge patch can't drop map keys (a renamed property), so clear the info first.
   if (Object.keys(old).some((k) => !(k in props))) dispatchOrThrow({ op: "update", ids: [n.id], patch: { component: null } });
-  dispatchOrThrow({ op: "update", ids: [n.id], patch: { name: variantName(props), component } });
+  dispatchOrThrow({ op: "update", ids: [n.id], patch: { name: variantName(props, order), component } });
 }
 
-/** Engine order (keys sorted), so names match what combine-as-variants writes. */
-function variantName(props: Props): string {
-  return Object.keys(props)
-    .sort()
-    .map((k) => `${k}=${props[k]}`)
+/** "Prop=Value, …" in the set's property order (keys the order lacks follow, sorted), the same
+ *  order combine-as-variants writes. */
+export function variantName(props: Props, order: string[] = []): string {
+  return orderedEntries(props, order)
+    .map(([k, v]) => `${k}=${v}`)
     .join(", ");
 }
 

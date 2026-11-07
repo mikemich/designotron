@@ -1,0 +1,120 @@
+{
+  "Primitives": {
+    "$extensions": {
+      "com.designotron": {
+        "id": "c1",
+        "modes": [
+          "Base"
+        ],
+        "name": "Primitives"
+      }
+    },
+    "Black": {
+      "$extensions": {
+        "com.designotron": {
+          "id": "black"
+        }
+      },
+      "$type": "color",
+      "$value": "#000000"
+    },
+    "Flags": {
+      "On": {
+        "$extensions": {
+          "com.designotron": {
+            "id": "flag",
+            "type": "boolean"
+          }
+        },
+        "$value": true
+      }
+    },
+    "Space": {
+      "$root": {
+        "$extensions": {
+          "com.designotron": {
+            "id": "space"
+          }
+        },
+        "$type": "number",
+        "$value": 4
+      },
+      "2": {
+        "$extensions": {
+          "com.designotron": {
+            "id": "space2"
+          }
+        },
+        "$type": "number",
+        "$value": 8.5
+      }
+    }
+  },
+  "Theme": {
+    "$extensions": {
+      "com.designotron": {
+        "id": "c2",
+        "modes": [
+          "Light",
+          "Dark"
+        ],
+        "name": "Theme"
+      }
+    },
+    "Font": {
+      "$extensions": {
+        "com.designotron": {
+          "id": "font",
+          "modes": {
+            "Dark": "Georgia"
+          },
+          "type": "string"
+        }
+      },
+      "$value": "Inter"
+    },
+    "Pad": {
+      "$extensions": {
+        "com.designotron": {
+          "id": "pad",
+          "modes": {
+            "Dark": 16
+          }
+        }
+      },
+      "$type": "number",
+      "$value": "{Primitives.Space.2}"
+    },
+    "Surface": {
+      "Bg": {
+        "$extensions": {
+          "com.designotron": {
+            "id": "bg",
+            "modes": {
+              "Dark": "{Primitives.Black}"
+            }
+          }
+        },
+        "$type": "color",
+        "$value": "#FFFFFF"
+      },
+      "Glass": {
+        "$description": "Frosted",
+        "$extensions": {
+          "com.designotron": {
+            "id": "glass",
+            "modes": {
+              "Dark": "#112233"
+            },
+            "scopes": [
+              "fill",
+              "stroke"
+            ]
+          }
+        },
+        "$type": "color",
+        "$value": "#11223380"
+      }
+    }
+  }
+}
