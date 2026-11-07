@@ -67,6 +67,8 @@ export class TextHistory {
 
   /** Notes an edit that took the text from `before` to `after`. New input empties the redo stack. */
   record(before: Snapshot, after: Snapshot, kind: EditKind, at: number) {
+    // An edit that changed nothing (a style set to what it was) isn't a run.
+    if (before.characters === after.characters && JSON.stringify(before.runs) === JSON.stringify(after.runs) && JSON.stringify(before.look) === JSON.stringify(after.look)) return;
     this.redoStack = [];
     const last = this.undoStack[this.undoStack.length - 1];
     const own = kind !== "insert" && kind !== "delete";

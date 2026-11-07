@@ -1497,6 +1497,12 @@ pub struct TextStyle {
 }
 
 impl TextStyle {
+  /// Whether the style sets a typography property (`fontSize`, ..., `paragraphSpacing`): all but
+  /// paragraph spacing are always set.
+  pub fn sets(&self, prop: &str) -> bool {
+    prop != "paragraphSpacing" || self.paragraph_spacing.is_some()
+  }
+
   /// Copies what the style sets onto a layer's text.
   pub fn apply_to(&self, tp: &mut TextProps) {
     tp.font_family = self.font_family.clone();

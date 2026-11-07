@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { dispatch, getDoc, localDispatchCount, query, styleTextSelection, useStore } from "../store";
+import { dispatch, foreignChangeCount, getDoc, query, styleTextSelection, useStore } from "../store";
 import type { Mat, TextProps } from "../types";
 import { apply, invert, type Pt } from "./geometry";
 import {
@@ -171,7 +171,7 @@ export function TextEditor({ id }: { id: string }) {
   // change from the panel (or a collaborator's edit) can be told from typing.
   const history = useRef(new TextHistory());
   const known = useRef<{ characters: string; runs: TextProps["runs"]; look: Look }>({ characters: node?.text?.characters ?? "", runs: node?.text?.runs ?? [], look: readLook(id) });
-  const seenOps = useRef(localDispatchCount());
+  const foreignSeen = useRef(foreignChangeCount());
   const pending = useRef<{ before: Snapshot; kind: EditKind | null } | null>(null);
   const composeBefore = useRef<Snapshot | null>(null);
   /** Edits made by the editor itself (rich paste, cut) that it records as one run when done. */
@@ -235,10 +235,20 @@ export function TextEditor({ id }: { id: string }) {
   };
   const remember = (s: Snapshot) => {
     known.current = { characters: s.characters, runs: s.runs, look: s.look as Look };
-    seenOps.current = localDispatchCount();
+    foreignSeen.current = foreignChangeCount();
+  };
+  /** Drops the history when something other than this editor changed the text since it last
+   * looked (a collaborator, a reload): `now` is the text as it stands before the next edit. */
+  const foreignGuard = (now: Snapshot) => {
+    const changed = foreignChangeCount() !== foreignSeen.current;
+    foreignSeen.current = foreignChangeCount();
+    if (!changed) return;
+    const k = known.current;
+    if (now.characters !== k.characters || !sameRuns(now.runs, k.runs) || !sameLook(now.look as Look, k.look)) history.current.clear();
   };
   /** Records an edit that took the text from `before` to what it is now. */
   const note = (before: Snapshot, kind: EditKind) => {
+    foreignGuard(before);
     const after = snapshot();
     remember(after);
     history.current.record(before, after, kind, Date.now());
@@ -249,11 +259,21 @@ export function TextEditor({ id }: { id: string }) {
     if (!ta) return;
     ta.value = s.characters;
     ta.setSelectionRange(s.selStart, s.selEnd);
-    dispatch({ op: "setText", id, characters: s.characters, runs: s.runs }, { quiet: true });
-    // A style applied to all the text lives in the layer's own properties.
+    // A style applied to all the text lives in the layer's own properties: restore only the keys
+    // that differ, with the runs in the same patch (the engine then keeps them as given and
+    // leaves other bindings alone).
     const look = s.look as Look | undefined;
-    if (look && !sameLook(look, readLook(id))) dispatch({ op: "update", ids: [id], patch: { text: look.text, fills: look.fills } }, { quiet: true });
-    remember(s);
+    const now = readLook(id);
+    const diff = look ? Object.fromEntries(Object.entries(look.text).filter(([k, v]) => v !== now.text[k])) : {};
+    const lookChanged = Object.keys(diff).length > 0 || (!!look && JSON.stringify(look.fills) !== JSON.stringify(now.fills));
+    if (!lookChanged || getDoc().nodes[id]?.text?.characters !== s.characters) dispatch({ op: "setText", id, characters: s.characters, runs: s.runs }, { quiet: true });
+    if (look && lookChanged) {
+      const patch: Record<string, unknown> = { text: { ...diff, runs: s.runs } };
+      if (JSON.stringify(look.fills) !== JSON.stringify(now.fills)) patch.fills = look.fills;
+      dispatch({ op: "update", ids: [id], patch }, { quiet: true });
+    }
+    // The engine normalises runs: what is remembered is what the document holds.
+    remember(snapshot());
     goalX.current = null;
     affRef.current = "after";
     trackSel(ta);
@@ -262,7 +282,9 @@ export function TextEditor({ id }: { id: string }) {
   const undoRedo = (redo: boolean) => {
     const ta = ref.current;
     if (!ta || composing.current) return;
-    const s = redo ? history.current.redo(snapshot()) : history.current.undo(snapshot());
+    const here = snapshot();
+    foreignGuard(here);
+    const s = redo ? history.current.redo(here) : history.current.undo(here);
     // At the start (or end) of the runs there is nothing to do; never the browser's own undo.
     if (s) showSnapshot(s);
   };
@@ -358,7 +380,7 @@ export function TextEditor({ id }: { id: string }) {
       // Someone else changed the text: the runs kept here no longer fit it.
       history.current.clear();
     } else if (!sameRuns(cur.runs, known.current.runs) || !sameLook(readLook(id), known.current.look)) {
-      if (localDispatchCount() === seenOps.current) history.current.clear();
+      if (foreignChangeCount() !== foreignSeen.current) history.current.clear();
       else {
         // A style change from the panel or a shortcut: a run of its own, undone like typing.
         const at = { selStart: ta.selectionStart, selEnd: ta.selectionEnd };
@@ -367,7 +389,7 @@ export function TextEditor({ id }: { id: string }) {
       }
     }
     known.current = { characters: c, runs: cur.runs.map((r) => ({ ...r })), look: readLook(id) };
-    seenOps.current = localDispatchCount();
+    foreignSeen.current = foreignChangeCount();
     if (ta.value === c) return;
     const old = ta.value;
     let pre = 0;
@@ -591,7 +613,8 @@ export function TextEditor({ id }: { id: string }) {
     }
     const len = Array.from(rich.text).length;
     const runs = [...cutRuns(cur.runs ?? [], at, at + len), ...pasted].sort((x, y) => x.start - y.start);
-    dispatch({ op: "update", ids: [id], patch: { text: { runs } } }, { quiet: true });
+    // Through setText so the engine normalises the runs (pasting bold next to bold merges them).
+    dispatch({ op: "setText", id, characters: ta.value, runs }, { quiet: true });
     // The pasted text and its styles are one run.
     note(before, "paste");
     trackSelection(ta);

@@ -166,6 +166,80 @@ try {
     await sleep(150);
   }
 
+  // ===== T-1 follow-ups: whole-text style undo keeps mixed styles and bindings; paste then undo =====
+  {
+    const id = await createText(page, "hello world", 100, 800);
+    await run(page, { op: "styleText", id, start: 6, end: 11, style: { fontWeight: 700, color: "#ff0000" }, clear: [] });
+    const runsBefore = JSON.stringify((await node(page, id)).text.runs);
+    await openEditor(page, 110, 808);
+    await page.keyboard.press("Control+a");
+    await page.keyboard.press("Control+i");
+    await sleep(150);
+    check("Ctrl+I over all the text sets italic", (await node(page, id)).text.italic === true);
+    await page.keyboard.press("Control+z");
+    await sleep(150);
+    const nb = await node(page, id);
+    check("Ctrl+Z restores the mixed styles (bold + red 'world') and the base", JSON.stringify(nb.text.runs) === runsBefore && nb.text.italic === false, JSON.stringify(nb.text.runs));
+    await page.keyboard.press("Control+Shift+z");
+    await sleep(150);
+    check("Ctrl+Shift+Z redoes the italic and the runs stay", (await node(page, id)).text.italic === true && (await node(page, id)).text.runs.some((r) => r.fontWeight === 700));
+    await page.keyboard.press("Escape");
+    await sleep(150);
+
+    await run(page, {
+      op: "setVariables",
+      collections: [{ id: "c_t", name: "Type", modes: [{ id: "m_b", name: "Base" }], variables: [{ id: "v_s", name: "Size", type: "number", values: { m_b: 40 } }] }],
+    });
+    const bound = await createText(page, "bound text", 250, 580);
+    await run(page, { op: "bindVariable", ids: [bound], property: "fontSize", variable: "v_s" });
+    await openEditor(page, 270, 600);
+    await page.keyboard.press("Control+a");
+    await page.keyboard.press("Control+i");
+    await sleep(150);
+    check("a bound text keeps its binding when all of it is made italic", (await node(page, bound)).bindings?.fontSize === "v_s" && (await node(page, bound)).text.italic === true, JSON.stringify((await node(page, bound)).bindings));
+    await page.keyboard.press("Control+z");
+    await sleep(150);
+    const bn = await node(page, bound);
+    check("a bound text keeps its binding through style and undo", bn.bindings?.fontSize === "v_s" && bn.text.fontSize === 40 && bn.text.italic === false, JSON.stringify([bn.bindings, bn.text.fontSize, bn.text.italic]));
+    await page.keyboard.press("Escape");
+    await sleep(150);
+
+    // Rich paste next to a bold run, typing, then undo past the paste (and redo).
+    const pid = await createText(page, "xxyy", 400, 800);
+    await run(page, { op: "styleText", id: pid, start: 0, end: 2, style: { fontWeight: 700 }, clear: [] });
+    const runs0 = JSON.stringify((await node(page, pid)).text.runs);
+    await openEditor(page, 410, 808);
+    await page.keyboard.press("Control+Home");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    await page.evaluate(() => {
+      const ta = document.querySelector("textarea.text-editor");
+      const dt = new DataTransfer();
+      dt.setData("text/plain", "PP");
+      dt.setData("application/x-designotron-text", JSON.stringify({ text: "PP", spans: [{ start: 0, end: 2, style: { fontWeight: 700 } }] }));
+      ta.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+    });
+    await sleep(200);
+    check("a rich paste next to bold text is one merged bold run", (await textOf(page, pid)) === "xxPPyy" && (await node(page, pid)).text.runs.length === 1, JSON.stringify((await node(page, pid)).text.runs));
+    await page.keyboard.type("z", { delay: 40 });
+    await page.keyboard.press("Control+z");
+    await sleep(120);
+    check("undo removes the typing and keeps the history", (await textOf(page, pid)) === "xxPPyy");
+    await page.keyboard.press("Control+z");
+    await sleep(120);
+    check("undo goes back past the paste", (await textOf(page, pid)) === "xxyy" && JSON.stringify((await node(page, pid)).text.runs) === runs0, `${await textOf(page, pid)} ${JSON.stringify((await node(page, pid)).text.runs)}`);
+    await page.keyboard.press("Control+Shift+z");
+    await sleep(120);
+    check("redo brings the paste back", (await textOf(page, pid)) === "xxPPyy", await textOf(page, pid));
+    await page.keyboard.press("Control+z");
+    await sleep(120);
+    await page.keyboard.press("Control+z");
+    await sleep(120);
+    check("undo again after redo still works", (await textOf(page, pid)) === "xxyy", await textOf(page, pid));
+    await page.keyboard.press("Escape");
+    await sleep(150);
+  }
+
   // ===== T-2: a missing font shows its real family =====
   {
     const id = await createText(page, "Hello", 100, 300, { text: { fontFamily: "Zephyr Grotesk" } });
@@ -210,29 +284,37 @@ try {
       g.font = '16px "Inter", sans-serif';
       return g.measureText("日").width;
     });
+    const domCtx = await browser.newContext({ viewport: { width: 600, height: 500 }, deviceScaleFactor: 1 });
+    await domCtx.route("**/*", (r) => (LOCAL.test(r.request().url()) ? r.continue() : r.abort()));
+    const domPage = await domCtx.newPage();
     const domStarts = async (html) => {
       fs.writeFileSync(path.join(exportDir, "index.html"), html);
-      const ctx = await browser.newContext({ viewport: { width: 600, height: 500 }, deviceScaleFactor: 1 });
-      await ctx.route("**/*", (r) => (LOCAL.test(r.request().url()) ? r.continue() : r.abort()));
-      const p = await ctx.newPage();
-      await p.goto(`http://127.0.0.1:${EXPORT_PORT}/index.html`);
-      await sleep(300);
-      const starts = await p.evaluate(() => {
-        const tn = document.querySelector("p").firstChild;
+      await domPage.goto(`http://127.0.0.1:${EXPORT_PORT}/index.html`);
+      await sleep(60);
+      return domPage.evaluate(() => {
+        const walker = document.createTreeWalker(document.querySelector("p"), NodeFilter.SHOW_TEXT);
         const out = [];
         let last = null;
-        for (let i = 0; i < tn.length; i++) {
-          const r = document.createRange();
-          r.setStart(tn, i);
-          r.setEnd(tn, i + 1);
-          const b = r.getClientRects()[0];
-          if (last === null || Math.abs(b.top - last) > 4) out.push(i);
-          last = b.top;
+        let idx = 0;
+        for (let tn = walker.nextNode(); tn; tn = walker.nextNode()) {
+          const str = tn.data;
+          for (let i = 0; i < str.length; ) {
+            const cp = str.codePointAt(i);
+            const len = cp > 0xffff ? 2 : 1;
+            const r = document.createRange();
+            r.setStart(tn, i);
+            r.setEnd(tn, i + len);
+            const b = r.getClientRects()[0];
+            if (b) {
+              if (last === null || Math.abs(b.top - last) > 4) out.push(idx);
+              last = b.top;
+            }
+            i += len;
+            idx++;
+          }
         }
         return out;
       });
-      await ctx.close();
-      return starts;
     };
     let widthsChecked = 0;
     let allClean = true;
@@ -269,6 +351,43 @@ try {
     check(`no line starts with a closing mark or ends with an opening one (${widthsChecked} widths, Japanese and Chinese)`, allClean, where.join(" | "));
     check("exported HTML breaks at the same characters as the engine's lines", allSame, where.join(" | "));
     check("exported SVG tspans equal the engine's lines (PNG rasterises that SVG)", svgSame);
+    // Classes the first samples don't reach: percent after an ideograph, ellipsis leaders, IVS,
+    // voiced marks, runs of ー, Hangul Jamo, variation selectors, halfwidth kana, digits.
+    const EXTRA = {
+      pct: "前年比百二十%増加前年比百二十％増加前年比百二十%増加",
+      leader: "続きは……次回へ‥続きは……次回へ‥続きは……次回へ",
+      ivs: "葛\u{E0100}飾区葛\u{E0100}飾区葛\u{E0100}飾区葛\u{E0100}飾区",
+      dakuten: "か\u3099か\u3099か\u3099か\u3099か\u3099か\u3099か\u3099か\u3099",
+      choon: "あーーーーーーーーーーい",
+      jamo: "\u1100\u1161\u11A8\u1100\u1161\u11A8\u1100\u1161\u11A8\u1100\u1161\u11A8\u1100\u1161\u11A8",
+      vs16: "日本㊗\uFE0F日本㊗\uFE0F日本㊗\uFE0F日本㊗\uFE0F日本㊗\uFE0F",
+      half: "日本語ｱｲｳｧｨ｡日本語｢ﾃｽﾄ｣､日本語ﾊﾞﾊﾟ日本語",
+      spaceclose: "漢字 」漢字 。漢字 」漢字 。漢字 」漢字 。",
+    };
+    let extraDiff = 0;
+    let extraTotal = 0;
+    const extraWhere = [];
+    for (const [lang, text] of Object.entries(EXTRA)) {
+      for (let w = 20; w <= 200; w += 9) {
+        const name = `${lang}_${w}`;
+        await tool(page, "create_nodes", { nodes: [{ type: "frame", name: `F${name}`, x: 600, y: 400, width: 400, height: 400, fill: "#ffffff", children: [{ type: "text", name, x: 10, y: 10, width: w, text, fontFamily: "Inter", fontSize: 16, lineHeight: 24 }] }] });
+        const t = await byName(page, name);
+        const f = await byName(page, `F${name}`);
+        const lay = await query(page, { q: "textLayout", id: t.id });
+        const starts = lay.lines.map((l) => l.start);
+        const dom = await domStarts(await query(page, { q: "exportHtml", id: f.id }));
+        extraTotal++;
+        // A box narrower than one character is the browser's own overflow-wrap business.
+        if (JSON.stringify(starts) !== JSON.stringify(dom) && w >= charW + 1) {
+          extraDiff++;
+          const cs = chars(text);
+          const show = (st) => st.map((x, i) => cs.slice(x, st[i + 1] ?? cs.length).join("")).join("|");
+          extraWhere.push(`${name}: engine ${show(starts)} dom ${show(dom)}`);
+        }
+      }
+    }
+    check(`engine lines equal Chrome's line-break: strict for ${extraTotal} more samples (percent, leaders, IVS, voiced marks, ー, Jamo, VS16, halfwidth, spaces)`, extraDiff === 0, `${extraDiff} differ; ` + extraWhere.slice(0, 4).join(" || "));
+    await domCtx.close();
     // The 12-wide sample from the report: no line starts with 。 、 or 」.
     const t12 = await byName(page, "ja12");
     const lay12 = await query(page, { q: "textLayout", id: t12.id });

@@ -19,7 +19,7 @@ import { DemoOverlay, playDemo, stopDemo } from "./Demo";
 import { importFigmaJson } from "./figma";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
-import { bootEngine, getDoc, getEngine, markSaved, newEngine, lastKnownDoc, noteEngineError, onDocChange, saveHook, toast as showToast, useStore, zoomToFit, dispatch } from "./store";
+import { bootEngine, getDoc, getEngine, markSaved, newEngine, lastKnownDoc, noteEngineError, noteForeignChange, onDocChange, saveHook, toast as showToast, useStore, zoomToFit, dispatch } from "./store";
 import { focusCanvas, ToastLive } from "./ui/controls";
 import { closePanel } from "./panels/PanelChrome";
 import {
@@ -953,6 +953,7 @@ function EditorInner({ fileId, onHome }: { fileId: string; onHome: () => void })
         const { page, selection } = useStore.getState().es;
         try {
           engine.load(json);
+          noteForeignChange();
           if (recovered === null && canSaveDelta(fileId)) engine.persistAdopt();
         } catch (err) {
           console.error(err);

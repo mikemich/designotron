@@ -48,7 +48,8 @@ export function resetFontStatus() {
 
 /** The status of `family`; `bundled` lists the families the editor itself offers. */
 export function fontStatus(family: string, bundled: readonly string[], measure: Measure = canvasMeasure): FontStatus {
-  if (bundled.includes(family) || GENERIC.has(family.trim().toLowerCase())) return "bundled";
+  const lower = family.trim().toLowerCase();
+  if (bundled.some((b) => b.toLowerCase() === lower) || GENERIC.has(lower)) return "bundled";
   const key = measure === canvasMeasure ? family : "";
   const known = key ? memo.get(key) : undefined;
   if (known) return known;

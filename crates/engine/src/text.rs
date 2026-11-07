@@ -232,17 +232,21 @@ pub fn layout_limited(props: &TextProps, max_width: Option<f64>, limit: Option<u
                 start: piece.start + char_i,
               };
               let w = measure(&p);
-              if !cur.is_empty() && cur_w + w > mw && c != ' ' {
+              if !cur.is_empty() && cur_w + w > mw && c != ' ' && !(cjk && is_attached(c)) {
                 // Kinsoku: a line never starts with a closing mark or ends with an opening one;
                 // the previous characters move down with it (oidashi), unless that empties the line.
-                let carry = if cjk { take_carry(&mut cur, c) } else { Some(Vec::new()) };
-                if let Some(carry) = carry {
-                  lines.push(make_line(std::mem::take(&mut cur), para_start, &styles, m, lh_of, base_lh));
-                  cur_w = 0.0;
-                  for q in carry {
-                    cur_w += measure(&q);
-                    push_piece(&mut cur, q);
-                  }
+                // When even the whole line would move, nothing is carried: the line breaks here and the
+                // next starts with the character (as the browser does).
+                let carry = if cjk {
+                  take_carry(&mut cur, c).unwrap_or_default()
+                } else {
+                  Vec::new()
+                };
+                lines.push(make_line(std::mem::take(&mut cur), para_start, &styles, m, lh_of, base_lh));
+                cur_w = 0.0;
+                for q in carry {
+                  cur_w += measure(&q);
+                  push_piece(&mut cur, q);
                 }
               }
               cur_w += w;
@@ -392,94 +396,60 @@ pub fn has_ideographic(s: &str) -> bool {
   s.chars().any(is_ideographic)
 }
 
+/// Marks that attach to the character before them: combining marks, variation selectors, the
+/// voiced sound marks, Hangul vowel and final Jamo and the halfwidth sound marks. A line never
+/// starts with one.
+fn is_attached(c: char) -> bool {
+  matches!(c as u32,
+    0x0300..=0x036F | 0x0483..=0x0489 | 0x0591..=0x05BD | 0x064B..=0x065F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF
+    | 0x1160..=0x11FF | 0x200D | 0x20D0..=0x20FF | 0x3099..=0x309A | 0xFE00..=0xFE0F | 0xFE20..=0xFE2F
+    | 0xFF9E..=0xFF9F | 0xE0100..=0xE01EF)
+}
+
 /// May not start a line.
 fn no_line_start(c: char) -> bool {
-  matches!(
-    c,
-    '）'
-      | '〕'
-      | '］'
-      | '｝'
-      | '〉'
-      | '》'
-      | '」'
-      | '』'
-      | '】'
-      | '〙'
-      | '〗'
-      | '〟'
-      | '’'
-      | '”'
-      | '｠'
-      | '»'
-      | ')'
-      | ']'
-      | '}'
-      | '、'
-      | '。'
-      | '，'
-      | '．'
-      | '：'
-      | '；'
-      | '？'
-      | '！'
-      | '‼'
-      | '⁇'
-      | '⁈'
-      | '⁉'
-      | '・'
-      | '゠'
-      | '–'
-      | '‐'
-      | '〜'
-      | '～'
-      | ','
-      | '.'
-      | ':'
-      | ';'
-      | '?'
-      | '!'
-      | 'ー'
-      | '々'
-      | '〻'
-      | 'ゝ'
-      | 'ゞ'
-      | 'ヽ'
-      | 'ヾ'
-      | 'ぁ'
-      | 'ぃ'
-      | 'ぅ'
-      | 'ぇ'
-      | 'ぉ'
-      | 'っ'
-      | 'ゃ'
-      | 'ゅ'
-      | 'ょ'
-      | 'ゎ'
-      | 'ゕ'
-      | 'ゖ'
-      | 'ァ'
-      | 'ィ'
-      | 'ゥ'
-      | 'ェ'
-      | 'ォ'
-      | 'ッ'
-      | 'ャ'
-      | 'ュ'
-      | 'ョ'
-      | 'ヮ'
-      | 'ヵ'
-      | 'ヶ'
-      | '\u{3000}'
-      | '\u{31F0}'..='\u{31FF}'
-  )
+  is_attached(c)
+    || matches!(
+      c,
+      '）' | '〕' | '］' | '｝' | '〉' | '》' | '」' | '』' | '】' | '〙' | '〗' | '〟' | '’' | '”' | '｠' | '»' | ')' | ']' | '}'
+      | '、' | '。' | '，' | '．' | '：' | '；' | '？' | '！' | '‼' | '⁇' | '⁈' | '⁉' | '・' | '゠' | '–' | '‐' | '〜' | '～'
+      | ',' | '.' | ':' | ';' | '?' | '!'
+      // Inseparable leaders, and a percent sign after an ideograph.
+      | '…' | '‥' | '․' | '%' | '％'
+      | 'ー' | '々' | '〻' | 'ゝ' | 'ゞ' | 'ヽ' | 'ヾ'
+      | 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'っ' | 'ゃ' | 'ゅ' | 'ょ' | 'ゎ' | 'ゕ' | 'ゖ'
+      | 'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ' | 'ッ' | 'ャ' | 'ュ' | 'ョ' | 'ヮ' | 'ヵ' | 'ヶ'
+      | '\u{3000}' | '\u{31F0}'..='\u{31FF}'
+      // Halfwidth: ｡ ｣ ､ ･ ｰ and the small kana ｧ-ｯ.
+      | '\u{FF61}' | '\u{FF63}' | '\u{FF64}' | '\u{FF65}' | '\u{FF67}'..='\u{FF70}'
+    )
 }
 
 /// May not end a line.
 fn no_line_end(c: char) -> bool {
   matches!(
     c,
-    '（' | '〔' | '［' | '｛' | '〈' | '《' | '「' | '『' | '【' | '〘' | '〖' | '〝' | '‘' | '“' | '｟' | '«' | '(' | '[' | '{'
+    '（'
+      | '〔'
+      | '［'
+      | '｛'
+      | '〈'
+      | '《'
+      | '「'
+      | '『'
+      | '【'
+      | '〘'
+      | '〖'
+      | '〝'
+      | '‘'
+      | '“'
+      | '｟'
+      | '«'
+      | '('
+      | '['
+      | '{'
+      | '\u{FF62}'
+      | '\u{200D}'
   )
 }
 
@@ -490,7 +460,7 @@ fn cjk_break_between(a: char, b: char) -> bool {
 
 /// Kinsoku for a break by character before `next`: the characters of `cur` that move down to the
 /// new line with it, so it doesn't start with a closing mark or the previous line end with an
-/// opening one. When even the whole line would move, nothing can break here: `None`.
+/// opening one. When even the whole line would move: `None`.
 fn take_carry(cur: &mut Vec<Piece>, next: char) -> Option<Vec<Piece>> {
   let all: Vec<(usize, char)> = cur
     .iter()
@@ -1348,7 +1318,7 @@ mod tests {
           let last = l.chars().last().unwrap();
           // A line can only break the rules when nothing else fits in the box (a word wider
           // than the box that has no allowed break).
-          let tiny = l.chars().count() == 1;
+          let tiny = l.chars().count() == 1 || width <= 2;
           assert!(!no_line_start(first) || tiny, "width {width}: {l:?} starts with {first}");
           assert!(!no_line_end(last) || tiny, "width {width}: {l:?} ends with {last}");
         }
@@ -1378,11 +1348,56 @@ mod tests {
 
   #[test]
   fn cjk_edge_cases_keep_their_characters() {
-    // A run of prolonged sound marks has no allowed break: it stays whole.
+    // A run of prolonged sound marks has nothing to carry: it breaks wherever the box is full, as
+    // the browser does.
     let run = "ー".repeat(10);
-    assert_eq!(cjk_lines(&run, 3.0), vec![run.clone()]);
-    // A box narrower than a character: one character per line, marks stay with theirs.
-    assert_eq!(cjk_lines("今日。", 0.5), vec!["今", "日。"]);
+    assert_eq!(cjk_lines(&run, 3.0), vec!["ーーー", "ーーー", "ーーー", "ー"]);
+    // A box narrower than a character: one character per line.
+    assert_eq!(cjk_lines("今日。", 0.5), vec!["今", "日", "。"]);
+    // Inseparable leaders, percent after an ideograph, halfwidth marks, combining marks.
+    assert_eq!(cjk_lines("前年比……増加", 5.0).concat(), "前年比……増加");
+    for (text, width) in [
+      ("前年比百二十%増加", 6.0),
+      ("前年比百二十％増加", 6.0),
+      ("前年比百二……", 6.0),
+      ("日本語ｱｲｳ｡日本語", 3.0),
+    ] {
+      for l in cjk_lines(text, width) {
+        let first = l.chars().next().unwrap();
+        assert!(!no_line_start(first) || l.chars().count() == 1, "{text}: {l:?}");
+      }
+    }
+    assert_eq!(cjk_lines("前年比百二十%増加", 6.0)[0], "前年比百二");
+    assert!(no_line_start('…') && no_line_start('‥') && no_line_start('%') && no_line_start('％'));
+    assert!(
+      no_line_start('｡')
+        && no_line_start('､')
+        && no_line_start('｣')
+        && no_line_start('･')
+        && no_line_start('ｰ')
+        && no_line_start('ｧ')
+        && no_line_start('ｯ')
+    );
+    assert!(no_line_end('｢') && no_line_end('\u{200D}'));
+    for c in [
+      '\u{0301}',
+      '\u{3099}',
+      '\u{309A}',
+      '\u{FE0F}',
+      '\u{E0100}',
+      '\u{200D}',
+      '\u{1161}',
+      '\u{11A8}',
+      '\u{FF9E}',
+      '\u{FF9F}',
+      '\u{20DD}',
+    ] {
+      assert!(no_line_start(c), "{:X}", c as u32);
+    }
+    // A voiced sound mark stays with its kana.
+    for l in cjk_lines("か\u{3099}か\u{3099}か\u{3099}か\u{3099}", 1.0) {
+      assert!(!l.starts_with('\u{3099}'), "{l:?}");
+    }
     // Latin words stay whole between CJK.
     let l = cjk_lines("私はRustが好き", 5.0);
     assert_eq!(l.concat(), "私はRustが好き");

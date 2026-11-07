@@ -134,7 +134,7 @@ fn spec_schema() -> Value {
       "maxLines": { "type": "number", "description": "Text: show at most this many lines, ending in an ellipsis when cut" },
       "truncate": { "type": "boolean", "description": "Text: cut what doesn't fit with an ellipsis" },
       "paragraphSpacing": { "type": "number", "description": "Text: extra space between paragraphs (lines split by newline)" },
-      "text": { "type": "string", "description": "Text content (type text)" },
+      "text": { "type": "string", "description": "Text content (type text). A newline starts a paragraph; U+2028 (\\u2028) is a soft line break: a new line without paragraph spacing (Shift+Enter in the editor)" },
       "spans": { "type": "array", "description": "Mixed-style text instead of `text`: [{text, fontWeight, italic, color, fontSize, fontFamily, decoration, link}]", "items": { "type": "object" } },
       "fontSize": { "type": "number" },
       "fontWeight": { "description": "100-900, or thin, light, regular, medium, semibold, bold, extrabold, black", "type": ["number", "string"] },
@@ -2609,10 +2609,28 @@ pub fn summary(e: &Engine, depth: usize) -> Value {
 
 /// "Inter 600 24/32" for a text style.
 fn text_style_label(t: &TextStyle) -> String {
-  match t.line_height {
+  let mut label = match t.line_height {
     Some(l) => format!("{} {} {}/{}", t.font_family, t.font_weight, round(t.font_size), round(l)),
     None => format!("{} {} {}", t.font_family, t.font_weight, round(t.font_size)),
+  };
+  if t.italic == Some(true) {
+    label.push_str(" italic");
   }
+  match t.case {
+    Some(TextCase::Upper) => label.push_str(" uppercase"),
+    Some(TextCase::Lower) => label.push_str(" lowercase"),
+    Some(TextCase::Title) => label.push_str(" title case"),
+    _ => {}
+  }
+  match t.decoration {
+    Some(TextDecoration::Underline) => label.push_str(" underline"),
+    Some(TextDecoration::Strikethrough) => label.push_str(" strikethrough"),
+    _ => {}
+  }
+  if let Some(p) = t.paragraph_spacing.filter(|p| *p > 0.0) {
+    label.push_str(&format!(" paragraph {}", round(p)));
+  }
+  label
 }
 
 /// The layers an outline lists: breadth first from the roots down to `depth`, until the cap.
@@ -3274,6 +3292,17 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
               cx.warn(format!("{prop} ignored: bind.{prop} sets it"));
             }
             n.bindings.insert(prop.clone(), name.clone());
+            // A bound typography property lets go of the text style (values stay) unless the
+            // same spec links one.
+            let style_sets = n
+              .text_style
+              .as_ref()
+              .and_then(|id| doc.styles.texts.iter().find(|t| &t.id == id))
+              .is_none_or(|t| t.sets(prop));
+            if crate::engine::TEXT_STYLE_PROPS.contains(&prop.as_str()) && style_sets && !s.get("textStyle").is_some_and(|v| v.is_string())
+            {
+              n.text_style = None;
+            }
           }
           other => {
             return Err(cx.err(
@@ -3721,6 +3750,14 @@ fn apply_text(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creating: b
       let t = n.text.get_or_insert_with(Default::default);
       st.apply_to(t);
       n.text_style = Some(st.id.clone());
+      // One source per property: the style replaces typography bindings the layer had, unless
+      // this same spec binds them (update_nodes then unbinds the others through BindVariable).
+      let binds = |p: &str| s.get("bind").and_then(|b| b.get(p)).is_some_and(|v| !v.is_null());
+      for p in crate::engine::TEXT_STYLE_PROPS {
+        if st.sets(p) && !binds(p) {
+          n.bindings.remove(p);
+        }
+      }
     }
     Some(other) => {
       return Err(cx.err(

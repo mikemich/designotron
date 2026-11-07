@@ -764,7 +764,13 @@ impl<'a> Ctx<'a> {
     }
     el.show_if = bound.visible.clone();
     if let Some(p) = bound.characters.clone() {
-      el.text_prop = Some(p);
+      // A soft line break in the layer's text is a <br /> in the prop's value too.
+      let soft = n.text.as_ref().is_some_and(|t| t.characters.contains(crate::text::SOFT_BREAK));
+      el.text_prop = Some(if soft {
+        format!("String({p}).split(\"\\u2028\").flatMap((s, i) => (i ? [<br key={{i}} />, s] : [s]))")
+      } else {
+        p
+      });
       el.spans.clear();
     }
     if n.kind == NodeType::Group {
@@ -3456,8 +3462,9 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
     let inner: String = el
       .spans
       .iter()
-      .map(|sp| {
-        let txt = jsx_text(&sp.text);
+      .enumerate()
+      .map(|(si, sp)| {
+        let txt = jsx_text(&sp.text, si + 1 == el.spans.len());
         let classes: Vec<String> = sp.styles.iter().map(|(k, v)| tw_class(k, v)).collect();
         match (&sp.link, classes.is_empty()) {
           (Some(href), _) => format!(
@@ -3479,7 +3486,7 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
   if let Some(t) = &el.text {
     out.push_str(&format!(
       "{pad}<{tag} className={class_attr}{handler}>{}</{tag}>\n",
-      jsx_text(t),
+      jsx_text(t, true),
       tag = el.tag
     ));
     return;
@@ -3495,17 +3502,29 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
   out.push_str(&format!("{pad}</{}>\n", el.tag));
 }
 
-/// Escaped text with a soft line break (U+2028) written as `<br>`.
-fn esc_text(s: &str) -> String {
-  esc(s).replace('\u{2028}', "<br>")
+/// Escaped text with a soft line break (U+2028) written as `<br>`. A break that ends the text
+/// (`last`) gets a second one: a lone trailing `<br>` shows no empty line, the canvas does.
+fn esc_text(s: &str, last: bool) -> String {
+  let out = esc(s).replace('\u{2028}', "<br>");
+  if last && s.ends_with('\u{2028}') {
+    out + "<br>"
+  } else {
+    out
+  }
 }
 
-/// A JSX text child: a string expression, with `<br />` for every soft line break.
-fn jsx_text(s: &str) -> String {
-  s.split('\u{2028}')
+/// A JSX text child: a string expression, with `<br />` for every soft line break (and an extra
+/// one for a break that ends the text, as in `esc_text`).
+fn jsx_text(s: &str, last: bool) -> String {
+  let mut out = s
+    .split('\u{2028}')
     .map(|p| format!("{{{}}}", serde_json::to_string(p).unwrap_or_default()))
     .collect::<Vec<_>>()
-    .join("<br />")
+    .join("<br />");
+  if last && s.ends_with('\u{2028}') {
+    out.push_str("<br />");
+  }
+  out
 }
 
 fn html(el: &El, depth: usize, out: &mut String) {
@@ -3546,17 +3565,19 @@ fn html(el: &El, depth: usize, out: &mut String) {
     let inner: String = el
       .spans
       .iter()
-      .map(|sp| {
+      .enumerate()
+      .map(|(si, sp)| {
+        let last = si + 1 == el.spans.len();
         let st: String = sp.styles.iter().map(|(k, v)| format!("{k}: {v}; ")).collect();
         let st = esc(st.trim_end());
         match (&sp.link, st.is_empty()) {
           (Some(href), _) => format!(
             "<a href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"{st}\">{}</a>",
             esc(href),
-            esc_text(&sp.text)
+            esc_text(&sp.text, last)
           ),
-          (None, true) => esc_text(&sp.text),
-          (None, false) => format!("<span style=\"{st}\">{}</span>", esc_text(&sp.text)),
+          (None, true) => esc_text(&sp.text, last),
+          (None, false) => format!("<span style=\"{st}\">{}</span>", esc_text(&sp.text, last)),
         }
       })
       .collect();
@@ -3564,7 +3585,7 @@ fn html(el: &El, depth: usize, out: &mut String) {
   } else if let Some(t) = &el.text {
     out.push_str(&format!(
       "{pad}<{tag} style=\"{style}\"{link}>{}</{tag}>\n",
-      esc_text(t),
+      esc_text(t, true),
       tag = el.tag
     ));
   } else {
@@ -6193,6 +6214,26 @@ mod r10_tests {
       }];
     });
     assert!(export_html(&doc, "s", &HeuristicMeasurer).contains("a<br>"));
+  }
+
+  #[test]
+  fn a_trailing_soft_break_shows_an_empty_line_like_the_canvas() {
+    let doc = text_screen("one\u{2028}", |_| {});
+    let h = export_html(&doc, "s", &HeuristicMeasurer);
+    assert!(h.contains("one<br><br>"), "{h}");
+    let r = export_react(&doc, "s", &HeuristicMeasurer);
+    assert!(r.contains("<br /><br />") || r.contains("{\"one\"}<br />{\"\"}<br />"), "{r}");
+    // Not at the end of a span that is followed by more text.
+    let doc = text_screen("a\u{2028}b", |t| {
+      t.runs = vec![crate::model::TextRun {
+        start: 0,
+        end: 2,
+        font_weight: Some(700),
+        ..Default::default()
+      }];
+    });
+    let h = export_html(&doc, "s", &HeuristicMeasurer);
+    assert!(h.contains("a<br></span>") && !h.contains("<br><br>"), "{h}");
   }
 
   #[test]

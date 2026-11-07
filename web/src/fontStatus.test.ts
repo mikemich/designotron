@@ -49,6 +49,14 @@ describe("fontStatus", () => {
     expect(fontStatus("sans-serif", BUNDLED, boom)).toBe("bundled");
   });
 
+  it("matches bundled families without regard to case", () => {
+    const boom: Measure = () => {
+      throw new Error("probed");
+    };
+    expect(fontStatus("inter", BUNDLED, boom)).toBe("bundled");
+    expect(fontStatus(" ROBOTO ", BUNDLED, boom)).toBe("bundled");
+  });
+
   it("calls a family the browser draws differently local, and one it can't draw missing", () => {
     resetFontStatus();
     const m = canvas({ Georgia: 9, "Helvetica Neue": 11 });

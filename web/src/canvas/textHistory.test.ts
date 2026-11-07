@@ -115,6 +115,15 @@ describe("TextHistory", () => {
     expect(s.text).toBe("four");
   });
 
+  it("does not record an edit that changed nothing", () => {
+    const h = new TextHistory();
+    const a: Snapshot = { characters: "ab", runs: [{ start: 0, end: 2, fontWeight: 700 }], look: { x: 1 }, selStart: 0, selEnd: 2 };
+    h.record(a, { ...a, runs: a.runs.map((r) => ({ ...r })) }, "style", 10);
+    expect(h.size).toBe(0);
+    h.record(a, { ...a, look: { x: 2 } }, "style", 20);
+    expect(h.size).toBe(1);
+  });
+
   it("keeps a stretch of deleting together and splits typing from deleting", () => {
     const s = new Sim();
     s.type("abcdef");

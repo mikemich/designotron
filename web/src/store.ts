@@ -515,17 +515,18 @@ export function noteEngineError(err: unknown): boolean {
   return trapped;
 }
 
-/** Counts commands this editor itself dispatched (not changes that arrive from collaborators):
- * the text editor tells its own style changes from a peer's. */
-let localDispatches = 0;
-export const localDispatchCount = () => localDispatches;
+/** Counts changes that arrive from outside this editor (a collaborator's delta, a document load):
+ * the text editor drops its undo runs when one of them changed the text it is editing. */
+let foreignChanges = 0;
+export const foreignChangeCount = () => foreignChanges;
+export const noteForeignChange = () => void foreignChanges++;
 
 export function dispatch<T = any>(cmd: Record<string, unknown>, opts: { quiet?: boolean } = {}): T | null {
   if (useStore.getState().tabView && TAB_VIEW_REFUSED.has(cmd.op as string)) return null;
   if (useStore.getState().engineFailed) return null;
   try {
     const r = JSON.parse(getEngine().dispatch(JSON.stringify(cmd)));
-    if (cmd.op !== "applyRemote") localDispatches++;
+    if (cmd.op === "applyRemote" || cmd.op === "replaceDocument") foreignChanges++;
     sync();
     if ((cmd.op === "undo" || cmd.op === "redo") && useStore.getState().vectorPoints.length) useStore.setState({ vectorPoints: [] });
     return r;

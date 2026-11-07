@@ -667,6 +667,61 @@ mod tokens {
   }
 
   #[test]
+  fn a_text_style_and_a_bound_typography_property_replace_each_other_in_the_tools() {
+    let mut e = engine();
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Type", "variables": [{ "name": "Size", "type": "number", "value": 40 }, { "name": "Gap", "type": "number", "value": 9 }] }),
+    );
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "texts": [{ "name": "Body", "fontSize": 18 }, { "name": "Spaced", "fontSize": 18, "paragraphSpacing": 6 }] }),
+    );
+    let t = one(&mut e, json!({ "type": "text", "text": "Hi", "bind": { "fontSize": "Size" } }));
+    assert_eq!(e.doc.get(&t).unwrap().text.as_ref().unwrap().font_size, 40.0);
+    // Linking a style drops the binding (update_nodes unbinds through BindVariable).
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": t, "textStyle": "Body" }] }));
+    let n = e.doc.get(&t).unwrap();
+    assert!(n.bindings.is_empty(), "{:?}", n.bindings);
+    assert_eq!((n.text.as_ref().unwrap().font_size, n.text_style.is_some()), (18.0, true));
+    // Binding a typography property lets go of the style, keeping the values.
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": t, "bind": { "fontSize": "Size" } }] }),
+    );
+    let n = e.doc.get(&t).unwrap();
+    assert!(n.text_style.is_none());
+    assert_eq!(
+      (n.bindings.contains_key("fontSize"), n.text.as_ref().unwrap().font_size),
+      (true, 40.0)
+    );
+    // Both in one spec: the style is linked and the property this spec binds stays bound.
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": t, "textStyle": "Body", "bind": { "fontSize": "Size" } }] }),
+    );
+    let n = e.doc.get(&t).unwrap();
+    assert!(n.text_style.is_some() && n.bindings.contains_key("fontSize"));
+    // A style that doesn't set paragraph spacing leaves its binding alone, one that does drops it.
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": t, "bind": { "paragraphSpacing": "Gap" } }] }),
+    );
+    assert!(e.doc.get(&t).unwrap().text_style.is_some(), "Body doesn't set paragraph spacing");
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": t, "textStyle": "Body" }] }));
+    assert!(e.doc.get(&t).unwrap().bindings.contains_key("paragraphSpacing"));
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": t, "textStyle": "Spaced" }] }));
+    assert!(!e.doc.get(&t).unwrap().bindings.contains_key("paragraphSpacing"));
+    // An instance records the unbinding as an override instead of just dropping it (covered by
+    // the instance test in components.rs: the tool goes through the same BindVariable command).
+  }
+
+  #[test]
   fn get_document_lists_text_styles() {
     let mut e = engine();
     run(

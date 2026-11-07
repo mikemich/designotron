@@ -25,7 +25,7 @@ use crate::{ai, arrange, codegen, patch, svg_import, vector_edit};
 
 const MAX_HISTORY: usize = 300;
 /// Typography properties both a text style and a variable can set: one source wins.
-const TEXT_STYLE_PROPS: [&str; 6] = [
+pub(crate) const TEXT_STYLE_PROPS: [&str; 6] = [
   "fontSize",
   "fontFamily",
   "fontWeight",
@@ -2142,7 +2142,14 @@ impl Engine {
           // One source per property: binding a typography property lets go of the text style
           // (the values stay).
           if var_id.is_some() && TEXT_STYLE_PROPS.contains(&property.as_str()) {
-            if let Some(n) = self.doc.get_mut(id).filter(|n| n.text_style.is_some()) {
+            let sets = |n: &Node, styles: &[TextStyle]| {
+              n.text_style
+                .as_ref()
+                .and_then(|sid| styles.iter().find(|s| &s.id == sid))
+                .is_some_and(|s| s.sets(&property))
+            };
+            let styles = self.doc.styles.texts.clone();
+            if let Some(n) = self.doc.get_mut(id).filter(|n| sets(n, &styles)) {
               n.text_style = None;
               components::record_override(&mut self.doc, id, &json!({ "textStyle": null }));
             }
@@ -2513,6 +2520,7 @@ impl Engine {
         let p = json!({ "text": { "characters": characters, "runs": runs } });
         let n = self.doc.get_mut(&id).ok_or("no such node")?;
         patch::apply(n, &p)?;
+        drop_unsafe_links(n);
         // The name follows the text until the user renames the layer.
         let auto_name = |s: &str| -> String { s.trim_start().chars().take(40).collect() };
         let old_name: String = old.chars().take(40).collect();
@@ -3351,7 +3359,7 @@ impl Engine {
             let unbound: Vec<&str> = TEXT_STYLE_PROPS
               .iter()
               .copied()
-              .filter(|p| n.bindings.remove(*p).is_some())
+              .filter(|p| t.sets(p) && n.bindings.remove(*p).is_some())
               .collect();
             n.text_style = Some(style_id.clone());
             let tp = n.text.as_ref().unwrap();
@@ -6427,6 +6435,27 @@ mod tests {
     let back = text_of(&e, &t);
     assert_eq!(back.characters, "Hello world");
     assert_eq!(back.runs, styled);
+  }
+
+  #[test]
+  fn set_text_with_runs_drops_unsafe_links() {
+    let mut e = engine();
+    let t = text_layer(&mut e, "Click");
+    e.dispatch(Command::SetText {
+      id: t.clone(),
+      characters: "Click".into(),
+      runs: Some(vec![crate::model::TextRun {
+        start: 0,
+        end: 5,
+        link: Some("javascript:alert(1)".into()),
+        font_weight: Some(700),
+        ..Default::default()
+      }]),
+    })
+    .unwrap();
+    let runs = text_of(&e, &t).runs;
+    assert!(runs.iter().all(|r| r.link.is_none()), "{runs:?}");
+    assert_eq!(runs[0].font_weight, Some(700));
   }
 
   #[test]
