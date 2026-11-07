@@ -141,7 +141,7 @@ macro_rules! adopt {
 
 /// True when `new` differs from `old` only in fields `layout::layout_node` never reads: paints,
 /// effects, opacity, blend mode, the name, variable bindings and pins, style links, prototype
-/// interactions, export rows, notes, layout grids, the lock, the colour and link of text runs, and the
+/// interactions, export rows, notes, layout grids, the lock, and the
 /// instance record (an instance's overrides reach its layers through the sync, which changes those
 /// layers themselves). (`stroke_weight` and `visible` are left out on purpose.)
 pub fn layout_neutral(old: &Node, new: &Node) -> bool {
@@ -180,13 +180,8 @@ pub fn layout_neutral(old: &Node, new: &Node) -> bool {
     locked,
     instance
   );
-  if let (Some(at), Some(nt)) = (a.text.as_mut(), new.text.as_ref()) {
-    if at.runs.len() == nt.runs.len() {
-      for (r, q) in at.runs.iter_mut().zip(&nt.runs) {
-        adopt!(r, q, color, link);
-      }
-    }
-  }
+  // (Not the colour or link of a text run: a run splits the measured pieces, and a real font's
+  // widths aren't additive, so the same words can measure differently.)
   a == *new
 }
 
@@ -733,6 +728,15 @@ mod tests {
     }
   }
 
+  /// A measurer that kerns "AV" like a real font does (the browser's `measureText` isn't additive).
+  struct Kern;
+  impl crate::text::TextMeasurer for Kern {
+    fn measure(&self, text: &str, font: &crate::text::FontSpec) -> f64 {
+      let n = text.chars().count() as f64;
+      n * font.size * 0.6 - text.matches("AV").count() as f64 * font.size * 0.2 + n * font.letter_spacing
+    }
+  }
+
   /// A laid-out screen with every kind of layer the neutral lists talk about.
   fn neutral_doc() -> Document {
     use crate::model::{AutoLayout, Sizing, TextProps, TextRun};
@@ -753,10 +757,11 @@ mod tests {
     doc.insert(screen, None, &page, None);
     let mut text = mk("text", NodeType::Text, 100.0, 20.0);
     text.text = Some(TextProps {
-      characters: "Hello neutral world".into(),
+      characters: "AVAVAVAV neutral world".into(),
+      auto_resize: crate::model::TextAutoResize::Width,
       runs: vec![TextRun {
-        start: 0,
-        end: 5,
+        start: 1,
+        end: 2,
         color: Some("#FF0000".into()),
         ..Default::default()
       }],
@@ -774,8 +779,21 @@ mod tests {
       ..Default::default()
     });
     doc.insert(label, Some("inner"), &page, None);
-    crate::layout::relayout_all(&mut doc, &crate::text::HeuristicMeasurer);
+    crate::layout::relayout_all(&mut doc, &Kern);
     doc
+  }
+
+  /// A run's colour splits the measured pieces, and a kerning font measures the pair differently:
+  /// dropping it merges them and moves the layout, so it is not a neutral change.
+  #[test]
+  fn a_run_colour_can_change_the_width_of_a_text() {
+    let base = neutral_doc();
+    let mut after = base.clone();
+    after.get_mut("text").unwrap().text.as_mut().unwrap().runs[0].color = None;
+    let mut laid = after.clone();
+    crate::layout::layout_node(&mut laid, "screen", &Kern);
+    assert!(laid != after, "the run colour moved the layout");
+    assert!(!layout_neutral(base.get("text").unwrap(), after.get("text").unwrap()));
   }
 
   /// Each field the neutral helpers list, changed on its own: the helper says neutral, and layout
@@ -785,7 +803,7 @@ mod tests {
   fn the_neutral_lists_name_only_fields_layout_and_render_never_read() {
     use crate::model::{BlendMode, Effect, ExportSetting, Interaction, LayoutGrid};
     let base = neutral_doc();
-    let m = crate::text::HeuristicMeasurer;
+    let m = Kern;
     type Change = Box<dyn Fn(&mut Node)>;
     let changes: Vec<(&str, bool, Change)> = vec![
       // (name, also render-neutral, change)
@@ -832,24 +850,6 @@ mod tests {
       ),
       ("layout_grids", false, Box::new(|n| n.layout_grids = vec![LayoutGrid::default()])),
       ("locked", false, Box::new(|n| n.locked = true)),
-      (
-        "run color",
-        false,
-        Box::new(|n| {
-          if let Some(r) = n.text.as_mut().and_then(|t| t.runs.first_mut()) {
-            r.color = Some("#0000FF".into());
-          }
-        }),
-      ),
-      (
-        "run link",
-        false,
-        Box::new(|n| {
-          if let Some(r) = n.text.as_mut().and_then(|t| t.runs.first_mut()) {
-            r.link = Some("https://example.com".into());
-          }
-        }),
-      ),
     ];
     for (name, render_too, change) in &changes {
       for id in ["screen", "text", "rect", "inner", "label"] {
@@ -909,6 +909,22 @@ mod tests {
         Box::new(|n| {
           if let Some(t) = n.text.as_mut() {
             t.characters.push('!')
+          }
+        }),
+      ),
+      (
+        "run color",
+        Box::new(|n| {
+          if let Some(r) = n.text.as_mut().and_then(|t| t.runs.first_mut()) {
+            r.color = Some("#0000FF".into());
+          }
+        }),
+      ),
+      (
+        "run link",
+        Box::new(|n| {
+          if let Some(r) = n.text.as_mut().and_then(|t| t.runs.first_mut()) {
+            r.link = Some("https://example.com".into());
           }
         }),
       ),

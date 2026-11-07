@@ -534,7 +534,7 @@ impl Run {
 
   fn step(&mut self) {
     self.steps += 1;
-    let k = self.r.below(100);
+    let k = self.r.below(130);
     match k {
       0..=9 => {
         if let Some(id) = self.pick(|n| n.text.is_some() && n.instance.is_none()) {
@@ -787,6 +787,7 @@ impl Run {
         let ids = self.pick_up_to(6, |n| n.parent.is_none());
         self.both(Command::Nudge { ids, dx: 10.0, dy: 5.0 });
       }
+      100.. => self.extra(k - 100),
       _ => {
         // A colour style made, applied to a few layers and sometimes deleted.
         if self.r.chance(50) {
@@ -803,6 +804,240 @@ impl Run {
           } else {
             self.both(Command::DeleteStyle { id });
           }
+        }
+      }
+    }
+  }
+
+  fn other_page(&mut self) -> Option<String> {
+    let pages: Vec<String> = self.a.doc.pages.iter().map(|p| p.id.clone()).collect();
+    if pages.len() < 2 {
+      return None;
+    }
+    Some(pages[self.r.below(pages.len())].clone())
+  }
+
+  fn extra(&mut self, k: usize) {
+    match k % 26 {
+      0..=2 => {
+        // Bindings and pins by name on layers inside instances (recorded as overrides), then a main edit.
+        let ids = self.pick_up_to(2, |n| n.master_id.is_some() || n.kind == NodeType::Instance);
+        let patch = match self.r.below(5) {
+          0 => json!({ "bindings": { "fill": (["Surface", "Theme/Text", "Muted", "Brand/Accent", "Later"][self.r.below(5)]) } }),
+          1 => json!({ "variableModes": { "Theme": (["Dark", "Light"][self.r.below(2)]) } }),
+          2 => json!({ "variableModes": { "c_brand": "b_b" } }),
+          3 => json!({ "bindings": { "opacity": "Fade", "cornerRadius": "Radius" } }),
+          _ => json!({ "variableModes": { "Brand": "B", "c_theme": null } }),
+        };
+        self.both(Command::Update { ids, patch });
+      }
+      3 => {
+        let inst = self.pick(|n| n.kind == NodeType::Instance);
+        let comp = self.pick(|n| n.kind == NodeType::Component);
+        if let (Some(id), Some(component_id)) = (inst, comp) {
+          self.both(Command::SwapComponent { id, component_id });
+        }
+      }
+      4 => {
+        let ids = self.pick_many(1, |n| n.kind == NodeType::Instance);
+        self.both(Command::DetachInstance { ids });
+      }
+      5 => {
+        let ids = self.pick_many(2, |n| n.master_id.is_some() || n.kind == NodeType::Instance);
+        if self.r.chance(50) {
+          self.both(Command::ResetInstance { ids });
+        } else {
+          self.both(Command::ResetOverrideGroups { ids, groups: vec![] });
+        }
+      }
+      6 => self.both(Command::AddPage { name: None }),
+      7 => {
+        // Only a page this run added and that holds little (a run that loses its screens tests nothing).
+        let small: Vec<String> = self
+          .a
+          .doc
+          .pages
+          .iter()
+          .skip(1)
+          .filter(|p| p.children.len() <= 3)
+          .map(|p| p.id.clone())
+          .collect();
+        if !small.is_empty() {
+          let id = small[self.r.below(small.len())].clone();
+          self.both(Command::DeletePage { id });
+        }
+      }
+      8 | 9 => {
+        let ids = self.pick_up_to(2, |n| n.parent.is_some() && n.master_id.is_none() && n.kind != NodeType::Component);
+        if let Some(page) = self.other_page() {
+          self.both(Command::MoveToPage { ids, page });
+          // and back to the first page now and then
+          if self.r.chance(50) {
+            let first = self.a.doc.pages[0].id.clone();
+            let ids = self.pick_up_to(2, |n| n.parent.is_none() && n.kind != NodeType::Component);
+            self.both(Command::MoveToPage { ids, page: first.clone() });
+            self.both(Command::SetPage { id: first });
+          }
+        }
+      }
+      10 => {
+        if self.r.chance(30) {
+          let id = self.a.page.clone();
+          self.both(Command::DuplicatePage { id });
+        } else if let Some(id) = self.other_page() {
+          self.both(Command::SetPage { id });
+        }
+      }
+      11 => {
+        // A whole document replaced by an edited copy (a version restore, an import).
+        let mut v: Value = serde_json::from_str(&self.a.to_json()).unwrap();
+        let color = self.r.hex();
+        if let Some(c) = v["variables"].get_mut(0).and_then(|c| c["variables"].get_mut(0)) {
+          c["values"]["m_light"] = json!(color);
+        }
+        if let Some(nodes) = v["nodes"].as_object_mut() {
+          let keys: Vec<String> = nodes.keys().cloned().collect();
+          if !keys.is_empty() {
+            let k = &keys[self.r.below(keys.len())];
+            nodes[k]["variableModes"] = json!({"c_theme": "m_dark"});
+          }
+        }
+        let keep_comments = self.r.chance(50);
+        self.both(Command::ReplaceDocument { doc: v, keep_comments });
+      }
+      12 | 13 => {
+        if let Some(id) = self.pick(|n| n.text.as_ref().is_some_and(|t| t.characters.chars().count() > 3) && n.instance.is_none()) {
+          let color = self.r.hex();
+          let style = if self.r.chance(70) {
+            json!({ "color": color })
+          } else {
+            json!({ "link": "https://example.com" })
+          };
+          self.both(Command::StyleText {
+            id,
+            start: 1,
+            end: 3,
+            style,
+            clear: vec![],
+          });
+        }
+      }
+      14 | 15 => {
+        let ids = self.pick_up_to(2, |n| n.parent.is_some());
+        let mut ups = Vec::new();
+        for id in ids {
+          ups.push(match self.r.below(3) {
+            0 => json!({ "id": id, "bind": { "fill": (["Muted", "Theme/Surface", "Primary"][self.r.below(3)]) } }),
+            1 => json!({ "id": id, "variableModes": { "Brand": (["A", "B"][self.r.below(2)]) } }),
+            _ => json!({ "id": id, "opacity": 0.4, "bind": { "cornerRadius": "Radius" } }),
+          });
+        }
+        self.both(Command::Ai {
+          tool: "update_nodes".into(),
+          input: json!({ "updates": ups }),
+        });
+      }
+      16 => self.both(Command::Relayout),
+      17 => {
+        // The file reopened (every engine loads the same text).
+        let json = self.a.to_json();
+        self.log.push("load".into());
+        self.a.load(&json).unwrap();
+        self.b.load(&json).unwrap();
+        let (o, l) = (self.ordered, self.ordered);
+        self.a.collab_reset(o, true, l || true);
+        self.b.collab_reset(o, true, l || true);
+        self.peer.load(&json).unwrap();
+        self.peer.collab_reset(o, true, true);
+      }
+      18 => {
+        let ids = self.pick_many(2, |n| n.kind == NodeType::Component);
+        self.both(Command::CombineVariants { ids });
+      }
+      19 => {
+        // A main component deleted (its instances keep their layers), sometimes restored.
+        if self.r.chance(50) {
+          let ids = self.pick_many(1, |n| n.kind == NodeType::Component);
+          self.both(Command::Delete { ids });
+        } else if let Some(id) = self.pick(|n| n.kind == NodeType::Instance) {
+          self.both(Command::RestoreComponent { id });
+        }
+      }
+      20 | 21 => {
+        // A variable bound inside an instance (an override), then deleted.
+        let ids = self.pick_many(2, |n| n.master_id.is_some());
+        let vars = self.variable_ids(VarKind::Color);
+        if vars.is_empty() {
+          return;
+        }
+        let v = vars[self.r.below(vars.len())].clone();
+        self.both(Command::BindVariable {
+          ids,
+          property: "fill".into(),
+          variable: Some(v.clone()),
+        });
+        if self.r.chance(50) {
+          let mut cols = variables::plain(&self.a.doc.variables);
+          for c in &mut cols {
+            c.variables.retain(|x| x.id != v);
+          }
+          self.both(Command::SetVariables { collections: cols });
+        }
+      }
+      22 => {
+        // A mode removed from a collection layers are pinned to.
+        let mut cols = variables::plain(&self.a.doc.variables);
+        if let Some(c) = cols.iter_mut().find(|c| c.modes.len() > 1) {
+          c.modes.pop();
+          self.both(Command::SetVariables { collections: cols });
+        }
+      }
+      23 => {
+        // A variable renamed while layers name it by name (in overrides too).
+        let mut cols = variables::plain(&self.a.doc.variables);
+        if let Some(v) = cols
+          .iter_mut()
+          .flat_map(|c| c.variables.iter_mut())
+          .find(|v| ["Surface", "Muted", "Text", "Accent", "Radius", "Fade"].contains(&v.name.as_str()))
+        {
+          Arc::make_mut(v).name.push('X');
+          self.both(Command::SetVariables { collections: cols });
+        }
+      }
+      24 => {
+        for _ in 0..1 + self.r.below(4) {
+          self.both(Command::Undo);
+        }
+      }
+      _ => {
+        let ids = self.pick_up_to(3, |n| n.parent.is_none());
+        self.both(Command::BeginGesture);
+        let (dx, dy) = (self.r.below(60) as f64 - 30.0, 7.0);
+        self.both(Command::Translate {
+          ids: ids.clone(),
+          dx,
+          dy,
+          snap: false,
+          zoom: 1.0,
+          axis: None,
+        });
+        self.remote();
+        self.remote();
+        if self.r.chance(50) {
+          self.both(Command::Undo);
+        }
+        self.both(Command::Translate {
+          ids,
+          dx: dx * 2.0,
+          dy,
+          snap: false,
+          zoom: 1.0,
+          axis: None,
+        });
+        if self.r.chance(50) {
+          self.both(Command::EndGesture);
+        } else {
+          self.both(Command::CancelGesture);
         }
       }
     }
@@ -1029,7 +1264,8 @@ fn incremental_passes_match_the_whole_file_passes_seed_4_on_a_loaded_file() {
 #[test]
 #[ignore]
 fn lockstep_many_seeds() {
-  for seed in 5..45 {
+  let from: u64 = std::env::var("LOCKSTEP_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+  for seed in from..from + 40 {
     run(seed, 400);
   }
 }
@@ -1091,27 +1327,116 @@ fn a_freshly_loaded_file_is_settled_by_the_first_change_only() {
 }
 
 #[test]
-fn deleting_a_bound_variable_runs_after_mutation_once() {
+fn deleting_a_bound_variable_leaves_nothing_dangling_and_costs_two_passes_at_most() {
   let mut e = build();
   let count = || AFTER_MUTATIONS.with(|c| c.get());
   let mut cols = variables::plain(&e.doc.variables);
   cols[0].variables.retain(|v| v.id != "v_text");
   let before = count();
   e.dispatch(Command::SetVariables { collections: cols.clone() }).unwrap();
-  assert_eq!(count() - before, 1, "one pass for the delete and its pruning");
+  // One pass for the delete, one for the instance overrides that named it.
+  assert!(count() - before <= 2, "{} passes", count() - before);
   assert!(!e.doc.nodes.values().any(|n| n.bindings.values().any(|v| v == "v_text")));
-  // The oracle prunes the same way.
   let mut r = build();
   r.reference = true;
-  let before = count();
   r.dispatch(Command::SetVariables { collections: cols }).unwrap();
-  assert!(count() - before >= 1);
   assert!(r.doc == e.doc);
   // Undo and redo are exact and run no pass.
   let before = count();
   e.dispatch(Command::Undo).unwrap();
   e.dispatch(Command::Redo).unwrap();
   assert_eq!(count(), before);
+}
+
+/// A layer inside an instance bound (an override) to a variable that is then deleted keeps what it
+/// shows and loses the link; it does not take its main's binding on the way, also when the same
+/// edit changes the main (so the instance is synced in that very pass).
+#[test]
+fn an_instance_layer_bound_to_a_deleted_variable_keeps_its_value_and_loses_the_link() {
+  for with_main_change in [false, true] {
+    let mut e = build();
+    let title = e
+      .doc
+      .nodes
+      .values()
+      .find(|n| {
+        n.name == "Title"
+          && n.master_id.is_some()
+          && n
+            .parent
+            .as_ref()
+            .and_then(|p| e.doc.get(p))
+            .is_some_and(|p| p.name == "Card" && p.instance.is_some())
+      })
+      .unwrap()
+      .id
+      .clone();
+    e.dispatch(Command::BindVariable {
+      ids: vec![title.clone()],
+      property: "fill".into(),
+      variable: Some("v_muted".into()),
+    })
+    .unwrap();
+    assert_eq!(e.doc.get(&title).unwrap().bindings.get("fill").map(String::as_str), Some("v_muted"));
+    let shown = e.doc.get(&title).unwrap().fills.clone();
+    let mut cols = variables::plain(&e.doc.variables);
+    cols[0]
+      .variables
+      .retain(|v| v.id != "v_muted" && (!with_main_change || v.id != "v_text"));
+    e.dispatch(Command::SetVariables { collections: cols }).unwrap();
+    let n = e.doc.get(&title).unwrap();
+    assert!(
+      n.bindings.is_empty(),
+      "main change {with_main_change}: the link is gone, not replaced by the main's: {:?}",
+      n.bindings
+    );
+    if !with_main_change {
+      assert_eq!(n.fills, shown, "the value it showed stays");
+    }
+    // Nothing keeps naming the variable, in the layers or in the instances' records.
+    assert!(!e.to_json().contains("v_muted"), "a dangling name is left");
+  }
+}
+
+/// A binding given by name on a layer inside an instance is recorded in the override by id, so
+/// pruning keeps it (it used to drop the name as dangling).
+#[test]
+fn a_binding_by_name_on_an_instance_layer_survives_pruning() {
+  let mut e = build();
+  let layer = e
+    .doc
+    .nodes
+    .values()
+    .find(|n| (n.name == "Body" || n.name == "Title") && n.master_id.is_some())
+    .unwrap()
+    .id
+    .clone();
+  e.dispatch(Command::Update {
+    ids: vec![layer.clone()],
+    patch: json!({ "bindings": { "opacity": "Fade" }, "variableModes": { "Brand": "B" } }),
+  })
+  .unwrap();
+  let n = e.doc.get(&layer).unwrap();
+  assert_eq!(n.bindings.get("opacity").map(String::as_str), Some("v_fade"));
+  assert_eq!(n.variable_modes.get("c_brand").map(String::as_str), Some("b_b"));
+  let inst = e
+    .doc
+    .ancestors(&layer)
+    .into_iter()
+    .find(|a| e.doc.get(a).is_some_and(|n| n.kind == NodeType::Instance))
+    .unwrap();
+  let ov = serde_json::to_string(&e.doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides).unwrap();
+  assert!(ov.contains("v_fade") && !ov.contains("\"Fade\""), "{ov}");
+  // An unrelated edit runs the prune over what changed; the layer is still bound.
+  e.dispatch(Command::Update {
+    ids: vec![inst],
+    patch: json!({ "name": "renamed" }),
+  })
+  .unwrap();
+  assert_eq!(
+    e.doc.get(&layer).unwrap().bindings.get("opacity").map(String::as_str),
+    Some("v_fade")
+  );
 }
 
 /// `Resolver` answers what `find` + `mode_for` + `resolve` answer, for every key a binding could
@@ -1453,5 +1778,69 @@ fn create_nodes_lays_out_only_what_it_touched() {
     let (ra, rb) = (a.dispatch(cmd.clone()).unwrap(), b.dispatch(cmd).unwrap());
     assert_eq!(ra, rb, "parent {parent:?}");
     assert!(a.doc == b.doc, "parent {parent:?}: documents differ");
+  }
+}
+
+/// A measurer that kerns "AV" like a real font does (the browser's `measureText` isn't additive).
+struct Kern;
+impl crate::text::TextMeasurer for Kern {
+  fn measure(&self, text: &str, font: &crate::text::FontSpec) -> f64 {
+    let n = text.chars().count() as f64;
+    n * font.size * 0.6 - text.matches("AV").count() as f64 * font.size * 0.2 + n * font.letter_spacing
+  }
+}
+
+/// With a measurer whose widths aren't additive, changing the colour or link of a text run (which
+/// splits or merges the measured pieces) gives the same layout whether or not layout is skipped.
+#[test]
+fn run_colour_and_link_changes_lay_out_like_the_whole_file_passes_with_a_kerning_measurer() {
+  let make = |reference: bool| {
+    let mut e = Engine::new(Box::new(Kern), 3);
+    e.reference = reference;
+    let r = e
+      .dispatch(Command::Ai {
+        tool: "create_nodes".into(),
+        input: json!({"nodes":[{"type":"frame","name":"F","layout":{"direction":"horizontal","gap":0,"padding":0},"children":[
+          {"type":"text","name":"T","text":"AVAVAVAV","fontSize":20},{"type":"rectangle","name":"R","width":10,"height":10}]}]}),
+      })
+      .unwrap();
+    let f = r["created"][0]["id"].as_str().unwrap().to_string();
+    (e, f)
+  };
+  let (mut a, f) = make(false);
+  let (mut b, _) = make(true);
+  let t = a.doc.get(&f).unwrap().children[0].clone();
+  let steps = [
+    Command::StyleText {
+      id: t.clone(),
+      start: 1,
+      end: 2,
+      style: json!({"color": "#FF0000"}),
+      clear: vec![],
+    },
+    Command::StyleText {
+      id: t.clone(),
+      start: 3,
+      end: 4,
+      style: json!({"link": "https://example.com"}),
+      clear: vec![],
+    },
+    Command::Update {
+      ids: vec![t.clone()],
+      patch: json!({"text": {"runs": [{"start": 0, "end": 1, "color": "#FF0000"}, {"start": 1, "end": 2, "color": "#0000FF"}]}}),
+    },
+    Command::Update {
+      ids: vec![t.clone()],
+      patch: json!({"text": {"runs": [{"start": 0, "end": 1, "color": "#FF0000"}, {"start": 1, "end": 2, "color": "#FF0000"}]}}),
+    },
+    Command::Update {
+      ids: vec![t.clone()],
+      patch: json!({"text": {"runs": []}}),
+    },
+  ];
+  for c in steps {
+    let (ra, rb) = (a.dispatch(c.clone()), b.dispatch(c.clone()));
+    assert_eq!(ra, rb);
+    assert!(a.doc == b.doc, "{c:?}: the documents differ");
   }
 }

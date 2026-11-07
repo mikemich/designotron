@@ -913,7 +913,7 @@ pub struct Engine {
   vars_settled: bool,
   /// Mains whose fingerprint was recomputed since the last `after_mutation` finished (it takes
   /// them again once its own changes are in).
-  fp_touched: Vec<NodeId>,
+  fp_touched: HashSet<NodeId>,
   /// Test oracle: the whole-document passes. When on, `after_mutation` runs `normalize` + `apply`
   /// over every layer, layout ignores the neutral-change skip, `render_incremental` re-renders
   /// every changed root, `paint_order`/`top_most` use the quadratic functions and fingerprints
@@ -1059,7 +1059,7 @@ impl Engine {
       moved_hint: Default::default(),
       step_moved: Vec::new(),
       vars_settled: false,
-      fp_touched: Vec::new(),
+      fp_touched: HashSet::new(),
       reference: false,
     }
   }
@@ -1260,19 +1260,6 @@ impl Engine {
   /// copy also prunes references to tokens the document lost, exactly as the room does.
   fn collab_apply(lists: bool, doc: &mut Document, d: &Value) -> Result<Vec<NodeId>, String> {
     crate::collab::apply_opts(doc, d, crate::collab::ApplyOpts { prune: lists })
-  }
-
-  /// After the variables were replaced: when one, a collection or a mode went away, unlinks every
-  /// layer and instance override that still names it in one pass (`prune_local` then finds
-  /// nothing, so `after_mutation` runs once, and an override that named the variable is cleaned
-  /// before the instances sync from their mains, not after). When nothing went away, it just drops
-  /// bindings and pins that name no variable, as before.
-  fn prune_gone_tokens(&mut self, before: &Document) {
-    if !crate::collab::lost_tokens(before, &self.doc) {
-      crate::variables::prune(&mut self.doc);
-    } else {
-      crate::collab::prune_refs(&mut self.doc, crate::collab::Scope::All);
-    }
   }
 
   /// After a local change: drops references to styles, variables and modes the change removed,
@@ -1954,11 +1941,14 @@ impl Engine {
     } else {
       // The mains touched since the last fingerprints were taken (before this pass, from a
       // remote delta or an undo) and by the passes above.
-      let mut comps: Vec<NodeId> = std::mem::take(&mut self.fp_touched);
-      comps.extend(self.touched_components(&fp_base));
-      comps.sort();
-      comps.dedup();
-      self.refresh_fingerprints_of(comps);
+      let mut comps = std::mem::take(&mut self.fp_touched);
+      match self.touched_components(&fp_base) {
+        Some(t) => {
+          comps.extend(t);
+          self.refresh_fingerprints_of(comps);
+        }
+        None => self.refresh_fingerprints(),
+      }
     }
     self.vars_settled = true;
     self.selection.retain(|i| self.doc.nodes.contains_key(i));
@@ -2054,17 +2044,33 @@ impl Engine {
     if self.reference {
       return self.refresh_fingerprints();
     }
-    let touched = self.touched_components(prev);
-    self.fp_touched.extend(touched.iter().cloned());
-    self.refresh_fingerprints_of(touched);
+    match self.touched_components(prev) {
+      Some(touched) => {
+        self.fp_touched.extend(touched.iter().cloned());
+        self.refresh_fingerprints_of(touched);
+      }
+      // A change bigger than the mains themselves: hashing them all is cheaper than finding which
+      // (and `after_mutation` hashes them again when it is done).
+      None => {
+        self.refresh_fingerprints();
+        self.fp_touched.extend(self.fingerprints.keys().cloned());
+      }
+    }
   }
 
   /// The main components with a layer in the difference between `prev` and the document, and the
   /// variants of a set that is in it.
-  fn touched_components(&self, prev: &Document) -> Vec<NodeId> {
+  fn touched_components(&self, prev: &Document) -> Option<Vec<NodeId>> {
+    // More changed layers than the mains hold between them: not worth finding which ones.
+    let mut limit: Option<usize> = None;
+    let mut seen_items = 0usize;
     let mut touched: Vec<NodeId> = Vec::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
     for item in prev.nodes.diff(&self.doc.nodes) {
+      seen_items += 1;
+      if seen_items > 256 && seen_items > *limit.get_or_insert_with(|| self.fingerprints.keys().map(|c| self.doc.subtree(c).len()).sum()) {
+        return None;
+      }
       let (doc, k, old_kind) = match item {
         imbl::ordmap::DiffItem::Add(k, _) => (&self.doc, k, None),
         imbl::ordmap::DiffItem::Update { old, new: (k, _) } => (&self.doc, k, Some(old.1.kind)),
@@ -2099,11 +2105,11 @@ impl Engine {
         cur = doc.get(&id).and_then(|n| n.parent.clone());
       }
     }
-    touched
+    Some(touched)
   }
 
   /// Recomputes the fingerprint of each of these components (dropping those that are gone).
-  fn refresh_fingerprints_of(&mut self, comps: Vec<NodeId>) {
+  fn refresh_fingerprints_of(&mut self, comps: impl IntoIterator<Item = NodeId>) {
     for c in comps {
       if self.doc.get(&c).is_some_and(|n| n.kind == NodeType::Component) {
         let fp = components::fingerprint(&self.doc, &c);
@@ -2112,9 +2118,15 @@ impl Engine {
         self.fingerprints.remove(&c);
       }
     }
+    // A main that was deleted leaves no fingerprint behind (nothing in a diff names it twice).
+    let doc = &self.doc;
+    self
+      .fingerprints
+      .retain(|k, _| doc.get(k).is_some_and(|n| n.kind == NodeType::Component));
   }
 
   fn refresh_fingerprints(&mut self) {
+    self.fp_touched.clear();
     self.fingerprints = self
       .doc
       .components()
@@ -2377,17 +2389,15 @@ impl Engine {
         }
         crate::variables::validate(&collections, &self.doc.variables)?;
         // Equal collections and variables keep their old allocations, so this step shares them.
-        let before = self.doc.clone();
         self.doc.variables = crate::variables::intern(collections, &self.doc.variables);
-        self.prune_gone_tokens(&before);
+        crate::variables::prune(&mut self.doc);
         Ok(json!({}))
       }
       Command::ImportVariables { json, name } => {
         let (collections, report) = crate::tokens_import::import(&self.doc, &json, &name, &mut self.gen)?;
         crate::variables::validate(&collections, &self.doc.variables)?;
-        let before = self.doc.clone();
         self.doc.variables = crate::variables::intern(collections, &self.doc.variables);
-        self.prune_gone_tokens(&before);
+        crate::variables::prune(&mut self.doc);
         Ok(report.to_json())
       }
       Command::BindVariable { ids, property, variable } => {
@@ -2691,7 +2701,8 @@ impl Engine {
       Command::Paste { data, parent, x, y } => self.paste(&data, parent, x, y),
       Command::Update { ids, patch: p } => {
         // Before anything records the patch (as an instance override, say).
-        let p = without_unsafe_links(p);
+        let mut p = without_unsafe_links(p);
+        crate::variables::resolve_names_in_patch(&self.doc, &mut p);
         let detached = crate::variables::unbind_for_patch(&mut self.doc, &ids, &p);
         for id in &ids {
           let before = self.doc.get(id).cloned().ok_or_else(|| format!("no node {id}"))?;
@@ -3444,11 +3455,7 @@ impl Engine {
           st.effects.retain(|s| s.id != id);
           st.grids.retain(|s| s.id != id);
         }
-        if existed {
-          // Links to the style go, and so do any other dangling ones, in the instance overrides
-          // too, in this one pass (`prune_local` then finds nothing).
-          crate::collab::prune_refs(&mut self.doc, crate::collab::Scope::All);
-        } else {
+        {
           let is = |l: &Option<String>| l.as_deref() == Some(id.as_str());
           let uses = |n: &Node| is(&n.fill_style) || is(&n.text_style) || is(&n.stroke_style) || is(&n.effect_style) || is(&n.grid_style);
           self.doc.update_where(uses, |n| {

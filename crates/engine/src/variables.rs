@@ -888,6 +888,38 @@ pub fn normalize_since(doc: &mut Document, base: &Document) {
   normalize_ids(doc, ids);
 }
 
+/// Rewrites the variable and mode names in a layer patch (`bindings`, `variableModes`) to ids, the way
+/// `normalize` does for the layer afterwards. An instance override records the patch as it is, and
+/// a name left in it would be dropped as dangling by the next prune.
+pub fn resolve_names_in_patch(doc: &Document, p: &mut Value) {
+  if let Some(Value::Object(b)) = p.get_mut("bindings") {
+    for v in b.values_mut() {
+      if let Some((_, var)) = v.as_str().and_then(|s| find(doc, s)) {
+        *v = json!(var.id);
+      }
+    }
+  }
+  if let Some(Value::Object(m)) = p.get_mut("variableModes") {
+    let old = std::mem::take(m);
+    // Id-keyed entries first, then the ones given by name, which replace them (as `normalize` does).
+    let by_id = |c: &str| doc.variables.iter().any(|x| x.id == c);
+    for (c, v) in old.iter().filter(|(c, _)| by_id(c) || !doc.variables.iter().any(|x| x.name == **c)) {
+      m.insert(c.clone(), v.clone());
+    }
+    for (c, v) in old.iter().filter(|(c, _)| !by_id(c)) {
+      if let (Some(coll), Some(mode)) = (doc.variables.iter().find(|x| x.name == *c), v.as_str()) {
+        let id = coll
+          .modes
+          .iter()
+          .find(|x| x.id == mode || x.name == mode)
+          .map(|x| x.id.clone())
+          .unwrap_or_else(|| mode.to_string());
+        m.insert(coll.id.clone(), json!(id));
+      }
+    }
+  }
+}
+
 /// Property bindings a direct edit replaces (editing a bound fill detaches its variable).
 /// Returns what it removed per layer, so a layer inside an instance can record the detach.
 pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) -> Vec<(NodeId, Vec<String>)> {
