@@ -147,6 +147,7 @@ fn main() {
       e.dispatch(Command::SetText {
         id: greet.clone(),
         characters: s.clone(),
+        runs: None,
       })
       .unwrap();
     });
@@ -279,6 +280,7 @@ fn main() {
       e.dispatch(Command::SetText {
         id: greet.clone(),
         characters: s.clone(),
+        runs: None,
       })
       .unwrap();
       let _ = e.render_incremental(&page, &[], None);
@@ -288,6 +290,7 @@ fn main() {
       e.dispatch(Command::SetText {
         id: greet.clone(),
         characters: s.clone(),
+        runs: None,
       })
       .unwrap();
     });

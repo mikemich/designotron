@@ -550,7 +550,11 @@ impl Run {
           } else {
             format!("{cur}{}", ["a", "b", " ", "xyz"][self.r.below(4)])
           };
-          self.both(Command::SetText { id, characters: next });
+          self.both(Command::SetText {
+            id,
+            characters: next,
+            runs: None,
+          });
         }
       }
       10..=17 => {
