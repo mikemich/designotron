@@ -8,9 +8,11 @@ import { askClaude } from "../ai/chatState";
 
 type View = { x: number; y: number; zoom: number };
 
+/** The name saved for comments; an "Anonymous" saved by an older version counts as no name. */
 export function userName(): string {
   try {
-    return localStorage.getItem("dt:userName") ?? "";
+    const n = localStorage.getItem("dt:userName") ?? "";
+    return n === "Anonymous" ? "" : n;
   } catch {
     return "";
   }
@@ -139,8 +141,9 @@ function Composer({ draft, style }: { draft: { x: number; y: number; node: strin
   }, []);
   const submit = () => {
     if (!text.trim()) return;
+    // A blank name is only this comment's author: it is never saved, so the field comes back.
     const author = name.trim() || "Anonymous";
-    setUserName(author);
+    if (name.trim()) setUserName(author);
     const r = dispatch<{ id: string }>({ op: "addComment", x: draft.x, y: draft.y, node: draft.node, text: text.trim(), author, time: Date.now() });
     useStore.setState({ draftComment: null, openComment: r?.id ?? null });
   };
@@ -181,7 +184,7 @@ function Thread({ pin, style }: { pin: CommentPin; style: { left: number; top: n
   const send = () => {
     if (!reply.trim()) return;
     const author = name.trim() || "Anonymous";
-    setUserName(author);
+    if (name.trim()) setUserName(author);
     dispatch({ op: "replyComment", id: pin.id, text: reply.trim(), author, time: Date.now() });
     setReply("");
   };

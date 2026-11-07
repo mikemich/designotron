@@ -465,7 +465,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           className="tbtn primary desk-only export-code"
           aria-label="Export code"
           onClick={A.exportProject}
-          title="Export the design as a React + Tailwind project"
+          title="Download this design as a React + Tailwind project (.zip)"
         >
           <Code2 size={16} className="export-icon" />
           <span className="export-label">Export code</span>
@@ -572,9 +572,10 @@ function ShareButton() {
               : "Shared: reconnecting…"
             : "Share for live editing"
         }
+        aria-label={role ? `Share, ${status === "live" ? "shared live" : "reconnecting"}` : "Share"}
         onClick={() => useCollab.setState({ dialogOpen: true })}
       >
-        <Users size={16} />
+        <Users size={16} /> <span className="label share-label">Share</span>
         {/* Phones show how many people are here instead of avatars (no room for both). */}
         {list.length > 0 && <span className="share-count">{list.length + 1}</span>}
       </button>

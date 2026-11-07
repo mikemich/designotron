@@ -32,10 +32,11 @@ import {
 } from "./chatState";
 import { bridgeHttpBase } from "./bridgeClient";
 import { getDoc, toast, useStore } from "../store";
-import { Menu, MOD, Seg, SelectField, type MenuItem } from "../ui/controls";
+import { focusCanvas, Menu, MOD, Seg, SelectField, type MenuItem } from "../ui/controls";
 import { imagesFrom } from "./images";
 import { Markdown } from "./markdown";
 import { isPhone } from "../panels/PhoneNote";
+import { ClaudeSetupSteps } from "./ClaudeSetup";
 
 const SUGGESTIONS = [
   "Design a 3-screen mobile onboarding flow for a meditation app, with prototype links",
@@ -520,6 +521,14 @@ export function ChatPanel() {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               submit();
+            } else if (e.key === "Escape") {
+              // Escape leaves the box (the draft and the panel stay); it never stops a running turn.
+              // An open quick-actions menu closes first.
+              if (menu) setMenu(null);
+              else {
+                e.currentTarget.blur();
+                focusCanvas();
+              }
             }
           }}
         />
@@ -606,30 +615,6 @@ export function ChatPanel() {
   );
 }
 
-const INSTALL_CMD =
-  "curl -fsSL https://raw.githubusercontent.com/mikemich/designotron/main/install.sh | sh";
-const RUN_CMD = "~/.local/bin/designotron";
-
-function CopyLine({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = () =>
-    navigator.clipboard?.writeText(text).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      },
-      () => {},
-    );
-  return (
-    <div className="copy-line">
-      <code tabIndex={0}>{text}</code>
-      <button onClick={copy} title="Copy">
-        {copied ? <Check size={12} /> : "Copy"}
-      </button>
-    </div>
-  );
-}
-
 /** Shown until Claude is connected: an API key (works at once) or the bridge for Pro/Max. */
 function ConnectCard({ alone }: { alone: boolean }) {
   const queued = useChat((s) => s.queued);
@@ -684,49 +669,12 @@ function ConnectCard({ alone }: { alone: boolean }) {
           Use my saved API key instead
         </button>
       )}
-      <details open={alone && mode === "bridge" && !queued && !isPhone()}>
+      {/* Open while Claude isn't connected, also with a message waiting: that is when the steps are needed. */}
+      <details open={alone && mode === "bridge" && !isPhone()}>
         <summary>
           <b>Have Claude Pro or Max?</b> Use it at no extra cost
         </summary>
-        <div style={{ margin: "6px 0" }}>
-          The Designotron bridge runs your own Claude Code on this computer:
-        </div>
-        <ol>
-          <li>
-            Install{" "}
-            <a href="https://code.claude.com" target="_blank" rel="noreferrer">
-              Claude Code
-            </a>{" "}
-            and sign in once: run <code>claude</code>, then <code>/login</code>.
-          </li>
-          <li>
-            Install the bridge (macOS or Linux):
-            <CopyLine text={INSTALL_CMD} />
-            On Windows, download it from{" "}
-            <a
-              href="https://github.com/mikemich/designotron/releases/latest"
-              target="_blank"
-              rel="noreferrer"
-            >
-              Releases
-            </a>
-            .
-          </li>
-          <li>
-            It starts in the background and at every login. If the installer
-            says to start it yourself, run:
-            <CopyLine text={RUN_CMD} />
-          </li>
-        </ol>
-        <div className="muted">
-          This page connects on its own a few seconds later. If it doesn't
-          (Safari and Brave can stop websites from reaching your computer), use
-          the copy of the editor the bridge serves at{" "}
-          <a href="http://127.0.0.1:5174" target="_blank" rel="noreferrer">
-            127.0.0.1:5174
-          </a>
-          .
-        </div>
+        <ClaudeSetupSteps />
       </details>
     </div>
   );

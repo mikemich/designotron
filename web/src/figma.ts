@@ -2,6 +2,7 @@
 // local bridge when the browser blocks it), download its images, convert in the engine.
 
 import { addAsset, readFileAsDataUrl } from "./assets";
+import { normalizeName } from "./folders";
 import { bridgeChecked, bridgeHttpBase } from "./ai/bridgeClient";
 import { dispatchOrThrow, zoomToFit } from "./store";
 
@@ -86,7 +87,8 @@ export function importFigmaJson(file: unknown, images: Record<string, string> = 
   return r;
 }
 
-export async function importFigmaUrl(url: string, token: string, progress: (s: string) => void): Promise<ImportResult> {
+/** Everything before the conversion: the file JSON and its images (nothing in the document changes). */
+export async function fetchFigmaUrl(url: string, token: string, progress: (s: string) => void): Promise<{ file: unknown; images: Record<string, string> }> {
   const parsed = parseFigmaUrl(url);
   if (!parsed) throw new Error("That doesn't look like a Figma file link (figma.com/design/…).");
   progress("Fetching the file from Figma…");
@@ -101,5 +103,24 @@ export async function importFigmaUrl(url: string, token: string, progress: (s: s
     images = await downloadImages(meta?.meta?.images ?? {}, refs, progress);
   }
   progress("Converting…");
+  return { file, images };
+}
+
+export async function importFigmaUrl(url: string, token: string, progress: (s: string) => void): Promise<ImportResult> {
+  const { file, images } = await fetchFigmaUrl(url, token, progress);
   return importFigmaJson(file, images);
+}
+
+/** The name a fetched Figma file carries, if any (cleaned and capped like any file name). */
+export function figmaFileName(file: unknown): string | undefined {
+  const n = (file as { name?: unknown } | null)?.name;
+  return typeof n === "string" ? normalizeName(n).slice(0, 200) || undefined : undefined;
+}
+
+/** What `importFigma` needs: a file's `document.children`, or a `/nodes` response's `nodes`. Checked before a
+ *  file is created for it, so JSON that isn't Figma's makes no empty file. */
+export function checkFigmaJson(file: unknown): void {
+  const f = file as { document?: { children?: unknown }; nodes?: unknown } | null;
+  const ok = Array.isArray(f?.document?.children) || (!!f?.nodes && typeof f.nodes === "object" && !Array.isArray(f.nodes));
+  if (!ok) throw new Error("not a Figma file: expected the JSON from the Figma REST API (/v1/files/:key)");
 }
