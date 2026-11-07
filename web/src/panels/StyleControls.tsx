@@ -104,7 +104,8 @@ export function BoundChip({ nodes, ids, prop, label }: { nodes: Node[]; ids: str
   // The swatch is the colour the canvas shows (already resolved for the layer's mode, aliases followed),
   // not the variable's stored first value, which for an alias is only `{alias}`.
   const paints = prop === "fill" ? nodes[0]?.fills : prop === "stroke" ? nodes[0]?.strokes : undefined;
-  const solid = paints?.find((p) => p.visible !== false && p.type === "solid");
+  // The engine writes the bound colour to the first paint; any other first visible solid paint otherwise.
+  const solid = paints?.[0]?.type === "solid" && paints[0].visible !== false ? paints[0] : paints?.find((p) => p.visible !== false && p.type === "solid");
   const swatch = found && found.v.type === "color" && solid?.type === "solid" ? solid.color : null;
   return (
     <div className="row wf-chip-row wf-bound" data-bound-chip={prop}>

@@ -116,23 +116,86 @@ const openVariables = async (page) => {
   // Six modes scroll sideways and keep the Name column.
   for (let i = 0; i < 3; i++) await page.locator(".variables-dialog thead button[title='Add mode']").click();
   await sleep(300);
-  const geo = await page.evaluate(() => {
-    const wrap = document.querySelector(".variables-dialog .var-table-wrap");
+  const SC = ".variables-dialog .var-table-scroll";
+  const geo = await page.evaluate((SC) => {
+    const wrap = document.querySelector(SC);
     return { scrolls: wrap.scrollWidth > wrap.clientWidth, sw: wrap.scrollWidth, cw: wrap.clientWidth };
-  });
+  }, SC);
   check("6 modes: the table scrolls sideways inside the dialog", geo.scrolls, JSON.stringify(geo));
-  await page.evaluate(() => (document.querySelector(".variables-dialog .var-table-wrap").scrollLeft = 9999));
+  await page.evaluate((SC) => (document.querySelector(SC).scrollLeft = 9999), SC);
   await sleep(150);
-  const after = await page.evaluate(() => {
-    const wrap = document.querySelector(".variables-dialog .var-table-wrap").getBoundingClientRect();
+  const after = await page.evaluate((SC) => {
+    const wrap = document.querySelector(SC).getBoundingClientRect();
     const inp = document.querySelector(".variables-dialog tr[data-variable] td:first-child input").getBoundingClientRect();
     const td = document.querySelector(".variables-dialog tr[data-variable] td:first-child");
     const bg = getComputedStyle(td).backgroundColor;
-    return { inLeft: inp.left, wrapLeft: wrap.left, w: inp.width, bg };
-  });
+    const hit = document.elementFromPoint(wrap.left + 3, inp.top + inp.height / 2);
+    const folder = document.querySelector(".variables-dialog .var-folder button")?.getBoundingClientRect();
+    const search = document.querySelector(".variables-dialog .var-search").getBoundingClientRect();
+    const name = document.querySelector(".variables-dialog .var-table-wrap > .row").getBoundingClientRect();
+    return { inLeft: inp.left, wrapLeft: wrap.left, w: inp.width, bg, hitName: !!hit?.closest("td:first-child"), folderLeft: folder?.left, folderRight: folder?.right, searchVisible: search.left >= wrap.left - 20 && search.width > 100, nameRowVisible: name.left >= wrap.left - 20 && name.width > 100 };
+  }, SC);
   check("scrolled right: the Name column is still visible (sticky)", after.inLeft >= after.wrapLeft - 1 && after.inLeft < after.wrapLeft + 60 && after.w >= 180, JSON.stringify(after));
   check("the sticky Name cell has an opaque background", !/rgba\(0, 0, 0, 0\)|transparent/.test(after.bg), after.bg);
+  check("scrolled right: just inside the scroller's left edge is the Name column (no mode input shows through)", after.hitName, JSON.stringify(after));
+  check("scrolled right: folder names stay visible", after.folderLeft === undefined || (after.folderLeft >= after.wrapLeft - 1 && after.folderRight > after.wrapLeft + 40), JSON.stringify(after));
+  check("scrolled right: the collection name row and the search box stay put", after.searchVisible && after.nameRowVisible, JSON.stringify(after));
+  // Shift+Tab into an off-screen earlier mode cell leaves it fully visible (not under the Name column).
+  const focus = await page.evaluate((SC) => {
+    const sc = document.querySelector(SC);
+    sc.scrollLeft = sc.scrollWidth;
+    const rows = [...document.querySelectorAll(".variables-dialog tr[data-variable]")];
+    const lastMode = rows.map((r) => { const c = [...r.querySelectorAll("td")]; return [...c[c.length - 2].querySelectorAll("input:not([type=color]), button")].pop(); }).find((i) => i && i.getBoundingClientRect().height > 0);
+    lastMode.focus();
+    return { ok: document.activeElement === lastMode };
+  }, SC);
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Shift+Tab");
+  await sleep(200);
+  const vis = await page.evaluate((SC) => {
+    const sc = document.querySelector(SC).getBoundingClientRect();
+    const nameCol = document.querySelector(".variables-dialog tr[data-variable] td:first-child").getBoundingClientRect();
+    const r = document.activeElement.getBoundingClientRect();
+    const w = document.querySelector(".variables-dialog .var-table-wrap");
+    return { wrapScroll: w.scrollLeft, wrapOverflow: w.scrollWidth - w.clientWidth, left: r.left, right: r.right, nameRight: nameCol.right, scLeft: sc.left, scRight: sc.right, tag: document.activeElement.tagName };
+  }, SC);
+  check("Shift+Tab to an earlier mode cell leaves it fully visible, clear of the sticky Name column, and the dialog body itself never scrolls", focus.ok && vis.wrapScroll === 0 && vis.wrapOverflow <= 0 && vis.left >= vis.nameRight - 1 && vis.right <= vis.scRight + 1, JSON.stringify(vis));
   await shot(page, "02-six-modes-scrolled");
+  await ctx.close();
+}
+
+// ---------------------------------------------------------------- new names stay unique after deletes
+{
+  const { ctx, page } = await open();
+  await BRAND(page);
+  await openVariables(page);
+  const names = async () => (await doc(page)).variables.map((c) => c.name);
+  await page.getByRole("button", { name: "New collection" }).click();
+  await page.getByRole("button", { name: "New collection" }).click();
+  await sleep(200);
+  let n = await names();
+  check("two new collections get distinct names", new Set(n).size === n.length && n.includes("Collection 3") && n.includes("Collection 4"), JSON.stringify(n));
+  // Delete Collection 3, then add: the next free number, not a repeat of Collection 4.
+  await page.locator(".var-coll", { hasText: "Collection 3" }).click();
+  await page.getByRole("button", { name: "Delete collection Collection 3" }).click();
+  await sleep(200);
+  await page.getByRole("button", { name: "New collection" }).click();
+  await sleep(200);
+  n = await names();
+  check("add after delete never repeats a collection name", new Set(n).size === n.length && n.includes("Collection 4"), JSON.stringify(n));
+  const modes = async () => (await doc(page)).variables.find((c) => c.name === "Collection 4").modes.map((m) => m.name);
+  await page.locator(".var-coll", { hasText: "Collection 4" }).click();
+  await sleep(150);
+  for (let i = 0; i < 2; i++) await page.locator(".variables-dialog thead button[title='Add mode']").click();
+  await sleep(200);
+  check("modes are Default, Mode 2, Mode 3", JSON.stringify(await modes()) === '["Default","Mode 2","Mode 3"]', JSON.stringify(await modes()));
+  await page.getByRole("button", { name: "Delete mode Mode 2" }).click();
+  await page.getByRole("button", { name: "Delete mode", exact: true }).click();
+  await sleep(250);
+  await page.locator(".variables-dialog thead button[title='Add mode']").click();
+  await sleep(250);
+  const m = await modes();
+  check("add mode after deleting Mode 2 gives a free name (Mode 4)", new Set(m).size === m.length && m.length === 3 && m.includes("Mode 4"), JSON.stringify(m));
   await ctx.close();
 }
 
@@ -183,6 +246,7 @@ const openVariables = async (page) => {
   await page.keyboard.press("Escape");
   await sleep(200);
   check("Escape in the search field clears it and keeps the dialog open", (await search.inputValue()) === "" && (await page.locator(".variables-dialog").count()) === 1);
+  await page.waitForSelector(".variables-dialog tr.var-folder", { timeout: 5000 }).catch(() => {});
   check("after clearing, the folder view is back", (await page.locator(".variables-dialog tr.var-folder").count()) > 0);
   // Keyboard path through the table: Tab from the search field reaches a name input, typing renames it.
   await search.fill("Step 7");
@@ -230,7 +294,7 @@ const openVariables = async (page) => {
   check("the bound-variable select has optgroups", labels.length > 0, JSON.stringify(labels));
   check("groups are 'Collection / folder'", labels.includes("Primitives / Blue") && labels.includes("Theme"), JSON.stringify(labels));
   const opt = await sel.locator("optgroup[label='Primitives / Blue'] option").allInnerTexts();
-  check("options show the leaf name", opt.length === 1 && opt[0] === "500", JSON.stringify(opt));
+  check("options show the full name within the collection (a closed select shows no group)", opt.length === 1 && /Blue\/500$/.test(opt[0]), JSON.stringify(opt));
   await shot(page, "05-picker-groups");
 
   // V-09: the chip of a fill bound to an alias has the swatch of the layer's fill.
@@ -439,7 +503,7 @@ const openVariables = async (page) => {
   check("0 then 5 typed quickly sets opacity 0.05", Math.abs((await op()) - 0.05) < 1e-9, String(await op()));
   await page.keyboard.press("Control+z");
   await sleep(200);
-  check("one undo per key: undo after '0','5' goes back one step (opacity 1)", (await op()) === 1, String(await op()));
+  check("a two-digit pair is one undo step: undo after '0','5' goes back to 1", (await op()) === 1, String(await op()));
   await page.keyboard.press("Control+z");
   await sleep(200);
   check("another undo steps back to the previous value (0.9)", (await op()) === 0.9, String(await op()));

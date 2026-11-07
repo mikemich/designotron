@@ -101,12 +101,12 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   useEffect(() => {
     const key = useStore.getState().focusOnDashboard;
     if (!key) return;
+    useStore.setState({ focusOnDashboard: null });
     let tries = 0;
     const go = () => {
       const el = document.querySelector<HTMLElement>(`[data-focus-key="${key}"]`);
       if (el) {
         el.focus({ preventScroll: true });
-        useStore.setState({ focusOnDashboard: null });
       } else if (tries++ < 30) requestAnimationFrame(go);
     };
     requestAnimationFrame(go);

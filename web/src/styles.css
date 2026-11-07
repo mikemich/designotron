@@ -1746,9 +1746,28 @@ body:has(.modal-bg) .hint-card {
 }
 .var-table-wrap {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   padding: 12px 14px;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   line-height: 1.6;
+}
+.var-table-wrap.muted {
+  display: block;
+  overflow: auto;
+}
+/* Only the table scrolls: the collection name and the search stay put, the sticky Name column sits flush
+   at the scroller's left edge (no padding for other columns to show through), and focus never lands
+   under the sticky Name column or header. */
+.var-table-scroll {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  scroll-padding-left: 260px;
+  scroll-padding-top: 38px;
 }
 /* Fixed columns: the Name column keeps its width and extra modes scroll sideways (the Name column stays
    put, opaque in both themes) instead of squeezing every column. */
@@ -1787,6 +1806,10 @@ body:has(.modal-bg) .hint-card {
 .var-folder td button {
   position: sticky;
   left: 0;
+  width: auto;
+  max-width: 260px;
+  display: inline-flex;
+  background: var(--panel);
 }
 .var-search {
   display: flex;

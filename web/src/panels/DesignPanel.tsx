@@ -1536,7 +1536,7 @@ function VariablesSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
               const cut = v.name.lastIndexOf("/");
               const folder = cut > 0 ? v.name.slice(0, cut).trim() : "";
               const group = [colls.length > 1 ? c.name : "", folder].filter(Boolean).join(" / ");
-              return { value: v.id, label: cut > 0 ? v.name.slice(cut + 1).trim() || v.name : v.name, group: group || undefined };
+              return { value: v.id, label: v.name, group: group || undefined };
             }),
         );
         return (

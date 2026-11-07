@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Hash, Link2, Palette, Plus, Search, SlidersHorizontal, ToggleLeft, Trash2, Type as TypeIcon, Unlink, X } from "lucide-react";
 import { dispatch, toast, useDoc, useStore } from "../store";
 import type { VarKind, Variable, VariableCollection } from "../types";
-import { Menu, type MenuItem, Popover, useDialog } from "../ui/controls";
+import { Menu, MOD, type MenuItem, Popover, useDialog } from "../ui/controls";
 import { ConfirmDialog } from "../dashboard/ConfirmDialog";
 import { cssColor } from "../ui/color";
 import { useFolderState } from "./FolderTree";
@@ -192,7 +192,9 @@ export function VariablesDialog() {
   });
   const folders = useFolderState("variables:" + (coll?.id ?? ""));
   const colSpan = (coll?.modes.length ?? 0) + 2;
-  const q = query.trim().toLowerCase();
+  // Typing stays responsive with hundreds of rows: the filter follows a beat behind.
+  const deferred = useDeferredValue(query);
+  const q = deferred.trim().toLowerCase();
   const matches = (v: Variable) => v.name.toLowerCase().includes(q);
   const found = q && coll ? coll.variables.filter(matches) : [];
   /** Deletes variables and says what keeps depending on them (Figma doesn't ask; one Ctrl+Z brings them back). */
@@ -200,7 +202,7 @@ export function VariablesDialog() {
     const impact = deleteImpact(doc.nodes, collections, new Set(gone.map((v) => v.id)));
     if (save(next) === null) return;
     const msg = impactMessage(impact);
-    if (msg) toast(`Deleted ${what}. ${msg} Ctrl+Z undoes.`);
+    if (msg) toast(`Deleted ${what}. ${msg} ${MOD}Z undoes.`);
   };
 
   const variableRow = (v: Variable, label: string, folder: string, depth: number) => (
@@ -275,11 +277,15 @@ export function VariablesDialog() {
 
   const update = (fn: (c: VariableCollection) => VariableCollection) => save(collections.map((c) => (c.id === coll.id ? fn(c) : c)));
   const addCollection = () => {
-    const c: VariableCollection = { id: uid("vc_"), name: `Collection ${collections.length + 1}`, modes: [{ id: uid("vm_"), name: "Default" }], variables: [] };
+    let cn = collections.length + 1;
+    while (collections.some((x) => x.name === `Collection ${cn}`)) cn++;
+    const c: VariableCollection = { id: uid("vc_"), name: `Collection ${cn}`, modes: [{ id: uid("vm_"), name: "Default" }], variables: [] };
     save([...collections, c]);
     setActive(c.id);
   };
-  const addVariable = (type: VarKind) =>
+  const addVariable = (type: VarKind) => {
+    // A new variable must show up, whatever the search says.
+    setQuery("");
     update((c) => {
       // The first free "color 3": counting alone collides after a delete or rename.
       let n = c.variables.filter((v) => v.type === type).length + 1;
@@ -287,6 +293,7 @@ export function VariablesDialog() {
       const values = Object.fromEntries(c.modes.map((m) => [m.id, DEFAULTS[type]]));
       return { ...c, variables: [...c.variables, { id: uid("v_"), name: `${type} ${n}`, type, values, description: "" }] };
     });
+  };
   /** Removes a mode and its values; layers pinned to it follow the engine's prune (back to the default mode). */
   const deleteMode = (id: string) =>
     update((c) => ({
@@ -308,9 +315,12 @@ export function VariablesDialog() {
     update((c) => {
       const id = uid("vm_");
       const first = c.modes[0]?.id;
+      // The first free "Mode 3": counting alone collides after a delete or rename.
+      let n = c.modes.length + 1;
+      while (c.modes.some((m) => m.name === `Mode ${n}`)) n++;
       return {
         ...c,
-        modes: [...c.modes, { id, name: `Mode ${c.modes.length + 1}` }],
+        modes: [...c.modes, { id, name: `Mode ${n}` }],
         variables: c.variables.map((v) => ({ ...v, values: { ...v.values, [id]: first ? v.values[first] : DEFAULTS[v.type] } })),
       };
     });
@@ -396,6 +406,10 @@ export function VariablesDialog() {
                   onKeyDown={(e) => e.stopPropagation()}
                 />
               </div>
+              <div className="sr-only" role="status" aria-live="polite" data-var-live>
+                {q ? (found.length ? `${found.length} variable${found.length === 1 ? "" : "s"} match in ${coll.name}` : `0 variables match in ${coll.name}`) : ""}
+              </div>
+              <div className="var-table-scroll" tabIndex={-1}>
               <table className="var-table" style={{ "--modes": coll.modes.length } as React.CSSProperties}>
                 <colgroup>
                   <col className="var-col-name" />
@@ -433,8 +447,8 @@ export function VariablesDialog() {
                     ) : (
                       <tr className="var-empty">
                         <td colSpan={colSpan}>
-                          <div className="muted" role="status">
-                            No variables match “{query.trim()}” in {coll.name}.
+                          <div className="muted">
+                            No variables match “{deferred.trim()}” in {coll.name}.
                           </div>
                         </td>
                       </tr>
@@ -444,9 +458,10 @@ export function VariablesDialog() {
                   )}
                 </tbody>
               </table>
+              </div>
               <button
                 className="btn"
-                style={{ marginTop: 8 }}
+                style={{ marginTop: 8, alignSelf: "flex-start" }}
                 onClick={(e) => {
                   const r = e.currentTarget.getBoundingClientRect();
                   setMenu({

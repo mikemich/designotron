@@ -257,7 +257,10 @@ export function ToastLive() {
   const toast = useStore((s) => s.toast);
   const [said, setSaid] = useState<{ info: string; error: string }>({ info: "", error: "" });
   useEffect(() => {
-    if (!toast) return;
+    if (!toast) {
+      setSaid({ info: "", error: "" });
+      return;
+    }
     // Clear first so the same text twice in a row is announced again.
     setSaid({ info: "", error: "" });
     const id = requestAnimationFrame(() => setSaid({ info: toast.kind === "info" ? toast.text : "", error: toast.kind === "error" ? toast.text : "" }));
@@ -515,7 +518,7 @@ export function useEscape(close: () => void, enabled = true) {
     if (!enabled) return;
     // Capture phase: dialogs stop key events from reaching the editor's shortcuts.
     const key = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || document.querySelector(".menu")) return;
+      if (e.key !== "Escape" || document.querySelector(".menu, .popover")) return;
       e.stopPropagation();
       ref.current();
     };
