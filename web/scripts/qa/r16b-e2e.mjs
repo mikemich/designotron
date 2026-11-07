@@ -382,7 +382,7 @@ const dialogOpen = (page) => page.locator(".plugins-dialog").count().then((n) =>
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await page.waitForSelector(".plugin-list");
   check("code that compiles but fails at run time saves", (await stored(page)).some((p) => p.name === "Saved runtime"));
-  await page.locator(".plugin-row", { hasText: "Saved runtime" }).getByTitle("Run").click();
+  await page.locator(".plugin-row", { hasText: "Saved runtime" }).getByRole("button", { name: /^Run / }).click();
   await waitStopped(page, 5000);
   await sleep(200);
   check("running from the list closes the dialog, and the toast says line 2", !(await dialogOpen(page)) && (await toasts(page)).some((t) => /failed at line 2/.test(t)), JSON.stringify(await toasts(page)));

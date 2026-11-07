@@ -109,7 +109,7 @@ function PagePanel() {
           <button
             type="button"
             className="swatch"
-            aria-label={`Page background ${page.background}`}
+            aria-label={`Page colour ${page.background}`}
             aria-haspopup="dialog"
             aria-expanded={!!anchor}
             onClick={(e) => setAnchor((e.currentTarget as HTMLElement).getBoundingClientRect())}
@@ -122,7 +122,7 @@ function PagePanel() {
           </span>
         </div>
         {anchor && (
-          <Popover anchor={anchor} label="Page background" onClose={() => setAnchor(null)}>
+          <Popover anchor={anchor} label="Page colour" onClose={() => setAnchor(null)}>
             <ColorPicker color={page.background} onChange={(color) => dispatch({ op: "setPageBackground", id: page.id, color })} />
           </Popover>
         )}

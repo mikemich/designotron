@@ -337,7 +337,9 @@ export function Popover(props: {
     const el = ref.current;
     const active = document.activeElement as HTMLElement | null;
     if (el && props.focusOnOpen !== false && !el.contains(active)) {
-      const first = tabbables(el)[0];
+      // Opened by keyboard: the first control. Opened by pointer: the dialog itself, so Enter still
+      // reaches whatever the opener wants it for (a crop frame leaves crop mode on Enter) and Tab goes in.
+      const first = keyboardModality ? tabbables(el)[0] : undefined;
       if (first) first.focus({ preventScroll: true });
       else {
         el.tabIndex = -1;

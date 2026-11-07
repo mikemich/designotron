@@ -969,6 +969,9 @@ button.swatch > i {
   padding: 10px;
   width: 240px;
 }
+.popover:focus {
+  outline: none;
+}
 .picker-sv:focus-visible,
 .picker-slider:focus-visible {
   outline: 2px solid var(--select);

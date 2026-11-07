@@ -104,6 +104,17 @@ function cancelKeyPresses() {
 const KEY_POINTER = -1;
 const within = (b: DOMRect, x: number, y: number) => x >= b.left && x <= b.right && y >= b.top && y <= b.bottom;
 
+/** The presenter's polite live region; `setter.current` sets what it says. */
+function LiveRegion({ setter }: { setter: { current: (text: string) => void } }) {
+  const [said, setSaid] = useState("");
+  setter.current = setSaid;
+  return (
+    <div className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-presenter-live="">
+      {said}
+    </div>
+  );
+}
+
 /** Prototype player: renders a frame and turns interactions into hotspots, with overlays
  *  (modals, menus) stacked on top. With `remixUrl` it is the view-only player for view links
  *  and embeds: no close, a Remix button instead. */
@@ -133,12 +144,14 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   // What a screen reader is told: the frame's name whenever the frame changes (Navigate, Back, Swap,
   // Restart), "<overlay> opened" and "Changed to <variant>". Not on scroll. Emptied first so the same
   // words twice in a row (a restart on the start frame) are still spoken.
-  const [said, setSaid] = useState("");
+  // The words live in their own component: a state change here would re-render the whole player, and
+  // a re-render restores every scroller to its stored position, which stops a smooth scroll half way.
+  const setSaid = useRef<(text: string) => void>(() => {});
   const saidTimer = useRef(0);
   const say = (text: string, wait = 60) => {
-    setSaid("");
+    setSaid.current("");
     clearTimeout(saidTimer.current);
-    saidTimer.current = window.setTimeout(() => setSaid(text), wait);
+    saidTimer.current = window.setTimeout(() => setSaid.current(text), wait);
   };
   useEffect(() => () => clearTimeout(saidTimer.current), []);
   // The first run is the start frame, once the dialog has taken focus (which announces the dialog itself).
@@ -600,9 +613,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         setTimeout(() => setFlash(false), 400);
       }}
     >
-      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true" data-presenter-live="">
-        {said}
-      </div>
+      <LiveRegion setter={setSaid} />
       <div
         className="bar"
         onClick={(e) => {
