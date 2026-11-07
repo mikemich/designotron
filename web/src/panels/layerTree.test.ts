@@ -38,6 +38,10 @@ describe("rangeIds", () => {
     expect(rangeIds(rows, "b", "c")).toEqual(["b", "c"]);
     expect(rangeIds(rows, "d", "a")).toEqual(["a", "b", "c", "d"]);
   });
+  it("keeps every row of the range when it is flat (search results)", () => {
+    expect(rangeIds(rows, "F", "d", false)).toEqual(["F", "a", "b", "c", "d"]);
+    expect(rangeIds(rows, "d", "a", false)).toEqual(["a", "b", "c", "d"]);
+  });
   it("falls back to the target without an anchor", () => {
     expect(rangeIds(rows, null, "c")).toEqual(["c"]);
     expect(rangeIds(rows, "gone", "c")).toEqual(["c"]);

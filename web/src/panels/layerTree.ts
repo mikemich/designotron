@@ -4,12 +4,13 @@ import type { Doc, Node } from "../types";
 /** Range select in the Layers panel (owner decision): the visible rows between the anchor and the
  * target, inclusive, top-most only. A frame in the range stands for its expanded children, as engine
  * operations treat a selection. A missing anchor gives just the target. */
-export function rangeIds(rows: { n: { id: string; parent: string | null } }[], anchorId: string | null | undefined, toId: string): string[] {
+export function rangeIds(rows: { n: { id: string; parent: string | null } }[], anchorId: string | null | undefined, toId: string, topMost = true): string[] {
   const to = rows.findIndex((r) => r.n.id === toId);
   if (to < 0) return [];
   const from = anchorId ? rows.findIndex((r) => r.n.id === anchorId) : -1;
   if (from < 0) return [toId];
   const [lo, hi] = from < to ? [from, to] : [to, from];
+  if (!topMost) return rows.slice(lo, hi + 1).map((r) => r.n.id);
   const inRange = new Set<string>();
   for (let i = lo; i <= hi; i++) inRange.add(rows[i].n.id);
   const parent = new Map(rows.map((r) => [r.n.id, r.n.parent]));

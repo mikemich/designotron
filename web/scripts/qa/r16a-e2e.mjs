@@ -512,6 +512,148 @@ const pos = { x: 70, y: 15 };
 check("no page errors (dark run)", ctx.errors.length === 0, ctx.errors.join(" | "));
 await ctx.context.close();
 
+// ---- Fix round: scroll, anchor, debounce, rename in results, read-only, Escape, roving tab stop ----
+{
+  const fx = await open("dark", 1);
+  const fp = fx.page;
+  await fp.evaluate(async () => {
+    const cards = [];
+    for (let i = 0; i < 40; i++) cards.push({ type: "frame", name: `Card ${String(i).padStart(2, "0")}`, width: 100, height: 20, children: [{ type: "rectangle", name: "Inner", width: 5, height: 5 }] });
+    await window.__dt.tool("create_nodes", { nodes: [{ type: "frame", name: "Screen", x: 0, y: 0, width: 400, height: 900, layout: { direction: "vertical" }, children: [{ type: "frame", name: "List", width: 300, height: "hug", layout: { direction: "vertical" }, children: cards }] }] });
+  });
+  const byName = (nm) => fp.evaluate((nm) => Object.values(window.__dt.doc().nodes).find((n) => n.name === nm)?.id, nm);
+  const frow = (id) => fp.locator(`[role=treeitem][data-layer="${id}"]`);
+  const sn = () => selNames(fp);
+  const scrollTop = () => fp.evaluate((s) => document.querySelector(s).scrollTop, SCROLL);
+  const inView = (id) =>
+    fp.evaluate(
+      ([s, id]) => {
+        const a = document.querySelector(s).getBoundingClientRect();
+        const r = document.querySelector(`[data-layer="${id}"]`);
+        if (!r) return false;
+        const b = r.getBoundingClientRect();
+        return b.top >= a.top - 1 && b.bottom <= a.bottom + 1;
+      },
+      [SCROLL, id],
+    );
+  const fscreen = await byName("Screen");
+  const flist = await byName("List");
+  await frow(fscreen).locator(".twisty").click();
+  await frow(flist).locator(".twisty").click();
+  await fp.waitForTimeout(200);
+  const c39 = await byName("Card 39");
+  const c00 = await byName("Card 00");
+  const p = { x: 70, y: 10 };
+  // 1: Shift-click far down keeps the clicked row in view.
+  await frow(c39).click({ position: p });
+  await fp.evaluate((s) => (document.querySelector(s).scrollTop = 100000), SCROLL);
+  await fp.waitForTimeout(200);
+  const before = await scrollTop();
+  await frow(c00).click({ position: p, modifiers: ["Shift"] });
+  await fp.waitForTimeout(300);
+  check("fix 1: Shift-click far down selects the range and leaves the clicked row in view", (await sn()).length === 40 && (await inView(c00)) && Math.abs((await scrollTop()) - before) < 40, `${before} -> ${await scrollTop()}`);
+  // 1b: Shift+ArrowDown past the viewport follows the focused row.
+  await fp.evaluate((s) => (document.querySelector(s).scrollTop = 0), SCROLL);
+  await frow(c39).click({ position: p });
+  await frow(c39).focus();
+  for (let i = 0; i < 30; i++) {
+    await fp.keyboard.press("Shift+ArrowDown");
+    await fp.waitForTimeout(30);
+  }
+  await fp.waitForTimeout(200);
+  const foc = await fp.evaluate(() => document.activeElement?.dataset?.layer);
+  check("fix 1: Shift+ArrowDown past the viewport keeps the focused row in view", (await sn()).length === 31 && (await inView(foc)));
+  // 2: stale anchor after a canvas selection.
+  await fp.evaluate((s) => (document.querySelector(s).scrollTop = 0), SCROLL);
+  const c35 = await byName("Card 35");
+  const c30 = await byName("Card 30");
+  const c28 = await byName("Card 28");
+  await frow(c35).click({ position: p });
+  await fp.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), c30);
+  await fp.waitForTimeout(300);
+  await frow(c28).click({ position: p, modifiers: ["Shift"] });
+  await fp.waitForTimeout(200);
+  const r2 = await sn();
+  check("fix 2: Shift-click after a canvas selection ranges from that selection", r2.length === 3 && ["Card 30", "Card 29", "Card 28"].every((n) => r2.includes(n)), r2.join(","));
+  // 3: Enter right after typing.
+  const ff = fp.getByRole("textbox", { name: "Search layers" });
+  await ff.click();
+  await fp.keyboard.type("Card 07");
+  await fp.keyboard.press("Enter");
+  await fp.waitForTimeout(60);
+  const r3 = await sn();
+  check("fix 3: Enter inside the debounce selects the matches of the typed text", r3.length === 1 && r3[0] === "Card 07", r3.join(","));
+  // 4: rename from the results menu, Tab through the hits, nothing left behind in the tree.
+  await fp.waitForTimeout(300);
+  await ff.fill("Card 0");
+  await fp.waitForTimeout(300);
+  const hit = (i) => fp.locator("[role=option][data-layer-hit]").nth(i);
+  await hit(0).click({ position: { x: 60, y: 10 }, button: "right" });
+  await fp.locator("[role=menu] [role=menuitem]", { hasText: /^Rename/ }).click();
+  const inp = fp.getByRole("textbox", { name: "Layer name" });
+  await inp.waitFor({ timeout: 2000 });
+  await fp.keyboard.type("Nine");
+  await fp.keyboard.press("Tab");
+  await fp.waitForTimeout(300);
+  check("fix 4: Rename from the results menu edits in the results; Tab renames the next hit", (await byName("Nine")) !== undefined && (await inp.count()) === 1 && (await inp.inputValue()) === "Card 08" && (await inp.evaluate((e) => e === document.activeElement)));
+  await fp.keyboard.press("Escape");
+  await fp.waitForTimeout(200);
+  await ff.click();
+  await ff.fill("");
+  await fp.waitForTimeout(500);
+  check("fix 4: no stray rename field in the tree after the search ends", (await inp.count()) === 0);
+  // F2 on a layer that is not in the results does nothing, now or later.
+  await ff.fill("Card 1");
+  await fp.waitForTimeout(300);
+  await fp.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), c30);
+  await focusCanvas(fp);
+  await fp.keyboard.press("F2");
+  await fp.waitForTimeout(300);
+  await ff.fill("");
+  await fp.waitForTimeout(500);
+  check("fix 4: F2 while searching, on a layer outside the results, opens nothing later", (await inp.count()) === 0);
+  // 5: read-only.
+  await fp.evaluate(() => window.__dt.collabSet({ viewer: true }));
+  await frow(c35).click({ position: p, button: "right" });
+  const vitems = await fp.locator("[role=menu] [role=menuitem]").allInnerTexts();
+  await fp.keyboard.press("Escape");
+  await frow(c35).dblclick({ position: p });
+  await fp.waitForTimeout(200);
+  check("fix 5: a read-only tab has no Rename, no double-click rename, no tree drag", !vitems.some((x) => x.startsWith("Rename")) && (await inp.count()) === 0 && (await frow(c35).getAttribute("draggable")) !== "true", vitems.slice(0, 3).join("|"));
+  await fp.evaluate(() => window.__dt.collabSet({ viewer: false }));
+  // Nice 1+2: Escape on the filter button, popover aria.
+  const fb = fp.getByRole("button", { name: "Filter layers" });
+  await fp.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), c30);
+  await fb.click();
+  check("nice 2: the filter button names the popover it controls", (await fb.getAttribute("aria-controls")) === "layer-filter-menu" && (await fb.getAttribute("aria-haspopup")) === "dialog");
+  await fb.focus();
+  await fp.keyboard.press("Escape");
+  await fp.waitForTimeout(150);
+  check("nice 1: Escape on the filter button closes the popover and keeps the selection", (await fp.locator("#layer-filter-menu").count()) === 0 && (await sn()).length === 1);
+  await fb.click();
+  await fp.getByRole("checkbox", { name: "Frames" }).focus();
+  for (let i = 0; i < 12; i++) await fp.keyboard.press("Tab");
+  await fp.waitForTimeout(150);
+  check("nice 2: Tab out of the popover closes it", (await fp.locator("#layer-filter-menu").count()) === 0);
+  // Nice 3+5: roving stop, flat Shift range in the results.
+  await ff.fill("Card");
+  await fp.waitForTimeout(300);
+  await hit(4).focus();
+  const stops = await fp.evaluate(() => [...document.querySelectorAll("[data-layer-hit]")].filter((e) => e.tabIndex === 0).map((e) => e.dataset.layerHit));
+  check("nice 3: one results tab stop, on the focused hit", stops.length === 1 && stops[0] === (await hit(4).getAttribute("data-layer-hit")));
+  await fp.keyboard.press("Enter");
+  await hit(8).click({ position: { x: 60, y: 10 }, modifiers: ["Shift"] });
+  check("nice 3+5: Enter sets the anchor; Shift range in results keeps every hit", (await sn()).length === 5, (await sn()).join(","));
+  // Nice 4: page switch shows no stale results.
+  await ff.fill("Card 3");
+  await fp.waitForTimeout(300);
+  await fp.evaluate(() => window.__dt.dispatch({ op: "addPage", name: null }));
+  await fp.waitForTimeout(40);
+  check("nice 4: another page doesn't show the previous page's results", (await fp.locator("[role=option][data-layer-hit]").count()) === 0 && (await fp.locator("#layer-search").inputValue()) === "");
+  check("no page errors (fix block)", fx.errors.length === 0, fx.errors.join(" | "));
+  await fx.context.close();
+}
+
 // ---- Screenshots in the light theme ----
 if (SHOTS) {
   ctx = await open("light", 2);
