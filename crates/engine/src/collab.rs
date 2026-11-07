@@ -299,7 +299,12 @@ pub fn moved(base: &[NodeId], new: &[NodeId]) -> Vec<NodeId> {
     stay.insert(seq[k].0);
     at = prev[k];
   }
-  new.iter().enumerate().filter(|(i, _)| !stay.contains(i)).map(|(_, id)| id.clone()).collect()
+  new
+    .iter()
+    .enumerate()
+    .filter(|(i, _)| !stay.contains(i))
+    .map(|(_, id)| id.clone())
+    .collect()
 }
 
 /// `cur` with the ids in `moved` taken out and put back where `reference` (the mover's list)
@@ -328,7 +333,11 @@ pub fn place(cur: &[NodeId], reference: &[NodeId], moved: &[NodeId]) -> Vec<Node
   let n = reference.len();
   let is_moved = |i: usize| mset.contains(reference[i].as_str());
   let lead = (0..n).take_while(|&i| is_moved(i)).count();
-  let tail = if lead == n { 0 } else { (0..n).rev().take_while(|&i| is_moved(i)).count() };
+  let tail = if lead == n {
+    0
+  } else {
+    (0..n).rev().take_while(|&i| is_moved(i)).count()
+  };
   let mut placed: HashSet<&str> = HashSet::new();
   let front: Vec<NodeId> = reference[..lead].iter().filter(|r| placed.insert(r.as_str())).cloned().collect();
   working.splice(0..0, front);
@@ -430,7 +439,11 @@ fn apply_comment_changes(doc: &mut Document, changes: &Map<String, Value>) -> Re
         .iter()
         .filter_map(|k| {
           let k = k.as_array()?;
-          Some((k.first()?.as_str()?.to_string(), k.get(1)?.as_f64()?.to_bits(), k.get(2)?.as_str()?.to_string()))
+          Some((
+            k.first()?.as_str()?.to_string(),
+            k.get(1)?.as_f64()?.to_bits(),
+            k.get(2)?.as_str()?.to_string(),
+          ))
         })
         .collect();
       c.messages.retain(|m| !gone.contains(&msg_key(m)));
@@ -539,7 +552,11 @@ impl Live {
   fn of(doc: &Document) -> Live {
     let s = &doc.styles;
     Live {
-      vars: doc.variables.iter().flat_map(|c| c.variables.iter().map(|v| v.id.clone())).collect(),
+      vars: doc
+        .variables
+        .iter()
+        .flat_map(|c| c.variables.iter().map(|v| v.id.clone()))
+        .collect(),
       modes: doc
         .variables
         .iter()
@@ -633,7 +650,10 @@ fn node_stale(n: &Node, live: &Live) -> bool {
     || style(&n.text_style, "textStyle")
     || style(&n.effect_style, "effectStyle")
     || style(&n.grid_style, "gridStyle")
-    || n.instance.as_ref().is_some_and(|i| i.overrides.values().any(|o| override_stale(o, live)))
+    || n
+      .instance
+      .as_ref()
+      .is_some_and(|i| i.overrides.values().any(|o| override_stale(o, live)))
 }
 
 /// Drops, from the layers in `scope`, every reference to a variable, collection, mode or style the
@@ -663,7 +683,10 @@ pub fn prune_refs(doc: &mut Document, scope: Scope) -> Vec<NodeId> {
     return vec![];
   }
   let live = Live::of(doc);
-  let mut stale: Vec<NodeId> = candidates.into_iter().filter(|id| node_stale(doc.get(id).unwrap(), &live)).collect();
+  let mut stale: Vec<NodeId> = candidates
+    .into_iter()
+    .filter(|id| node_stale(doc.get(id).unwrap(), &live))
+    .collect();
   for id in &stale {
     let Some(n) = doc.get_mut(id) else { continue };
     n.bindings.retain(|_, v| live.vars.contains(v));
@@ -1105,7 +1128,9 @@ pub fn apply_opts(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<
 
 /// The strings of a JSON array (anything else is empty).
 fn id_list(v: &Value) -> Vec<String> {
-  v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
+  v.as_array()
+    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+    .unwrap_or_default()
 }
 
 /// Applies the per-id changes of pages, styles and variables in `d`, if it has any.
@@ -1115,7 +1140,11 @@ fn apply_granular(doc: &mut Document, d: &Value) -> Result<(), String> {
     let old: Vec<(String, Vec<NodeId>)> = moves
       .into_iter()
       .flat_map(|m| m.keys())
-      .filter(|id| c.get("patch").and_then(|p| p.get(id.as_str())).is_some_and(|p| p.get("children").is_some()))
+      .filter(|id| {
+        c.get("patch")
+          .and_then(|p| p.get(id.as_str()))
+          .is_some_and(|p| p.get("children").is_some())
+      })
       .filter_map(|id| doc.page(id).map(|p| (id.clone(), p.children.clone())))
       .collect();
     ListDelta::apply(&mut doc.pages, c, |p| &p.id, &[], "page")?;
@@ -1409,7 +1438,11 @@ fn merge_json(cur: &Value, from: &Value, to: &Value, deep: bool, strict: bool) -
 /// of the list return, ones it put in leave, and ones others added stay where they are.
 /// `repair` drops the ones that no longer belong. With `cur == from` the result is `to`.
 fn merge_order(cur: Option<&Value>, from: Option<&Value>, to: Option<&Value>) -> Value {
-  let (cur, from, to) = (cur.map(id_list).unwrap_or_default(), from.map(id_list).unwrap_or_default(), to.map(id_list).unwrap_or_default());
+  let (cur, from, to) = (
+    cur.map(id_list).unwrap_or_default(),
+    from.map(id_list).unwrap_or_default(),
+    to.map(id_list).unwrap_or_default(),
+  );
   let (in_from, in_to): (HashSet<&String>, HashSet<&String>) = (from.iter().collect(), to.iter().collect());
   let cur: Vec<NodeId> = cur.iter().filter(|c| !in_from.contains(c) || in_to.contains(c)).cloned().collect();
   let at_from: HashMap<&String, usize> = from.iter().enumerate().map(|(i, id)| (id, i)).collect();
@@ -1419,8 +1452,10 @@ fn merge_order(cur: Option<&Value>, from: Option<&Value>, to: Option<&Value>) ->
     .filter(|id| {
       let Some(&f) = at_from.get(id) else { return true }; // the step took it out: it returns
       let Some(&c) = at_cur.get(id) else { return false }; // someone else took it out
-      let before = |i: usize, list: &[NodeId], other: &HashMap<&String, usize>| list[..i].iter().rev().find(|x| other.contains_key(x)).cloned();
-      let after = |i: usize, list: &[NodeId], other: &HashMap<&String, usize>| list[i + 1..].iter().find(|x| other.contains_key(x)).cloned();
+      let before =
+        |i: usize, list: &[NodeId], other: &HashMap<&String, usize>| list[..i].iter().rev().find(|x| other.contains_key(x)).cloned();
+      let after =
+        |i: usize, list: &[NodeId], other: &HashMap<&String, usize>| list[i + 1..].iter().find(|x| other.contains_key(x)).cloned();
       before(c, &cur, &at_from) == before(f, &from, &at_from) || after(c, &cur, &at_from) == after(f, &from, &at_from)
     })
     .collect();
@@ -1437,7 +1472,10 @@ fn merge_comment(cur: &Comment, from: &Comment, to: &Comment) -> Comment {
     ..c.clone()
   };
   let mut out = merge_fields(&bare(cur), &bare(from), &bare(to), false).unwrap_or_else(|| bare(cur));
-  let (fk, tk): (HashSet<MsgKey>, HashSet<MsgKey>) = (from.messages.iter().map(msg_key).collect(), to.messages.iter().map(msg_key).collect());
+  let (fk, tk): (HashSet<MsgKey>, HashSet<MsgKey>) = (
+    from.messages.iter().map(msg_key).collect(),
+    to.messages.iter().map(msg_key).collect(),
+  );
   let mut msgs: Vec<crate::model::CommentMessage> = cur
     .messages
     .iter()
@@ -3145,13 +3183,29 @@ mod tests {
     }
     // Front and back stay at the ends whatever others hold meanwhile.
     let cur = ids(&["b", "c", "t", "a", "n"]);
-    assert_eq!(place(&cur, &ids(&["c", "a", "b", "t"]), &ids(&["c"])), ["c", "b", "t", "a", "n"], "back");
-    assert_eq!(place(&ids(&["c", "a", "b", "t", "n"]), &ids(&["b", "c", "t", "a"]), &ids(&["a"])), ["c", "b", "t", "n", "a"], "front");
+    assert_eq!(
+      place(&cur, &ids(&["c", "a", "b", "t"]), &ids(&["c"])),
+      ["c", "b", "t", "a", "n"],
+      "back"
+    );
+    assert_eq!(
+      place(&ids(&["c", "a", "b", "t", "n"]), &ids(&["b", "c", "t", "a"]), &ids(&["a"])),
+      ["c", "b", "t", "n", "a"],
+      "front"
+    );
     // A move in the middle follows the sibling it followed, else the one it preceded, else the end.
     let cur = ids(&["a", "b", "c", "t"]);
     assert_eq!(place(&cur, &ids(&["a", "t", "b", "c"]), &ids(&["t"])), ["a", "t", "b", "c"]);
-    assert_eq!(place(&ids(&["b", "c", "t"]), &ids(&["a", "t", "b", "c"]), &ids(&["t"])), ["t", "b", "c"], "anchor gone: before the next one");
-    assert_eq!(place(&ids(&["q", "r"]), &ids(&["a", "t", "b"]), &ids(&["t"])), ["q", "r", "t"], "no anchors: the end");
+    assert_eq!(
+      place(&ids(&["b", "c", "t"]), &ids(&["a", "t", "b", "c"]), &ids(&["t"])),
+      ["t", "b", "c"],
+      "anchor gone: before the next one"
+    );
+    assert_eq!(
+      place(&ids(&["q", "r"]), &ids(&["a", "t", "b"]), &ids(&["t"])),
+      ["q", "r", "t"],
+      "no anchors: the end"
+    );
     // Nothing moved: the list as it is. Ids the reference doesn't hold are not moved.
     assert_eq!(place(&cur, &ids(&["t", "a"]), &[]), cur);
     assert_eq!(place(&cur, &ids(&["t", "a"]), &ids(&["zzz"])), cur);
@@ -3306,10 +3360,16 @@ mod tests {
     fn assert_converged(&self) {
       for (i, e) in self.eds.iter().enumerate() {
         for (id, n) in self.doc.nodes.iter() {
-        let got = e.doc.nodes.get(id);
-        assert!(got.is_some_and(|g| g == n), "editor {i} ({:?}) node {id}: room has children {:?}, editor {:?}", self.dialect[i], n.children, got.map(|g| g.children.clone()));
-      }
-      assert_eq!(e.doc.nodes.len(), self.doc.nodes.len(), "editor {i} node count");
+          let got = e.doc.nodes.get(id);
+          assert!(
+            got.is_some_and(|g| g == n),
+            "editor {i} ({:?}) node {id}: room has children {:?}, editor {:?}",
+            self.dialect[i],
+            n.children,
+            got.map(|g| g.children.clone())
+          );
+        }
+        assert_eq!(e.doc.nodes.len(), self.doc.nodes.len(), "editor {i} node count");
         assert_eq!(e.doc.pages, self.doc.pages, "editor {i} pages");
         assert_eq!(e.doc.styles, self.doc.styles, "editor {i} styles");
         assert_eq!(e.doc.variables, self.doc.variables, "editor {i} variables");
@@ -3322,7 +3382,12 @@ mod tests {
     fn assert_sound(&self, d: &Document) {
       for n in d.nodes.values() {
         for c in &n.children {
-          assert_eq!(d.get(c).and_then(|x| x.parent.clone()).as_deref(), Some(n.id.as_str()), "child {c} of {}", n.id);
+          assert_eq!(
+            d.get(c).and_then(|x| x.parent.clone()).as_deref(),
+            Some(n.id.as_str()),
+            "child {c} of {}",
+            n.id
+          );
         }
         if let Some(p) = &n.parent {
           assert!(d.get(p).unwrap().children.contains(&n.id), "{} is listed by {p}", n.id);
@@ -3476,7 +3541,10 @@ mod tests {
       let parent = h.eds[2].doc.get(&a).unwrap().parent.clone();
       let in_frame = h.eds[2].doc.get(&frame).unwrap().children.contains(&a);
       let in_other = h.eds[2].doc.get(&other).unwrap().children.contains(&a);
-      assert_eq!((in_frame, in_other), (parent.as_deref() == Some(frame.as_str()), parent.as_deref() == Some(other.as_str())));
+      assert_eq!(
+        (in_frame, in_other),
+        (parent.as_deref() == Some(frame.as_str()), parent.as_deref() == Some(other.as_str()))
+      );
     });
   }
 
@@ -3511,7 +3579,11 @@ mod tests {
     h.eds[0].dispatch(Command::Undo).unwrap();
     h.sync(0);
     h.assert_converged();
-    assert_eq!(h.order(2, &frame), "A,C,B,T", "A is back at the start, C is still first among the rest");
+    assert_eq!(
+      h.order(2, &frame),
+      "A,C,B,T",
+      "A is back at the start, C is still first among the rest"
+    );
     // Redo brings it to the front again.
     h.eds[0].dispatch(Command::Redo).unwrap();
     h.sync(0);
@@ -3658,7 +3730,11 @@ mod tests {
       reply(&mut h.eds[1], &cid, "BEN-1", "Ben", 50.0);
       reply(&mut h.eds[2], &cid, "CAI-1", "Cai", 10.0);
       h.race(x + 1, y + 1);
-      let want = if x == 0 { ["Q1", "BEN-1", "CAI-1"] } else { ["Q1", "CAI-1", "BEN-1"] };
+      let want = if x == 0 {
+        ["Q1", "BEN-1", "CAI-1"]
+      } else {
+        ["Q1", "CAI-1", "BEN-1"]
+      };
       for i in 0..3 {
         assert_eq!(texts(&h, i, &cid), want, "editor {i}, relay order {x},{y}");
       }
@@ -3936,7 +4012,11 @@ mod tests {
         assert_eq!(h.eds[i].doc.get(&a).unwrap().fill_style, None, "editor {i}, relay order {x},{y}");
         assert!(h.eds[i].doc.styles.colors.is_empty());
       }
-      assert_eq!(colour(&h.eds[2], &a), "#FF00FF", "it keeps the colour the style gave it (if the apply came first)");
+      assert_eq!(
+        colour(&h.eds[2], &a),
+        "#FF00FF",
+        "it keeps the colour the style gave it (if the apply came first)"
+      );
     });
   }
 
@@ -3953,7 +4033,11 @@ mod tests {
   fn instance_overrides_lose_links_to_deleted_tokens_too() {
     let mut h = Hub::new(&[Lists, Lists]);
     let (ink, _) = with_variable(&mut h);
-    ai(&mut h.eds[0], "define_styles", json!({ "colors": [{ "name": "Brand", "color": "#6D4AFF" }] }));
+    ai(
+      &mut h.eds[0],
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand", "color": "#6D4AFF" }] }),
+    );
     h.sync(0);
     h.sync(1);
     let style = h.eds[0].doc.styles.colors[0].id.clone();
@@ -3981,11 +4065,18 @@ mod tests {
     h.settle();
     for i in 0..2 {
       let o = &h.eds[i].doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides;
-      assert_eq!(o["inner"]["bindings"], json!({ "stroke": null }), "editor {i}: null stays, the link goes");
+      assert_eq!(
+        o["inner"]["bindings"],
+        json!({ "stroke": null }),
+        "editor {i}: null stays, the link goes"
+      );
       assert!(o["inner"].get("fillStyle").is_none());
       assert_eq!(o["inner"]["fills"][0]["color"], "#010203", "literal values stay");
       let deep = &o["nested"]["instance"]["overrides"]["deep"];
-      assert!(deep["bindings"].as_object().unwrap().is_empty() && deep.get("strokeStyle").is_none(), "{deep}");
+      assert!(
+        deep["bindings"].as_object().unwrap().is_empty() && deep.get("strokeStyle").is_none(),
+        "{deep}"
+      );
     }
   }
 
@@ -3993,7 +4084,11 @@ mod tests {
   fn local_delete_style_clears_override_style_keys_too() {
     let mut e = engine(1);
     let id = rect(&mut e, 0.0, None);
-    ai(&mut e, "define_styles", json!({ "colors": [{ "name": "Brand", "color": "#6D4AFF" }] }));
+    ai(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand", "color": "#6D4AFF" }] }),
+    );
     let style = e.doc.styles.colors[0].id.clone();
     e.doc.get_mut(&id).unwrap().instance = Some(crate::model::InstanceInfo {
       component_id: "main".into(),
@@ -4002,13 +4097,17 @@ mod tests {
     });
     // Any command that touches the layer drops what points at nothing.
     set(&mut e, &id, json!({ "x": 3.0 }));
-    assert!(e.doc.get(&id).unwrap().instance.as_ref().unwrap().overrides["inner"].get("effectStyle").is_none());
+    assert!(e.doc.get(&id).unwrap().instance.as_ref().unwrap().overrides["inner"]
+      .get("effectStyle")
+      .is_none());
     e.dispatch(Command::DeleteStyle { id: style }).unwrap();
     let o = &e.doc.get(&id).unwrap().instance.as_ref().unwrap().overrides;
     assert!(o["inner"].as_object().unwrap().is_empty(), "{o:?}");
     // And it undoes with the delete.
     e.dispatch(Command::Undo).unwrap();
-    assert!(e.doc.get(&id).unwrap().instance.as_ref().unwrap().overrides["inner"].get("fillStyle").is_some());
+    assert!(e.doc.get(&id).unwrap().instance.as_ref().unwrap().overrides["inner"]
+      .get("fillStyle")
+      .is_some());
   }
 
   #[test]
@@ -4032,9 +4131,17 @@ mod tests {
     let before = scans();
     set(&mut h.eds[0], &a, json!({ "x": 9.0 }));
     h.sync(0);
-    ai(&mut h.eds[0], "define_variables", json!({ "collection": "Theme", "variables": [{ "name": "Ink 2", "type": "color", "value": "#000000" }] }));
+    ai(
+      &mut h.eds[0],
+      "define_variables",
+      json!({ "collection": "Theme", "variables": [{ "name": "Ink 2", "type": "color", "value": "#000000" }] }),
+    );
     h.sync(0);
-    ai(&mut h.eds[0], "define_styles", json!({ "colors": [{ "name": "S", "color": "#FF0000" }] }));
+    ai(
+      &mut h.eds[0],
+      "define_styles",
+      json!({ "colors": [{ "name": "S", "color": "#FF0000" }] }),
+    );
     h.sync(0);
     assert_eq!(scans(), before, "no token went away: no full scan, here or at the receiver");
     // Deleting one scans on the editor that deletes it and on every receiver.
@@ -4059,7 +4166,10 @@ mod tests {
     let d = h.eds[0].collab_delta();
     assert!(d["moves"][&frame].is_array() && d["commentChanges"][&cid].is_object());
     apply(&mut h.doc, &d).unwrap();
-    assert!(legacy_lists(&json!({ "nodes": {}, "removed": [] }), &h.doc, &[]).is_none(), "nothing to rewrite");
+    assert!(
+      legacy_lists(&json!({ "nodes": {}, "removed": [] }), &h.doc, &[]).is_none(),
+      "nothing to rewrite"
+    );
     let old = legacy_lists(&d, &h.doc, &[b.clone()]).unwrap();
     assert!(old.get("moves").is_none() && old.get("commentChanges").is_none());
     assert_eq!(old["patch"][&frame]["children"], json!(h.doc.get(&frame).unwrap().children));
@@ -4130,11 +4240,17 @@ mod tests {
     room.assert_converged();
     let page = room.editors[0].doc.page(&room.editors[0].page).unwrap();
     assert_eq!(page.children, [d.clone(), a.clone(), c.clone()], "the later change decides");
-    assert!(room.editors.iter().all(|e| !e.collab_lists), "a room without lists is not asked for them");
+    assert!(
+      room.editors.iter().all(|e| !e.collab_lists),
+      "a room without lists is not asked for them"
+    );
     assert!(room.editors[0].collab_delta().get("moves").is_none());
     // Their deltas carry no moves or comment changes, whatever they change.
     reorder(&mut room.editors[0], &a, ReorderTo::Back);
     let d = room.editors[0].collab_delta();
-    assert!(d.get("moves").is_none() && d.get("pageMoves").is_none() && d.get("commentChanges").is_none(), "{d}");
+    assert!(
+      d.get("moves").is_none() && d.get("pageMoves").is_none() && d.get("commentChanges").is_none(),
+      "{d}"
+    );
   }
 }

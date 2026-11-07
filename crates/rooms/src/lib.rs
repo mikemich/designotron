@@ -1509,7 +1509,9 @@ impl Rooms {
     let raw_text = others(&|p| p.lists).then(|| text_of(raw));
     // Editors that predate `lists` get whole child lists and comments, and the layers pruned.
     let older_lists = others(&|p| !p.lists);
-    let rewritten = older_lists.then(|| designotron_engine::collab::legacy_lists(&delta, doc_now, &pruned)).flatten();
+    let rewritten = older_lists
+      .then(|| designotron_engine::collab::legacy_lists(&delta, doc_now, &pruned))
+      .flatten();
     let to_raw = |v: &Value| serde_json::value::to_raw_value(v).ok();
     let rewritten_raw = rewritten.as_ref().and_then(to_raw);
     let gran_text = match &rewritten_raw {
