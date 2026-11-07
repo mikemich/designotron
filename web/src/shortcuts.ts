@@ -3,15 +3,15 @@ import { copySelection, pasteHere, pasteOverSelection, pasteReplace } from "./ca
 import { closeEmptyPrompt, dispatch, getDoc, pointerDrag, selectSibling, selection, setTool, toggleUi, toggleView, useStore, zoomBy, zoomToFit, zoomToSelection } from "./store";
 import { useShortcuts } from "./panels/ShortcutsDialog";
 import { focusedByPointer, isMac } from "./ui/controls";
+import { controlOwnsKey, isTextEntry } from "./keyTarget";
 import { canOpenCursorChat, openCursorChat } from "./follow";
 import { useCollab } from "./collab";
 import { collapseAllLayers } from "./panels/layerTree";
 import { nextOpacity, type PendingDigit } from "./opacityKeys";
 
 function isTyping(e: KeyboardEvent): boolean {
-  const t = e.target as HTMLElement | null;
   // A paste dispatched on `document` has no Element target.
-  return t instanceof Element && (t.matches("input, textarea, select") || t.isContentEditable);
+  return controlOwnsKey(e, (el) => focusedByPointer(el as EventTarget | null));
 }
 
 /** Menus and dialogs own their keys; the canvas shortcuts stay out (⌘ combos still pass). */
@@ -271,16 +271,16 @@ export function installShortcuts(): () => void {
   };
 
   const onCopy = (e: ClipboardEvent) => {
-    if (isTyping(e as unknown as KeyboardEvent)) return;
+    if (isTextEntry(e.target)) return;
     A.copyToClipboardData(e);
     copySelection();
   };
   const onCut = (e: ClipboardEvent) => {
-    if (isTyping(e as unknown as KeyboardEvent)) return;
+    if (isTextEntry(e.target)) return;
     A.cut(e);
   };
   const onPaste = (e: ClipboardEvent) => {
-    if (isTyping(e as unknown as KeyboardEvent)) return;
+    if (isTextEntry(e.target)) return;
     if (!e.clipboardData?.getData("text/plain") && !e.clipboardData?.files.length) {
       pasteHere();
       return;

@@ -24,6 +24,7 @@ import { CommentLayer } from "./Comments";
 import { Measure, SpacingGaps, trackPointer } from "./Measure";
 import { RemoteCursors, RemoteSelections } from "./RemoteCursors";
 import { PaintHandles } from "./PaintHandles";
+import { pickTouchHandle } from "./touchHandles";
 import { CropMode } from "./CropMode";
 import { FollowFrame } from "./FollowFrame";
 import { CursorChat } from "./CursorChat";
@@ -241,6 +242,8 @@ export function Canvas() {
   // The long-press menu: the latest `openLongPressMenu`, and when it last opened.
   const longPress = useRef<(x: number, y: number) => void>(() => {});
   const longPressAt = useRef(0);
+  /** What a finger at a client point grabs of the selection box (set each render, read by the pointer handlers). */
+  const touchPick = useRef<(x: number, y: number) => Handle | "rotate" | null | undefined>(() => undefined);
   /** The touch handlers' hold timer and drag abort, for the native context menu and pointercancel. */
   const holdControl = useRef<{ cancel: () => void; abort: () => void } | null>(null);
   // Alt held with nothing being dragged: show distances from the selection to the hovered layer.
@@ -481,7 +484,7 @@ export function Canvas() {
         const t = e.target as Element;
         first = { id: e.pointerId, x: e.clientX, y: e.clientY, sel: [...useStore.getState().es.selection], target: t, timer: 0 };
         // Only the drawing surface: inputs, prompts and popovers on the canvas keep the browser's menu.
-        const onCanvas = (t === el || !!t.closest?.("svg.dt-content, svg.overlay")) && !t.closest?.("[data-paint-overlay], [data-handle], [data-rotate], [data-vpt], [data-link]");
+        const onCanvas = (t === el || !!t.closest?.("svg.dt-content, svg.overlay")) && !t.closest?.("[data-paint-overlay], [data-handle], [data-rotate], [data-vpt], [data-link]") && !touchPick.current(e.clientX, e.clientY);
         const st = useStore.getState();
         if (onCanvas && st.tool === "move" && !st.editingText && !st.editingVector) {
           const at = { x: e.clientX, y: e.clientY };
@@ -774,13 +777,25 @@ export function Canvas() {
       return;
     }
 
-    const handle = target.getAttribute("data-handle") as Handle | null;
+    let handle = target.getAttribute("data-handle") as Handle | null;
+    let rotating = target.hasAttribute("data-rotate");
+    // A finger is wide: the nearest handle in a 44 px zone wins over what is under it, and the
+    // rotate ring only starts outside that zone. A mouse keeps the exact DOM target.
+    // With handles up, the pick replaces the DOM target (null: neither, so the layer moves), except on the
+    // prototype link dot, which sits beside the e handle.
+    if ((e.pointerType === "touch" || e.pointerType === "pen") && !target.closest?.("[data-link]")) {
+      const pick = touchPick.current(e.clientX, e.clientY);
+      if (pick !== undefined) {
+        handle = pick === "rotate" ? null : pick;
+        rotating = pick === "rotate";
+      }
+    }
     if (handle) {
       dispatch({ op: "beginGesture" });
       drag.current = { kind: "resize", handle, start: p, ids: [...sel], scale: tool === "scale", scaleStrokes: getScaleStrokes() };
       return;
     }
-    if (target.hasAttribute("data-rotate")) {
+    if (rotating) {
       const u = selItems.union;
       if (!u) return;
       const pivot = { x: u.x + u.width / 2, y: u.y + u.height / 2 };
@@ -1365,6 +1380,13 @@ export function Canvas() {
         ]
     : [];
   const centroid = box ? { x: (box[0].x + box[2].x) / 2, y: (box[0].y + box[2].y) / 2 } : null;
+  touchPick.current = (cx, cy) => {
+    const r = ref.current?.getBoundingClientRect();
+    if (!r || !box || !showHandles || isLine || editingVector) return undefined;
+    return pickTouchHandle<Handle>({ x: cx - r.left, y: cy - r.top }, handlePts, box);
+  };
+  // Handles are bigger under a finger.
+  const handleSize = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches ? 10 : 8;
   const sizeLabel = selItems.union ? `${round(single ? single.width : selItems.union.width)} × ${round(single ? single.height : selItems.union.height)}` : "";
   const bottomMid = box ? [...box].sort((a, b) => b.y - a.y).slice(0, 2).reduce((a, b) => mid(a, b)) : null;
 
@@ -1493,7 +1515,7 @@ export function Canvas() {
           })}
         {showHandles &&
           handlePts.map(({ h, p }) => (
-            <rect key={h} data-handle={h} className="handle" x={p.x - 4} y={p.y - 4} width={8} height={8} fill="white" stroke="#0d99ff" strokeWidth={1} style={{ cursor: HANDLE_CURSORS[h] }} />
+            <rect key={h} data-handle={h} className="handle" x={p.x - handleSize / 2} y={p.y - handleSize / 2} width={handleSize} height={handleSize} fill="white" stroke="#0d99ff" strokeWidth={1} style={{ cursor: HANDLE_CURSORS[h] }} />
           ))}
         {showHandles && bottomMid && !measuring && (
           <g transform={`translate(${bottomMid.x} ${bottomMid.y + 16})`}>

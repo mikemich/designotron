@@ -262,17 +262,17 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "create_nodes",
-      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), svg (whole SVG markup as editable layers), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). Top-level layers without x and y go to (0, 0) when that is free, else to the right of the page's content. Returns ids for the created layers.",
+      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), svg (whole SVG markup as editable layers), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). A `type: image` layer is a rectangle with an image fill (give imageUrl or src). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). Top-level layers without x and y go to (0, 0) when that is free, else to the right of the page's content. Returns ids for the created layers.",
       "input_schema": { "type": "object", "properties": { "parentId": { "type": "string" }, "nodes": { "type": "array", "items": spec } }, "required": ["nodes"] }
     },
     {
       "name": "update_nodes",
-      "description": "Change properties of existing layers. Each update is {id, ...any create_nodes property except children}. Use 'patch' for raw model fields. Sizes are 0 to 100000 px and min must not exceed max; the whole call is refused if one update is invalid. Setting new `text` on a mixed-style text layer gives all of it the first character's style (like typing over a selection in Figma); pass `spans` to style parts of it. `svg` is only read by create_nodes.",
+      "description": "Change properties of existing layers. Each update is {id, ...any create_nodes property except children}. Use 'patch' for raw model fields. On an instance, `componentId` swaps it to another main component like the editor's swap (layers with the same name path keep their overrides; one undo step; the result lists `swapped`); pass a variant's id, not a component set's. Changing the fill, stroke, effects or grids of a layer that links a style detaches that style (values kept) and the result warns; a typography variable (bind) also replaces a text style (warns too), while a plain typography value (fontSize, fontWeight, ...) keeps the text style link (textStyle: null detaches it). Sizes are 0 to 100000 px and min must not exceed max; the whole call is refused if one update is invalid. Setting new `text` on a mixed-style text layer gives all of it the first character's style (like typing over a selection in Figma); pass `spans` to style parts of it. `svg` is only read by create_nodes.",
       "input_schema": { "type": "object", "properties": { "updates": { "type": "array", "items": update_item } }, "required": ["updates"] }
     },
     {
       "name": "delete_nodes",
-      "description": "Delete layers. Deleting a main component leaves its instances in place; the result reports how many as instancesDetached.",
+      "description": "Delete layers. Deleting a main component leaves its instances in place; they keep their look and can rebuild the main (Restore main component); the result reports how many as instancesKept, with a note.",
       "input_schema": { "type": "object", "properties": { "ids": { "type": "array", "items": { "type": "string" } } }, "required": ["ids"] }
     },
     {
@@ -282,7 +282,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "arrange",
-      "description": "Structural actions on layers: group, ungroup, frame, duplicate, create_component (turns each selected layer into its own main component, so several ids make several components; to make ONE component from several layers, `frame` them first, then create_component the frame; use it for anything that repeats, then place instances), combine_variants (merges components that are states of one control into one component set; name them 'State=Default', 'State=Error' or 'Input/Default', 'Input/Error' first, then rename the resulting set), detach_instance, add_auto_layout, remove_auto_layout, bring_to_front, send_to_back, align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal, distribute_vertical, union, subtract (bottom layer minus the rest), intersect, exclude, flatten (union, subtract, intersect, exclude and flatten combine shapes: a frame, component or instance with layers inside is refused; select the shapes inside it, or ungroup it first), outline_stroke, mask (bottom layer masks the others).",
+      "description": "Structural actions on layers: group, ungroup, frame, duplicate, create_component (turns each selected layer into its own main component, so several ids make several components; to make ONE component from several layers, `frame` them first, then create_component the frame; use it for anything that repeats, then place instances), combine_variants (merges components that are states of one control into one component set; name them 'State=Default', 'State=Error' first so the property is called State, or 'Input/State=Default', 'Input/State=Error' to name the set Input too; 'Chip/Default' and 'Chip/Selected' give a set Chip with a property called Property 1, as in Figma, and the result says so), detach_instance, add_auto_layout, remove_auto_layout, bring_to_front, send_to_back, align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal, distribute_vertical, union, subtract (bottom layer minus the rest), intersect, exclude, flatten (union, subtract, intersect, exclude and flatten combine shapes: a frame, component or instance with layers inside is refused; select the shapes inside it, or ungroup it first), outline_stroke, mask (bottom layer masks the others).",
       "input_schema": { "type": "object", "properties": { "action": { "type": "string", "enum": ARRANGE_ACTIONS }, "ids": { "type": "array", "items": { "type": "string" } } }, "required": ["action", "ids"] }
     },
     {
@@ -292,7 +292,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "set_component_props",
-      "description": "Component properties, like Figma's: define Boolean (hides/shows a layer), Text (a text layer's characters) and Instance swap (which component a nested instance is) properties on a main component or component set, bind its layers to them, and set values on instances. `ops` run in order as one undo step: {op:'add', component, name, kind:'boolean'|'text'|'instanceSwap', default?, bind?:layerId} (bind makes it from that layer of the main component and starts from its state; instance swap needs a default component id); {op:'update', component, prop, name?, default?, options?:[componentId]} (a new default changes the bound layers of the main component); {op:'delete', component, prop}; {op:'bind', node:layerId, field:'visible'|'characters'|'swap', prop|null}; {op:'set', instance, prop, value|null} (null restores the main component's value; swap takes a component id); {op:'expose', instance, expose:boolean} (an instance inside a main component shows its properties on instances of the outer component). `component` is a main component or set id (a variant's properties are its set's); `prop` is a property id or name. Properties show in get_nodes (`component.props`, `propRefs` on layers, `componentProps` on components and instances) and become React props in code export.",
+      "description": "Component properties, like Figma's: define Boolean (hides/shows a layer), Text (a text layer's characters) and Instance swap (which component a nested instance is) properties on a main component or component set, bind its layers to them, and set values on instances (a value for a property no layer uses is kept but reported as `unused`). `ops` run in order as one undo step: {op:'add', component, name, kind:'boolean'|'text'|'instanceSwap', default?, bind?:layerId} (bind makes it from that layer of the main component and starts from its state; instance swap needs a default component id); {op:'update', component, prop, name?, default?, options?:[componentId]} (a new default changes the bound layers of the main component); {op:'delete', component, prop}; {op:'bind', node:layerId, field:'visible'|'characters'|'swap', prop|null}; {op:'set', instance, prop, value|null} (null restores the main component's value; swap takes a component id); {op:'expose', instance, expose:boolean} (an instance inside a main component shows its properties on instances of the outer component). `component` is a main component or set id (a variant's properties are its set's); `prop` is a property id or name. Properties show in get_nodes (`component.props`, `propRefs` on layers, `componentProps` on components and instances) and become React props in code export.",
       "input_schema": { "type": "object", "properties": { "ops": { "type": "array", "items": { "type": "object", "properties": { "op": { "type": "string", "enum": ["add", "update", "delete", "bind", "set", "expose"] } }, "required": ["op"] } } }, "required": ["ops"] }
     },
     {
@@ -342,7 +342,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "define_variables",
-      "description": "Create or update a variable collection with modes and colour/number/string/boolean variables. For a theme or dark mode, use modes [\"Light\", \"Dark\"] and give each colour `values` {Light, Dark}. Bind layer properties with bind: {fill: 'Theme/Background', cornerRadius: 'Radius/md'} in create_nodes/update_nodes (bindable: fill, stroke, cornerRadius, gap, counterGap, padding, paddingTop/Right/Bottom/Left, opacity, width, height, strokeWeight, fontSize, fontFamily, fontWeight, lineHeight, letterSpacing, paragraphSpacing, characters, visible); switch a frame (and its children) to a mode with variableModes: {Theme: 'Dark'}, e.g. on a duplicate of a screen, instead of recolouring it. Bound variables become CSS variables in exported code. A name may appear once per call. An existing variable is updated in place (a missing `type` keeps its type; a different type is refused, delete it first). To rename or delete, pass `rename: [{from, to}]` / `delete: [names]` for variables, `renameModes` / `deleteModes` for modes, `renameCollection: \"New\"` or `deleteCollection: true` for the collection itself: they run before `variables`, as one undo step, renames keep every binding and alias (they follow the id), and deleting a used variable unbinds its layers (they keep their current value) and the result says how many (`unbound`). A call that renames or deletes returns an object {renamed, deleted, unbound, note?, collections} instead of the plain list of collections. Deleting a mode drops its values and unpins frames set to it.",
+      "description": "Create or update a variable collection with modes and colour/number/string/boolean variables. For a theme or dark mode, use modes [\"Light\", \"Dark\"] and give each colour `values` {Light, Dark}. Bind layer properties with bind: {fill: 'Theme/Background', cornerRadius: 'Radius/md'} in create_nodes/update_nodes (bindable: fill, stroke, cornerRadius, gap, counterGap, padding, paddingTop/Right/Bottom/Left, opacity, width, height, strokeWeight, fontSize, fontFamily, fontWeight, lineHeight, letterSpacing, paragraphSpacing, characters, visible); switch a frame (and its children) to a mode with variableModes: {Theme: 'Dark'}, e.g. on a duplicate of a screen, instead of recolouring it. Bound variables become CSS variables in exported code. A name may appear once per call. An existing variable is updated in place (a missing `type` keeps its type; a different type is refused, delete it first). To rename or delete, pass `rename: [{from, to}]` / `delete: [names]` for variables, `renameModes` / `deleteModes` for modes, `renameCollection: \"New\"` or `deleteCollection: true` for the collection itself: they run before `variables`, as one undo step, renames keep every binding and alias (they follow the id), and deleting a used variable unbinds its layers (they keep their current value) and the result says how many (`unbound`). The result lists only the collection the call touched, {collections: [...], others: <how many other collections exist>}; a call that renames or deletes adds {renamed, deleted, unbound, note?}. Deleting a mode drops its values and unpins frames set to it.",
       "input_schema": { "type": "object", "properties": {
         "collection": { "type": "string" },
         "rename": { "type": "array", "description": "Rename variables of this collection: [{from, to}] (names or ids)", "items": { "type": "object", "properties": { "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["from", "to"] } },
@@ -395,7 +395,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "fix_issues",
-      "description": "Apply the automatic fixes from lint_design. Pass `kinds` to limit which kinds are fixed (e.g. [\"lowContrast\"]).",
+      "description": "Apply the automatic fixes from lint_design. Pass `kinds` to limit which kinds are fixed (e.g. [\"lowContrast\"]). Colours bound to variables or linked to styles are never changed automatically; they come back in `skipped` with the reason.",
       "input_schema": { "type": "object", "properties": { "kinds": { "type": "array", "items": { "type": "string" } } } }
     },
     {
@@ -518,7 +518,7 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
     summary_note.insert("deleted".into(), json!({ "collection": c.name, "variables": c.variables.len() }));
     let (layers, aliases) = deletion_impact(e, &all, &gone);
     e.dispatch_inner(Command::SetVariables { collections: all })?;
-    return Ok(editing_result(e, summary_note, layers, aliases));
+    return Ok(editing_result(e, summary_note, layers, aliases, &[name]));
   }
   let idx = match existing {
     Some(i) => i,
@@ -748,7 +748,7 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
   }
   if !editing {
     e.dispatch_inner(Command::SetVariables { collections: all })?;
-    return Ok(crate::variables::summary(&e.doc));
+    return Ok(touched_collections(e, &[name]));
   }
   let (layers, aliases) = deletion_impact(e, &all, &gone);
   if !renamed.is_empty() {
@@ -765,7 +765,19 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
     summary_note.insert("deleted".into(), Value::Object(del));
   }
   e.dispatch_inner(Command::SetVariables { collections: all })?;
-  Ok(editing_result(e, summary_note, layers, aliases))
+  let new_name = rename_coll.as_deref().unwrap_or(name);
+  Ok(editing_result(e, summary_note, layers, aliases, &[name, new_name]))
+}
+
+/// `{collections, others}`: only the collections a define_variables call touched, and how many
+/// others the file has (read them with get_document).
+fn touched_collections(e: &Engine, names: &[&str]) -> Value {
+  let all = crate::variables::summary(&e.doc);
+  let all = all.as_array().cloned().unwrap_or_default();
+  let (mine, rest): (Vec<Value>, Vec<Value>) = all
+    .into_iter()
+    .partition(|c| names.iter().any(|n| c["name"] == *n || c["id"] == *n));
+  json!({ "collections": mine, "others": rest.len() })
 }
 
 /// Layers bound to deleted variables, and aliases of them in variables that stay.
@@ -789,7 +801,7 @@ fn deletion_impact(e: &Engine, remaining: &[crate::variables::Collection], gone:
 }
 
 /// The result of a define_variables call that renamed or deleted: what changed, what it left behind.
-fn editing_result(e: &Engine, mut note: serde_json::Map<String, Value>, layers: usize, aliases: usize) -> Value {
+fn editing_result(e: &Engine, mut note: serde_json::Map<String, Value>, layers: usize, aliases: usize, touched: &[&str]) -> Value {
   note.insert("unbound".into(), json!(layers));
   if layers > 0 || aliases > 0 {
     let mut parts = Vec::new();
@@ -804,7 +816,9 @@ fn editing_result(e: &Engine, mut note: serde_json::Map<String, Value>, layers: 
     }
     note.insert("note".into(), json!(parts.join("; ")));
   }
-  note.insert("collections".into(), crate::variables::summary(&e.doc));
+  if let Value::Object(t) = touched_collections(e, touched) {
+    note.extend(t);
+  }
   Value::Object(note)
 }
 
@@ -1124,7 +1138,7 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         .filter(|id| e.doc.get(id).is_some_and(|n| n.kind == NodeType::Component))
         .collect();
       ops::delete(&mut e.doc, &found);
-      let detached = e
+      let kept = e
         .doc
         .nodes
         .values()
@@ -1137,8 +1151,14 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         })
         .count();
       let mut r = json!({ "deleted": found });
-      if detached > 0 {
-        r["instancesDetached"] = json!(detached);
+      if kept > 0 {
+        r["instancesKept"] = json!(kept);
+        r["note"] = json!(format!(
+          "{kept} instance{} keep{} {} look and can rebuild the main (Restore main component)",
+          if kept == 1 { "" } else { "s" },
+          if kept == 1 { "s" } else { "" },
+          if kept == 1 { "its" } else { "their" }
+        ));
       }
       if !missing.is_empty() {
         r["notFound"] = json!(missing);
@@ -1222,22 +1242,34 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       None,
       input.get("includeResolved").and_then(|v| v.as_bool()).unwrap_or(false),
     )),
-    "reply_comment" => e.dispatch_inner(Command::ReplyComment {
-      id: input.get("id").and_then(|v| v.as_str()).ok_or("id is required")?.to_string(),
-      text: input.get("text").and_then(|v| v.as_str()).ok_or("text is required")?.to_string(),
-      // The editor stamps the author (a plugin's replies say "<person> via <plugin>"); at most 80 characters.
-      author: input
-        .get("author")
-        .and_then(|v| v.as_str())
-        .map(|a| a.trim().chars().take(80).collect::<String>())
-        .filter(|a| !a.is_empty())
-        .unwrap_or_else(|| "Claude".into()),
-      time: input.get("time").and_then(|v| v.as_f64()).unwrap_or(0.0),
-    }),
-    "resolve_comment" => e.dispatch_inner(Command::ResolveComment {
-      id: input.get("id").and_then(|v| v.as_str()).ok_or("id is required")?.to_string(),
-      resolved: input.get("resolved").and_then(|v| v.as_bool()).unwrap_or(true),
-    }),
+    "reply_comment" => {
+      let id = input.get("id").and_then(|v| v.as_str()).ok_or("id is required")?.to_string();
+      e.dispatch_inner(Command::ReplyComment {
+        id: id.clone(),
+        text: input.get("text").and_then(|v| v.as_str()).ok_or("text is required")?.to_string(),
+        // The editor stamps the author (a plugin's replies say "<person> via <plugin>"); at most 80 characters.
+        author: input
+          .get("author")
+          .and_then(|v| v.as_str())
+          .map(|a| a.trim().chars().take(80).collect::<String>())
+          .filter(|a| !a.is_empty())
+          .unwrap_or_else(|| "Claude".into()),
+        time: input.get("time").and_then(|v| v.as_f64()).unwrap_or(0.0),
+      })?;
+      Ok(comment_state(e, &id))
+    }
+    "resolve_comment" => {
+      let id = input.get("id").and_then(|v| v.as_str()).ok_or("id is required")?.to_string();
+      e.dispatch_inner(Command::ResolveComment {
+        id: id.clone(),
+        resolved: input.get("resolved").and_then(|v| v.as_bool()).unwrap_or(true),
+      })?;
+      let mut r = comment_state(e, &id);
+      if let Value::Object(m) = &mut r {
+        m.remove("replies");
+      }
+      Ok(r)
+    }
     "define_styles" => define_styles(e, input),
     "pages" => {
       let id = input.get("id").and_then(|v| v.as_str()).map(String::from);
@@ -1335,7 +1367,21 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         }
         crate::layout::relayout_all(&mut e.doc, e.measurer.as_ref());
       }
-      Ok(json!({ "fixed": fixed }))
+      // What is still wrong and has no automatic fix (bound or linked colours, ...). Names alone
+      // (`defaultName`) never have one, so they aren't listed.
+      let skipped: Vec<Value> = crate::lint::lint_page(&e.doc, &page, e.measurer())
+        .into_iter()
+        .filter(|i| kinds.is_empty() || kinds.iter().any(|k| k == i.kind))
+        .filter(|i| i.fix.is_none() && i.kind != "defaultName")
+        .map(|i| json!({ "id": i.node_id, "kind": i.kind, "reason": i.message }))
+        .collect();
+      let mut r = json!({ "fixed": fixed });
+      if !skipped.is_empty() {
+        // A big page can have hundreds: list the first 50 and count them all.
+        r["skippedCount"] = json!(skipped.len());
+        r["skipped"] = json!(skipped.iter().take(50).collect::<Vec<_>>());
+      }
+      Ok(r)
     }
     "search_photos" | "place_photo" => Err(photos::NEEDS_EDITOR.to_string()),
     t if BROWSER_TOOLS.contains(&t) => Err(format!("{t} needs the Designotron editor open in a browser")),
@@ -1469,6 +1515,21 @@ fn arrange(e: &mut Engine, input: &Value) -> Result<Value, String> {
     }
   };
   let mut r = e.dispatch_inner(cmd)?;
+  if action == "combine_variants" {
+    // Names built from slashes or plain words get Figma's generated "Property 1"; say how to choose.
+    let generated = r["id"].as_str().and_then(|id| e.doc.get(id)).is_some_and(|set| {
+      set.children.iter().filter_map(|c| e.doc.get(c)).any(|v| {
+        v.component.as_ref().is_some_and(|c| {
+          c.variant_props
+            .keys()
+            .any(|k| k.strip_prefix("Property ").is_some_and(|n| n.parse::<u32>().is_ok()))
+        })
+      })
+    });
+    if generated {
+      r["note"] = json!("Property names were generated (Property 1); name components 'Set/Prop=Value' to choose them");
+    }
+  }
   if let Value::Object(m) = &mut r {
     m.insert("selection".into(), json!(e.selection));
     if !missing.is_empty() {
@@ -1489,6 +1550,7 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
     .ok_or("updates must be an array of {id, ...} objects")?;
   let mut cx = Ctx::new();
   let mut done = Vec::new();
+  let mut swapped: Vec<Value> = Vec::new();
   for (i, u) in updates.iter().enumerate() {
     let mark = cx.enter(&format!("updates[{i}]"));
     if !u.is_object() {
@@ -1524,6 +1586,7 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
         m.remove("y");
       }
     }
+    let swap_to = swap_target(&mut cx, &e.doc, &before, u)?;
     let mut after = before.clone();
     apply_spec(&mut cx, &e.doc, &mut after, &spec, false)?;
     if let Some(p) = u.get("patch") {
@@ -1609,15 +1672,171 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
       })
       .map_err(|m| cx.err("device", m))?;
     }
+    // The swap itself changes the style links (the new main has its own): judge only the edit.
+    let edited = e.doc.get(id).cloned();
+    if let Some(to) = swap_to {
+      let from = before.instance.as_ref().map(|i| i.component_id.clone()).unwrap_or_default();
+      e.dispatch_inner(Command::SwapComponent {
+        id: id.to_string(),
+        component_id: to.clone(),
+      })?;
+      swapped.push(json!({ "id": id, "from": from, "to": to }));
+    }
+    if let Some(now) = edited.as_ref() {
+      for w in detached_styles(&e.doc, &before, now, u) {
+        cx.warn(format!("{id}: {w}"));
+      }
+    }
     done.push(id.to_string());
     cx.leave(mark);
   }
   let mut r = json!({ "updated": done });
+  if !swapped.is_empty() {
+    r["swapped"] = json!(swapped);
+  }
   let warnings = cx.into_warnings();
   if !warnings.is_empty() {
     r["warnings"] = json!(warnings);
   }
   Ok(r)
+}
+
+/// Style links a layer had that an update dropped without the spec asking (a style can't keep
+/// driving a property that was edited), as warnings. The values stay.
+fn detached_styles(doc: &Document, before: &Node, now: &Node, spec: &Value) -> Vec<String> {
+  let mut out = Vec::new();
+  let mut check =
+    |what: &str, key: &str, was: &Option<String>, is: &Option<String>, name: &dyn Fn(&str) -> Option<String>, cause: String| {
+      // A spec that names the key (a style, or null) already says what it wants.
+      if spec.get(key).is_some() {
+        return;
+      }
+      if let Some(id) = was.as_ref().filter(|w| Some(*w) != is.as_ref()) {
+        let label = name(id).unwrap_or_else(|| id.clone());
+        out.push(format!("{what} style '{label}' detached ({cause} changed); values kept"));
+      }
+    };
+  let text_cause = {
+    let field = |n: &Node| n.text.as_ref().and_then(|t| serde_json::to_value(t).ok()).unwrap_or(Value::Null);
+    let (was, is) = (field(before), field(now));
+    let mut keys: Vec<String> = crate::engine::TEXT_STYLE_PROPS
+      .iter()
+      .filter(|k| was.get(**k) != is.get(**k))
+      .map(|k| k.to_string())
+      .collect();
+    if let Some(b) = spec.get("bind").and_then(|b| b.as_object()) {
+      keys.extend(b.keys().filter(|k| crate::engine::TEXT_STYLE_PROPS.contains(&k.as_str())).cloned());
+    }
+    keys.sort();
+    keys.dedup();
+    if keys.is_empty() {
+      "text".to_string()
+    } else {
+      keys.join(", ")
+    }
+  };
+  check(
+    "text",
+    "textStyle",
+    &before.text_style,
+    &now.text_style,
+    &|id| doc.styles.texts.iter().find(|s| s.id == id).map(|s| s.name.clone()),
+    text_cause,
+  );
+  check(
+    "fill",
+    "fillStyle",
+    &before.fill_style,
+    &now.fill_style,
+    &|id| doc.styles.colors.iter().find(|s| s.id == id).map(|s| s.name.clone()),
+    "fill".into(),
+  );
+  check(
+    "stroke",
+    "strokeStyle",
+    &before.stroke_style,
+    &now.stroke_style,
+    &|id| doc.styles.colors.iter().find(|s| s.id == id).map(|s| s.name.clone()),
+    "stroke".into(),
+  );
+  check(
+    "effect",
+    "effectStyle",
+    &before.effect_style,
+    &now.effect_style,
+    &|id| doc.styles.effects.iter().find(|s| s.id == id).map(|s| s.name.clone()),
+    "effects".into(),
+  );
+  check(
+    "grid",
+    "gridStyle",
+    &before.grid_style,
+    &now.grid_style,
+    &|id| doc.styles.grids.iter().find(|s| s.id == id).map(|s| s.name.clone()),
+    "layout grids".into(),
+  );
+  out
+}
+
+/// `componentId` in an update: the main component to swap an instance to (like the editor's
+/// swap), after checks that the swap can happen. `None` when there is nothing to swap.
+fn swap_target(cx: &mut Ctx, doc: &Document, before: &Node, spec: &Value) -> Result<Option<NodeId>, String> {
+  let Some(v) = spec.get("componentId").filter(|v| !v.is_null()) else {
+    return Ok(None);
+  };
+  let Some(info) = before.instance.as_ref() else {
+    cx.warn("componentId only swaps instances; ignored");
+    return Ok(None);
+  };
+  let to = parse::string(cx, "componentId", v)?;
+  match doc.get(&to) {
+    Some(c) if c.kind == NodeType::Component => {}
+    Some(c) if c.kind == NodeType::ComponentSet => {
+      let variants: Vec<String> = c
+        .children
+        .iter()
+        .filter_map(|v| doc.get(v))
+        .map(|v| format!("{} ({})", v.id, v.name))
+        .collect();
+      return Err(cx.err(
+        "componentId",
+        format!("{to} is a component set; swap to one of its variants: {}", variants.join(", ")),
+      ));
+    }
+    Some(c) => {
+      return Err(cx.err(
+        "componentId",
+        format!(
+          "{to} is a {}, not a main component (find them with find_nodes type component)",
+          c.kind.label()
+        ),
+      ))
+    }
+    None => {
+      return Err(cx.err(
+        "componentId",
+        format!("no component {to}; find components with find_nodes type component"),
+      ))
+    }
+  }
+  if to == info.component_id {
+    return Ok(None);
+  }
+  let name = |id: &str| doc.get(id).map(|c| c.name.clone()).unwrap_or_default();
+  let host = crate::components::enclosing_component(doc, &before.id);
+  // (`swap_component` does nothing for a layer inside an instance when the new main contains the
+  // outer instance's own main.)
+  let recursive = before.master_id.as_ref().is_some_and(|k| doc.is_ancestor(&to, k));
+  if to == before.id || recursive || doc.is_ancestor(&to, &before.id) || crate::components::would_nest(doc, &to, &host) {
+    return Err(cx.err(
+      "componentId",
+      format!(
+        "can't swap to {}: it contains, or is used inside, the component this instance lives in",
+        name(&to)
+      ),
+    ));
+  }
+  Ok(Some(to))
 }
 
 /// New padding given to a device frame is the content's: its safe area goes on top again.
@@ -1940,7 +2159,17 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
     overlay,
     preserve_scroll,
   });
-  let mut r = json!({ "ok": true });
+  let mut echo = json!({ "trigger": trigger, "action": action });
+  if let Some(d) = n.interactions.last().and_then(|i| i.destination.as_ref()) {
+    echo["destinationId"] = json!(d);
+  }
+  if let Some(u) = n.interactions.last().and_then(|i| i.url.as_ref()) {
+    echo["url"] = json!(u);
+  }
+  if matches!(action, Action::Navigate | Action::OpenOverlay | Action::SwapOverlay) {
+    echo["transition"] = json!(transition);
+  }
+  let mut r = json!({ "ok": true, "interaction": echo });
   if !replaced.is_empty() {
     r["replaced"] = json!(replaced
       .iter()
@@ -2273,7 +2502,7 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
       }
       None => {
         if effects.is_empty() {
-          return Err(cx.err("", "give a shadow, blur or backgroundBlur"));
+          return Err(cx.err("", "give shadow {x, y, blur, spread, color}, blur or backgroundBlur"));
         }
         let id = e.gen.next("s_");
         e.doc.styles_mut().effects.push(EffectStyle {
@@ -2601,7 +2830,9 @@ pub fn summary(e: &Engine, depth: usize) -> Value {
       v["moreLayers"] = json!(left_out);
     }
     v["truncated"] = json!(format!(
-      "the outline lists about {OUTLINE_CAP} layers, level by level; layers with children left out show childCount; use get_nodes or find_nodes for the rest"
+      "listed {} of {} layers on this page (outline cap ~{OUTLINE_CAP}, so a larger depth lists no more); layers with children left out show childCount; use get_nodes or find_nodes for the rest",
+      included.len(),
+      e.doc.page_nodes(&e.page).len()
     ));
   }
   v
@@ -3308,15 +3539,15 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
               cx.warn(format!("{prop} ignored: bind.{prop} sets it"));
             }
             n.bindings.insert(prop.clone(), name.clone());
-            // A bound typography property lets go of the text style (values stay) unless the
-            // same spec links one.
+            // A bound typography property lets go of the text style (values stay): a style and a
+            // variable can't both drive a layer. (A spec that names a style too is judged in
+            // `apply_text`, which warns.)
             let style_sets = n
               .text_style
               .as_ref()
               .and_then(|id| doc.styles.texts.iter().find(|t| &t.id == id))
               .is_none_or(|t| t.sets(prop));
-            if crate::engine::TEXT_STYLE_PROPS.contains(&prop.as_str()) && style_sets && !s.get("textStyle").is_some_and(|v| v.is_string())
-            {
+            if crate::engine::TEXT_STYLE_PROPS.contains(&prop.as_str()) && style_sets {
               n.text_style = None;
             }
           }
@@ -3390,10 +3621,10 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
     None
   };
   if let Some(key) = fill_key {
-    n.fills = parse_fills(&s[key]).map_err(|e| cx.err(key, e))?;
+    n.fills = parse_fills(&s[key]).map_err(|e| cx.err(key, colour_hint(doc, e, "fill")))?;
   }
   if let Some(f) = s.get("fills") {
-    n.fills = parse_fills(f).map_err(|e| cx.err("fills", e))?;
+    n.fills = parse_fills(f).map_err(|e| cx.err("fills", colour_hint(doc, e, "fill")))?;
   }
   if let Some(url) = s.get("imageUrl").or(s.get("src")).and_then(|v| v.as_str()) {
     parse::image_url(cx, if s.get("imageUrl").is_some() { "imageUrl" } else { "src" }, url)?;
@@ -3427,7 +3658,7 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
   }
   let mut stroked = false;
   if let Some(st) = s.get("stroke") {
-    n.strokes = parse_fills(st).map_err(|e| cx.err("stroke", e))?;
+    n.strokes = parse_fills(st).map_err(|e| cx.err("stroke", colour_hint(doc, e, "stroke")))?;
     stroked = true;
   }
   match s.get("strokeStyle") {
@@ -3765,14 +3996,30 @@ fn apply_text(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creating: b
       let st = find_text_style(cx, doc, "textStyle", name)?;
       let t = n.text.get_or_insert_with(Default::default);
       st.apply_to(t);
-      n.text_style = Some(st.id.clone());
-      // One source per property: the style replaces typography bindings the layer had, unless
-      // this same spec binds them (update_nodes then unbinds the others through BindVariable).
+      // One source per property: a variable this same spec binds wins over the style, which then
+      // links nothing (values kept). Otherwise the style replaces the typography bindings the
+      // layer had (update_nodes then unbinds them through BindVariable).
       let binds = |p: &str| s.get("bind").and_then(|b| b.get(p)).is_some_and(|v| !v.is_null());
-      for p in crate::engine::TEXT_STYLE_PROPS {
-        if st.sets(p) && !binds(p) {
-          n.bindings.remove(p);
+      let clash: Vec<&str> = crate::engine::TEXT_STYLE_PROPS
+        .iter()
+        .copied()
+        .filter(|p| st.sets(p) && binds(p))
+        .collect();
+      if clash.is_empty() {
+        n.text_style = Some(st.id.clone());
+        for p in crate::engine::TEXT_STYLE_PROPS {
+          if st.sets(p) {
+            n.bindings.remove(p);
+          }
         }
+      } else {
+        n.text_style = None;
+        cx.warn(format!(
+          "textStyle '{}' not linked: bind.{} drives the {} (a text style and a typography variable can't both drive a layer)",
+          st.name,
+          clash.join(", bind."),
+          clash.join(", ")
+        ));
       }
     }
     Some(other) => {
@@ -4164,6 +4411,29 @@ fn check_paint_sources(paints: &[Paint]) -> Result<(), String> {
     }
   }
   Ok(())
+}
+
+/// `{id, replies, resolved}` of a comment thread, read after a command changed it.
+fn comment_state(e: &Engine, id: &str) -> Value {
+  match e.doc.comments.get(id) {
+    Some(c) => json!({ "id": id, "replies": c.messages.len().saturating_sub(1), "resolved": c.resolved }),
+    None => json!({ "id": id }),
+  }
+}
+
+/// An "unrecognised colour 'Theme/Background'" error that names a variable or a colour style of
+/// the file says how to use it (`prop` is `fill` or `stroke`).
+fn colour_hint(doc: &Document, err: String, prop: &str) -> String {
+  let Some(name) = err.strip_prefix("unrecognised colour '").and_then(|r| r.strip_suffix('\'')) else {
+    return err;
+  };
+  if crate::variables::find(doc, name).is_some() {
+    return format!("{err}; '{name}' is a variable: use bind: {{{prop}: '{name}'}}");
+  }
+  if doc.styles.colors.iter().any(|c| c.name.eq_ignore_ascii_case(name) || c.id == name) {
+    return format!("{err}; '{name}' is a colour style: use {prop}Style: '{name}'");
+  }
+  err
 }
 
 /// Parses `fill` values: hex, CSS gradients, paint objects, arrays, or "none".

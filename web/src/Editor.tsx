@@ -793,6 +793,16 @@ function EditorInner({ fileId, onHome }: { fileId: string; onHome: () => void })
     };
 
     saveHook.flush = flush;
+    // Claude's edits (a tool call changed the document) don't wait for the typing debounce: the
+    // save starts on the next tick, or right after the one that is running.
+    saveHook.soon = () => {
+      if (closed || stale || tabRef.current.view || retry || !useStore.getState().dirty) return;
+      cancelTimers();
+      pendingSince ??= Date.now();
+      setTimeout(() => {
+        if (!closed) void flush();
+      }, 0);
+    };
     const off = onDocChange(() => {
       // Selection and page changes move the revision but not the document.
       const rev = docRev();
@@ -897,7 +907,10 @@ function EditorInner({ fileId, onHome }: { fileId: string; onHome: () => void })
         closing.set(fileId, writing);
       }
       closed = true;
-      if (saveHook.flush === flush) saveHook.flush = null;
+      if (saveHook.flush === flush) {
+        saveHook.flush = null;
+        saveHook.soon = null;
+      }
       tabs?.close();
     };
   }, [ready, fileId]);

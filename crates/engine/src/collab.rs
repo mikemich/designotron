@@ -756,9 +756,15 @@ fn clean_override(o: &mut Value, live: &Live) {
   let Some(obj) = o.as_object_mut() else { return };
   if let Some(Value::Object(b)) = obj.get_mut("bindings") {
     b.retain(|_, v| v.as_str().is_none_or(|s| live.vars.contains(s)));
+    if b.is_empty() {
+      obj.remove("bindings");
+    }
   }
   if let Some(Value::Object(m)) = obj.get_mut("variableModes") {
     m.retain(|c, v| v.as_str().is_none_or(|mode| live.mode_ok(c, mode)));
+    if m.is_empty() {
+      obj.remove("variableModes");
+    }
   }
   for k in STYLE_KEYS {
     if obj.get(k).and_then(|v| v.as_str()).is_some_and(|s| !live.style_ok(k, s)) {
@@ -768,6 +774,7 @@ fn clean_override(o: &mut Value, live: &Live) {
   if let Some(Value::Object(swap)) = obj.get_mut(crate::components::SWAP_KEY) {
     if let Some(Value::Object(inner)) = swap.get_mut("overrides") {
       inner.values_mut().for_each(|o| clean_override(o, live));
+      inner.retain(|_, o| o.as_object().is_none_or(|m| !m.is_empty()));
     }
   }
 }
@@ -835,6 +842,7 @@ pub fn prune_refs(doc: &mut Document, scope: Scope) -> Vec<NodeId> {
     }
     if let Some(info) = n.instance.as_mut() {
       info.overrides.values_mut().for_each(|o| clean_override(o, &live));
+      info.overrides.retain(|_, o| o.as_object().is_none_or(|m| !m.is_empty()));
     }
   }
   stale.sort();
@@ -4402,7 +4410,7 @@ mod tests {
     for i in 0..2 {
       let o = &h.eds[i].doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides;
       assert!(o["inner"].get("textStyle").is_none(), "editor {i}");
-      assert!(o["inner"]["variableModes"].as_object().unwrap().is_empty(), "editor {i}");
+      assert!(o["inner"].get("variableModes").is_none(), "editor {i}");
       assert_eq!(o["inner"]["bindings"]["fill"], json!(ink));
     }
     h.assert_converged();
@@ -4420,11 +4428,8 @@ mod tests {
       );
       assert!(o["inner"].get("fillStyle").is_none());
       assert_eq!(o["inner"]["fills"][0]["color"], "#010203", "literal values stay");
-      let deep = &o["nested"]["instance"]["overrides"]["deep"];
-      assert!(
-        deep["bindings"].as_object().unwrap().is_empty() && deep.get("strokeStyle").is_none(),
-        "{deep}"
-      );
+      let inner = &o["nested"]["instance"]["overrides"];
+      assert!(inner.get("deep").is_none(), "{inner}");
     }
   }
 
@@ -4450,7 +4455,7 @@ mod tests {
       .is_none());
     e.dispatch(Command::DeleteStyle { id: style }).unwrap();
     let o = &e.doc.get(&id).unwrap().instance.as_ref().unwrap().overrides;
-    assert!(o["inner"].as_object().unwrap().is_empty(), "{o:?}");
+    assert!(o.get("inner").is_none(), "{o:?}");
     // And it undoes with the delete.
     e.dispatch(Command::Undo).unwrap();
     assert!(e.doc.get(&id).unwrap().instance.as_ref().unwrap().overrides["inner"]

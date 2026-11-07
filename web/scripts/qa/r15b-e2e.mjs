@@ -102,7 +102,7 @@ try {
   check("define_variables no longer requires type", !tools.define_variables.inputSchema.properties.variables.items.required.includes("type"));
   check("define_styles describes rename and delete", /rename: \[\{from, to\}\]/.test(d("define_styles")) && tools.define_styles.inputSchema.properties.delete);
   check("update_nodes describes first-character style and sizes", /first character's style/.test(d("update_nodes")) && /100000/.test(d("update_nodes")));
-  check("create_instance, get_nodes, delete_nodes, pages, set_prototype, find_nodes descriptions", /can't be placed inside its own component|can't place an instance inside its own component|its own component/.test(d("create_instance")) && /ids. is required/.test(d("get_nodes")) && /instancesDetached/.test(d("delete_nodes")) && /deleted: id/.test(d("pages")) && /cleared: n/.test(JSON.stringify(tools.set_prototype)) && /limit 0/.test(d("find_nodes")));
+  check("create_instance, get_nodes, delete_nodes, pages, set_prototype, find_nodes descriptions", /can't be placed inside its own component|can't place an instance inside its own component|its own component/.test(d("create_instance")) && /ids. is required/.test(d("get_nodes")) && /instancesKept/.test(d("delete_nodes")) && /deleted: id/.test(d("pages")) && /cleared: n/.test(JSON.stringify(tools.set_prototype)) && /limit 0/.test(d("find_nodes")));
 
   // ---- X-01 / X-02: unions and orphans (X's e14/e15) ----
   await tool("create_nodes", {
@@ -297,7 +297,7 @@ try {
   const bf2 = await tool("update_nodes", { updates: [{ id: r2, fill: "#00FF00", bind: { fill: "Bg" } }] });
   check("X-19 fill with bind.fill warns", bf2.ok && /fill ignored: bind\.fill sets it/.test(bf2.text), bf2.text);
   const mainWithInst = await tool("delete_nodes", { ids: [button] });
-  check("X-21 deleting a main component reports instances", mainWithInst.ok && mainWithInst.obj.instancesDetached >= 1, mainWithInst.text);
+  check("X-21 deleting a main component reports instances", mainWithInst.ok && mainWithInst.obj.instancesKept >= 1, mainWithInst.text);
   await undo();
   const longText = await tool("create_nodes", { nodes: [{ type: "text", name: "Long", x: 0, y: 2000, text: "x".repeat(3600) }] });
   const gl = await tool("get_nodes", { ids: ids(longText) });

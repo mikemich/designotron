@@ -167,6 +167,13 @@ export default function App() {
       window.removeEventListener("hashchange", onHash);
     };
   }, []);
+  // The address names the screen once the visitor has moved (#Detail), so a link, a reload or the
+  // back button of the design lands on it. Links in the screens are plain anchors to the hash.
+  const moved = useRef(false);
+  useEffect(() => {
+    if (history.length > 1) moved.current = true;
+    if (moved.current && window.location.hash.slice(1) !== current) window.history.replaceState(null, "", `#${encodeURIComponent(current)}`);
+  }, [history.length, current]);
   // After delay: runs once per visit to a screen, and once when an overlay opens.
   useEffect(() => {
     const timers = (delays[current] ?? []).map((d) => setTimeout(() => run(d), d.ms));
@@ -286,6 +293,8 @@ struct El {
   /// A component reference whose component (or a layer nested in it) runs actions: it gets the
   /// screen's `onNavigate`.
   pass_navigate: bool,
+  /// The click goes to a screen: a plain element can be written as `<a href="#Screen">`.
+  nav_link: bool,
 }
 
 impl El {
@@ -318,6 +327,7 @@ impl El {
       label: None,
       action_label: None,
       pass_navigate: false,
+      nav_link: false,
     }
   }
 
@@ -340,8 +350,10 @@ struct Ctx<'a> {
   screen_order: Vec<(String, String)>,
   used_names: BTreeSet<String>,
   reuse_components: bool,
-  /// One h1 per screen.
-  h1_used: bool,
+  /// Tag of each text layer the screen (or component) being built writes as a heading.
+  headings: BTreeMap<String, &'static str>,
+  /// CSS custom property of every variable.
+  css_names: std::collections::HashMap<String, String>,
   /// The main component whose function is being built (its layers use its properties).
   cur_comp: Option<NodeId>,
   /// Properties the function being built uses, in order.
@@ -411,7 +423,8 @@ impl<'a> Ctx<'a> {
       screen_order: Vec::new(),
       used_names: TAKEN_IDENTS.iter().map(|s| s.to_lowercase()).collect(),
       reuse_components,
-      h1_used: false,
+      headings: BTreeMap::new(),
+      css_names: crate::variables::css_names(doc),
       cur_comp: None,
       used_props: Vec::new(),
       component_order: Vec::new(),
@@ -646,6 +659,9 @@ impl<'a> Ctx<'a> {
       let link = n.text.as_ref().is_some_and(|t| t.runs.iter().any(|r| r.link.is_some()));
       link || (n.kind.is_container() && self.container_tag(n) == "button")
     });
+    // A layer that runs a click action (in any variant, or a nested component) is a link or
+    // control in the component's function.
+    let found = found || self.uses_navigate(comp_id);
     self.interactive_cache.insert(comp_id.to_string(), found);
     found
   }
@@ -709,7 +725,10 @@ impl<'a> Ctx<'a> {
       }
     }
     if place == Place::Root {
-      self.h1_used = false;
+      self.headings.clear();
+    }
+    if matches!(place, Place::Root | Place::ComponentRoot) {
+      self.plan_headings(&n.id, place == Place::Root);
     }
     let image_src = image_only(&n);
     // Masks have no faithful HTML equivalent; export the masked container as SVG.
@@ -722,6 +741,7 @@ impl<'a> Ctx<'a> {
         let mut e = El::new("div");
         // Drawn in its own space: the CSS transform on the element does its rotation and flip.
         e.raw = Some(crate::render::export_svg_own(self.doc, &n.id, self.m));
+        self.describe_svg(&mut e, &n);
         e
       }
       NodeType::Text => {
@@ -743,6 +763,7 @@ impl<'a> Ctx<'a> {
       NodeType::Vector | NodeType::Polygon | NodeType::Star => {
         let mut e = El::new("div");
         e.raw = Some(crate::render::export_svg_local(self.doc, &n.id, self.m));
+        self.describe_svg(&mut e, &n);
         e
       }
       _ if image_src.is_some() => {
@@ -787,6 +808,24 @@ impl<'a> Ctx<'a> {
     self.position(&mut el, &n, place);
     self.limits(&mut el, &n);
     self.visual(&mut el, &n);
+    // A screen that clips scrolls sideways below its design width instead of cutting content off.
+    // (Only a screen: content that bleeds off the right edge on purpose stays clipped.)
+    let mut sideways = false;
+    if place == Place::Root
+      && n.parent.is_none()
+      && n.kind.is_frame_like()
+      && n.overflow == crate::model::Overflow::None
+      && el.styles.iter().any(|(k, v)| k == "overflow" && v == "hidden")
+      && !n.children.iter().filter_map(|c| self.doc.get(c)).filter(|c| c.visible).any(|c| {
+        let b = self.doc.local_matrix(c).bounds_of(c.width, c.height);
+        b.x + b.width > n.width + 0.5
+      })
+    {
+      el.styles.retain(|(k, _)| k != "overflow");
+      el.s("overflow-x", "auto");
+      el.s("overflow-y", "hidden");
+      sideways = true;
+    }
     if self.style_classes || self.fallbacks {
       self.apply_styles(&mut el, &n);
     }
@@ -929,7 +968,7 @@ impl<'a> Ctx<'a> {
         .iter()
         .filter_map(|c| self.doc.get(c))
         .any(|c| n.layout.is_none() || c.absolute_position);
-      let scrolls = el.styles.iter().any(|(k, v)| k.starts_with("overflow") && v == "auto");
+      let scrolls = !sideways && el.styles.iter().any(|(k, v)| k.starts_with("overflow") && v == "auto");
       if has_absolute && n.stroke_align != StrokeAlign::Outside && !scrolls && !el.children.is_empty() {
         if let Some(ov) = el.styles.iter().find(|(k, _)| k == "outline").map(|(_, v)| v.clone()) {
           el.styles.retain(|(k, _)| k != "outline" && k != "outline-offset");
@@ -996,6 +1035,7 @@ impl<'a> Ctx<'a> {
     }
     if matches!(place, Place::Root | Place::ComponentRoot) {
       fix_interactive(&mut el, place == Place::ComponentRoot);
+      fix_landmarks(&mut el, &[]);
     }
     Some(el)
   }
@@ -1198,19 +1238,148 @@ impl<'a> Ctx<'a> {
     Some(PropArgs { attrs, exprs })
   }
 
-  /// h1 for the first large heading of a screen, h2/h3 for smaller ones.
-  fn heading_tag(&mut self, n: &Node) -> &'static str {
-    let Some(t) = n.text.as_ref() else { return "p" };
-    if t.font_size >= 32.0 && !self.h1_used {
-      self.h1_used = true;
-      "h1"
-    } else if t.font_size >= 24.0 {
-      "h2"
-    } else if t.font_size >= 18.0 && t.font_weight >= 600 {
-      "h3"
-    } else {
-      "p"
+  /// Whether `build` writes this instance as a reference to its component (`<Card />`): it has no
+  /// overrides, or only ones the component's props express. Mirrors `prop_args` without its
+  /// side effects.
+  fn written_as_reference(&self, n: &Node) -> bool {
+    let Some(info) = n.instance.as_ref() else { return false };
+    if self.doc.get(&info.component_id).is_none() {
+      return false;
     }
+    if !components::has_overrides(self.doc, &n.id) {
+      return true;
+    }
+    let defs = props::props_of(self.doc, &info.component_id);
+    if defs.is_empty() || self.doc.instance_ancestor(&n.id).is_some() {
+      return false;
+    }
+    info.overrides.iter().all(|(key, v)| {
+      let Some(def) = self
+        .doc
+        .get(key)
+        .and_then(|m| m.prop_refs.as_ref())
+        .and_then(|r| r.swap.as_ref())
+        .and_then(|p| defs.iter().find(|d| &d.id == p))
+      else {
+        return false;
+      };
+      let _ = def;
+      let Some(obj) = v.as_object() else { return false };
+      if obj.keys().any(|k| k != components::SWAP_KEY && k != "name") {
+        return false;
+      }
+      obj
+        .get(components::SWAP_KEY)
+        .and_then(|s| serde_json::from_value::<InstanceInfo>(s.clone()).ok())
+        .is_some_and(|s| s.overrides.is_empty() && s.prop_values.is_empty())
+    })
+  }
+
+  /// The heading level the screen's outline gives a text layer (`plan_headings`), else `p`.
+  fn heading_tag(&self, n: &Node) -> &'static str {
+    self.headings.get(&n.id).copied().unwrap_or("p")
+  }
+
+  /// Decides which texts of a screen (or of a component) are headings: one h1 (the first text at
+  /// the largest size of 24 px or more, never in a header, nav, footer, aside or control), then
+  /// h2 and h3 by the next sizes. Long text is a paragraph, levels never skip, and nothing
+  /// comes before the h1.
+  fn plan_headings(&mut self, root: &str, top: bool) {
+    struct Cand {
+      id: String,
+      size: f64,
+      weight: u32,
+    }
+    fn walk(c: &Ctx, id: &str, root: &str, shut: bool, out: &mut Vec<Cand>) {
+      let Some(n) = c.doc.get(id) else { return };
+      if !n.visible || n.device_part.is_some() {
+        return;
+      }
+      if n.children.iter().any(|k| c.doc.get(k).is_some_and(|m| m.is_mask && m.visible)) {
+        return;
+      }
+      // A plain instance is written as a reference to its component: its texts are not the screen's.
+      if n.kind == NodeType::Instance && c.reuse_components && id != root && c.written_as_reference(n) {
+        return;
+      }
+      let clicks = n
+        .interactions
+        .iter()
+        .any(|i| matches!(i.trigger, crate::model::Trigger::OnClick | crate::model::Trigger::OnPress) && c.action_of(n, i).is_some());
+      let mut shut = shut || clicks;
+      if n.kind.is_container() {
+        shut = shut || matches!(c.container_tag(n), "button" | "nav" | "header" | "footer" | "aside");
+      }
+      if let Some(t) = n.text.as_ref() {
+        if !shut && t.font_size >= 18.0 && t.characters.chars().count() <= 120 && c.line_count(n, t) < 3 {
+          out.push(Cand {
+            id: id.to_string(),
+            size: t.font_size,
+            weight: t.font_weight,
+          });
+        }
+      }
+      for k in &n.children {
+        walk(c, k, root, shut, out);
+      }
+    }
+    let mut cands = Vec::new();
+    walk(self, root, root, false, &mut cands);
+    let mut sizes: Vec<f64> = cands.iter().filter(|c| c.size >= 24.0).map(|c| c.size).collect();
+    sizes.sort_by(|a, b| b.total_cmp(a));
+    sizes.dedup();
+    let mut seen_h1 = !top;
+    let mut wants: Vec<(String, &'static str)> = Vec::new();
+    for c in cands {
+      let want = if c.size >= 24.0 {
+        let rank = sizes.iter().position(|s| *s == c.size).unwrap_or(0) + usize::from(!top);
+        match rank {
+          0 if !seen_h1 => "h1",
+          0 | 1 => "h2",
+          _ => "h3",
+        }
+      } else if c.weight >= 600 {
+        "h3"
+      } else {
+        continue;
+      };
+      // The h1 comes first: whatever precedes it in reading order is a paragraph.
+      if top && !seen_h1 && want != "h1" {
+        continue;
+      }
+      seen_h1 |= want == "h1";
+      wants.push((c.id, want));
+    }
+    // With no h2 anywhere the h3 tier is the second level, so siblings keep one level; otherwise
+    // an h3 with no h2 before it is an h2.
+    let lone_h3 = !wants.iter().any(|(_, w)| *w == "h2");
+    let mut seen_h2 = false;
+    for (id, want) in wants {
+      let tag = if want == "h3" && (lone_h3 || !seen_h2) { "h2" } else { want };
+      seen_h2 |= tag == "h2";
+      self.headings.insert(id, tag);
+    }
+  }
+
+  /// How many lines a text takes in its box (hard breaks, plus wrapping at the box width).
+  fn line_count(&self, n: &Node, t: &crate::model::TextProps) -> usize {
+    let wraps = t.auto_resize != crate::model::TextAutoResize::Width && n.width > 0.0;
+    t.characters
+      .split(['\n', '\u{2028}'])
+      .map(|line| {
+        if !wraps {
+          return 1;
+        }
+        let font = crate::text::FontSpec {
+          family: &t.font_family,
+          size: t.font_size,
+          weight: t.font_weight,
+          italic: t.italic,
+          letter_spacing: t.letter_spacing,
+        };
+        ((self.m.measure(line, &font) / n.width).ceil() as usize).max(1)
+      })
+      .sum()
   }
 
   /// Landmark and control tags from layer names and behaviour.
@@ -1228,10 +1397,31 @@ impl<'a> Ctx<'a> {
       .subtree(&n.id)
       .iter()
       .any(|c| self.doc.get(c).map(|x| x.kind == NodeType::Text).unwrap_or(false));
-    if (has("button") || has("btn") || has("cta") || clickable) && small && has_text && n.kind != NodeType::Group {
+    // A row, tab or pill that only goes to a screen is a link (`fix_nested`), not a button, unless
+    // its name says button.
+    let named_button = has("button") || has("btn") || has("cta");
+    let only_navigates = n
+      .interactions
+      .iter()
+      .filter(|i| is_click(i.trigger) && self.action_of(n, i).is_some())
+      .all(|i| i.action == Action::Navigate);
+    let clickable = clickable && (named_button || !only_navigates);
+    if (named_button || clickable) && small && has_text && n.kind != NodeType::Group {
       return "button";
     }
     if n.kind == NodeType::Group {
+      return "div";
+    }
+    // "Nav/Item", "Menu item", "Card label": parts of a landmark, not landmarks themselves.
+    const PARTS: [&str; 7] = ["item", "link", "tab", "button", "icon", "label", "text"];
+    let words: Vec<&str> = name
+      .rsplit('/')
+      .next()
+      .unwrap_or("")
+      .split(|c: char| !c.is_alphanumeric())
+      .filter(|w| !w.is_empty())
+      .collect();
+    if words.first().is_some_and(|w| PARTS.contains(w)) || words.last().is_some_and(|w| PARTS.contains(w)) {
       return "div";
     }
     if has("nav") || has("navbar") || has("navigation") || has("menu") && n.layout.is_some() {
@@ -1246,6 +1436,25 @@ impl<'a> Ctx<'a> {
       "section"
     } else {
       "div"
+    }
+  }
+
+  /// Vector artwork is decoration (`aria-hidden`), unless the layer's name says it is a picture
+  /// of something (logo, chart, map...): then it is an image named by the layer.
+  fn describe_svg(&self, e: &mut El, n: &Node) {
+    // A layer with a click is a control: `name_control` names it, and it must stay visible.
+    if n.interactions.iter().any(|i| is_click(i.trigger) && self.action_of(n, i).is_some()) {
+      return;
+    }
+    let name = n.name.to_lowercase();
+    let picture = name
+      .split(|c: char| !c.is_alphanumeric())
+      .any(|w| ["logo", "illustration", "chart", "graph", "map", "badge"].contains(&w.trim_end_matches('s')));
+    if picture && self.interactive_depth == 0 && !n.name.trim().is_empty() {
+      e.attrs.push(("role".into(), "img".into()));
+      e.attrs.push(("aria-label".into(), n.name.trim().to_string()));
+    } else {
+      e.attrs.push(("aria-hidden".into(), "true".into()));
     }
   }
 
@@ -1338,6 +1547,7 @@ impl<'a> Ctx<'a> {
             el.navigate = nav;
             el.overlay = overlay;
             el.url = url;
+            el.nav_link = i.action == Action::Navigate;
           }
         }
         Trigger::Key | Trigger::AfterDelay => {
@@ -1635,7 +1845,7 @@ impl<'a> Ctx<'a> {
     }
     for (prop, var_id) in &n.bindings {
       let Some((c, v)) = vars::find(self.doc, var_id) else { continue };
-      let name = vars::css_name(c, v);
+      let name = self.css_names.get(&v.id).cloned().unwrap_or_else(|| vars::css_name(c, v));
       // Single-layer code carries the value the layer sees, so it renders without the tokens file.
       let fallback = if self.fallbacks {
         vars::resolve(self.doc, &n.id, var_id).and_then(|val| match v.kind {
@@ -2363,7 +2573,42 @@ fn holds_control(el: &El) -> bool {
   })
 }
 
+/// Landmarks never nest in themselves: a `nav`, `header`, `footer`, `aside` or `main` inside an
+/// element with the same tag, and a `header` or `footer` inside either of those two, become `div`s.
+fn fix_landmarks(el: &mut El, above: &[&'static str]) {
+  let is_lm = matches!(el.tag, "nav" | "header" | "footer" | "aside" | "main");
+  let bar = matches!(el.tag, "header" | "footer");
+  if is_lm && (above.contains(&el.tag) || (bar && above.iter().any(|t| matches!(*t, "header" | "footer")))) {
+    el.tag = "div";
+  }
+  let mut inner: Vec<&'static str> = above.to_vec();
+  inner.push(el.tag);
+  for c in &mut el.children {
+    fix_landmarks(c, &inner);
+  }
+}
+
 fn fix_nested(el: &mut El, inside: bool, acting: bool) {
+  // A plain element that goes to a screen is a link (a component keeps its own root).
+  if el.nav_link
+    && !inside
+    && el.component_ref.is_none()
+    && !el.is_component_root
+    && el.raw.is_none()
+    && matches!(el.tag, "div" | "p" | "h1" | "h2" | "h3")
+    && !holds_control(el)
+  {
+    if let Some(screen) = el.navigate.clone() {
+      el.tag = "a";
+      el.attrs.push(("href".into(), format!("#{screen}")));
+      if !el.styles.iter().any(|(k, _)| k == "display") {
+        el.s("display", "block");
+      }
+      for sp in &mut el.spans {
+        sp.link = None;
+      }
+    }
+  }
   let interactive = el.tag == "button" || el.tag == "a";
   // A component reference passes its handler on as `onClick`; the component is the control.
   let has_action = (el.navigate.is_some() || el.url.is_some()) && el.component_ref.is_none();
@@ -2467,11 +2712,7 @@ pub(crate) struct StyleNames {
 }
 
 pub(crate) fn style_names(doc: &Document) -> StyleNames {
-  let mut taken: BTreeSet<String> = doc
-    .variables
-    .iter()
-    .flat_map(|c| c.variables.iter().map(move |v| crate::variables::css_name(c, v)))
-    .collect();
+  let mut taken: BTreeSet<String> = crate::variables::css_names(doc).into_values().collect();
   let mut out = StyleNames::default();
   let free = |base: String, taken: &mut BTreeSet<String>| {
     let mut name = base.clone();
@@ -2508,11 +2749,7 @@ pub(crate) fn style_names(doc: &Document) -> StyleNames {
 /// class of each text style, as the exported project names them.
 pub fn inspect_names(doc: &Document) -> serde_json::Value {
   let n = style_names(doc);
-  let vars: BTreeMap<String, String> = doc
-    .variables
-    .iter()
-    .flat_map(|c| c.variables.iter().map(move |v| (v.id.clone(), crate::variables::css_name(c, v))))
-    .collect();
+  let vars: BTreeMap<String, String> = crate::variables::css_names(doc).into_iter().collect();
   json!({ "colorStyles": n.colors, "textStyles": n.texts, "variables": vars })
 }
 
@@ -3167,6 +3404,7 @@ fn tw_class_raw(k: &str, v: &str) -> String {
     ("overflow", "auto") => "overflow-auto".into(),
     ("overflow-x", "auto") => "overflow-x-auto".into(),
     ("overflow-y", "auto") => "overflow-y-auto".into(),
+    ("overflow-y", "hidden") => "overflow-y-hidden".into(),
     ("overscroll-behavior", "contain") => "overscroll-contain".into(),
     ("overscroll-behavior-x", "contain") => "overscroll-x-contain".into(),
     ("overscroll-behavior-y", "contain") => "overscroll-y-contain".into(),
@@ -3391,7 +3629,16 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
   };
   let handler = match action {
     Some(a) => {
-      let mut h = if el.stop_click {
+      // A link to a screen keeps its `href` for the browser's own features (copy link, open in a
+      // new tab) and navigates in place on a plain click.
+      let link = el.tag == "a" && el.nav_link;
+      let mut h = if link {
+        let stop = if el.stop_click { " e.stopPropagation();" } else { "" };
+        // A modified or non-primary click is the browser's (new tab, new window).
+        format!(
+          " onClick={{(e) => {{{stop} if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; e.preventDefault(); {a}; }}}}"
+        )
+      } else if el.stop_click {
         format!(" onClick={{(e) => {{ e.stopPropagation(); {a}; }}}}")
       } else {
         format!(" onClick={{() => {a}}}")
@@ -3399,6 +3646,11 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
       if el.focusable {
         h.push_str(" role=\"button\" tabIndex={0}");
         h.push_str(&key_handler(&a));
+      } else if link {
+        // Enter runs the link's own action, so a screen's Enter key trigger doesn't also run.
+        h.push_str(&format!(
+          " onKeyDown={{(e) => {{ if (e.target === e.currentTarget && e.key === \"Enter\" && !(e.metaKey || e.ctrlKey || e.shiftKey || e.altKey)) {{ e.preventDefault(); {a}; }} }}}}"
+        ));
       }
       h
     }
@@ -3542,6 +3794,10 @@ fn html(el: &El, depth: usize, out: &mut String) {
       ]
       .map(|(k, v)| (k.to_string(), v.to_string())),
     );
+  }
+  if el.tag == "a" && el.nav_link {
+    // A link made from a layer looks like the layer, not like a hyperlink.
+    decls.extend([("color", "inherit"), ("text-decoration", "none")].map(|(k, v)| (k.to_string(), v.to_string())));
   }
   decls.extend(el.styles.iter().cloned());
   let mut style: String = decls.iter().map(|(k, v)| format!("{k}: {v}; ")).collect();
@@ -4117,7 +4373,7 @@ const FOCUS_CSS: &str = ":focus-visible { outline: 2px solid #2563eb !important;
 /// What the prototype and the export don't carry over, and the top-level layers left out.
 fn readme_limits(doc: &Document) -> String {
   let mut out = String::from(
-    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- While hovering / While pressing Change to, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert).\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n- Strokes are CSS `outline`s (they take no layout space, like Figma's), so `src/index.css` ends with a `:focus-visible` rule that keeps a keyboard focus ring; restyle it to taste.\n- Fixed-size layers don't shrink below their design width, so in a window narrower than the screen's design they can overflow (the screen is as wide as the window up to its design width); layers pinned to both sides or scaled follow the screen.\n- Accessible names (`aria-label`) generated for icon-only controls are in English (\"Go to Detail\", \"Back\"); translate them for other languages.\n",
+    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- While hovering / While pressing Change to, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert).\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n- Strokes are CSS `outline`s (they take no layout space, like Figma's), so `src/index.css` ends with a `:focus-visible` rule that keeps a keyboard focus ring; restyle it to taste.\n- Fixed-size layers don't shrink below their design width, so in a window narrower than the screen's design they can overflow (the screen is as wide as the window up to its design width); layers pinned to both sides or scaled follow the screen.\n- Below its design width a screen scrolls sideways (`overflow-x: auto`) instead of cutting content off; there are no breakpoints, so reflow for small windows is up to you.\n- `env(safe-area-inset-*)` is 0 in a desktop browser, so the content of a device frame sits higher than on the device.\n- Accessible names (`aria-label`) generated for icon-only controls are in English (\"Go to Detail\", \"Back\"); translate them for other languages.\n",
   );
   let left_out: Vec<&str> = doc
     .pages
@@ -4935,7 +5191,8 @@ mod tests {
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric())
         .collect();
-      let end = rest.find('>').unwrap_or(rest.len());
+      // (An arrow function's `=>` is not the end of the tag.)
+      let end = rest.replace("=>", "= ").find('>').unwrap_or(rest.len());
       let self_closing = rest[..end].ends_with('/');
       if name.is_empty() || self_closing {
         continue;
@@ -5649,6 +5906,7 @@ mod r8_tests {
   #[test]
   fn a_card_holding_a_button_is_not_itself_a_control() {
     let mut doc = sample();
+    doc.get_mut("btn").unwrap().interactions[0].action = Action::CloseOverlay;
     let page = doc.pages[0].id.clone();
     let mut card = crate::ops::default_node(NodeType::Frame, "card".into(), "Card".into());
     card.height = 150.0;
@@ -5697,7 +5955,10 @@ mod r8_tests {
       comps.contains("onClick={onClick ? (e) => { e.stopPropagation(); onClick(); } : undefined}"),
       "{comps}"
     );
-    assert!(comps.contains("e.stopPropagation(); onNavigate?.("), "{comps}");
+    assert!(
+      comps.contains("e.stopPropagation(); if (e.button") && comps.contains("onNavigate?.("),
+      "{comps}"
+    );
   }
 
   #[test]
@@ -5722,7 +5983,9 @@ mod r8_tests {
 
   #[test]
   fn clickable_layers_are_keyboard_controls() {
-    let doc = sample();
+    let mut doc = sample();
+    // (A click to a screen is a link: `navigate_clicks_are_links` covers it.)
+    doc.get_mut("btn").unwrap().interactions[0].action = Action::CloseOverlay;
     let src = export_react(&doc, "home", &HeuristicMeasurer);
     assert!(src.contains("role=\"button\" tabIndex={0}"), "{src}");
     assert!(src.contains("onKeyDown="), "{src}");
@@ -6020,7 +6283,7 @@ mod r10_tests {
       t.font_size = 28.0;
     }
     let html = tight(export_html(&doc, "s", &HeuristicMeasurer));
-    assert!(html.contains("<h2") && html.contains("font-weight:400"), "{html}");
+    assert!(html.contains("<h1") && html.contains("font-weight:400"), "{html}");
     doc.get_mut("t").unwrap().text.as_mut().unwrap().font_weight = 700;
     let html = tight(export_html(&doc, "s", &HeuristicMeasurer));
     assert!(html.contains("font-weight:700") && !html.contains("font-weight:400"), "{html}");
@@ -8474,5 +8737,544 @@ mod r17c_tests {
       "{react}"
     );
     assert_eq!(tile_size(Some((40000.0, 20.0)), 100.0), (16384.0, 2000.0));
+  }
+}
+
+#[cfg(test)]
+mod r19b_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::model::{Action, AutoLayout, Interaction, Sizing};
+  use crate::text::HeuristicMeasurer;
+  use crate::variables::{Collection, VarKind, VarMode, Variable};
+  use serde_json::json;
+  use std::sync::Arc;
+
+  fn base() -> Document {
+    let mut gen = IdGen::new(19);
+    new_document(&mut gen, "R19b")
+  }
+
+  fn add(doc: &mut Document, kind: NodeType, id: &str, name: &str, parent: Option<&str>) {
+    let page = doc.pages[0].id.clone();
+    let n = crate::ops::default_node(kind, id.into(), name.into());
+    doc.insert(n, parent, &page, None);
+  }
+
+  fn text(doc: &mut Document, id: &str, parent: &str, chars: &str, size: f64) {
+    add(doc, NodeType::Text, id, id, Some(parent));
+    let n = doc.get_mut(id).unwrap();
+    n.width = 600.0;
+    let t = n.text.as_mut().unwrap();
+    t.characters = chars.into();
+    t.font_size = size;
+  }
+
+  /// The tag of the element that holds `chars` in React output.
+  fn tag_of(src: &str, chars: &str) -> String {
+    let at = src.find(&format!("{{\"{chars}\"}}")).unwrap_or_else(|| panic!("no {chars}\n{src}"));
+    let open = src[..at].rfind('<').unwrap();
+    src[open + 1..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect()
+  }
+
+  fn var(id: &str, name: &str, v: f64) -> Arc<Variable> {
+    Arc::new(Variable {
+      id: id.into(),
+      name: name.into(),
+      kind: VarKind::Number,
+      values: [("m".to_string(), json!(v))].into(),
+      ..Default::default()
+    })
+  }
+
+  fn coll(id: &str, name: &str, vars: Vec<Arc<Variable>>) -> Arc<Collection> {
+    Arc::new(Collection {
+      id: id.into(),
+      name: name.into(),
+      modes: vec![VarMode {
+        id: "m".into(),
+        name: "Base".into(),
+      }],
+      variables: vars,
+    })
+  }
+
+  #[test]
+  fn colliding_token_names_get_their_collection_and_unique_ones_stay() {
+    let mut doc = base();
+    doc.variables = vec![
+      coll("c1", "Radius", vec![var("r1", "md", 12.0), var("r2", "Only one", 3.0)]),
+      coll("c2", "Space", vec![var("s1", "md", 16.0), var("s2", "///", 4.0)]),
+      coll("c3", "Space", vec![var("s3", "md", 20.0)]),
+    ];
+    let names = crate::variables::css_names(&doc);
+    assert_eq!(names["r1"], "--radius-md");
+    assert_eq!(names["r2"], "--only-one");
+    assert_eq!(names["s1"], "--space-md");
+    // Same collection name, same variable name: the second gets -2.
+    assert_eq!(names["s3"], "--space-md-2");
+    // No ASCII letters: the collection and the position, a valid property.
+    assert_eq!(names["s2"], "--space-2");
+    let css = crate::variables::tokens_css(&doc);
+    assert!(
+      css.contains("--radius-md: 12;") && css.contains("--space-md: 16;") && css.contains("--space-md-2: 20;"),
+      "{css}"
+    );
+    assert!(!css.contains("--md:") && !css.contains("--:"), "{css}");
+    // Bindings and the inspector use the same names.
+    add(&mut doc, NodeType::Frame, "f", "Card", None);
+    doc.get_mut("f").unwrap().corner_radius = 12.0;
+    doc.get_mut("f").unwrap().bindings.insert("cornerRadius".into(), "r1".into());
+    let react = export_react(&doc, "f", &HeuristicMeasurer);
+    assert!(react.contains("var(--radius-md,12)"), "{react}");
+    assert_eq!(inspect_names(&doc)["variables"]["s1"], "--space-md");
+    // An alias points at the prefixed name.
+    {
+      let c = Arc::make_mut(&mut doc.variables[1]);
+      let v = Arc::make_mut(&mut c.variables[0]);
+      v.values.insert("m".into(), json!({ "alias": "r1" }));
+    }
+    assert!(crate::variables::tokens_css(&doc).contains("--space-md: var(--radius-md);"));
+  }
+
+  #[test]
+  fn a_unique_token_name_is_unchanged() {
+    let mut doc = base();
+    doc.variables = vec![coll("c1", "Radius", vec![var("r1", "md", 12.0)])];
+    assert_eq!(crate::variables::css_names(&doc)["r1"], "--md");
+  }
+
+  fn count(src: &str, tag: &str) -> usize {
+    src.matches(&format!("<{tag} ")).count() + src.matches(&format!("<{tag}>")).count()
+  }
+
+  #[test]
+  fn landmarks_never_nest_and_parts_of_a_landmark_are_not_landmarks() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Home", None);
+    add(&mut doc, NodeType::Frame, "ft", "Footer", Some("s"));
+    add(&mut doc, NodeType::Frame, "fl", "Footer links", Some("ft"));
+    add(&mut doc, NodeType::Frame, "sb", "Sidebar", Some("s"));
+    for i in 0..4 {
+      add(&mut doc, NodeType::Frame, &format!("ni{i}"), "Nav/Item", Some("sb"));
+    }
+    add(&mut doc, NodeType::Frame, "hd", "Header", Some("s"));
+    add(&mut doc, NodeType::Frame, "nv", "Nav", Some("hd"));
+    add(&mut doc, NodeType::Frame, "ni", "Nav Item", Some("nv"));
+    let html = export_html(&doc, "s", &HeuristicMeasurer);
+    assert_eq!(count(&html, "footer"), 1, "{html}");
+    assert_eq!(count(&html, "nav"), 1, "{html}");
+    assert_eq!(count(&html, "header"), 1, "{html}");
+    assert_eq!(count(&html, "aside"), 1, "{html}");
+    // A header inside a footer is a div too.
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Home", None);
+    add(&mut doc, NodeType::Frame, "ft", "Footer", Some("s"));
+    add(&mut doc, NodeType::Frame, "hd", "Footer header", Some("ft"));
+    let html = export_html(&doc, "s", &HeuristicMeasurer);
+    assert_eq!((count(&html, "footer"), count(&html, "header")), (1, 0), "{html}");
+  }
+
+  #[test]
+  fn the_landing_outline_has_one_h1_and_no_skipped_levels() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Landing", None);
+    add(&mut doc, NodeType::Frame, "hd", "Header", Some("s"));
+    text(&mut doc, "logo", "hd", "Acme", 24.0);
+    add(&mut doc, NodeType::Frame, "hero", "Hero", Some("s"));
+    text(&mut doc, "h", "hero", "Build faster", 48.0);
+    text(&mut doc, "sub", "hero", "Ship the thing", 20.0);
+    doc.get_mut("sub").unwrap().text.as_mut().unwrap().font_weight = 700;
+    let quote =
+      "A very long testimonial that goes on and on about how good the product is, well past one hundred and twenty characters in total.";
+    text(&mut doc, "q", "s", quote, 28.0);
+    text(&mut doc, "feat", "s", "Features", 32.0);
+    text(&mut doc, "fine", "s", "Fine print", 16.0);
+    let html = export_react(&doc, "s", &HeuristicMeasurer);
+    // The logo sits in a header; the quote is long text.
+    assert_eq!(tag_of(&html, "Acme"), "p", "{html}");
+    assert_eq!(tag_of(&html, "Build faster"), "h1", "{html}");
+    assert_eq!(tag_of(&html, quote), "p", "{html}");
+    // 20 px bold would be an h3, but no h2 exists on the screen: it is the second level.
+    assert_eq!(tag_of(&html, "Features"), "h2", "{html}");
+    assert_eq!(tag_of(&html, "Ship the thing"), "h2", "{html}");
+    assert_eq!(tag_of(&html, "Fine print"), "p", "{html}");
+    assert_eq!(count(&html, "h1"), 1);
+  }
+
+  #[test]
+  fn an_h3_without_an_h2_before_it_is_an_h2() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Page", None);
+    text(&mut doc, "a", "s", "Title", 40.0);
+    text(&mut doc, "b", "s", "Small bold", 20.0);
+    doc.get_mut("b").unwrap().text.as_mut().unwrap().font_weight = 600;
+    let html = export_html(&doc, "s", &HeuristicMeasurer);
+    assert!(html.contains("<h1") && html.contains("<h2") && !html.contains("<h3"), "{html}");
+    // A screen without text of 24 px has no h1.
+    doc.get_mut("a").unwrap().text.as_mut().unwrap().font_size = 16.0;
+    let html = export_html(&doc, "s", &HeuristicMeasurer);
+    assert!(!html.contains("<h1"), "{html}");
+  }
+
+  #[test]
+  fn text_in_a_clickable_layer_is_not_a_heading() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Page", None);
+    add(&mut doc, NodeType::Frame, "cta", "Card", Some("s"));
+    doc.get_mut("cta").unwrap().interactions.push(Interaction {
+      action: Action::CloseOverlay,
+      ..Default::default()
+    });
+    text(&mut doc, "big", "cta", "Click me", 40.0);
+    text(&mut doc, "t", "s", "Real title", 30.0);
+    let html = export_react(&doc, "s", &HeuristicMeasurer);
+    assert_eq!(tag_of(&html, "Real title"), "h1", "{html}");
+    assert_ne!(tag_of(&html, "Click me"), "h1");
+  }
+
+  #[test]
+  fn a_screen_root_scrolls_sideways_instead_of_clipping() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Home", None);
+    doc.get_mut("s").unwrap().clip_content = true;
+    add(&mut doc, NodeType::Frame, "in", "Inner", Some("s"));
+    doc.get_mut("in").unwrap().clip_content = true;
+    let react = export_react(&doc, "s", &HeuristicMeasurer);
+    assert!(react.contains("overflow-x-auto overflow-y-hidden"), "{react}");
+    // The inner frame keeps its clip.
+    assert!(react.contains("overflow-hidden"), "{react}");
+    let html = export_html(&doc, "s", &HeuristicMeasurer);
+    assert!(
+      html.contains("overflow-x:auto;overflow-y:hidden;") || html.contains("overflow-x: auto; overflow-y: hidden;"),
+      "{html}"
+    );
+    let readme = export_project(&doc, &HeuristicMeasurer)
+      .into_iter()
+      .find(|f| f.path == "README.md")
+      .unwrap()
+      .content;
+    assert!(
+      readme.contains("scrolls sideways") && readme.contains("safe-area-inset"),
+      "{readme}"
+    );
+  }
+
+  fn nav_doc() -> Document {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "home", "Home", None);
+    add(&mut doc, NodeType::Frame, "detail", "Detail", None);
+    text(&mut doc, "go", "home", "See details", 16.0);
+    doc.get_mut("go").unwrap().interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    add(&mut doc, NodeType::Frame, "b", "Buy button", Some("home"));
+    doc.get_mut("b").unwrap().height = 40.0;
+    doc.get_mut("b").unwrap().interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    text(&mut doc, "bt", "b", "Buy", 16.0);
+    doc
+  }
+
+  #[test]
+  fn navigate_clicks_are_links_and_app_opens_the_hash() {
+    let doc = nav_doc();
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(src.contains("<a ") && src.contains("href=\"#Detail\""), "{src}");
+    assert!(
+      src.contains("e.preventDefault(); onNavigate?.(\"Detail\")") && src.contains("e.ctrlKey"),
+      "{src}"
+    );
+    assert!(src.contains("e.key === \"Enter\""), "{src}");
+    // A control named button stays a button.
+    assert!(src.contains("<button "), "{src}");
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(html.contains("<a style=") && html.contains("href=\"#Detail\""), "{html}");
+    assert!(html.contains("color:inherit") || html.contains("color: inherit"), "{html}");
+    let app = export_project(&doc, &HeuristicMeasurer)
+      .into_iter()
+      .find(|f| f.path == "src/App.tsx")
+      .unwrap()
+      .content;
+    assert!(app.contains("hashchange") && app.contains("window.history.replaceState"), "{app}");
+  }
+
+  #[test]
+  fn a_clickable_card_holding_a_control_keeps_its_div() {
+    let mut doc = nav_doc();
+    add(&mut doc, NodeType::Frame, "card", "Card", Some("home"));
+    doc.get_mut("card").unwrap().interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    add(&mut doc, NodeType::Frame, "x", "Close button", Some("card"));
+    doc.get_mut("x").unwrap().height = 30.0;
+    doc.get_mut("x").unwrap().interactions.push(Interaction {
+      action: Action::CloseOverlay,
+      ..Default::default()
+    });
+    text(&mut doc, "xt", "x", "Close", 14.0);
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    // "See details" is a link; the card (with a button inside) is not.
+    assert_eq!(src.matches("href=\"#Detail\"").count(), 1, "{src}");
+  }
+
+  #[test]
+  fn vector_artwork_is_hidden_from_screen_readers_unless_it_is_a_picture() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Home", None);
+    add(&mut doc, NodeType::Vector, "v", "Arrow", Some("s"));
+    add(&mut doc, NodeType::Vector, "l", "Brand \"logo\" <b>", Some("s"));
+    let html = export_html(&doc, "s", &HeuristicMeasurer);
+    assert!(html.contains("aria-hidden=\"true\""), "{html}");
+    assert!(
+      html.contains("role=\"img\"") && html.contains("aria-label=\"Brand &quot;logo&quot; &lt;b&gt;\""),
+      "{html}"
+    );
+    let react = export_react(&doc, "s", &HeuristicMeasurer);
+    assert!(react.contains("aria-hidden=\"true\"") && react.contains("role=\"img\""), "{react}");
+    assert!(react.contains("aria-label={\"Brand \\\"logo\\\" <b>\"}"), "{react}");
+  }
+
+  /// Controls (`a`, `button`) may not nest; the markup of `src` is scanned as JSX or HTML.
+  fn nested_controls(src: &str) -> bool {
+    let mut stack: Vec<String> = Vec::new();
+    let mut i = 0;
+    while let Some(off) = src[i..].find('<') {
+      i += off + 1;
+      let rest = &src[i..];
+      let closing = rest.starts_with('/');
+      let name: String = rest
+        .trim_start_matches('/')
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+      let end = rest.replace("=>", "= ").find('>').unwrap_or(rest.len());
+      if name.is_empty() || rest[..end].ends_with('/') {
+        continue;
+      }
+      if closing {
+        if let Some(p) = stack.iter().rposition(|t| *t == name) {
+          stack.truncate(p);
+        }
+      } else {
+        if (name == "a" || name == "button") && stack.iter().any(|t| t == "a" || t == "button") {
+          return true;
+        }
+        stack.push(name);
+      }
+    }
+    false
+  }
+
+  #[test]
+  fn clickable_vectors_stay_visible_controls_with_one_role() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "home", "Home", None);
+    add(&mut doc, NodeType::Frame, "detail", "Detail", None);
+    add(&mut doc, NodeType::Vector, "arrow", "Arrow", Some("home"));
+    doc.get_mut("arrow").unwrap().interactions.push(Interaction {
+      action: Action::Back,
+      ..Default::default()
+    });
+    add(&mut doc, NodeType::Vector, "logo", "Logo", Some("home"));
+    doc.get_mut("logo").unwrap().interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    let react = export_react(&doc, "home", &HeuristicMeasurer);
+    assert!(!react.contains("aria-hidden") && !react.contains("role=\"img\""), "{react}");
+    for line in react.lines() {
+      assert!(line.matches("role=").count() <= 1, "{line}");
+    }
+    // The name comes from the layer, through the control.
+    assert!(
+      react.contains("aria-label=\"Logo\"") && react.contains("aria-label=\"Arrow\""),
+      "{react}"
+    );
+  }
+
+  #[test]
+  fn vector_names_match_whole_words() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Home", None);
+    for (i, n) in ["Typography", "Paragraph", "Bitmap", "Roadmap", "Charts", "Brand logo"]
+      .iter()
+      .enumerate()
+    {
+      add(&mut doc, NodeType::Vector, &format!("v{i}"), n, Some("s"));
+    }
+    let html = export_html(&doc, "s", &HeuristicMeasurer);
+    assert_eq!(html.matches("role=\"img\"").count(), 2, "{html}");
+    assert!(
+      html.contains("aria-label=\"Charts\"") && html.contains("aria-label=\"Brand logo\""),
+      "{html}"
+    );
+  }
+
+  #[test]
+  fn a_component_with_a_link_is_never_nested_in_a_control() {
+    let mut doc = nav_doc();
+    let mut gen = crate::doc::IdGen::new(900);
+    let page = doc.pages[0].id.clone();
+    let mut f = crate::ops::default_node(NodeType::Frame, "promo".into(), "Promo".into());
+    f.x = 900.0;
+    f.height = 40.0;
+    doc.insert(f, None, &page, None);
+    text(&mut doc, "pt", "promo", "Read more", 16.0);
+    doc.get_mut("pt").unwrap().interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    let comp = crate::components::create_component(&mut doc, &["promo".to_string()], &mut gen).unwrap();
+    // One instance in a clickable card, one in a frame named button.
+    add(&mut doc, NodeType::Frame, "card", "Card", Some("home"));
+    doc.get_mut("card").unwrap().height = 150.0;
+    doc.get_mut("card").unwrap().interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    crate::components::create_instance(&mut doc, &comp, Some("card"), &page, 0.0, 0.0, &mut gen).unwrap();
+    add(&mut doc, NodeType::Frame, "buy", "Promo button", Some("home"));
+    doc.get_mut("buy").unwrap().height = 40.0;
+    doc.get_mut("buy").unwrap().interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    crate::components::create_instance(&mut doc, &comp, Some("buy"), &page, 0.0, 0.0, &mut gen).unwrap();
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let comps = &files.iter().find(|f| f.path == "src/components.tsx").unwrap().content;
+    assert!(comps.contains("<a ") && comps.contains("function Promo"), "{comps}");
+    for f in files.iter().filter(|f| f.path.ends_with(".tsx")) {
+      assert!(!nested_controls(&f.content), "{}\n{}", f.path, f.content);
+    }
+  }
+
+  fn bleed_doc(child_x: f64) -> Document {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Landing", None);
+    {
+      let s = doc.get_mut("s").unwrap();
+      s.width = 1440.0;
+      s.clip_content = true;
+    }
+    add(&mut doc, NodeType::Ellipse, "blob", "Blob", Some("s"));
+    {
+      let b = doc.get_mut("blob").unwrap();
+      b.width = 400.0;
+      b.height = 400.0;
+      b.x = child_x;
+    }
+    doc
+  }
+
+  #[test]
+  fn a_screen_whose_content_bleeds_off_the_right_edge_stays_clipped() {
+    let bleeding = export_react(&bleed_doc(1300.0), "s", &HeuristicMeasurer);
+    assert!(
+      bleeding.contains("overflow-hidden") && !bleeding.contains("overflow-x-auto"),
+      "{bleeding}"
+    );
+    let inside = export_react(&bleed_doc(900.0), "s", &HeuristicMeasurer);
+    assert!(inside.contains("overflow-x-auto overflow-y-hidden"), "{inside}");
+    // A clipping card inside a screen, exported alone, keeps its clip.
+    let mut doc = bleed_doc(900.0);
+    add(&mut doc, NodeType::Frame, "card", "Card", Some("s"));
+    doc.get_mut("card").unwrap().clip_content = true;
+    let card = export_react(&doc, "card", &HeuristicMeasurer);
+    assert!(card.contains("overflow-hidden") && !card.contains("overflow-x-auto"), "{card}");
+  }
+
+  #[test]
+  fn small_rows_that_navigate_are_links_unless_named_button() {
+    let mut doc = nav_doc();
+    add(&mut doc, NodeType::Frame, "ni", "Nav/Item", Some("home"));
+    doc.get_mut("ni").unwrap().height = 40.0;
+    doc.get_mut("ni").unwrap().interactions.push(Interaction {
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    text(&mut doc, "nit", "ni", "Overview", 15.0);
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    let at = src.find("Overview").unwrap();
+    let open = src[..at].rfind("<a ").unwrap_or(0);
+    let btn = src[..at].rfind("<button ").unwrap_or(0);
+    assert!(open > btn, "{src}");
+    // The "Buy button" frame of nav_doc stays a button.
+    assert!(
+      src.contains("<button ") && src[..src.find("Buy").unwrap()].rfind("<button ").is_some(),
+      "{src}"
+    );
+    // A small clickable that does something else than navigate is still a button.
+    doc.get_mut("ni").unwrap().interactions[0].action = Action::CloseOverlay;
+    let src = export_react(&doc, "home", &HeuristicMeasurer);
+    let at = src.find("Overview").unwrap();
+    assert!(
+      src[..at].rfind("<button ").unwrap_or(0) > src[..at].rfind("<a ").unwrap_or(0),
+      "{src}"
+    );
+  }
+
+  #[test]
+  fn a_scroller_with_fixed_children_keeps_its_stroke_overlay() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Home", None);
+    add(&mut doc, NodeType::Frame, "list", "List", Some("s"));
+    {
+      let l = doc.get_mut("list").unwrap();
+      l.overflow = crate::model::Overflow::Vertical;
+      l.strokes = vec![crate::model::Paint::solid("#112233")];
+      l.stroke_weight = 2.0;
+      l.stroke_align = StrokeAlign::Inside;
+    }
+    add(&mut doc, NodeType::Rectangle, "bar", "Bar", Some("list"));
+    doc.get_mut("bar").unwrap().scroll_behavior = crate::model::ScrollBehavior::Fixed;
+    let src = export_react(&doc, "s", &HeuristicMeasurer);
+    // The scroller moves into an inner box, so the stroke is the usual overlay span.
+    assert!(!src.contains("[outline:"), "{src}");
+  }
+
+  #[test]
+  fn wrap_rows_export_fill_children_as_flexible_with_their_limits() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "w", "Cards", None);
+    {
+      let f = doc.get_mut("w").unwrap();
+      f.width = 1344.0;
+      f.layout = Some(AutoLayout {
+        wrap: true,
+        direction: crate::model::LayoutDirection::Horizontal,
+        gap: 24.0,
+        counter_gap: 24.0,
+        ..Default::default()
+      });
+    }
+    for i in 0..6 {
+      let id = format!("c{i}");
+      add(&mut doc, NodeType::Frame, &id, "Card", Some("w"));
+      let c = doc.get_mut(&id).unwrap();
+      c.sizing_h = Sizing::Fill;
+      c.min_width = Some(280.0);
+      c.max_width = Some(420.0);
+    }
+    let html = export_html(&doc, "w", &HeuristicMeasurer);
+    assert!(html.contains("flex-wrap:wrap") || html.contains("flex-wrap: wrap"), "{html}");
+    assert!(
+      html.contains("align-content:flex-start") || html.contains("align-content: flex-start"),
+      "{html}"
+    );
+    assert_eq!(
+      html.matches("min-width:280px").count() + html.matches("min-width: 280px").count(),
+      6,
+      "{html}"
+    );
+    assert_eq!(
+      html.matches("max-width:420px").count() + html.matches("max-width: 420px").count(),
+      6,
+      "{html}"
+    );
   }
 }

@@ -550,6 +550,13 @@ if (!haveOldEditor || process.env.E2E_ONLY_NEW) {
 
 await browser.close();
 for (const c of children) c.kill();
-for (const d of tmp) fs.rmSync(d, { recursive: true, force: true });
+// The killed relays may still be writing room files for a moment; retry, and never fail the run on clean-up.
+for (const d of tmp) {
+  try {
+    fs.rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch (e) {
+    console.log(`note: could not remove ${d}: ${e.code}`);
+  }
+}
 console.log(failed ? `\n${failed} check(s) FAILED` : "\nall checks passed");
 process.exit(failed ? 1 : 0);

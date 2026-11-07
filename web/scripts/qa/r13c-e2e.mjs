@@ -526,7 +526,8 @@ for (const scheme of ["dark", "light"]) {
 {
   const { ctx, page } = await open(PHONE);
   await page.screenshot({ path: `${OUT}/r13c-phone.png` });
-  check("phone: no panel toggles (the phone layout is unchanged)", await dt(page, () => !document.querySelector(".panel-toggle") || getComputedStyle(document.querySelector(".panel-toggle")).display === "none"));
+  // r19c: phones now have the Layers and Design toggles (bottom sheets).
+  check("phone: panel toggles open bottom sheets (r19c)", await dt(page, () => !!document.querySelector(".panel-toggle") && getComputedStyle(document.querySelector(".panel-toggle")).display !== "none"));
   await ctx.close();
 }
 

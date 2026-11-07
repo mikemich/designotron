@@ -30,7 +30,7 @@ export function PhoneNote() {
   return (
     <div className="phone-note" role="status">
       <span>
-        Designotron is best on a computer. On a phone you can look around (drag, pinch to zoom), leave comments, present prototypes and ask Claude.
+        Designotron is best on a computer. On a phone you can look around (drag, pinch to zoom), leave comments, present prototypes, ask Claude and edit properties in the Layers and Design sheets.
       </span>
       <button className="ibtn" title="Hide" onClick={hide}>
         <X size={13} />

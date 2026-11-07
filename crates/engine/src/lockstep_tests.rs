@@ -822,7 +822,7 @@ impl Run {
   }
 
   fn extra(&mut self, k: usize) {
-    match k % 26 {
+    match k % 27 {
       0..=2 => {
         // Bindings and pins by name on layers inside instances (recorded as overrides), then a main edit.
         let ids = self.pick_up_to(2, |n| n.master_id.is_some() || n.kind == NodeType::Instance);
@@ -1012,6 +1012,21 @@ impl Run {
         for _ in 0..1 + self.r.below(4) {
           self.both(Command::Undo);
         }
+      }
+      25 => {
+        // Wrap rows: a layout frame starts wrapping, its fill children get a min and max width.
+        let frames = self.pick_up_to(2, |n| n.layout.as_ref().is_some_and(|l| l.direction == LayoutDirection::Horizontal));
+        let wrap = self.r.chance(70);
+        self.both(Command::Update {
+          ids: frames,
+          patch: json!({ "layout": { "wrap": wrap } }),
+        });
+        let kids = self.pick_up_to(3, |n| n.sizing_h == Sizing::Fill);
+        let (lo, hi) = (40.0 + self.r.below(80) as f64, 120.0 + self.r.below(200) as f64);
+        self.both(Command::Update {
+          ids: kids,
+          patch: json!({ "minWidth": lo, "maxWidth": hi }),
+        });
       }
       _ => {
         let ids = self.pick_up_to(3, |n| n.parent.is_none());
@@ -1331,15 +1346,15 @@ fn a_freshly_loaded_file_is_settled_by_the_first_change_only() {
 }
 
 #[test]
-fn deleting_a_bound_variable_leaves_nothing_dangling_and_costs_two_passes_at_most() {
+fn deleting_a_bound_variable_leaves_nothing_dangling_and_costs_one_pass() {
   let mut e = build();
   let count = || AFTER_MUTATIONS.with(|c| c.get());
   let mut cols = variables::plain(&e.doc.variables);
   cols[0].variables.retain(|v| v.id != "v_text");
   let before = count();
   e.dispatch(Command::SetVariables { collections: cols.clone() }).unwrap();
-  // One pass for the delete, one for the instance overrides that named it.
-  assert!(count() - before <= 2, "{} passes", count() - before);
+  // The delete records what instance layers show first, so nothing re-syncs afterwards.
+  assert_eq!(count() - before, 1, "{} passes", count() - before);
   assert!(!e.doc.nodes.values().any(|n| n.bindings.values().any(|v| v == "v_text")));
   let mut r = build();
   r.reference = true;
@@ -1394,9 +1409,7 @@ fn an_instance_layer_bound_to_a_deleted_variable_keeps_its_value_and_loses_the_l
       "main change {with_main_change}: the link is gone, not replaced by the main's: {:?}",
       n.bindings
     );
-    if !with_main_change {
-      assert_eq!(n.fills, shown, "the value it showed stays");
-    }
+    assert_eq!(n.fills, shown, "main change {with_main_change}: the value it showed stays");
     // Nothing keeps naming the variable, in the layers or in the instances' records.
     assert!(!e.to_json().contains("v_muted"), "a dangling name is left");
   }

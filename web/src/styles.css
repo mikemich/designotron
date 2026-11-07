@@ -158,6 +158,24 @@ textarea {
 .topbar .save-state {
   flex: 0 0 auto;
   white-space: nowrap;
+  position: relative;
+}
+/* Narrow bars show the save state as a dot (the text stays for screen readers and the tooltip). */
+.topbar .save-dot {
+  display: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+.topbar .save-state[data-state="saving"] .save-dot {
+  background: #f5a623;
+}
+.topbar .save-state[data-state="neutral"] .save-dot {
+  background: var(--text-3);
+}
+.topbar .save-state[data-state="failed"] .save-dot {
+  background: var(--danger);
 }
 /* On narrow desktop widths the bar is full: let the save label and breadcrumb give way
    (with an ellipsis) rather than overlap the buttons next to them. */
@@ -189,6 +207,10 @@ textarea {
   justify-content: center;
   gap: 6px;
   color: var(--text);
+}
+.tbtn.chevron-btn {
+  min-width: 24px;
+  padding: 0;
 }
 .tbtn:hover {
   background: var(--panel-2);
@@ -1649,6 +1671,33 @@ a.btn {
     flex: 0 1 auto;
     text-overflow: ellipsis;
   }
+  .topbar .file-loc {
+    display: none;
+  }
+  .topbar .save-dot {
+    display: block;
+  }
+  .topbar .save-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+}
+/* r19c: 40 px buttons leave a small touch tablet (up to 960 px) no room for the file name beside the zoom button;
+   pinch zooms, and the main menu has Zoom to fit. */
+@media (max-width: 960px) and (pointer: coarse) {
+  .topbar .zoom-btn {
+    display: none;
+  }
+}
+/* r19c: from 1001 px the file name keeps a readable 120 px (the breadcrumb and the save text give way);
+   below that the bar has no room for it and it keeps 48 px. */
+@media (min-width: 1001px) and (max-width: 1100px) {
+  .topbar .filename {
+    min-width: 120px;
+  }
 }
 /* r18b: a desktop at 200% zoom (about 720 px) keeps the tablet layout, where the tool groups leave no room
    for the file name between them: it gives way (it was clipped to nothing there already). */
@@ -1667,6 +1716,68 @@ a.btn {
   .main > .panel {
     display: none;
   }
+  /* Phones: Layers and Design open as bottom sheets over the canvas (one at a time, like Claude's). */
+  .main:not(.no-left) > .panel:not(.right),
+  .main:not(.no-right) > .panel.right {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 44px;
+    grid-template-rows: auto minmax(0, 1fr);
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    height: 60vh;
+    height: 60dvh;
+    max-height: 60vh;
+    max-height: 60dvh;
+    z-index: 46;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    border: 0;
+    border-top: 1px solid var(--border);
+    border-radius: 14px 14px 0 0;
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.4);
+    visibility: visible;
+  }
+  /* A view-only link has nothing to edit: no sheets. */
+  .app.view-only .main:not(.zz) > .panel:not(.zz) {
+    display: none;
+  }
+  .panel > .tabs {
+    grid-column: 1;
+    grid-row: 1;
+    min-width: 0;
+  }
+  .panel > .tabpanel {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .panel > .panel-close {
+    display: inline-flex;
+    grid-column: 2;
+    grid-row: 1;
+    width: 44px;
+    height: 44px;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0;
+  }
+  /* The phone note and toasts sit above the sheet instead of under it. */
+  body:has(.main:not(.no-left) > .panel:not(.right)) .phone-note,
+  body:has(.main:not(.no-right) > .panel.right) .phone-note {
+    display: none;
+  }
+  body:has(.main:not(.no-left) > .panel:not(.right)) .toast,
+  body:has(.main:not(.no-right) > .panel.right) .toast {
+    bottom: calc(60vh + 12px);
+    bottom: calc(60dvh + 12px);
+  }
+  .app.view-only .panel-toggle {
+    display: none;
+  }
   /* Phones: Claude is a full-screen sheet over the canvas (closed with its X). */
   .main > .chat {
     position: fixed;
@@ -1676,6 +1787,11 @@ a.btn {
   }
   .topbar {
     overflow-x: auto;
+    padding: 0 4px;
+    gap: 0;
+  }
+  .topbar .group {
+    gap: 0;
   }
   /* Touch targets of at least 40px. */
   .topbar .tbtn {
@@ -1701,6 +1817,47 @@ a.btn {
   }
   .hero {
     flex-wrap: wrap;
+  }
+}
+
+/* Touch screens (r19c): 40 px toolbar buttons and menu items, 36 px layer rows (ROW in LeftPanel.tsx),
+   32 px fields and links. 44 px does not fit the top bar at 1024 px. */
+@media (pointer: coarse) {
+  .topbar .tbtn,
+  .topbar .tbtn.chevron-btn {
+    min-width: 40px;
+    height: 40px;
+  }
+  .menu .item,
+  [role="menuitem"] {
+    min-height: 40px;
+  }
+  .layer {
+    height: 36px;
+  }
+  .field {
+    min-height: 32px;
+    height: 32px;
+  }
+  .field input,
+  .field select {
+    min-height: 30px;
+  }
+  .share-option a,
+  .share-dialog a,
+  .share-dialog label {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding-block: 4px;
+  }
+  .share-dialog input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+  }
+  .ibtn {
+    min-width: 32px;
+    min-height: 32px;
   }
 }
 
@@ -2956,12 +3113,13 @@ button.plugin-log-line {
 .tbtn.export-code .export-icon {
   display: none;
 }
-@media (max-width: 1000px) {
-  .topbar .save-state,
-  .topbar .file-loc,
+@media (max-width: 1000px), (max-width: 1280px) and (pointer: coarse) {
   .topbar .tool-extra {
     display: none;
   }
+}
+/* Export code is an icon at 1100 px and below (after the base rule above, which hides the icon). */
+@media (max-width: 1100px) {
   .tbtn.export-code .export-label {
     display: none;
   }

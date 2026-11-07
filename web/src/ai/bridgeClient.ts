@@ -2,7 +2,7 @@
 // The bridge forwards MCP tool calls from Claude Code to this editor and
 // streams Claude Code chat events back.
 
-import { getEngine, onDocChange } from "../store";
+import { currentDocRev, getEngine, onDocChange, saveSoonSince } from "../store";
 import { DRAG_BUSY, LEFT_FILE, executeTool, whenCanvasIdle, type ToolOutcome } from "./tools";
 import { appendText, connectionLost, patchItem, push, resumeFailed, showScreenshot, useChat } from "./chatState";
 import { onPreviewMessage } from "./preview";
@@ -243,7 +243,12 @@ class BridgeClient {
           // Not in the middle of the person's drag: the drag's next step would undo this call.
           out = { ok: false, result: DRAG_BUSY };
         } else if (ended()) out = { ok: false, result: LEFT_FILE };
-        else out = await executeTool(m.name, m.input, { group, ...(chatTurn !== undefined ? { fileId: this.turnFile } : {}) });
+        else {
+          const rev = currentDocRev();
+          out = await executeTool(m.name, m.input, { group, ...(chatTurn !== undefined ? { fileId: this.turnFile } : {}) });
+          // Claude's edits reach storage at once: a quick close can't lose them.
+          saveSoonSince(rev);
+        }
         this.send({ type: "tool_result", id: m.id, ok: out.ok, result: out.result, image: out.image ?? null });
         if (chatTurn === undefined || !ended()) showScreenshot(out, m.name);
         break;
