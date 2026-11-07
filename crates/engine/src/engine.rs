@@ -751,6 +751,8 @@ pub enum Query {
     id: NodeId,
   },
   ExportProject,
+  /// The variables as a W3C design tokens file (text).
+  TokensJson,
   /// Names the exported code gives the document's styles and variables (for the Code tab's Inspect).
   InspectNames,
   ToolDefs,
@@ -3807,6 +3809,7 @@ impl Engine {
           .collect();
         json!(files)
       }
+      Query::TokensJson => json!(crate::variables::tokens_json_text(&self.doc)),
       Query::InspectNames => codegen::inspect_names(&self.doc),
       Query::ToolDefs => ai::tool_defs(),
       Query::SystemPrompt => json!(ai::SYSTEM_PROMPT),
