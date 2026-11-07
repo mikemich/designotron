@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, RotateCcw, Settings2, X } from "lucide-react";
 import { toast, useStore } from "./store";
 import type { Interaction, OverlaySettings, Rect } from "./types";
@@ -93,6 +93,13 @@ interface Tap {
   x: number;
   y: number;
 }
+/** Keyboard presses in progress (a hotspot's key is down). Each entry removes its own listeners
+ *  without running its release; the presenter closing or restarting calls them all. */
+const keyPresses = new Set<() => void>();
+function cancelKeyPresses() {
+  for (const stop of [...keyPresses]) stop();
+  keyPresses.clear();
+}
 /** The pointer id a key press uses (real pointers are never negative). */
 const KEY_POINTER = -1;
 const within = (b: DOMRect, x: number, y: number) => x >= b.left && x <= b.right && y >= b.top && y <= b.bottom;
@@ -109,6 +116,9 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   // Options (remembered per browser) and the menu that sets them.
   const [prefs, setPrefs] = useState(loadPrefs);
   const [menu, setMenu] = useState(false);
+  const menuRef = useRef(false);
+  menuRef.current = menu;
+  const menuId = useId();
   // Moves on every restart (R): screens, scrollers and timers start over even on the same frame.
   const [restarts, setRestarts] = useState(0);
   const [leaving, setLeaving] = useState<Leaving | null>(null);
@@ -187,6 +197,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   const restart = () => {
     hovering.current?.();
     pressing.current?.();
+    cancelKeyPresses();
     carried.current = null;
     closePlayer();
     setLeaving(null);
@@ -385,6 +396,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       pressing.current?.();
       disarmSwallow.current?.();
       hovering.current?.();
+      cancelKeyPresses();
     },
     [],
   );
@@ -426,6 +438,12 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   keys.current = { scene, top, frames, current, overlays };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Escape with the options open closes only them.
+      if (e.key === "Escape" && menuRef.current) {
+        e.preventDefault();
+        setMenu(false);
+        return;
+      }
       const t = e.target as HTMLElement | null;
       if (t && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable)) return;
       const k = keys.current;
@@ -452,7 +470,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       }
       if (run(k.scene, null)) return;
       // R starts over (after the screens' own Key triggers, so a frame can keep R for itself).
-      if (name === "R" && !t?.closest('[role="menu"]')) {
+      if (name === "R" && !t?.closest(".bar-menu")) {
         e.preventDefault();
         restartRef.current();
         return;
@@ -475,14 +493,25 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
 
   if (!frame || !scene) return null;
   const hasHotspots = scene.all.size > 0;
+  // Tab: the bar first, then the hotspots top to bottom and left to right (the order they have on
+  // screen, not the order they were drawn in), wrapping at the ends.
   const trapTab = (e: React.KeyboardEvent) => {
     const root = rootRef.current;
     if (e.key !== "Tab" || !root) return;
-    const els = [...root.querySelectorAll<HTMLElement>('button, a[href], .hotspot[tabindex="0"]')];
-    const at = document.activeElement;
-    if (!els.length) e.preventDefault();
-    else if (e.shiftKey && (at === els[0] || at === root)) (e.preventDefault(), els[els.length - 1].focus());
-    else if (!e.shiftKey && at === els[els.length - 1]) (e.preventDefault(), els[0].focus());
+    const all = [...root.querySelectorAll<HTMLElement>('button, a[href], input, .hotspot[tabindex="0"]')];
+    const spots = all
+      .filter((el) => !el.closest(".bar"))
+      .map((el) => ({ el, r: el.getBoundingClientRect() }))
+      .sort((a, b) => a.r.top - b.r.top || a.r.left - b.r.left)
+      .map((x) => x.el);
+    const els = [...all.filter((el) => el.closest(".bar")), ...spots];
+    const at = document.activeElement as HTMLElement | null;
+    const i = at ? els.indexOf(at) : -1;
+    if (!els.length) return e.preventDefault();
+    if (i < 0 && at !== root) return;
+    e.preventDefault();
+    const last = els.length - 1;
+    els[e.shiftKey ? (i <= 0 ? last : i - 1) : i < 0 || i === last ? 0 : i + 1].focus();
   };
 
   const crumb = frame.name + (top ? ` › ${doc.nodes[top.id]?.name ?? ""}` : "");
@@ -551,7 +580,14 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         setTimeout(() => setFlash(false), 400);
       }}
     >
-      <div className="bar" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="bar"
+        onClick={(e) => {
+          e.stopPropagation();
+          // Any other button of the bar closes the options.
+          if (!(e.target as Element).closest(".bar-menu")) setMenu(false);
+        }}
+      >
         <button className="tbtn" title="Back" onClick={back}>
           <ChevronLeft size={16} />
         </button>
@@ -574,41 +610,29 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         <div
           className="bar-menu"
           onKeyDown={(e) => {
-            // Escape closes the menu (and only it) while it is open.
+            // Escape closes the options (and only them) and gives focus back to their button.
             if (!menu || e.key !== "Escape") return;
             e.preventDefault();
             e.stopPropagation();
             setMenu(false);
             e.currentTarget.querySelector("button")?.focus();
           }}
+          onBlur={(e) => {
+            // Tabbing or clicking away closes it.
+            if (menu && !e.currentTarget.contains(e.relatedTarget as Node | null)) setMenu(false);
+          }}
         >
-          <button className="tbtn" title="Presenter options" aria-label="Presenter options" aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu((m) => !m)}>
+          <button className="tbtn" title="Presenter options" aria-label="Presenter options" aria-expanded={menu} aria-controls={menuId} onClick={() => setMenu((m) => !m)}>
             <Settings2 size={16} />
           </button>
           {menu && (
-            <div
-              className="bar-menu-list"
-              role="menu"
-              aria-label="Presenter options"
-            >
+            <div className="bar-menu-list" id={menuId} role="group" aria-label="Presenter options">
               <label>
-                <input
-                  type="checkbox"
-                  role="menuitemcheckbox"
-                  aria-checked={prefs.hints}
-                  checked={prefs.hints}
-                  onChange={(e) => (setPrefs((p) => ({ ...p, hints: e.target.checked })), savePrefs({ hints: e.target.checked }))}
-                />
+                <input type="checkbox" checked={prefs.hints} onChange={(e) => (setPrefs((p) => ({ ...p, hints: e.target.checked })), savePrefs({ hints: e.target.checked }))} />
                 Show hotspot hints on click
               </label>
               <label>
-                <input
-                  type="checkbox"
-                  role="menuitemcheckbox"
-                  aria-checked={prefs.always}
-                  checked={prefs.always}
-                  onChange={(e) => (setPrefs((p) => ({ ...p, always: e.target.checked })), savePrefs({ always: e.target.checked }))}
-                />
+                <input type="checkbox" checked={prefs.always} onChange={(e) => (setPrefs((p) => ({ ...p, always: e.target.checked })), savePrefs({ always: e.target.checked }))} />
                 Always show hotspots
               </label>
             </div>
@@ -888,16 +912,21 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
       if (p) onPress?.(h, p, KEY_POINTER);
       // The release is the key coming up, wherever focus is by then (a press that opens an overlay
       // moves it).
-      const release = (k: KeyboardEvent | FocusEvent) => {
-        if (k instanceof KeyboardEvent && k.key !== key) return;
+      const stop = () => {
         window.removeEventListener("keyup", release, true);
         window.removeEventListener("blur", release);
+        keyPresses.delete(stop);
+      };
+      const release = (k: KeyboardEvent | FocusEvent) => {
+        if (k instanceof KeyboardEvent && k.key !== key) return;
+        stop();
         const up = h.interactions.find(is("mouseUp"));
         if (up) onAct?.(h, up);
         if (p) window.dispatchEvent(new PointerEvent("pointerup", { pointerId: KEY_POINTER, button: 0 }));
       };
       window.addEventListener("keyup", release, true);
       window.addEventListener("blur", release);
+      keyPresses.add(stop);
     };
     return (
       <div

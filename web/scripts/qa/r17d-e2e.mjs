@@ -63,9 +63,10 @@ const homeKids = () => [
     ["Push", 320],
     ["Go Detail", 380],
     ["To KeyR", 440],
+    ["Release", 490],
   ].map(([n, y]) => box(n, 16, y, 200, 44, "#DBEAFE", [text(n + " label", n, 12, 12, 15, "#1E3A8A")])),
-  ...Array.from({ length: 10 }, (_, i) => box(`Card ${i + 1}`, 16, 520 + i * 100, 343, 88, "#FFFFFF", [text(`Card ${i + 1} title`, `Card ${i + 1}`, 16, 16, 18)])),
-  rect("Spacer", 16, 1560, 343, 60, "#E2E8F0"),
+  ...Array.from({ length: 10 }, (_, i) => box(`Card ${i + 1}`, 16, 580 + i * 100, 343, 88, "#FFFFFF", [text(`Card ${i + 1} title`, `Card ${i + 1}`, 16, 16, 18)])),
+  rect("Spacer", 16, 1620, 343, 60, "#E2E8F0"),
 ];
 const screens = () => [
   box("Home", 0, 0, W, H, "#F8FAFC", homeKids(), { overflow: "vertical" }),
@@ -117,6 +118,7 @@ async function build(page) {
   await set("Home", "Hover only", { trigger: "mouse_enter", action: "navigate", destinationId: ids.Detail, transition: "instant" });
   await set("Home", "Push", { action: "navigate", destinationId: ids.Detail, transition: "push", direction: "left", duration: 1000, easing: "linear" });
   await set("Home", "Go Detail", { action: "navigate", destinationId: ids.Detail, transition: "instant" });
+  await set("Home", "Release", { trigger: "mouse_up", action: "navigate", destinationId: ids.Detail, transition: "instant" });
   await set("Home", "To KeyR", { action: "navigate", destinationId: ids.KeyR, transition: "instant" });
   await set("Home", null, { trigger: "key", key: "K", action: "navigate", destinationId: ids["Home 2"], transition: "instant", preserveScroll: true });
   await set("Home", null, { trigger: "key", key: "J", action: "navigate", destinationId: ids["Home 2"], transition: "instant" });
@@ -210,6 +212,48 @@ try {
   await sleep(250);
   check("Space up closes it again", (await overlayCount(p)) === 0);
   check("the screen is still Home", (await crumb(p)) === "Home");
+
+  // Tab follows the screen (top to bottom), not the order the hotspots were drawn in.
+  await p.evaluate(() => document.querySelector(".presenter").focus());
+  const order = [];
+  for (let i = 0; i < 20; i++) {
+    await p.keyboard.press("Tab");
+    const l = await p.evaluate(() => (document.activeElement?.classList.contains("hotspot") ? document.activeElement.getAttribute("aria-label") : null));
+    if (l) order.push(l);
+  }
+  const want = ["Open tall", "Open scrolly", "Open far", "Hold, while pressing", "Push", "Go Detail", "To KeyR", "Release, mouse up"];
+  check("Tab visits the hotspots top to bottom", want.every((w, i) => order[i] === w) && order[8] === want[0], order.join(" > "));
+
+  // A key held on a Mouse up hotspot: the release acts, but not once R has restarted the screen.
+  const focusLabel = async (label) => {
+    await p.evaluate(() => document.querySelector(".presenter").focus());
+    for (let i = 0; i < 20; i++) {
+      await p.keyboard.press("Tab");
+      if ((await p.evaluate(() => document.activeElement?.getAttribute("aria-label"))) === label) return true;
+    }
+    return false;
+  };
+  check("Tab reaches the Mouse up hotspot", await focusLabel("Release, mouse up"));
+  await p.keyboard.down("Space");
+  await p.keyboard.up("Space");
+  await sleep(250);
+  check("Space down and up on a Mouse up hotspot runs it on release", (await crumb(p)) === "Detail", await crumb(p));
+  await p.keyboard.press("R");
+  await sleep(250);
+  await focusLabel("Release, mouse up");
+  await p.keyboard.down("Space");
+  await p.keyboard.press("r");
+  await sleep(250);
+  await p.keyboard.up("Space");
+  await sleep(300);
+  check("a key held across R does nothing when it is released", (await crumb(p)) === "Home", await crumb(p));
+  await p.keyboard.down("Space"); // held while the presenter closes
+  await p.keyboard.press("Escape");
+  await sleep(250);
+  await p.keyboard.up("Space");
+  await sleep(250);
+  check("a key held while the presenter closes does nothing afterwards", (await p.locator(".presenter").count()) === 0);
+  await present(p);
 
   // ---------- overlay with its own overflow scrolls ----------
   await hotspot(p, "Open scrolly").click();
@@ -308,8 +352,8 @@ try {
   check("R also resets the scroll of the start screen", (await homeScroll(".stage .scroller")) === 0);
 
   // ---------- hotspot hints ----------
-  const bar = ".presenter .bar button[aria-haspopup='menu']";
-  const item = (n) => p.getByRole("menuitemcheckbox", { name: n });
+  const bar = ".presenter .bar button[aria-controls]";
+  const item = (n) => p.getByRole("checkbox", { name: n });
   const flashes = () => p.locator(".presenter .hint-flash").count();
   await p.click(bar);
   check("the options menu offers both options with today's defaults", (await item("Show hotspot hints on click").isChecked()) && !(await item("Always show hotspots").isChecked()));
@@ -342,7 +386,38 @@ try {
   check("and the menu shows them", !(await item("Show hotspot hints on click").isChecked()) && (await item("Always show hotspots").isChecked()));
   await p.keyboard.press("Escape");
   await sleep(150);
-  check("Escape closes the menu, not the presenter", (await p.locator(".presenter").count()) === 1 && (await p.locator(".presenter [role='menu']").count()) === 0);
+  check("the options are a disclosure, not an ARIA menu", (await p.locator(".presenter [role='menu'], .presenter [aria-haspopup]").count()) === 0 && (await p.locator(bar).getAttribute("aria-expanded")) === "false");
+  check("Escape closes the menu, not the presenter", (await p.locator(".presenter").count()) === 1 && (await p.locator(".presenter .bar-menu-list").count()) === 0);
+  const menuOpen = () => p.locator(".presenter .bar-menu-list").count();
+  await p.click(bar);
+  await p.evaluate(() => (document.querySelector(".presenter .bar button[title=\x27Back\x27]") ?? document.body).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  await sleep(150);
+  check("Escape anywhere closes only the open options", (await menuOpen()) === 0 && (await p.locator(".presenter").count()) === 1);
+  await p.click(bar);
+  await p.keyboard.press("Tab");
+  await p.keyboard.press("Tab");
+  check("Tab inside the options stays open", (await menuOpen()) === 1);
+  await p.keyboard.press("Tab");
+  await sleep(100);
+  check("Tab out of the options closes them", (await menuOpen()) === 0);
+  await p.click(bar);
+  await p.locator(".presenter .bar button[title='Back']").click();
+  await sleep(100);
+  check("clicking Back (or Next) closes the options", (await menuOpen()) === 0);
+  await p.click(bar);
+  await p.mouse.click(40, 450);
+  await sleep(100);
+  check("a click outside closes the options", (await menuOpen()) === 0);
+  // With every hotspot outlined, the focused one still stands out.
+  check("Tab reaches Go Detail", await focusLabel("Go Detail"));
+  const ring = await p.evaluate(() => {
+    const st = (el) => {
+      const c = getComputedStyle(el);
+      return `${c.outlineWidth}|${c.outlineColor}|${c.boxShadow}|${c.backgroundColor}`;
+    };
+    return { focused: st(document.activeElement), other: st(document.querySelector(".presenter .hotspot[aria-label='Push']")) };
+  });
+  check("in Always show hotspots mode the focus ring differs from the outline", ring.focused !== ring.other && /rgb\(255, 255, 255\)/.test(ring.focused), JSON.stringify(ring));
   await p.click(".presenter .bar button[title='Close (Esc)']");
   await sleep(200);
 
@@ -399,7 +474,7 @@ try {
     check(`view link plays on the ${name}`, up);
     if (!up) continue;
     await sleep(300);
-    check(`view-only (${name}): has the Restart button and the options menu`, (await v.locator(".presenter .bar button[title='Restart (R)']").count()) === 1 && (await v.locator(".presenter .bar button[aria-haspopup='menu']").count()) === 1);
+    check(`view-only (${name}): has the Restart button and the options menu`, (await v.locator(".presenter .bar button[title='Restart (R)']").count()) === 1 && (await v.locator(".presenter .bar button[aria-controls]").count()) === 1);
     await v.locator(".presenter .hotspot[aria-label='Open tall']").click();
     await sleep(300);
     check(`view-only (${name}): an overlay is open`, (await v.locator(".presenter .overlay-backdrop").count()) === 1);
@@ -408,8 +483,8 @@ try {
     check(`view-only (${name}): R with an overlay open restarts`, (await v.locator(".presenter .overlay-backdrop").count()) === 0 && (await v.locator(".presenter .crumb").first().innerText()) === "Home");
     check(`view-only (${name}): every hotspot has a label or is aria-hidden`, (await allLabelled(v)).bad === 0);
     if (base === URL) {
-      await v.click(".presenter .bar button[aria-haspopup='menu']");
-      await v.getByRole("menuitemcheckbox", { name: "Always show hotspots" }).check();
+      await v.click(".presenter .bar button[aria-controls]");
+      await v.getByRole("checkbox", { name: "Always show hotspots" }).check();
       await v.reload();
       await v.waitForSelector(".presenter", { timeout: 15000 });
       await sleep(300);

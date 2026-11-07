@@ -499,7 +499,7 @@ export function carryScroll(from: Pick<Scene, "id" | "scrollers">, to: Pick<Scen
       for (const s of list) {
         const names: string[] = [];
         for (let id: string | null | undefined = s.id; id && id !== scene.id; id = doc.nodes[id]?.parent) names.unshift(doc.nodes[id]?.name ?? "");
-        const base = s.id === scene.id ? "" : names.join("\u0000");
+        const base = s.id === scene.id ? "\u0002" : names.join("\u0000");
         const n = seen.get(base) ?? 0;
         seen.set(base, n + 1);
         out.set(`${base}\u0001${n}`, s);

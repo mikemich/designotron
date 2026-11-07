@@ -1344,6 +1344,13 @@ a.btn {
   outline: 2px solid var(--select);
   outline-offset: -1px;
 }
+/* The focus ring must stay visible when every hotspot is outlined. */
+.presenter.hints-always .hotspot:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 5px var(--select);
+  background: rgba(13, 153, 255, 0.3);
+}
 .presenter .bar-menu {
   position: relative;
 }
