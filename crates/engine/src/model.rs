@@ -185,6 +185,12 @@ impl NodeType {
   }
 }
 
+/// Reads a string map and drops `null` values, so a merge patch can remove an entry.
+fn map_skip_nulls<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<String, String>, D::Error> {
+  let raw = BTreeMap::<String, Option<String>>::deserialize(d)?;
+  Ok(raw.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect())
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Node {
@@ -284,9 +290,12 @@ pub struct Node {
   pub layout_grids: Vec<LayoutGrid>,
   /// Masks the siblings painted above it (Figma "Use as mask"); not drawn itself.
   pub is_mask: bool,
-  /// Property → variable id (see `variables::PROPERTIES`).
+  /// Property → variable id (see `variables::PROPERTIES`). A `null` in a merge patch removes
+  /// the entry (instance overrides record "unbound" this way).
+  #[serde(deserialize_with = "map_skip_nulls")]
   pub bindings: BTreeMap<String, String>,
-  /// Collection id → mode id for this layer and its descendants.
+  /// Collection id → mode id for this layer and its descendants (`null` in a patch removes one).
+  #[serde(deserialize_with = "map_skip_nulls")]
   pub variable_modes: BTreeMap<String, String>,
   /// Component properties this layer of a main component is bound to.
   #[serde(skip_serializing_if = "Option::is_none")]

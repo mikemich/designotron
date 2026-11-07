@@ -602,6 +602,11 @@ pub enum Query {
   OverrideGroups {
     id: NodeId,
   },
+  /// The layers inside instance `id` that carry overrides, in tree order, capped at 20:
+  /// `{ layers: [{ id, name, groups: [{ key, label }] }], more }`.
+  OverriddenLayers {
+    id: NodeId,
+  },
   /// Component properties for the design panel: of a main component or set, the controls of
   /// an instance, or what a layer of a main component can bind to.
   ComponentProps {
@@ -1961,11 +1966,7 @@ impl Engine {
           None => None,
         };
         for id in &ids {
-          let n = self.doc.get_mut(id).ok_or_else(|| format!("no node {id}"))?;
-          match &var_id {
-            Some(v) => n.bindings.insert(property.clone(), v.clone()),
-            None => n.bindings.remove(&property),
-          };
+          crate::variables::set_binding(&mut self.doc, id, &property, var_id.as_deref())?;
         }
         Ok(json!({}))
       }
@@ -1990,10 +1991,14 @@ impl Engine {
         };
         for id in &ids {
           let n = self.doc.get_mut(id).ok_or_else(|| format!("no node {id}"))?;
-          match &mid {
+          let had = match &mid {
             Some(m) => n.variable_modes.insert(cid.clone(), m.clone()),
             None => n.variable_modes.remove(&cid),
           };
+          if had.is_some() || mid.is_some() {
+            let pin = json!({ "variableModes": { cid.clone(): mid } });
+            components::record_override(&mut self.doc, id, &pin);
+          }
         }
         Ok(json!({}))
       }
@@ -2241,11 +2246,16 @@ impl Engine {
       Command::Update { ids, patch: p } => {
         // Before anything records the patch (as an instance override, say).
         let p = without_unsafe_links(p);
-        crate::variables::unbind_for_patch(&mut self.doc, &ids, &p);
+        let detached = crate::variables::unbind_for_patch(&mut self.doc, &ids, &p);
         for id in &ids {
           let before = self.doc.get(id).cloned().ok_or_else(|| format!("no node {id}"))?;
           patch::apply(self.doc.get_mut(id).unwrap(), &p)?;
           components::record_override(&mut self.doc, id, &p);
+          // The detach of a layer inside an instance is an override too (`bindings: {x: null}`).
+          if let Some((_, gone)) = detached.iter().find(|(d, _)| d == id) {
+            let unbound: serde_json::Map<String, Value> = gone.iter().map(|g| (g.clone(), Value::Null)).collect();
+            components::record_override(&mut self.doc, id, &json!({ "bindings": unbound }));
+          }
           let keys = before
             .text
             .as_ref()
@@ -2269,11 +2279,15 @@ impl Engine {
           // Editing a linked layer's fill, stroke, effects or grids by hand detaches it (Styles, W3-C);
           // on an instance layer the unlink is an override too, so a main edit doesn't relink it.
           let mut unlinked = serde_json::Map::new();
-          if after.fill_style.is_some() && before.fills != after.fills {
+          // A variable bound in the same patch replaces the style, unless the patch names one too.
+          let binds = |prop: &str, style: &str| {
+            p.get("bindings").and_then(|b| b.get(prop)).is_some_and(|v| v.is_string()) && !p.get(style).is_some_and(|v| v.is_string())
+          };
+          if after.fill_style.is_some() && (before.fills != after.fills || binds("fill", "fillStyle")) {
             self.doc.get_mut(id).unwrap().fill_style = None;
             unlinked.insert("fillStyle".into(), Value::Null);
           }
-          if after.stroke_style.is_some() && before.strokes != after.strokes {
+          if after.stroke_style.is_some() && (before.strokes != after.strokes || binds("stroke", "strokeStyle")) {
             self.doc.get_mut(id).unwrap().stroke_style = None;
             unlinked.insert("strokeStyle".into(), Value::Null);
           }
@@ -3046,18 +3060,22 @@ impl Engine {
           let stroke = kind.as_deref() == Some("stroke");
           for id in &ids {
             if let Some(n) = self.doc.get_mut(id) {
-              if stroke {
+              // One source per paint: a style replaces the variable bound to the same fill or stroke.
+              let prop = if stroke { "stroke" } else { "fill" };
+              let was_bound = n.bindings.remove(prop).is_some();
+              let mut rec = if stroke {
                 set_stroke_color(n, &c.color);
                 n.stroke_style = Some(style_id.clone());
-                applied.push((
-                  id.clone(),
-                  json!({ "strokes": n.strokes, "strokeWeight": n.stroke_weight, "strokeStyle": style_id }),
-                ));
+                json!({ "strokes": n.strokes, "strokeWeight": n.stroke_weight, "strokeStyle": style_id })
               } else {
                 n.fills = vec![Paint::solid(&c.color)];
                 n.fill_style = Some(style_id.clone());
-                applied.push((id.clone(), json!({ "fills": n.fills, "fillStyle": style_id })));
+                json!({ "fills": n.fills, "fillStyle": style_id })
+              };
+              if let (Some(m), true) = (rec.as_object_mut(), was_bound) {
+                m.insert("bindings".into(), json!({ prop: null }));
               }
+              applied.push((id.clone(), rec));
             }
           }
         } else if let Some(e) = self.doc.styles.effects.iter().find(|s| s.id == style_id).cloned() {
@@ -3735,6 +3753,20 @@ impl Engine {
           .map(|(key, label)| json!({ "key": key, "label": label }))
           .collect();
         json!({ "groups": groups })
+      }
+      Query::OverriddenLayers { id } => {
+        let (layers, more) = components::overridden_layers(&self.doc, &id, 20);
+        let layers: Vec<Value> = layers
+          .into_iter()
+          .map(|(lid, name, groups)| {
+            let groups: Vec<Value> = groups
+              .into_iter()
+              .map(|(key, label)| json!({ "key": key, "label": label }))
+              .collect();
+            json!({ "id": lid, "name": name, "groups": groups })
+          })
+          .collect();
+        json!({ "layers": layers, "more": more })
       }
       Query::OverrideCount { id } => json!({ "count": components::override_count(&self.doc, &id) }),
       Query::ComponentProps { id } => crate::props::describe(&self.doc, &id),

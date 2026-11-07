@@ -150,6 +150,29 @@ export function resetItems(ids: string[], groups: OverrideGroup[], all: string, 
   return items;
 }
 
+type InsideLayer = { id: string; name: string; groups: OverrideGroup[] };
+
+/** The layers inside instance `id` that differ from its main (the engine caps the list at 20). */
+export function useOverriddenLayers(id: string, enabled = true): { layers: InsideLayer[]; more: boolean } {
+  const doc = useDoc();
+  return useMemo(
+    () => (enabled ? query<{ layers: InsideLayer[]; more: boolean }>({ q: "overriddenLayers", id }) : { layers: [], more: false }),
+    [doc, id, enabled],
+  );
+}
+
+/** The instance's reset menu: its own groups, then the changed layers inside it, one reset each. */
+export function instanceResetItems(id: string, groups: OverrideGroup[], inside: { layers: InsideLayer[]; more: boolean }): MenuItem[] {
+  const items = resetItems([id], groups, "Reset all changes", () => dispatch({ op: "resetInstance", ids: [id] }));
+  if (!inside.layers.length) return items;
+  items.push({ sep: true }, { heading: "Layers inside" });
+  for (const l of inside.layers) {
+    items.push({ label: `${l.name}: ${l.groups.map((g) => g.label).join(", ")}`, onClick: () => A.resetOverrideGroups([l.id]) });
+  }
+  if (inside.more) items.push({ label: "Select a layer to reset one property", disabled: true });
+  return items;
+}
+
 /** A button that opens the reset menu under itself. */
 function ResetButton({ title, items, testId }: { title: string; items: MenuItem[]; testId?: string }) {
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
@@ -194,6 +217,7 @@ export function InstanceSection({ n }: { n: Node }) {
   // Layers that differ from the main component, including ones changed through an outer instance.
   const overrides = useMemo(() => query<{ count: number }>({ q: "overrideCount", id: n.id }).count, [doc, n.id]);
   const groups = useOverrideGroups(n.id);
+  const inside = useOverriddenLayers(n.id, !!n.instance);
   if (!n.instance) return null;
   const comp = doc.nodes[n.instance.componentId];
   const set = comp ? variantSet(doc, comp) : null;
@@ -221,7 +245,7 @@ export function InstanceSection({ n }: { n: Node }) {
             <ResetButton
               title="Reset overrides"
               testId="instance-reset"
-              items={resetItems([n.id], groups, "Reset all changes", () => dispatch({ op: "resetInstance", ids: [n.id] }))}
+              items={instanceResetItems(n.id, groups, inside)}
             />
           )}
           <IconButton title="Detach instance" onClick={A.detachInstance}>
