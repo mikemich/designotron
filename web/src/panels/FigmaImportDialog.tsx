@@ -1,10 +1,8 @@
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { FileJson, Loader2, X } from "lucide-react";
-import { getDoc, useStore, toast } from "../store";
-import { deleteFile } from "../files";
+import { useStore, toast } from "../store";
 import { checkFigmaJson, fetchFigmaUrl, figmaFileName, importFigmaJson, importFigmaUrl, type ImportResult } from "../figma";
 import { useDialog } from "../ui/controls";
-import { reportFailure } from "../errors";
 
 const TOKEN_KEY = "dt:figmaToken";
 const readToken = () => {
@@ -38,19 +36,19 @@ export function FigmaImportDialog({ onCreate }: { onCreate?: (src: FigmaSource, 
   const close = async () => {
     if (creating.current) return;
     closed.current = true;
-    const { figmaOpen, fileId } = useStore.getState();
     useStore.setState({ figmaOpen: false, figmaResult: null });
-    // Opened the old way (a tab restored mid-import) and cancelled: don't leave an empty "Untitled" file behind.
-    if (!onCreate && figmaOpen === "new" && fileId && getDoc().pages.every((p) => p.children.length === 0)) {
-      try {
-        await deleteFile(fileId);
-      } catch (e) {
-        reportFailure("remove the empty file", e);
-      }
-      useStore.setState({ focusOnDashboard: "import-figma" });
-      location.hash = "#/";
-    }
   };
+  // Leaving the dashboard with the dialog open (browser Back, a link) ends it: it must not follow the
+  // person into the editor, and an import still being fetched is dropped.
+  useEffect(
+    () => () => {
+      if (!onCreate) return;
+      closed.current = true;
+      if (useStore.getState().figmaOpen === "new") useStore.setState({ figmaOpen: false });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
   const dialogRef = useDialog(close);
 
   const finish = (r: ImportResult) => {
