@@ -273,7 +273,7 @@ try {
   await create([{ type: "rectangle", name: "Refuse slot", x: 700, y: 400, width: 90, height: 60, fill: "#EEEEEE" }]);
   await select((await byName("Refuse slot")).id);
   await tiles().first().click();
-  await p.waitForSelector(".toast.error, .toast");
+  await p.waitForSelector(".toast:has-text('Refusing that file')", { timeout: 10000 }).catch(() => {});
   check("an SVG is refused", /Refusing that file \(image\/svg\+xml\)/.test(await toastText()), await toastText());
   check("and the layer is unchanged", !imageFill(await byName("Refuse slot")));
   await search("huge");

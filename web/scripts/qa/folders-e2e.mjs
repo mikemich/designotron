@@ -245,6 +245,8 @@ try {
   await p.waitForSelector(".move-dialog");
   check("Move to… opens from the keyboard", /Move to/.test(onMove) && (await p.locator(".move-dialog").count()) === 1, onMove);
   check("Move is off until the choice changes", await p.locator(".move-dialog button.primary").isDisabled());
+  // The dialog moves focus into itself on mount; wait for that before tabbing.
+  await p.waitForFunction(() => !!document.activeElement?.closest(".move-dialog"), null, { timeout: 3000 }).catch(() => {});
   await p.keyboard.press("Tab");
   const inTree = await p.evaluate(() => !!document.activeElement?.closest("[role=tree]"));
   await p.keyboard.press("Home");

@@ -67,7 +67,7 @@ try {
   const rect = await owner.evaluate(() => window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [{ type: "rectangle", name: "Box", x: 0, y: 0, width: 120, height: 80, fill: "#D9D9D9" }] } }).created[0].id);
 
   // Share online; Ann joins.
-  await owner.click(".tbtn[title='Share for live editing']");
+  await Promise.all([owner.waitForResponse((r) => r.url().endsWith("/health"), { timeout: 3000 }).catch(() => {}), owner.click(".tbtn[title='Share for live editing']")]); // the dialog asks /health whether this page is a relay
   if (!(await owner.locator(".share-dialog input.mono").count())) await owner.click("text=Use a different relay");
   await owner.fill(".share-dialog input.mono", RELAY);
   await owner.click("button:has-text('Share online')");
@@ -145,7 +145,7 @@ try {
     await p.goto(RELAY);
     await p.click("button:has-text('New design file')");
     await p.waitForSelector("#dt-canvas");
-    await p.click(".tbtn[title='Share for live editing']");
+    await Promise.all([p.waitForResponse((r) => r.url().endsWith("/health"), { timeout: 3000 }).catch(() => {}), p.click(".tbtn[title='Share for live editing']")]);
     if (!(await p.locator(".share-dialog input.mono").count())) await p.click("text=Use a different relay");
     await p.fill(".share-dialog input.mono", RELAY);
     await p.click("button:has-text('Share online')");

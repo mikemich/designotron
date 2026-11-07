@@ -159,6 +159,16 @@ textarea {
   flex: 0 0 auto;
   white-space: nowrap;
 }
+/* On narrow desktop widths the bar is full: let the save label and breadcrumb give way
+   (with an ellipsis) rather than overlap the buttons next to them. */
+@media (max-width: 1280px) {
+  .topbar .save-state {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
 .topbar .filename:hover {
   border-color: var(--border);
 }

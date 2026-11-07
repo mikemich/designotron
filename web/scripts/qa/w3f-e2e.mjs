@@ -136,8 +136,8 @@ try {
   check("clicking the hex copies it", clip === hex, `${clip} vs ${hex}`);
   check("\"Copied\" appears", (await inspect().locator(".insp-live").innerText()).includes("Copied"));
   check("the fill bound to Brand/primary shows that name", (await colours.innerText()).includes("Brand/primary"), (await colours.innerText()).replace(/\s+/g, " "));
-  await colours.getByRole("button", { name: "CSS" }).click();
-  check("CSS format shows the variable for a bound fill", (await colours.innerText()).includes("var(--theme-brand-primary)") || (await colours.innerText()).includes("var(--brand-primary)"), (await colours.innerText()).replace(/\s+/g, " "));
+  await colours.getByRole("button", { name: "Token" }).click();
+  check("Token format shows the variable for a bound fill", (await colours.innerText()).includes("var(--theme-brand-primary)") || (await colours.innerText()).includes("var(--brand-primary)"), (await colours.innerText()).replace(/\s+/g, " "));
   await colours.getByRole("button", { name: "Hex" }).click();
   check("the designer's note appears as an annotation", (await page.locator("[data-testid=inspect-note]").innerText()).includes("Never nest cards"));
 
@@ -154,7 +154,7 @@ try {
   check("mixed text styles are listed", (await group("Typography").innerText()).includes("Mixed") && (await group("Typography").innerText()).includes("0-3"), (await group("Typography").innerText()).replace(/\s+/g, " "));
   await page.evaluate(() => window.__dt.tool("create_nodes", { parentId: null, nodes: [{ type: "frame", name: "Grad", x: 0, y: 2000, width: 100, height: 100, fill: "linear-gradient(90deg, #FF0000 0%, #0000FF 100%)" }] }));
   await select("Grad");
-  await group("Colours").getByRole("button", { name: "CSS" }).click();
+  await group("Colours").getByRole("button", { name: "Token" }).click();
   const gradText = await group("Colours").locator(".insp-val").first().innerText();
   check("a gradient shows as a CSS linear-gradient()", /^linear-gradient\(90deg, #ff0000 0%, #0000ff 100%\)$/.test(gradText), gradText);
   await group("Colours").getByRole("button", { name: "Hex" }).click();

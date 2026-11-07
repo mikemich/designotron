@@ -398,10 +398,13 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
             else e.target.value = clean;
           }}
         />
-        <span className="small save-state" role="status" title={saveTitle}>
-          {saveLabel}
-          {saveTitle && <span className="sr-only">{saveTitle.slice(saveLabel.length)}</span>}
-        </span>
+        {/* A viewer already has the "View only" pill; don't say it twice. */}
+        {!viewing && (
+          <span className="small save-state" role="status" title={saveTitle}>
+            {saveLabel}
+            {saveTitle && <span className="sr-only">{saveTitle.slice(saveLabel.length)}</span>}
+          </span>
+        )}
       </div>
       <div className="group">
         <button

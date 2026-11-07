@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Check, Copy, Globe, Link2, Loader2, Share2, Users, Wifi, X } from "lucide-react";
 import { copyUrl, encodeFile, linkBase, linkDestination, previewUrl, viewUrl } from "../snapshot";
 import { myColor, pageIsRelay, relayUrl, remixShared, startOnline, startSharing, stopSharing, useCollab } from "../collab";
@@ -126,9 +126,16 @@ export function ShareDialog() {
   const close = () => useCollab.setState({ dialogOpen: false });
   const dialogRef = useDialog(close);
 
-  // An editor served by a relay can share online with no setup.
+  // An editor served by a relay can share online with no setup. Never swap the field out from
+  // under someone who has already started typing an address.
+  const typedRelay = useRef(false);
   useEffect(() => {
-    if (!relay) pageIsRelay().then((yes) => yes && (setRelay(location.origin), setCustomRelay(false)));
+    if (!relay)
+      pageIsRelay().then((yes) => {
+        if (!yes || typedRelay.current) return;
+        setRelay(location.origin);
+        setCustomRelay(false);
+      });
   }, []);
 
   const copy = (text: string, input?: HTMLInputElement | null) => {
@@ -191,7 +198,7 @@ export function ShareDialog() {
                     <label className="small muted" htmlFor={relayId}>
                       Relay address
                     </label>
-                    <input id={relayId} className="textinput mono" value={relay} onChange={(e) => setRelay(e.target.value)} placeholder="Relay address, e.g. https://designotron-relay.fly.dev" />
+                    <input id={relayId} className="textinput mono" value={relay} onChange={(e) => ((typedRelay.current = true), setRelay(e.target.value))} placeholder="Relay address, e.g. https://designotron-relay.fly.dev" />
                     <div className="muted small" style={{ lineHeight: 1.5 }}>
                       Rooms are hosted on a Designotron relay: a small open-source server.{" "}
                       <a href={RELAY_DOCS} target="_blank" rel="noreferrer">
