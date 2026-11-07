@@ -325,7 +325,7 @@ try {
         }
         check(
           "Tab reaches the buttons and the card; the row holding a button is no control itself",
-          stops[0].startsWith("BUTTON:") && stops[1].startsWith("BUTTON::Delete") && stops[2].includes(":button:Pro plan") && !stops.some((s) => s === "DIV:button:"),
+          stops[0].startsWith("BUTTON:") && stops[1].startsWith("BUTTON::Delete") && stops[2].startsWith("A::Pro plan") && !stops.some((s) => s === "DIV:button:"),
           stops.join(" | "),
         );
         await shot(p, "export-tab-focus");
@@ -346,7 +346,7 @@ try {
         const focused = await p.evaluate(() => document.activeElement?.getAttribute("role"));
         await p.keyboard.press("Enter");
         await p.waitForTimeout(400);
-        check("Enter on a click-focused card runs one action", focused === "button" && (await seen("Dashboard screen")) && !(await seen("Settings screen")), `focused role ${focused}`);
+        check("Enter on a click-focused card (a link now) runs one action", focused === null && (await seen("Dashboard screen")) && !(await seen("Settings screen")), `focused role ${focused}`);
 
         // A button inside a row: its click doesn't also run the row's.
         await p.goto(base + "?nested");

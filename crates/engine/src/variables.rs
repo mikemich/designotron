@@ -1098,10 +1098,51 @@ pub fn prune(doc: &mut Document) {
   });
 }
 
-/// CSS custom property name for a variable ("Colors/Primary 500" → `--colors-primary-500`).
+/// CSS custom property name for a variable on its own ("Colors/Primary 500" → `--colors-primary-500`).
+/// Exports use [`css_names`], which keeps variables of different collections apart.
 pub fn css_name(c: &Collection, v: &Variable) -> String {
   let _ = c;
   format!("--{}", slug(&v.name))
+}
+
+/// The custom property of every variable in the document, by variable id. A name that is unique
+/// stays `--name`; every variable whose name collides gets `--collection-name`; a name still
+/// taken after that gets `-2`, `-3`, ... in document order; a name with no ASCII letters is
+/// `--collection-N` (N is its position in the collection, from 1).
+pub fn css_names(doc: &Document) -> HashMap<String, String> {
+  let mut count: HashMap<String, usize> = HashMap::new();
+  for c in &doc.variables {
+    for v in &c.variables {
+      let s = slug(&v.name);
+      if !s.is_empty() {
+        *count.entry(s).or_default() += 1;
+      }
+    }
+  }
+  let mut taken: HashSet<String> = HashSet::new();
+  let mut out = HashMap::new();
+  for c in &doc.variables {
+    let cs = slug(&c.name);
+    for (i, v) in c.variables.iter().enumerate() {
+      let s = slug(&v.name);
+      let base = if s.is_empty() {
+        format!("--{}-{}", if cs.is_empty() { "token" } else { &cs }, i + 1)
+      } else if count[&s] > 1 && !cs.is_empty() {
+        format!("--{cs}-{s}")
+      } else {
+        format!("--{s}")
+      };
+      let mut name = base.clone();
+      let mut n = 2;
+      while taken.contains(&name) {
+        name = format!("{base}-{n}");
+        n += 1;
+      }
+      taken.insert(name.clone());
+      out.insert(v.id.clone(), name);
+    }
+  }
+  out
 }
 
 pub fn slug(s: &str) -> String {
@@ -1116,11 +1157,11 @@ pub fn slug(s: &str) -> String {
   out.trim_end_matches('-').to_string()
 }
 
-fn css_value(doc: &Document, c: &Collection, v: &Variable, mode: &str) -> Option<String> {
+fn css_value(doc: &Document, names: &HashMap<String, String>, c: &Collection, v: &Variable, mode: &str) -> Option<String> {
   let val = v.values.get(mode).or_else(|| c.modes.first().and_then(|m| v.values.get(&m.id)))?;
   if let Some(alias) = val.get("alias").and_then(|a| a.as_str()) {
-    let (ac, av) = find(doc, alias)?;
-    return Some(format!("var({})", css_name(ac, av)));
+    let (_, av) = find(doc, alias)?;
+    return Some(format!("var({})", names.get(&av.id)?));
   }
   Some(match v.kind {
     VarKind::Color => crate::color::css_with_opacity(&crate::color::normalize(val.as_str()?), 1.0),
@@ -1133,16 +1174,18 @@ fn css_value(doc: &Document, c: &Collection, v: &Variable, mode: &str) -> Option
 /// CSS name of the first number variable in the document, for the examples in the exported
 /// docs (`None` when there isn't one).
 pub fn first_number_token(doc: &Document) -> Option<String> {
+  let names = css_names(doc);
   doc.variables.iter().find_map(|c| {
     c.variables
       .iter()
       .find(|v| v.kind == VarKind::Number && !slug(&v.name).is_empty())
-      .map(|v| css_name(c, v))
+      .and_then(|v| names.get(&v.id).cloned())
   })
 }
 
 /// `:root` block for default modes and a `[data-<collection>="<mode>"]` block per other mode.
 pub fn tokens_css(doc: &Document) -> String {
+  let names = css_names(doc);
   let mut out = String::from("/* Design tokens generated from Designotron variables.\n");
   match first_number_token(doc) {
     Some(name) => out.push_str(&format!(
@@ -1154,8 +1197,8 @@ pub fn tokens_css(doc: &Document) -> String {
   for c in &doc.variables {
     let Some(default) = c.modes.first() else { continue };
     for v in &c.variables {
-      if let Some(val) = css_value(doc, c, v, &default.id) {
-        out.push_str(&format!("  {}: {val};\n", css_name(c, v)));
+      if let Some(val) = css_value(doc, &names, c, v, &default.id) {
+        out.push_str(&format!("  {}: {val};\n", names[&v.id]));
       }
     }
   }
@@ -1165,8 +1208,8 @@ pub fn tokens_css(doc: &Document) -> String {
     for m in &c.modes {
       out.push_str(&format!("\n[{}=\"{}\"] {{\n", mode_attr(doc, c), mode_slug(c, m)));
       for v in &c.variables {
-        if let Some(val) = css_value(doc, c, v, &m.id) {
-          out.push_str(&format!("  {}: {val};\n", css_name(c, v)));
+        if let Some(val) = css_value(doc, &names, c, v, &m.id) {
+          out.push_str(&format!("  {}: {val};\n", names[&v.id]));
         }
       }
       out.push_str("}\n");
