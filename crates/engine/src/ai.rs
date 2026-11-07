@@ -156,7 +156,7 @@ fn spec_schema() -> Value {
       "strokeStyle": { "type": ["string", "null"], "description": "Colour style name or id: sets the stroke colour and links the stroke to it; null unlinks" },
       "effectStyle": { "type": ["string", "null"], "description": "Effect style name or id (from define_styles effects): sets the layer's effects and links it; null unlinks" },
       "gridStyle": { "type": ["string", "null"], "description": "Grid style name or id (from define_styles grids): sets a frame's layout grids and links it; null unlinks" },
-      "textStyle": { "type": ["string", "null"], "description": "Text style name or id (from define_styles): sets font, size, weight, line height and letter spacing and links the layer to it; null unlinks" },
+      "textStyle": { "type": ["string", "null"], "description": "Text style name or id (from define_styles): sets font, size, weight, line height, letter spacing (and italic, paragraph spacing, case, decoration when the style sets them) and links the layer to it; null unlinks" },
       "svg": { "type": "string", "description": "Full SVG markup for an editable icon or illustration (type svg): paths, shapes and groups become vector layers with their fills, strokes and gradients; width/height scale it. Text, images, filters and masks are refused" },
       "svgPath": { "type": "string", "description": "SVG path data for an icon (type vector)" },
       "viewBox": { "type": "array", "description": "[minX, minY, width, height] for svgPath, default [0,0,24,24]" },
@@ -368,7 +368,7 @@ pub fn tool_defs() -> Value {
         "rename": { "type": "array", "description": "Rename styles: [{from, to}] (names or ids)", "items": { "type": "object", "properties": { "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["from", "to"] } },
         "delete": { "type": "array", "items": { "type": "string" }, "description": "Names (or ids) of styles to delete" },
         "colors": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "color": { "type": "string", "description": "Hex colour; anything unreadable is an error" } }, "required": ["name", "color"] } },
-        "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": ["number", "string"], "description": "px, or \"10%\" / \"0.05em\" of fontSize" } }, "required": ["name", "fontSize"] } },
+        "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": ["number", "string"], "description": "px, or \"10%\" / \"0.05em\" of fontSize" }, "italic": { "type": ["boolean", "null"] }, "paragraphSpacing": { "type": ["number", "null"] }, "textCase": { "type": ["string", "null"], "enum": ["original", "upper", "lower", "title", null] }, "decoration": { "type": ["string", "null"], "enum": ["none", "underline", "strikethrough", null] } }, "required": ["name", "fontSize"], "description": "italic, paragraphSpacing, textCase and decoration are optional: a style that doesn't set one leaves linked layers' own value; null on an existing style stops it setting the field" } },
         "effects": { "type": "array", "description": "Effect styles: {name, description, shadow: {x, y, blur, spread, color, inset} or an array of them, blur (layer blur px), backgroundBlur (px)}", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "shadow": { "type": ["object", "array", "string"] }, "blur": { "type": "number" }, "backgroundBlur": { "type": "number" } }, "required": ["name"] } },
         "grids": { "type": "array", "description": "Grid styles: {name, description, grids: [{pattern:'columns'|'rows'|'grid', count, gutter, margin, size}]}", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "grids": { "type": "array", "items": { "type": "object" } } }, "required": ["name", "grids"] } }
       } }
@@ -2081,6 +2081,11 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
             line_height: None,
             auto_line_height: false,
             letter_spacing: None,
+            italic: None,
+            paragraph_spacing: None,
+            case: None,
+            decoration: None,
+            clear: vec![],
           },
         };
         e.dispatch_inner(cmd)?;
@@ -2167,6 +2172,27 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
       None => None,
     };
     let family = t.get("fontFamily").and_then(|v| v.as_str()).map(String::from);
+    // The optional fields: a value sets them, null stops the style setting them.
+    let italic = parse::opt_bool(&cx, t, "italic")?;
+    let paragraph_spacing = parse::opt_number(&cx, t, "paragraphSpacing")?.map(|v| v.max(0.0));
+    let case = match t.get("textCase").filter(|v| !v.is_null()) {
+      Some(v) => Some(parse_text_case(&cx, v)?),
+      None => None,
+    };
+    let decoration = match t.get("decoration").filter(|v| !v.is_null()) {
+      Some(v) => Some(parse_decoration(&cx, "decoration", v)?),
+      None => None,
+    };
+    let clear: Vec<String> = [
+      ("italic", "italic"),
+      ("paragraphSpacing", "paragraphSpacing"),
+      ("textCase", "case"),
+      ("decoration", "decoration"),
+    ]
+    .iter()
+    .filter(|(k, _)| t.get(*k).is_some_and(|v| v.is_null()))
+    .map(|(_, c)| c.to_string())
+    .collect();
     match existing {
       Some(s) => {
         e.dispatch_inner(Command::UpdateTextStyle {
@@ -2178,6 +2204,11 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
           line_height: line_height.flatten(),
           auto_line_height: line_height == Some(None),
           letter_spacing: spacing,
+          italic,
+          paragraph_spacing,
+          case,
+          decoration,
+          clear,
         })?;
         updated.push(json!(s.id));
       }
@@ -2191,6 +2222,10 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
           font_weight: weight.unwrap_or(400),
           line_height: line_height.flatten(),
           letter_spacing: spacing.unwrap_or(0.0),
+          italic,
+          paragraph_spacing,
+          case,
+          decoration,
         });
         created.push(json!(id));
       }
@@ -3684,11 +3719,7 @@ fn apply_text(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creating: b
     Some(Value::String(name)) => {
       let st = find_text_style(cx, doc, "textStyle", name)?;
       let t = n.text.get_or_insert_with(Default::default);
-      t.font_family = st.font_family.clone();
-      t.font_size = st.font_size;
-      t.font_weight = st.font_weight;
-      t.line_height = st.line_height;
-      t.letter_spacing = st.letter_spacing;
+      st.apply_to(t);
       n.text_style = Some(st.id.clone());
     }
     Some(other) => {
@@ -3780,18 +3811,7 @@ fn apply_text(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creating: b
     )?;
   }
   if let Some(v) = s.get("textCase").filter(|v| !v.is_null()) {
-    t.case = parse::choice(
-      cx,
-      "textCase",
-      v,
-      &[
-        (&["original", "none", "normal"], TextCase::Original),
-        (&["upper", "uppercase"], TextCase::Upper),
-        (&["lower", "lowercase"], TextCase::Lower),
-        (&["title", "capitalize"], TextCase::Title),
-      ],
-      &parse::no_hint,
-    )?;
+    t.case = parse_text_case(cx, v)?;
   }
   if let Some(v) = s.get("decoration").filter(|v| !v.is_null()) {
     t.decoration = parse_decoration(cx, "decoration", v)?;
@@ -3822,6 +3842,21 @@ fn apply_text(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creating: b
     t.paragraph_spacing = v.max(0.0);
   }
   Ok(())
+}
+
+fn parse_text_case(cx: &Ctx, v: &Value) -> Result<TextCase, String> {
+  parse::choice(
+    cx,
+    "textCase",
+    v,
+    &[
+      (&["original", "none", "normal"], TextCase::Original),
+      (&["upper", "uppercase"], TextCase::Upper),
+      (&["lower", "lowercase"], TextCase::Lower),
+      (&["title", "capitalize"], TextCase::Title),
+    ],
+    &parse::no_hint,
+  )
 }
 
 fn parse_decoration(cx: &Ctx, key: &str, v: &Value) -> Result<TextDecoration, String> {

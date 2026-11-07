@@ -44,6 +44,7 @@ import { ApplyStyleButton, BoundChip, CreateStyleButton, StyleChip } from "./Sty
 import { inScope } from "./variableScopes";
 import { framePosition, ownCoordinate } from "./groupOffset";
 import { rangeValue } from "./textRange";
+import { familiesIn, fontLabel, fontNote, fontStatus, useFontEpoch } from "../fontStatus";
 import { parseLetterSpacing, parseLineHeight } from "./textUnits";
 
 const begin = () => dispatch({ op: "beginGesture" });
@@ -839,12 +840,25 @@ function TextSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const isItalic = r("italic") === true;
   const isDecorated = (d: "underline" | "strikethrough") => r("decoration") === d;
   const truncating = nodes.every((n) => !!n.text!.truncate || n.text!.maxLines != null);
+  // A family the browser can't draw keeps its name in the field, with a warning, instead of the
+  // picker showing its first font.
+  useFontEpoch();
+  const family = r("fontFamily") as Maybe<string>;
+  const familyOptions = FONTS.map((f) => ({ value: f, label: f }));
+  if (family !== MIXED && !FONTS.includes(family)) familyOptions.unshift({ value: family, label: fontLabel(family, fontStatus(family, FONTS)) });
+  const usedFamilies = [...new Set(nodes.flatMap((n) => (partial ? familiesIn(n.text!, sel!.start, sel!.end) : familiesIn(n.text!))))];
+  const familyNote = fontNote(usedFamilies.map((f) => ({ family: f, status: fontStatus(f, FONTS) })));
   return (
     <Section title={partial ? `Text · ${sel!.end - sel!.start} characters selected` : "Text"} actions={<ApplyStyleButton kind="text" ids={ids} />}>
       <StyleChip kind="text" nodes={nodes} ids={ids} />
       <div className="row">
-        <SelectField ariaLabel="Font family" value={r("fontFamily") as Maybe<string>} options={FONTS.map((f) => ({ value: f, label: f }))} onChange={(fontFamily) => set({ fontFamily })} />
+        <SelectField ariaLabel="Font family" value={family} options={familyOptions} onChange={(fontFamily) => set({ fontFamily })} />
       </div>
+      {familyNote && (
+        <div className="font-note" role="note">
+          {familyNote}
+        </div>
+      )}
       <div className="grid2">
         <SelectField ariaLabel="Font weight" value={r("fontWeight") as Maybe<number>} options={weightOptions(r("fontWeight") as Maybe<number>)} onChange={(fontWeight) => set({ fontWeight })} />
         <NumberField value={r("fontSize") as Maybe<number>} min={1} onChange={(fontSize) => set({ fontSize })} onScrubStart={begin} onScrubEnd={end} label="Aa" title="Font size" />

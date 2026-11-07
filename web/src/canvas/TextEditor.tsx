@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { dispatch, getDoc, query, styleTextSelection, useStore } from "../store";
+import { dispatch, getDoc, localDispatchCount, query, styleTextSelection, useStore } from "../store";
 import type { Mat, TextProps } from "../types";
 import { apply, invert, type Pt } from "./geometry";
 import {
@@ -18,10 +18,13 @@ import {
   type CaretGeometry,
   type Pos,
 } from "./textCaret";
+import { kindOf, TextHistory, type EditKind, type Snapshot } from "./textHistory";
+
+type Look = { text: Record<string, unknown>; fills: unknown[] };
 
 /** In-place text editing. The canvas draws the text live (all its lines, mixed styles) from the
- * engine; the textarea laid over it is only the input: keyboard, IME, native undo and screen
- * readers. Its text is transparent, and the caret and selection are drawn from the engine's own
+ * engine; the textarea laid over it is only the input: keyboard, IME and screen readers (undo
+ * is ours, in runs: see `textHistory`). Its text is transparent, and the caret and selection are drawn from the engine's own
  * line layout so they line up with the glyphs the canvas shows. */
 
 /** Set by the canvas when it opened the gesture for a text layer it just created. */
@@ -40,6 +43,22 @@ export function editTextAt(id: string, page: Pt) {
 }
 
 const CLIP_TYPE = "application/x-designotron-text";
+/** A soft line break (Shift+Enter): a new line inside a paragraph, as in Figma. */
+const SOFT_BREAK = "\u2028";
+
+/** The layer-wide look a style change can touch besides runs: styling all the text folds the style
+ * into the base properties (and a colour into the fills), so undo has to carry those too. */
+function readLook(id: string): Look {
+  const n = getDoc().nodes[id];
+  const t = n?.text;
+  if (!t) return { text: {}, fills: [] };
+  return {
+    text: { fontFamily: t.fontFamily, fontSize: t.fontSize, fontWeight: t.fontWeight, italic: t.italic, letterSpacing: t.letterSpacing, decoration: t.decoration },
+    fills: JSON.parse(JSON.stringify(n.fills)),
+  };
+}
+const sameLook = (a: Look, b: Look) => JSON.stringify(a) === JSON.stringify(b);
+const sameRuns = (a: TextProps["runs"], b: TextProps["runs"]) => a === b || JSON.stringify(a) === JSON.stringify(b);
 
 interface SpanStyle {
   fontFamily?: string;
@@ -148,6 +167,15 @@ export function TextEditor({ id }: { id: string }) {
   const rev = useStore((s) => s.rev);
   const node = getDoc().nodes[id];
   const startText = useRef(node?.text?.characters ?? "");
+  // Undo inside the editor, in runs. `known` is the text and runs this editor last saw, so a style
+  // change from the panel (or a collaborator's edit) can be told from typing.
+  const history = useRef(new TextHistory());
+  const known = useRef<{ characters: string; runs: TextProps["runs"]; look: Look }>({ characters: node?.text?.characters ?? "", runs: node?.text?.runs ?? [], look: readLook(id) });
+  const seenOps = useRef(localDispatchCount());
+  const pending = useRef<{ before: Snapshot; kind: EditKind | null } | null>(null);
+  const composeBefore = useRef<Snapshot | null>(null);
+  /** Edits made by the editor itself (rich paste, cut) that it records as one run when done. */
+  const suppress = useRef(0);
   // The selection (code points) and which side of a wrap the caret sits on are read from the
   // textarea on every render; `sync` renders again when they changed without the document.
   const [, redraw] = useReducer((n: number) => n + 1, 0);
@@ -195,6 +223,49 @@ export function TextEditor({ id }: { id: string }) {
     const o = drawn.current;
     if (o.s !== n.s || o.e !== n.e || o.back !== n.back || o.aff !== n.aff) redraw();
   };
+  const trackSel = (ta: HTMLTextAreaElement) => {
+    const before = (i: number) => Array.from(ta.value.slice(0, i)).length;
+    useStore.setState({ textSel: { id, start: before(ta.selectionStart), end: before(ta.selectionEnd) } });
+  };
+  /** The text, runs and selection now. */
+  const snapshot = (): Snapshot => {
+    const ta = ref.current!;
+    const runs = getDoc().nodes[id]?.text?.runs ?? [];
+    return { characters: ta.value, runs: runs.map((r) => ({ ...r })), look: readLook(id), selStart: ta.selectionStart, selEnd: ta.selectionEnd };
+  };
+  const remember = (s: Snapshot) => {
+    known.current = { characters: s.characters, runs: s.runs, look: s.look as Look };
+    seenOps.current = localDispatchCount();
+  };
+  /** Records an edit that took the text from `before` to what it is now. */
+  const note = (before: Snapshot, kind: EditKind) => {
+    const after = snapshot();
+    remember(after);
+    history.current.record(before, after, kind, Date.now());
+  };
+  /** Shows a snapshot: the textarea, the selection and the layer's text and runs. */
+  const showSnapshot = (s: Snapshot) => {
+    const ta = ref.current;
+    if (!ta) return;
+    ta.value = s.characters;
+    ta.setSelectionRange(s.selStart, s.selEnd);
+    dispatch({ op: "setText", id, characters: s.characters, runs: s.runs }, { quiet: true });
+    // A style applied to all the text lives in the layer's own properties.
+    const look = s.look as Look | undefined;
+    if (look && !sameLook(look, readLook(id))) dispatch({ op: "update", ids: [id], patch: { text: look.text, fills: look.fills } }, { quiet: true });
+    remember(s);
+    goalX.current = null;
+    affRef.current = "after";
+    trackSel(ta);
+    sync();
+  };
+  const undoRedo = (redo: boolean) => {
+    const ta = ref.current;
+    if (!ta || composing.current) return;
+    const s = redo ? history.current.redo(snapshot()) : history.current.undo(snapshot());
+    // At the start (or end) of the runs there is nothing to do; never the browser's own undo.
+    if (s) showSnapshot(s);
+  };
 
   useEffect(() => {
     // New text: the canvas already opened the gesture before creating the layer, so creating
@@ -210,6 +281,7 @@ export function TextEditor({ id }: { id: string }) {
       // A textarea reads line breaks as "\n": make the layer's text agree before indices are used.
       const chars0 = getDoc().nodes[id]?.text?.characters;
       if (chars0 !== undefined && chars0 !== el.value) dispatch({ op: "setText", id, characters: el.value }, { quiet: true });
+      remember(snapshot());
       const at = caretAt?.id === id ? caretAt : null;
       caretAt = null;
       const g = layout();
@@ -233,6 +305,19 @@ export function TextEditor({ id }: { id: string }) {
       ta.setSelectionRange(chars.slice(0, sel.start).join("").length, chars.slice(0, sel.end).join("").length);
     };
     window.addEventListener("dt-refocus-text", refocus);
+    // What kind of edit is about to happen, and the text it starts from. Undo and redo that don't
+    // come from the keyboard (the Edit menu, touch) arrive here too.
+    const onBeforeInput = (ev: Event) => {
+      const e = ev as InputEvent;
+      if (e.inputType === "historyUndo" || e.inputType === "historyRedo") {
+        e.preventDefault();
+        undoRedo(e.inputType === "historyRedo");
+        return;
+      }
+      if (composing.current) return;
+      pending.current = { before: snapshot(), kind: kindOf(e.inputType) };
+    };
+    el?.addEventListener("beforeinput", onBeforeInput);
     // Some browsers report a textarea's selection only here, not on the element.
     const onSelChange = () => {
       if (document.activeElement === ref.current) sync();
@@ -240,6 +325,7 @@ export function TextEditor({ id }: { id: string }) {
     document.addEventListener("selectionchange", onSelChange);
     return () => {
       window.removeEventListener("dt-refocus-text", refocus);
+      el?.removeEventListener("beforeinput", onBeforeInput);
       document.removeEventListener("selectionchange", onSelChange);
       useStore.setState({ textSel: null });
       // Empty text is removed inside the gesture, so abandoning a new text leaves no undo step.
@@ -265,8 +351,24 @@ export function TextEditor({ id }: { id: string }) {
   // offset after the changed span moves by the change in length.
   useEffect(() => {
     const ta = ref.current;
-    const c = getDoc().nodes[id]?.text?.characters;
-    if (!ta || c === undefined || composing.current || ta.value === c) return;
+    const cur = getDoc().nodes[id]?.text;
+    const c = cur?.characters;
+    if (!ta || !cur || c === undefined || composing.current) return;
+    if (c !== known.current.characters) {
+      // Someone else changed the text: the runs kept here no longer fit it.
+      history.current.clear();
+    } else if (!sameRuns(cur.runs, known.current.runs) || !sameLook(readLook(id), known.current.look)) {
+      if (localDispatchCount() === seenOps.current) history.current.clear();
+      else {
+        // A style change from the panel or a shortcut: a run of its own, undone like typing.
+        const at = { selStart: ta.selectionStart, selEnd: ta.selectionEnd };
+        const now = { characters: c, runs: cur.runs.map((r) => ({ ...r })), look: readLook(id), ...at };
+        history.current.record({ characters: c, runs: known.current.runs, look: known.current.look, ...at }, now, "style", Date.now());
+      }
+    }
+    known.current = { characters: c, runs: cur.runs.map((r) => ({ ...r })), look: readLook(id) };
+    seenOps.current = localDispatchCount();
+    if (ta.value === c) return;
     const old = ta.value;
     let pre = 0;
     while (pre < old.length && pre < c.length && old[pre] === c[pre]) pre++;
@@ -295,10 +397,7 @@ export function TextEditor({ id }: { id: string }) {
   const lh = t.lineHeight ?? t.fontSize * 1.2;
   const wrapsAtMax = t.autoResize === "width" && !!node.maxWidth;
   const finish = () => useStore.setState({ editingText: null });
-  const trackSelection = (ta: HTMLTextAreaElement) => {
-    const before = (i: number) => Array.from(ta.value.slice(0, i)).length;
-    useStore.setState({ textSel: { id, start: before(ta.selectionStart), end: before(ta.selectionEnd) } });
-  };
+  const trackSelection = trackSel;
   /** Current value of a style at the selection start (run override or base). */
   const styleAt = (key: "fontWeight" | "italic" | "decoration") => {
     const sel = useStore.getState().textSel;
@@ -346,6 +445,7 @@ export function TextEditor({ id }: { id: string }) {
   const onMouseDown = (e: React.MouseEvent<HTMLTextAreaElement>) => {
     e.stopPropagation();
     const ta = e.currentTarget;
+    history.current.breakRun();
     // Touch keeps the browser's own selection handles and gestures.
     if (pointer.current === "touch" || e.button !== 0 || !geo) return;
     const hit = hitAt(e.clientX, e.clientY);
@@ -439,9 +539,20 @@ export function TextEditor({ id }: { id: string }) {
     const text = ta.value.slice(ta.selectionStart, ta.selectionEnd);
     const rich: RichText = { text, spans: resolveSpans(t, layerColor(id), s, en) };
     e.preventDefault();
-    e.clipboardData.setData("text/plain", text);
+    // Plain text has no soft breaks: they become line breaks. The rich clipboard keeps them.
+    e.clipboardData.setData("text/plain", text.replaceAll(SOFT_BREAK, "\n"));
     e.clipboardData.setData(CLIP_TYPE, JSON.stringify(rich));
-    if (cut) document.execCommand("delete");
+    if (cut) {
+      const before = snapshot();
+      suppress.current++;
+      try {
+        document.execCommand("delete");
+      } finally {
+        suppress.current--;
+      }
+      pending.current = null;
+      note(before, "paste");
+    }
   };
 
   const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -453,10 +564,17 @@ export function TextEditor({ id }: { id: string }) {
     if (!rich) return;
     e.preventDefault();
     const at = toIndex(ta.value, ta.selectionStart);
-    if (!document.execCommand("insertText", false, rich.text)) {
-      ta.setRangeText(rich.text, ta.selectionStart, ta.selectionEnd, "end");
-      dispatch({ op: "setText", id, characters: ta.value }, { quiet: true });
+    const before = snapshot();
+    suppress.current++;
+    try {
+      if (!document.execCommand("insertText", false, rich.text)) {
+        ta.setRangeText(rich.text, ta.selectionStart, ta.selectionEnd, "end");
+        dispatch({ op: "setText", id, characters: ta.value }, { quiet: true });
+      }
+    } finally {
+      suppress.current--;
     }
+    pending.current = null;
     // Everything runs inside the editing gesture: the paste and its styles are one undo step.
     const cur = getDoc().nodes[id]?.text;
     if (!cur) return;
@@ -474,6 +592,20 @@ export function TextEditor({ id }: { id: string }) {
     const len = Array.from(rich.text).length;
     const runs = [...cutRuns(cur.runs ?? [], at, at + len), ...pasted].sort((x, y) => x.start - y.start);
     dispatch({ op: "update", ids: [id], patch: { text: { runs } } }, { quiet: true });
+    // The pasted text and its styles are one run.
+    note(before, "paste");
+    trackSelection(ta);
+    sync();
+  };
+
+  /** Shift+Enter: a new line inside the paragraph (U+2028), its own undo run. */
+  const insertSoftBreak = (ta: HTMLTextAreaElement) => {
+    const before = snapshot();
+    ta.setRangeText(SOFT_BREAK, ta.selectionStart, ta.selectionEnd, "end");
+    goalX.current = null;
+    affRef.current = "after";
+    dispatch({ op: "setText", id, characters: ta.value }, { quiet: true });
+    note(before, "break");
     trackSelection(ta);
     sync();
   };
@@ -515,6 +647,7 @@ export function TextEditor({ id }: { id: string }) {
           height: bottom - top0,
           font: `${t.italic ? "italic " : ""}${t.fontWeight} ${t.fontSize}px/${lh}px "${t.fontFamily}", sans-serif`,
           letterSpacing: t.letterSpacing,
+          lineBreak: "strict",
           textAlign: t.alignH,
           textTransform: t.case === "upper" ? "uppercase" : t.case === "lower" ? "lowercase" : t.case === "title" ? "capitalize" : "none",
           whiteSpace: t.autoResize === "width" && !wrapsAtMax ? "pre" : "pre-wrap",
@@ -524,6 +657,12 @@ export function TextEditor({ id }: { id: string }) {
           goalX.current = null;
           affRef.current = "after";
           dispatch({ op: "setText", id, characters: e.target.value }, { quiet: true });
+          const p = pending.current;
+          pending.current = null;
+          if (suppress.current || composing.current) remember(snapshot());
+          // An edit with no `beforeinput` (a browser that skips it) is a run of its own.
+          else if (p?.kind) note(p.before, p.kind);
+          else note({ ...known.current, selStart: e.target.selectionStart, selEnd: e.target.selectionStart }, "paste");
           sync();
         }}
         onSelect={(e) => {
@@ -539,8 +678,18 @@ export function TextEditor({ id }: { id: string }) {
           e.currentTarget.scrollTop = 0;
           e.currentTarget.scrollLeft = 0;
         }}
-        onCompositionStart={() => (composing.current = true)}
-        onCompositionEnd={() => (composing.current = false)}
+        onCompositionStart={() => {
+          composing.current = true;
+          composeBefore.current = snapshot();
+          pending.current = null;
+        }}
+        onCompositionEnd={() => {
+          composing.current = false;
+          // The committed text is one run, however many keys made it.
+          const before = composeBefore.current;
+          composeBefore.current = null;
+          if (before) note(before, "ime");
+        }}
         onFocus={() => setFocused(true)}
         onBlur={(e) => {
           setFocused(false);
@@ -568,6 +717,17 @@ export function TextEditor({ id }: { id: string }) {
           e.stopPropagation();
           const mod = e.metaKey || e.ctrlKey;
           const k = e.key.toLowerCase();
+          if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(e.key)) history.current.breakRun();
+          if (mod && !e.altKey && !e.nativeEvent.isComposing && (k === "z" || (k === "y" && !e.shiftKey))) {
+            e.preventDefault();
+            undoRedo(k === "y" || e.shiftKey);
+            return;
+          }
+          if (e.key === "Enter" && e.shiftKey && !mod && !e.altKey && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            insertSoftBreak(e.currentTarget);
+            return;
+          }
           if (mod && e.shiftKey && k === "v") plainPaste.current = Date.now();
           if (!moveByLines(e) && !["Shift", "Control", "Alt", "Meta"].includes(e.key)) {
             goalX.current = null;

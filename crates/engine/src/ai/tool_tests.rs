@@ -629,6 +629,44 @@ mod tokens {
   }
 
   #[test]
+  fn define_styles_takes_the_optional_text_fields() {
+    use crate::model::{TextCase, TextDecoration};
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "define_styles",
+      json!({ "texts": [{ "name": "Label", "fontSize": 12, "italic": true, "paragraphSpacing": 8, "textCase": "uppercase", "decoration": "underline" }] }),
+    );
+    assert_eq!(r["created"].as_array().unwrap().len(), 1);
+    let s = e.doc.styles.texts[0].clone();
+    assert_eq!(
+      (s.italic, s.paragraph_spacing, s.case, s.decoration),
+      (Some(true), Some(8.0), Some(TextCase::Upper), Some(TextDecoration::Underline))
+    );
+    let t = one(&mut e, json!({ "type": "text", "text": "Hi", "textStyle": "Label" }));
+    let tp = e.doc.get(&t).unwrap().text.clone().unwrap();
+    assert!(tp.italic && tp.paragraph_spacing == 8.0 && tp.case == TextCase::Upper && tp.decoration == TextDecoration::Underline);
+    // An update changes what it names and leaves the rest; null stops the style setting a field.
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "texts": [{ "name": "Label", "fontSize": 12, "textCase": "lower", "decoration": null }] }),
+    );
+    let s = e.doc.styles.texts[0].clone();
+    assert_eq!((s.italic, s.case, s.decoration), (Some(true), Some(TextCase::Lower), None));
+    let tp = e.doc.get(&t).unwrap().text.clone().unwrap();
+    assert_eq!((tp.case, tp.decoration), (TextCase::Lower, TextDecoration::Underline));
+    // A bad value names its key.
+    let err = e
+      .dispatch(ai(
+        "define_styles",
+        json!({ "texts": [{ "name": "X", "fontSize": 12, "textCase": "shout" }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("textCase"), "{err}");
+  }
+
+  #[test]
   fn get_document_lists_text_styles() {
     let mut e = engine();
     run(

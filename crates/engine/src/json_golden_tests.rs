@@ -76,6 +76,7 @@ fn rich() -> Engine {
   e.dispatch(Command::SetText {
     id: kids[0].clone(),
     characters: "Override".into(),
+    runs: None,
   })
   .unwrap();
   e.dispatch(Command::Update {

@@ -172,71 +172,90 @@ pub fn layout_limited(props: &TextProps, max_width: Option<f64>, limit: Option<u
   let mut lines: Vec<TextLine> = Vec::new();
   // Index of each paragraph's first line.
   let mut para_starts: Vec<usize> = Vec::new();
+  // Index of each line that follows a soft line break (U+2028): no paragraph spacing, but not a
+  // wrapped line either.
+  let mut soft_starts: Vec<usize> = Vec::new();
   let mut offset = 0;
-  for para in text.split('\n') {
+  for para_text in text.split('\n') {
     para_starts.push(lines.len());
-    let n = para.chars().count();
-    let para_start = offset;
-    let words = split_words(&chars[offset..offset + n], &char_style[offset..offset + n], offset);
-    offset += n + 1;
-    let mut cur: Vec<Piece> = Vec::new();
-    let mut cur_w = 0.0;
-    let measure = |p: &Piece| m.measure(&p.text, &styles[p.style].font());
-    let trimmed_width = |pieces: &[Piece]| -> f64 {
-      let mut w: f64 = pieces.iter().map(measure).sum();
-      if let Some(last) = pieces.last() {
-        let t = last.text.trim_end();
-        if t.len() != last.text.len() {
-          w -= measure(last) - m.measure(t, &styles[last.style].font());
-        }
+    let cjk = para_text.chars().any(is_ideographic);
+    for (si, para) in para_text.split(SOFT_BREAK).enumerate() {
+      if si > 0 {
+        soft_starts.push(lines.len());
       }
-      w
-    };
-    for word in words {
-      let word_w: f64 = word.iter().map(measure).sum();
-      let mw = max_width.filter(|w| *w > 0.0).unwrap_or(f64::INFINITY);
-      let word_fit_w = trimmed_width(&word);
-      // A word wider than the whole line never fits, even alone on a line.
-      let fits = if cur.is_empty() {
-        word_fit_w <= mw + 0.01
-      } else {
-        cur_w + word_fit_w <= mw + 0.01
-      };
-      if fits {
-        cur_w += word_w;
-        for p in word {
-          push_piece(&mut cur, p);
-        }
-        continue;
-      }
-      if !cur.is_empty() {
-        lines.push(make_line(std::mem::take(&mut cur), para_start, &styles, m, lh_of, base_lh));
-      }
-      cur_w = 0.0;
-      if word_fit_w > mw + 0.01 {
-        // Overlong words break by character.
-        for piece in word {
-          for (char_i, c) in piece.text.chars().enumerate() {
-            let p = Piece {
-              text: c.to_string(),
-              style: piece.style,
-              start: piece.start + char_i,
-            };
-            let w = measure(&p);
-            if !cur.is_empty() && cur_w + w > mw && c != ' ' {
-              lines.push(make_line(std::mem::take(&mut cur), para_start, &styles, m, lh_of, base_lh));
-              cur_w = 0.0;
-            }
-            cur_w += w;
-            push_piece(&mut cur, p);
+      let n = para.chars().count();
+      let para_start = offset;
+      let words = split_words(&chars[offset..offset + n], &char_style[offset..offset + n], offset, cjk);
+      // The break itself takes one index, like the `\n` after a paragraph.
+      offset += n + 1;
+      let mut cur: Vec<Piece> = Vec::new();
+      let mut cur_w = 0.0;
+      let measure = |p: &Piece| m.measure(&p.text, &styles[p.style].font());
+      let trimmed_width = |pieces: &[Piece]| -> f64 {
+        let mut w: f64 = pieces.iter().map(measure).sum();
+        if let Some(last) = pieces.last() {
+          let t = last.text.trim_end();
+          if t.len() != last.text.len() {
+            w -= measure(last) - m.measure(t, &styles[last.style].font());
           }
         }
-      } else {
-        cur_w = word_w;
-        cur = word;
+        w
+      };
+      for word in words {
+        let word_w: f64 = word.iter().map(measure).sum();
+        let mw = max_width.filter(|w| *w > 0.0).unwrap_or(f64::INFINITY);
+        let word_fit_w = trimmed_width(&word);
+        // A word wider than the whole line never fits, even alone on a line.
+        let fits = if cur.is_empty() {
+          word_fit_w <= mw + 0.01
+        } else {
+          cur_w + word_fit_w <= mw + 0.01
+        };
+        if fits {
+          cur_w += word_w;
+          for p in word {
+            push_piece(&mut cur, p);
+          }
+          continue;
+        }
+        if !cur.is_empty() {
+          lines.push(make_line(std::mem::take(&mut cur), para_start, &styles, m, lh_of, base_lh));
+        }
+        cur_w = 0.0;
+        if word_fit_w > mw + 0.01 {
+          // Overlong words break by character.
+          for piece in word {
+            for (char_i, c) in piece.text.chars().enumerate() {
+              let p = Piece {
+                text: c.to_string(),
+                style: piece.style,
+                start: piece.start + char_i,
+              };
+              let w = measure(&p);
+              if !cur.is_empty() && cur_w + w > mw && c != ' ' {
+                // Kinsoku: a line never starts with a closing mark or ends with an opening one;
+                // the previous characters move down with it (oidashi), unless that empties the line.
+                let carry = if cjk { take_carry(&mut cur, c) } else { Some(Vec::new()) };
+                if let Some(carry) = carry {
+                  lines.push(make_line(std::mem::take(&mut cur), para_start, &styles, m, lh_of, base_lh));
+                  cur_w = 0.0;
+                  for q in carry {
+                    cur_w += measure(&q);
+                    push_piece(&mut cur, q);
+                  }
+                }
+              }
+              cur_w += w;
+              push_piece(&mut cur, p);
+            }
+          }
+        } else {
+          cur_w = word_w;
+          cur = word;
+        }
       }
+      lines.push(make_line(cur, para_start, &styles, m, lh_of, base_lh));
     }
-    lines.push(make_line(cur, para_start, &styles, m, lh_of, base_lh));
   }
   if let Some(limit) = limit.filter(|l| *l < lines.len()) {
     // Blank lines after the limit are no content: nothing is cut then.
@@ -256,7 +275,7 @@ pub fn layout_limited(props: &TextProps, max_width: Option<f64>, limit: Option<u
       next_para += 1;
     }
     line.top = top;
-    line.soft_wrap = i + 1 < count && para_starts.get(next_para) != Some(&(i + 1));
+    line.soft_wrap = i + 1 < count && para_starts.get(next_para) != Some(&(i + 1)) && soft_starts.binary_search(&(i + 1)).is_err();
     top += line.height;
   }
   let width = lines.iter().map(|l| l.width).fold(0.0, f64::max);
@@ -337,13 +356,188 @@ fn resolve_styles(props: &TextProps, len: usize) -> (Vec<SpanStyle>, Vec<usize>)
   (styles, per_char)
 }
 
-/// Words (with trailing spaces) as style pieces.
-fn split_words(chars: &[char], styles: &[usize], base: usize) -> Vec<Vec<Piece>> {
+/// A soft line break (Shift+Enter, Figma's U+2028): a new line inside the paragraph.
+pub const SOFT_BREAK: char = '\u{2028}';
+
+// ---------- CJK line breaking (kinsoku) ----------
+//
+// The tables follow CSS `line-break: strict` for Japanese and Chinese, which is what the HTML
+// and React exports write on text that contains CJK: the canvas, PNG and SVG then break where
+// the browser does.
+
+/// Characters laid out as ideographs, between which a line may break: CJK ideographs (with
+/// extensions and compatibility forms), kana, Hangul, Bopomofo, CJK symbols and punctuation, and
+/// the fullwidth forms.
+pub fn is_ideographic(c: char) -> bool {
+  matches!(c as u32,
+    0x1100..=0x11FF // Hangul Jamo
+    | 0x2E80..=0x2FDF // CJK and Kangxi radicals
+    | 0x3000..=0x303F // CJK symbols and punctuation
+    | 0x3040..=0x30FF // Hiragana, Katakana
+    | 0x3100..=0x312F | 0x31A0..=0x31BF // Bopomofo
+    | 0x3130..=0x318F // Hangul compatibility Jamo
+    | 0x31C0..=0x31EF // CJK strokes
+    | 0x31F0..=0x31FF // Katakana phonetic extensions
+    | 0x3200..=0x4DBF // enclosed CJK, CJK compatibility, Extension A
+    | 0x4E00..=0x9FFF // CJK unified ideographs
+    | 0xA960..=0xA97F | 0xAC00..=0xD7FF // Hangul syllables and Jamo extensions
+    | 0xF900..=0xFAFF // compatibility ideographs
+    | 0xFE30..=0xFE4F // CJK compatibility forms
+    | 0xFF00..=0xFFEF // fullwidth and halfwidth forms
+    | 0x20000..=0x3134F // Extensions B and later
+  )
+}
+
+pub fn has_ideographic(s: &str) -> bool {
+  s.chars().any(is_ideographic)
+}
+
+/// May not start a line.
+fn no_line_start(c: char) -> bool {
+  matches!(
+    c,
+    '）'
+      | '〕'
+      | '］'
+      | '｝'
+      | '〉'
+      | '》'
+      | '」'
+      | '』'
+      | '】'
+      | '〙'
+      | '〗'
+      | '〟'
+      | '’'
+      | '”'
+      | '｠'
+      | '»'
+      | ')'
+      | ']'
+      | '}'
+      | '、'
+      | '。'
+      | '，'
+      | '．'
+      | '：'
+      | '；'
+      | '？'
+      | '！'
+      | '‼'
+      | '⁇'
+      | '⁈'
+      | '⁉'
+      | '・'
+      | '゠'
+      | '–'
+      | '‐'
+      | '〜'
+      | '～'
+      | ','
+      | '.'
+      | ':'
+      | ';'
+      | '?'
+      | '!'
+      | 'ー'
+      | '々'
+      | '〻'
+      | 'ゝ'
+      | 'ゞ'
+      | 'ヽ'
+      | 'ヾ'
+      | 'ぁ'
+      | 'ぃ'
+      | 'ぅ'
+      | 'ぇ'
+      | 'ぉ'
+      | 'っ'
+      | 'ゃ'
+      | 'ゅ'
+      | 'ょ'
+      | 'ゎ'
+      | 'ゕ'
+      | 'ゖ'
+      | 'ァ'
+      | 'ィ'
+      | 'ゥ'
+      | 'ェ'
+      | 'ォ'
+      | 'ッ'
+      | 'ャ'
+      | 'ュ'
+      | 'ョ'
+      | 'ヮ'
+      | 'ヵ'
+      | 'ヶ'
+      | '\u{3000}'
+      | '\u{31F0}'..='\u{31FF}'
+  )
+}
+
+/// May not end a line.
+fn no_line_end(c: char) -> bool {
+  matches!(
+    c,
+    '（' | '〔' | '［' | '｛' | '〈' | '《' | '「' | '『' | '【' | '〘' | '〖' | '〝' | '‘' | '“' | '｟' | '«' | '(' | '[' | '{'
+  )
+}
+
+/// Whether a line may break between `a` and `b` (neither a space) in text that has ideographs.
+fn cjk_break_between(a: char, b: char) -> bool {
+  (is_ideographic(a) || is_ideographic(b)) && !no_line_start(b) && !no_line_end(a)
+}
+
+/// Kinsoku for a break by character before `next`: the characters of `cur` that move down to the
+/// new line with it, so it doesn't start with a closing mark or the previous line end with an
+/// opening one. When even the whole line would move, nothing can break here: `None`.
+fn take_carry(cur: &mut Vec<Piece>, next: char) -> Option<Vec<Piece>> {
+  let all: Vec<(usize, char)> = cur
+    .iter()
+    .enumerate()
+    .flat_map(|(pi, p)| p.text.chars().map(move |c| (pi, c)))
+    .collect();
+  let mut k = 0;
+  let mut first = next;
+  while k < all.len() && (no_line_start(first) || no_line_end(all[all.len() - 1 - k].1)) {
+    k += 1;
+    first = all[all.len() - k].1;
+  }
+  if k == 0 {
+    return Some(Vec::new());
+  }
+  if k >= all.len() {
+    return None;
+  }
+  let mut carry: Vec<Piece> = Vec::new();
+  for _ in 0..k {
+    let last = cur.last_mut().unwrap();
+    let c = last.text.pop().unwrap();
+    let start = last.start + last.text.chars().count();
+    let style = last.style;
+    if last.text.is_empty() {
+      cur.pop();
+    }
+    carry.insert(
+      0,
+      Piece {
+        text: c.to_string(),
+        style,
+        start,
+      },
+    );
+  }
+  Some(carry)
+}
+
+/// Words (with trailing spaces) as style pieces. In text with ideographs (`cjk`) a word also ends
+/// wherever a line may break between two characters.
+fn split_words(chars: &[char], styles: &[usize], base: usize, cjk: bool) -> Vec<Vec<Piece>> {
   let mut words: Vec<Vec<Piece>> = Vec::new();
   let mut cur: Vec<Piece> = Vec::new();
   let mut prev_space = false;
   for (i, c) in chars.iter().enumerate() {
-    if prev_space && *c != ' ' {
+    if (prev_space && *c != ' ') || (cjk && i > 0 && *c != ' ' && !prev_space && cjk_break_between(chars[i - 1], *c)) {
       words.push(std::mem::take(&mut cur));
     }
     push_piece(
@@ -1112,5 +1306,185 @@ mod tests {
     let g = caret_geometry(&n, &t, &HeuristicMeasurer, true, None);
     assert!(g.lines.len() > 2);
     assert_eq!(g.lines.last().unwrap().end, t.characters.chars().count());
+  }
+
+  /// Every ideograph is one em wide, everything else half an em: box widths count characters.
+  struct Em;
+
+  impl TextMeasurer for Em {
+    fn measure(&self, text: &str, font: &FontSpec) -> f64 {
+      text
+        .chars()
+        .map(|c| if is_ideographic(c) { font.size } else { font.size / 2.0 })
+        .sum()
+    }
+  }
+
+  const JA: &str = "吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。「何でも薄暗いじめじめした所で、ニャーニャー泣いていた事だけは記憶している。」（ぁっ）";
+  const ZH: &str = "春眠不觉晓，处处闻啼鸟。夜来风雨声，花落知多少？（这是一首唐诗。）“好”，他说！";
+
+  fn cjk_lines(text: &str, chars_wide: f64) -> Vec<String> {
+    let props = TextProps {
+      characters: text.into(),
+      font_size: 10.0,
+      auto_resize: TextAutoResize::Height,
+      ..Default::default()
+    };
+    layout_text(&props, Some(chars_wide * 10.0), &Em)
+      .lines
+      .into_iter()
+      .map(|l| l.text)
+      .collect()
+  }
+
+  #[test]
+  fn cjk_lines_never_start_or_end_against_kinsoku() {
+    for text in [JA, ZH] {
+      for width in 1..=30 {
+        let lines = cjk_lines(text, width as f64);
+        assert_eq!(lines.concat(), text, "width {width}: no character is lost");
+        for l in &lines {
+          let first = l.chars().next().unwrap();
+          let last = l.chars().last().unwrap();
+          // A line can only break the rules when nothing else fits in the box (a word wider
+          // than the box that has no allowed break).
+          let tiny = l.chars().count() == 1;
+          assert!(!no_line_start(first) || tiny, "width {width}: {l:?} starts with {first}");
+          assert!(!no_line_end(last) || tiny, "width {width}: {l:?} ends with {last}");
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn cjk_breaks_match_the_table() {
+    assert_eq!(
+      cjk_lines("今日は晴れです。明日は雨でしょう。", 8.0),
+      vec!["今日は晴れです。", "明日は雨でしょ", "う。"]
+    );
+    assert_eq!(
+      cjk_lines("「こんにちは」と彼は言った。", 5.0),
+      vec!["「こんにち", "は」と彼は", "言った。"]
+    );
+    assert_eq!(cjk_lines("春眠不觉晓，处处闻啼鸟。", 5.0), vec!["春眠不觉", "晓，处处闻", "啼鸟。"]);
+  }
+
+  #[test]
+  fn a_closing_mark_pulls_the_character_before_it_down() {
+    assert_eq!(cjk_lines("今日は晴れ。", 5.0), vec!["今日は晴", "れ。"]);
+    // An opening bracket never ends a line.
+    assert_eq!(cjk_lines("今日は「晴れ」", 4.0), vec!["今日は", "「晴れ」"]);
+  }
+
+  #[test]
+  fn cjk_edge_cases_keep_their_characters() {
+    // A run of prolonged sound marks has no allowed break: it stays whole.
+    let run = "ー".repeat(10);
+    assert_eq!(cjk_lines(&run, 3.0), vec![run.clone()]);
+    // A box narrower than a character: one character per line, marks stay with theirs.
+    assert_eq!(cjk_lines("今日。", 0.5), vec!["今", "日。"]);
+    // Latin words stay whole between CJK.
+    let l = cjk_lines("私はRustが好き", 5.0);
+    assert_eq!(l.concat(), "私はRustが好き");
+    assert!(l.iter().any(|x| x.contains("Rust")), "{l:?}");
+    // Full-width space.
+    let l = cjk_lines("あ\u{3000}い\u{3000}う", 2.0);
+    assert!(l.iter().all(|x| !x.starts_with('\u{3000}')), "{l:?}");
+    // Right-aligned and justified text takes the same lines.
+    for align in [crate::model::TextAlignH::Right, crate::model::TextAlignH::Justify] {
+      let props = TextProps {
+        characters: JA.into(),
+        font_size: 10.0,
+        align_h: align,
+        auto_resize: TextAutoResize::Height,
+        ..Default::default()
+      };
+      let l = layout_text(&props, Some(100.0), &Em);
+      assert_eq!(l.lines.iter().map(|x| x.text.as_str()).collect::<String>(), JA);
+    }
+  }
+
+  #[test]
+  fn latin_text_keeps_its_old_breaks() {
+    // Without ideographs the table is not consulted: a long word still breaks at any character.
+    let long = TextProps {
+      characters: "abc,def.ghi".into(),
+      auto_resize: TextAutoResize::Height,
+      ..Default::default()
+    };
+    let l = layout_text(&long, Some(30.0), &Em);
+    assert!(
+      l.lines.iter().any(|x| x.text.starts_with(',') || x.text.starts_with('.')),
+      "{:?}",
+      l.lines
+    );
+  }
+
+  #[test]
+  fn a_soft_break_starts_a_line_without_paragraph_spacing() {
+    let props = TextProps {
+      characters: "a\u{2028}b\nc".into(),
+      paragraph_spacing: 20.0,
+      ..Default::default()
+    };
+    let l = layout_text(&props, None, &HeuristicMeasurer);
+    let lh = 16.0 * 1.2;
+    let texts: Vec<&str> = l.lines.iter().map(|x| x.text.as_str()).collect();
+    assert_eq!(texts, vec!["a", "b", "c"]);
+    let tops: Vec<f64> = l.lines.iter().map(|x| x.top).collect();
+    assert_eq!(tops, vec![0.0, lh, 2.0 * lh + 20.0]);
+    // The break takes one index, like a newline, and the line before it is a hard line.
+    assert_eq!((l.lines[0].start, l.lines[0].end), (0, 1));
+    assert_eq!((l.lines[1].start, l.lines[1].end), (2, 3));
+    assert_eq!((l.lines[2].start, l.lines[2].end), (4, 5));
+    assert!(!l.lines[0].soft_wrap && !l.lines[1].soft_wrap);
+    // Nothing of the break is measured or drawn.
+    assert!(l.lines.iter().all(|x| !x.text.contains('\u{2028}')));
+  }
+
+  #[test]
+  fn soft_breaks_at_the_edges_and_twice_in_a_row() {
+    let lay = |s: &str| {
+      let props = TextProps {
+        characters: s.into(),
+        ..Default::default()
+      };
+      layout_text(&props, None, &HeuristicMeasurer)
+    };
+    assert_eq!(lay("\u{2028}a").lines.len(), 2);
+    assert_eq!(lay("a\u{2028}").lines.len(), 2);
+    let l = lay("a\u{2028}\u{2028}b");
+    assert_eq!(l.lines.iter().map(|x| x.text.as_str()).collect::<Vec<_>>(), vec!["a", "", "b"]);
+    assert_eq!(l.lines[2].start, 3);
+    // Next to a newline.
+    let l = lay("a\u{2028}\nb");
+    assert_eq!(l.lines.iter().map(|x| x.text.as_str()).collect::<Vec<_>>(), vec!["a", "", "b"]);
+    // Auto width grows to the longest line.
+    let l = lay("ab\u{2028}abcdef");
+    assert_eq!(l.width, l.lines[1].width);
+    // Wrapping inside a line after a soft break still counts as soft wrap.
+    let props = TextProps {
+      characters: "x\u{2028}one two three four five six".into(),
+      ..Default::default()
+    };
+    let l = layout_text(&props, Some(60.0), &HeuristicMeasurer);
+    assert!(!l.lines[0].soft_wrap && l.lines[1].soft_wrap);
+  }
+
+  #[test]
+  fn the_caret_after_a_soft_break_is_on_the_next_line() {
+    let (n, t) = text_node("ab\u{2028}cd", 200.0, 100.0, |_, _| {});
+    let g = caret_geometry(&n, &t, &HeuristicMeasurer, true, None);
+    assert_eq!(g.lines.len(), 2);
+    assert_eq!((g.lines[0].start, g.lines[0].end), (0, 2));
+    assert_eq!((g.lines[1].start, g.lines[1].end), (3, 5));
+    assert!(g.lines[1].top > g.lines[0].top);
+  }
+
+  #[test]
+  fn soft_breaks_survive_a_run_remap() {
+    let runs = vec![bold(0, 3)];
+    let r = remap_runs("ab\u{2028}cd", "ab\u{2028}cXd", &runs);
+    assert_eq!((r[0].start, r[0].end), (0, 3));
   }
 }
