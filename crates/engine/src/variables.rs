@@ -80,8 +80,27 @@ pub fn reshare(new: &mut [Arc<Collection>], old: &[Arc<Collection>]) {
 }
 
 impl PartialEq for Collection {
+  /// Destructured on purpose: a field added later must be compared here or this stops compiling.
   fn eq(&self, o: &Self) -> bool {
-    self.id == o.id && self.name == o.name && self.modes == o.modes && crate::model::arcs_eq(&self.variables, &o.variables)
+    let Collection {
+      id,
+      name,
+      modes,
+      variables,
+    } = self;
+    *id == o.id && *name == o.name && *modes == o.modes && crate::model::arcs_eq(variables, &o.variables)
+  }
+}
+
+impl Collection {
+  /// A collection from plain variables (they get their `Arc`s here).
+  pub fn new(id: &str, name: &str, modes: Vec<VarMode>, variables: Vec<Variable>) -> Self {
+    Collection {
+      id: id.into(),
+      name: name.into(),
+      modes,
+      variables: variables.into_iter().map(Arc::new).collect(),
+    }
   }
 }
 

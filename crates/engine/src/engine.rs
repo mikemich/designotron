@@ -1938,7 +1938,9 @@ impl Engine {
         for c in &mut collections {
           let modes: Vec<String> = c.modes.iter().map(|m| m.id.clone()).collect();
           for v in &mut c.variables {
-            Arc::make_mut(v).values.retain(|m, _| modes.contains(m));
+            if v.values.keys().any(|m| !modes.contains(m)) {
+              Arc::make_mut(v).values.retain(|m, _| modes.contains(m));
+            }
           }
         }
         crate::variables::validate(&collections, &self.doc.variables)?;
@@ -2969,10 +2971,18 @@ impl Engine {
         Ok(json!({}))
       }
       Command::DeleteStyle { id } => {
-        self.doc.styles_mut().colors.retain(|s| s.id != id);
-        self.doc.styles_mut().texts.retain(|s| s.id != id);
-        self.doc.styles_mut().effects.retain(|s| s.id != id);
-        self.doc.styles_mut().grids.retain(|s| s.id != id);
+        let st = &self.doc.styles;
+        if st.colors.iter().any(|s| s.id == id)
+          || st.texts.iter().any(|s| s.id == id)
+          || st.effects.iter().any(|s| s.id == id)
+          || st.grids.iter().any(|s| s.id == id)
+        {
+          let st = self.doc.styles_mut();
+          st.colors.retain(|s| s.id != id);
+          st.texts.retain(|s| s.id != id);
+          st.effects.retain(|s| s.id != id);
+          st.grids.retain(|s| s.id != id);
+        }
         let is = |l: &Option<String>| l.as_deref() == Some(id.as_str());
         let uses = |n: &Node| is(&n.fill_style) || is(&n.text_style) || is(&n.stroke_style) || is(&n.effect_style) || is(&n.grid_style);
         self.doc.update_where(uses, |n| {

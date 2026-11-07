@@ -53,15 +53,29 @@ pub struct Document {
 
 impl PartialEq for Document {
   /// Same as comparing every field, but a shared `Arc` short-circuits (this runs on every command).
+  /// The destructuring is deliberate: a field added later must be listed here (or ignored on
+  /// purpose, like `names`), or this stops compiling. Forgetting one would make an edit to it
+  /// compare equal, so no undo step would be recorded and no delta sent.
   fn eq(&self, o: &Self) -> bool {
-    self.id == o.id
-      && self.name == o.name
-      && self.schema == o.schema
-      && arcs_eq(&self.pages, &o.pages)
-      && self.nodes == o.nodes
-      && arc_eq(&self.styles, &o.styles)
-      && arcs_eq(&self.variables, &o.variables)
-      && arc_eq(&self.comments, &o.comments)
+    let Document {
+      id,
+      name,
+      schema,
+      pages,
+      nodes,
+      styles,
+      variables,
+      comments,
+      names: _,
+    } = self;
+    *id == o.id
+      && *name == o.name
+      && *schema == o.schema
+      && arcs_eq(pages, &o.pages)
+      && *nodes == o.nodes
+      && arc_eq(styles, &o.styles)
+      && arcs_eq(variables, &o.variables)
+      && arc_eq(comments, &o.comments)
   }
 }
 

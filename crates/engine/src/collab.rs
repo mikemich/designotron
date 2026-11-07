@@ -61,13 +61,13 @@ pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> 
   if granular {
     granular_parts(base, doc, o);
   } else {
-    if base.pages != doc.pages {
+    if !arcs_eq(&base.pages, &doc.pages) {
       o.insert("pages".into(), json!(doc.pages));
     }
-    if base.styles != doc.styles {
+    if !arc_eq(&base.styles, &doc.styles) {
       o.insert("styles".into(), json!(doc.styles));
     }
-    if base.variables != doc.variables {
+    if !arcs_eq(&base.variables, &doc.variables) {
       o.insert("variables".into(), json!(doc.variables));
     }
   }
@@ -538,13 +538,25 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
     doc.name = v.to_string();
   }
   if let Some(v) = d.get("pages") {
-    doc.pages = serde_json::from_value(v.clone()).map_err(|e| format!("bad pages: {e}"))?;
+    let new: Vec<Arc<crate::model::Page>> = serde_json::from_value(v.clone()).map_err(|e| format!("bad pages: {e}"))?;
+    let old = std::mem::replace(&mut doc.pages, new);
+    for p in &mut doc.pages {
+      if let Some(o) = old.iter().find(|o| o.id == p.id).filter(|o| arc_eq(o, p)) {
+        *p = Arc::clone(o);
+      }
+    }
   }
   if let Some(v) = d.get("styles") {
-    doc.styles = serde_json::from_value(v.clone()).map_err(|e| format!("bad styles: {e}"))?;
+    let new: Arc<crate::model::Styles> = serde_json::from_value(v.clone()).map_err(|e| format!("bad styles: {e}"))?;
+    if *new != *doc.styles {
+      doc.styles = new;
+    }
   }
   if let Some(v) = d.get("variables") {
-    doc.variables = serde_json::from_value(v.clone()).map_err(|e| format!("bad variables: {e}"))?;
+    let mut new: Vec<Arc<crate::variables::Collection>> = serde_json::from_value(v.clone()).map_err(|e| format!("bad variables: {e}"))?;
+    let old = std::mem::take(&mut doc.variables);
+    crate::variables::reshare(&mut new, &old);
+    doc.variables = new;
   }
   apply_granular(doc, d)?;
   // Two people deleting different pages at the same moment must not leave none (the first
@@ -668,7 +680,9 @@ fn revert_inner(doc: &Document, from: &Document, to: &Document) -> Document {
         out.comments_mut().insert(id.clone(), t.clone());
       }
       (_, None, _) => {
-        out.comments_mut().remove(id);
+        if out.comments.contains_key(id) {
+          out.comments_mut().remove(id);
+        }
       }
     }
   }
@@ -1986,6 +2000,43 @@ mod tests {
     assert_eq!(m.name, "Renamed", "the peer's newer rename survives (three-way)");
     assert_eq!(m.effects[0].blur, 12.0, "my edit is undone");
     assert_eq!(m.description, "");
+  }
+
+  #[test]
+  fn a_remote_variable_change_leaves_untouched_collections_shared() {
+    use crate::variables::{Collection, VarKind, VarMode, Variable};
+    let mut a = engine(1);
+    let mode = |m: &str| VarMode {
+      id: m.into(),
+      name: m.into(),
+    };
+    let cols: Vec<Collection> = (0..3)
+      .map(|c| {
+        let vars = (0..5)
+          .map(|i| Variable {
+            id: format!("v{c}_{i}"),
+            name: format!("V{i}"),
+            kind: VarKind::Number,
+            values: [("m".to_string(), json!(i))].into_iter().collect(),
+            ..Default::default()
+          })
+          .collect();
+        Collection::new(&format!("c{c}"), &format!("C{c}"), vec![mode("m")], vars)
+      })
+      .collect();
+    a.dispatch(Command::SetVariables { collections: cols }).unwrap();
+    let base = a.doc.clone();
+    let mut edited = crate::variables::plain(&a.doc.variables);
+    Arc::make_mut(&mut edited[1].variables[2]).values.insert("m".into(), json!(99));
+    a.dispatch(Command::SetVariables { collections: edited }).unwrap();
+    let d = delta(&base, &a.doc, true, true);
+    let mut b = base.clone();
+    apply(&mut b, &d).unwrap();
+    assert_eq!(b.variables, a.doc.variables);
+    assert!(Arc::ptr_eq(&b.variables[0], &base.variables[0]));
+    assert!(Arc::ptr_eq(&b.variables[2], &base.variables[2]));
+    assert!(Arc::ptr_eq(&b.variables[1].variables[0], &base.variables[1].variables[0]));
+    assert!(!Arc::ptr_eq(&b.variables[1].variables[2], &base.variables[1].variables[2]));
   }
 
   #[test]
