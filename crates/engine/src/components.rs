@@ -4033,6 +4033,46 @@ mod tests {
     }
 
     #[test]
+    fn a_text_style_on_an_instance_label_records_the_unbinding_as_an_override() {
+      let mut k = kit();
+      tokens(&mut k.e);
+      k.e.doc.styles_mut().texts.push(crate::model::TextStyle {
+        id: "ts".into(),
+        name: "Body".into(),
+        font_family: "Inter".into(),
+        font_size: 22.0,
+        font_weight: 400,
+        ..Default::default()
+      });
+      let main_label = named(&k.e, &k.default, "Label");
+      bind(&mut k.e, &main_label, "fontSize", Some("v_w"));
+      assert_eq!(font_size(&k.e, &main_label), 100.0);
+      let inst = instance(&mut k.e, &k.default, None);
+      let label = named(&k.e, &inst, "Label");
+      assert_eq!(font_size(&k.e, &label), 100.0);
+      k.e
+        .dispatch(Command::ApplyStyle {
+          ids: vec![label.clone()],
+          style_id: "ts".into(),
+          kind: None,
+        })
+        .unwrap();
+      let key = named_master(&k.e, &label);
+      assert_eq!(override_of(&k.e, &inst, &key)["bindings"]["fontSize"], Value::Null);
+      assert_eq!(font_size(&k.e, &label), 22.0);
+      // An edit of the main re-syncs the copy: the style still wins over the main's variable.
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![main_label.clone()],
+          patch: json!({ "opacity": 0.5 }),
+        })
+        .unwrap();
+      assert_eq!(font_size(&k.e, &label), 22.0);
+      assert!(bound(&k.e, &label, "fontSize").is_none());
+      assert_eq!(font_size(&k.e, &main_label), 100.0);
+    }
+
+    #[test]
     fn style_and_variable_choices_on_an_instance_layer_survive_edits_of_the_main() {
       let mut k = kit();
       tokens(&mut k.e);
@@ -4321,6 +4361,7 @@ mod tests {
       e.dispatch(Command::SetText {
         id: id.to_string(),
         characters: s.to_string(),
+        runs: None,
       })
       .unwrap();
     }

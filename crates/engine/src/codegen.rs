@@ -764,7 +764,13 @@ impl<'a> Ctx<'a> {
     }
     el.show_if = bound.visible.clone();
     if let Some(p) = bound.characters.clone() {
-      el.text_prop = Some(p);
+      // A soft line break in the layer's text is a <br /> in the prop's value too.
+      let soft = n.text.as_ref().is_some_and(|t| t.characters.contains(crate::text::SOFT_BREAK));
+      el.text_prop = Some(if soft {
+        format!("String({p}).split(\"\\u2028\").flatMap((s, i) => (i ? [<br key={{i}} />, s] : [s]))")
+      } else {
+        p
+      });
       el.spans.clear();
     }
     if n.kind == NodeType::Group {
@@ -1811,7 +1817,11 @@ impl<'a> Ctx<'a> {
         && t.font_size == style.font_size
         && t.font_weight == style.font_weight
         && t.line_height == style.line_height
-        && t.letter_spacing == style.letter_spacing;
+        && t.letter_spacing == style.letter_spacing
+        && style.italic.is_none_or(|v| t.italic == v)
+        && style.paragraph_spacing.is_none_or(|v| t.paragraph_spacing == v)
+        && style.case.is_none_or(|v| t.case == v)
+        && style.decoration.is_none_or(|v| t.decoration == v);
       // A bound font property is stated inline, where `bind_vars` can replace it with its token
       // (and one layer's `calc(var(..))` doesn't end up in the class every user of the style shares).
       let bound = ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing"]
@@ -1819,8 +1829,19 @@ impl<'a> Ctx<'a> {
         .any(|p| n.bindings.contains_key(*p));
       if same && !bound && el.raw.is_none() {
         let class = self.names.texts.get(&style.id).cloned().unwrap_or_else(|| text_class(&style.name));
-        const OWN: [&str; 5] = ["font-family", "font-size", "font-weight", "line-height", "letter-spacing"];
-        let mut decls: Vec<(String, String)> = el.styles.iter().filter(|(k, _)| OWN.contains(&k.as_str())).cloned().collect();
+        // The optional fields join the class only when the style sets them.
+        let mut own: Vec<&str> = vec!["font-family", "font-size", "font-weight", "line-height", "letter-spacing"];
+        for (set, key) in [
+          (style.italic.is_some(), "font-style"),
+          (style.case.is_some(), "text-transform"),
+          (style.decoration.is_some(), "text-decoration"),
+        ] {
+          if set {
+            own.push(key);
+          }
+        }
+        let own = own;
+        let mut decls: Vec<(String, String)> = el.styles.iter().filter(|(k, _)| own.contains(&k.as_str())).cloned().collect();
         // An automatic line height is a multiple, so one class fits every size that uses it.
         if style.line_height.is_none() {
           decls.retain(|(k, _)| k != "line-height");
@@ -1832,8 +1853,8 @@ impl<'a> Ctx<'a> {
         if !decls.iter().any(|(k, _)| k == "letter-spacing") {
           decls.push(("letter-spacing".into(), "0".into()));
         }
-        decls.sort_by_key(|(k, _)| OWN.iter().position(|o| o == k));
-        el.styles.retain(|(k, _)| !OWN.contains(&k.as_str()));
+        decls.sort_by_key(|(k, _)| own.iter().position(|o| o == k));
+        el.styles.retain(|(k, _)| !own.contains(&k.as_str()));
         el.classes.push(class.clone());
         self.text_classes.entry(class).or_insert(decls);
       }
@@ -2259,6 +2280,10 @@ impl<'a> Ctx<'a> {
       TextCase::Upper => el.s("text-transform", "uppercase"),
       TextCase::Lower => el.s("text-transform", "lowercase"),
       TextCase::Title => el.s("text-transform", "capitalize"),
+    }
+    // The canvas breaks CJK text by the strict kinsoku rules: the browser has to as well.
+    if crate::text::has_ideographic(&t.characters) {
+      el.s("line-break", "strict");
     }
     // Truncation: one line is `truncate`, several are `line-clamp-N`.
     let limit = crate::text::line_limit(&t, Some(n.height));
@@ -3437,8 +3462,9 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
     let inner: String = el
       .spans
       .iter()
-      .map(|sp| {
-        let txt = format!("{{{}}}", serde_json::to_string(&sp.text).unwrap_or_default());
+      .enumerate()
+      .map(|(si, sp)| {
+        let txt = jsx_text(&sp.text, si + 1 == el.spans.len());
         let classes: Vec<String> = sp.styles.iter().map(|(k, v)| tw_class(k, v)).collect();
         match (&sp.link, classes.is_empty()) {
           (Some(href), _) => format!(
@@ -3459,8 +3485,8 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
   }
   if let Some(t) = &el.text {
     out.push_str(&format!(
-      "{pad}<{tag} className={class_attr}{handler}>{{{}}}</{tag}>\n",
-      serde_json::to_string(t).unwrap_or_default(),
+      "{pad}<{tag} className={class_attr}{handler}>{}</{tag}>\n",
+      jsx_text(t, true),
       tag = el.tag
     ));
     return;
@@ -3474,6 +3500,31 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
     jsx(c, depth + 1, out);
   }
   out.push_str(&format!("{pad}</{}>\n", el.tag));
+}
+
+/// Escaped text with a soft line break (U+2028) written as `<br>`. A break that ends the text
+/// (`last`) gets a second one: a lone trailing `<br>` shows no empty line, the canvas does.
+fn esc_text(s: &str, last: bool) -> String {
+  let out = esc(s).replace('\u{2028}', "<br>");
+  if last && s.ends_with('\u{2028}') {
+    out + "<br>"
+  } else {
+    out
+  }
+}
+
+/// A JSX text child: a string expression, with `<br />` for every soft line break (and an extra
+/// one for a break that ends the text, as in `esc_text`).
+fn jsx_text(s: &str, last: bool) -> String {
+  let mut out = s
+    .split('\u{2028}')
+    .map(|p| format!("{{{}}}", serde_json::to_string(p).unwrap_or_default()))
+    .collect::<Vec<_>>()
+    .join("<br />");
+  if last && s.ends_with('\u{2028}') {
+    out.push_str("<br />");
+  }
+  out
 }
 
 fn html(el: &El, depth: usize, out: &mut String) {
@@ -3514,23 +3565,29 @@ fn html(el: &El, depth: usize, out: &mut String) {
     let inner: String = el
       .spans
       .iter()
-      .map(|sp| {
+      .enumerate()
+      .map(|(si, sp)| {
+        let last = si + 1 == el.spans.len();
         let st: String = sp.styles.iter().map(|(k, v)| format!("{k}: {v}; ")).collect();
         let st = esc(st.trim_end());
         match (&sp.link, st.is_empty()) {
           (Some(href), _) => format!(
             "<a href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\" style=\"{st}\">{}</a>",
             esc(href),
-            esc(&sp.text)
+            esc_text(&sp.text, last)
           ),
-          (None, true) => esc(&sp.text),
-          (None, false) => format!("<span style=\"{st}\">{}</span>", esc(&sp.text)),
+          (None, true) => esc_text(&sp.text, last),
+          (None, false) => format!("<span style=\"{st}\">{}</span>", esc_text(&sp.text, last)),
         }
       })
       .collect();
     out.push_str(&format!("{pad}<{tag} style=\"{style}\"{link}>{inner}</{tag}>\n", tag = el.tag));
   } else if let Some(t) = &el.text {
-    out.push_str(&format!("{pad}<{tag} style=\"{style}\"{link}>{}</{tag}>\n", esc(t), tag = el.tag));
+    out.push_str(&format!(
+      "{pad}<{tag} style=\"{style}\"{link}>{}</{tag}>\n",
+      esc_text(t, true),
+      tag = el.tag
+    ));
   } else {
     out.push_str(&format!("{pad}<{} style=\"{style}\"{link}>\n", el.tag));
     for c in &el.children {
@@ -3991,8 +4048,13 @@ fn style_css(ctx: &Ctx) -> String {
       let line = get("line-height").unwrap_or_else(|| "normal".into());
       let family = get("font-family").unwrap_or_else(|| "sans-serif".into());
       let weight = get("font-weight").unwrap_or_else(|| "400".into());
+      // What the style sets beyond the font shorthand.
+      let extra: String = ["font-style", "text-transform", "text-decoration"]
+        .iter()
+        .filter_map(|k| get(k).map(|v| format!("    {k}: {v};\n")))
+        .collect();
       out.push_str(&format!(
-        "  .{class} {{\n    font: {weight} {size}/{line} {family};\n    letter-spacing: {};\n  }}\n",
+        "  .{class} {{\n    font: {weight} {size}/{line} {family};\n    letter-spacing: {};\n{extra}  }}\n",
         get("letter-spacing").unwrap_or_else(|| "0".into())
       ));
     }
@@ -5181,6 +5243,7 @@ mod tests {
       font_weight: 400,
       line_height: None,
       letter_spacing: 0.0,
+      ..Default::default()
     };
     doc.styles_mut().texts = vec![
       text("t1", "Heading 1", 20.0),
@@ -5248,6 +5311,7 @@ mod tests {
       font_weight: 400,
       line_height: None,
       letter_spacing: 0.0,
+      ..Default::default()
     });
     doc.get_mut("t").unwrap().text_style = Some("ts".into());
     let files = export_project(&doc, &HeuristicMeasurer);
@@ -5431,6 +5495,7 @@ mod tests {
       font_weight: 700,
       line_height: Some(48.0),
       letter_spacing: -0.5,
+      ..Default::default()
     });
     doc.styles_mut().colors.push(crate::model::ColorStyle {
       id: "cs1".into(),
@@ -6090,6 +6155,7 @@ mod r10_tests {
       font_weight: 400,
       line_height: None,
       letter_spacing: 0.0,
+      ..Default::default()
     });
     {
       let n = doc.get_mut("t").unwrap();
@@ -6102,6 +6168,126 @@ mod r10_tests {
     let files = export_project(&doc, &HeuristicMeasurer);
     let css = &files.iter().find(|f| f.path == "src/index.css").unwrap().content;
     assert!(css.contains("16px/1.2"), "{css}");
+  }
+
+  fn text_screen(characters: &str, f: impl FnOnce(&mut crate::model::TextProps)) -> Document {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "s", "Screen", None);
+    add(&mut doc, NodeType::Text, "t", "Body", Some("s"));
+    let t = doc.get_mut("t").unwrap().text.as_mut().unwrap();
+    t.characters = characters.into();
+    f(t);
+    doc
+  }
+
+  #[test]
+  fn a_soft_line_break_is_a_br_in_html_and_react() {
+    let doc = text_screen("one\u{2028}two", |_| {});
+    let h = export_html(&doc, "s", &HeuristicMeasurer);
+    assert!(h.contains("one<br>two"), "{h}");
+    assert!(!h.contains('\u{2028}'), "{h}");
+    let r = export_react(&doc, "s", &HeuristicMeasurer);
+    assert!(r.contains("{\"one\"}<br />{\"two\"}"), "{r}");
+    // Styled spans, and inside a paragraph with spacing.
+    let doc = text_screen("one\u{2028}two\nthree", |t| {
+      t.paragraph_spacing = 20.0;
+      t.runs = vec![crate::model::TextRun {
+        start: 0,
+        end: 3,
+        font_weight: Some(700),
+        ..Default::default()
+      }];
+    });
+    let h = export_html(&doc, "s", &HeuristicMeasurer);
+    assert!(h.contains("one</span><span") || h.contains("one</span>"), "{h}");
+    assert!(h.contains("<br>two"), "{h}");
+    assert!(h.contains("margin-top: 20px"), "{h}");
+    let r = export_react(&doc, "s", &HeuristicMeasurer);
+    assert!(r.contains("<br />{\"two\"}"), "{r}");
+    // A span that holds only the break.
+    let doc = text_screen("a\u{2028}b", |t| {
+      t.runs = vec![crate::model::TextRun {
+        start: 0,
+        end: 2,
+        font_weight: Some(700),
+        ..Default::default()
+      }];
+    });
+    assert!(export_html(&doc, "s", &HeuristicMeasurer).contains("a<br>"));
+  }
+
+  #[test]
+  fn a_trailing_soft_break_shows_an_empty_line_like_the_canvas() {
+    let doc = text_screen("one\u{2028}", |_| {});
+    let h = export_html(&doc, "s", &HeuristicMeasurer);
+    assert!(h.contains("one<br><br>"), "{h}");
+    let r = export_react(&doc, "s", &HeuristicMeasurer);
+    assert!(r.contains("<br /><br />") || r.contains("{\"one\"}<br />{\"\"}<br />"), "{r}");
+    // Not at the end of a span that is followed by more text.
+    let doc = text_screen("a\u{2028}b", |t| {
+      t.runs = vec![crate::model::TextRun {
+        start: 0,
+        end: 2,
+        font_weight: Some(700),
+        ..Default::default()
+      }];
+    });
+    let h = export_html(&doc, "s", &HeuristicMeasurer);
+    assert!(h.contains("a<br></span>") && !h.contains("<br><br>"), "{h}");
+  }
+
+  #[test]
+  fn line_break_strict_is_written_only_on_cjk_text() {
+    for (text, cjk) in [
+      ("今日は晴れです。", true),
+      ("Hello there", false),
+      ("Hello 世界", true),
+      ("ｱｲｳ", true),
+      ("Привет", false),
+    ] {
+      let doc = text_screen(text, |_| {});
+      let h = export_html(&doc, "s", &HeuristicMeasurer);
+      assert_eq!(h.contains("line-break: strict"), cjk, "{text}: {h}");
+      let r = export_react(&doc, "s", &HeuristicMeasurer);
+      assert_eq!(r.contains("[line-break:strict]"), cjk, "{text}: {r}");
+      // `overflow-wrap: anywhere` stays for text that wraps.
+      assert!(!cjk || !h.contains("overflow-wrap") || h.contains("anywhere"));
+    }
+  }
+
+  #[test]
+  fn text_style_classes_carry_the_optional_fields_a_style_sets() {
+    use crate::model::{TextCase, TextDecoration};
+    let mut doc = text_screen("Hi", |t| {
+      t.font_family = "Inter".into();
+      t.font_size = 16.0;
+      t.italic = true;
+      t.case = TextCase::Upper;
+      t.decoration = TextDecoration::Underline;
+    });
+    doc.styles_mut().texts.push(crate::model::TextStyle {
+      id: "ts".into(),
+      name: "Caption".into(),
+      font_family: "Inter".into(),
+      font_size: 16.0,
+      font_weight: 400,
+      italic: Some(true),
+      case: Some(TextCase::Upper),
+      decoration: Some(TextDecoration::Underline),
+      ..Default::default()
+    });
+    doc.get_mut("t").unwrap().text_style = Some("ts".into());
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let css = &files.iter().find(|f| f.path == "src/index.css").unwrap().content;
+    assert!(
+      css.contains("font-style: italic") && css.contains("text-transform: uppercase") && css.contains("text-decoration: underline"),
+      "{css}"
+    );
+    // A layer that no longer matches the style states its own values inline instead.
+    doc.get_mut("t").unwrap().text.as_mut().unwrap().case = TextCase::Lower;
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let css = &files.iter().find(|f| f.path == "src/index.css").unwrap().content;
+    assert!(!css.contains("text-transform: uppercase"), "{css}");
   }
 
   #[test]
@@ -7180,6 +7366,7 @@ mod r14_tests {
         font_weight: 700,
         line_height: None,
         letter_spacing: 0.0,
+        ..Default::default()
       });
       t.text_style = Some("ts".into());
     }
@@ -7352,6 +7539,7 @@ mod r15_tests {
       font_weight: 400,
       line_height: None,
       letter_spacing: 0.0,
+      ..Default::default()
     });
     // A component whose root has an image fill (its className is built at render time) and a
     // text with a hostile family, as an instance placed on the home screen.
@@ -8279,10 +8467,7 @@ mod r17c_tests {
       }
     });
     let html = export_html(&doc, "home", &HeuristicMeasurer);
-    assert!(
-      html.contains("overflow: hidden;\" aria-hidden=\"true\"><svg width=\"0\""),
-      "{html}"
-    );
+    assert!(html.contains("overflow: hidden;\" aria-hidden=\"true\"><svg width=\"0\""), "{html}");
     let react = export_react(&doc, "home", &HeuristicMeasurer);
     assert!(
       react.contains("<span className=") && react.contains("dangerouslySetInnerHTML"),

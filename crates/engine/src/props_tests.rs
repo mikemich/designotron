@@ -80,6 +80,7 @@ fn text_property_sets_characters_and_follows_direct_edits() {
     .dispatch(Command::SetText {
       id: label.clone(),
       characters: "Pay".into(),
+      runs: None,
     })
     .unwrap();
   let info = k.e.doc.get(&inst).unwrap().instance.clone().unwrap();
@@ -1046,6 +1047,7 @@ mod review {
       .dispatch(Command::SetText {
         id: l,
         characters: "Buy".into(),
+        runs: None,
       })
       .unwrap();
     let t = named(&k.e, &k.default, "Label");
@@ -1173,6 +1175,7 @@ mod review {
     e2.dispatch(Command::SetText {
       id: l,
       characters: "Hello".into(),
+      runs: None,
     })
     .unwrap();
     let t = named(&e2, &comp, "Label");
@@ -1205,6 +1208,7 @@ mod review {
       .dispatch(Command::SetText {
         id: l,
         characters: "Typed".into(),
+        runs: None,
       })
       .unwrap();
     let t = named(&k.e, &hover, "Label");
@@ -1246,6 +1250,7 @@ mod review {
       .dispatch(Command::SetText {
         id: l,
         characters: "Typed".into(),
+        runs: None,
       })
       .unwrap();
     update(&mut k, &t, json!({ "text": { "fontSize": 30 } }));
@@ -1517,6 +1522,7 @@ fn the_first_layer_bound_to_a_text_property_sets_its_default() {
     .dispatch(Command::SetText {
       id: hover.clone(),
       characters: "Other".into(),
+      runs: None,
     })
     .unwrap();
   k.e

@@ -7,7 +7,7 @@ import { create } from "zustand";
 import { allAssets, loadAssets, referencedAssets } from "./assets";
 import { bridgeChecked, bridgeHttpBase } from "./ai/bridgeClient";
 import { reportFailure } from "./errors";
-import { dispatch, getDoc, getEngine, newEngine, onDocChange, toast, useStore, zoomToFit } from "./store";
+import { dispatch, getDoc, getEngine, newEngine, noteForeignChange, onDocChange, toast, useStore, zoomToFit } from "./store";
 import { deleteFile, newFileId, saveFile } from "./files";
 import { userName } from "./canvas/Comments";
 
@@ -362,6 +362,7 @@ function loadShared(doc: unknown, assets: Record<string, string>, fit = true) {
   loadAssets(assets ?? {});
   for (const id of Object.keys(assets ?? {})) sentAssets.add(id);
   getEngine().load(JSON.stringify(doc));
+  noteForeignChange();
   dispatch({ op: "relayout" });
   getEngine().collabReset(ordered, granular, lists);
   if (fit) requestAnimationFrame(zoomToFit);

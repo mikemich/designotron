@@ -1484,6 +1484,45 @@ pub struct TextStyle {
   pub font_weight: u32,
   pub line_height: Option<f64>,
   pub letter_spacing: f64,
+  /// The fields below are optional: `None` means the style doesn't set them and a linked layer
+  /// keeps its own value.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub italic: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub paragraph_spacing: Option<f64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub case: Option<TextCase>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub decoration: Option<TextDecoration>,
+}
+
+impl TextStyle {
+  /// Whether the style sets a typography property (`fontSize`, ..., `paragraphSpacing`): all but
+  /// paragraph spacing are always set.
+  pub fn sets(&self, prop: &str) -> bool {
+    prop != "paragraphSpacing" || self.paragraph_spacing.is_some()
+  }
+
+  /// Copies what the style sets onto a layer's text.
+  pub fn apply_to(&self, tp: &mut TextProps) {
+    tp.font_family = self.font_family.clone();
+    tp.font_size = self.font_size;
+    tp.font_weight = self.font_weight;
+    tp.line_height = self.line_height;
+    tp.letter_spacing = self.letter_spacing;
+    if let Some(v) = self.italic {
+      tp.italic = v;
+    }
+    if let Some(v) = self.paragraph_spacing {
+      tp.paragraph_spacing = v;
+    }
+    if let Some(v) = self.case {
+      tp.case = v;
+    }
+    if let Some(v) = self.decoration {
+      tp.decoration = v;
+    }
+  }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]

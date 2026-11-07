@@ -24,6 +24,15 @@ use crate::text::TextMeasurer;
 use crate::{ai, arrange, codegen, patch, svg_import, vector_edit};
 
 const MAX_HISTORY: usize = 300;
+/// Typography properties both a text style and a variable can set: one source wins.
+pub(crate) const TEXT_STYLE_PROPS: [&str; 6] = [
+  "fontSize",
+  "fontFamily",
+  "fontWeight",
+  "lineHeight",
+  "letterSpacing",
+  "paragraphSpacing",
+];
 pub const CLIPBOARD_TAG: &str = "designotron/nodes";
 /// Screen pixels from a path within which vector edit mode offers to add a point.
 const VECTOR_SEGMENT_TOLERANCE: f64 = 6.0;
@@ -345,6 +354,10 @@ pub enum Command {
   SetText {
     id: NodeId,
     characters: String,
+    /// Stores these runs exactly (the editor's undo restores a snapshot) instead of remapping
+    /// the old ones across the edit.
+    #[serde(default)]
+    runs: Option<Vec<crate::model::TextRun>>,
   },
   /// Applies style overrides to characters `start..end` of a text layer.
   /// `style` uses TextRun field names; `clear` lists overrides to remove.
@@ -566,6 +579,14 @@ pub enum Command {
     #[serde(default)]
     auto_line_height: bool,
     letter_spacing: Option<f64>,
+    italic: Option<bool>,
+    paragraph_spacing: Option<f64>,
+    case: Option<crate::model::TextCase>,
+    decoration: Option<crate::model::TextDecoration>,
+    /// Fields the style stops setting (`italic`, `paragraphSpacing`, `case`, `decoration`):
+    /// linked layers keep the value they have.
+    #[serde(default)]
+    clear: Vec<String>,
   },
   /// Saves a layer's effects as a named effect style and links the layer to it.
   AddEffectStyle {
@@ -2145,6 +2166,21 @@ impl Engine {
         };
         for id in &ids {
           crate::variables::set_binding(&mut self.doc, id, &property, var_id.as_deref())?;
+          // One source per property: binding a typography property lets go of the text style
+          // (the values stay).
+          if var_id.is_some() && TEXT_STYLE_PROPS.contains(&property.as_str()) {
+            let sets = |n: &Node, styles: &[TextStyle]| {
+              n.text_style
+                .as_ref()
+                .and_then(|sid| styles.iter().find(|s| &s.id == sid))
+                .is_some_and(|s| s.sets(&property))
+            };
+            let styles = self.doc.styles.texts.clone();
+            if let Some(n) = self.doc.get_mut(id).filter(|n| sets(n, &styles)) {
+              n.text_style = None;
+              components::record_override(&mut self.doc, id, &json!({ "textStyle": null }));
+            }
+          }
         }
         Ok(json!({}))
       }
@@ -2495,7 +2531,11 @@ impl Engine {
         }
         Ok(json!({}))
       }
-      Command::SetText { id, characters } => {
+      Command::SetText {
+        id,
+        characters,
+        runs: given,
+      } => {
         // A textarea reads line breaks as "\n": keep the stored text in the same form so the
         // editor's indices and the engine's agree.
         let characters = characters.replace("\r\n", "\n").replace('\r', "\n");
@@ -2505,10 +2545,17 @@ impl Engine {
           .and_then(|n| n.text.as_ref())
           .map(|t| (t.characters.clone(), t.runs.clone()))
           .unwrap_or_default();
-        let runs = crate::text::remap_runs(&old, &characters, &runs);
+        let runs = match given {
+          Some(mut r) => {
+            crate::text::normalize_runs(&mut r, characters.chars().count());
+            r
+          }
+          None => crate::text::remap_runs(&old, &characters, &runs),
+        };
         let p = json!({ "text": { "characters": characters, "runs": runs } });
         let n = self.doc.get_mut(&id).ok_or("no such node")?;
         patch::apply(n, &p)?;
+        drop_unsafe_links(n);
         // The name follows the text until the user renames the layer.
         let auto_name = |s: &str| -> String { s.trim_start().chars().take(40).collect() };
         let old_name: String = old.chars().take(40).collect();
@@ -3066,6 +3113,10 @@ impl Engine {
           font_weight: t.font_weight,
           line_height: t.line_height,
           letter_spacing: t.letter_spacing,
+          italic: Some(t.italic),
+          paragraph_spacing: Some(t.paragraph_spacing),
+          case: Some(t.case),
+          decoration: Some(t.decoration),
         });
         if let Some(n) = self.doc.get_mut(&from) {
           n.text_style = Some(id.clone());
@@ -3234,6 +3285,11 @@ impl Engine {
         line_height,
         auto_line_height,
         letter_spacing,
+        italic,
+        paragraph_spacing,
+        case,
+        decoration,
+        clear,
       } => {
         let style = self.doc.styles_mut().texts.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
         if let Some(v) = name {
@@ -3256,16 +3312,33 @@ impl Engine {
         if let Some(v) = letter_spacing {
           style.letter_spacing = v;
         }
+        if let Some(v) = italic {
+          style.italic = Some(v);
+        }
+        if let Some(v) = paragraph_spacing {
+          style.paragraph_spacing = Some(v.max(0.0));
+        }
+        if let Some(v) = case {
+          style.case = Some(v);
+        }
+        if let Some(v) = decoration {
+          style.decoration = Some(v);
+        }
+        for key in &clear {
+          match key.as_str() {
+            "italic" => style.italic = None,
+            "paragraphSpacing" => style.paragraph_spacing = None,
+            "case" => style.case = None,
+            "decoration" => style.decoration = None,
+            _ => {}
+          }
+        }
         let t = style.clone();
         self.doc.update_where(
           |n| n.text_style.as_deref() == Some(id.as_str()),
           |n| {
             if let Some(tp) = n.text.as_mut() {
-              tp.font_family = t.font_family.clone();
-              tp.font_size = t.font_size;
-              tp.font_weight = t.font_weight;
-              tp.line_height = t.line_height;
-              tp.letter_spacing = t.letter_spacing;
+              t.apply_to(tp);
             }
           },
         );
@@ -3314,20 +3387,24 @@ impl Engine {
           }
         } else if let Some(t) = self.doc.styles.texts.iter().find(|s| s.id == style_id).cloned() {
           for id in &ids {
-            if let Some(tp) = self.doc.get_mut(id).and_then(|n| n.text.as_mut()) {
-              tp.font_family = t.font_family.clone();
-              tp.font_size = t.font_size;
-              tp.font_weight = t.font_weight;
-              tp.line_height = t.line_height;
-              tp.letter_spacing = t.letter_spacing;
+            let Some(n) = self.doc.get_mut(id) else { continue };
+            let Some(tp) = n.text.as_mut() else { continue };
+            t.apply_to(tp);
+            // One source per property: the style replaces the typography variables bound on
+            // the layer.
+            let unbound: Vec<&str> = TEXT_STYLE_PROPS
+              .iter()
+              .copied()
+              .filter(|p| t.sets(p) && n.bindings.remove(*p).is_some())
+              .collect();
+            n.text_style = Some(style_id.clone());
+            let tp = n.text.as_ref().unwrap();
+            let text = json!({ "fontFamily": tp.font_family, "fontSize": tp.font_size, "fontWeight": tp.font_weight, "lineHeight": tp.line_height, "letterSpacing": tp.letter_spacing, "italic": tp.italic, "paragraphSpacing": tp.paragraph_spacing, "case": tp.case, "decoration": tp.decoration });
+            let mut rec = json!({ "text": text, "textStyle": style_id });
+            if !unbound.is_empty() {
+              rec["bindings"] = Value::Object(unbound.iter().map(|p| (p.to_string(), Value::Null)).collect());
             }
-            if let Some(n) = self.doc.get_mut(id) {
-              n.text_style = Some(style_id.clone());
-              if let Some(tp) = &n.text {
-                let text = json!({ "fontFamily": tp.font_family, "fontSize": tp.font_size, "fontWeight": tp.font_weight, "lineHeight": tp.line_height, "letterSpacing": tp.letter_spacing });
-                applied.push((id.clone(), json!({ "text": text, "textStyle": style_id })));
-              }
-            }
+            applied.push((id.clone(), rec));
           }
         } else {
           return Err("no such style".into());
@@ -5926,6 +6003,7 @@ mod tests {
       font_weight: 700,
       line_height: None,
       letter_spacing: 0.0,
+      ..Default::default()
     });
     e.dispatch(Command::ApplyStyle {
       ids: vec![t.clone()],
@@ -5942,6 +6020,11 @@ mod tests {
       line_height: Some(56.0),
       auto_line_height: false,
       letter_spacing: None,
+      italic: None,
+      paragraph_spacing: None,
+      case: None,
+      decoration: None,
+      clear: vec![],
     })
     .unwrap();
     let s = &e.doc.styles.texts[0];
@@ -6315,6 +6398,260 @@ mod tests {
     assert_eq!(i.x, 300.0);
   }
 
+  fn text_layer(e: &mut Engine, chars: &str) -> NodeId {
+    id_of(
+      &e.dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: chars.into(),
+        parent: None,
+      })
+      .unwrap(),
+    )
+  }
+
+  fn text_of(e: &Engine, id: &str) -> crate::model::TextProps {
+    e.doc.get(id).unwrap().text.clone().unwrap()
+  }
+
+  #[test]
+  fn set_text_with_runs_stores_them_exactly_in_one_gesture_step() {
+    let mut e = engine();
+    let t = text_layer(&mut e, "Hello world");
+    e.dispatch(Command::StyleText {
+      id: t.clone(),
+      start: 6,
+      end: 11,
+      style: json!({ "fontWeight": 700 }),
+      clear: vec![],
+    })
+    .unwrap();
+    let styled = text_of(&e, &t).runs;
+    assert_eq!(styled.len(), 1);
+    e.dispatch(Command::BeginGesture).unwrap();
+    // Typing a word remaps the run; an undo snapshot then puts the old text and runs back.
+    e.dispatch(Command::SetText {
+      id: t.clone(),
+      characters: "Hello brave world".into(),
+      runs: None,
+    })
+    .unwrap();
+    assert_eq!((text_of(&e, &t).runs[0].start, text_of(&e, &t).runs[0].end), (6, 17));
+    e.dispatch(Command::SetText {
+      id: t.clone(),
+      characters: "Hello world".into(),
+      runs: Some(styled.clone()),
+    })
+    .unwrap();
+    assert_eq!(text_of(&e, &t).runs, styled);
+    // A run past the end is clamped, plain and empty runs are dropped.
+    e.dispatch(Command::SetText {
+      id: t.clone(),
+      characters: "Hi".into(),
+      runs: Some(vec![
+        crate::model::TextRun {
+          start: 0,
+          end: 99,
+          font_weight: Some(700),
+          ..Default::default()
+        },
+        crate::model::TextRun {
+          start: 1,
+          end: 2,
+          ..Default::default()
+        },
+      ]),
+    })
+    .unwrap();
+    let r = text_of(&e, &t).runs;
+    assert_eq!(r.len(), 1);
+    assert_eq!((r[0].start, r[0].end, r[0].font_weight), (0, 2, Some(700)));
+    e.dispatch(Command::EndGesture).unwrap();
+    // The whole session is one undo step.
+    e.dispatch(Command::Undo).unwrap();
+    let back = text_of(&e, &t);
+    assert_eq!(back.characters, "Hello world");
+    assert_eq!(back.runs, styled);
+  }
+
+  #[test]
+  fn set_text_with_runs_drops_unsafe_links() {
+    let mut e = engine();
+    let t = text_layer(&mut e, "Click");
+    e.dispatch(Command::SetText {
+      id: t.clone(),
+      characters: "Click".into(),
+      runs: Some(vec![crate::model::TextRun {
+        start: 0,
+        end: 5,
+        link: Some("javascript:alert(1)".into()),
+        font_weight: Some(700),
+        ..Default::default()
+      }]),
+    })
+    .unwrap();
+    let runs = text_of(&e, &t).runs;
+    assert!(runs.iter().all(|r| r.link.is_none()), "{runs:?}");
+    assert_eq!(runs[0].font_weight, Some(700));
+  }
+
+  #[test]
+  fn text_styles_carry_italic_paragraph_spacing_case_and_decoration() {
+    use crate::model::{TextCase, TextDecoration};
+    let mut e = engine();
+    let a = text_layer(&mut e, "One");
+    let b = text_layer(&mut e, "Two");
+    e.dispatch(Command::Update {
+      ids: vec![a.clone()],
+      patch: json!({ "text": { "italic": true, "paragraphSpacing": 12, "case": "upper", "decoration": "underline" } }),
+    })
+    .unwrap();
+    let sid = id_of(
+      &e.dispatch(Command::AddTextStyle {
+        name: "Caption".into(),
+        from: a.clone(),
+      })
+      .unwrap(),
+    );
+    let st = e.doc.styles.texts[0].clone();
+    assert_eq!(
+      (st.italic, st.paragraph_spacing, st.case, st.decoration),
+      (Some(true), Some(12.0), Some(TextCase::Upper), Some(TextDecoration::Underline))
+    );
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![b.clone()],
+      style_id: sid.clone(),
+      kind: None,
+    })
+    .unwrap();
+    let tb = text_of(&e, &b);
+    assert!(tb.italic && tb.paragraph_spacing == 12.0 && tb.case == TextCase::Upper && tb.decoration == TextDecoration::Underline);
+    // Editing the style updates both layers.
+    e.dispatch(Command::UpdateTextStyle {
+      id: sid.clone(),
+      name: None,
+      font_family: None,
+      font_size: None,
+      font_weight: None,
+      line_height: None,
+      auto_line_height: false,
+      letter_spacing: None,
+      italic: None,
+      paragraph_spacing: Some(30.0),
+      case: Some(TextCase::Lower),
+      decoration: None,
+      clear: vec![],
+    })
+    .unwrap();
+    for n in [&a, &b] {
+      let t = text_of(&e, n);
+      assert_eq!((t.paragraph_spacing, t.case), (30.0, TextCase::Lower));
+    }
+    // A field the style stops setting is left alone on the layers: they keep what they have.
+    e.dispatch(Command::UpdateTextStyle {
+      id: sid.clone(),
+      name: None,
+      font_family: None,
+      font_size: None,
+      font_weight: None,
+      line_height: None,
+      auto_line_height: false,
+      letter_spacing: None,
+      italic: None,
+      paragraph_spacing: None,
+      case: None,
+      decoration: None,
+      clear: vec!["case".into(), "italic".into()],
+    })
+    .unwrap();
+    let st = e.doc.styles.texts[0].clone();
+    assert!(st.case.is_none() && st.italic.is_none());
+    assert_eq!(text_of(&e, &b).case, TextCase::Lower);
+    assert!(text_of(&e, &b).italic);
+    // JSON: skipped at None, present when set, and an old style without them loads unchanged.
+    let j = serde_json::to_value(&st).unwrap();
+    assert!(j.get("case").is_none() && j.get("italic").is_none());
+    assert_eq!(j["paragraphSpacing"], 30.0);
+    assert_eq!(j["decoration"], "underline");
+    let old_json = json!({ "id": "x", "name": "Old", "fontFamily": "Inter", "fontSize": 12.0, "fontWeight": 400, "lineHeight": null, "letterSpacing": 0.0 });
+    let old: crate::model::TextStyle = serde_json::from_value(old_json.clone()).unwrap();
+    assert_eq!(
+      (old.italic, old.paragraph_spacing, old.case, old.decoration),
+      (None, None, None, None)
+    );
+    assert_eq!(serde_json::to_value(&old).unwrap(), old_json);
+    // Undo goes back to the style before the clear.
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(e.doc.styles.texts[0].case, Some(TextCase::Lower));
+  }
+
+  #[test]
+  fn applying_a_text_style_unbinds_typography_variables_and_binding_detaches_the_style() {
+    let mut e = engine();
+    e.doc.variables = serde_json::from_value(json!([
+      { "id": "c_t", "name": "Type", "modes": [{ "id": "m_l", "name": "Base" }],
+        "variables": [
+          { "id": "v_s", "name": "Size", "type": "number", "values": { "m_l": 40 } },
+          { "id": "v_f", "name": "Family", "type": "string", "values": { "m_l": "Georgia" } } ] }
+    ]))
+    .unwrap();
+    let t = text_layer(&mut e, "Title");
+    let bind = |e: &mut Engine, prop: &str, var: Option<&str>| {
+      e.dispatch(Command::BindVariable {
+        ids: vec![t.clone()],
+        property: prop.into(),
+        variable: var.map(String::from),
+      })
+      .unwrap();
+    };
+    bind(&mut e, "fontSize", Some("v_s"));
+    bind(&mut e, "fontFamily", Some("v_f"));
+    assert_eq!(text_of(&e, &t).font_size, 40.0);
+    e.doc.styles_mut().texts.push(crate::model::TextStyle {
+      id: "ts".into(),
+      name: "Body".into(),
+      font_family: "Inter".into(),
+      font_size: 18.0,
+      font_weight: 400,
+      ..Default::default()
+    });
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![t.clone()],
+      style_id: "ts".into(),
+      kind: None,
+    })
+    .unwrap();
+    let n = e.doc.get(&t).unwrap();
+    assert!(n.bindings.is_empty(), "the style wins: {:?}", n.bindings);
+    assert_eq!(n.text_style.as_deref(), Some("ts"));
+    assert_eq!(
+      (n.text.as_ref().unwrap().font_size, n.text.as_ref().unwrap().font_family.as_str()),
+      (18.0, "Inter")
+    );
+    // The size stays what the style says through later edits.
+    e.dispatch(Command::Update {
+      ids: vec![t.clone()],
+      patch: json!({ "opacity": 0.9 }),
+    })
+    .unwrap();
+    assert_eq!(text_of(&e, &t).font_size, 18.0);
+    // Binding a typography property lets go of the style and keeps the other values.
+    bind(&mut e, "fontSize", Some("v_s"));
+    let n = e.doc.get(&t).unwrap();
+    assert!(n.text_style.is_none());
+    assert_eq!(n.text.as_ref().unwrap().font_size, 40.0);
+    assert_eq!(n.text.as_ref().unwrap().font_family, "Inter");
+    // Applying again and unbinding doesn't touch the link.
+    e.dispatch(Command::ApplyStyle {
+      ids: vec![t.clone()],
+      style_id: "ts".into(),
+      kind: None,
+    })
+    .unwrap();
+    bind(&mut e, "fontSize", None);
+    assert_eq!(e.doc.get(&t).unwrap().text_style.as_deref(), Some("ts"));
+  }
+
   #[test]
   fn styled_text_survives_typing() {
     let mut e = engine();
@@ -6339,11 +6676,13 @@ mod tests {
     e.dispatch(Command::SetText {
       id: id.clone(),
       characters: "Oh, Hello world".into(),
+      runs: None,
     })
     .unwrap();
     e.dispatch(Command::SetText {
       id: id.clone(),
       characters: "Oh, Hello world!".into(),
+      runs: None,
     })
     .unwrap();
     let t = e.doc.get(&id).unwrap().text.clone().unwrap();
@@ -6874,6 +7213,7 @@ mod tests {
     e.dispatch(Command::SetText {
       id: id.clone(),
       characters: "ab\r\ncd\ref".into(),
+      runs: None,
     })
     .unwrap();
     assert_eq!(e.doc.get(&id).unwrap().text.as_ref().unwrap().characters, "ab\ncd\nef");
@@ -6894,6 +7234,7 @@ mod tests {
     e.dispatch(Command::SetText {
       id: id.clone(),
       characters: " plus".into(),
+      runs: None,
     })
     .unwrap();
     assert_eq!(e.doc.get(&id).unwrap().name, "plus");
