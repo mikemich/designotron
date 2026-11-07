@@ -22,20 +22,58 @@ use crate::clipboard;
 use crate::model::{arc_eq, arcs_eq, ColorStyle, Comment, Document, EffectStyle, GridStyle, Node, NodeId, TextStyle};
 use crate::variables::{Collection, Variable};
 
+/// What `delta_with` writes: `patches` as per-property patches (peers that predate them get
+/// whole nodes), `granular` pages, styles and variables per id, `lists` child orders as moves
+/// and comments per message (see `moved`, `place` and `comment_changes`). `lists` needs both
+/// others; a room says whether it takes it in its welcome.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeltaOpts {
+  pub patches: bool,
+  pub granular: bool,
+  pub lists: bool,
+}
+
+/// `delta_with` without `lists`: the form every peer since per-id changes understands.
+pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> Value {
+  delta_with(
+    base,
+    doc,
+    DeltaOpts {
+      patches,
+      granular,
+      lists: false,
+    },
+  )
+}
+
 /// Changes from `base` to `doc` as JSON: added nodes in full (`nodes`), changed ones as
 /// per-property `patch`es (whole nodes when `patches` is false, for peers that predate
 /// patches), removed nodes and comments, plus the document-level fields that differ
 /// (name, pages, styles, variables). With `granular`, pages, styles and variables are sent
 /// as per-id changes (`pageChanges`, `colorStyles`, `textStyles`, `effectStyles`, `gridStyles`,
 /// `collectionChanges`, `variableChanges`: see `ListDelta`); otherwise as whole lists, for peers that predate them.
-pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> Value {
+/// With `lists`, a child list that changed also says which children moved (`moves`, `pageMoves`:
+/// the receiver places those relative to its own list), and a comment that exists on both sides
+/// travels as the messages added and removed and the fields changed (`commentChanges`).
+pub fn delta_with(base: &Document, doc: &Document, opts: DeltaOpts) -> Value {
+  delta_hinted(base, doc, opts, &HashSet::new())
+}
+
+/// `delta_with`, with the layers the person moved on purpose (see `moved_hinted`).
+pub fn delta_hinted(base: &Document, doc: &Document, opts: DeltaOpts, hint: &HashSet<NodeId>) -> Value {
+  let DeltaOpts { patches, granular, lists } = opts;
   let mut nodes = Map::new();
   let mut patch = Map::new();
+  let mut moves = Map::new();
   let mut removed = Vec::new();
   for item in base.nodes.diff(&doc.nodes) {
     match item {
       imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, v) } if patches => {
-        patch.insert(k.clone(), Value::Object(node_patch(o, v)));
+        let p = node_patch(o, v);
+        if lists && o.children != v.children {
+          moves.insert(k.clone(), json!(moved_hinted(&o.children, &v.children, hint)));
+        }
+        patch.insert(k.clone(), Value::Object(p));
       }
       imbl::ordmap::DiffItem::Add(k, v) | imbl::ordmap::DiffItem::Update { new: (k, v), .. } => {
         nodes.insert(k.clone(), serde_json::to_value(v).unwrap_or(Value::Null));
@@ -44,9 +82,16 @@ pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> 
     }
   }
   let mut comments = Map::new();
+  let mut changes = Map::new();
   for (id, c) in doc.comments.iter() {
-    if base.comments.get(id) != Some(c) {
-      comments.insert(id.clone(), serde_json::to_value(c).unwrap_or(Value::Null));
+    let part = match base.comments.get(id) {
+      Some(b) if b == c => continue,
+      Some(b) if lists => comment_changes(b, c),
+      _ => None,
+    };
+    match part {
+      Some(p) => drop(changes.insert(id.clone(), p)),
+      None => drop(comments.insert(id.clone(), serde_json::to_value(c).unwrap_or(Value::Null))),
     }
   }
   let comments_removed: Vec<&String> = base.comments.keys().filter(|k| !doc.comments.contains_key(*k)).collect();
@@ -55,11 +100,28 @@ pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> 
   if !patch.is_empty() {
     o.insert("patch".into(), Value::Object(patch));
   }
+  if !moves.is_empty() {
+    o.insert("moves".into(), Value::Object(moves));
+  }
+  if !changes.is_empty() {
+    o.insert("commentChanges".into(), Value::Object(changes));
+  }
   if base.name != doc.name {
     o.insert("name".into(), json!(doc.name));
   }
   if granular {
     granular_parts(base, doc, o);
+    if lists {
+      let mut page_moves = Map::new();
+      for p in doc.pages.iter() {
+        if let Some(b) = base.page(&p.id).filter(|b| b.children != p.children) {
+          page_moves.insert(p.id.clone(), json!(moved_hinted(&b.children, &p.children, hint)));
+        }
+      }
+      if !page_moves.is_empty() {
+        o.insert("pageMoves".into(), Value::Object(page_moves));
+      }
+    }
   } else {
     if !arcs_eq(&base.pages, &doc.pages) {
       o.insert("pages".into(), json!(doc.pages));
@@ -205,6 +267,602 @@ pub fn legacy(d: &Value, doc: &Document) -> Option<Value> {
     o.insert("variables".into(), json!(doc.variables));
   }
   Some(out)
+}
+
+/// This engine can read and write child orders as moves and comments per message (the `lists`
+/// part of a room's welcome; see `DeltaOpts`).
+pub const LISTS: bool = true;
+
+/// The ids of `new` that moved relative to `base`: the ones `base` lacks, and the ones not on a
+/// longest run of ids that kept their relative order. In `new` order. Taking one layer to the
+/// back gives just that layer. Which of two equally long runs stays is arbitrary, so the editor
+/// says which layers the person moved (`moved_hinted`).
+pub fn moved(base: &[NodeId], new: &[NodeId]) -> Vec<NodeId> {
+  moved_hinted(base, new, &HashSet::new())
+}
+
+/// `moved`, with the layers a command or drag moved (`hint`: Bring forward, Send backward, a drop
+/// in Layers) as the tie-break between runs of equal length. Moving one layer a step is also a
+/// neighbour "moving" the other way round, and which of the two counts is arbitrary without it:
+/// with the hint the run that stays keeps the most layers nobody moved on purpose. The set is
+/// still the smallest there is (the longest run stays), so nothing a command didn't move is
+/// re-placed, and `place(base, new, M)` is `new` for it.
+pub fn moved_hinted(base: &[NodeId], new: &[NodeId], hint: &HashSet<NodeId>) -> Vec<NodeId> {
+  let pos: HashMap<&str, usize> = base.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+  // (index in `new`, position in `base`) of the ids both lists hold.
+  let seq: Vec<(usize, usize)> = new
+    .iter()
+    .enumerate()
+    .filter_map(|(i, id)| pos.get(id.as_str()).map(|&p| (i, p)))
+    .collect();
+  let mut prev: Vec<Option<usize>> = vec![None; seq.len()];
+  let last;
+  if hint.is_empty() {
+    // Longest increasing run of base positions (patience sorting, O(n log n)).
+    let mut tails: Vec<usize> = Vec::new();
+    for (k, &(_, p)) in seq.iter().enumerate() {
+      let at = tails.partition_point(|&t| seq[t].1 < p);
+      if at > 0 {
+        prev[k] = Some(tails[at - 1]);
+      }
+      if at == tails.len() {
+        tails.push(k);
+      } else {
+        tails[at] = k;
+      }
+    }
+    last = tails.last().copied();
+  } else {
+    // The same run, weighted: length first, then the number of layers nobody moved on purpose
+    // (a Fenwick tree of the best chain ending at or before each base position).
+    let big = seq.len() as u64 + 1;
+    let weight = |k: usize| big + u64::from(!hint.contains(&new[seq[k].0]));
+    let m = base.len();
+    let mut tree: Vec<(u64, usize)> = vec![(0, usize::MAX); m + 1];
+    let mut best: Vec<u64> = vec![0; seq.len()];
+    let mut top: Option<usize> = None;
+    for (k, &(_, p)) in seq.iter().enumerate() {
+      // Best chain among base positions below `p`.
+      let (mut w, mut from) = (0, usize::MAX);
+      let mut i = p;
+      while i > 0 {
+        if tree[i].0 > w {
+          (w, from) = tree[i];
+        }
+        i -= i & i.wrapping_neg();
+      }
+      prev[k] = (from != usize::MAX).then_some(from);
+      best[k] = w + weight(k);
+      let mut i = p + 1;
+      while i <= m {
+        if best[k] > tree[i].0 {
+          tree[i] = (best[k], k);
+        }
+        i += i & i.wrapping_neg();
+      }
+      if top.is_none_or(|t| best[k] > best[t]) {
+        top = Some(k);
+      }
+    }
+    last = top;
+  }
+  let mut stay: HashSet<usize> = HashSet::new();
+  let mut at = last;
+  while let Some(k) = at {
+    stay.insert(seq[k].0);
+    at = prev[k];
+  }
+  new
+    .iter()
+    .enumerate()
+    .filter(|(i, _)| !stay.contains(i))
+    .map(|(_, id)| id.clone())
+    .collect()
+}
+
+/// `cur` with the ids in `moved` taken out and put back where `reference` (the mover's list)
+/// has them, relative to everything else `cur` holds:
+/// - the leading run of `reference` that is all moved goes to the start, in order (sent to the
+///   back), and the trailing run to the end (brought to the front);
+/// - any other moved id goes right after the nearest preceding `reference` sibling `cur` has,
+///   else before the nearest following one, else to the end.
+///
+/// Ids of `cur` that `reference` doesn't know (added by others meanwhile) keep their places.
+/// Deterministic, so every peer that applies the same moves to the same list gets the same
+/// order. With `cur` equal to the mover's base and `reference` its new list the result is
+/// exactly `reference`.
+pub fn place(cur: &[NodeId], reference: &[NodeId], moved: &[NodeId]) -> Vec<NodeId> {
+  let in_ref: HashSet<&str> = reference.iter().map(String::as_str).collect();
+  let mset: HashSet<&str> = moved.iter().map(String::as_str).filter(|m| in_ref.contains(m)).collect();
+  let mut seen: HashSet<&str> = HashSet::new();
+  let working: Vec<&NodeId> = cur
+    .iter()
+    .filter(|c| !mset.contains(c.as_str()) && seen.insert(c.as_str()))
+    .collect();
+  if mset.is_empty() {
+    return working.into_iter().cloned().collect();
+  }
+  let n = reference.len();
+  let is_moved = |i: usize| mset.contains(reference[i].as_str());
+  let lead = (0..n).take_while(|&i| is_moved(i)).count();
+  let tail = if lead == n {
+    0
+  } else {
+    (0..n).rev().take_while(|&i| is_moved(i)).count()
+  };
+  // Nothing is inserted into a vector: each moved id is hung on the id it follows (or precedes),
+  // and the result is written out once, in O(n + moved).
+  let mut present: HashSet<&str> = working.iter().map(|w| w.as_str()).collect();
+  let mut placed: HashSet<&str> = HashSet::new();
+  let mut after: HashMap<&str, Vec<&NodeId>> = HashMap::new();
+  let mut before: HashMap<&str, Vec<&NodeId>> = HashMap::new();
+  let mut front: Vec<&NodeId> = Vec::new();
+  let mut end: Vec<&NodeId> = Vec::new();
+  for r in &reference[..lead] {
+    if placed.insert(r.as_str()) {
+      present.insert(r.as_str());
+      front.push(r);
+    }
+  }
+  for i in lead..n - tail {
+    if !is_moved(i) || !placed.insert(reference[i].as_str()) {
+      continue;
+    }
+    let id = &reference[i];
+    let anchor = (0..i).rev().find(|&j| present.contains(reference[j].as_str()));
+    match anchor {
+      Some(j) => after.entry(reference[j].as_str()).or_default().insert(0, id),
+      None => match (i + 1..n).find(|&k| present.contains(reference[k].as_str())) {
+        Some(k) => before.entry(reference[k].as_str()).or_default().push(id),
+        None => end.push(id),
+      },
+    }
+    present.insert(id.as_str());
+  }
+  let mut tail_ids: Vec<&NodeId> = Vec::new();
+  for r in &reference[n - tail..] {
+    if placed.insert(r.as_str()) {
+      tail_ids.push(r);
+    }
+  }
+  enum Todo<'a> {
+    Expand(&'a NodeId),
+    Out(&'a NodeId),
+  }
+  let mut out: Vec<NodeId> = Vec::with_capacity(working.len() + front.len() + end.len() + tail_ids.len());
+  let roots: Vec<&NodeId> = front.into_iter().chain(working).chain(end).chain(tail_ids).collect();
+  let mut stack: Vec<Todo> = roots.into_iter().rev().map(Todo::Expand).collect();
+  while let Some(t) = stack.pop() {
+    match t {
+      Todo::Out(id) => out.push(id.clone()),
+      Todo::Expand(id) => {
+        stack.extend(after.get(id.as_str()).into_iter().flatten().rev().map(|x| Todo::Expand(x)));
+        stack.push(Todo::Out(id));
+        stack.extend(before.get(id.as_str()).into_iter().flatten().rev().map(|x| Todo::Expand(x)));
+      }
+    }
+  }
+  out
+}
+
+/// The first, slower `place` (a vector with inserts); the tests compare the two.
+#[cfg(test)]
+fn place_slow(cur: &[NodeId], reference: &[NodeId], moved: &[NodeId]) -> Vec<NodeId> {
+  let in_ref: HashSet<&str> = reference.iter().map(String::as_str).collect();
+  let mset: HashSet<&str> = moved.iter().map(String::as_str).filter(|m| in_ref.contains(m)).collect();
+  let mut seen: HashSet<&str> = HashSet::new();
+  let mut working: Vec<NodeId> = cur
+    .iter()
+    .filter(|c| !mset.contains(c.as_str()) && seen.insert(c.as_str()))
+    .cloned()
+    .collect();
+  if mset.is_empty() {
+    return working;
+  }
+  let n = reference.len();
+  let is_moved = |i: usize| mset.contains(reference[i].as_str());
+  let lead = (0..n).take_while(|&i| is_moved(i)).count();
+  let tail = if lead == n {
+    0
+  } else {
+    (0..n).rev().take_while(|&i| is_moved(i)).count()
+  };
+  let mut placed: HashSet<&str> = HashSet::new();
+  let front: Vec<NodeId> = reference[..lead].iter().filter(|r| placed.insert(r.as_str())).cloned().collect();
+  working.splice(0..0, front);
+  for i in lead..n - tail {
+    if !is_moved(i) || !placed.insert(reference[i].as_str()) {
+      continue;
+    }
+    let at = |w: &[NodeId], id: &NodeId| w.iter().position(|x| x == id);
+    let slot = (0..i)
+      .rev()
+      .find_map(|j| at(&working, &reference[j]).map(|p| p + 1))
+      .or_else(|| (i + 1..n).find_map(|k| at(&working, &reference[k])))
+      .unwrap_or(working.len());
+    working.insert(slot, reference[i].clone());
+  }
+  for r in &reference[n - tail..] {
+    if placed.insert(r.as_str()) {
+      working.push(r.clone());
+    }
+  }
+  working
+}
+
+/// A comment message's identity: messages carry no id, and nothing edits one, so author, time and
+/// text name it.
+type MsgKey = (String, u64, String);
+
+fn msg_key(m: &crate::model::CommentMessage) -> MsgKey {
+  (m.author.clone(), m.time.to_bits(), m.text.clone())
+}
+
+/// What changed in a comment both sides hold, as `{set?, add?, del?}` (see `delta_with`), or
+/// `None` when it can't be said that way (the whole comment then travels).
+fn comment_changes(b: &Comment, c: &Comment) -> Option<Value> {
+  let mut set = Map::new();
+  if b.resolved != c.resolved {
+    set.insert("resolved".into(), json!(c.resolved));
+  }
+  if b.x != c.x {
+    set.insert("x".into(), json!(c.x));
+  }
+  if b.y != c.y {
+    set.insert("y".into(), json!(c.y));
+  }
+  if b.node != c.node {
+    set.insert("node".into(), json!(c.node));
+  }
+  if b.page != c.page {
+    set.insert("page".into(), json!(c.page));
+  }
+  let (bk, ck): (HashSet<MsgKey>, HashSet<MsgKey>) = (b.messages.iter().map(msg_key).collect(), c.messages.iter().map(msg_key).collect());
+  let add: Vec<&crate::model::CommentMessage> = c.messages.iter().filter(|m| !bk.contains(&msg_key(m))).collect();
+  let del: Vec<Value> = b
+    .messages
+    .iter()
+    .filter(|m| !ck.contains(&msg_key(m)))
+    .map(|m| json!([m.author, m.time, m.text]))
+    .collect();
+  if set.is_empty() && add.is_empty() && del.is_empty() {
+    return None;
+  }
+  let mut out = Map::new();
+  if !set.is_empty() {
+    out.insert("set".into(), Value::Object(set));
+  }
+  if !add.is_empty() {
+    out.insert("add".into(), json!(add));
+  }
+  if !del.is_empty() {
+    out.insert("del".into(), Value::Array(del));
+  }
+  Some(Value::Object(out))
+}
+
+/// Applies `commentChanges` to the comments `doc` still has (one a peer deleted stays deleted).
+fn apply_comment_changes(doc: &mut Document, changes: &Map<String, Value>) -> Result<(), String> {
+  for (id, ch) in changes {
+    let Some(cur) = doc.comments.get(id) else { continue };
+    let mut c = cur.clone();
+    if let Some(set) = ch.get("set").and_then(|s| s.as_object()) {
+      if let Some(v) = set.get("resolved").and_then(|v| v.as_bool()) {
+        c.resolved = v;
+      }
+      if let Some(v) = set.get("x").and_then(|v| v.as_f64()) {
+        c.x = v;
+      }
+      if let Some(v) = set.get("y").and_then(|v| v.as_f64()) {
+        c.y = v;
+      }
+      if let Some(v) = set.get("node") {
+        c.node = v.as_str().map(str::to_string);
+      }
+      if let Some(v) = set.get("page").and_then(|v| v.as_str()) {
+        c.page = v.to_string();
+      }
+    }
+    if let Some(del) = ch.get("del").and_then(|d| d.as_array()) {
+      // A malformed key fails the delta, as a malformed message in `add` does.
+      let gone: HashSet<MsgKey> = del
+        .iter()
+        .map(|k| {
+          let k = k.as_array()?;
+          Some((
+            k.first()?.as_str()?.to_string(),
+            k.get(1)?.as_f64()?.to_bits(),
+            k.get(2)?.as_str()?.to_string(),
+          ))
+        })
+        .collect::<Option<_>>()
+        .ok_or_else(|| format!("bad comment key in {id}"))?;
+      c.messages.retain(|m| !gone.contains(&msg_key(m)));
+    }
+    if let Some(add) = ch.get("add").and_then(|a| a.as_array()) {
+      let mut have: HashSet<MsgKey> = c.messages.iter().map(msg_key).collect();
+      for m in add {
+        let m: crate::model::CommentMessage = serde_json::from_value(m.clone()).map_err(|e| format!("bad comment message {id}: {e}"))?;
+        if have.insert(msg_key(&m)) {
+          c.messages.push(m);
+        }
+      }
+    }
+    if c != *cur {
+      doc.comments_mut().insert(id.clone(), c);
+    }
+  }
+  Ok(())
+}
+
+/// A delta in the form editors that predate `lists` (but read per-id changes) understand: the
+/// child lists the delta moved things in are sent whole, taken from `doc` (the room's document,
+/// after applying), comments that changed are sent whole (or as removed), and the layers
+/// `prune_refs` changed (`pruned`) are sent whole, because those editors don't prune. `None` when
+/// there is nothing to rewrite.
+pub fn legacy_lists(d: &Value, doc: &Document, pruned: &[NodeId]) -> Option<Value> {
+  let has = |k: &str| d.get(k).is_some();
+  if !has("moves") && !has("pageMoves") && !has("commentChanges") && pruned.is_empty() {
+    return None;
+  }
+  let mut out = d.clone();
+  let o = out.as_object_mut()?;
+  fn sub<'a>(o: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<String, Value> {
+    let v = o.entry(key.to_string()).or_insert_with(|| json!({}));
+    if !v.is_object() {
+      *v = json!({});
+    }
+    v.as_object_mut().unwrap()
+  }
+  if let Some(Value::Object(moves)) = o.remove("moves") {
+    for id in moves.keys() {
+      if let Some(n) = doc.get(id) {
+        let entry = sub(sub(o, "patch"), id);
+        entry.insert("children".into(), json!(n.children));
+      }
+    }
+  }
+  if let Some(Value::Object(moves)) = o.remove("pageMoves") {
+    for id in moves.keys() {
+      if let Some(p) = doc.page(id) {
+        let entry = sub(sub(sub(o, "pageChanges"), "patch"), id);
+        entry.insert("children".into(), json!(p.children));
+      }
+    }
+  }
+  if let Some(Value::Object(changes)) = o.remove("commentChanges") {
+    for id in changes.keys() {
+      match doc.comments.get(id) {
+        Some(c) => {
+          sub(o, "comments").insert(id.clone(), serde_json::to_value(c).unwrap_or(Value::Null));
+        }
+        None => {
+          let gone = o.entry("commentsRemoved".to_string()).or_insert_with(|| json!([]));
+          if let Some(a) = gone.as_array_mut().filter(|a| !a.iter().any(|x| x.as_str() == Some(id))) {
+            a.push(json!(id));
+          }
+        }
+      }
+    }
+  }
+  for id in pruned {
+    if let Some(n) = doc.get(id) {
+      sub(o, "nodes").insert(id.clone(), serde_json::to_value(n).unwrap_or(Value::Null));
+      sub(o, "patch").remove(id);
+    }
+  }
+  Some(out)
+}
+
+#[cfg(test)]
+thread_local! {
+  /// How many whole-document scans `prune_refs` made on this thread (see the tests).
+  static ALL_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// What `prune_refs` examines.
+#[derive(Clone, Copy)]
+pub enum Scope<'a> {
+  /// Just these layers (the ones a change touched).
+  Nodes(&'a [NodeId]),
+  /// Every layer (a style, variable, collection or mode went away).
+  All,
+}
+
+/// Variables, modes and styles that exist, for `prune_refs`.
+struct Live {
+  vars: HashSet<String>,
+  modes: HashMap<String, HashSet<String>>,
+  colors: HashSet<String>,
+  texts: HashSet<String>,
+  effects: HashSet<String>,
+  grids: HashSet<String>,
+}
+
+impl Live {
+  fn of(doc: &Document) -> Live {
+    let s = &doc.styles;
+    Live {
+      vars: doc
+        .variables
+        .iter()
+        .flat_map(|c| c.variables.iter().map(|v| v.id.clone()))
+        .collect(),
+      modes: doc
+        .variables
+        .iter()
+        .map(|c| (c.id.clone(), c.modes.iter().map(|m| m.id.clone()).collect()))
+        .collect(),
+      colors: s.colors.iter().map(|x| x.id.clone()).collect(),
+      texts: s.texts.iter().map(|x| x.id.clone()).collect(),
+      effects: s.effects.iter().map(|x| x.id.clone()).collect(),
+      grids: s.grids.iter().map(|x| x.id.clone()).collect(),
+    }
+  }
+
+  fn mode_ok(&self, coll: &str, mode: &str) -> bool {
+    self.modes.get(coll).is_some_and(|m| m.contains(mode))
+  }
+
+  fn style_ok(&self, key: &str, id: &str) -> bool {
+    match key {
+      "fillStyle" | "strokeStyle" => self.colors.contains(id),
+      "textStyle" => self.texts.contains(id),
+      "effectStyle" => self.effects.contains(id),
+      _ => self.grids.contains(id),
+    }
+  }
+}
+
+const STYLE_KEYS: [&str; 5] = ["fillStyle", "strokeStyle", "textStyle", "effectStyle", "gridStyle"];
+
+fn has_refs(n: &Node) -> bool {
+  !n.bindings.is_empty()
+    || !n.variable_modes.is_empty()
+    || n.fill_style.is_some()
+    || n.stroke_style.is_some()
+    || n.text_style.is_some()
+    || n.effect_style.is_some()
+    || n.grid_style.is_some()
+    || n.instance.as_ref().is_some_and(|i| !i.overrides.is_empty())
+}
+
+/// True when an override patch (or a nested swap record's overrides) refers to something gone.
+fn override_stale(o: &Value, live: &Live) -> bool {
+  let Some(obj) = o.as_object() else { return false };
+  let bad_binding = obj
+    .get("bindings")
+    .and_then(|b| b.as_object())
+    .is_some_and(|b| b.values().any(|v| v.as_str().is_some_and(|s| !live.vars.contains(s))));
+  let bad_mode = obj
+    .get("variableModes")
+    .and_then(|m| m.as_object())
+    .is_some_and(|m| m.iter().any(|(c, v)| v.as_str().is_some_and(|mode| !live.mode_ok(c, mode))));
+  let bad_style = STYLE_KEYS
+    .iter()
+    .any(|k| obj.get(*k).and_then(|v| v.as_str()).is_some_and(|s| !live.style_ok(k, s)));
+  bad_binding
+    || bad_mode
+    || bad_style
+    || obj
+      .get(crate::components::SWAP_KEY)
+      .and_then(|s| s.get("overrides"))
+      .and_then(|o| o.as_object())
+      .is_some_and(|inner| inner.values().any(|o| override_stale(o, live)))
+}
+
+/// Removes what `override_stale` finds. A `null` stays: `bindings: {fill: null}` records "unbound here".
+fn clean_override(o: &mut Value, live: &Live) {
+  let Some(obj) = o.as_object_mut() else { return };
+  if let Some(Value::Object(b)) = obj.get_mut("bindings") {
+    b.retain(|_, v| v.as_str().is_none_or(|s| live.vars.contains(s)));
+  }
+  if let Some(Value::Object(m)) = obj.get_mut("variableModes") {
+    m.retain(|c, v| v.as_str().is_none_or(|mode| live.mode_ok(c, mode)));
+  }
+  for k in STYLE_KEYS {
+    if obj.get(k).and_then(|v| v.as_str()).is_some_and(|s| !live.style_ok(k, s)) {
+      obj.remove(k);
+    }
+  }
+  if let Some(Value::Object(swap)) = obj.get_mut(crate::components::SWAP_KEY) {
+    if let Some(Value::Object(inner)) = swap.get_mut("overrides") {
+      inner.values_mut().for_each(|o| clean_override(o, live));
+    }
+  }
+}
+
+fn node_stale(n: &Node, live: &Live) -> bool {
+  let style = |l: &Option<String>, key: &str| l.as_deref().is_some_and(|s| !live.style_ok(key, s));
+  n.bindings.values().any(|v| !live.vars.contains(v))
+    || n.variable_modes.iter().any(|(c, m)| !live.mode_ok(c, m))
+    || style(&n.fill_style, "fillStyle")
+    || style(&n.stroke_style, "strokeStyle")
+    || style(&n.text_style, "textStyle")
+    || style(&n.effect_style, "effectStyle")
+    || style(&n.grid_style, "gridStyle")
+    || n
+      .instance
+      .as_ref()
+      .is_some_and(|i| i.overrides.values().any(|o| override_stale(o, live)))
+}
+
+/// Drops, from the layers in `scope`, every reference to a variable, collection, mode or style the
+/// document no longer has: `bindings`, `variableModes` (the rule of `variables::prune`), the
+/// style links, and the same keys inside instance overrides (swap records too). A layer keeps
+/// the value it shows and loses the link. Returns the changed layers, sorted.
+///
+/// A deleted token and someone's link to it can meet in any order, and nobody else's copy
+/// knows about the other half, so every peer and the room run this on each delta they apply
+/// (`apply_opts`) and the sender after each local change: all end with the same document.
+pub fn prune_refs(doc: &mut Document, scope: Scope) -> Vec<NodeId> {
+  let candidates: Vec<NodeId> = match scope {
+    Scope::All => {
+      #[cfg(test)]
+      ALL_SCANS.with(|c| c.set(c.get() + 1));
+      doc.nodes.values().filter(|n| has_refs(n)).map(|n| n.id.clone()).collect()
+    }
+    Scope::Nodes(ids) => ids
+      .iter()
+      .filter(|id| doc.get(id).is_some_and(has_refs))
+      .cloned()
+      .collect::<BTreeSet<_>>()
+      .into_iter()
+      .collect(),
+  };
+  if candidates.is_empty() {
+    return vec![];
+  }
+  let live = Live::of(doc);
+  let mut stale: Vec<NodeId> = candidates
+    .into_iter()
+    .filter(|id| node_stale(doc.get(id).unwrap(), &live))
+    .collect();
+  for id in &stale {
+    let Some(n) = doc.get_mut(id) else { continue };
+    n.bindings.retain(|_, v| live.vars.contains(v));
+    n.variable_modes.retain(|c, m| live.mode_ok(c, m));
+    for (link, key) in [
+      (&mut n.fill_style, "fillStyle"),
+      (&mut n.stroke_style, "strokeStyle"),
+      (&mut n.text_style, "textStyle"),
+      (&mut n.effect_style, "effectStyle"),
+      (&mut n.grid_style, "gridStyle"),
+    ] {
+      if link.as_deref().is_some_and(|s| !live.style_ok(key, s)) {
+        *link = None;
+      }
+    }
+    if let Some(info) = n.instance.as_mut() {
+      info.overrides.values_mut().for_each(|o| clean_override(o, &live));
+    }
+  }
+  stale.sort();
+  stale
+}
+
+/// Every id of a style, variable, collection and mode (for telling whether a change removed one).
+fn token_ids(d: &Document) -> BTreeSet<String> {
+  let s = &d.styles;
+  let mut v: BTreeSet<String> = s.colors.iter().map(|x| x.id.clone()).collect();
+  v.extend(s.texts.iter().map(|x| x.id.clone()));
+  v.extend(s.effects.iter().map(|x| x.id.clone()));
+  v.extend(s.grids.iter().map(|x| x.id.clone()));
+  for c in &d.variables {
+    v.insert(format!("c:{}", c.id));
+    v.extend(c.variables.iter().map(|x| x.id.clone()));
+    v.extend(c.modes.iter().map(|m| format!("m:{}/{}", c.id, m.id)));
+  }
+  v
+}
+
+/// True when `after` lacks a style, variable, collection or mode that `before` has. Documents that
+/// share their styles and variables (the usual case) compare in O(1).
+pub fn lost_tokens(before: &Document, after: &Document) -> bool {
+  if arc_eq(&before.styles, &after.styles) && arcs_eq(&before.variables, &after.variables) {
+    return false;
+  }
+  token_ids(before).difference(&token_ids(after)).next().is_some()
 }
 
 /// The collections without their variables (new allocations; the variables travel separately).
@@ -482,12 +1140,39 @@ pub fn is_empty(d: &Value) -> bool {
     && empty("removed")
     && empty("comments")
     && empty("commentsRemoved")
+    && empty("moves")
+    && empty("pageMoves")
+    && empty("commentChanges")
     && ["name", "pages", "styles", "variables"].iter().all(|k| d.get(*k).is_none())
     && !is_granular(d)
 }
 
+/// How `apply_opts` applies a delta.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ApplyOpts {
+  /// Afterwards, drop references to styles, variables and modes the document no longer has
+  /// (`prune_refs`), from the layers the delta touched and, when it removed a token, from all.
+  pub prune: bool,
+}
+
 /// Applies a peer's delta, then repairs the tree around everything it touched.
 pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
+  apply_opts(doc, d, ApplyOpts::default()).map(drop)
+}
+
+/// `apply`, with the options; returns the layers `prune_refs` changed.
+pub fn apply_opts(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<NodeId>, String> {
+  // All or nothing: a delta that fails half way leaves the document as it was (the room acks it as
+  // rejected, so no peer may hold any of it).
+  let start = doc.clone();
+  let out = apply_inner(doc, d, opts);
+  if out.is_err() {
+    *doc = start;
+  }
+  out
+}
+
+fn apply_inner(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<NodeId>, String> {
   let before = doc.clone();
   let mut touched: Vec<NodeId> = Vec::new();
   if let Some(nodes) = d.get("nodes").and_then(|v| v.as_object()) {
@@ -497,13 +1182,19 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
       touched.push(id.clone());
     }
   }
+  let moves = d.get("moves").and_then(|v| v.as_object());
   if let Some(patches) = d.get("patch").and_then(|v| v.as_object()) {
     for (id, p) in patches {
       // A layer someone deleted meanwhile stays deleted.
       let (Some(n), Some(p)) = (doc.get(id), p.as_object()) else {
         continue;
       };
-      let n = patch_node(n, p).map_err(|e| format!("bad patch {id}: {e}"))?;
+      let mut new = patch_node(n, p).map_err(|e| format!("bad patch {id}: {e}"))?;
+      // The sender's list is the reference; what it moved is placed in this one's order.
+      if let Some(m) = moves.and_then(|m| m.get(id)).filter(|_| p.contains_key("children")) {
+        new.children = place(&n.children, &new.children, &id_list(m));
+      }
+      let n = new;
       doc.nodes.insert(id.clone(), Arc::new(n));
       touched.push(id.clone());
     }
@@ -524,6 +1215,9 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
       let c: Comment = serde_json::from_value(v.clone()).map_err(|e| format!("bad comment {id}: {e}"))?;
       doc.comments_mut().insert(id.clone(), c);
     }
+  }
+  if let Some(c) = d.get("commentChanges").and_then(|v| v.as_object()) {
+    apply_comment_changes(doc, c)?;
   }
   for id in d
     .get("commentsRemoved")
@@ -563,13 +1257,47 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
   // page is the editor's fallback): the room's order decides, so every copy keeps the same one.
   keep_a_page(doc, &before);
   repair(doc, &before, &touched);
-  Ok(())
+  if !opts.prune {
+    return Ok(vec![]);
+  }
+  // Someone's link to a token and someone else's deletion of it can arrive in either order.
+  Ok(if lost_tokens(&before, doc) {
+    prune_refs(doc, Scope::All)
+  } else {
+    prune_refs(doc, Scope::Nodes(&touched))
+  })
+}
+
+/// The strings of a JSON array (anything else is empty).
+fn id_list(v: &Value) -> Vec<String> {
+  v.as_array()
+    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+    .unwrap_or_default()
 }
 
 /// Applies the per-id changes of pages, styles and variables in `d`, if it has any.
 fn apply_granular(doc: &mut Document, d: &Value) -> Result<(), String> {
   if let Some(c) = d.get("pageChanges") {
+    let moves = d.get("pageMoves").and_then(|v| v.as_object());
+    let old: Vec<(String, Vec<NodeId>)> = moves
+      .into_iter()
+      .flat_map(|m| m.keys())
+      .filter(|id| {
+        c.get("patch")
+          .and_then(|p| p.get(id.as_str()))
+          .is_some_and(|p| p.get("children").is_some())
+      })
+      .filter_map(|id| doc.page(id).map(|p| (id.clone(), p.children.clone())))
+      .collect();
     ListDelta::apply(&mut doc.pages, c, |p| &p.id, &[], "page")?;
+    for (id, old) in old {
+      if let (Some(p), Some(m)) = (doc.page_mut(&id), moves.and_then(|m| m.get(&id))) {
+        let placed = place(&old, &p.children, &id_list(m));
+        if placed != p.children {
+          p.children = placed;
+        }
+      }
+    }
   }
   if let Some(c) = d.get("colorStyles") {
     ListDelta::apply(&mut doc.styles_mut().colors, c, |s| &s.id, &[], "colour style")?;
@@ -616,6 +1344,20 @@ fn apply_granular(doc: &mut Document, d: &Value) -> Result<(), String> {
 pub fn revert(doc: &Document, from: &Document, to: &Document) -> Document {
   let mut out = revert_inner(doc, from, to);
   keep_a_page(&mut out, doc);
+  out
+}
+
+thread_local! {
+  /// The layers the step being reverted moved on purpose (see `revert_hinted`).
+  static REVERT_HINT: std::cell::RefCell<HashSet<NodeId>> = std::cell::RefCell::new(HashSet::new());
+}
+
+/// `revert`, for a step whose command moved the layers in `hint` (the engine records them with
+/// the step): undoing "Send backward" of one layer puts that layer back, not its neighbour.
+pub fn revert_hinted(doc: &Document, from: &Document, to: &Document, hint: &[NodeId]) -> Document {
+  REVERT_HINT.with(|h| *h.borrow_mut() = hint.iter().cloned().collect());
+  let out = revert(doc, from, to);
+  REVERT_HINT.with(|h| h.borrow_mut().clear());
   out
 }
 
@@ -671,7 +1413,8 @@ fn revert_inner(doc: &Document, from: &Document, to: &Document) -> Document {
       // The step changed where a comment sits (a restore re-homing it): a peer's newer
       // messages or resolve stay, and a comment a peer deleted meanwhile stays deleted.
       (Some(f), Some(t), Some(cur)) => {
-        if let Some(m) = merge_fields(cur, f, t, false) {
+        let m = merge_comment(cur, f, t);
+        if m != *cur {
           out.comments_mut().insert(id.clone(), m);
         }
       }
@@ -819,7 +1562,7 @@ fn merge_json(cur: &Value, from: &Value, to: &Value, deep: bool, strict: bool) -
       continue; // this step left it alone, or someone else changed this text
     }
     let merged = if k == "children" {
-      Some(merge_children(cv, fv, tv))
+      Some(merge_order(cv, fv, tv))
     } else if let (true, Some(cv), Some(fv), Some(tv)) = (deep, cv, fv, tv) {
       (cv.is_object() && fv.is_object() && tv.is_object()).then(|| merge_json(cv, fv, tv, true, strict || k == "overrides"))
     } else {
@@ -843,14 +1586,70 @@ fn merge_json(cur: &Value, from: &Value, to: &Value, deep: bool, strict: bool) -
   Value::Object(out)
 }
 
-/// Child lists: `to`'s order, plus children `cur` has that neither `from` nor `to` knew (added
-/// by others meanwhile). `repair` drops the ones that no longer belong.
-fn merge_children(cur: Option<&Value>, from: Option<&Value>, to: Option<&Value>) -> Value {
-  let list = |v: Option<&Value>| v.and_then(|v| v.as_array()).cloned().unwrap_or_default();
-  let (cur, from, mut out) = (list(cur), list(from), list(to));
-  let theirs: Vec<Value> = cur.iter().filter(|c| !from.contains(c) && !out.contains(c)).cloned().collect();
-  out.extend(theirs);
-  Value::Array(out)
+/// Child lists, three ways: `from` is the list the step produced, `to` the one it started from
+/// (an undo; for a redo the other way round) and `cur` the list now. What the step moved
+/// (`moved(from, to)`) goes back, unless `cur` shows a collaborator moved it since (it no longer
+/// sits between the neighbours the step gave it), and goes back relative to the others
+/// (`place`), so a collaborator's later reorders of other layers stay. Layers the step took out
+/// of the list return, ones it put in leave, and ones others added stay where they are.
+/// `repair` drops the ones that no longer belong. With `cur == from` the result is `to`.
+fn merge_order(cur: Option<&Value>, from: Option<&Value>, to: Option<&Value>) -> Value {
+  let (cur, from, to) = (
+    cur.map(id_list).unwrap_or_default(),
+    from.map(id_list).unwrap_or_default(),
+    to.map(id_list).unwrap_or_default(),
+  );
+  let (in_from, in_to): (HashSet<&String>, HashSet<&String>) = (from.iter().collect(), to.iter().collect());
+  let cur: Vec<NodeId> = cur.iter().filter(|c| !in_from.contains(c) || in_to.contains(c)).cloned().collect();
+  let at_from: HashMap<&String, usize> = from.iter().enumerate().map(|(i, id)| (id, i)).collect();
+  let at_cur: HashMap<&String, usize> = cur.iter().enumerate().map(|(i, id)| (id, i)).collect();
+  let hint = REVERT_HINT.with(|h| h.borrow().clone());
+  let kept: Vec<NodeId> = moved_hinted(&from, &to, &hint)
+    .into_iter()
+    .filter(|id| {
+      let Some(&f) = at_from.get(id) else { return true }; // the step took it out: it returns
+      let Some(&c) = at_cur.get(id) else { return false }; // someone else took it out
+      let before =
+        |i: usize, list: &[NodeId], other: &HashMap<&String, usize>| list[..i].iter().rev().find(|x| other.contains_key(x)).cloned();
+      let after =
+        |i: usize, list: &[NodeId], other: &HashMap<&String, usize>| list[i + 1..].iter().find(|x| other.contains_key(x)).cloned();
+      before(c, &cur, &at_from) == before(f, &from, &at_from) || after(c, &cur, &at_from) == after(f, &from, &at_from)
+    })
+    .collect();
+  json!(place(&cur, &to, &kept))
+}
+
+/// Three-way merge of a comment: the fields as for a layer, the messages one by one. A message the
+/// step added (in `from`, not in `to`) goes, whoever replied since; one it removed returns at the
+/// end, as a reply does on the wire (`commentChanges.add` appends), so this editor's document and
+/// the room's agree.
+fn merge_comment(cur: &Comment, from: &Comment, to: &Comment) -> Comment {
+  let bare = |c: &Comment| Comment {
+    messages: vec![],
+    ..c.clone()
+  };
+  let mut out = merge_fields(&bare(cur), &bare(from), &bare(to), false).unwrap_or_else(|| bare(cur));
+  let (fk, tk): (HashSet<MsgKey>, HashSet<MsgKey>) = (
+    from.messages.iter().map(msg_key).collect(),
+    to.messages.iter().map(msg_key).collect(),
+  );
+  let mut msgs: Vec<crate::model::CommentMessage> = cur
+    .messages
+    .iter()
+    .filter(|m| {
+      let k = msg_key(m);
+      !fk.contains(&k) || tk.contains(&k)
+    })
+    .cloned()
+    .collect();
+  for m in &to.messages {
+    let k = msg_key(m);
+    if !fk.contains(&k) && !msgs.iter().any(|x| msg_key(x) == k) {
+      msgs.push(m.clone());
+    }
+  }
+  out.messages = msgs;
+  out
 }
 
 /// Keyed lists (pages, styles): items the step added are removed, items it removed come back
@@ -1280,7 +2079,7 @@ mod tests {
           // Seeds differ in more than the low bit (the id generator ignores it).
           let mut e = engine(10 + 2 * i as u64);
           e.load(&json).unwrap();
-          e.collab_reset(true, true);
+          e.collab_reset(true, true, false);
           e
         })
         .collect();
@@ -1504,7 +2303,7 @@ mod tests {
       editors: vec![a, b],
     };
     for e in room.editors.iter_mut() {
-      e.collab_reset(true, true);
+      e.collab_reset(true, true, false);
     }
     set(&mut room.editors[0], &id, json!({ "text": { "characters": "Goodbye" } }));
     sync(&mut room, 0);
@@ -2494,5 +3293,1312 @@ mod tests {
     for e in &room.editors {
       assert!(e.doc.comments.is_empty());
     }
+  }
+
+  // ---- `lists` rooms: moves, comments per message, three-way undo, pruned references ----------
+
+  use crate::model::CommentMessage;
+  use crate::ops::ReorderTo;
+
+  fn ids(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+  }
+
+  #[test]
+  fn moved_finds_what_a_reorder_moved() {
+    let base = ids(&["a", "b", "c", "t"]);
+    assert!(moved(&base, &base).is_empty());
+    assert_eq!(moved(&base, &ids(&["b", "c", "t", "a"])), ["a"], "to the front");
+    assert_eq!(moved(&base, &ids(&["c", "a", "b", "t"])), ["c"], "to the back");
+    assert_eq!(moved(&base, &ids(&["a", "c", "b", "t"])).len(), 1, "a swap moves one");
+    assert_eq!(moved(&base, &ids(&["a", "b", "c", "t", "n"])), ["n"], "an added id counts");
+    assert!(moved(&base, &ids(&["a", "c", "t"])).is_empty(), "removals alone move nothing");
+    assert_eq!(moved(&base, &ids(&["t", "c", "b", "a"])).len(), 3, "a reversal moves all but one");
+    assert_eq!(moved(&ids(&[]), &ids(&["x", "y"])), ["x", "y"]);
+    // O(n log n): a long list with one id taken to the front.
+    let long: Vec<String> = (0..50_000).map(|i| format!("n{i}")).collect();
+    let mut shuffled = long.clone();
+    let last = shuffled.pop().unwrap();
+    shuffled.insert(0, last.clone());
+    assert_eq!(moved(&long, &shuffled), [last]);
+  }
+
+  #[test]
+  fn place_puts_moved_ids_where_the_movers_list_has_them() {
+    // The mover's own base and new list reproduce the new list exactly.
+    let base = ids(&["a", "b", "c", "t"]);
+    for new in [
+      ids(&["b", "c", "t", "a"]),
+      ids(&["c", "a", "b", "t"]),
+      ids(&["a", "t", "b", "c"]),
+      ids(&["t", "c", "b", "a"]),
+      ids(&["a", "x", "b", "c", "t"]),
+      ids(&["x", "a", "b", "c", "t", "y"]),
+    ] {
+      let m = moved(&base, &new);
+      assert_eq!(place(&base, &new, &m), new, "{new:?}");
+    }
+    // Front and back stay at the ends whatever others hold meanwhile.
+    let cur = ids(&["b", "c", "t", "a", "n"]);
+    assert_eq!(
+      place(&cur, &ids(&["c", "a", "b", "t"]), &ids(&["c"])),
+      ["c", "b", "t", "a", "n"],
+      "back"
+    );
+    assert_eq!(
+      place(&ids(&["c", "a", "b", "t", "n"]), &ids(&["b", "c", "t", "a"]), &ids(&["a"])),
+      ["c", "b", "t", "n", "a"],
+      "front"
+    );
+    // A move in the middle follows the sibling it followed, else the one it preceded, else the end.
+    let cur = ids(&["a", "b", "c", "t"]);
+    assert_eq!(place(&cur, &ids(&["a", "t", "b", "c"]), &ids(&["t"])), ["a", "t", "b", "c"]);
+    assert_eq!(
+      place(&ids(&["b", "c", "t"]), &ids(&["a", "t", "b", "c"]), &ids(&["t"])),
+      ["t", "b", "c"],
+      "anchor gone: before the next one"
+    );
+    assert_eq!(
+      place(&ids(&["q", "r"]), &ids(&["a", "t", "b"]), &ids(&["t"])),
+      ["q", "r", "t"],
+      "no anchors: the end"
+    );
+    // Nothing moved: the list as it is. Ids the reference doesn't hold are not moved.
+    assert_eq!(place(&cur, &ids(&["t", "a"]), &[]), cur);
+    assert_eq!(place(&cur, &ids(&["t", "a"]), &ids(&["zzz"])), cur);
+    // Duplicates in `cur` are dropped.
+    assert_eq!(place(&ids(&["a", "a", "b"]), &ids(&["a", "b"]), &[]), ["a", "b"]);
+  }
+
+  /// How an editor speaks to the room.
+  #[derive(Clone, Copy, PartialEq, Debug)]
+  enum Dialect {
+    /// `lists`: moves, comments per message, prunes by itself.
+    Lists,
+    /// Per-id changes, whole child lists and comments (round 16).
+    Granular,
+    /// Whole lists only.
+    Whole,
+  }
+  use Dialect::{Granular, Lists, Whole};
+
+  /// A relay as `designotron-rooms` runs it (applies with pruning, rewrites each delta for the
+  /// dialect of its receivers) and its editors, over a frame with four layers, a second frame and
+  /// a layer at the top level.
+  struct Hub {
+    doc: Document,
+    eds: Vec<Engine>,
+    dialect: Vec<Dialect>,
+    /// frame, A, B, C, T (the frame's children), other frame, R (top level).
+    ids: Vec<String>,
+    /// Messages on their way to editors, in the order the relay sent them.
+    queue: std::collections::VecDeque<(usize, Value)>,
+  }
+
+  impl Hub {
+    fn new(dialects: &[Dialect]) -> Hub {
+      let mut first = engine(1);
+      let shape = |e: &mut Engine, kind: NodeType, x: f64, parent: Option<String>| -> String {
+        e.dispatch(Command::CreateShape {
+          kind,
+          x,
+          y: 0.0,
+          width: 40.0,
+          height: 40.0,
+          parent,
+        })
+        .unwrap()["id"]
+          .as_str()
+          .unwrap()
+          .to_string()
+      };
+      let frame = shape(&mut first, NodeType::Frame, 0.0, None);
+      let mut ids = vec![frame.clone()];
+      for i in 0..4 {
+        ids.push(shape(&mut first, NodeType::Rectangle, 10.0 * i as f64, Some(frame.clone())));
+      }
+      ids.push(shape(&mut first, NodeType::Frame, 500.0, None));
+      ids.push(shape(&mut first, NodeType::Rectangle, 900.0, None));
+      let json = first.to_json();
+      let eds = dialects
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+          let mut e = engine(10 + 2 * i as u64);
+          e.load(&json).unwrap();
+          e.collab_reset(true, *d != Whole, *d == Lists);
+          e
+        })
+        .collect();
+      Hub {
+        doc: first.doc.clone(),
+        eds,
+        dialect: dialects.to_vec(),
+        ids,
+        queue: Default::default(),
+      }
+    }
+
+    fn frame(&self) -> String {
+      self.ids[0].clone()
+    }
+
+    fn id(&self, label: char) -> String {
+      self.ids["?ABCT".find(label).unwrap()].clone()
+    }
+
+    /// Editor `i` sends its changes; the relay applies them at once and queues what each editor
+    /// receives, as the room would for its dialect.
+    fn send(&mut self, i: usize) {
+      let d = self.eds[i].collab_delta();
+      if d.get("full").is_some() || is_empty(&d) {
+        return;
+      }
+      let d: Value = serde_json::from_str(&d.to_string()).unwrap();
+      let pruned = apply_opts(&mut self.doc, &d, ApplyOpts { prune: true }).expect("the relay takes every delta");
+      let lists_form = legacy_lists(&d, &self.doc, &pruned);
+      let out = &mut self.queue;
+      for j in 0..self.eds.len() {
+        if j == i {
+          out.push_back((j, json!({ "ack": true })));
+          if self.dialect[i] != Lists && !pruned.is_empty() {
+            out.push_back((j, legacy_lists(&json!({ "nodes": {} }), &self.doc, &pruned).unwrap()));
+          }
+          continue;
+        }
+        let m = match self.dialect[j] {
+          Lists => d.clone(),
+          Granular => lists_form.clone().unwrap_or_else(|| d.clone()),
+          Whole => {
+            let g = lists_form.clone().unwrap_or_else(|| d.clone());
+            legacy(&g, &self.doc).unwrap_or(g)
+          }
+        };
+        out.push_back((j, m));
+      }
+    }
+
+    /// Delivers everything queued, in order. An editor sends what it has not sent yet before it
+    /// hears anything (as the web shell does), and what it then sends queues behind the rest.
+    fn deliver(&mut self) {
+      while let Some((j, m)) = self.queue.pop_front() {
+        self.send(j);
+        let e = &mut self.eds[j];
+        if m.get("ack").is_some() {
+          e.dispatch(Command::CollabAck { rejected: false }).unwrap();
+        } else {
+          e.dispatch(Command::ApplyRemote { delta: m, local: false }).unwrap();
+        }
+      }
+    }
+
+    fn sync(&mut self, i: usize) {
+      self.send(i);
+      self.deliver();
+    }
+
+    /// Editors `first` and `second` both have unsent changes; the relay orders `first`'s first and
+    /// everyone hears them in that order.
+    fn race(&mut self, first: usize, second: usize) {
+      self.send(first);
+      self.send(second);
+      self.deliver();
+      self.settle();
+    }
+
+    fn settle(&mut self) {
+      for i in 0..self.eds.len() {
+        self.send(i);
+      }
+      self.deliver();
+      self.assert_converged();
+    }
+
+    fn assert_converged(&self) {
+      for (i, e) in self.eds.iter().enumerate() {
+        for (id, n) in self.doc.nodes.iter() {
+          let got = e.doc.nodes.get(id);
+          assert!(
+            got.is_some_and(|g| g == n),
+            "editor {i} ({:?}) node {id}: room has children {:?}, editor {:?}",
+            self.dialect[i],
+            n.children,
+            got.map(|g| g.children.clone())
+          );
+        }
+        assert_eq!(e.doc.nodes.len(), self.doc.nodes.len(), "editor {i} node count");
+        assert_eq!(e.doc.pages, self.doc.pages, "editor {i} pages");
+        assert_eq!(e.doc.styles, self.doc.styles, "editor {i} styles");
+        assert_eq!(e.doc.variables, self.doc.variables, "editor {i} variables");
+        assert_eq!(e.doc.comments, self.doc.comments, "editor {i} comments");
+      }
+      self.assert_sound(&self.doc);
+    }
+
+    /// Parent and child lists agree; nothing refers to a token that is gone.
+    fn assert_sound(&self, d: &Document) {
+      for n in d.nodes.values() {
+        for c in &n.children {
+          assert_eq!(
+            d.get(c).and_then(|x| x.parent.clone()).as_deref(),
+            Some(n.id.as_str()),
+            "child {c} of {}",
+            n.id
+          );
+        }
+        if let Some(p) = &n.parent {
+          assert!(d.get(p).unwrap().children.contains(&n.id), "{} is listed by {p}", n.id);
+        } else {
+          assert!(d.page(&n.page).unwrap().children.contains(&n.id), "{} is on its page", n.id);
+        }
+      }
+      let mut stale = d.clone();
+      assert!(prune_refs(&mut stale, Scope::All).is_empty(), "no dangling token reference");
+    }
+
+    /// The labels of `parent`'s children ("A,B,C,T"; other ids as "?").
+    fn order(&self, i: usize, parent: &str) -> String {
+      let list = &self.eds[i].doc.get(parent).unwrap().children;
+      list.iter().map(|c| self.label(c)).collect::<Vec<_>>().join(",")
+    }
+
+    fn label(&self, id: &str) -> String {
+      match self.ids.iter().position(|x| x == id) {
+        Some(1) => "A".into(),
+        Some(2) => "B".into(),
+        Some(3) => "C".into(),
+        Some(4) => "T".into(),
+        Some(5) => "F2".into(),
+        Some(6) => "R".into(),
+        Some(0) => "F".into(),
+        _ => "?".into(),
+      }
+    }
+
+    fn page_order(&self, i: usize) -> String {
+      let page = self.eds[i].doc.pages[0].children.clone();
+      page.iter().map(|c| self.label(c)).collect::<Vec<_>>().join(",")
+    }
+  }
+
+  fn reorder(e: &mut Engine, id: &str, to: ReorderTo) {
+    e.dispatch(Command::Reorder {
+      ids: vec![id.to_string()],
+      to,
+    })
+    .unwrap();
+  }
+
+  fn move_to(e: &mut Engine, id: &str, parent: Option<&str>, index: usize) {
+    e.dispatch(Command::MoveToParent {
+      ids: vec![id.to_string()],
+      parent: parent.map(str::to_string),
+      index: Some(index),
+    })
+    .unwrap();
+  }
+
+  /// Runs `f` once per relay order (`first`, `second`) of two editors.
+  fn each_order(f: impl Fn(usize, usize)) {
+    f(0, 1);
+    f(1, 0);
+  }
+
+  #[test]
+  fn concurrent_reorders_both_apply() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let (frame, a, c) = (h.frame(), h.id('A'), h.id('C'));
+      assert_eq!(h.order(0, &frame), "A,B,C,T");
+      reorder(&mut h.eds[0], &a, ReorderTo::Front);
+      reorder(&mut h.eds[1], &c, ReorderTo::Back);
+      h.race(x, y);
+      for i in 0..3 {
+        assert_eq!(h.order(i, &frame), "C,B,T,A", "editor {i}, relay order {x},{y}");
+      }
+    });
+  }
+
+  #[test]
+  fn three_concurrent_reorders_all_apply() {
+    for first in 0..3 {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let (frame, a, b, t) = (h.frame(), h.id('A'), h.id('B'), h.id('T'));
+      reorder(&mut h.eds[0], &a, ReorderTo::Front);
+      reorder(&mut h.eds[1], &t, ReorderTo::Back);
+      reorder(&mut h.eds[2], &b, ReorderTo::Front);
+      for i in [first, (first + 1) % 3, (first + 2) % 3] {
+        h.send(i);
+      }
+      h.deliver();
+      h.settle();
+      let o = h.order(0, &frame);
+      assert!(o.starts_with('T') && (o.ends_with('A') || o.ends_with('B')), "{o} (first {first})");
+    }
+  }
+
+  #[test]
+  fn a_multi_layer_reorder_and_a_third_layers_move_all_apply() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists]);
+      let (frame, a, b, t) = (h.frame(), h.id('A'), h.id('B'), h.id('T'));
+      h.eds[0]
+        .dispatch(Command::Reorder {
+          ids: vec![a, b],
+          to: ReorderTo::Front,
+        })
+        .unwrap();
+      reorder(&mut h.eds[1], &t, ReorderTo::Back);
+      h.race(x, y);
+      let o = h.order(0, &frame);
+      // The pair that came to the front is last, T is at the back.
+      assert_eq!(o, "T,C,B,A", "relay order {x},{y}");
+    });
+  }
+
+  #[test]
+  fn a_reorder_racing_an_added_layer_keeps_both() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists]);
+      let (frame, a) = (h.frame(), h.id('A'));
+      reorder(&mut h.eds[0], &a, ReorderTo::Front);
+      let n = rect(&mut h.eds[1], 70.0, Some(frame.clone()));
+      h.race(x, y);
+      let o = &h.eds[0].doc.get(&frame).unwrap().children;
+      assert_eq!(o.len(), 5);
+      assert!(o.contains(&n));
+      let pos = |id: &str| o.iter().position(|c| c == id).unwrap();
+      assert!(pos(&a) > pos(&h.id('T')), "A is in front of what it was behind");
+    });
+  }
+
+  #[test]
+  fn a_reorder_racing_the_delete_of_its_anchor_lands_by_the_next_sibling() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists]);
+      let (frame, a, b, t) = (h.frame(), h.id('A'), h.id('B'), h.id('T'));
+      // T goes between A and B; A is deleted at the same moment.
+      move_to(&mut h.eds[0], &t, Some(&frame), 1);
+      assert_eq!(h.order(0, &frame), "A,T,B,C");
+      h.eds[1].dispatch(Command::Delete { ids: vec![a] }).unwrap();
+      h.race(x, y);
+      assert_eq!(h.order(0, &frame), "T,B,C", "relay order {x},{y}");
+      assert!(h.eds[0].doc.get(&b).is_some());
+    });
+  }
+
+  #[test]
+  fn a_reorder_racing_a_reparent_of_the_moved_layer_stays_consistent() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let (frame, other, a) = (h.frame(), h.ids[5].clone(), h.id('A'));
+      reorder(&mut h.eds[0], &a, ReorderTo::Front);
+      move_to(&mut h.eds[1], &a, Some(&other), 0);
+      h.race(x, y);
+      let parent = h.eds[2].doc.get(&a).unwrap().parent.clone();
+      let in_frame = h.eds[2].doc.get(&frame).unwrap().children.contains(&a);
+      let in_other = h.eds[2].doc.get(&other).unwrap().children.contains(&a);
+      assert_eq!(
+        (in_frame, in_other),
+        (parent.as_deref() == Some(frame.as_str()), parent.as_deref() == Some(other.as_str()))
+      );
+    });
+  }
+
+  #[test]
+  fn concurrent_top_level_reorders_both_apply() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let (frame, r) = (h.frame(), h.id('?'));
+      let _ = r;
+      let top = h.ids[6].clone();
+      assert_eq!(h.page_order(0), "F,F2,R");
+      reorder(&mut h.eds[0], &frame, ReorderTo::Front);
+      reorder(&mut h.eds[1], &top, ReorderTo::Back);
+      h.race(x, y);
+      for i in 0..3 {
+        assert_eq!(h.page_order(i), "R,F2,F", "editor {i}, relay order {x},{y}");
+      }
+    });
+  }
+
+  #[test]
+  fn undo_of_a_reorder_keeps_a_collaborators_later_reorder() {
+    // B-3: Ana brings A to the front, Ben then sends C to the back; Ana's undo puts A back and
+    // leaves Ben's order alone.
+    let mut h = Hub::new(&[Lists, Lists, Lists]);
+    let (frame, a, c) = (h.frame(), h.id('A'), h.id('C'));
+    reorder(&mut h.eds[0], &a, ReorderTo::Front);
+    h.sync(0);
+    reorder(&mut h.eds[1], &c, ReorderTo::Back);
+    h.sync(1);
+    assert_eq!(h.order(0, &frame), "C,B,T,A");
+    h.eds[0].dispatch(Command::Undo).unwrap();
+    h.sync(0);
+    h.assert_converged();
+    assert_eq!(
+      h.order(2, &frame),
+      "A,C,B,T",
+      "A is back at the start, C is still first among the rest"
+    );
+    // Redo brings it to the front again.
+    h.eds[0].dispatch(Command::Redo).unwrap();
+    h.sync(0);
+    h.assert_converged();
+    assert_eq!(h.order(2, &frame), "C,B,T,A");
+  }
+
+  #[test]
+  fn undo_after_a_collaborator_moved_the_same_layer_leaves_it_there() {
+    let mut h = Hub::new(&[Lists, Lists]);
+    let (frame, b) = (h.frame(), h.id('B'));
+    reorder(&mut h.eds[0], &b, ReorderTo::Front);
+    h.sync(0);
+    reorder(&mut h.eds[1], &b, ReorderTo::Back);
+    h.sync(1);
+    assert_eq!(h.order(0, &frame), "B,A,C,T");
+    h.eds[0].dispatch(Command::Undo).unwrap();
+    h.sync(0);
+    h.assert_converged();
+    assert_eq!(h.order(1, &frame), "B,A,C,T", "Ben's move of the same layer wins");
+  }
+
+  #[test]
+  fn redo_after_a_collaborators_reorder_places_the_layer_by_the_same_rule() {
+    let mut h = Hub::new(&[Lists, Lists]);
+    let (frame, a, c) = (h.frame(), h.id('A'), h.id('C'));
+    reorder(&mut h.eds[0], &a, ReorderTo::Front);
+    h.sync(0);
+    h.eds[0].dispatch(Command::Undo).unwrap();
+    h.sync(0);
+    reorder(&mut h.eds[1], &c, ReorderTo::Back);
+    h.sync(1);
+    assert_eq!(h.order(0, &frame), "C,A,B,T");
+    h.eds[0].dispatch(Command::Redo).unwrap();
+    h.sync(0);
+    h.assert_converged();
+    assert_eq!(h.order(1, &frame), "C,B,T,A");
+  }
+
+  #[test]
+  fn undo_and_redo_of_reorders_are_exact_when_nobody_else_edits() {
+    let mut h = Hub::new(&[Lists, Lists]);
+    let (frame, a, b, t) = (h.frame(), h.id('A'), h.id('B'), h.id('T'));
+    let start = h.eds[0].doc.clone();
+    let mut states = vec![start.clone()];
+    for (id, to) in [(&a, ReorderTo::Front), (&t, ReorderTo::Back), (&b, ReorderTo::Forward)] {
+      reorder(&mut h.eds[0], id, to);
+      states.push(h.eds[0].doc.clone());
+    }
+    // The pure merge, with nobody else's change in the way, is exact too (what undo does after a sync).
+    for i in (1..states.len()).rev() {
+      let back = revert(&states[i], &states[i], &states[i - 1]);
+      assert_eq!(back.nodes, states[i - 1].nodes, "revert {i}");
+      assert_eq!(back.pages, states[i - 1].pages, "revert {i} pages");
+      let fwd = revert(&states[i - 1], &states[i - 1], &states[i]);
+      assert_eq!(fwd.nodes, states[i].nodes, "forward {i}");
+    }
+    h.sync(0);
+    for i in (0..3).rev() {
+      h.eds[0].dispatch(Command::Undo).unwrap();
+      h.sync(0);
+      assert_eq!(h.eds[0].doc.nodes, states[i].nodes);
+    }
+    h.assert_converged();
+    assert_eq!(h.order(1, &frame), "A,B,C,T");
+    for want in states.iter().skip(1).take(3) {
+      h.eds[0].dispatch(Command::Redo).unwrap();
+      h.sync(0);
+      assert_eq!(h.eds[0].doc.nodes, want.nodes);
+    }
+    h.assert_converged();
+  }
+
+  #[test]
+  fn undo_of_a_top_level_reorder_keeps_the_peers_later_reorder() {
+    let mut h = Hub::new(&[Lists, Lists]);
+    let (frame, top) = (h.frame(), h.ids[6].clone());
+    reorder(&mut h.eds[0], &frame, ReorderTo::Front);
+    h.sync(0);
+    reorder(&mut h.eds[1], &top, ReorderTo::Back);
+    h.sync(1);
+    assert_eq!(h.page_order(0), "R,F2,F");
+    h.eds[0].dispatch(Command::Undo).unwrap();
+    h.sync(0);
+    h.assert_converged();
+    assert_eq!(h.page_order(1), "F,R,F2", "F is back in front of the others, R stays first of them");
+  }
+
+  #[test]
+  fn an_old_editors_whole_order_still_applies_in_a_lists_room() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Whole, Granular]);
+      let (frame, a, c) = (h.frame(), h.id('A'), h.id('C'));
+      reorder(&mut h.eds[0], &a, ReorderTo::Front);
+      reorder(&mut h.eds[1], &c, ReorderTo::Back);
+      h.race(x, y);
+      let o = h.order(2, &frame);
+      // The old editor's whole list is the last writer's, the new one's move is placed.
+      assert!(matches!(o.as_str(), "C,B,T,A" | "C,A,B,T" | "B,C,T,A"), "{o}");
+      for i in 0..3 {
+        assert_eq!(h.order(i, &frame), o);
+      }
+    });
+  }
+
+  #[test]
+  fn bring_forward_and_a_peers_send_to_back_both_apply_in_either_relay_order() {
+    // C1: B one step forward is B moving, not its neighbour C.
+    {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let (frame, b) = (h.frame(), h.id('B'));
+      reorder(&mut h.eds[0], &b, ReorderTo::Forward);
+      let d = h.eds[0].collab_delta();
+      assert_eq!(d["moves"][&frame], json!([b]), "the layer the person moved is the one named");
+    }
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let (frame, b, t) = (h.frame(), h.id('B'), h.id('T'));
+      reorder(&mut h.eds[0], &b, ReorderTo::Forward);
+      reorder(&mut h.eds[1], &t, ReorderTo::Back);
+      h.race(x, y);
+      for i in 0..3 {
+        assert_eq!(h.order(i, &frame), "T,A,C,B", "editor {i}, relay order {x},{y}");
+      }
+    });
+  }
+
+  #[test]
+  fn a_command_that_changed_nothing_leaves_no_hint_behind() {
+    // LEAK: A to the back while it is there (nothing changes), then B one step backward: the
+    // delta names B only, so a peer bringing A to the front at once is not overridden.
+    for (x, y) in [(0, 1), (1, 0)] {
+      let mut h = Hub::new(&[Lists, Lists]);
+      let (frame, a, b) = (h.frame(), h.id('A'), h.id('B'));
+      reorder(&mut h.eds[0], &a, ReorderTo::Back);
+      reorder(&mut h.eds[0], &b, ReorderTo::Backward);
+      assert_eq!(h.order(0, &frame), "B,A,C,T");
+      let d = h.eds[0].collab_delta();
+      assert_eq!(d["moves"][&frame], json!([b]), "only the layer that moved");
+      // Again, for real, with the peer.
+      let mut h = Hub::new(&[Lists, Lists]);
+      reorder(&mut h.eds[0], &a, ReorderTo::Back);
+      reorder(&mut h.eds[0], &b, ReorderTo::Backward);
+      reorder(&mut h.eds[1], &a, ReorderTo::Front);
+      h.race(x, y);
+      assert_eq!(h.order(0, &frame), "B,C,T,A", "relay order {x},{y}: A is in front, B stepped back");
+    }
+  }
+
+  #[test]
+  fn a_failed_command_and_what_was_moved_before_joining_leave_no_hint() {
+    let mut h = Hub::new(&[Lists]);
+    let frame = h.frame();
+    // A move into itself fails and names nothing.
+    let _ = h.eds[0].dispatch(Command::MoveToParent {
+      ids: vec![frame.clone()],
+      parent: Some(frame.clone()),
+      index: None,
+    });
+    assert!(h.eds[0].collab_delta().get("moves").is_none());
+    // Moved while alone, then the baseline starts: the first delta names only what moved after.
+    let mut e = engine(5);
+    let first = rect(&mut e, 0.0, None);
+    let second = rect(&mut e, 20.0, None);
+    reorder(&mut e, &first, ReorderTo::Front);
+    e.collab_reset(true, true, true);
+    reorder(&mut e, &second, ReorderTo::Front);
+    let d = e.collab_delta();
+    let page = e.doc.pages[0].id.clone();
+    assert_eq!(d["pageMoves"][&page], json!([second]), "{d}");
+  }
+
+  #[test]
+  fn undoing_a_send_backward_after_a_peer_moved_another_layer_puts_the_layer_back() {
+    let mut h = Hub::new(&[Lists, Lists]);
+    let (frame, b, c) = (h.frame(), h.id('B'), h.id('C'));
+    reorder(&mut h.eds[0], &c, ReorderTo::Backward); // A,C,B,T
+    h.sync(0);
+    reorder(&mut h.eds[1], &b, ReorderTo::Front); // A,C,T,B
+    h.sync(1);
+    assert_eq!(h.order(0, &frame), "A,C,T,B");
+    h.eds[0].dispatch(Command::Undo).unwrap();
+    h.sync(0);
+    h.assert_converged();
+    assert_eq!(h.order(1, &frame), "A,T,B,C", "C goes back behind B, Ben's move of B stays");
+    h.eds[0].dispatch(Command::Redo).unwrap();
+    h.sync(0);
+    h.assert_converged();
+  }
+
+  #[test]
+  fn a_hint_only_breaks_ties_between_equally_long_runs() {
+    let base = ids(&["a", "b", "x", "c"]);
+    let new = ids(&["a", "b", "c", "x"]);
+    assert_eq!(moved(&base, &new), ["c"], "alone, the neighbour is what stays out of the run");
+    let hint: HashSet<String> = ["x".to_string()].into();
+    assert_eq!(moved_hinted(&base, &new, &hint), ["x"]);
+    for h in [vec!["x"], vec!["c"], vec!["a", "b", "x", "c"], vec![]] {
+      let hint: HashSet<String> = h.iter().map(|s| s.to_string()).collect();
+      let m = moved_hinted(&base, &new, &hint);
+      assert_eq!(m.len(), 1, "the smallest set, whatever the hint: {h:?}");
+      assert_eq!(place(&base, &new, &m), new, "{h:?}");
+    }
+  }
+
+  /// A small deterministic generator for the property tests.
+  fn lcg(seed: &mut u64) -> usize {
+    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    (*seed >> 33) as usize
+  }
+
+  #[test]
+  fn hinted_moves_are_as_small_as_unhinted_ones_and_exact() {
+    let mut seed = 99;
+    for _ in 0..2000 {
+      let n = 2 + lcg(&mut seed) % 9;
+      let base: Vec<String> = (0..n).map(|i| format!("n{i}")).collect();
+      let mut new = base.clone();
+      for i in (1..n).rev() {
+        new.swap(i, lcg(&mut seed) % (i + 1));
+      }
+      if lcg(&mut seed).is_multiple_of(3) {
+        new.push("added".into());
+      }
+      let hint: HashSet<String> = base.iter().filter(|_| lcg(&mut seed).is_multiple_of(2)).cloned().collect();
+      let m = moved_hinted(&base, &new, &hint);
+      assert_eq!(m.len(), moved(&base, &new).len(), "{base:?} {new:?} {hint:?}");
+      assert_eq!(place(&base, &new, &m), new, "{base:?} {new:?} {hint:?}");
+    }
+  }
+
+  #[test]
+  fn the_indexed_place_matches_the_plain_one() {
+    let mut seed = 7;
+    for _ in 0..3000 {
+      let n = lcg(&mut seed) % 9;
+      let pool: Vec<String> = (0..12).map(|i| format!("n{i}")).collect();
+      let pick = |seed: &mut u64, k: usize| -> Vec<String> {
+        let mut v: Vec<String> = pool.iter().filter(|_| lcg(seed) % 12 < k).cloned().collect();
+        for i in (1..v.len()).rev() {
+          v.swap(i, lcg(seed) % (i + 1));
+        }
+        v
+      };
+      let cur = pick(&mut seed, 3 + n % 6);
+      let reference = pick(&mut seed, 3 + n % 6);
+      let moved: Vec<String> = pool.iter().filter(|_| lcg(&mut seed).is_multiple_of(3)).cloned().collect();
+      assert_eq!(
+        place(&cur, &reference, &moved),
+        place_slow(&cur, &reference, &moved),
+        "{cur:?} {reference:?} {moved:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn place_stays_fast_when_everything_interleaves() {
+    let n = 10_000;
+    let cur: Vec<String> = (0..n).map(|i| format!("n{i}")).collect();
+    let mut reference: Vec<String> = Vec::new();
+    for i in 0..n / 2 {
+      reference.push(cur[i].clone());
+      reference.push(cur[n - 1 - i].clone());
+    }
+    let m = moved(&cur, &reference);
+    let t = std::time::Instant::now();
+    assert_eq!(place(&cur, &reference, &m), reference);
+    assert!(t.elapsed() < std::time::Duration::from_millis(150), "{:?}", t.elapsed());
+  }
+
+  #[test]
+  fn a_malformed_comment_change_applies_nothing() {
+    let (mut h, _) = (Hub::new(&[Lists]), 0);
+    let a = h.id('A');
+    let cid = add_comment(&mut h.eds[0], &a, "Q1", "Ana", 1.0);
+    h.sync(0);
+    let before = h.doc.clone();
+    let node = serde_json::to_value(h.doc.get(&a).unwrap()).unwrap();
+    for bad in [
+      json!({ cid.clone(): { "add": [5] } }),
+      json!({ cid.clone(): { "del": [["x"]] } }),
+      json!({ cid.clone(): { "del": [5] } }),
+    ] {
+      let mut doc = before.clone();
+      let mut n2 = node.clone();
+      n2["x"] = json!(321.0);
+      let d = json!({ "nodes": {}, "patch": { a.clone(): { "x": 321.0 } }, "commentChanges": bad });
+      assert!(apply_opts(&mut doc, &d, ApplyOpts { prune: true }).is_err(), "{bad}");
+      assert!(doc == before, "a failed delta leaves the document as it was: {bad}");
+    }
+    // The same delta without the bad part applies.
+    let mut doc = before.clone();
+    apply(&mut doc, &json!({ "patch": { a.clone(): { "x": 321.0 } } })).unwrap();
+    assert_eq!(doc.get(&a).unwrap().x, 321.0);
+  }
+
+  fn add_comment(e: &mut Engine, node: &str, text: &str, author: &str, time: f64) -> String {
+    e.dispatch(Command::AddComment {
+      page: None,
+      x: 5.0,
+      y: 5.0,
+      node: Some(node.to_string()),
+      text: text.into(),
+      author: author.into(),
+      time,
+    })
+    .unwrap()["id"]
+      .as_str()
+      .unwrap()
+      .to_string()
+  }
+
+  fn reply(e: &mut Engine, id: &str, text: &str, author: &str, time: f64) {
+    e.dispatch(Command::ReplyComment {
+      id: id.into(),
+      text: text.into(),
+      author: author.into(),
+      time,
+    })
+    .unwrap();
+  }
+
+  fn texts(h: &Hub, i: usize, id: &str) -> Vec<String> {
+    h.eds[i].doc.comments[id].messages.iter().map(|m| m.text.clone()).collect()
+  }
+
+  #[test]
+  fn concurrent_replies_both_stay_in_the_relays_order() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let a = h.id('A');
+      let cid = add_comment(&mut h.eds[0], &a, "Q1", "Ana", 1.0);
+      h.sync(0);
+      // Client clocks disagree with the relay's order on purpose.
+      reply(&mut h.eds[1], &cid, "BEN-1", "Ben", 50.0);
+      reply(&mut h.eds[2], &cid, "CAI-1", "Cai", 10.0);
+      h.race(x + 1, y + 1);
+      let want = if x == 0 {
+        ["Q1", "BEN-1", "CAI-1"]
+      } else {
+        ["Q1", "CAI-1", "BEN-1"]
+      };
+      for i in 0..3 {
+        assert_eq!(texts(&h, i, &cid), want, "editor {i}, relay order {x},{y}");
+      }
+    });
+  }
+
+  #[test]
+  fn three_concurrent_replies_all_stay() {
+    for first in 0..3 {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let a = h.id('A');
+      let cid = add_comment(&mut h.eds[0], &a, "Q", "Ana", 1.0);
+      h.sync(0);
+      for (i, who) in ["Ana", "Ben", "Cai"].iter().enumerate() {
+        reply(&mut h.eds[i], &cid, &format!("R-{who}"), who, 5.0);
+      }
+      for i in [first, (first + 1) % 3, (first + 2) % 3] {
+        h.send(i);
+      }
+      h.deliver();
+      h.settle();
+      let got = texts(&h, 0, &cid);
+      assert_eq!(got.len(), 4, "{got:?}");
+      assert_eq!(got[1], format!("R-{}", ["Ana", "Ben", "Cai"][first]), "the relay's order: {got:?}");
+      for i in 1..3 {
+        assert_eq!(texts(&h, i, &cid), got);
+      }
+    }
+  }
+
+  #[test]
+  fn undoing_my_reply_removes_only_mine() {
+    let mut h = Hub::new(&[Lists, Lists, Lists]);
+    let a = h.id('A');
+    let cid = add_comment(&mut h.eds[0], &a, "Q1", "Ana", 1.0);
+    h.sync(0);
+    reply(&mut h.eds[1], &cid, "BEN-1", "Ben", 2.0);
+    h.sync(1);
+    reply(&mut h.eds[2], &cid, "CAI-1", "Cai", 3.0);
+    h.sync(2);
+    h.eds[1].dispatch(Command::Undo).unwrap();
+    h.sync(1);
+    h.assert_converged();
+    assert_eq!(texts(&h, 0, &cid), ["Q1", "CAI-1"]);
+    h.eds[1].dispatch(Command::Redo).unwrap();
+    h.sync(1);
+    h.assert_converged();
+    assert_eq!(texts(&h, 2, &cid), ["Q1", "CAI-1", "BEN-1"], "back at the end, as a reply is");
+  }
+
+  #[test]
+  fn undoing_my_reply_when_a_peer_replied_after_and_at_the_same_time() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let a = h.id('A');
+      let cid = add_comment(&mut h.eds[0], &a, "Q1", "Ana", 1.0);
+      h.sync(0);
+      reply(&mut h.eds[1], &cid, "BEN-1", "Ben", 2.0);
+      reply(&mut h.eds[2], &cid, "CAI-1", "Cai", 2.0);
+      h.race(x + 1, y + 1);
+      h.eds[1].dispatch(Command::Undo).unwrap();
+      h.sync(1);
+      h.assert_converged();
+      assert_eq!(texts(&h, 0, &cid), ["Q1", "CAI-1"]);
+    });
+  }
+
+  #[test]
+  fn resolving_and_replying_at_once_both_stick() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let a = h.id('A');
+      let cid = add_comment(&mut h.eds[0], &a, "Q1", "Ana", 1.0);
+      h.sync(0);
+      h.eds[0]
+        .dispatch(Command::ResolveComment {
+          id: cid.clone(),
+          resolved: true,
+        })
+        .unwrap();
+      reply(&mut h.eds[1], &cid, "BEN-1", "Ben", 2.0);
+      h.race(x, y);
+      for i in 0..3 {
+        let c = &h.eds[i].doc.comments[&cid];
+        assert!(c.resolved && c.messages.len() == 2, "editor {i}: {c:?}");
+      }
+    });
+  }
+
+  #[test]
+  fn a_reply_racing_the_threads_deletion_stays_deleted() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let a = h.id('A');
+      let cid = add_comment(&mut h.eds[0], &a, "Q1", "Ana", 1.0);
+      h.sync(0);
+      h.eds[0].dispatch(Command::DeleteComment { id: cid.clone() }).unwrap();
+      reply(&mut h.eds[1], &cid, "BEN-1", "Ben", 2.0);
+      h.race(x, y);
+      for i in 0..3 {
+        assert!(h.eds[i].doc.comments.is_empty(), "editor {i}");
+      }
+    });
+  }
+
+  #[test]
+  fn a_reply_only_delta_is_not_empty() {
+    let mut h = Hub::new(&[Lists, Lists]);
+    let a = h.id('A');
+    let cid = add_comment(&mut h.eds[0], &a, "Q1", "Ana", 1.0);
+    h.sync(0);
+    reply(&mut h.eds[1], &cid, "BEN-1", "Ben", 2.0);
+    let d = h.eds[1].collab_delta();
+    assert!(!is_empty(&d), "{d}");
+    assert_eq!(d["commentChanges"][&cid]["add"][0]["text"], "BEN-1");
+    assert!(d["comments"].as_object().unwrap().is_empty(), "the thread itself isn't resent");
+    assert!(!is_empty(&json!({ "moves": { "n": ["a"] } })));
+    assert!(!is_empty(&json!({ "pageMoves": { "p": [] } })));
+    assert!(is_empty(&json!({ "moves": {}, "pageMoves": {}, "commentChanges": {} })));
+  }
+
+  #[test]
+  fn comment_changes_set_fields_and_remove_messages() {
+    let mk = |msgs: &[(&str, f64)]| Comment {
+      id: "c".into(),
+      page: "p".into(),
+      messages: msgs
+        .iter()
+        .map(|(t, time)| CommentMessage {
+          author: "x".into(),
+          text: t.to_string(),
+          time: *time,
+        })
+        .collect(),
+      ..Default::default()
+    };
+    let base = mk(&[("one", 1.0), ("two", 2.0)]);
+    let mut moved_c = mk(&[("two", 2.0), ("three", 3.0)]);
+    moved_c.x = 7.0;
+    moved_c.resolved = true;
+    moved_c.node = Some("n".into());
+    let ch = comment_changes(&base, &moved_c).unwrap();
+    assert_eq!(ch["set"], json!({ "resolved": true, "x": 7.0, "node": "n" }));
+    assert_eq!(ch["add"].as_array().unwrap().len(), 1);
+    assert_eq!(ch["del"], json!([["x", 1.0, "one"]]));
+    let mut doc = engine(1).doc.clone();
+    doc.comments_mut().insert("c".into(), base.clone());
+    apply_comment_changes(&mut doc, json!({ "c": ch, "gone": { "add": [] } }).as_object().unwrap()).unwrap();
+    assert_eq!(doc.comments["c"], moved_c);
+    // Applying it twice changes nothing (a message is added once).
+    let again = comment_changes(&base, &moved_c).unwrap();
+    apply_comment_changes(&mut doc, json!({ "c": again }).as_object().unwrap()).unwrap();
+    assert_eq!(doc.comments["c"], moved_c);
+    assert!(comment_changes(&base, &base).is_none());
+  }
+
+  /// A color variable plus a rectangle that can be bound to it, shared with everyone.
+  fn with_variable(h: &mut Hub) -> (String, String) {
+    ai(
+      &mut h.eds[0],
+      "define_variables",
+      json!({ "collection": "Theme", "variables": [{ "name": "Ink", "type": "color", "value": "#112233" }] }),
+    );
+    h.sync(0);
+    for i in 1..h.eds.len() {
+      h.sync(i);
+    }
+    (var_id(&h.eds[0], "Theme", "Ink"), h.id('A'))
+  }
+
+  fn without_variables(e: &Engine, keep_var: Option<&str>) -> Vec<Collection> {
+    let mut cs = crate::variables::plain(&e.doc.variables);
+    for c in &mut cs {
+      c.variables.retain(|v| Some(v.id.as_str()) == keep_var);
+    }
+    cs
+  }
+
+  fn bind(e: &mut Engine, id: &str, var: &str) {
+    e.dispatch(Command::BindVariable {
+      ids: vec![id.to_string()],
+      property: "fill".into(),
+      variable: Some(var.to_string()),
+    })
+    .unwrap();
+  }
+
+  #[test]
+  fn deleting_a_variable_while_someone_binds_it_leaves_no_dangling_id() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      let (ink, a) = with_variable(&mut h);
+      let cs = without_variables(&h.eds[0], None);
+      h.eds[0].dispatch(Command::SetVariables { collections: cs }).unwrap();
+      bind(&mut h.eds[1], &a, &ink);
+      h.race(x, y);
+      for i in 0..3 {
+        let n = h.eds[i].doc.get(&a).unwrap();
+        assert!(n.bindings.is_empty(), "editor {i}, relay order {x},{y}: {:?}", n.bindings);
+        assert_eq!(colour(&h.eds[i], &a), "#112233", "the layer keeps the colour it showed");
+      }
+      // A later change of that layer still reaches everyone.
+      set(&mut h.eds[2], &a, json!({ "x": 333.0 }));
+      h.settle();
+      assert_eq!(h.eds[0].doc.get(&a).unwrap().x, 333.0);
+    });
+  }
+
+  #[test]
+  fn deleting_a_collection_while_someone_binds_into_it_unbinds_everywhere() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists]);
+      let (ink, a) = with_variable(&mut h);
+      h.eds[0].dispatch(Command::SetVariables { collections: vec![] }).unwrap();
+      bind(&mut h.eds[1], &a, &ink);
+      h.race(x, y);
+      assert!(h.doc.variables.is_empty());
+      assert!(h.eds[1].doc.get(&a).unwrap().bindings.is_empty());
+    });
+  }
+
+  #[test]
+  fn deleting_a_mode_while_a_frame_is_pinned_to_it_unpins_everywhere() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists]);
+      ai(
+        &mut h.eds[0],
+        "define_variables",
+        json!({ "collection": "Theme", "modes": ["Light", "Dark"], "variables": [{ "name": "Ink", "type": "color", "values": { "Light": "#FFFFFF", "Dark": "#000000" } }] }),
+      );
+      h.sync(0);
+      h.sync(1);
+      let coll = h.eds[0].doc.variables[0].clone();
+      let dark = coll.modes[1].id.clone();
+      let frame = h.frame();
+      let mut cs = crate::variables::plain(&h.eds[0].doc.variables);
+      cs[0].modes.truncate(1);
+      h.eds[0].dispatch(Command::SetVariables { collections: cs }).unwrap();
+      h.eds[1]
+        .dispatch(Command::SetVariableMode {
+          ids: vec![frame.clone()],
+          collection: coll.id.clone(),
+          mode: Some(dark),
+        })
+        .unwrap();
+      h.race(x, y);
+      for i in 0..2 {
+        assert!(h.eds[i].doc.get(&frame).unwrap().variable_modes.is_empty(), "editor {i}");
+      }
+    });
+  }
+
+  #[test]
+  fn deleting_a_style_while_someone_applies_it_leaves_the_fill_and_no_link() {
+    each_order(|x, y| {
+      let mut h = Hub::new(&[Lists, Lists, Lists]);
+      ai(
+        &mut h.eds[0],
+        "define_styles",
+        json!({ "colors": [{ "name": "Tmp", "color": "#FF00FF" }] }),
+      );
+      h.sync(0);
+      let sid = h.eds[0].doc.styles.colors[0].id.clone();
+      let a = h.id('A');
+      h.eds[0].dispatch(Command::DeleteStyle { id: sid.clone() }).unwrap();
+      h.eds[1]
+        .dispatch(Command::ApplyStyle {
+          ids: vec![a.clone()],
+          style_id: sid,
+          kind: None,
+        })
+        .unwrap();
+      h.race(x, y);
+      for i in 0..3 {
+        assert_eq!(h.eds[i].doc.get(&a).unwrap().fill_style, None, "editor {i}, relay order {x},{y}");
+        assert!(h.eds[i].doc.styles.colors.is_empty());
+      }
+      assert_eq!(
+        colour(&h.eds[2], &a),
+        "#FF00FF",
+        "it keeps the colour the style gave it (if the apply came first)"
+      );
+    });
+  }
+
+  fn override_instance(e: &mut Engine, id: &str, overrides: Value) {
+    // Set directly: no command writes an override with a style link or a binding to a variable.
+    e.doc.get_mut(id).unwrap().instance = Some(crate::model::InstanceInfo {
+      component_id: "main".into(),
+      overrides: overrides.as_object().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+      ..Default::default()
+    });
+  }
+
+  #[test]
+  fn instance_overrides_lose_links_to_deleted_tokens_too() {
+    let mut h = Hub::new(&[Lists, Lists]);
+    let (ink, _) = with_variable(&mut h);
+    ai(
+      &mut h.eds[0],
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand", "color": "#6D4AFF" }] }),
+    );
+    h.sync(0);
+    h.sync(1);
+    let style = h.eds[0].doc.styles.colors[0].id.clone();
+    let coll = h.eds[0].doc.variables[0].id.clone();
+    let inst = h.id('B');
+    let rec = json!({
+      "inner": { "bindings": { "fill": ink, "stroke": null }, "fillStyle": style, "textStyle": "gone", "fills": [{ "type": "solid", "color": "#010203" }],
+        "variableModes": { coll.clone(): "no-such-mode" } },
+      "nested": { "instance": { "componentId": "m2", "overrides": { "deep": { "bindings": { "fill": ink }, "strokeStyle": style } } } }
+    });
+    override_instance(&mut h.eds[1], &inst, rec);
+    h.sync(1);
+    // Scrubbed on arrival (the dead textStyle and mode) everywhere, by every copy the same way.
+    for i in 0..2 {
+      let o = &h.eds[i].doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides;
+      assert!(o["inner"].get("textStyle").is_none(), "editor {i}");
+      assert!(o["inner"]["variableModes"].as_object().unwrap().is_empty(), "editor {i}");
+      assert_eq!(o["inner"]["bindings"]["fill"], json!(ink));
+    }
+    h.assert_converged();
+    // Deleting the variable and the style cleans the overrides, and keeps the `null` record.
+    let cs = without_variables(&h.eds[0], None);
+    h.eds[0].dispatch(Command::SetVariables { collections: cs }).unwrap();
+    h.eds[0].dispatch(Command::DeleteStyle { id: style }).unwrap();
+    h.settle();
+    for i in 0..2 {
+      let o = &h.eds[i].doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides;
+      assert_eq!(
+        o["inner"]["bindings"],
+        json!({ "stroke": null }),
+        "editor {i}: null stays, the link goes"
+      );
+      assert!(o["inner"].get("fillStyle").is_none());
+      assert_eq!(o["inner"]["fills"][0]["color"], "#010203", "literal values stay");
+      let deep = &o["nested"]["instance"]["overrides"]["deep"];
+      assert!(
+        deep["bindings"].as_object().unwrap().is_empty() && deep.get("strokeStyle").is_none(),
+        "{deep}"
+      );
+    }
+  }
+
+  #[test]
+  fn local_delete_style_clears_override_style_keys_too() {
+    let mut e = engine(1);
+    let id = rect(&mut e, 0.0, None);
+    ai(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand", "color": "#6D4AFF" }] }),
+    );
+    let style = e.doc.styles.colors[0].id.clone();
+    e.doc.get_mut(&id).unwrap().instance = Some(crate::model::InstanceInfo {
+      component_id: "main".into(),
+      overrides: [("inner".to_string(), json!({ "fillStyle": style, "effectStyle": "gone" }))].into(),
+      ..Default::default()
+    });
+    // Any command that touches the layer drops what points at nothing.
+    set(&mut e, &id, json!({ "x": 3.0 }));
+    assert!(e.doc.get(&id).unwrap().instance.as_ref().unwrap().overrides["inner"]
+      .get("effectStyle")
+      .is_none());
+    e.dispatch(Command::DeleteStyle { id: style }).unwrap();
+    let o = &e.doc.get(&id).unwrap().instance.as_ref().unwrap().overrides;
+    assert!(o["inner"].as_object().unwrap().is_empty(), "{o:?}");
+    // And it undoes with the delete.
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.doc.get(&id).unwrap().instance.as_ref().unwrap().overrides["inner"]
+      .get("fillStyle")
+      .is_some());
+  }
+
+  #[test]
+  fn local_binding_to_a_missing_variable_is_pruned_like_a_receivers() {
+    let mut e = engine(1);
+    let id = rect(&mut e, 0.0, None);
+    set(&mut e, &id, json!({ "bindings": { "fill": "nope" }, "fillStyle": "nope" }));
+    let n = e.doc.get(&id).unwrap();
+    assert!(n.bindings.is_empty() && n.fill_style.is_none());
+  }
+
+  #[test]
+  fn the_whole_document_is_scanned_only_when_a_token_disappears() {
+    let mut h = Hub::new(&[Lists, Lists]);
+    let (ink, a) = with_variable(&mut h);
+    bind(&mut h.eds[1], &a, &ink);
+    h.sync(1);
+    h.sync(0);
+    let scans = || ALL_SCANS.with(|c| c.get());
+    // A move, a rename of the variable, a new variable and a new style remove nothing.
+    let before = scans();
+    set(&mut h.eds[0], &a, json!({ "x": 9.0 }));
+    h.sync(0);
+    ai(
+      &mut h.eds[0],
+      "define_variables",
+      json!({ "collection": "Theme", "variables": [{ "name": "Ink 2", "type": "color", "value": "#000000" }] }),
+    );
+    h.sync(0);
+    ai(
+      &mut h.eds[0],
+      "define_styles",
+      json!({ "colors": [{ "name": "S", "color": "#FF0000" }] }),
+    );
+    h.sync(0);
+    assert_eq!(scans(), before, "no token went away: no full scan, here or at the receiver");
+    // Deleting one scans on the editor that deletes it and on every receiver.
+    let cs = without_variables(&h.eds[0], Some(&var_id(&h.eds[0], "Theme", "Ink 2")));
+    h.eds[0].dispatch(Command::SetVariables { collections: cs }).unwrap();
+    assert!(scans() > before, "the deleter scans");
+    let mid = scans();
+    h.sync(0);
+    assert!(scans() > mid, "and so does the room and a receiver");
+    assert!(h.eds[1].doc.get(&a).unwrap().bindings.is_empty());
+  }
+
+  #[test]
+  fn legacy_lists_rewrites_moves_comments_and_pruned_layers_whole() {
+    let mut h = Hub::new(&[Lists, Lists]);
+    let (frame, a, b) = (h.frame(), h.id('A'), h.id('B'));
+    let cid = add_comment(&mut h.eds[0], &a, "Q1", "Ana", 1.0);
+    h.sync(0);
+    h.sync(1);
+    reorder(&mut h.eds[0], &a, ReorderTo::Front);
+    reply(&mut h.eds[0], &cid, "R1", "Ana", 2.0);
+    let d = h.eds[0].collab_delta();
+    assert!(d["moves"][&frame].is_array() && d["commentChanges"][&cid].is_object());
+    apply(&mut h.doc, &d).unwrap();
+    assert!(
+      legacy_lists(&json!({ "nodes": {}, "removed": [] }), &h.doc, &[]).is_none(),
+      "nothing to rewrite"
+    );
+    let old = legacy_lists(&d, &h.doc, std::slice::from_ref(&b)).unwrap();
+    assert!(old.get("moves").is_none() && old.get("commentChanges").is_none());
+    assert_eq!(old["patch"][&frame]["children"], json!(h.doc.get(&frame).unwrap().children));
+    assert_eq!(old["comments"][&cid]["messages"].as_array().unwrap().len(), 2, "the whole thread");
+    assert_eq!(old["nodes"][&b]["id"], json!(b), "a pruned layer travels whole");
+    assert!(old["patch"].get(&b).is_none());
+    // A comment that is gone becomes a removal.
+    let mut gone = h.doc.clone();
+    gone.comments_mut().remove(&cid);
+    let old = legacy_lists(&d, &gone, &[]).unwrap();
+    assert_eq!(old["commentsRemoved"], json!([cid]));
+    assert!(old["comments"].get(&cid).is_none());
+  }
+
+  #[test]
+  fn editors_of_every_dialect_converge_on_reorders_replies_and_prunes() {
+    for dialects in [
+      [Lists, Lists, Granular],
+      [Lists, Granular, Lists],
+      [Lists, Lists, Whole],
+      [Granular, Lists, Whole],
+      [Granular, Granular, Whole],
+    ] {
+      for (x, y) in [(0, 1), (1, 0), (2, 0)] {
+        let mut h = Hub::new(&dialects);
+        let (frame, a, c, b) = (h.frame(), h.id('A'), h.id('C'), h.id('B'));
+        let cid = add_comment(&mut h.eds[0], &a, "Q1", "Ana", 1.0);
+        let (ink, _) = with_variable(&mut h);
+        h.settle();
+        reorder(&mut h.eds[0], &a, ReorderTo::Front);
+        reply(&mut h.eds[1], &cid, "BEN", "Ben", 2.0);
+        reorder(&mut h.eds[2], &c, ReorderTo::Back);
+        let cs = without_variables(&h.eds[0], None);
+        h.eds[0].dispatch(Command::SetVariables { collections: cs }).unwrap();
+        bind(&mut h.eds[1], &b, &ink);
+        h.race(x, y);
+        h.settle();
+        let o = h.order(0, &frame);
+        assert_eq!(o.len(), 7, "{o} {dialects:?}");
+        for i in 1..3 {
+          assert_eq!(h.order(i, &frame), o, "{dialects:?} {x},{y}");
+        }
+        assert!(!texts(&h, 2, &cid).is_empty() && texts(&h, 0, &cid)[0] == "Q1");
+        assert!(h.eds[0].doc.get(&b).unwrap().bindings.is_empty(), "{dialects:?} {x},{y}");
+        // Nothing is lost for the dialects that speak lists: both replies and moves stay.
+        if dialects[1] == Lists {
+          assert!(texts(&h, 0, &cid).contains(&"BEN".to_string()), "{dialects:?} {x},{y}");
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn editors_that_never_heard_of_lists_behave_as_before() {
+    // A room without `lists` (a relay from before): whole lists, last writer wins, converged.
+    let (mut room, a) = Room::new(2);
+    let c = rect(&mut room.editors[0], 20.0, None);
+    let d = rect(&mut room.editors[0], 40.0, None);
+    sync(&mut room, 0);
+    sync(&mut room, 1);
+    reorder(&mut room.editors[0], &a, ReorderTo::Front);
+    reorder(&mut room.editors[1], &d, ReorderTo::Back);
+    let from_a = room.send(0);
+    let from_b = room.send(1);
+    for m in from_a.into_iter().chain(from_b) {
+      room.receive(m);
+    }
+    room.assert_converged();
+    let page = room.editors[0].doc.page(&room.editors[0].page).unwrap();
+    assert_eq!(page.children, [d.clone(), a.clone(), c.clone()], "the later change decides");
+    assert!(
+      room.editors.iter().all(|e| !e.collab_lists),
+      "a room without lists is not asked for them"
+    );
+    assert!(room.editors[0].collab_delta().get("moves").is_none());
+    // Their deltas carry no moves or comment changes, whatever they change.
+    reorder(&mut room.editors[0], &a, ReorderTo::Back);
+    let d = room.editors[0].collab_delta();
+    assert!(
+      d.get("moves").is_none() && d.get("pageMoves").is_none() && d.get("commentChanges").is_none(),
+      "{d}"
+    );
   }
 }

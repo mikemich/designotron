@@ -180,10 +180,18 @@ impl WasmEngine {
 
   /// Starts the collaboration baseline at the current document; `ordered` when the relay
   /// acknowledges changes in order, `granular` when it also takes pages, styles and variables
-  /// per id (see `Engine::collab_reset`).
+  /// per id, `lists` when it also takes child orders as moves and comments per message (see
+  /// `Engine::collab_reset`).
   #[wasm_bindgen(js_name = collabReset)]
-  pub fn collab_reset(&mut self, ordered: bool, granular: bool) {
-    self.inner.collab_reset(ordered, granular);
+  pub fn collab_reset(&mut self, ordered: bool, granular: bool, lists: bool) {
+    self.inner.collab_reset(ordered, granular, lists);
+  }
+
+  /// Whether this engine reads and writes child orders as moves and comments per message in
+  /// deltas (what an editor tells the room it can do when joining).
+  #[wasm_bindgen(js_name = collabLists)]
+  pub fn collab_lists(&self) -> bool {
+    designotron_engine::collab::LISTS
   }
 
   /// Whether this engine reads and writes pages, styles and variables per id in deltas (what

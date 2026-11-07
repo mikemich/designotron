@@ -113,7 +113,7 @@ must never be committed.
   be handled in `collab::delta`, `apply` and `revert`. Pages, styles and variables travel per id
   (`pageChanges`, `colorStyles`, `textStyles`, `collectionChanges`, `variableChanges`) when the
   room says `granular` in its welcome; the relay turns them into the old whole lists for editors
-  that didn't join with `granular:true`. The LAN share listener serves only the
+  that didn't join with `granular:true`. When the welcome also says `lists`, a changed child list travels with `moves`/`pageMoves` (the children that moved; the receiver puts them back with `collab::place`, so concurrent reorders both apply, and undo uses the three-way `merge_order`), an existing comment travels as `commentChanges` (replies append in the relay's order), and every copy drops references to deleted styles and variables with `collab::prune_refs` after each delta (`apply_opts`) and each local command; the relay rewrites all of this for editors that didn't join with `lists` (`collab::legacy_lists`). The LAN share listener serves only the
   editor and `/collab/ws` behind the token; never add MCP, chat or fetch routes to it.
 - The canvas patches one `<g data-root>` per top-level layer; a root whose only change is its
   position gets a transform update instead of new markup. `.canvas` uses `contain: strict` and

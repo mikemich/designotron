@@ -10,9 +10,14 @@
 //!   document (or one with `reset`) sets the room's document.
 //! - client → `{type:"join", …, granular:true}` when the editor can read pages, styles and
 //!   variables as per-id changes (see `collab::delta`).
-//! - server → `{type:"welcome", you, doc|null, assets, peers, ordered:true, granular:true}`
+//! - client → `{type:"join", …, lists:true}` when the editor can also read child orders as moves
+//!   (`moves`, `pageMoves`) and comments per message (`commentChanges`), and prunes references to
+//!   deleted styles and variables itself (see `collab::DeltaOpts`, `collab::prune_refs`).
+//! - server → `{type:"welcome", you, doc|null, assets, peers, ordered:true, granular:true, lists:true}`
 //!   (`granular`: this room takes per-id changes; editors that sent none get the whole lists
-//!   instead, taken from the room's document)
+//!   instead, taken from the room's document. `lists`: it takes moves and per-message comment
+//!   changes; editors that sent no `lists` get whole child lists and comments, and the layers
+//!   the room pruned, taken from the room's document)
 //! - client ↔ `{type:"delta", delta, assets?}`, `{type:"presence", presence}`
 //! - server → `{type:"ack", rejected?}` to the sender of each delta, at its place in the
 //!   order the room applied changes (`ordered`): editors keep their own unacknowledged
@@ -70,6 +75,9 @@ use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Mutex, Notify};
+
+/// Rooms drop references to deleted tokens from every change they apply (and replay).
+const PRUNE: designotron_engine::collab::ApplyOpts = designotron_engine::collab::ApplyOpts { prune: true };
 
 /// The answer to a client's `{type:"ping"}`.
 const PONG: &str = r#"{"type":"pong"}"#;
@@ -260,6 +268,8 @@ struct Peer {
   presence: Value,
   /// Reads per-id changes of pages, styles and variables.
   granular: bool,
+  /// Also reads moves and per-message comment changes, and prunes dangling references itself.
+  lists: bool,
 }
 
 /// The sending half of one connection.
@@ -297,6 +307,8 @@ struct Incoming<'a> {
   reset: bool,
   #[serde(default)]
   granular: bool,
+  #[serde(default)]
+  lists: bool,
   #[serde(borrow, default)]
   delta: Option<&'a RawValue>,
   #[serde(borrow, default)]
@@ -315,6 +327,8 @@ struct Welcome<'a> {
   ordered: bool,
   /// Pages, styles and variables may travel as per-id changes (see the protocol above).
   granular: bool,
+  /// Child orders may travel as moves and comments per message (see the protocol above).
+  lists: bool,
   /// The document model revision this server understands.
   model: u32,
   /// The id of this room's view-only link (editors, when the server has them).
@@ -434,8 +448,11 @@ const EDITOR_RESERVE: usize = 10;
 /// does anything else. Only comments: new threads, replies appended to existing ones and
 /// resolving. Everything is rebuilt from typed values, so nothing else the viewer put in the
 /// message (pages, styles, variables, unknown keys) can reach the room.
+///
+/// Replies and resolving come either as a whole comment (older editors; the old messages must be
+/// an exact prefix of the new ones) or as `commentChanges` with only `add` and `set.resolved`.
 fn viewer_delta(delta: &Value, doc: &Document) -> Option<Value> {
-  use designotron_engine::model::Comment;
+  use designotron_engine::model::{Comment, CommentMessage};
   let o = delta.as_object()?;
   // The editor always sends these three, empty; anything else but comments is refused.
   let empty = |k: &str| match o.get(k) {
@@ -446,21 +463,30 @@ fn viewer_delta(delta: &Value, doc: &Document) -> Option<Value> {
   };
   if o
     .keys()
-    .any(|k| !matches!(k.as_str(), "comments" | "nodes" | "removed" | "commentsRemoved"))
+    .any(|k| !matches!(k.as_str(), "comments" | "nodes" | "removed" | "commentsRemoved" | "commentChanges"))
     || !empty("nodes")
     || !empty("removed")
     || !empty("commentsRemoved")
   {
     return None;
   }
-  let given = o.get("comments")?.as_object()?;
-  if given.is_empty() || given.len() > VIEWER_MAX_COMMENTS {
+  let none = Map::new();
+  let given = match o.get("comments") {
+    None => &none,
+    Some(v) => v.as_object()?,
+  };
+  let changes = match o.get("commentChanges") {
+    None => &none,
+    Some(v) => v.as_object()?,
+  };
+  if given.len() + changes.len() == 0 || given.len() + changes.len() > VIEWER_MAX_COMMENTS {
     return None;
   }
+  let text_ok = |m: &CommentMessage| m.text.len() <= VIEWER_MAX_TEXT && m.author.len() <= 200;
   let mut out = Map::new();
   for (id, v) in given {
     let c: Comment = serde_json::from_value(v.clone()).ok()?;
-    if &c.id != id || c.messages.iter().any(|m| m.text.len() > VIEWER_MAX_TEXT || m.author.len() > 200) {
+    if &c.id != id || !c.messages.iter().all(text_ok) {
       return None;
     }
     if let Some(old) = doc.comments.get(id) {
@@ -476,7 +502,53 @@ fn viewer_delta(delta: &Value, doc: &Document) -> Option<Value> {
     }
     out.insert(id.clone(), serde_json::to_value(&c).ok()?);
   }
-  Some(json!({ "nodes": {}, "removed": [], "comments": out, "commentsRemoved": [] }))
+  let mut clean = Map::new();
+  for (id, ch) in changes {
+    let ch = ch.as_object()?;
+    // Never `del`, and of `set` only `resolved`.
+    if ch.keys().any(|k| !matches!(k.as_str(), "set" | "add" | "del")) {
+      return None;
+    }
+    if let Some(del) = ch.get("del") {
+      if !del.as_array()?.is_empty() {
+        return None;
+      }
+    }
+    let mut part = Map::new();
+    if let Some(set) = ch.get("set") {
+      let set = set.as_object()?;
+      if set.keys().any(|k| k != "resolved") {
+        return None;
+      }
+      if let Some(r) = set.get("resolved") {
+        part.insert("set".into(), json!({ "resolved": r.as_bool()? }));
+      }
+    }
+    if let Some(add) = ch.get("add") {
+      let add = add.as_array()?;
+      if add.len() > VIEWER_MAX_NEW_MESSAGES {
+        return None;
+      }
+      let msgs: Vec<CommentMessage> = add.iter().map(|m| serde_json::from_value(m.clone()).ok()).collect::<Option<_>>()?;
+      if !msgs.iter().all(text_ok) {
+        return None;
+      }
+      if !msgs.is_empty() {
+        part.insert("add".into(), serde_json::to_value(&msgs).ok()?);
+      }
+    }
+    if !part.is_empty() {
+      clean.insert(id.clone(), Value::Object(part));
+    }
+  }
+  if out.is_empty() && clean.is_empty() {
+    return None;
+  }
+  let mut d = json!({ "nodes": {}, "removed": [], "comments": out, "commentsRemoved": [] });
+  if !clean.is_empty() {
+    d["commentChanges"] = Value::Object(clean);
+  }
+  Some(d)
 }
 
 /// 128 random bits from the OS-seeded hasher keys, as hex.
@@ -1283,6 +1355,7 @@ impl Rooms {
         .collect(),
       ordered: true,
       granular: true,
+      lists: true,
       model: designotron_engine::collab::MODEL_REVISION,
       view: (self.view_links && role == Role::Editor).then(|| view_id(room_id)),
       role: role.name(),
@@ -1313,6 +1386,7 @@ impl Rooms {
         color: color.clone(),
         presence: Value::Null,
         granular: m.granular,
+        lists: m.lists && m.granular,
       },
     );
     self.people.fetch_add(1, Ordering::Relaxed);
@@ -1384,11 +1458,15 @@ impl Rooms {
       None
     };
     let raw: &RawValue = fixed.as_deref().unwrap_or(raw);
-    if let Err(e) = designotron_engine::collab::apply(r.doc.as_mut().unwrap(), &delta) {
-      log::warn!("rejected collab delta: {e}");
-      self.ack(r, id, true);
-      return Step::Go;
-    }
+    // Every copy prunes references to deleted tokens the same way (`collab::prune_refs`).
+    let pruned = match designotron_engine::collab::apply_opts(r.doc.as_mut().unwrap(), &delta, PRUNE) {
+      Ok(pruned) => pruned,
+      Err(e) => {
+        log::warn!("rejected collab delta: {e}");
+        self.ack(r, id, true);
+        return Step::Go;
+      }
+    };
     let (doc_bytes, asset_bytes) = (r.doc_bytes + growth, r.asset_bytes);
     self.set_bytes(r, doc_bytes, asset_bytes);
     // Images are optional for the document to stay consistent: over the limit, peers get
@@ -1416,38 +1494,70 @@ impl Rooms {
         r.compact = true;
       }
     }
-    let out = DeltaOut {
-      kind: "delta",
-      from: id,
-      delta: raw,
-      assets: if keep { m.assets } else { None },
+    let assets_out = if keep { m.assets } else { None };
+    let text_of = |d: &RawValue| {
+      let out = DeltaOut {
+        kind: "delta",
+        from: id,
+        delta: d,
+        assets: assets_out,
+      };
+      Arc::new(serde_json::to_string(&out).unwrap_or_default())
     };
-    let older = r.peers.iter().any(|(pid, p)| *pid != id && !p.granular);
-    let whole = older
-      .then(|| designotron_engine::collab::legacy(&delta, r.doc.as_ref().unwrap()))
+    let doc_now = r.doc.as_ref().unwrap();
+    let others = |f: &dyn Fn(&Peer) -> bool| r.peers.iter().any(|(pid, p)| *pid != id && f(p));
+    let raw_text = others(&|p| p.lists).then(|| text_of(raw));
+    // Editors that predate `lists` get whole child lists and comments, and the layers pruned.
+    let older_lists = others(&|p| !p.lists);
+    let rewritten = older_lists
+      .then(|| designotron_engine::collab::legacy_lists(&delta, doc_now, &pruned))
+      .flatten();
+    let to_raw = |v: &Value| serde_json::value::to_raw_value(v).ok();
+    let rewritten_raw = rewritten.as_ref().and_then(to_raw);
+    let gran_text = match &rewritten_raw {
+      Some(w) => Some(text_of(w)),
+      None => older_lists.then(|| raw_text.clone().unwrap_or_else(|| text_of(raw))),
+    };
+    // Peers that predate per-id changes get the room's whole lists instead.
+    let whole = others(&|p| !p.granular)
+      .then(|| designotron_engine::collab::legacy(rewritten.as_ref().unwrap_or(&delta), doc_now))
       .flatten()
-      .and_then(|w| serde_json::value::to_raw_value(&w).ok());
-    match &whole {
-      // Peers that predate per-id changes get the room's whole lists instead.
-      Some(whole) => {
-        let old = DeltaOut { delta: whole, ..out };
-        let (new, old) = (
-          Arc::new(serde_json::to_string(&out).unwrap_or_default()),
-          Arc::new(serde_json::to_string(&old).unwrap_or_default()),
-        );
-        let to: Vec<(Outbox, Arc<String>)> = r
-          .peers
-          .iter()
-          .filter(|(pid, _)| **pid != id)
-          .map(|(_, p)| (p.out.clone(), if p.granular { new.clone() } else { old.clone() }))
-          .collect();
-        for (o, text) in to {
-          self.put(r, &o, text, false);
-        }
-      }
-      None => self.hold_broadcast(r, id, &out),
+      .and_then(|w| to_raw(&w));
+    let old_text = whole.as_deref().map(text_of).or_else(|| gran_text.clone());
+    let to: Vec<(Outbox, Arc<String>)> = r
+      .peers
+      .iter()
+      .filter(|(pid, _)| **pid != id)
+      .filter_map(|(_, p)| {
+        let text = if p.lists {
+          raw_text.clone()
+        } else if p.granular {
+          gran_text.clone()
+        } else {
+          old_text.clone()
+        };
+        text.map(|t| (p.out.clone(), t))
+      })
+      .collect();
+    for (o, text) in to {
+      self.put(r, &o, text, false);
     }
     self.ack(r, id, false);
+    // An editor that predates `lists` doesn't prune: it is given the layers the room pruned.
+    if !pruned.is_empty() && r.peers.get(&id).is_some_and(|p| !p.lists) {
+      let nothing = json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [] });
+      let fix = designotron_engine::collab::legacy_lists(&nothing, r.doc.as_ref().unwrap(), &pruned)
+        .and_then(|v| serde_json::value::to_raw_value(&v).ok());
+      if let (Some(fix), Some(out)) = (fix, r.peers.get(&id).map(|p| p.out.clone())) {
+        let text = DeltaOut {
+          kind: "delta",
+          from: id,
+          delta: &fix,
+          assets: None,
+        };
+        self.put(r, &out, Arc::new(serde_json::to_string(&text).unwrap_or_default()), false);
+      }
+    }
     if assets.is_some() && !keep {
       return Step::Warn(format!(
         "Images in this change would make the shared file larger than {} MB, so others won't see them.",
@@ -1820,8 +1930,8 @@ fn replay(doc: &mut Document, assets: &mut Map<String, Value>, snapshot_seq: u64
       continue;
     }
     out.last = out.last.max(l.seq);
-    match designotron_engine::collab::apply(doc, &l.delta) {
-      Ok(()) => out.applied += 1,
+    match designotron_engine::collab::apply_opts(doc, &l.delta, PRUNE) {
+      Ok(_) => out.applied += 1,
       Err(e) => log::warn!("skipped a logged change that no longer applies: {e}"),
     }
     for (k, v) in l.assets.iter().flat_map(|a| a.iter()) {
@@ -1963,7 +2073,7 @@ mod tests {
       .expect("told to disconnect");
   }
 
-  fn peer(rooms: &Rooms, granular: bool) -> (Peer, mpsc::UnboundedReceiver<Arc<String>>) {
+  fn peer(rooms: &Rooms, granular: bool, lists: bool) -> (Peer, mpsc::UnboundedReceiver<Arc<String>>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let out = Outbox {
       tx,
@@ -1977,6 +2087,7 @@ mod tests {
         color: "#000".into(),
         presence: Value::Null,
         granular,
+        lists,
         role: Role::Editor,
       },
       rx,
@@ -2003,8 +2114,8 @@ mod tests {
       doc: Some(doc),
       ..Room::default()
     };
-    let (old, mut old_rx) = peer(&rooms, false);
-    let (new, mut new_rx) = peer(&rooms, true);
+    let (old, mut old_rx) = peer(&rooms, false, false);
+    let (new, mut new_rx) = peer(&rooms, true, false);
     r.peers.insert(1, old);
     r.peers.insert(2, new);
     let msg =
@@ -2090,6 +2201,12 @@ mod tests {
     }
 
     async fn join_uncommitted(&mut self, doc: Option<Value>, reset: bool) -> (u64, Rx) {
+      self.join_as(doc, reset, true, false).await
+    }
+
+    /// Joins as an editor of the given dialect (`granular`: per-id changes, `lists`: moves and
+    /// per-message comments); the welcome is the first message in the receiver.
+    async fn join_as(&mut self, doc: Option<Value>, reset: bool, granular: bool, lists: bool) -> (u64, Rx) {
       self.next += 1;
       let id = self.next;
       let (tx, rx) = mpsc::unbounded_channel();
@@ -2099,7 +2216,7 @@ mod tests {
         kick: Arc::new(Notify::new()),
       };
       self.kicks.push(out.kick.clone());
-      let mut msg = json!({ "type": "join", "name": "p", "color": "#000", "granular": true, "reset": reset });
+      let mut msg = json!({ "type": "join", "name": "p", "color": "#000", "granular": granular, "lists": lists, "reset": reset });
       if let Some(d) = doc {
         msg["doc"] = d;
       }
@@ -2109,6 +2226,14 @@ mod tests {
       let step = self.rooms.join(ROOM, &mut r, id, Role::Editor, &out, &m, text.len()).await;
       assert!(matches!(step, Step::Go));
       (id, rx)
+    }
+
+    /// `join_as` for a lists editor, committed, with its welcome read.
+    async fn join_as_welcomed(&mut self, doc: Option<Value>, reset: bool) -> (u64, Value, Rx) {
+      let (id, mut rx) = self.join_as(doc, reset, true, true).await;
+      self.commit().await;
+      let welcome: Value = serde_json::from_str(&rx.try_recv().expect("welcome")).unwrap();
+      (id, welcome, rx)
     }
 
     async fn delta_text(&self, id: u64, text: &str) {
@@ -2126,6 +2251,297 @@ mod tests {
       self.send_uncommitted(id, x).await;
       self.commit().await;
     }
+  }
+
+  /// A document with a frame holding layers A, B, C and T, a rectangle R bound to a variable, and
+  /// the variable; and the ids.
+  fn lists_doc() -> (Value, Vec<String>) {
+    use designotron_engine::engine::{Command, Engine};
+    let mut e = Engine::new(Box::new(designotron_engine::text::HeuristicMeasurer), 5);
+    let mut make = |kind: designotron_engine::model::NodeType, parent: Option<String>| {
+      e.dispatch(Command::CreateShape {
+        kind,
+        x: 0.0,
+        y: 0.0,
+        width: 20.0,
+        height: 20.0,
+        parent,
+      })
+      .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+    };
+    use designotron_engine::model::NodeType::{Frame, Rectangle};
+    let r = make(Rectangle, None);
+    let frame = make(Frame, None);
+    let mut ids = vec![frame.clone()];
+    for _ in 0..4 {
+      ids.push(make(Rectangle, Some(frame.clone())));
+    }
+    ids.push(r.clone());
+    e.dispatch(Command::Ai {
+      tool: "define_variables".into(),
+      input: json!({ "collection": "Theme", "variables": [{ "name": "Ink", "type": "color", "value": "#112233" }] }),
+    })
+    .unwrap();
+    let var = e.doc.variables[0].variables[0].id.clone();
+    e.dispatch(Command::BindVariable {
+      ids: vec![r],
+      property: "fill".into(),
+      variable: Some(var.clone()),
+    })
+    .unwrap();
+    ids.push(var);
+    (serde_json::to_value(&e.doc).unwrap(), ids)
+  }
+
+  /// `{type: delta, delta}` for a hand-written change.
+  fn delta_msg(delta: Value) -> String {
+    json!({ "type": "delta", "delta": delta }).to_string()
+  }
+
+  #[tokio::test]
+  async fn the_welcome_says_lists_and_only_lists_editors_get_moves() {
+    let dir = tmp_dir("lists-welcome");
+    let mut h = Harness::open(&dir).await;
+    let (doc, ids) = lists_doc();
+    let frame = ids[0].clone();
+    let (ana, welcome, mut ana_rx) = {
+      let (id, mut rx) = h.join_as(Some(doc), true, true, true).await;
+      h.commit().await;
+      let w: Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+      (id, w, rx)
+    };
+    assert_eq!((welcome["lists"].clone(), welcome["granular"].clone()), (json!(true), json!(true)));
+    // Ben speaks `lists`, Cai only per-id changes, Dan only whole lists.
+    let (_ben, mut ben_rx) = h.join_as(None, false, true, true).await;
+    let (_cai, mut cai_rx) = h.join_as(None, false, true, false).await;
+    let (_dan, mut dan_rx) = h.join_as(None, false, false, false).await;
+    h.commit().await;
+    for rx in [&mut ben_rx, &mut cai_rx, &mut dan_rx] {
+      let w = drain(rx).into_iter().find(|m| m["type"] == "welcome").unwrap();
+      assert_eq!(w["lists"], json!(true), "the room always offers it");
+    }
+    drain(&mut ana_rx);
+    // Ana takes A (ids[1]) to the front, replies to a comment, and the room is told what moved.
+    let (a, b, c, t) = (ids[1].clone(), ids[2].clone(), ids[3].clone(), ids[4].clone());
+    let new = json!([b, c, t, a]);
+    let create = json!({ "nodes": {}, "removed": [], "commentsRemoved": [],
+      "comments": { "c1": { "id": "c1", "page": "p", "x": 0.0, "y": 0.0, "messages": [{ "author": "Ana", "text": "Q", "time": 1.0 }] } } });
+    h.delta_text(ana, &delta_msg(create)).await;
+    h.commit().await;
+    for rx in [&mut ben_rx, &mut cai_rx, &mut dan_rx] {
+      drain(rx);
+    }
+    let change = json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [],
+      "patch": { frame.clone(): { "children": new.clone() } },
+      "moves": { frame.clone(): [a.clone()] },
+      "commentChanges": { "c1": { "add": [{ "author": "Ana", "text": "R", "time": 2.0 }] } } });
+    h.delta_text(ana, &delta_msg(change)).await;
+    h.commit().await;
+    let ben = &drain(&mut ben_rx)[0]["delta"];
+    assert_eq!(ben["moves"][&frame], json!([a]), "a lists editor gets the delta as sent");
+    assert_eq!(ben["commentChanges"]["c1"]["add"][0]["text"], "R");
+    for (name, rx) in [("cai", &mut cai_rx), ("dan", &mut dan_rx)] {
+      let got = drain(rx);
+      let d = &got[0]["delta"];
+      assert!(d.get("moves").is_none() && d.get("commentChanges").is_none(), "{name}: {d}");
+      assert_eq!(d["patch"][&frame]["children"], new, "{name}: the room's whole child list");
+      assert_eq!(
+        d["comments"]["c1"]["messages"].as_array().unwrap().len(),
+        2,
+        "{name}: the whole thread"
+      );
+    }
+    // The room's document holds the placed order and both messages.
+    let r = h.room.lock().await;
+    let doc = r.doc.as_ref().unwrap();
+    assert_eq!(doc.get(&frame).unwrap().children, [b, c, t, a]);
+    assert_eq!(doc.comments["c1"].messages.len(), 2);
+  }
+
+  #[tokio::test]
+  async fn concurrent_replies_through_the_room_both_stay() {
+    let dir = tmp_dir("lists-replies");
+    let mut h = Harness::open(&dir).await;
+    let (doc, _) = lists_doc();
+    let (ana, _, _) = h.join_as_welcomed(Some(doc), true).await;
+    let (ben, _) = h.join_as(None, false, true, true).await;
+    let (cai, _) = h.join_as(None, false, true, true).await;
+    h.commit().await;
+    let create = json!({ "nodes": {}, "removed": [], "commentsRemoved": [],
+      "comments": { "c1": { "id": "c1", "page": "p", "x": 0.0, "y": 0.0, "messages": [{ "author": "Ana", "text": "Q1", "time": 1.0 }] } } });
+    h.delta_text(ana, &delta_msg(create)).await;
+    let reply = |who: &str, time: f64| {
+      delta_msg(json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [],
+        "commentChanges": { "c1": { "add": [{ "author": who, "text": format!("{who}-1"), "time": time }] } } }))
+    };
+    // Both replied to [Q1]; Cai's reaches the room first, with the later client clock.
+    h.delta_text(cai, &reply("Cai", 9.0)).await;
+    h.delta_text(ben, &reply("Ben", 3.0)).await;
+    h.commit().await;
+    let r = h.room.lock().await;
+    let texts: Vec<_> = r.doc.as_ref().unwrap().comments["c1"]
+      .messages
+      .iter()
+      .map(|m| m.text.clone())
+      .collect();
+    assert_eq!(texts, ["Q1", "Cai-1", "Ben-1"], "the room's order, not the clocks'");
+  }
+
+  #[tokio::test]
+  async fn a_pruned_layer_reaches_older_peers_whole_and_lists_peers_prune_themselves() {
+    let dir = tmp_dir("lists-prune");
+    let mut h = Harness::open(&dir).await;
+    let (doc, ids) = lists_doc();
+    let (rect, var) = (ids[5].clone(), ids[6].clone());
+    let (ana, _, mut ana_rx) = h.join_as_welcomed(Some(doc), true).await;
+    let (_ben, mut ben_rx) = h.join_as(None, false, true, true).await;
+    let (cai, mut cai_rx) = h.join_as(None, false, true, false).await;
+    h.commit().await;
+    drain(&mut ben_rx);
+    drain(&mut cai_rx);
+    drain(&mut ana_rx);
+    // Ana deletes the variable (her own copy would unbind R, but this change doesn't say so: another
+    // editor's bind that the room orders after it has the same effect).
+    let colls = {
+      let r = h.room.lock().await;
+      r.doc.as_ref().unwrap().variables[0].id.clone()
+    };
+    let delete = json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [],
+      "variableChanges": { colls.clone(): { "del": [var.clone()] } } });
+    h.delta_text(ana, &delta_msg(delete)).await;
+    h.commit().await;
+    {
+      let r = h.room.lock().await;
+      assert!(
+        r.doc.as_ref().unwrap().get(&rect).unwrap().bindings.is_empty(),
+        "the room pruned the dangling binding"
+      );
+    }
+    // A lists peer is sent the delta as it was: it prunes by itself.
+    let ben = drain(&mut ben_rx);
+    assert!(
+      ben[0]["delta"].get("nodes").is_none_or(|n| n.as_object().unwrap().is_empty()),
+      "{}",
+      ben[0]
+    );
+    // An older peer is sent the layer whole, without the link.
+    let cai_got = drain(&mut cai_rx);
+    assert_eq!(cai_got[0]["delta"]["nodes"][&rect]["id"], json!(rect));
+    assert!(cai_got[0]["delta"]["nodes"][&rect]["bindings"]
+      .as_object()
+      .is_none_or(|b| b.is_empty()));
+    // The editor that sent it is a lists one, and hears only its ack.
+    assert_eq!(types(&drain(&mut ana_rx)), ["ack"]);
+    // An older editor that causes a prune is told what the room pruned right after its ack.
+    let bind = json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [],
+      "patch": { rect.clone(): { "bindings": { "fill": "gone-variable" } } } });
+    h.delta_text(cai, &delta_msg(bind)).await;
+    h.commit().await;
+    let got = drain(&mut cai_rx);
+    assert_eq!(got[0]["type"], "ack");
+    assert_eq!(got[1]["type"], "delta");
+    assert_eq!(got[1]["delta"]["nodes"][&rect]["id"], json!(rect));
+    assert!(got[1]["delta"]["nodes"][&rect]["bindings"].as_object().is_none_or(|b| b.is_empty()));
+  }
+
+  #[test]
+  fn viewers_may_reply_and_resolve_through_comment_changes_only() {
+    use designotron_engine::model::{Comment, CommentMessage};
+    let mut doc = designotron_engine::doc::new_document(&mut designotron_engine::doc::IdGen::new(1), "t");
+    doc.comments_mut().insert(
+      "c1".into(),
+      Comment {
+        id: "c1".into(),
+        page: "p".into(),
+        messages: vec![CommentMessage {
+          author: "Ana".into(),
+          text: "Q".into(),
+          time: 1.0,
+        }],
+        ..Default::default()
+      },
+    );
+    let wrap = |changes: Value| json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [], "commentChanges": changes });
+    let reply = json!({ "author": "Vic", "text": "hi", "time": 5.0 });
+    let ok = viewer_delta(
+      &wrap(json!({ "c1": { "add": [reply.clone()], "set": { "resolved": true } } })),
+      &doc,
+    )
+    .expect("a reply and a resolve");
+    assert_eq!(ok["commentChanges"]["c1"]["add"][0]["text"], "hi");
+    assert_eq!(ok["commentChanges"]["c1"]["set"], json!({ "resolved": true }));
+    assert!(ok["comments"].as_object().unwrap().is_empty());
+    // Rebuilt from typed values: unknown keys on a message are gone.
+    let sneaky = json!({ "author": "Vic", "text": "hi", "time": 5.0, "page": "x", "extra": 1 });
+    let ok = viewer_delta(&wrap(json!({ "c1": { "add": [sneaky] } })), &doc).unwrap();
+    assert_eq!(
+      ok["commentChanges"]["c1"]["add"][0],
+      json!({ "author": "Vic", "text": "hi", "time": 5.0 })
+    );
+    // Never: removing a message, moving or re-homing the thread, or anything else in the change.
+    for bad in [
+      json!({ "c1": { "del": [["Ana", 1.0, "Q"]] } }),
+      json!({ "c1": { "set": { "x": 3.0 } } }),
+      json!({ "c1": { "set": { "y": 3.0 } } }),
+      json!({ "c1": { "set": { "node": "n" } } }),
+      json!({ "c1": { "set": { "page": "q" } } }),
+      json!({ "c1": { "set": { "resolved": "yes" } } }),
+      json!({ "c1": { "other": 1 } }),
+      json!({ "c1": { "add": [{ "author": "x", "text": "t".repeat(VIEWER_MAX_TEXT + 1), "time": 1.0 }] } }),
+      json!({ "c1": { "add": (0..=VIEWER_MAX_NEW_MESSAGES).map(|i| json!({ "author": "x", "text": "t", "time": i })).collect::<Vec<_>>() } }),
+      json!({ "c1": { "add": [{ "author": "x".repeat(201), "text": "t", "time": 1.0 }] } }),
+      json!({ "c1": { "add": [5] } }),
+      json!({}),
+    ] {
+      assert!(viewer_delta(&wrap(bad.clone()), &doc).is_none(), "{bad}");
+    }
+    // An empty `del` is harmless; a delta that also carries other parts is not.
+    assert!(viewer_delta(&wrap(json!({ "c1": { "add": [reply.clone()], "del": [] } })), &doc).is_some());
+    let mut with_nodes = wrap(json!({ "c1": { "add": [reply.clone()] } }));
+    with_nodes["pages"] = json!([]);
+    assert!(viewer_delta(&with_nodes, &doc).is_none());
+    // The whole-comment form older editors send keeps working, and a new thread may be sent beside a reply.
+    let whole = json!({ "nodes": {}, "removed": [], "commentsRemoved": [], "comments": { "c1": { "id": "c1", "page": "p", "x": 0.0, "y": 0.0, "resolved": false,
+      "messages": [{ "author": "Ana", "text": "Q", "time": 1.0 }, { "author": "Vic", "text": "hi", "time": 5.0 }] } } });
+    assert!(viewer_delta(&whole, &doc).is_some());
+    let mut both = whole.clone();
+    both["comments"]["c2"] =
+      json!({ "id": "c2", "page": "p", "x": 1.0, "y": 1.0, "messages": [{ "author": "Vic", "text": "new", "time": 6.0 }] });
+    both["comments"].as_object_mut().unwrap().remove("c1");
+    both["commentChanges"] = json!({ "c1": { "add": [reply] } });
+    let d = viewer_delta(&both, &doc).unwrap();
+    assert!(d["comments"]["c2"].is_object() && d["commentChanges"]["c1"].is_object());
+  }
+
+  #[tokio::test]
+  async fn replaying_the_log_reproduces_the_pruned_document() {
+    let dir = tmp_dir("lists-replay");
+    let (doc, ids) = lists_doc();
+    let (rect, var) = (ids[5].clone(), ids[6].clone());
+    let colls = doc["variables"][0]["id"].as_str().unwrap().to_string();
+    let first = {
+      let mut h = Harness::open(&dir).await;
+      let (ana, _, _) = h.join_as_welcomed(Some(doc.clone()), true).await;
+      let delete = json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [],
+        "variableChanges": { colls: { "del": [var] } } });
+      h.delta_text(ana, &delta_msg(delete)).await;
+      h.commit().await;
+      let r = h.room.lock().await;
+      assert!(r.doc.as_ref().unwrap().get(&rect).unwrap().bindings.is_empty());
+      serde_json::to_value(r.doc.as_ref().unwrap()).unwrap()
+    };
+    // A crash: the snapshot is the shared file as first saved, the log holds the delete.
+    let mut h = Harness::open(&dir).await;
+    let (_, w, _) = h.join_as_welcomed(None, false).await;
+    assert_eq!(
+      w["doc"]["nodes"][&rect]["bindings"], first["nodes"][&rect]["bindings"],
+      "the replayed layer is unbound too"
+    );
+    assert_eq!(w["doc"]["nodes"], first["nodes"]);
+    assert_eq!(w["doc"]["variables"], first["variables"]);
   }
 
   fn comment_delta_body(x: f64) -> Value {
@@ -2378,6 +2794,7 @@ mod tests {
             color: "#000".into(),
             presence: Value::Null,
             granular: true,
+            lists: true,
           },
         );
       }
