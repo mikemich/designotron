@@ -20,7 +20,8 @@ export const PLUGIN_SANDBOX = "allow-scripts";
  *  ignores everything that doesn't arrive on its end of the port. The plugin can't get at the port:
  *  `parent`, `postMessage`, `addEventListener`, the port's `postMessage` and the `data`/`ports`
  *  getters of MessageEvent are captured before plugin code exists, the plugin starts from a timer
- *  task (so `window.event` is undefined, and it never sees the message that carried the port), and
+ *  task, as does every reply and event after it (so `window.event` is undefined whenever plugin code
+ *  runs, and it never sees a message or the port that carried it), and
  *  the script is strict, so the plugin (sloppy, from `new Function`) can't reach its callers through
  *  `arguments.callee.caller` or stack-trace hooks. */
 export const BOOTSTRAP_SCRIPT = String.raw`"use strict";
@@ -74,11 +75,16 @@ export const BOOTSTRAP_SCRIPT = String.raw`"use strict";
     const m = eventData.call(e);
     if (!m) return;
     if (m.ping) return send({ dtPlugin: true, pong: true });
-    if (m.event) return (listeners[m.event] || []).forEach((fn) => fn(m.data));
-    const p = pending.get(m.id);
-    if (!p) return;
-    pending.delete(m.id);
-    m.error ? p.reject(new Error(m.error)) : p.resolve(m.result);
+    // Plugin code runs only from timer tasks (timers of one delay fire in order, so replies and
+    // events keep their order): while this event is being dispatched, window.event is the
+    // port's message, and a continuation that ran now could read the port off it.
+    later(() => {
+      if (m.event) return (listeners[m.event] || []).forEach((fn) => fn(m.data));
+      const p = pending.get(m.id);
+      if (!p) return;
+      pending.delete(m.id);
+      m.error ? p.reject(new Error(m.error)) : p.resolve(m.result);
+    }, 0);
   };
   const onStart = (e) => {
     const m = eventData.call(e);
@@ -92,7 +98,7 @@ export const BOOTSTRAP_SCRIPT = String.raw`"use strict";
     port.start();
     const code = m.code;
     // From a timer task, not from this event: window.event is undefined there, so plugin code can't
-    // read the message (or its port) off it. Compiled inside the chain so a syntax error is
+    // read the message (or its port) off it. onPort does the same for replies and events. Compiled inside the chain so a syntax error is
     // reported like any other plugin error.
     later(() => {
       Promise.resolve()
@@ -105,7 +111,7 @@ export const BOOTSTRAP_SCRIPT = String.raw`"use strict";
 `;
 
 /** base64 SHA-256 of `BOOTSTRAP_SCRIPT` (the text between the script tags). */
-export const BOOTSTRAP_HASH = "sha256-034wF++Z8Jf4i8COseKkto+yJO1G1AfZm8TZWjFA1GM=";
+export const BOOTSTRAP_HASH = "sha256-e3dBmEyBOMHYFAauit4eQrQQnNXX/6qd3nicFnX+A3w=";
 
 /** Frame policy: nothing loads or connects; images only from data: and blob:; scripts only the
  *  bootstrap (by hash) and eval. No `unsafe-inline`: a plugin's frames can't use `on*=`

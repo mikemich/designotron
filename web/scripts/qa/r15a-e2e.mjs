@@ -312,8 +312,12 @@ const answered = () => reportMsgs().filter((r) => r.id !== undefined || /token|r
     let seen = 0;
     window.addEventListener("message", () => seen++);
     // The legitimate calls still work through all of that.
-    await dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: "LEGIT", width: 10, height: 10 }] });
+    const legit = await dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: "LEGIT", width: 10, height: 10 }] });
     await dt.getDocument(1);
+    // A reply's continuation and an event callback must not run inside the port's message event either.
+    await dt.selection();
+    const evAfterReply = typeof window.event;
+    const evInEvent = await new Promise((resolve) => { dt.on("selectionchange", () => resolve(typeof window.event)); dt.tool("select", { ids: [legit.created[0].id] }); setTimeout(() => resolve("no event"), 3000); });
     // Forged calls the old way (window messages with and without a token) and through any port found.
     const send = (m) => window.top.postMessage(m, "*");
     send({ dtPlugin: true, id: 900, method: "tool", args: ["create_nodes", { nodes: [{ type: "rectangle", name: "FORGED WINDOW", width: 5, height: 5 }] }] });
@@ -321,7 +325,7 @@ const answered = () => reportMsgs().filter((r) => r.id !== undefined || /token|r
     send({ dtPlugin: true, pong: true });
     for (const p of ports) p.postMessage({ dtPlugin: true, id: 777, method: "tool", args: ["create_nodes", { nodes: [{ type: "rectangle", name: "PORT FORGED", width: 5, height: 5 }] }] });
     await new Promise((r) => setTimeout(r, 1200));
-    dt.notify("EVENT:" + evType + " PORTS:" + ports.size + " WINDOWMSGS:" + seen);
+    dt.notify("EVENT:" + evType + " AFTERREPLY:" + evAfterReply + " INEVENT:" + evInEvent + " PORTS:" + ports.size + " WINDOWMSGS:" + seen);
   `;
   await addPlugin(page, "tok", code, "Channel probe");
   await run(page, "tok");
@@ -330,6 +334,7 @@ const answered = () => reportMsgs().filter((r) => r.id !== undefined || /token|r
   const ts = await toasts(page);
   check("the plugin ran to completion", took >= 0, `${took} ms; toasts ${JSON.stringify(ts)}`);
   check("window.event is undefined on the plugin's first line", ts.some((t) => /EVENT:undefined /.test(t)), JSON.stringify(ts));
+  check("window.event is undefined after a reply and inside a selectionchange callback", ts.some((t) => /AFTERREPLY:undefined INEVENT:undefined /.test(t)), JSON.stringify(ts));
   check("the legitimate calls worked through the spies", (await named(page, "LEGIT")).length === 1);
   check("no port or message event ever reached plugin code", ts.some((t) => /PORTS:0 /.test(t)), JSON.stringify(ts));
   check("no window message ever arrives in the plugin frame after the start", ts.some((t) => /WINDOWMSGS:0/.test(t)), JSON.stringify(ts));
@@ -404,7 +409,8 @@ const answered = () => reportMsgs().filter((r) => r.id !== undefined || /token|r
   const sockets = [];
   page.on("request", (r) => {
     if (r.frame() === page.mainFrame()) return;
-    if (/\.wasm(\?|$)/.test(r.url())) wasmFromFrame.push(r.url());
+    // (vite dev serves a JS wrapper as `.wasm?import`; only the wasm itself counts.)
+    if (/\.wasm(\?(?!import)|$)/.test(r.url())) wasmFromFrame.push(r.url());
     if (/\.(js|tsx)(\?|$)/.test(r.url())) scriptsFromFrame.push(r.url());
   });
   page.on("websocket", (ws) => sockets.push(ws.url()));
