@@ -19,11 +19,12 @@ function compactPref(): boolean {
   }
 }
 
-/** Shown on an empty page: describe a design for Claude, or start from a template. */
-export function EmptyPrompt({ pageId }: { pageId: string }) {
+/** Shown on an empty page: describe a design for Claude, or start from a template. `forceCompact`: the
+ *  file has layers on other pages, so it is not a blank file and gets the pill, never the card. */
+export function EmptyPrompt({ pageId, forceCompact = false }: { pageId: string; forceCompact?: boolean }) {
   const [text, setText] = useState("");
   // Read once per mount: closing the card must not turn the next frame of this very file into a pill.
-  const [compact, setCompact] = useState(compactPref);
+  const [compact, setCompact] = useState(() => forceCompact || compactPref());
   const [grab, setGrab] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {

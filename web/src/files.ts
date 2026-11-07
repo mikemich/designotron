@@ -20,6 +20,7 @@ import {
   applyMoveFolder,
   applyRenameFolder,
   newFolderId,
+  normalizeName,
   sanitizeFolders,
   upsertEntry,
   type FileMeta,
@@ -974,11 +975,17 @@ export async function isEmptyFile(id: string): Promise<boolean> {
   }
 }
 
+/** A document id of the engine's shape ("d_…"), for a copy of a file. */
+export function newDocId(): string {
+  return "d_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
 export async function duplicateFile(id: string): Promise<string | null> {
   const json = await loadFile(id);
   if (!json) return null;
   const doc = JSON.parse(json);
-  doc.name = `${doc.name} (copy)`;
+  doc.name = normalizeName(`${doc.name} (copy)`) || "Untitled (copy)";
+  doc.id = newDocId();
   const nid = newFileId();
   // A copy stays next to the original.
   const meta = await getFileMeta(id);

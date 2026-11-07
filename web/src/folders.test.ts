@@ -9,6 +9,7 @@ import {
   canMoveFolder,
   childrenOf,
   deleteSummary,
+  nameWasCut,
   normalizeName,
   pathLabel,
   resolveFolder,
@@ -144,6 +145,29 @@ describe("names", () => {
     expect(normalizeName("a\u0000b")).toBe("a b");
     expect(normalizeName("   ")).toBe("");
     expect(normalizeName("x".repeat(200))).toHaveLength(80);
+  });
+  it("normalizeName cuts by grapheme and never leaves a lone surrogate", () => {
+    const lone = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+    const a = normalizeName("a".repeat(79) + "\u{1F600}" + "tail");
+    expect(a).toBe("a".repeat(79) + "\u{1F600}");
+    expect(lone.test(a)).toBe(false);
+    const b = normalizeName("a".repeat(80) + "\u{1F600}");
+    expect(b).toBe("a".repeat(80));
+    expect(lone.test(b)).toBe(false);
+  });
+  it("normalizeName keeps or drops a ZWJ family whole at the boundary", () => {
+    const family = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}";
+    expect(family.length).toBe(11);
+    expect(normalizeName("a".repeat(79) + family + "z")).toBe("a".repeat(79) + family);
+    expect(normalizeName("a".repeat(80) + family)).toBe("a".repeat(80));
+  });
+  it("nameWasCut tells when a name was shortened", () => {
+    const family = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}\u200D\u{1F466}";
+    expect(nameWasCut("short")).toBe(false);
+    expect(nameWasCut("x".repeat(80))).toBe(false);
+    expect(nameWasCut("x".repeat(81))).toBe(true);
+    expect(nameWasCut("a".repeat(70) + family.repeat(5))).toBe(false);
+    expect(nameWasCut("  " + "x".repeat(80) + "  ")).toBe(false);
   });
   it("uniqueName numbers duplicates", () => {
     expect(uniqueName([], "New folder")).toBe("New folder");

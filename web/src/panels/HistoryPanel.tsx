@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { Copy, History, RotateCcw, Trash2 } from "lucide-react";
 import { dispatchOrThrow, getDoc, getEngine, toast, useStore } from "../store";
-import { deleteVersion, getFileMeta, listVersions, loadVersion, newFileId, renameVersion, saveFile, saveVersion, type Version } from "../files";
+import { deleteVersion, getFileMeta, listVersions, loadVersion, newDocId, newFileId, renameVersion, saveFile, saveVersion, type Version } from "../files";
 import { IconButton, Section } from "../ui/controls";
+import { normalizeName } from "../folders";
 import { attempt, reportFailure } from "../errors";
 
 /** Saves an automatic version when the last one is older than this. */
@@ -14,6 +15,13 @@ function ago(t: number): string {
   if (s < 3600) return `${Math.round(s / 60)} min ago`;
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;
   return new Date(t).toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+/** Automatic versions are labelled as such with their time, whatever they were stored as
+ *  (older ones say "Autosave"). Renaming one makes it a named version (`auto: false`). */
+export function versionLabel(v: Version): string {
+  if (!v.auto) return v.name;
+  return `Automatic version · ${new Date(v.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
 /** Named and automatic snapshots of this file; restoring is one undoable step. */
@@ -43,12 +51,12 @@ export function HistoryPanel() {
     await attempt("restore the version", async () => {
       const json = await loadVersion(fileId, v.id);
       if (!json) return toast("That version could not be read", "error");
-      await saveVersion(fileId, `Before restoring “${v.name}”`, getEngine().save(), true);
+      await saveVersion(fileId, `Before restoring “${versionLabel(v)}”`, getEngine().save(), true);
       // The file keeps its current name: a version is about the design, not what it's called.
       const doc = JSON.parse(json);
       doc.name = getDoc().name;
       dispatchOrThrow({ op: "replaceDocument", doc, keepComments: true });
-      toast(`Restored “${v.name}”. Undo to go back.`);
+      toast(`Restored “${versionLabel(v)}”. Undo to go back.`);
     });
     refresh();
   };
@@ -57,7 +65,8 @@ export function HistoryPanel() {
       const json = await loadVersion(fileId, v.id);
       if (!json) return toast("That version could not be read", "error");
       const doc = JSON.parse(json);
-      doc.name = `${getDoc().name} (${v.name})`;
+      doc.name = normalizeName(`${getDoc().name} (${versionLabel(v)})`) || "Untitled";
+      doc.id = newDocId();
       await saveFile(newFileId(), doc.name, JSON.stringify(doc), { folder: (await getFileMeta(fileId))?.folder });
       toast(`Saved “${doc.name}” to your files`);
     });
@@ -108,7 +117,8 @@ export function HistoryPanel() {
               />
             ) : (
               <div className="version-name" title="Double-click to rename" onDoubleClick={() => setRenaming(v.id)}>
-                {v.name}
+                {versionLabel(v)}
+                {v.auto && <span className="sr-only"> (automatic)</span>}
               </div>
             )}
             <div className="muted small">{ago(v.createdAt)}</div>

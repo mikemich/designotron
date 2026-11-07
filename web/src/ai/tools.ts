@@ -2,6 +2,7 @@
 // engine (one undo step each), browser-only tools are handled here.
 
 import { aiDispatch, getDoc, pointerDrag, query, selection, useStore, zoomToSelection } from "../store";
+import { addAsset } from "../assets";
 import { LEFT_FILE, getScreenshot, importHtml, importUrl } from "./browserTools";
 
 export { LEFT_FILE };
@@ -83,6 +84,36 @@ export async function whenCanvasIdle(timeoutMs = 45000): Promise<boolean> {
   return true;
 }
 
+const MAX_TOOL_IMAGE = 25 * 1024 * 1024;
+const IMAGE_DATA_URL = /^data:image\/(png|jpe?g|gif|webp|svg\+xml)[;,]/i;
+const IMAGE_DATA_URL_IN_CSS = /url\(\s*(["']?)(data:image\/(?:png|jpe?g|gif|webp|svg\+xml)[;,][^"')]*)\1\s*\)/gi;
+
+/** Image bytes never enter the document: every image data URL a tool input carries (under
+ *  `imageUrl` or `src`, or as `url(data:...)` inside a `fill`/`fills` string) is handed to `add`
+ *  and replaced by `asset:<id>`. Pure apart from `add`; returns a copy and leaves other strings
+ *  (text, svg markup) alone. Throws for an image over 25 MB. */
+export function internImageSources(input: unknown, add: (dataUrl: string) => string): unknown {
+  const take = (url: string) => {
+    if (url.length > MAX_TOOL_IMAGE) throw new Error("image is larger than 25 MB");
+    return "asset:" + add(url);
+  };
+  const walk = (v: unknown, key: string, inFill: boolean): unknown => {
+    if (typeof v === "string") {
+      if ((key === "imageUrl" || key === "src") && IMAGE_DATA_URL.test(v)) return take(v);
+      if (inFill && v.includes("data:image/")) return v.replace(IMAGE_DATA_URL_IN_CSS, (_m, _q, url) => `url(${take(url)})`);
+      return v;
+    }
+    if (Array.isArray(v)) return v.map((x) => walk(x, key, inFill));
+    if (v && typeof v === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, x] of Object.entries(v)) out[k] = walk(x, k, inFill || k === "fill" || k === "fills");
+      return out;
+    }
+    return v;
+  };
+  return walk(input, "", false);
+}
+
 /** The file the editor has open (set by the chat state as files open and close). */
 let openFile: string | null = null;
 /** Counts file changes: a call that waited (network, fonts, a screenshot) writes only if no file
@@ -131,7 +162,8 @@ export async function executeTool(name: string, input: any, opts: { group?: stri
     if (name === "search_photos" || name === "place_photo") return await (await import("../photos/tool")).run(name, input, opts.group, stillOpen);
     // The engine has no clock and doesn't know who is calling: stamp comment replies here.
     if (name === "reply_comment") input = { ...input, time: Date.now(), author: opts.author ?? "Claude" };
-    const result = aiDispatch(name, input ?? {}, opts.group);
+    input = internImageSources(input ?? {}, addAsset);
+    const result = aiDispatch(name, input, opts.group);
     if (name === "select") setTimeout(zoomToSelection, 0);
     return { ok: true, result };
   } catch (err) {

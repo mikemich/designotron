@@ -19,7 +19,7 @@ import { DemoOverlay, playDemo, stopDemo } from "./Demo";
 import { importFigmaJson } from "./figma";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
-import { bootEngine, getDoc, getEngine, markSaved, newEngine, onDocChange, saveHook, toast as showToast, useStore, zoomToFit, dispatch } from "./store";
+import { bootEngine, getDoc, getEngine, markSaved, newEngine, noteEngineError, onDocChange, saveHook, toast as showToast, useStore, zoomToFit, dispatch } from "./store";
 import { focusCanvas, ToastLive } from "./ui/controls";
 import { closePanel } from "./panels/PanelChrome";
 import {
@@ -182,6 +182,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   /** Marks the open document stale (another tab saved while this one has unsaved edits). */
   const staleRef = useRef<(() => void) | null>(null);
   const tabView = useStore((s) => s.tabView);
+  const engineFailed = useStore((s) => s.engineFailed);
   /** Leaving was asked for while unsaved changes are only on screen; the function leaves. */
   const [leaveAsk, setLeaveAsk] = useState<(() => void) | null>(null);
   /** Saving keeps failing (disk full, storage blocked): the bar offers a copy to download. */
@@ -558,10 +559,30 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     const runFlush = async () => {
       try {
         // A write already started for this revision (closing while one ran) is not repeated.
-        while (!stale && !tabRef.current.view && (final || (!closed && docRev() !== useStore.getState().savedDocRev && startedRev < docRev()))) {
+        while (!stale && !tabRef.current.view && !useStore.getState().engineFailed && (final || (!closed && docRev() !== useStore.getState().savedDocRev && startedRev < docRev()))) {
           // The engine was replaced under this editor: its revisions mean nothing here.
           if (!final && getEngine() !== engine) break;
-          let snap = final ?? (await snapshotInSlices());
+          // Preparing the save can fail too (wasm out of memory, a string too long): that is a
+          // failed save like a failed write, never a label stuck on "Saving…".
+          let snap: Snapshot;
+          try {
+            snap = final ?? (await snapshotInSlices());
+          } catch (err) {
+            final = null;
+            noteEngineError(err);
+            console.error(err);
+            if (!useStore.getState().engineFailed) keepRecovery();
+            startedRev = -1;
+            failedSave();
+            if (!closed) {
+              useStore.setState({ saveFailed: true });
+              retry ??= setTimeout(() => {
+                retry = null;
+                schedule();
+              }, failures >= 3 ? 30000 : 5000);
+            }
+            break;
+          }
           final = null;
           // A plan still being gathered when a newer one was made and started (closing the
           // page) must not land after it: it holds older records of the same layers.
@@ -593,7 +614,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
               retry ??= setTimeout(() => {
                 retry = null;
                 schedule();
-              }, 5000);
+              }, failures >= 3 ? 30000 : 5000);
             }
             break;
           }
@@ -613,7 +634,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
             lastVersion = Date.now();
             // A version is a whole copy of the file (the current one, which may be newer than
             // the save that just finished).
-            await saveVersion(fileId, "Autosave", engine.save(), true).catch(console.error);
+            await saveVersion(fileId, "Automatic version", engine.save(), true).catch(console.error);
           }
           maybeThumbnail();
         }
@@ -709,8 +730,17 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     // localStorage too (picked up the next time the file opens). False when it couldn't be kept.
     const leave = (): boolean => {
       if (!useStore.getState().dirty || stale || tabRef.current.view) return true;
-      const snap = snapshot();
-      const kept = keepRecovery();
+      let snap: Snapshot;
+      let kept: boolean;
+      try {
+        snap = snapshot();
+        kept = keepRecovery();
+      } catch (err) {
+        // The engine can't serialise (it stopped): nothing to keep, and the page still asks before closing.
+        noteEngineError(err);
+        console.error(err);
+        return false;
+      }
       cancelTimers();
       if (startedRev >= snap.rev) return kept;
       startedRev = snap.rev;
@@ -1193,7 +1223,8 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           </button>
         </div>
       )}
-      {storageBar && (
+      {engineFailed && <EngineFailedBar fileId={fileId} />}
+      {storageBar && !engineFailed && (
         <div className={"stale-bar" + (tabBar || gone || stale ? " second" : "")} role="alert">
           This browser can't store the file (storage is full or blocked), so your changes aren't saved.
           <button className="btn primary small" onClick={() => saveDtron()}>
@@ -1207,6 +1238,38 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       <DemoOverlay />
       {!readOnly && <PluginWindow />}
       <ToastLive />
+    </div>
+  );
+}
+
+/** The wasm engine trapped (out of memory): editing and saving have stopped. Offers a reload and a
+ *  last try at a .dtron copy of what is in memory. */
+function EngineFailedBar({ fileId }: { fileId: string }) {
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  useEffect(() => {
+    getFileMeta(fileId).then((m) => setSavedAt(m?.updatedAt ?? null), () => {});
+  }, [fileId]);
+  const time = savedAt ? new Date(savedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : null;
+  return (
+    <div className="stale-bar engine-bar" role="alertdialog" aria-label="The editor stopped">
+      <span>
+        The editor ran out of memory and stopped. Your file is safe up to the last save{time ? ` (${time})` : ""}. Reload to reopen it.
+      </span>
+      <button className="btn primary small" onClick={() => location.reload()}>
+        Reload
+      </button>
+      <button
+        className="btn small"
+        onClick={() => {
+          try {
+            saveDtron();
+          } catch {
+            showToast("Couldn't make a copy either: the editor has stopped. Reload to reopen the last save.", "error");
+          }
+        }}
+      >
+        Try to download a .dtron
+      </button>
     </div>
   );
 }

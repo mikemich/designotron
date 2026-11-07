@@ -150,6 +150,8 @@ interface Store {
   savedDocRev: number;
   /** The last save attempt failed. */
   saveFailed: boolean;
+  /** The engine itself trapped (wasm out of memory or unreachable): nothing more can be edited or saved. */
+  engineFailed: boolean;
   /** This tab only shows the file (another tab edits it): the engine still allows comments, undo
    * and replacing the document in read-only mode, which here would be lost, so `dispatch` refuses them. */
   tabView: boolean;
@@ -236,6 +238,7 @@ export const useStore = create<Store>(() => ({
   dirty: false,
   savedDocRev: -1,
   saveFailed: false,
+  engineFailed: false,
   tabView: false,
   toast: null,
   dropTarget: null,
@@ -471,14 +474,26 @@ export function toast(text: string, kind: "info" | "error" = "info") {
 /** Runs an engine command. Errors surface as a toast and return null. */
 const TAB_VIEW_REFUSED = new Set(["addComment", "replyComment", "resolveComment", "undo", "redo", "replaceDocument"]);
 
+/** Sets `engineFailed` when `err` is the wasm engine itself stopping (not an ordinary command
+ *  error, which is a plain string). Returns whether it was. */
+export function noteEngineError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  const trapped =
+    (typeof WebAssembly !== "undefined" && err instanceof WebAssembly.RuntimeError) || /unreachable|out of memory|recursive use of an object/i.test(msg);
+  if (trapped && !useStore.getState().engineFailed) useStore.setState({ engineFailed: true });
+  return trapped;
+}
+
 export function dispatch<T = any>(cmd: Record<string, unknown>, opts: { quiet?: boolean } = {}): T | null {
   if (useStore.getState().tabView && TAB_VIEW_REFUSED.has(cmd.op as string)) return null;
+  if (useStore.getState().engineFailed) return null;
   try {
     const r = JSON.parse(getEngine().dispatch(JSON.stringify(cmd)));
     sync();
     if ((cmd.op === "undo" || cmd.op === "redo") && useStore.getState().vectorPoints.length) useStore.setState({ vectorPoints: [] });
     return r;
   } catch (err) {
+    if (noteEngineError(err)) return null;
     if (!opts.quiet) toast(String(err), "error");
     return null;
   }
@@ -486,9 +501,14 @@ export function dispatch<T = any>(cmd: Record<string, unknown>, opts: { quiet?: 
 
 /** Throwing variant for callers that report errors themselves (AI tools). */
 export function dispatchOrThrow<T = any>(cmd: Record<string, unknown>): T {
-  const r = JSON.parse(getEngine().dispatch(JSON.stringify(cmd)));
-  sync();
-  return r;
+  try {
+    const r = JSON.parse(getEngine().dispatch(JSON.stringify(cmd)));
+    sync();
+    return r;
+  } catch (err) {
+    noteEngineError(err);
+    throw err;
+  }
 }
 
 /** Runs an AI tool through the engine. Given a `group`, its undo step joins that chat turn's
@@ -500,6 +520,9 @@ export function aiDispatch<T = any>(tool: string, input: unknown, group?: string
   try {
     if (group) setGroup(group);
     return JSON.parse(engine.dispatch(JSON.stringify({ op: "ai", tool, input })));
+  } catch (err) {
+    noteEngineError(err);
+    throw err;
   } finally {
     if (group) setGroup(null);
     sync();
@@ -507,7 +530,12 @@ export function aiDispatch<T = any>(tool: string, input: unknown, group?: string
 }
 
 export function query<T = any>(q: Record<string, unknown>): T {
-  return JSON.parse(getEngine().query(JSON.stringify(q)));
+  try {
+    return JSON.parse(getEngine().query(JSON.stringify(q)));
+  } catch (err) {
+    noteEngineError(err);
+    throw err;
+  }
 }
 
 export function selection(): string[] {
@@ -622,6 +650,8 @@ export function zoomBy(factor: number, cx?: number, cy?: number) {
   dirty: () => useStore.getState().dirty,
   setViewport: (v: Viewport) => useStore.setState({ viewport: v }),
   onDocChange: (fn: () => void) => onDocChange(fn),
+  /** The wasm engine (tests stub its methods to simulate a trap). */
+  engine: () => getEngine(),
   vectorEdit: () => ({ id: useStore.getState().editingVector, points: useStore.getState().vectorPoints }),
 };
 

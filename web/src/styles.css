@@ -155,6 +155,10 @@ textarea {
   min-width: 60px;
   max-width: 280px;
 }
+.topbar .save-state {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 .topbar .filename:hover {
   border-color: var(--border);
 }
@@ -2436,6 +2440,11 @@ body:has(.modal-bg) .hint-card {
 .stale-bar.second {
   top: 90px;
 }
+.stale-bar.engine-bar {
+  z-index: 60;
+  background: #4a1f1f;
+  border-color: #f06a6a;
+}
 
 .tbtn.export-code .export-icon {
   display: none;
@@ -3530,7 +3539,8 @@ body:has(.phone-note) .toast {
   align-items: center;
   gap: 4px;
   color: var(--text-2);
-  min-width: 0;
+  /* Never squeezed below the first folder's name, whatever else the bar says. */
+  min-width: 8ch;
   max-width: 320px;
   font-size: 12px;
 }

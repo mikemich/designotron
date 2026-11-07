@@ -1456,7 +1456,7 @@ export function Canvas() {
       <FollowFrame />
       {showRulers && <Rulers v={v} width={size.w} height={size.h} selection={selItems.union} />}
       {editingText && <TextEditor id={editingText} />}
-      {empty && !figmaOpen && (tool === "move" || tool === "hand") && <EmptyPrompt pageId={pageObj?.id ?? ""} />}
+      {empty && !figmaOpen && (tool === "move" || tool === "hand") && <EmptyPrompt pageId={pageObj?.id ?? ""} forceCompact={doc.pages.some((p) => p.id !== pageObj?.id && p.children.length > 0)} />}
       <ZoomFlash zoom={v.zoom} />
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
     </div>

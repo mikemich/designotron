@@ -30,11 +30,31 @@ export function newFolderId(): string {
   return "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
-/** Trims, collapses whitespace, strips control characters and caps the length. Empty means rejected. */
-export function normalizeName(raw: string): string {
-  // eslint-disable-next-line no-control-regex
-  return raw.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim().slice(0, MAX_NAME).trim();
+/** The first `max` graphemes of `s` (code points when `Intl.Segmenter` is missing), so a cut never
+ *  leaves half an emoji or a lone surrogate. A grapheme that straddles the end is dropped whole. */
+export function cutGraphemes(s: string, max: number): string {
+  const Seg = (Intl as { Segmenter?: new (l?: string, o?: { granularity: "grapheme" }) => { segment(s: string): Iterable<{ segment: string }> } }).Segmenter;
+  const parts = Seg ? Array.from(new Seg(undefined, { granularity: "grapheme" }).segment(s), (x) => x.segment) : Array.from(s);
+  return parts.length <= max ? s : parts.slice(0, max).join("");
 }
+
+const cleanName = (raw: string) =>
+  // eslint-disable-next-line no-control-regex
+  raw.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim();
+
+/** Trims, collapses whitespace, strips control characters and caps the length at 80 graphemes. Empty means rejected. */
+export function normalizeName(raw: string): string {
+  return cutGraphemes(cleanName(raw), MAX_NAME).trim();
+}
+
+/** Whether `raw` is longer than a name may be, so `normalizeName` shortened it (for the notice). */
+export function nameWasCut(raw: string): boolean {
+  const clean = cleanName(raw);
+  return clean.length > MAX_NAME && normalizeName(raw) !== clean;
+}
+
+/** The notice for a name that was shortened. */
+export const NAME_CUT_NOTICE = `Names can be up to ${MAX_NAME} characters; it was shortened`;
 
 /** `base`, or `base 2`, `base 3`... when a sibling already has that name. */
 export function uniqueName(taken: string[], base: string): string {

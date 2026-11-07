@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Folder as FolderIcon, MoreHorizontal } from "lucide-react";
-import { MAX_NAME, childrenOf, type Folder } from "../folders";
+import { childrenOf, type Folder } from "../folders";
 
 /** What is being dragged (HTML5 drag data can't be read until the drop, so the dashboard keeps it here). */
 export const dragState: { current: { kind: "file" | "folder"; id: string } | null } = { current: null };
@@ -28,7 +28,6 @@ export function NameInput(props: { value: string; label: string; onDone: (name: 
       className={"name-input" + (props.className ? " " + props.className : "")}
       aria-label={props.label}
       defaultValue={props.value}
-      maxLength={MAX_NAME}
       onClick={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => {
