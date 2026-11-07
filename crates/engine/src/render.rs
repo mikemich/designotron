@@ -1200,6 +1200,27 @@ pub fn font_stack(family: &str) -> String {
   format!("'{family}', {fallback}")
 }
 
+/// `s` escaped for the inside of a CSS string delimited by `quote`: backslashes, the quote,
+/// `<` (so `</style>` can't end an inline block), and control characters, line separators and
+/// NUL as hex escapes (`\A `). Ordinary text comes out unchanged.
+pub fn css_string(s: &str, quote: char) -> String {
+  let mut out = String::with_capacity(s.len());
+  for c in s.chars() {
+    match c {
+      '\\' => out.push_str("\\\\"),
+      '<' => out.push_str("\\3C "),
+      '\0' => out.push_str("\\FFFD "),
+      c if c == quote => {
+        out.push('\\');
+        out.push(c);
+      }
+      c if c.is_control() || c == '\u{2028}' || c == '\u{2029}' => out.push_str(&format!("\\{:X} ", c as u32)),
+      c => out.push(c),
+    }
+  }
+  out
+}
+
 pub fn esc(s: &str) -> String {
   s.replace('&', "&amp;")
     .replace('<', "&lt;")

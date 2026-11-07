@@ -14,7 +14,7 @@ use crate::model::{
 };
 use crate::paint;
 use crate::props;
-use crate::render::{esc, export_svg_geometry, font_stack};
+use crate::render::{css_string, esc, export_svg_geometry, font_stack};
 use crate::text::TextMeasurer;
 
 const PX: &str = "px";
@@ -2525,9 +2525,9 @@ fn text_spans(t: &crate::model::TextProps) -> Vec<Span> {
   out
 }
 
-/// A font stack for CSS, with quotes and backslashes in the family name escaped.
+/// A font stack for CSS, with the family name escaped as a CSS string.
 fn css_family(family: &str) -> String {
-  font_stack(&family.replace('\\', "\\\\").replace('\'', "\\'"))
+  font_stack(&css_string(family, '\''))
 }
 
 /// A paint as a CSS background value for a layer of `w` x `h` (gradient handles are in layer units).
@@ -2589,7 +2589,15 @@ fn css_paint(p: &Paint, w: f64, h: f64) -> String {
 fn css_url(src: &str) -> String {
   let text_data = src.starts_with("data:") && src.split(',').next().is_some_and(|h| !h.contains(";base64"));
   if !text_data {
-    return src.replace('\'', "%27").replace('"', "%22");
+    let mut out = String::with_capacity(src.len());
+    for c in src.chars() {
+      match c {
+        '\'' | '"' | '\\' | '<' | '>' | '\u{2028}' | '\u{2029}' => out.push_str(&format!("%{:02X}", c as u32)),
+        c if c.is_control() => out.push_str(&format!("%{:02X}", c as u32)),
+        c => out.push(c),
+      }
+    }
+    return out;
   }
   let b = src.as_bytes();
   let mut out = String::with_capacity(src.len());
@@ -2922,10 +2930,19 @@ fn jsx(el: &El, depth: usize, out: &mut String) {
   }
 }
 
+/// `s` safe inside a `/* */` comment: no `*/` survives, even one formed by removing another.
+fn comment_text(s: &str) -> String {
+  let mut t = s.replace(['\u{2028}', '\u{2029}', '\0'], " ");
+  while t.contains("*/") {
+    t = t.replace("*/", "");
+  }
+  t
+}
+
 fn jsx_el(el: &El, depth: usize, out: &mut String) {
   let pad = "  ".repeat(depth);
   if let Some(c) = &el.comment {
-    out.push_str(&format!("{pad}{{/* {} */}}\n", c.replace("*/", "")));
+    out.push_str(&format!("{pad}{{/* {} */}}\n", comment_text(c)));
   }
   if let Some(c) = &el.approx {
     out.push_str(&format!("{pad}{{/* {c} */}}\n"));
@@ -3028,7 +3045,7 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
         match (&sp.link, classes.is_empty()) {
           (Some(href), _) => format!(
             "<a href={} target=\"_blank\" rel=\"noopener noreferrer\" className=\"{}\">{txt}</a>",
-            serde_json::to_string(href).unwrap_or_default(),
+            jsx_attr_value(href),
             classes.join(" ")
           ),
           (None, true) => txt,
@@ -3125,12 +3142,22 @@ fn html(el: &El, depth: usize, out: &mut String) {
   }
 }
 
+/// Whether `f` looks like a Google Fonts family (letters, digits, spaces and hyphens), which is
+/// all that can go into the stylesheet URL. Anything else isn't a Google font and stays out of
+/// it (it still works when installed). With this alphabet `+` for space is the only encoding needed.
+fn is_google_family(f: &str) -> bool {
+  f.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+    && f.len() <= 64
+    && f.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-')
+}
+
 fn google_fonts_link(doc: &Document) -> String {
   let fams: BTreeSet<String> = doc
     .nodes
     .values()
     .filter_map(|n| n.text.as_ref())
-    .map(|t| t.font_family.clone())
+    .map(|t| t.font_family.trim().to_string())
+    .filter(|f| is_google_family(f))
     .collect();
   if fams.is_empty() {
     return String::new();
@@ -3241,7 +3268,7 @@ fn component_fns(ctx: &mut Ctx) -> String {
 
 /// A description as a JSDoc comment above a function (nothing when it is empty).
 fn jsdoc(description: Option<&str>) -> String {
-  let text = description.unwrap_or("").trim().replace("*/", "* /");
+  let text = description.unwrap_or("").trim().replace("*/", "* /").replace('\0', "");
   if text.is_empty() {
     String::new()
   } else if !text.contains('\n') {
@@ -6719,5 +6746,268 @@ mod r14_tests {
   fn dtcg_numbers_are_integers_when_whole() {
     let text = crate::variables::tokens_json_text(&doc_with(|_| {}));
     assert!(text.contains("\"$value\": 8\n") && !text.contains("8.0"), "{text}");
+  }
+}
+
+#[cfg(test)]
+mod r15_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::model::{Interaction, TextRun};
+  use crate::text::HeuristicMeasurer;
+  use crate::variables::{Collection, VarKind, VarMode, Variable};
+  use serde_json::json;
+  use std::sync::Arc;
+
+  /// Strings that try to end a CSS string, comment, style block, JS comment or attribute.
+  const HOSTILE: &[&str] = &[
+    "Inter\"; } </style><script>window.__pwned=1</script> a{",
+    "q'uote\"s",
+    "trail\\",
+    "x*/y",
+    "**//z",
+    "</style><script>PWN</script>",
+    "line1\nline2\r\nline3",
+    "} { a{b:c} @import url(//evil)",
+    "sep\u{2028}ara\u{2029}tor",
+    "nul\0byte",
+    "')} body{background:url(//evil)",
+    "--> <!-- ]]>",
+    "${x} `tick`",
+  ];
+
+  /// Looks for text that leaves a CSS string, comment or brace: a raw newline in a string, an
+  /// unterminated string or comment, and unbalanced braces or parentheses.
+  fn check_css(css: &str, what: &str) {
+    let cs: Vec<char> = css.chars().collect();
+    let (mut i, mut depth, mut parens) = (0usize, 0i32, 0i32);
+    while i < cs.len() {
+      match cs[i] {
+        '/' if cs.get(i + 1) == Some(&'*') => {
+          i += 2;
+          loop {
+            match (cs.get(i), cs.get(i + 1)) {
+              (None, _) => panic!("{what}: unterminated comment\n{css}"),
+              (Some('*'), Some('/')) => break,
+              _ => i += 1,
+            }
+          }
+          i += 1;
+        }
+        q @ ('"' | '\'') => {
+          i += 1;
+          loop {
+            match cs.get(i) {
+              None => panic!("{what}: unterminated string\n{css}"),
+              Some('\\') => i += 2,
+              Some('\n') | Some('\r') | Some('\u{c}') => panic!("{what}: newline in string\n{css}"),
+              Some(c) if *c == q => break,
+              Some(_) => i += 1,
+            }
+          }
+        }
+        '{' => depth += 1,
+        '}' => depth -= 1,
+        '(' => parens += 1,
+        ')' => parens -= 1,
+        _ => {}
+      }
+      assert!(depth >= 0 && parens >= 0, "{what}: unbalanced\n{css}");
+      i += 1;
+    }
+    assert!(depth == 0 && parens == 0, "{what}: unbalanced at end\n{css}");
+  }
+
+  fn hostile_doc(h: &str) -> Document {
+    let mut gen = IdGen::new(15);
+    let mut doc = new_document(&mut gen, h);
+    let page = doc.pages[0].id.clone();
+    let mut home = crate::ops::default_node(NodeType::Frame, "home".into(), h.into());
+    home.width = 390.0;
+    home.height = 844.0;
+    doc.insert(home, None, &page, None);
+    let mut other = crate::ops::default_node(NodeType::Frame, "other".into(), format!("{h} 2"));
+    other.x = 500.0;
+    doc.insert(other, None, &page, None);
+    let mut t = crate::ops::default_node(NodeType::Text, "t".into(), h.into());
+    {
+      let tp = t.text.as_mut().unwrap();
+      tp.characters = format!("{h} text");
+      tp.font_family = h.into();
+      let len = tp.characters.chars().count();
+      tp.runs = vec![TextRun {
+        start: 0,
+        end: len.min(3),
+        font_family: Some(h.into()),
+        link: Some(format!("https://example.com/{h}")),
+        ..Default::default()
+      }];
+    }
+    t.interactions.push(Interaction {
+      destination: Some("other".into()),
+      ..Default::default()
+    });
+    t.text_style = Some("ts".into());
+    doc.insert(t, Some("home"), &page, None);
+    let mut img = crate::ops::default_node(NodeType::Rectangle, "img".into(), h.into());
+    img.fills = vec![serde_json::from_value(json!({"type": "image", "src": format!("https://example.com/{h}.png")})).unwrap()];
+    img.interactions.push(Interaction {
+      action: crate::model::Action::OpenUrl,
+      url: Some(format!("https://example.com/{h}")),
+      ..Default::default()
+    });
+    doc.insert(img, Some("home"), &page, None);
+    doc.styles_mut().colors.push(crate::model::ColorStyle {
+      id: "cs".into(),
+      name: h.into(),
+      color: "#112233".into(),
+    });
+    doc.styles_mut().texts.push(crate::model::TextStyle {
+      id: "ts".into(),
+      name: h.into(),
+      font_family: h.into(),
+      font_size: 16.0,
+      font_weight: 400,
+      line_height: None,
+      letter_spacing: 0.0,
+    });
+    let var = |id: &str, name: &str, kind: VarKind, v: serde_json::Value| Variable {
+      id: id.into(),
+      name: name.into(),
+      kind,
+      values: [("m".to_string(), v)].into(),
+      description: h.into(),
+      ..Default::default()
+    };
+    doc.variables = vec![Arc::new(Collection {
+      id: "c".into(),
+      name: h.into(),
+      modes: vec![
+        VarMode {
+          id: "m".into(),
+          name: h.into(),
+        },
+        VarMode {
+          id: "m2".into(),
+          name: format!("{h}!"),
+        },
+      ],
+      variables: vec![
+        Arc::new(var("v1", h, VarKind::String, json!(h))),
+        Arc::new(var("v2", &format!("{h}/two"), VarKind::Color, json!("#abcdef"))),
+        Arc::new(var("v3", "n", VarKind::Number, json!(4.0))),
+      ],
+    })];
+    doc
+  }
+
+  fn comment_lines_ok(src: &str, what: &str) {
+    for l in src.lines().filter(|l| l.trim_start().starts_with("{/*")) {
+      let t = l.trim();
+      assert!(t.ends_with("*/}") && t[3..t.len() - 3].matches("*/").count() == 0, "{what}: {l}");
+    }
+  }
+
+  #[test]
+  fn hostile_names_never_break_out_of_exported_code() {
+    for h in HOSTILE {
+      let doc = hostile_doc(h);
+      let m = HeuristicMeasurer;
+      let files = export_project(&doc, &m);
+      for f in &files {
+        let what = format!("{h:?} in {}", f.path);
+        if f.path.ends_with(".css") || f.path.ends_with(".html") {
+          assert!(
+            !f.content.contains("<script>PWN") && !f.content.contains("<script>window"),
+            "{what}\n{}",
+            f.content
+          );
+        }
+        if f.path.ends_with(".css") {
+          check_css(&f.content, &what);
+          assert!(!f.content.contains('<'), "{what}\n{}", f.content);
+        }
+        if f.path == "index.html" {
+          assert_eq!(f.content.matches("<script").count(), 1, "{what}\n{}", f.content);
+        }
+        if f.path.ends_with(".tsx") {
+          comment_lines_ok(&f.content, &what);
+        }
+      }
+      for id in ["home", "other"] {
+        let html = export_html(&doc, id, &m);
+        let what = format!("{h:?} in html export of {id}");
+        assert_eq!(html.matches("<script").count(), 0, "{what}\n{html}");
+        assert_eq!(html.matches("</style>").count(), 1, "{what}\n{html}");
+        let style = html.split("<style>").nth(1).unwrap().split("</style>").next().unwrap();
+        check_css(style, &what);
+        comment_lines_ok(&export_react(&doc, id, &m), &what);
+      }
+      check_css(&crate::variables::tokens_css(&doc), &format!("{h:?} in tokens.css"));
+    }
+  }
+
+  #[test]
+  fn a_hostile_font_stays_out_of_the_google_fonts_url() {
+    let doc = hostile_doc(HOSTILE[0]);
+    assert_eq!(google_fonts_link(&doc), "");
+    let css = export_project(&doc, &HeuristicMeasurer)
+      .into_iter()
+      .find(|f| f.path == "src/index.css")
+      .unwrap()
+      .content;
+    assert!(!css.contains("@import url(\"https://fonts"), "{css}");
+    assert!(!css.contains("<script"), "{css}");
+    let html = export_html(&doc, "home", &HeuristicMeasurer);
+    assert!(!html.contains("fonts.googleapis"), "{html}");
+  }
+
+  #[test]
+  fn real_family_names_give_the_same_google_url_as_before() {
+    let mut doc = hostile_doc("Open Sans");
+    doc.get_mut("t").unwrap().text.as_mut().unwrap().font_family = "Open Sans".into();
+    let text = |doc: &mut Document, id: &str, f: &str| {
+      let mut t = crate::ops::default_node(NodeType::Text, id.into(), "x".into());
+      t.text.as_mut().unwrap().font_family = f.into();
+      let page = doc.pages[0].id.clone();
+      doc.insert(t, Some("home"), &page, None);
+    };
+    text(&mut doc, "t2", "Playfair Display");
+    text(&mut doc, "t3", "Inter");
+    text(&mut doc, "t4", "Bad&Font");
+    let w = "wght@300;400;500;600;700;800";
+    assert_eq!(
+      google_fonts_link(&doc),
+      format!("https://fonts.googleapis.com/css2?family=Inter:{w}&family=Open+Sans:{w}&family=Playfair+Display:{w}&display=swap")
+    );
+  }
+
+  #[test]
+  fn string_tokens_escape_backslashes_and_newlines() {
+    let mut doc = hostile_doc("x");
+    let mut c = (*doc.variables[0]).clone();
+    let s = |id: &str, name: &str, v: &str| {
+      Arc::new(Variable {
+        id: id.into(),
+        name: name.into(),
+        kind: VarKind::String,
+        values: [("m".to_string(), json!(v))].into(),
+        ..Default::default()
+      })
+    };
+    c.variables = vec![s("a", "A", "a\\"), s("b", "B", "one\ntwo"), s("c", "C", "plain \"q\"")];
+    doc.variables = vec![Arc::new(c)];
+    let css = crate::variables::tokens_css(&doc);
+    assert!(css.contains("--a: \"a\\\\\";"), "{css}");
+    assert!(css.contains("--b: \"one\\A two\";"), "{css}");
+    assert!(css.contains("--c: \"plain \\\"q\\\"\";"), "{css}");
+    check_css(&css, "tokens");
+  }
+
+  #[test]
+  fn css_family_is_unchanged_for_ordinary_names() {
+    assert_eq!(css_family("Open Sans"), "'Open Sans', sans-serif");
+    assert_eq!(css_family("Gill's \"Sans\""), "'Gill\\'s \"Sans\"', sans-serif");
+    assert_eq!(css_family("a\nb"), "'a\\A b', sans-serif");
   }
 }

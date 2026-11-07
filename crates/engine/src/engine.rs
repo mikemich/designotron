@@ -953,6 +953,8 @@ impl Engine {
     let ids: Vec<NodeId> = doc.nodes.keys().cloned().collect();
     doc.break_parent_cycles(&ids);
     components::repair_masters(&mut doc);
+    // Nor may a crafted link survive: unsafe schemes are dropped from text and prototypes.
+    sanitize_links(&mut doc, None);
     self.page = doc.pages[0].id.clone();
     self.doc = doc;
     self.selection.clear();
@@ -1302,6 +1304,7 @@ impl Engine {
         let prev = self.doc.clone();
         if local {
           crate::collab::apply(&mut self.doc, &delta)?;
+          sanitize_links(&mut self.doc, Some(&delta_ids(&delta)));
           self.after_mutation(&prev);
           self.rev += 1;
           self.doc_rev += 1;
@@ -1310,9 +1313,11 @@ impl Engine {
         if let Some(c) = self.collab_confirmed.as_mut() {
           // In the relay's order, under this editor's own changes it hasn't ordered yet.
           crate::collab::apply(c, &delta)?;
+          sanitize_links(c, Some(&delta_ids(&delta)));
           self.doc = self.collab_rebuild().unwrap();
         } else {
           crate::collab::apply(&mut self.doc, &delta)?;
+          sanitize_links(&mut self.doc, Some(&delta_ids(&delta)));
         }
         if let Some(g) = self.gesture.as_mut() {
           let _ = crate::collab::apply(&mut g.doc, &delta);
@@ -3980,6 +3985,51 @@ fn recolor_stroke(n: &mut Node, color: &str) {
 
 /// Removes links a text's runs may not carry (anything but http(s), mailto and tel), so a
 /// patch from an AI tool, a plugin or a peer can't plant a `javascript:` link.
+/// Ids of the nodes a peer's delta adds or patches.
+fn delta_ids(d: &Value) -> Vec<NodeId> {
+  ["nodes", "patch"]
+    .iter()
+    .filter_map(|k| d.get(*k).and_then(|v| v.as_object()))
+    .flat_map(|m| m.keys().cloned())
+    .collect()
+}
+
+fn has_unsafe_link(n: &Node) -> bool {
+  n.interactions
+    .iter()
+    .any(|i| i.url.as_deref().is_some_and(|u| crate::model::safe_link(u).is_none()))
+    || n.text.as_ref().is_some_and(|t| {
+      t.runs
+        .iter()
+        .any(|r| r.link.as_deref().is_some_and(|l| crate::model::safe_link(l).is_none()))
+    })
+}
+
+/// Drops links with unsafe schemes (`javascript:`, `data:`) from text runs and prototype
+/// URLs: all nodes, or only the given ids.
+fn sanitize_links(doc: &mut Document, ids: Option<&[NodeId]>) {
+  let fix = |n: &mut Node| {
+    for i in n.interactions.iter_mut() {
+      if i.url.as_deref().is_some_and(|u| crate::model::safe_link(u).is_none()) {
+        i.url = None;
+      }
+    }
+    drop_unsafe_links(n);
+  };
+  match ids {
+    None => doc.update_where(has_unsafe_link, fix),
+    Some(ids) => {
+      for id in ids {
+        if doc.get(id).is_some_and(has_unsafe_link) {
+          if let Some(n) = doc.get_mut(id) {
+            fix(n);
+          }
+        }
+      }
+    }
+  }
+}
+
 fn drop_unsafe_links(n: &mut Node) {
   let Some(t) = n.text.as_mut() else { return };
   if t
@@ -7359,5 +7409,108 @@ mod tests {
     fn points(e: &Engine, id: &str) -> Vec<VectorPoint> {
       e.doc.get(id).unwrap().vector.as_ref().unwrap().subpaths[0].points.clone()
     }
+  }
+}
+
+#[cfg(test)]
+mod r15_link_tests {
+  use super::*;
+  use crate::model::{Action, Interaction, TextRun};
+  use crate::text::HeuristicMeasurer;
+
+  fn engine() -> Engine {
+    Engine::new(Box::new(HeuristicMeasurer), 42)
+  }
+
+  fn bad_nodes() -> Document {
+    let mut e = engine();
+    let page = e.doc.pages[0].id.clone();
+    let mut b = crate::ops::default_node(NodeType::Rectangle, "b".into(), "B".into());
+    for (i, url) in [
+      "javascript:alert(1)",
+      " JaVa\tScRiPt:alert(1)",
+      "data:text/html,<b>",
+      "https://ok.example/a",
+    ]
+    .iter()
+    .enumerate()
+    {
+      b.interactions.push(Interaction {
+        action: Action::OpenUrl,
+        url: Some((*url).into()),
+        delay_ms: i as f64,
+        ..Default::default()
+      });
+    }
+    e.doc.insert(b, None, &page, None);
+    let mut t = crate::ops::default_node(NodeType::Text, "t".into(), "T".into());
+    {
+      let tp = t.text.as_mut().unwrap();
+      tp.characters = "abcdef".into();
+      tp.runs = vec![
+        TextRun {
+          start: 0,
+          end: 3,
+          link: Some("javascript:alert(2)".into()),
+          ..Default::default()
+        },
+        TextRun {
+          start: 3,
+          end: 6,
+          link: Some("https://ok.example/".into()),
+          ..Default::default()
+        },
+      ];
+    }
+    e.doc.insert(t, None, &page, None);
+    e.doc.clone()
+  }
+
+  fn check(doc: &Document) {
+    let urls: Vec<Option<String>> = doc.get("b").unwrap().interactions.iter().map(|i| i.url.clone()).collect();
+    assert_eq!(urls, vec![None, None, None, Some("https://ok.example/a".into())]);
+    let runs = &doc.get("t").unwrap().text.as_ref().unwrap().runs;
+    assert!(
+      runs.iter().all(|r| r.link.as_deref().is_none_or(|l| l.starts_with("https://"))),
+      "{runs:?}"
+    );
+    assert_eq!(runs.iter().filter(|r| r.link.is_some()).count(), 1);
+  }
+
+  #[test]
+  fn loading_a_file_drops_unsafe_links() {
+    let json = serde_json::to_string(&bad_nodes()).unwrap();
+    assert!(json.contains("javascript:alert(1)"));
+    let mut e = engine();
+    e.load(&json).unwrap();
+    check(&e.doc);
+  }
+
+  #[test]
+  fn remote_changes_drop_unsafe_links() {
+    let bad = bad_nodes();
+    let base = engine().doc.clone();
+    for local in [false, true] {
+      let mut e = engine();
+      let past = e.past.len();
+      let d = crate::collab::delta(&base, &bad, false, false);
+      e.dispatch(Command::ApplyRemote { delta: d, local }).unwrap();
+      check(&e.doc);
+      assert_eq!(e.past.len(), past, "a remote change is not a local history step");
+    }
+    // A patch of an existing layer is cleaned too.
+    let mut e = engine();
+    let mut clean = bad.clone();
+    for id in ["b", "t"] {
+      let n = clean.get_mut(id).unwrap();
+      n.interactions.clear();
+      if let Some(t) = n.text.as_mut() {
+        t.runs.clear();
+      }
+    }
+    e.doc = clean.clone();
+    let d = crate::collab::delta(&clean, &bad, false, false);
+    e.dispatch(Command::ApplyRemote { delta: d, local: false }).unwrap();
+    check(&e.doc);
   }
 }

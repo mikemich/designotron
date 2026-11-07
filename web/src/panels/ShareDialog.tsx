@@ -250,6 +250,9 @@ export function ShareDialog() {
                     </button>
                   ))}
                 </div>
+                <div className="muted small share-carries" style={{ lineHeight: 1.5 }}>
+                  Links carry the whole file: every page, and comments with their authors' names.
+                </div>
                 {manual && (
                   <>
                     <div className="small">Your browser blocked copying. Select this and copy it:</div>
