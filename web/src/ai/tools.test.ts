@@ -40,8 +40,14 @@ describe("internImageSources", () => {
     expect(out.b.src).toBe("asset:same");
     expect(input.a.src).toBe(PNG);
   });
+  it("interns every image subtype, and a 20 MB decoded image is accepted", () => {
+    const bmp = "data:image/bmp;base64,Qk0=";
+    expect((internImageSources({ imageUrl: bmp }, add) as any).imageUrl).toBe("asset:" + add(bmp));
+    const ok = "data:image/png;base64," + "A".repeat(26 * 1024 * 1024);
+    expect((internImageSources({ src: ok }, add) as any).src).toMatch(/^asset:/);
+  });
   it("refuses an image over 25 MB", () => {
-    const big = "data:image/png;base64," + "A".repeat(26 * 1024 * 1024);
+    const big = "data:image/png;base64," + "A".repeat(34 * 1024 * 1024);
     expect(() => internImageSources({ imageUrl: big }, add)).toThrow("image is larger than 25 MB");
   });
 });

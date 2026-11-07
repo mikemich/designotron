@@ -19,6 +19,8 @@ import {
   applyMoveFiles,
   applyMoveFolder,
   applyRenameFolder,
+  MAX_NAME,
+  cutGraphemes,
   newFolderId,
   normalizeName,
   sanitizeFolders,
@@ -975,6 +977,12 @@ export async function isEmptyFile(id: string): Promise<boolean> {
   }
 }
 
+/** `name` plus `suffix`, with the name cut so the whole fits the 80-character limit. */
+export function withSuffix(name: string, suffix: string): string {
+  const room = Math.max(1, MAX_NAME - Array.from(suffix).length);
+  return normalizeName(cutGraphemes(normalizeName(String(name)), room).trimEnd() + suffix) || "Untitled" + suffix;
+}
+
 /** A document id of the engine's shape ("d_…"), for a copy of a file. */
 export function newDocId(): string {
   return "d_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -984,7 +992,7 @@ export async function duplicateFile(id: string): Promise<string | null> {
   const json = await loadFile(id);
   if (!json) return null;
   const doc = JSON.parse(json);
-  doc.name = normalizeName(`${doc.name} (copy)`) || "Untitled (copy)";
+  doc.name = withSuffix(doc.name, " (copy)");
   doc.id = newDocId();
   const nid = newFileId();
   // A copy stays next to the original.

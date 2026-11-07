@@ -1,6 +1,8 @@
 // Editor state: wraps the WASM engine (source of truth for the document)
 // and holds UI-only state in a zustand store.
 
+import { isEngineTrap } from "./engineError";
+export { isEngineTrap };
 import { create } from "zustand";
 import init, { clearMeasureCache, WasmEngine } from "./wasm/pkg/designotron_engine_wasm";
 import wasmUrl from "./wasm/pkg/designotron_engine_wasm_bg.wasm?url";
@@ -371,10 +373,19 @@ export function hasDeviceFrames(): boolean {
 /** Parsed document for the current revision. Kept current from engine deltas, so a
  * change to one layer costs that layer, not the whole file. */
 export function getDoc(): Doc {
+  // A trapped engine throws from every method: the screen keeps what it last had.
+  if (docCache && useStore.getState().engineFailed) return docCache.doc;
   const e = getEngine();
-  const rev = e.rev();
-  if (docCache && docCache.rev === rev) return docCache.doc;
-  const d = JSON.parse(e.docDelta(!docCache));
+  let rev: number;
+  let d: any;
+  try {
+    rev = e.rev();
+    if (docCache && docCache.rev === rev) return docCache.doc;
+    d = JSON.parse(e.docDelta(!docCache));
+  } catch (err) {
+    if (noteEngineError(err) && docCache) return docCache.doc;
+    throw err;
+  }
   // Selecting and the like: keep the same object, so what is derived from it isn't redone.
   if (d.same && docCache) {
     docCache = { rev, doc: docCache.doc };
@@ -427,11 +438,19 @@ export function markSaved(docRev: number) {
 
 /** Pulls revision and state from the engine into the store. */
 export function sync() {
+  if (useStore.getState().engineFailed) return;
   const e = getEngine();
-  const rev = e.rev();
+  let rev: number;
+  let es: EngineState;
   const st = useStore.getState();
-  if (rev === st.rev) return;
-  const es: EngineState = JSON.parse(e.state());
+  try {
+    rev = e.rev();
+    if (rev === st.rev) return;
+    es = JSON.parse(e.state());
+  } catch (err) {
+    if (noteEngineError(err)) return;
+    throw err;
+  }
   // Selecting or switching page moves `rev` but not `docRev`: nothing to save.
   useStore.setState({ rev, es, dirty: es.docRev !== st.savedDocRev });
   dropStalePoints();
@@ -474,12 +493,18 @@ export function toast(text: string, kind: "info" | "error" = "info") {
 /** Runs an engine command. Errors surface as a toast and return null. */
 const TAB_VIEW_REFUSED = new Set(["addComment", "replyComment", "resolveComment", "undo", "redo", "replaceDocument"]);
 
+/** The document as last read, including edits not saved yet: what is left to save or download
+ *  when the engine can no longer be asked. */
+export function lastKnownDoc(): Doc | null {
+  return docCache?.doc ?? null;
+}
+
 /** Sets `engineFailed` when `err` is the wasm engine itself stopping (not an ordinary command
  *  error, which is a plain string). Returns whether it was. */
 export function noteEngineError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  const trapped =
-    (typeof WebAssembly !== "undefined" && err instanceof WebAssembly.RuntimeError) || /unreachable|out of memory|recursive use of an object/i.test(msg);
+  // Never match plain strings: command errors are strings that often echo what the person typed
+  // (an arrange action "unreachable", a layer named "Unreachable").
+  const trapped = isEngineTrap(err);
   if (trapped && !useStore.getState().engineFailed) useStore.setState({ engineFailed: true });
   return trapped;
 }
@@ -530,6 +555,7 @@ export function aiDispatch<T = any>(tool: string, input: unknown, group?: string
 }
 
 export function query<T = any>(q: Record<string, unknown>): T {
+  if (useStore.getState().engineFailed) throw new Error("The editor has stopped");
   try {
     return JSON.parse(getEngine().query(JSON.stringify(q)));
   } catch (err) {
@@ -548,6 +574,7 @@ export function currentPage(): string {
 
 /** Engine SVG for a page with asset references resolved to object URLs. */
 export function renderPage(page: string, hidden: string[], editing = ""): string {
+  if (useStore.getState().engineFailed) return "";
   return resolveAssets(getEngine().render(page, JSON.stringify(hidden), editing));
 }
 
@@ -565,6 +592,8 @@ export type RenderUpdate =
 
 /** Incremental canvas render: only top-level layers changed since the last call come back. */
 export function renderPageIncremental(page: string, hidden: string[], reset: boolean, editing = ""): RenderUpdate {
+  // Nothing changed as far as the screen knows: it keeps what it drew.
+  if (useStore.getState().engineFailed) return { order: [], changed: {}, moved: {}, bounds: {}, texts: {} };
   const r = JSON.parse(getEngine().renderIncremental(page, JSON.stringify(hidden), reset, editing));
   if ("full" in r) return { full: resolveAssets(r.full) };
   for (const k in r.changed) r.changed[k] = resolveAssets(r.changed[k]);

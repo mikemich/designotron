@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import { Copy, History, RotateCcw, Trash2 } from "lucide-react";
 import { dispatchOrThrow, getDoc, getEngine, toast, useStore } from "../store";
-import { deleteVersion, getFileMeta, listVersions, loadVersion, newDocId, newFileId, renameVersion, saveFile, saveVersion, type Version } from "../files";
+import { deleteVersion, getFileMeta, listVersions, loadVersion, newDocId, newFileId, withSuffix, renameVersion, saveFile, saveVersion, type Version } from "../files";
 import { IconButton, Section } from "../ui/controls";
-import { normalizeName } from "../folders";
 import { attempt, reportFailure } from "../errors";
 
 /** Saves an automatic version when the last one is older than this. */
@@ -20,7 +19,8 @@ function ago(t: number): string {
 /** Automatic versions are labelled as such with their time, whatever they were stored as
  *  (older ones say "Autosave"). Renaming one makes it a named version (`auto: false`). */
 export function versionLabel(v: Version): string {
-  if (!v.auto) return v.name;
+  // Only the plain automatic ones are renamed; a safety copy ("Before restoring …") keeps its name.
+  if (!v.auto || (v.name !== "Autosave" && v.name !== "Automatic version")) return v.name;
   return `Automatic version · ${new Date(v.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
@@ -65,7 +65,7 @@ export function HistoryPanel() {
       const json = await loadVersion(fileId, v.id);
       if (!json) return toast("That version could not be read", "error");
       const doc = JSON.parse(json);
-      doc.name = normalizeName(`${getDoc().name} (${versionLabel(v)})`) || "Untitled";
+      doc.name = withSuffix(getDoc().name, ` (${versionLabel(v)})`);
       doc.id = newDocId();
       await saveFile(newFileId(), doc.name, JSON.stringify(doc), { folder: (await getFileMeta(fileId))?.folder });
       toast(`Saved “${doc.name}” to your files`);
@@ -111,7 +111,9 @@ export function HistoryPanel() {
                 }}
                 onBlur={async (e) => {
                   setRenaming(null);
-                  if (e.target.value.trim()) await attempt("rename the version", () => renameVersion(fileId, v.id, e.target.value.trim()));
+                  // Unchanged (focus, then blur) is not a rename: an automatic version stays automatic.
+                  const next = e.target.value.trim();
+                  if (next && next !== versionLabel(v) && next !== v.name) await attempt("rename the version", () => renameVersion(fileId, v.id, e.target.value.trim()));
                   refresh();
                 }}
               />

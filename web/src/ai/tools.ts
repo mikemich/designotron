@@ -85,8 +85,9 @@ export async function whenCanvasIdle(timeoutMs = 45000): Promise<boolean> {
 }
 
 const MAX_TOOL_IMAGE = 25 * 1024 * 1024;
-const IMAGE_DATA_URL = /^data:image\/(png|jpe?g|gif|webp|svg\+xml)[;,]/i;
-const IMAGE_DATA_URL_IN_CSS = /url\(\s*(["']?)(data:image\/(?:png|jpe?g|gif|webp|svg\+xml)[;,][^"')]*)\1\s*\)/gi;
+// Every image subtype: the engine accepts any data:image/ URL, and none may stay inline.
+const IMAGE_DATA_URL = /^data:image\/[a-z0-9.+-]+[;,]/i;
+const IMAGE_DATA_URL_IN_CSS = /url\(\s*(["']?)(data:image\/[a-z0-9.+-]+[;,][^"')]*)\1\s*\)/gi;
 
 /** Image bytes never enter the document: every image data URL a tool input carries (under
  *  `imageUrl` or `src`, or as `url(data:...)` inside a `fill`/`fills` string) is handed to `add`
@@ -94,7 +95,9 @@ const IMAGE_DATA_URL_IN_CSS = /url\(\s*(["']?)(data:image\/(?:png|jpe?g|gif|webp
  *  (text, svg markup) alone. Throws for an image over 25 MB. */
 export function internImageSources(input: unknown, add: (dataUrl: string) => string): unknown {
   const take = (url: string) => {
-    if (url.length > MAX_TOOL_IMAGE) throw new Error("image is larger than 25 MB");
+    // Decoded size: base64 carries 3 bytes in 4 characters.
+    const bytes = /;base64,/i.test(url.slice(0, 80)) ? (url.length * 3) / 4 : url.length;
+    if (bytes > MAX_TOOL_IMAGE) throw new Error("image is larger than 25 MB");
     return "asset:" + add(url);
   };
   const walk = (v: unknown, key: string, inFill: boolean): unknown => {

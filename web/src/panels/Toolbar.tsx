@@ -100,19 +100,22 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
   const viewing = useCollab((s) => s.viewer);
   const readOnly = !!es.readOnly || viewing;
   const tabView = useStore((s) => s.tabView);
+  const engineFailed = useStore((s) => s.engineFailed);
   // A tab that only shows the file, or a viewer, saves nothing: say that, never "Saved locally".
   const saveLabel = tabView
     ? "Read-only: open in another tab"
     : viewing
       ? "View only"
-      : saveFailed || !persistentStorage()
+      : saveFailed || !persistentStorage() || (engineFailed && dirty)
         ? "Not saved"
         : dirty
           ? "Saving…"
           : "Saved locally";
   const saveTitle =
     saveLabel === "Not saved"
-      ? "Not saved: browser storage is full or blocked"
+      ? engineFailed && !saveFailed
+        ? "Not saved: the editor stopped. Reload to reopen the last save"
+        : "Not saved: browser storage is full or blocked"
       : tabView
         ? "Read-only: open in another tab. This tab only shows the file; another tab edits it."
         : undefined;
@@ -387,7 +390,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
           }}
           onBlur={(e) => {
-            if (readOnly) return;
+            if (readOnly || e.target.value === doc.name) return;
             const clean = normalizeName(e.target.value);
             if (!clean) return void (e.target.value = doc.name);
             if (nameWasCut(e.target.value)) toast(NAME_CUT_NOTICE);

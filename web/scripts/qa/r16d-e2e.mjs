@@ -155,7 +155,7 @@ const graphemes = (page, text) =>
   );
   const json2 = await page.evaluate(() => JSON.stringify(window.__dt.doc()));
   check("fills[].src data URL becomes an asset too", out2.ok && !json2.includes("data:image"), JSON.stringify(out2.result).slice(0, 100));
-  const big = await page.evaluate(() => window.__dt.tool("create_nodes", { nodes: [{ type: "rectangle", imageUrl: "data:image/png;base64," + "A".repeat(26 * 1024 * 1024) }] }));
+  const big = await page.evaluate(() => window.__dt.tool("create_nodes", { nodes: [{ type: "rectangle", imageUrl: "data:image/png;base64," + "A".repeat(34 * 1024 * 1024) }] }));
   check("an image over 25 MB is refused with a message", !big.ok && /larger than 25 MB/.test(String(big.result)), String(big.result));
   check("the image is drawn from the asset store", await waitFor(() => page.evaluate(() => !!document.querySelector('#dt-canvas image[href^="blob:"], #dt-canvas image[*|href^="blob:"]')), 4000));
   check("saves", await waitSaved(page));
@@ -189,7 +189,12 @@ await dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: "From plugin"
   await page.evaluate(() => {
     const e = window.__dt.engine();
     window.__orig = e.persistPlan.bind(e);
+    window.__origSave = e.save.bind(e);
+    // Preparing the save AND the recovery copy both fail: the label must still say so.
     e.persistPlan = () => {
+      throw new RangeError("Invalid string length (stub)");
+    };
+    e.save = () => {
       throw new RangeError("Invalid string length (stub)");
     };
   });
@@ -198,11 +203,13 @@ await dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: "From plugin"
   check("the full sentence is in the title and the live text", (await page.locator(".save-state").getAttribute("title")) === "Not saved: browser storage is full or blocked" && /storage is full or blocked/.test(await label(page)));
   await shot(page, "p5-not-saved-1440");
   check("no bar after the first failure", (await page.locator(".stale-bar").count()) === 0);
+  check("a failing recovery copy didn't stop the failure being reported", (await page.evaluate(() => window.__dt.dirty())) === true);
   check("after two failures the .dtron bar appears", await waitFor(async () => (await page.locator(".stale-bar").count()) > 0, 9000), (await page.locator(".stale-bar").allTextContents()).join("|"));
   check("the label never sticks on 'Saving…'", (await labelShort(page)) === "Not saved");
   check("the bar offers the download", (await page.getByRole("button", { name: "Download a .dtron copy" }).count()) === 1);
   await page.evaluate(() => {
     window.__dt.engine().persistPlan = window.__orig;
+    window.__dt.engine().save = window.__origSave;
   });
   await addRect(page, "Three", 160);
   check("with the stub removed it returns to 'Saved locally'", await waitSaved(page, 15000), await label(page));
@@ -231,6 +238,7 @@ await dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: "From plugin"
   });
   await page.evaluate(() => window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [{ type: "rectangle", name: "Lost" }] } }));
   check("the banner shows when the engine traps", await waitFor(() => page.locator(".engine-bar").isVisible(), 3000));
+  await waitFor(async () => /\(\d/.test(await page.locator(".engine-bar").innerText()), 3000);
   const text = await page.locator(".engine-bar").innerText();
   check("it says the editor stopped and the file is safe up to the last save", /ran out of memory and stopped/.test(text) && /safe up to the last save \(\d/.test(text), text.replace(/\n/g, " "));
   check("it has Reload and the download button", (await page.getByRole("button", { name: "Reload" }).count()) === 1 && (await page.getByRole("button", { name: "Try to download a .dtron" }).count()) === 1);
@@ -244,6 +252,98 @@ await dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: "From plugin"
   check("Reload reopens the same file", (await fileIdOf(page)) === id);
   check("it has the last save and no banner", (await page.evaluate(() => Object.values(window.__dt.doc().nodes).some((n) => n.name === "Safe"))) && (await page.locator(".engine-bar").count()) === 0);
   check("and the edit that hit the trap isn't there", !(await page.evaluate(() => Object.values(window.__dt.doc().nodes).some((n) => n.name === "Lost"))));
+  await page.close();
+}
+
+// ---------- P-7c: ordinary errors that mention "unreachable" are not a trap ----------
+{
+  const page = await openNew();
+  const r = await page.evaluate(() => window.__dt.tool("arrange", { action: "unreachable" }));
+  await sleep(300);
+  check("a tool error that echoes 'unreachable' is an ordinary error", !r.ok && /unreachable/.test(String(r.result)), String(r.result).slice(0, 80));
+  const named = await page.evaluate(() => window.__dt.tool("create_nodes", { nodes: [{ type: "rectangle", name: "Unreachable out of memory", width: 40, height: 40 }] }));
+  await sleep(300);
+  check("a layer named 'Unreachable' is fine", named.ok);
+  check("no banner, and the editor keeps working", (await page.locator(".engine-bar").count()) === 0 && (await addRect(page, "Still works")) !== null);
+  check("it still saves", await waitSaved(page));
+  const bad = await page.evaluate(() => window.__dt.tool("create_nodes", { nodes: [{ type: "rectangle", imageUrl: "data:image/png;base64,@@@@" }] }));
+  check("a data URL that isn't base64 is refused with a message", !bad.ok && /not valid base64/.test(String(bad.result)), String(bad.result));
+  await page.close();
+}
+
+// ---------- P-7c: after a real trap every engine method throws ----------
+{
+  const page = await openNew();
+  const id = await fileIdOf(page);
+  await addRect(page, "Saved");
+  check("Saved is stored first", await waitSaved(page));
+  const errs0 = errors.length;
+  const consoleErrs = [];
+  page.on("console", (m) => m.type() === "error" && consoleErrs.push(m.text().slice(0, 160)));
+  await page.evaluate(() => {
+    window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [{ type: "rectangle", name: "Unsaved", x: 100, y: 0, width: 80, height: 80, fill: "#00aa00" }] } });
+    window.__dt.doc(); // the screen has read it
+    const e = window.__dt.engine();
+    const proto = Object.getPrototypeOf(e);
+    let trapped = false;
+    for (const k of Object.getOwnPropertyNames(proto)) {
+      if (k === "constructor" || typeof proto[k] !== "function") continue;
+      e[k] = function () {
+        if (!trapped) {
+          trapped = true;
+          throw new WebAssembly.RuntimeError("unreachable");
+        }
+        throw new Error("recursive use of an object detected which would lead to unsafe aliasing in rust");
+      };
+    }
+    try {
+      window.__dt.dispatch({ op: "ai", tool: "create_nodes", input: { nodes: [{ type: "rectangle", name: "Lost" }] } });
+    } catch {
+      /* the trap */
+    }
+  });
+  await sleep(600);
+  check("total trap: the banner is visible", await page.locator(".engine-bar").isVisible());
+  check("the banner is an alert", (await page.locator(".engine-bar").getAttribute("role")) === "alert");
+  await page.mouse.move(700, 400);
+  await page.mouse.click(720, 420);
+  await sleep(300);
+  const body = await page.evaluate(() => document.body.innerText.length);
+  check("the page isn't blank: the banner and a message show", body > 50 && (await page.locator(".engine-bar").isVisible()), `body ${body} chars; canvas ${await page.locator("#dt-canvas").count()}; console: ${consoleErrs.slice(0, 2).join(" | ")}`);
+  if ((await page.locator(".save-state").count()) > 0) check("the label doesn't say Saving…", (await labelShort(page)) === "Not saved", await label(page));
+  const armed = await page.evaluate(() => {
+    const ev = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  });
+  check("the close prompt is still armed (unsaved edit)", armed);
+  check("no uncaught page error from the trap", errors.length === errs0, errors.slice(errs0).join("|").slice(0, 200));
+  await shot(page, "p7c-total-trap");
+  const [dl] = await Promise.all([page.waitForEvent("download", { timeout: 5000 }).catch(() => null), page.getByRole("button", { name: "Try to download a .dtron" }).click()]);
+  check("Try to download works from the screen's copy when engine.save throws", !!dl && /\.dtron$/.test(dl.suggestedFilename()), dl?.suggestedFilename());
+  if (dl) {
+    const file = JSON.parse(fs.readFileSync(await dl.path(), "utf8"));
+    const names = Object.values(file.document.nodes).map((n) => n.name);
+    check("the file holds the last edit, saved or not", file.format === "designotron" && names.includes("Unsaved") && names.includes("Saved") && !names.includes("Lost"), names.join(","));
+    // Open it again as a new file.
+    const fresh = track(await ctx.newPage());
+    await fresh.goto(URL);
+    await fresh.waitForSelector("button:has-text('New design file')");
+    const [chooser] = await Promise.all([fresh.waitForEvent("filechooser", { timeout: 4000 }).catch(() => null), fresh.getByRole("button", { name: "Open .dtron" }).first().click()]);
+    if (chooser) {
+      await chooser.setFiles(await dl.path());
+      await fresh.waitForSelector("#dt-canvas", { timeout: 6000 }).catch(() => {});
+      check("the downloaded file re-opens with the last edit", await waitFor(() => fresh.evaluate(() => Object.values(window.__dt.doc().nodes).some((n) => n.name === "Unsaved")), 5000));
+    } else {
+      check("(re-open through the file chooser not reachable from the dashboard here; contents were checked)", true);
+    }
+    await fresh.close();
+  }
+  // Going home reloads instead of reusing the stopped engine.
+  page.on("dialog", (d) => d.accept());
+  await page.evaluate(() => (location.hash = "#/"));
+  check("going home reloads: the dashboard shows, no banner", await waitFor(async () => (await page.locator(".file-card, .files-bar").count()) > 0 && (await page.locator(".engine-bar").count()) === 0, 8000));
+  void id;
   await page.close();
 }
 

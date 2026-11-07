@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Component, useEffect, useRef, useState, type ReactNode } from "react";
 import { Canvas } from "./canvas/Canvas";
 import { LeftPanel } from "./panels/LeftPanel";
 import { RightPanel } from "./panels/RightPanel";
@@ -19,7 +19,7 @@ import { DemoOverlay, playDemo, stopDemo } from "./Demo";
 import { importFigmaJson } from "./figma";
 import { ShareDialog } from "./panels/ShareDialog";
 import { installShortcuts } from "./shortcuts";
-import { bootEngine, getDoc, getEngine, markSaved, newEngine, noteEngineError, onDocChange, saveHook, toast as showToast, useStore, zoomToFit, dispatch } from "./store";
+import { bootEngine, getDoc, getEngine, markSaved, newEngine, lastKnownDoc, noteEngineError, onDocChange, saveHook, toast as showToast, useStore, zoomToFit, dispatch } from "./store";
 import { focusCanvas, ToastLive } from "./ui/controls";
 import { closePanel } from "./panels/PanelChrome";
 import {
@@ -33,8 +33,10 @@ import {
   waitFileLock,
   type FileLock,
   clearRecovery,
+  download as download_,
   listVersions,
   loadFile,
+  toDtron,
   persistentStorage,
   planIsOutdated,
   readRecovery,
@@ -59,6 +61,7 @@ import { readFileAsDataUrl } from "./assets";
 import { failureText, reportFailure } from "./errors";
 import { resolveFolder } from "./folders";
 import { saveDtron } from "./actions";
+import { fileSafe } from "./exporter";
 
 /** Largest document (in characters) copied to localStorage when closing: the quota is about
  * 5 MB, and a bigger copy only fails after a slow synchronous write. */
@@ -146,7 +149,38 @@ interface Snapshot {
   rev: number;
 }
 
-export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void }) {
+/** Whatever throws while the editor draws (a stopped engine makes every read throw) shows the
+ *  engine-stopped bar instead of an empty page. */
+class EditorBoundary extends Component<{ fileId: string; children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(err: unknown) {
+    console.error(err);
+    noteEngineError(err);
+    useStore.setState({ engineFailed: true });
+  }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <div className="engine-fallback" role="main">
+        <EngineFailedBar fileId={this.props.fileId} />
+        <p>The editor stopped, so this page can't be shown. Reload to reopen the file at its last save.</p>
+      </div>
+    );
+  }
+}
+
+export function Editor(props: { fileId: string; onHome: () => void }) {
+  return (
+    <EditorBoundary fileId={props.fileId}>
+      <EditorInner {...props} />
+    </EditorBoundary>
+  );
+}
+
+function EditorInner({ fileId, onHome }: { fileId: string; onHome: () => void }) {
   const chatOpen = useStore((s) => s.chatOpen);
   const panels = useStore((s) => s.panels);
   const compact = useStore((s) => s.compact);
@@ -500,16 +534,27 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       const rev = docRev();
       if (recoveryTried === rev) return recoveryRev === rev;
       recoveryTried = rev;
-      // From the size of what was stored (or a guess), so a big file isn't serialised just to
-      // find out its copy is too big for localStorage.
-      if ((storedSize(fileId) ?? Object.keys(getDoc().nodes).length * GUESS_CHARS_PER_LAYER) <= MAX_RECOVERY_CHARS) {
-        const json = engine.save();
-        if (json.length <= MAX_RECOVERY_CHARS && writeRecovery(fileId, json)) {
-          recoveryRev = rev;
-          return true;
+      try {
+        // From the size of what was stored (or a guess), so a big file isn't serialised just to
+        // find out its copy is too big for localStorage.
+        if ((storedSize(fileId) ?? Object.keys(getDoc().nodes).length * GUESS_CHARS_PER_LAYER) <= MAX_RECOVERY_CHARS) {
+          const json = engine.save();
+          if (json.length <= MAX_RECOVERY_CHARS && writeRecovery(fileId, json)) {
+            recoveryRev = rev;
+            return true;
+          }
         }
+      } catch (err) {
+        // The engine can't serialise (a string too long, a trap): no copy, but never a throw
+        // that would leave the label stuck on "Saving…".
+        noteEngineError(err);
+        console.error(err);
       }
-      clearRecovery(fileId);
+      try {
+        clearRecovery(fileId);
+      } catch {
+        /* storage blocked */
+      }
       recoveryRev = -1;
       return false;
     };
@@ -556,6 +601,24 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       }
       return flushing!;
     };
+    // A save that couldn't be prepared or written: say so and schedule the retry first, only then
+    // try the recovery copy (which can fail too, and must never hide the failure).
+    const saveFailure = (err: unknown) => {
+      console.error(err);
+      startedRev = -1;
+      failedSave();
+      if (!closed) {
+        useStore.setState({ saveFailed: true });
+        retry ??= setTimeout(
+          () => {
+            retry = null;
+            schedule();
+          },
+          failures >= 3 ? 30000 : 5000,
+        );
+      }
+      keepRecovery();
+    };
     const runFlush = async () => {
       try {
         // A write already started for this revision (closing while one ran) is not repeated.
@@ -570,17 +633,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           } catch (err) {
             final = null;
             noteEngineError(err);
-            console.error(err);
-            if (!useStore.getState().engineFailed) keepRecovery();
-            startedRev = -1;
-            failedSave();
-            if (!closed) {
-              useStore.setState({ saveFailed: true });
-              retry ??= setTimeout(() => {
-                retry = null;
-                schedule();
-              }, failures >= 3 ? 30000 : 5000);
-            }
+            saveFailure(err);
             break;
           }
           final = null;
@@ -605,17 +658,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
             // keeps the unsaved changes on screen).
             if (err instanceof LockLostError) break;
             // Not stored (quota, disk): stay dirty, keep what the recovery copy can hold, try again.
-            console.error(err);
-            keepRecovery();
-            startedRev = -1;
-            failedSave();
-            if (!closed) {
-              useStore.setState({ saveFailed: true });
-              retry ??= setTimeout(() => {
-                retry = null;
-                schedule();
-              }, failures >= 3 ? 30000 : 5000);
-            }
+            saveFailure(err);
             break;
           }
           dropRecovery(snap);
@@ -634,7 +677,12 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
             lastVersion = Date.now();
             // A version is a whole copy of the file (the current one, which may be newer than
             // the save that just finished).
-            await saveVersion(fileId, "Automatic version", engine.save(), true).catch(console.error);
+            try {
+              await saveVersion(fileId, "Automatic version", engine.save(), true);
+            } catch (err) {
+              noteEngineError(err);
+              console.error(err);
+            }
           }
           maybeThumbnail();
         }
@@ -798,10 +846,16 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       window.removeEventListener("pagehide", pagehide);
       document.removeEventListener("visibilitychange", hidden);
       // Leaving the file: write what's unsaved now, before the engine is replaced.
-      if (!stale && !tabRef.current.view && useStore.getState().dirty && startedRev < docRev()) {
-        final = snapshot();
-        startedRev = final.rev;
-        flush();
+      // (Not from a stopped engine: it can't be asked, and the page keeps asking before it closes.)
+      if (!stale && !tabRef.current.view && !useStore.getState().engineFailed && useStore.getState().dirty && startedRev < docRev()) {
+        try {
+          final = snapshot();
+          startedRev = final.rev;
+          flush();
+        } catch (err) {
+          noteEngineError(err);
+          console.error(err);
+        }
       }
       if (running) {
         const writing: Promise<void> = flushing!.finally(() => {
@@ -1223,7 +1277,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
           </button>
         </div>
       )}
-      {engineFailed && <EngineFailedBar fileId={fileId} />}
+      {engineFailed && <EngineFailedBar fileId={fileId} second={!!(tabBar || gone || stale)} />}
       {storageBar && !engineFailed && (
         <div className={"stale-bar" + (tabBar || gone || stale ? " second" : "")} role="alert">
           This browser can't store the file (storage is full or blocked), so your changes aren't saved.
@@ -1244,30 +1298,47 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
 
 /** The wasm engine trapped (out of memory): editing and saving have stopped. Offers a reload and a
  *  last try at a .dtron copy of what is in memory. */
-function EngineFailedBar({ fileId }: { fileId: string }) {
+function EngineFailedBar({ fileId, second = false }: { fileId: string; second?: boolean }) {
   const [savedAt, setSavedAt] = useState<number | null>(null);
   useEffect(() => {
     getFileMeta(fileId).then((m) => setSavedAt(m?.updatedAt ?? null), () => {});
   }, [fileId]);
+  // The editor's own close guard may be gone (the editor unmounted): keep asking while there are
+  // changes that were never stored.
+  useEffect(() => {
+    const ask = (e: BeforeUnloadEvent) => {
+      if (!useStore.getState().dirty) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", ask);
+    return () => window.removeEventListener("beforeunload", ask);
+  }, []);
   const time = savedAt ? new Date(savedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : null;
+  const download = () => {
+    try {
+      saveDtron();
+      return;
+    } catch {
+      /* the engine can't be asked: use the copy the screen holds */
+    }
+    try {
+      const doc = lastKnownDoc();
+      if (!doc) throw new Error("no copy");
+      download_(`${fileSafe(doc.name || "Untitled")}.dtron`, toDtron(JSON.stringify(doc)), "application/json");
+    } catch {
+      showToast("Couldn't make a copy either: the editor has stopped. Reload to reopen the last save.", "error");
+    }
+  };
   return (
-    <div className="stale-bar engine-bar" role="alertdialog" aria-label="The editor stopped">
+    <div className={"stale-bar engine-bar" + (second ? " second" : "")} role="alert" aria-label="The editor stopped">
       <span>
         The editor ran out of memory and stopped. Your file is safe up to the last save{time ? ` (${time})` : ""}. Reload to reopen it.
       </span>
       <button className="btn primary small" onClick={() => location.reload()}>
         Reload
       </button>
-      <button
-        className="btn small"
-        onClick={() => {
-          try {
-            saveDtron();
-          } catch {
-            showToast("Couldn't make a copy either: the editor has stopped. Reload to reopen the last save.", "error");
-          }
-        }}
-      >
+      <button className="btn small" onClick={download}>
         Try to download a .dtron
       </button>
     </div>

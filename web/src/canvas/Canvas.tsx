@@ -280,6 +280,8 @@ export function Canvas() {
   useLayoutEffect(() => {
     const host = contentRef.current;
     if (!host) return;
+    // A stopped engine can't draw: the canvas keeps what it has on screen.
+    if (useStore.getState().engineFailed) return;
     const fresh = rootEls.current.size === 0;
     // The text being edited is drawn live (all its lines, mixed styles); its textarea is only the input.
     const r = renderPageIncremental(page, demoHidden, fresh, editingText ?? "");
