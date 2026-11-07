@@ -809,7 +809,12 @@ impl<'a> Renderer<'a> {
           scaling_factor: *scaling_factor,
           rotation: *rotation,
           filters: filters.as_ref(),
-          natural: self.m.image_size(src),
+          // Only a tile depends on the size: other fills never ask, so measuring never repaints them.
+          natural: if *scale_mode == crate::model::ScaleMode::Tile {
+            self.m.image_size(src)
+          } else {
+            None
+          },
         };
         self.defs.push_str(&paint::image_pattern(&pid, &ip, w, h));
         format!("url(#{pid})")

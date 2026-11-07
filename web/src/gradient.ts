@@ -12,8 +12,15 @@ interface Rgba {
   a: number;
 }
 
-function parse(hex: string): Rgba {
-  const h = hex.replace("#", "");
+function parse(color: string): Rgba {
+  // Stops are stored as hex; rgb()/rgba() text (from older files or tools) is read too.
+  const fn = color.trim().match(/^rgba?\(\s*([\d.]+%?)[\s,]+([\d.]+%?)[\s,]+([\d.]+%?)(?:[\s,/]+([\d.]+%?))?\s*\)$/i);
+  if (fn) {
+    const ch = (v: string) => Math.max(0, Math.min(255, v.endsWith("%") ? (parseFloat(v) * 255) / 100 : parseFloat(v)));
+    const al = fn[4] === undefined ? 1 : fn[4].endsWith("%") ? parseFloat(fn[4]) / 100 : parseFloat(fn[4]);
+    return { r: ch(fn[1]), g: ch(fn[2]), b: ch(fn[3]), a: Math.max(0, Math.min(1, al)) };
+  }
+  const h = color.replace("#", "");
   const full = h.length <= 4 ? h.split("").map((c) => c + c).join("") : h;
   const n = (i: number) => parseInt(full.slice(i, i + 2), 16);
   return { r: n(0) || 0, g: n(2) || 0, b: n(4) || 0, a: full.length >= 8 ? n(6) / 255 : 1 };

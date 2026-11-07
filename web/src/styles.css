@@ -3203,12 +3203,24 @@ body:has(.phone-note) .toast {
 /* Images in Assets */
 .image-assets .image-asset {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   padding: 4px;
   border-radius: 5px;
+}
+.image-assets .image-main {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
   cursor: pointer;
+  color: inherit;
 }
 .image-assets .image-asset:hover {
   background: var(--panel-2);
@@ -3224,6 +3236,7 @@ body:has(.phone-note) .toast {
   border: 1px solid var(--border, #3a3a3a);
 }
 .image-assets .image-meta {
+  display: grid;
   min-width: 0;
   font-size: 11px;
 }

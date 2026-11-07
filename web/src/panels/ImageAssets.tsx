@@ -48,24 +48,24 @@ export function ImageAssets({ filter }: { filter: string }) {
             data-count={e.count}
             draggable
             onDragStart={(ev) => ev.dataTransfer.setData("application/x-designotron-image", e.src)}
-            onClick={() => select(e)}
-            title={"Click to select the layers that use it. Drag it onto the canvas, or use + to place a copy" + (e.credit ? `\nPhoto: ${e.credit.title || "untitled"} by ${e.credit.author} (${e.credit.license})` : "")}
           >
-            <span className="image-thumb" style={thumb(e.src) ? { backgroundImage: `url("${thumb(e.src)}")` } : undefined} />
-            <span className="image-meta">
-              <div className="name">{name}</div>
-              <div className="muted">
-                {e.count === 1 ? "1 layer" : `${e.count} layers`}
-                {e.credit ? ` · ${e.credit.author}` : ""}
-              </div>
-            </span>
-            <IconButton
-              title="Place at its own size"
-              onClick={(ev) => {
-                ev.stopPropagation();
-                void placeImageSource(e.src, undefined, undefined, name);
-              }}
+            <button
+              type="button"
+              className="image-main"
+              aria-pressed={on}
+              onClick={() => select(e)}
+              title={"Select the layers that use it. Drag it onto the canvas, or use + to place a copy" + (e.credit ? `\nPhoto: ${e.credit.title || "untitled"} by ${e.credit.author} (${e.credit.license})` : "")}
             >
+              <span className="image-thumb" style={thumb(e.src) ? { backgroundImage: `url("${thumb(e.src)}")` } : undefined} />
+              <span className="image-meta">
+                <span className="name">{name}</span>
+                <span className="muted">
+                  {e.count === 1 ? "1 layer" : `${e.count} layers`}
+                  {e.credit ? ` · ${e.credit.author}` : ""}
+                </span>
+              </span>
+            </button>
+            <IconButton title="Place at its own size" onClick={() => void placeImageSource(e.src, undefined, undefined, name)}>
               <Plus size={14} />
             </IconButton>
           </div>

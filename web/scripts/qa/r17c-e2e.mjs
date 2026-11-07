@@ -265,7 +265,7 @@ try {
     same("rotation 90: canvas and PNG agree", canvas, png, 2);
     const html = await htmlPixels(page, L.id, assets, pts);
     check("rotation 90: exported HTML has the red edge on the right", html.px.map(cls).join() === want.join(), html.px.map(cls).join());
-    check("rotation 90: the export turns an inner layer with the box swapped", /width: 200px; height: 400px/.test(html.code) && /rotate\(90deg\)/.test(html.code));
+    check("rotation 90: the export turns an inner layer with the box swapped", /width: 100cqh; height: 100cqw/.test(html.code) && /rotate\(90deg\)/.test(html.code));
     same("rotation 90: exported HTML matches the PNG", html.px, png, 8);
     // 180 and 270: red at the bottom / on the left.
     for (const [deg, spot, away] of [[180, [200, 190], [200, 10]], [270, [20, 100], [380, 100]]]) {
@@ -276,6 +276,26 @@ try {
       check(`rotation ${deg}: red where expected in the PNG and the exported HTML`, cls(a) === "red" && cls(b) === "blue" && cls(ch) === "red" && cls(hh) === "blue", `${cls(a)}/${cls(b)} ${cls(ch)}/${cls(hh)}`);
     }
     await run(page, { op: "delete", ids: [L.id] });
+  }
+
+  // ===== Exported fills follow the layer's size (a Fill-width hero shown narrower than the design) =====
+  {
+    const L = await imageLayer(page, "edge", "heroimg", { scaleMode: "stretch" });
+    const assets = { [L.src.slice(6)]: L.data };
+    await run(page, { op: "delete", ids: [L.id] });
+    const made = await tool(page, "create_nodes", {
+      nodes: [{ type: "frame", name: "Hero", x: 0, y: 0, width: 400, height: 200, layout: { direction: "vertical" }, children: [{ type: "rectangle", name: "HeroPic", width: "fill", height: 200, imageUrl: L.src, imageScaleMode: "stretch", imageRotation: 90, imageFilters: { contrast: 0.1 } }] }],
+    });
+    const heroId = made.result.created[0].id;
+    await sleep(300);
+    // The page is 300 px wide, the design 400: the turned image still covers its box, and the red band
+    // (the image's top 20%, now the right 20%) is the right 60 px, not a 400 px layout squeezed in.
+    const pts = [[290, 100], [255, 100], [200, 100], [30, 100], [150, 190]];
+    const cls = (c) => (c[0] > 200 && c[2] < 60 ? "red" : c[2] > 150 && c[0] < 60 ? "blue" : fmt(c));
+    const html = await htmlPixels(page, heroId, assets, pts, 300, 200);
+    check("a turned, adjusted fill follows a narrower page: red on the right 20%", html.px.map(cls).join() === "red,red,blue,blue,blue", html.px.map(fmt).join(" "));
+    check("the exported fill layers use no pixel sizes", !/width: 400px; height: 200px[^"]*background-image/.test(html.code) && /100cqh/.test(html.code), "");
+    await run(page, { op: "delete", ids: [heroId] });
   }
 
   // ===== Adjustments =====

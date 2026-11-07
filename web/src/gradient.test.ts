@@ -31,6 +31,16 @@ describe("colorAt", () => {
   });
 });
 
+describe("colorAt with other colour spellings", () => {
+  it("reads rgb() and rgba() stops", () => {
+    const stops = [
+      { color: "rgb(255, 0, 0)", position: 0 },
+      { color: "rgba(0, 0, 255, 0.5)", position: 1 },
+    ];
+    expect(colorAt(stops, 0.5)).toBe("#800080BF");
+  });
+});
+
 describe("addStop", () => {
   it("puts the first new stop in the middle and colours it by interpolation", () => {
     const r = addStop(bw);

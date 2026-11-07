@@ -320,8 +320,8 @@ pub fn tile_cell(natural: Option<(f64, f64)>, factor: f64, w: f64, h: f64) -> (f
     1.0
   };
   match natural {
-    Some((nw, nh)) if nw > 0.0 && nh > 0.0 => (nw * f, nh * f),
-    _ => ((64.0 * f).min(w), (64.0 * f).min(h)),
+    Some((nw, nh)) if nw > 0.0 && nh > 0.0 => ((nw * f).min(16384.0), (nh * f).min(16384.0)),
+    _ => ((64.0 * f).min(w).min(16384.0), (64.0 * f).min(h).min(16384.0)),
   }
 }
 
@@ -1043,6 +1043,7 @@ mod tests {
     assert_eq!(quarter_turns(f64::NAN), 0);
     assert_eq!(tile_cell(Some((40.0, 20.0)), 2.0, 10.0, 10.0), (80.0, 40.0));
     assert_eq!(tile_cell(Some((40.0, 20.0)), 1000.0, 10.0, 10.0), (4000.0, 2000.0));
+    assert_eq!(tile_cell(Some((40000.0, 20.0)), 100.0, 10.0, 10.0), (16384.0, 2000.0));
     assert_eq!(tile_cell(None, 1.0, 400.0, 30.0), (64.0, 30.0));
   }
 
