@@ -1791,6 +1791,39 @@ impl Engine {
     id
   }
 
+  /// Boolean operations and flatten work on shapes; a frame, component or instance with layers
+  /// inside would be swallowed whole (its children vanish), so refuse it, also when it sits inside
+  /// a selected group (a group's outline is its children's). Groups themselves are fine.
+  fn refuse_filled_containers(&self, ids: &[NodeId], what: &str) -> Result<(), String> {
+    fn find<'a>(doc: &'a Document, id: &str) -> Option<&'a Node> {
+      let n = doc.get(id)?;
+      if n.kind == NodeType::Group {
+        return n.children.iter().find_map(|c| find(doc, c));
+      }
+      (n.kind.is_container() && !n.children.is_empty()).then_some(n)
+    }
+    for id in ids {
+      if let Some(n) = find(&self.doc, id) {
+        let (article, kind) = match n.kind {
+          NodeType::Instance => ("an", "instance"),
+          k => ("a", if k == NodeType::Frame { "frame" } else { k.label() }),
+        };
+        let hint = if n.kind == NodeType::Instance {
+          "Detach it first (arrange detach_instance), or select the shapes inside it"
+        } else {
+          "Select the shapes inside it, or ungroup it first"
+        };
+        return Err(format!(
+          "{} is {article} {} with layers inside; {what}. {}",
+          n.name,
+          kind.to_lowercase(),
+          hint
+        ));
+      }
+    }
+    Ok(())
+  }
+
   /// Replaces layers (paint order) with one vector placed where the top one was.
   fn replace_with_vector(&mut self, ids: &[NodeId], page_sps: Vec<SubPath>, name: &str) -> Result<NodeId, String> {
     let top = ids.last().ok_or("nothing selected")?;
@@ -2518,6 +2551,7 @@ impl Engine {
         if ids.len() < 2 {
           return Err("select at least two layers".into());
         }
+        self.refuse_filled_containers(&ids, "boolean operations combine shapes")?;
         let shapes: Vec<Vec<Vec<[f64; 2]>>> = ids
           .iter()
           .map(|id| crate::paths::to_contours(&crate::paths::page_outline(&self.doc, id)).0)
@@ -2540,6 +2574,7 @@ impl Engine {
       }
       Command::Flatten { ids } => {
         let ids = ops::paint_order(&self.doc, &ops::top_most(&self.doc, &ids));
+        self.refuse_filled_containers(&ids, "flatten combines shapes")?;
         let sps: Vec<SubPath> = ids.iter().flat_map(|id| crate::paths::page_outline(&self.doc, id)).collect();
         if sps.is_empty() {
           return Err("nothing to flatten (text can't be flattened yet)".into());

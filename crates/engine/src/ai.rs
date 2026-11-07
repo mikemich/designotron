@@ -96,8 +96,8 @@ fn spec_schema() -> Value {
       "name": { "type": "string" },
       "x": { "type": "number", "description": "Relative to the parent layer (for a layer inside a group too; the editor's X field measures from the frame instead)" },
       "y": { "type": "number", "description": "Relative to the parent layer, like x" },
-      "width": { "description": "number (px), or 'fill' / 'hug' inside auto layout. Percentages other than '100%' are not supported", "type": ["number", "string"] },
-      "height": { "description": "number (px), or 'fill' / 'hug'", "type": ["number", "string"] },
+      "width": { "description": "number (px), or 'fill' / 'hug' inside auto layout. 0 to 100000 px. Percentages other than '100%' are not supported", "type": ["number", "string"] },
+      "height": { "description": "number (px, 0 to 100000), or 'fill' / 'hug'", "type": ["number", "string"] },
       "fill": { "description": "Hex colour like '#7C5CFF' (rgb()/rgba() also work), a CSS linear-gradient(...), radial-gradient(...) or conic-gradient(from 90deg at 50% 50%, ...) string, a paint object (type solid, linearGradient, radialGradient, angularGradient, diamondGradient with stops [{color, position}] and optional handles {start, end, width} in 0..1 box units), or 'none'", "type": ["string", "object"] },
       "stroke": { "type": ["string", "object"], "description": "Hex colour, or the same paint forms as fill" },
       "strokeWidth": { "type": "number" },
@@ -127,10 +127,10 @@ fn spec_schema() -> Value {
         }
       },
       "absolute": { "type": "boolean", "description": "Ignore parent auto layout" },
-      "minWidth": { "type": "number", "description": "Minimum width for hug/fill in auto layout (0 clears)" },
-      "maxWidth": { "type": "number", "description": "Maximum width; auto-width text wraps at it (0 clears)" },
-      "minHeight": { "type": "number" },
-      "maxHeight": { "type": "number" },
+      "minWidth": { "type": "number", "description": "Minimum width for hug/fill in auto layout (0 clears; 0 to 100000, must not exceed maxWidth)" },
+      "maxWidth": { "type": "number", "description": "Maximum width; auto-width text wraps at it (0 clears; 0 to 100000)" },
+      "minHeight": { "type": "number", "description": "0 clears; 0 to 100000, must not exceed maxHeight" },
+      "maxHeight": { "type": "number", "description": "0 clears; 0 to 100000" },
       "maxLines": { "type": "number", "description": "Text: show at most this many lines, ending in an ellipsis when cut" },
       "truncate": { "type": "boolean", "description": "Text: cut what doesn't fit with an ellipsis" },
       "paragraphSpacing": { "type": "number", "description": "Text: extra space between paragraphs (lines split by newline)" },
@@ -237,12 +237,12 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "get_nodes",
-      "description": "Full properties of specific layers plus their subtree outline.",
+      "description": "Full properties of specific layers plus their subtree outline. `ids` is required (a list of layer ids; use find_nodes to look them up). Text longer than 2000 characters is cut and marked with charactersTruncated and charactersLength.",
       "input_schema": { "type": "object", "properties": { "ids": { "type": "array", "items": { "type": "string" } }, "depth": { "type": "integer" } }, "required": ["ids"] }
     },
     {
       "name": "find_nodes",
-      "description": "Find layers without reading the whole tree: by name (case-insensitive substring, or /regex/), type, text content, instances of a componentId, or a linked style name. Filters combine (all must match). Returns {total, nodes:[{id,type,name,parentId,page,w,h,text?}]}.",
+      "description": "Find layers without reading the whole tree: by name (case-insensitive substring, or /regex/), type, text content, instances of a componentId, or a linked style name. Filters combine (all must match). Returns {total, nodes:[{id,type,name,parentId,page,w,h,text?}]}; limit 0 returns only the total.",
       "input_schema": { "type": "object", "properties": {
         "name": { "type": "string", "description": "Substring of the layer name, or /regex/ (e.g. /^Button/)" },
         "type": { "type": "string", "description": "frame, rectangle, ellipse, text, line, polygon, star, vector, group, component, component_set, instance, image (a rectangle with an image fill)" },
@@ -261,12 +261,12 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "update_nodes",
-      "description": "Change properties of existing layers. Each update is {id, ...any create_nodes property except children}. Use 'patch' for raw model fields.",
+      "description": "Change properties of existing layers. Each update is {id, ...any create_nodes property except children}. Use 'patch' for raw model fields. Sizes are 0 to 100000 px and min must not exceed max; the whole call is refused if one update is invalid. Setting new `text` on a mixed-style text layer gives all of it the first character's style (like typing over a selection in Figma); pass `spans` to style parts of it. `svg` is only read by create_nodes.",
       "input_schema": { "type": "object", "properties": { "updates": { "type": "array", "items": update_item } }, "required": ["updates"] }
     },
     {
       "name": "delete_nodes",
-      "description": "Delete layers.",
+      "description": "Delete layers. Deleting a main component leaves its instances in place; the result reports how many as instancesDetached.",
       "input_schema": { "type": "object", "properties": { "ids": { "type": "array", "items": { "type": "string" } } }, "required": ["ids"] }
     },
     {
@@ -276,12 +276,12 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "arrange",
-      "description": "Structural actions on layers: group, ungroup, frame, duplicate, create_component (turns each selected layer into its own main component, so several ids make several components; to make ONE component from several layers, `frame` them first, then create_component the frame; use it for anything that repeats, then place instances), combine_variants (merges components that are states of one control into one component set; name them 'State=Default', 'State=Error' or 'Input/Default', 'Input/Error' first, then rename the resulting set), detach_instance, add_auto_layout, remove_auto_layout, bring_to_front, send_to_back, align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal, distribute_vertical, union, subtract (bottom layer minus the rest), intersect, exclude, flatten, outline_stroke, mask (bottom layer masks the others).",
+      "description": "Structural actions on layers: group, ungroup, frame, duplicate, create_component (turns each selected layer into its own main component, so several ids make several components; to make ONE component from several layers, `frame` them first, then create_component the frame; use it for anything that repeats, then place instances), combine_variants (merges components that are states of one control into one component set; name them 'State=Default', 'State=Error' or 'Input/Default', 'Input/Error' first, then rename the resulting set), detach_instance, add_auto_layout, remove_auto_layout, bring_to_front, send_to_back, align_left, align_center, align_right, align_top, align_middle, align_bottom, distribute_horizontal, distribute_vertical, union, subtract (bottom layer minus the rest), intersect, exclude, flatten (union, subtract, intersect, exclude and flatten combine shapes: a frame, component or instance with layers inside is refused; select the shapes inside it, or ungroup it first), outline_stroke, mask (bottom layer masks the others).",
       "input_schema": { "type": "object", "properties": { "action": { "type": "string", "enum": ARRANGE_ACTIONS }, "ids": { "type": "array", "items": { "type": "string" } } }, "required": ["action", "ids"] }
     },
     {
       "name": "create_instance",
-      "description": "Place an instance of a main component.",
+      "description": "Place an instance of a main component. parentId must be an existing layer that can hold children (a frame, group, component or instance); it is refused otherwise, and an instance can't be placed inside its own component.",
       "input_schema": { "type": "object", "properties": { "componentId": { "type": "string" }, "parentId": { "type": "string" }, "x": { "type": "number" }, "y": { "type": "number" } }, "required": ["componentId"] }
     },
     {
@@ -309,7 +309,7 @@ pub fn tool_defs() -> Value {
         "direction": { "type": "string", "enum": ["left", "right", "up", "down"], "description": "For move_in, move_out and push (default left)" },
         "easing": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out", "ease_in_back", "ease_out_back", "ease_in_out_back"], "description": "Default ease_out" },
         "duration": { "type": "number", "description": "Transition milliseconds (default 300)" },
-        "clear": { "type": "boolean", "description": "Remove existing interactions first" },
+        "clear": { "type": "boolean", "description": "Remove existing interactions first. With nothing else given, only clears them and returns {cleared: n}" },
         "delay": { "type": "number", "description": "Milliseconds before a delay trigger fires (default 800)" }
       }, "required": ["nodeId"] }
     },
@@ -335,23 +335,31 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "define_variables",
-      "description": "Create or update a variable collection with modes and colour/number/string/boolean variables. For a theme or dark mode, use modes [\"Light\", \"Dark\"] and give each colour `values` {Light, Dark}. Bind layer properties with bind: {fill: 'Theme/Background', cornerRadius: 'Radius/md'} in create_nodes/update_nodes (bindable: fill, stroke, cornerRadius, gap, counterGap, padding, paddingTop/Right/Bottom/Left, opacity, width, height, strokeWeight, fontSize, fontFamily, fontWeight, lineHeight, letterSpacing, paragraphSpacing, characters, visible); switch a frame (and its children) to a mode with variableModes: {Theme: 'Dark'}, e.g. on a duplicate of a screen, instead of recolouring it. Bound variables become CSS variables in exported code.",
+      "description": "Create or update a variable collection with modes and colour/number/string/boolean variables. For a theme or dark mode, use modes [\"Light\", \"Dark\"] and give each colour `values` {Light, Dark}. Bind layer properties with bind: {fill: 'Theme/Background', cornerRadius: 'Radius/md'} in create_nodes/update_nodes (bindable: fill, stroke, cornerRadius, gap, counterGap, padding, paddingTop/Right/Bottom/Left, opacity, width, height, strokeWeight, fontSize, fontFamily, fontWeight, lineHeight, letterSpacing, paragraphSpacing, characters, visible); switch a frame (and its children) to a mode with variableModes: {Theme: 'Dark'}, e.g. on a duplicate of a screen, instead of recolouring it. Bound variables become CSS variables in exported code. A name may appear once per call. An existing variable is updated in place (a missing `type` keeps its type; a different type is refused, delete it first). To rename or delete, pass `rename: [{from, to}]` / `delete: [names]` for variables, `renameModes` / `deleteModes` for modes, `renameCollection: \"New\"` or `deleteCollection: true` for the collection itself: they run before `variables`, as one undo step, renames keep every binding and alias (they follow the id), and deleting a used variable unbinds its layers (they keep their current value) and the result says how many (`unbound`). A call that renames or deletes returns an object {renamed, deleted, unbound, note?, collections} instead of the plain list of collections. Deleting a mode drops its values and unpins frames set to it.",
       "input_schema": { "type": "object", "properties": {
         "collection": { "type": "string" },
+        "rename": { "type": "array", "description": "Rename variables of this collection: [{from, to}] (names or ids)", "items": { "type": "object", "properties": { "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["from", "to"] } },
+        "delete": { "type": "array", "items": { "type": "string" }, "description": "Names (or ids) of variables of this collection to delete" },
+        "renameModes": { "type": "array", "description": "Rename modes: [{from, to}]", "items": { "type": "object", "properties": { "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["from", "to"] } },
+        "deleteModes": { "type": "array", "items": { "type": "string" }, "description": "Mode names to delete (their values go with them; a collection keeps at least one mode)" },
+        "renameCollection": { "type": "string", "description": "New name for this collection" },
+        "deleteCollection": { "type": "boolean", "description": "Delete this collection and its variables (not combinable with `variables`)" },
         "modes": { "type": "array", "items": { "type": "string" }, "description": "Mode names; the first is the default. Default: [\"Default\"]" },
         "variables": { "type": "array", "items": { "type": "object", "properties": {
           "name": { "type": "string" },
-          "type": { "type": "string", "enum": ["color", "number", "string", "boolean"] },
+          "type": { "type": "string", "enum": ["color", "number", "string", "boolean"], "description": "Default color for a new variable; an existing variable keeps its type when omitted" },
           "value": { "description": "Same value in every mode; {\"alias\": \"Collection/name\"} makes it an alias of another variable of the same type" },
           "values": { "type": "object", "description": "Mode name → value (or an alias object)" },
           "scopes": { "type": "array", "items": { "type": "string", "enum": ["fill", "stroke", "cornerRadius", "size", "gap", "opacity", "strokeWidth", "textContent", "fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "paragraphSpacing"] }, "description": "Limit where the variable is offered in the editor (default: everywhere its type fits). Binding it elsewhere only warns." }
-        }, "required": ["name", "type"] } }
-      }, "required": ["collection", "variables"] }
+        }, "required": ["name"] } }
+      }, "required": ["collection"] }
     },
     {
       "name": "define_styles",
-      "description": "Create shared colour, text, effect and grid styles (design tokens), e.g. a type scale like Heading/H1, Body/Regular, or Shadow/Card. Link layers to them by name with textStyle / fillStyle / strokeStyle (colour styles only), effectStyle and gridStyle in create_nodes/update_nodes, or in bulk with fix_issues (kinds: [\"unlinkedStyle\"]). A name with slashes shows as a folder in the Assets panel. Variables are bound with bind, not styles.",
+      "description": "Create shared colour, text, effect and grid styles (design tokens), e.g. a type scale like Heading/H1, Body/Regular, or Shadow/Card. Link layers to them by name with textStyle / fillStyle / strokeStyle (colour styles only), effectStyle and gridStyle in create_nodes/update_nodes, or in bulk with fix_issues (kinds: [\"unlinkedStyle\"]). A name with slashes shows as a folder in the Assets panel. Variables are bound with bind, not styles. A style name may appear once per list; an existing name is updated in place and the layers using it follow. To rename or delete, pass `rename: [{from, to}]` / `delete: [names]` (colour, text, effect and grid styles; a name used by two kinds is refused, pass the id instead): renames keep every layer link, deleting unlinks the layers (they keep their current values) and the result counts them.",
       "input_schema": { "type": "object", "properties": {
+        "rename": { "type": "array", "description": "Rename styles: [{from, to}] (names or ids)", "items": { "type": "object", "properties": { "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["from", "to"] } },
+        "delete": { "type": "array", "items": { "type": "string" }, "description": "Names (or ids) of styles to delete" },
         "colors": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "color": { "type": "string", "description": "Hex colour; anything unreadable is an error" } }, "required": ["name", "color"] } },
         "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": ["number", "string"], "description": "px, or \"10%\" / \"0.05em\" of fontSize" } }, "required": ["name", "fontSize"] } },
         "effects": { "type": "array", "description": "Effect styles: {name, description, shadow: {x, y, blur, spread, color, inset} or an array of them, blur (layer blur px), backgroundBlur (px)}", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "shadow": { "type": ["object", "array", "string"] }, "blur": { "type": "number" }, "backgroundBlur": { "type": "number" } }, "required": ["name"] } },
@@ -360,7 +368,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "pages",
-      "description": "Manage pages: add, rename, delete or switch.",
+      "description": "Manage pages: add, rename, delete (returns {deleted: id}) or switch.",
       "input_schema": { "type": "object", "properties": { "action": { "type": "string", "enum": ["add", "rename", "delete", "switch"] }, "id": { "type": "string" }, "name": { "type": "string" } }, "required": ["action"] }
     },
     {
@@ -405,11 +413,107 @@ pub fn tool_defs() -> Value {
   defs
 }
 
+/// `[{from, to}]` pairs of a rename list, validated; `key` names the field in errors.
+fn rename_pairs(input: &Value, key: &str) -> Result<Vec<(String, String)>, String> {
+  let Some(v) = input.get(key).filter(|v| !v.is_null()) else {
+    return Ok(vec![]);
+  };
+  let list = v
+    .as_array()
+    .ok_or_else(|| format!("{key} must be a list of {{from, to}} objects"))?;
+  let mut out = Vec::new();
+  let mut bad = Vec::new();
+  for (i, item) in list.iter().enumerate() {
+    let from = item.get("from").and_then(|x| x.as_str()).filter(|x| !x.trim().is_empty());
+    let to = item.get("to").and_then(|x| x.as_str()).filter(|x| !x.trim().is_empty());
+    match (from, to) {
+      (Some(f), Some(t)) => out.push((f.to_string(), t.trim().to_string())),
+      _ => bad.push(format!("{key}[{i}] needs text fields `from` and `to`")),
+    }
+  }
+  if bad.is_empty() {
+    Ok(out)
+  } else {
+    Err(bad.join("; "))
+  }
+}
+
+/// A list of names (or ids) such as `delete: ["Old"]`.
+fn name_list(input: &Value, key: &str) -> Result<Vec<String>, String> {
+  let Some(v) = input.get(key).filter(|v| !v.is_null()) else {
+    return Ok(vec![]);
+  };
+  v.as_array()
+    .filter(|a| a.iter().all(|x| x.as_str().is_some()))
+    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+    .ok_or_else(|| format!("{key} must be a list of names"))
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+  format!("{n} {}", if n == 1 { one } else { many })
+}
+
 fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
   use crate::variables::{Collection, VarKind, VarMode, Variable};
   let name = input.get("collection").and_then(|v| v.as_str()).ok_or("collection is required")?;
+  let renames = rename_pairs(input, "rename")?;
+  let deletes = name_list(input, "delete")?;
+  let rename_modes = rename_pairs(input, "renameModes")?;
+  let delete_modes = name_list(input, "deleteModes")?;
+  let rename_coll = input
+    .get("renameCollection")
+    .filter(|v| !v.is_null())
+    .map(|v| {
+      v.as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .ok_or("renameCollection must be the new name (text)")
+    })
+    .transpose()?;
+  let delete_coll = match input.get("deleteCollection").filter(|v| !v.is_null()) {
+    None => false,
+    Some(Value::Bool(b)) => *b,
+    Some(_) => return Err("deleteCollection must be true or false".into()),
+  };
+  let editing = !renames.is_empty()
+    || !deletes.is_empty()
+    || !rename_modes.is_empty()
+    || !delete_modes.is_empty()
+    || rename_coll.is_some()
+    || delete_coll;
   let mut all: Vec<Collection> = crate::variables::plain(&e.doc.variables);
-  let idx = match all.iter().position(|c| c.name == name || c.id == name) {
+  let existing = all.iter().position(|c| c.name == name || c.id == name);
+  if existing.is_none() && editing {
+    let have: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
+    return Err(format!(
+      "no collection '{name}' to rename or delete from; collections: {}",
+      if have.is_empty() { "none yet".to_string() } else { have.join(", ") }
+    ));
+  }
+  // Variables that disappear (and where they were used) are counted against the old document.
+  let mut gone: Vec<String> = Vec::new();
+  let mut summary_note = serde_json::Map::new();
+  if delete_coll {
+    if !renames.is_empty() || !deletes.is_empty() || !rename_modes.is_empty() || !delete_modes.is_empty() || rename_coll.is_some() {
+      return Err(
+        "deleteCollection can't be combined with rename, delete, renameModes, deleteModes or renameCollection; it removes the whole collection".into(),
+      );
+    }
+    if input.get("variables").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) {
+      return Err(
+        "deleteCollection can't be combined with variables; delete the collection in one call, define variables in another".into(),
+      );
+    }
+    let i = existing.unwrap_or(0);
+    gone.extend(all[i].variables.iter().map(|v| v.id.clone()));
+    let c = all.remove(i);
+    summary_note.insert("deleted".into(), json!({ "collection": c.name, "variables": c.variables.len() }));
+    let (layers, aliases) = deletion_impact(e, &all, &gone);
+    e.dispatch_inner(Command::SetVariables { collections: all })?;
+    return Ok(editing_result(e, summary_note, layers, aliases));
+  }
+  let idx = match existing {
     Some(i) => i,
     None => {
       all.push(Collection {
@@ -420,6 +524,73 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
       all.len() - 1
     }
   };
+  // Deletions, then renames (so rename B to C works beside delete C); the variables of the same
+  // call are applied on top.
+  let mut renamed: Vec<Value> = Vec::new();
+  let mut deleted_vars: Vec<String> = Vec::new();
+  let mut deleted_modes: Vec<String> = Vec::new();
+  let mut problems: Vec<String> = Vec::new();
+  for m in &delete_modes {
+    match all[idx].modes.iter().position(|x| &x.name == m || &x.id == m) {
+      Some(_) if all[idx].modes.len() == 1 => problems.push(format!(
+        "deleteModes: {m} is the only mode of {}; a collection needs one",
+        all[idx].name
+      )),
+      Some(i) => {
+        all[idx].modes.remove(i);
+        deleted_modes.push(m.clone());
+      }
+      None => problems.push(format!("deleteModes: no mode '{m}' in {}", all[idx].name)),
+    }
+  }
+  for (from, to) in &rename_modes {
+    match all[idx].modes.iter().position(|m| &m.name == from || &m.id == from) {
+      Some(i) => {
+        if all[idx].modes.iter().enumerate().any(|(j, m)| j != i && m.name == *to) {
+          problems.push(format!("renameModes: {to} already exists in {}", all[idx].name));
+        } else {
+          all[idx].modes[i].name = to.clone();
+          renamed.push(json!({ "mode": from, "to": to }));
+        }
+      }
+      None => problems.push(format!("renameModes: no mode '{from}' in {}", all[idx].name)),
+    }
+  }
+  for d in &deletes {
+    let c = &mut all[idx];
+    match c.variables.iter().position(|v| &v.name == d || &v.id == d) {
+      Some(i) => {
+        gone.push(c.variables[i].id.clone());
+        deleted_vars.push(c.variables.remove(i).name.clone());
+      }
+      None => problems.push(format!("delete: no variable '{d}' in {}", c.name)),
+    }
+  }
+  for (from, to) in &renames {
+    let c = &mut all[idx];
+    match c.variables.iter().position(|v| &v.name == from || &v.id == from) {
+      Some(i) => {
+        if c.variables.iter().enumerate().any(|(j, v)| j != i && v.name == *to) {
+          problems.push(format!("rename: {to} already exists in {}", c.name));
+        } else {
+          Arc::make_mut(&mut c.variables[i]).name = to.clone();
+          renamed.push(json!({ "variable": from, "to": to }));
+        }
+      }
+      None => problems.push(format!("rename: no variable '{from}' in {}", c.name)),
+    }
+  }
+  if let Some(new) = &rename_coll {
+    if all.iter().enumerate().any(|(j, c)| j != idx && c.name == *new) {
+      problems.push(format!("renameCollection: a collection named {new} already exists"));
+    } else {
+      renamed.push(json!({ "collection": all[idx].name, "to": new }));
+      all[idx].name = new.clone();
+    }
+  }
+  if !problems.is_empty() {
+    return Err(problems.join("; "));
+  }
   let mut mode_names: Vec<String> = input
     .get("modes")
     .and_then(|v| v.as_array())
@@ -434,14 +605,60 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
       all[idx].modes.push(VarMode { id, name: m });
     }
   }
+  // One name may appear once per call (the later entry would silently overwrite the earlier one).
+  let specs: Vec<Value> = input.get("variables").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+  let mut dups = Vec::new();
+  for (i, spec) in specs.iter().enumerate() {
+    if let Some(n) = spec.get("name").and_then(|v| v.as_str()) {
+      if let Some(first) = specs[..i].iter().position(|o| o.get("name").and_then(|v| v.as_str()) == Some(n)) {
+        dups.push(format!(
+          "variables[{i}]: {n} is already in this call (variables[{first}]); give each variable one entry"
+        ));
+      }
+    }
+  }
+  if !dups.is_empty() {
+    return Err(dups.join("; "));
+  }
+  let touched: Vec<String> = specs
+    .iter()
+    .filter_map(|sp| sp.get("name").and_then(|v| v.as_str()).map(String::from))
+    .collect();
   let modes = all[idx].modes.clone();
-  for spec in input.get("variables").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+  for spec in specs {
     let vname = spec
       .get("name")
       .and_then(|v| v.as_str())
       .ok_or("each variable needs a name")?
       .to_string();
-    let kind: VarKind = serde_json::from_value(spec.get("type").cloned().unwrap_or(json!("color"))).map_err(|e| format!("{vname}: {e}"))?;
+    // An existing variable keeps its type when none is given; a new one defaults to color.
+    let old_kind = all[idx].variables.iter().find(|v| v.name == vname).map(|v| v.kind);
+    let given = spec.get("type").filter(|v| !v.is_null());
+    let inferred = || {
+      let v = spec
+        .get("value")
+        .or_else(|| spec.get("values").and_then(|m| m.as_object()).and_then(|m| m.values().next()))?;
+      match v {
+        Value::Number(_) => Some(VarKind::Number),
+        Value::Bool(_) => Some(VarKind::Boolean),
+        // A colour string stays a colour; any other text is a string.
+        Value::String(t) if crate::color::parse_strict(t).is_none() => Some(VarKind::String),
+        _ => None,
+      }
+    };
+    let kind: VarKind = match (given, old_kind) {
+      (None, Some(k)) => k,
+      (None, None) if inferred().is_some() => inferred().unwrap_or(VarKind::Color),
+      (g, _) => serde_json::from_value(g.cloned().unwrap_or(json!("color")))
+        .map_err(|_| format!("{vname}: type must be color, number, string or boolean"))?,
+    };
+    if let Some(old) = old_kind.filter(|k| *k != kind) {
+      return Err(format!(
+        "{vname} is a {} variable and can't become {}; delete it first (define_variables with delete: [\"{vname}\"]) or use another name",
+        kind_word(old),
+        kind_word(kind)
+      ));
+    }
     let coll = &mut all[idx];
     let pos = match coll.variables.iter().position(|v| v.name == vname) {
       Some(p) => p,
@@ -492,34 +709,96 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
   }
   // Aliases are written by name ("Collection/name"); store the variable id.
   let lookup = all.clone();
-  for v in all.iter_mut().flat_map(|c| c.variables.iter_mut()) {
-    if !v.values.values().any(|x| x.get("alias").is_some()) {
-      continue;
-    }
-    let v = Arc::make_mut(v);
-    for val in v.values.values_mut() {
-      let Some(target) = val.get("alias").and_then(|a| a.as_str()).map(String::from) else {
+  for (ci, c) in all.iter_mut().enumerate() {
+    for v in c.variables.iter_mut() {
+      // Only variables this call wrote are resolved: stored aliases (ids) of the others stay as
+      // they are, even when their target was deleted.
+      if ci != idx || !touched.contains(&v.name) || !v.values.values().any(|x| x.get("alias").is_some()) {
         continue;
-      };
-      let found = lookup.iter().flat_map(|c| c.variables.iter().map(move |x| (c, x))).find(|(c, x)| {
-        x.id == target || format!("{}/{}", c.name, x.name) == target || (x.name == target && !c.variables.iter().any(|y| y.id == target))
-      });
-      match found {
-        Some((_, x)) if x.kind == v.kind => *val = json!({ "alias": x.id }),
-        Some((_, x)) => {
-          return Err(format!(
-            "{}: alias '{target}' is a {} variable, expected {}",
-            v.name,
-            kind_word(x.kind),
-            kind_word(v.kind)
-          ))
+      }
+      let v = Arc::make_mut(v);
+      for val in v.values.values_mut() {
+        let Some(target) = val.get("alias").and_then(|a| a.as_str()).map(String::from) else {
+          continue;
+        };
+        let found = lookup.iter().flat_map(|c| c.variables.iter().map(move |x| (c, x))).find(|(c, x)| {
+          x.id == target || format!("{}/{}", c.name, x.name) == target || (x.name == target && !c.variables.iter().any(|y| y.id == target))
+        });
+        match found {
+          Some((_, x)) if x.kind == v.kind => *val = json!({ "alias": x.id }),
+          Some((_, x)) => {
+            return Err(format!(
+              "{}: alias '{target}' is a {} variable, expected {}",
+              v.name,
+              kind_word(x.kind),
+              kind_word(v.kind)
+            ))
+          }
+          None => return Err(format!("{}: no variable '{target}' to alias", v.name)),
         }
-        None => return Err(format!("{}: no variable '{target}' to alias", v.name)),
       }
     }
   }
+  if !editing {
+    e.dispatch_inner(Command::SetVariables { collections: all })?;
+    return Ok(crate::variables::summary(&e.doc));
+  }
+  let (layers, aliases) = deletion_impact(e, &all, &gone);
+  if !renamed.is_empty() {
+    summary_note.insert("renamed".into(), json!(renamed));
+  }
+  let mut del = serde_json::Map::new();
+  if !deleted_vars.is_empty() {
+    del.insert("variables".into(), json!(deleted_vars));
+  }
+  if !deleted_modes.is_empty() {
+    del.insert("modes".into(), json!(deleted_modes));
+  }
+  if !del.is_empty() {
+    summary_note.insert("deleted".into(), Value::Object(del));
+  }
   e.dispatch_inner(Command::SetVariables { collections: all })?;
-  Ok(crate::variables::summary(&e.doc))
+  Ok(editing_result(e, summary_note, layers, aliases))
+}
+
+/// Layers bound to deleted variables, and aliases of them in variables that stay.
+fn deletion_impact(e: &Engine, remaining: &[crate::variables::Collection], gone: &[String]) -> (usize, usize) {
+  if gone.is_empty() {
+    return (0, 0);
+  }
+  let layers = e
+    .doc
+    .nodes
+    .values()
+    .filter(|n| n.bindings.values().any(|v| gone.contains(v)))
+    .count();
+  let aliases = remaining
+    .iter()
+    .flat_map(|c| c.variables.iter())
+    .flat_map(|v| v.values.values())
+    .filter(|x| x.get("alias").and_then(|a| a.as_str()).is_some_and(|a| gone.iter().any(|g| g == a)))
+    .count();
+  (layers, aliases)
+}
+
+/// The result of a define_variables call that renamed or deleted: what changed, what it left behind.
+fn editing_result(e: &Engine, mut note: serde_json::Map<String, Value>, layers: usize, aliases: usize) -> Value {
+  note.insert("unbound".into(), json!(layers));
+  if layers > 0 || aliases > 0 {
+    let mut parts = Vec::new();
+    if layers > 0 {
+      parts.push(format!(
+        "{} lost the binding and keep their current value",
+        plural(layers, "layer", "layers")
+      ));
+    }
+    if aliases > 0 {
+      parts.push(format!("{} now point at a missing variable", plural(aliases, "alias", "aliases")));
+    }
+    note.insert("note".into(), json!(parts.join("; ")));
+  }
+  note.insert("collections".into(), crate::variables::summary(&e.doc));
+  Value::Object(note)
 }
 
 fn kind_word(k: crate::variables::VarKind) -> String {
@@ -580,6 +859,9 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
     "get_document" => Ok(summary(e, input.get("depth").and_then(|v| v.as_u64()).unwrap_or(3) as usize)),
     "get_nodes" => {
       let ids = str_list(input.get("ids"));
+      if ids.is_empty() {
+        return Err("ids is required (a list of layer ids; find them with find_nodes or get_document)".into());
+      }
       let depth = input.get("depth").and_then(|v| v.as_u64()).unwrap_or(2) as usize;
       let out: Vec<Value> = ids
         .iter()
@@ -619,8 +901,30 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
       if found.is_empty() {
         return Err(not_found(&ids, "delete"));
       }
+      // Main components anywhere in the deleted subtrees; their instances stay behind. Counted
+      // like the editor does: copies nested inside other instances follow their outer instance.
+      let mains: Vec<NodeId> = found
+        .iter()
+        .flat_map(|id| e.doc.subtree(id))
+        .filter(|id| e.doc.get(id).is_some_and(|n| n.kind == NodeType::Component))
+        .collect();
       ops::delete(&mut e.doc, &found);
+      let detached = e
+        .doc
+        .nodes
+        .values()
+        .filter(|n| n.instance.as_ref().is_some_and(|i| mains.contains(&i.component_id)))
+        .filter(|n| {
+          !e.doc
+            .ancestors(&n.id)
+            .iter()
+            .any(|a| e.doc.get(a).is_some_and(|a| a.kind == NodeType::Instance))
+        })
+        .count();
       let mut r = json!({ "deleted": found });
+      if detached > 0 {
+        r["instancesDetached"] = json!(detached);
+      }
       if !missing.is_empty() {
         r["notFound"] = json!(missing);
       }
@@ -636,9 +940,47 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         .to_string();
       let parent = input.get("parentId").and_then(|v| v.as_str()).map(String::from);
       let (x, y) = (num(input.get("x")).unwrap_or(0.0), num(input.get("y")).unwrap_or(0.0));
-      let page = e.page.clone();
-      let id = crate::components::create_instance(&mut e.doc, &comp, parent.as_deref(), &page, x, y, &mut e.gen)
-        .ok_or("componentId is not a component")?;
+      match e.doc.get(&comp) {
+        Some(c) if c.kind == NodeType::Component => {}
+        Some(c) if c.kind == NodeType::ComponentSet => {
+          let variants: Vec<String> = c
+            .children
+            .iter()
+            .filter_map(|v| e.doc.get(v))
+            .map(|v| format!("{} ({})", v.id, v.name))
+            .collect();
+          return Err(format!(
+            "componentId {comp} is a component set; place one of its variants: {}",
+            variants.join(", ")
+          ));
+        }
+        Some(c) => {
+          return Err(format!(
+            "componentId {comp} is a {}, not a main component; pass the id of a component (find them with find_nodes type component)",
+            c.kind.label()
+          ))
+        }
+        None => return Err(format!("no component {comp}; find components with find_nodes type component")),
+      }
+      let mut page = e.page.clone();
+      if let Some(p) = &parent {
+        check_parent(e, p)?;
+        page = e.doc.get(p).map(|n| n.page.clone()).unwrap_or(page);
+      }
+      let id = crate::components::create_instance(&mut e.doc, &comp, parent.as_deref(), &page, x, y, &mut e.gen).ok_or_else(|| {
+        let name = |id: &str| e.doc.get(id).map(|c| c.name.clone()).unwrap_or_default();
+        let host = parent.as_deref().and_then(|p| crate::components::enclosing_component(&e.doc, p));
+        match host {
+          Some(h) if h != comp => format!(
+            "{} is used inside {}, so {} can't go inside {} (it would contain itself)",
+            name(&h),
+            name(&comp),
+            name(&comp),
+            name(&h)
+          ),
+          _ => format!("can't place an instance of {} inside {} itself", name(&comp), name(&comp)),
+        }
+      })?;
       Ok(json!({ "id": id }))
     }
     "set_component_props" => {
@@ -681,9 +1023,11 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
           id: id.ok_or("id required")?,
           name: name.ok_or("name required")?,
         }),
-        "delete" => e.dispatch_inner(Command::DeletePage {
-          id: id.ok_or("id required")?,
-        }),
+        "delete" => {
+          let id = id.ok_or("id required")?;
+          e.dispatch_inner(Command::DeletePage { id: id.clone() })?;
+          Ok(json!({ "deleted": id }))
+        }
         "switch" => {
           let id = id.ok_or("id required")?;
           if e.doc.page(&id).is_none() {
@@ -923,6 +1267,9 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
     if spec.get("children").is_some() {
       cx.warn("children can't be changed with update_nodes; use create_nodes with parentId, or move_nodes");
     }
+    if u.get("svg").is_some() {
+      cx.warn("svg is only read by create_nodes (type svg); ignored");
+    }
     if let Some(t) = u.get("type").and_then(|v| v.as_str()) {
       if parse_kind(&cx, &t.to_lowercase()).ok() != Some(before.kind) {
         cx.warn(format!(
@@ -1134,6 +1481,16 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
   let id = input.get("nodeId").and_then(|v| v.as_str()).ok_or("nodeId required")?;
   if e.doc.get(id).is_none() {
     return Err(format!("no layer {id}"));
+  }
+  // `clear: true` alone removes the interactions without adding one.
+  let wants_new = ["action", "destinationId", "url", "trigger", "overlay"]
+    .iter()
+    .any(|k| input.get(*k).is_some_and(|v| !v.is_null()));
+  if input.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) && !wants_new {
+    let n = e.doc.get_mut(id).ok_or("no such node")?;
+    let cleared = n.interactions.len();
+    n.interactions.clear();
+    return Ok(json!({ "ok": true, "cleared": cleared }));
   }
   // A url alone means "open this link".
   let default_action = if input.get("action").is_none_or(|a| a.is_null()) && input.get("url").is_some_and(|u| u.is_string()) {
@@ -1352,10 +1709,167 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
   Ok(r)
 }
 
+/// The style a rename/delete entry names: by name or id, across colour, text, effect and grid
+/// styles. Returns (id, kind word). A name shared by two kinds is refused with the ids to use.
+fn find_style(e: &Engine, key: &str, what: &str) -> Result<(String, &'static str), String> {
+  let st = &e.doc.styles;
+  let mut hits: Vec<(String, &'static str)> = Vec::new();
+  for (kind, list) in [
+    ("color", st.colors.iter().map(|s| (&s.id, &s.name)).collect::<Vec<_>>()),
+    ("text", st.texts.iter().map(|s| (&s.id, &s.name)).collect()),
+    ("effect", st.effects.iter().map(|s| (&s.id, &s.name)).collect()),
+    ("grid", st.grids.iter().map(|s| (&s.id, &s.name)).collect()),
+  ] {
+    hits.extend(
+      list
+        .into_iter()
+        .filter(|(id, _)| id.as_str() == key)
+        .map(|(id, _)| (id.clone(), kind)),
+    );
+  }
+  if hits.is_empty() {
+    for (kind, list) in [
+      ("color", st.colors.iter().map(|s| (&s.id, &s.name)).collect::<Vec<_>>()),
+      ("text", st.texts.iter().map(|s| (&s.id, &s.name)).collect()),
+      ("effect", st.effects.iter().map(|s| (&s.id, &s.name)).collect()),
+      ("grid", st.grids.iter().map(|s| (&s.id, &s.name)).collect()),
+    ] {
+      hits.extend(
+        list
+          .into_iter()
+          .filter(|(_, n)| n.as_str() == key)
+          .map(|(id, _)| (id.clone(), kind)),
+      );
+    }
+  }
+  match hits.len() {
+    0 => Err(format!("{what}: no style named '{key}' (find ids and names with get_document)")),
+    1 => Ok(hits.remove(0)),
+    _ => Err(format!(
+      "{what}: '{key}' names several styles ({}); pass one id instead of the name",
+      hits
+        .iter()
+        .map(|(id, k)| format!("{id} is a {k} style"))
+        .collect::<Vec<_>>()
+        .join(", ")
+    )),
+  }
+}
+
+fn style_name_of(e: &Engine, id: &str) -> String {
+  let st = &e.doc.styles;
+  st.colors
+    .iter()
+    .map(|s| (&s.id, &s.name))
+    .chain(st.texts.iter().map(|s| (&s.id, &s.name)))
+    .chain(st.effects.iter().map(|s| (&s.id, &s.name)))
+    .chain(st.grids.iter().map(|s| (&s.id, &s.name)))
+    .find(|(i, _)| i.as_str() == id)
+    .map(|(_, n)| n.clone())
+    .unwrap_or_default()
+}
+
 /// Creates colour and text styles; a name that already exists is updated in place (its layers follow).
 fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
   let mut cx = Ctx::new();
   let (mut created, mut updated) = (Vec::new(), Vec::new());
+  // The same name twice in one list would silently overwrite the first entry.
+  let mut dups = Vec::new();
+  for key in ["colors", "texts", "effects", "grids"] {
+    let list = input.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    for (i, item) in list.iter().enumerate() {
+      let Some(n) = item.get("name").and_then(|v| v.as_str()).map(str::trim) else {
+        continue;
+      };
+      let first = list[..i]
+        .iter()
+        .position(|o| o.get("name").and_then(|v| v.as_str()).map(str::trim) == Some(n));
+      if let Some(first) = first {
+        dups.push(format!(
+          "{key}[{i}]: {n} is already in this call ({key}[{first}]); give each style one entry"
+        ));
+      }
+    }
+  }
+  if !dups.is_empty() {
+    return Err(dups.join("; "));
+  }
+  let renames = rename_pairs(input, "rename")?;
+  let deletes = name_list(input, "delete")?;
+  let mut renamed = Vec::new();
+  let mut deleted = Vec::new();
+  let mut problems = Vec::new();
+  for (from, to) in &renames {
+    match find_style(e, from, "rename") {
+      Ok((id, kind)) => {
+        let st = &e.doc.styles;
+        let taken = match kind {
+          "color" => st.colors.iter().any(|s| s.name == *to && s.id != id),
+          "text" => st.texts.iter().any(|s| s.name == *to && s.id != id),
+          "effect" => st.effects.iter().any(|s| s.name == *to && s.id != id),
+          _ => st.grids.iter().any(|s| s.name == *to && s.id != id),
+        };
+        if taken {
+          problems.push(format!("rename: a {kind} style named {to} already exists"));
+          continue;
+        }
+        let cmd = match kind {
+          "color" => Command::UpdateColorStyle {
+            id: id.clone(),
+            name: Some(to.clone()),
+            color: None,
+          },
+          "effect" => Command::UpdateEffectStyle {
+            id: id.clone(),
+            name: Some(to.clone()),
+            effects: None,
+            description: None,
+          },
+          "grid" => Command::UpdateGridStyle {
+            id: id.clone(),
+            name: Some(to.clone()),
+            grids: None,
+            description: None,
+          },
+          _ => Command::UpdateTextStyle {
+            id: id.clone(),
+            name: Some(to.clone()),
+            font_family: None,
+            font_size: None,
+            font_weight: None,
+            line_height: None,
+            auto_line_height: false,
+            letter_spacing: None,
+          },
+        };
+        e.dispatch_inner(cmd)?;
+        renamed.push(json!({ "id": id, "from": from, "to": to, "kind": kind }));
+      }
+      Err(m) => problems.push(m),
+    }
+  }
+  let mut unlinked = 0usize;
+  for d in &deletes {
+    match find_style(e, d, "delete") {
+      Ok((id, kind)) => {
+        let name = style_name_of(e, &id);
+        let is = |l: &Option<String>| l.as_deref() == Some(id.as_str());
+        let uses = e
+          .doc
+          .nodes
+          .values()
+          .filter(|n| is(&n.fill_style) || is(&n.text_style) || is(&n.stroke_style) || is(&n.effect_style) || is(&n.grid_style))
+          .count();
+        unlinked += uses;
+        e.dispatch_inner(Command::DeleteStyle { id: id.clone() })?;
+        deleted.push(json!({ "id": id, "name": name, "kind": kind, "unlinked": uses }));
+      }
+      Err(m) => problems.push(m),
+    }
+  }
+  if !problems.is_empty() {
+    return Err(problems.join("; "));
+  }
   for (i, c) in input
     .get("colors")
     .and_then(|v| v.as_array())
@@ -1539,6 +2053,19 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
   if !updated.is_empty() {
     r["updated"] = json!(updated);
   }
+  if !renamed.is_empty() {
+    r["renamed"] = json!(renamed);
+  }
+  if !deleted.is_empty() {
+    r["deleted"] = json!(deleted);
+    r["unlinked"] = json!(unlinked);
+    if unlinked > 0 {
+      r["note"] = json!(format!(
+        "{} lost the style link and keep their current values",
+        plural(unlinked, "layer", "layers")
+      ));
+    }
+  }
   Ok(r)
 }
 
@@ -1589,10 +2116,17 @@ fn find_nodes(e: &Engine, input: &Value) -> Result<Value, String> {
       return Err(cx.err("within", format!("no layer {w}")));
     }
   }
-  let limit = match input.get("limit").filter(|v| !v.is_null()) {
-    Some(v) => (parse::number(&cx, "limit", v)?.max(1.0) as usize).min(FIND_MAX),
-    None => FIND_DEFAULT,
+  let limit_given = match input.get("limit").filter(|v| !v.is_null()) {
+    Some(v) => {
+      let l = parse::number(&cx, "limit", v)?;
+      if l < 0.0 {
+        return Err(cx.err("limit", "must be 0 or more (0 returns only the total)"));
+      }
+      Some(l as usize)
+    }
+    None => None,
   };
+  let limit = limit_given.map_or(FIND_DEFAULT, |l| l.clamp(1, FIND_MAX));
   // Ids a style name stands for (a name can be shared by a colour and a text style).
   let style_ids: Option<Vec<&str>> = style.as_ref().map(|s| {
     let l = s.to_lowercase();
@@ -1677,7 +2211,7 @@ fn find_nodes(e: &Engine, input: &Value) -> Result<Value, String> {
       }
     }
     total += 1;
-    if out.len() < limit {
+    if out.len() < limit && limit_given != Some(0) {
       let mut m = json!({
         "id": n.id, "type": n.kind, "name": n.name, "parentId": n.parent, "page": n.page,
         "w": round(n.width), "h": round(n.height),
@@ -1752,6 +2286,8 @@ fn cap_text(m: &mut Map<String, Value>) {
       }
     }
   }
+  t.insert("charactersTruncated".into(), json!(true));
+  t.insert("charactersLength".into(), json!(len));
   m.insert("textTruncated".into(), json!(true));
   m.insert("textLength".into(), json!(len));
 }
@@ -1960,19 +2496,25 @@ pub fn insert_specs(e: &mut Engine, specs: &[Value], parent: Option<&str>) -> Re
   insert_specs_ex(e, specs, parent).map(|r| r.created)
 }
 
+/// A parent for new layers must exist, hold children and not be a device's system UI.
+fn check_parent(e: &Engine, p: &str) -> Result<(), String> {
+  let pn = e.doc.get(p).ok_or_else(|| format!("no parent layer {p}"))?;
+  if !pn.kind.is_container() {
+    return Err(format!("{p} is a {} and cannot have children", pn.kind.label()));
+  }
+  if crate::devices::in_part(&e.doc, p) {
+    return Err(format!(
+      "{p} is system UI of a device frame and cannot have children; use parentId {}",
+      crate::devices::host_of(&e.doc, p)
+    ));
+  }
+  Ok(())
+}
+
 /// `insert_specs` with the named descendants and the warnings about the input.
 pub fn insert_specs_ex(e: &mut Engine, specs: &[Value], parent: Option<&str>) -> Result<Inserted, String> {
   if let Some(p) = parent {
-    let pn = e.doc.get(p).ok_or_else(|| format!("no parent layer {p}"))?;
-    if !pn.kind.is_container() {
-      return Err(format!("{p} is a {} and cannot have children", pn.kind.label()));
-    }
-    if crate::devices::in_part(&e.doc, p) {
-      return Err(format!(
-        "{p} is system UI of a device frame and cannot have children; use parentId {}",
-        crate::devices::host_of(&e.doc, p)
-      ));
-    }
+    check_parent(e, p)?;
   }
   let page = parent
     .and_then(|p| e.doc.get(p))
@@ -2263,11 +2805,12 @@ fn parse_kind(cx: &Ctx, s: &str) -> Result<NodeType, String> {
     "vector" | "icon" | "path" => NodeType::Vector,
     "group" => NodeType::Group,
     "component" => NodeType::Component,
+    "svg" => return Err(cx.err("svg", "type svg needs an svg string (the full <svg>...</svg> markup in `svg`)")),
     other => {
       return Err(cx.err(
         "type",
         format!(
-          "unknown layer type '{other}'; use frame, rectangle, ellipse, text, line, polygon, star, vector, group, image, instance or component"
+          "unknown layer type '{other}'; use frame, rectangle, ellipse, text, line, polygon, star, vector, group, image, instance, component or svg (with an `svg` string)"
         ),
       ))
     }
@@ -2287,8 +2830,14 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
   if let Some(v) = parse::opt_number(cx, s, "y")? {
     n.y = v;
   }
-  let dim_w = parse::dimension(cx, "width", s.get("width"))?;
-  let dim_h = parse::dimension(cx, "height", s.get("height"))?;
+  let (dim_w, dim_h) = match (
+    parse::dimension(cx, "width", s.get("width")),
+    parse::dimension(cx, "height", s.get("height")),
+  ) {
+    (Ok(w), Ok(h)) => (w, h),
+    (Err(a), Err(b)) => return Err(format!("{a}; {b}")),
+    (Err(a), _) | (_, Err(a)) => return Err(a),
+  };
   apply_dimension(n, dim_w, true);
   apply_dimension(n, dim_h, false);
   if let Some(v) = parse::opt_number(cx, s, "rotation")? {
@@ -2355,7 +2904,25 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
     ("maxHeight", &mut n.max_height),
   ] {
     if s.get(key).is_some() {
-      *slot = parse::opt_number(cx, s, key)?.filter(|v| *v > 0.0);
+      *slot = match parse::opt_number(cx, s, key)? {
+        Some(v) => Some(parse::size_px(cx, key, v)?).filter(|v| *v > 0.0),
+        None => None,
+      };
+    }
+  }
+  // Only an axis this spec sets is judged: a layer that already has min > max (the design panel,
+  // an import or an old file) must stay editable.
+  for (lo, hi, name) in [(n.min_width, n.max_width, "Width"), (n.min_height, n.max_height, "Height")] {
+    if s.get(format!("min{name}")).is_none() && s.get(format!("max{name}")).is_none() {
+      continue;
+    }
+    if let (Some(lo), Some(hi)) = (lo, hi) {
+      if lo > hi {
+        return Err(cx.err(
+          &format!("min{name}"),
+          format!("min{name} {lo} is larger than max{name} {hi}; lower min{name} or raise max{name} (0 clears one)"),
+        ));
+      }
     }
   }
   match s.get("bind") {
@@ -2368,6 +2935,9 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
           }
           Value::String(name) => {
             check_binding(cx, doc, prop, name)?;
+            if matches!(prop.as_str(), "fill" | "stroke") && s.get(prop.as_str()).is_some_and(|v| !v.is_null()) {
+              cx.warn(format!("{prop} ignored: bind.{prop} sets it"));
+            }
             n.bindings.insert(prop.clone(), name.clone());
           }
           other => {
@@ -2818,7 +3388,21 @@ fn apply_text(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creating: b
   let t = n.text.get_or_insert_with(Default::default);
   if let Some(v) = s.get("text").or(s.get("characters")).filter(|v| !v.is_null()) {
     let key = if s.get("text").is_some() { "text" } else { "characters" };
-    t.characters = parse::string(cx, key, v)?;
+    let new = parse::string(cx, key, v)?;
+    // New text takes the first character's style, like typing over a selection in Figma: runs
+    // cut for the old text would land mid-word on the new one. `spans` keeps explicit styling.
+    if new != t.characters && s.get("spans").is_none_or(|v| v.is_null()) {
+      let first = t.runs.iter().find(|r| r.start == 0 && r.end > 0).cloned();
+      t.runs = first
+        .map(|mut r| {
+          r.end = new.chars().count();
+          let mut runs = vec![r];
+          crate::text::normalize_runs(&mut runs, new.chars().count());
+          runs
+        })
+        .unwrap_or_default();
+    }
+    t.characters = new;
     if creating && s.get("name").is_none() {
       n.name = t.characters.chars().take(40).collect();
     }
@@ -3101,6 +3685,7 @@ fn spans_to_runs(cx: &mut Ctx, spans: &[Value], layer_size: f64) -> Result<(Stri
     if !sp.is_object() {
       return Err(cx.err("", format!("must be an object {{text, ...}}, got {}", parse::kind_of(sp))));
     }
+    parse::warn_span_keys(cx, sp);
     let piece = match sp.get("text").filter(|v| !v.is_null()) {
       Some(v) => parse::string(cx, "text", v)?,
       None => String::new(),
@@ -3408,7 +3993,15 @@ pub fn diff_patch(before: &Node, after: &Node) -> Value {
       }
     }
     // Links that are left out of saved nodes when unset: a removed one is an explicit null.
-    for k in ["effectStyle", "gridStyle", "strokeStyle"] {
+    for k in [
+      "effectStyle",
+      "gridStyle",
+      "strokeStyle",
+      "minWidth",
+      "maxWidth",
+      "minHeight",
+      "maxHeight",
+    ] {
       if bm.contains_key(k) && !am.contains_key(k) {
         out.insert(k.into(), Value::Null);
       }
