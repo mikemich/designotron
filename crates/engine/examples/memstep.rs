@@ -2,6 +2,9 @@
 //! `cargo run --release -p designotron-engine --example memstep [frames]`
 //! `cargo run --release -p designotron-engine --example memstep t20k [layers]` builds a big file
 //! (66 screens of 50 cards plus a 1000-rectangle frame) and prints net and peak memory per step.
+//! `cargo run --release -p designotron-engine --example memstep vars300` builds a file with 3
+//! collections of 100 variables (3 modes) and 2000 layers, then prints KB retained per undo step
+//! for property edits, variable edits through `SetVariables`, page renames and comment replies.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -133,7 +136,78 @@ fn t20k(layers: usize) {
   mark("persist commit");
 }
 
+/// KB retained per step over `n` dispatches of `make(i)`.
+fn per_step(e: &mut Engine, n: usize, mut make: impl FnMut(&mut Engine, usize) -> Command) -> f64 {
+  let base = NET.load(Ordering::Relaxed);
+  for i in 0..n {
+    let c = make(e, i);
+    e.dispatch(c).unwrap();
+  }
+  (NET.load(Ordering::Relaxed) - base) as f64 / 1024.0 / n as f64
+}
+
+fn vars300() {
+  let mut e = Engine::new(Box::new(HeuristicMeasurer), 1);
+  for c in 0..3 {
+    let vars: Vec<_> = (0..100)
+      .map(|i| {
+        json!({ "name": format!("Group{}/Token {i}", i % 10), "type": "color",
+          "values": { "Light": format!("#{:06X}", i * 1000 + c), "Dark": format!("#{:06X}", 0xFFFFFF - i * 1000), "Brand": "#7C5CFF" },
+          "description": "A design token with a description that is long enough to count" })
+      })
+      .collect();
+    e.dispatch(Command::Ai {
+      tool: "define_variables".into(),
+      input: json!({ "collection": format!("Coll{c}"), "modes": ["Light", "Dark", "Brand"], "variables": vars }),
+    })
+    .unwrap();
+  }
+  let kids: Vec<_> = (0..2000)
+    .map(|i| {
+      let mut n = json!({ "type": "rectangle", "name": format!("Box {i}"), "x": (i % 50) * 40, "y": (i / 50) * 40, "width": 30, "height": 30, "fill": "#7C3AED", "cornerRadius": 6 });
+      if i % 10 == 0 {
+        n["bind"] = json!({ "fill": format!("Coll{}/Group{}/Token {}", i % 3, (i / 10) % 10, (i / 10) % 100) });
+      }
+      n
+    })
+    .collect();
+  e.dispatch(Command::Ai {
+    tool: "create_nodes".into(),
+    input: json!({ "nodes": [{ "type": "frame", "name": "Canvas", "width": 2000, "height": 1600, "children": kids }] }),
+  })
+  .unwrap();
+  let count: usize = serde_json::to_value(&e.doc.variables).unwrap().as_array().unwrap().iter().map(|c| c["variables"].as_array().unwrap().len()).sum();
+  println!("nodes {} variables {count}", e.doc.nodes.len());
+  mark("built (with undo history)");
+  let id = e.doc.nodes.values().find(|n| n.name == "Box 7").map(|n| n.id.clone()).unwrap();
+  let page = e.doc.pages[0].id.clone();
+  let prop = per_step(&mut e, 40, |_, i| Command::Ai {
+    tool: "update_nodes".into(),
+    input: json!({ "updates": [{ "id": id, "opacity": 0.1 + i as f64 / 60.0 }] }),
+  });
+  println!("property edit      {prop:>8.1} KB/step");
+  // The dialog sends the whole set with one value changed.
+  let var = per_step(&mut e, 40, |e, i| {
+    let mut cols = serde_json::to_value(&e.doc.variables).unwrap();
+    let values = cols[1]["variables"][50]["values"].as_object_mut().unwrap();
+    let mode = values.keys().next().unwrap().clone();
+    values.insert(mode, json!(format!("#{:06X}", 0x100000 + i)));
+    Command::SetVariables { collections: serde_json::from_value(cols).unwrap() }
+  });
+  println!("variable edit      {var:>8.1} KB/step");
+  let ren = per_step(&mut e, 40, |_, i| Command::RenamePage { id: page.clone(), name: format!("Page {i}") });
+  println!("page rename        {ren:>8.1} KB/step");
+  e.dispatch(Command::AddComment { page: None, x: 10.0, y: 10.0, node: None, text: "hi".into(), author: "a".into(), time: 1.0 }).unwrap();
+  let cid = e.doc.comments.keys().next().unwrap().clone();
+  let rep = per_step(&mut e, 40, |_, i| Command::ReplyComment { id: cid.clone(), text: format!("reply {i}"), author: "b".into(), time: i as f64 });
+  println!("comment reply      {rep:>8.1} KB/step");
+}
+
 fn main() {
+  if std::env::args().nth(1).as_deref() == Some("vars300") {
+    vars300();
+    return;
+  }
   if std::env::args().nth(1).as_deref() == Some("t20k") {
     t20k(std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(20000));
     return;
