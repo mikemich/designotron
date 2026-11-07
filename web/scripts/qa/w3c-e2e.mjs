@@ -303,7 +303,11 @@ if (process.env.E2E_RELAY) {
   });
   await owner.click(".tbtn[title='Share for live editing']");
   await owner.fill(".share-dialog input.textinput >> nth=0", "Olga");
-  if (!(await owner.locator(".share-dialog input.mono").count())) await owner.click("text=Use a different relay");
+  if (!(await owner.locator(".share-dialog input.mono").count())) await owner.click(".share-dialog >> text=Use a different relay");
+  await owner.waitForSelector(".share-dialog input.mono", { timeout: 5000 }).catch(async () => {
+    await owner.screenshot({ path: `${OUT}/relay-field-missing.png` });
+    check("the relay field opens", false, (await owner.locator(".share-dialog").innerText().catch(() => "no dialog")).slice(0, 300));
+  });
   await owner.fill(".share-dialog input.mono", RELAY);
   await owner.click("button:has-text('Share online')");
   await owner.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 15000 });
