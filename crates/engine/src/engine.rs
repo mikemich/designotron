@@ -885,6 +885,9 @@ pub struct Engine {
   collab_pending: std::collections::VecDeque<Value>,
   /// The room understands pages, styles and variables as per-id changes.
   collab_granular: bool,
+  /// The room also understands child orders as moves and comments per message, and every
+  /// copy of the document drops references to deleted tokens (`collab::DeltaOpts`, `prune_refs`).
+  pub(crate) collab_lists: bool,
 }
 
 /// Per-root SVG from the last canvas render, and the document it was made from.
@@ -926,6 +929,7 @@ impl Engine {
       collab_confirmed: None,
       collab_pending: Default::default(),
       collab_granular: false,
+      collab_lists: false,
     }
   }
 
@@ -1067,7 +1071,7 @@ impl Engine {
   pub fn collab_delta(&mut self) -> Value {
     let ordered = self.collab_confirmed.is_some();
     let out = match &self.collab_synced {
-      Some(base) => crate::collab::delta(base, &self.doc, ordered, self.collab_granular),
+      Some(base) => crate::collab::delta_with(base, &self.doc, self.delta_opts(ordered)),
       None => json!({ "full": self.doc }),
     };
     self.collab_synced = Some(self.doc.clone());
@@ -1080,9 +1084,11 @@ impl Engine {
   /// Starts a collaboration baseline at the current document without producing a delta.
   /// `ordered`: the relay acknowledges every change in the order it applies them (and
   /// understands per-property patches). `granular`: it also understands pages, styles and
-  /// variables as per-id changes (`collab::delta`).
-  pub fn collab_reset(&mut self, ordered: bool, granular: bool) {
+  /// variables as per-id changes (`collab::delta`), `lists` when it also takes child orders as
+  /// moves and comments per message and every copy prunes references to deleted tokens.
+  pub fn collab_reset(&mut self, ordered: bool, granular: bool, lists: bool) {
     self.collab_granular = ordered && granular;
+    self.collab_lists = self.collab_granular && lists;
     self.collab_synced = Some(self.doc.clone());
     self.collab_confirmed = ordered.then(|| self.doc.clone());
     self.collab_pending.clear();
@@ -1093,7 +1099,7 @@ impl Engine {
   pub fn collab_unsent(&mut self) -> Value {
     let mut out: Vec<Value> = self.collab_pending.drain(..).collect();
     if let Some(base) = &self.collab_synced {
-      let d = crate::collab::delta(base, &self.doc, self.collab_confirmed.is_some(), self.collab_granular);
+      let d = crate::collab::delta_with(base, &self.doc, self.delta_opts(self.collab_confirmed.is_some()));
       if !crate::collab::is_empty(&d) {
         out.push(d);
       }
@@ -1101,11 +1107,49 @@ impl Engine {
     Value::Array(out)
   }
 
+  /// How this editor writes deltas for its room.
+  fn delta_opts(&self, ordered: bool) -> crate::collab::DeltaOpts {
+    crate::collab::DeltaOpts {
+      patches: ordered,
+      granular: self.collab_granular,
+      lists: self.collab_lists,
+    }
+  }
+
+  /// Applies a delta from the room (or one of this editor's own, re-applied). With `lists`, every
+  /// copy also prunes references to tokens the document lost, exactly as the room does.
+  fn collab_apply(lists: bool, doc: &mut Document, d: &Value) -> Result<Vec<NodeId>, String> {
+    crate::collab::apply_opts(doc, d, crate::collab::ApplyOpts { prune: lists })
+  }
+
+  /// After a local change: drops references to styles, variables and modes the change removed,
+  /// and links it made to ones that don't exist, so the sender never holds one that receivers
+  /// prune. Only the changed layers are looked at (all of them when a token went away).
+  fn prune_local(&mut self, prev: &Document) {
+    let mut changed: Vec<NodeId> = Vec::new();
+    for item in prev.nodes.diff(&self.doc.nodes) {
+      match item {
+        imbl::ordmap::DiffItem::Add(k, _) | imbl::ordmap::DiffItem::Update { new: (k, _), .. } => changed.push(k.clone()),
+        imbl::ordmap::DiffItem::Remove(..) => {}
+      }
+    }
+    let scope = if crate::collab::lost_tokens(prev, &self.doc) {
+      crate::collab::Scope::All
+    } else {
+      crate::collab::Scope::Nodes(&changed)
+    };
+    let pruned_from = self.doc.clone();
+    if !crate::collab::prune_refs(&mut self.doc, scope).is_empty() {
+      // A main component's link may be the one that went: its instances follow.
+      self.after_mutation(&pruned_from);
+    }
+  }
+
   /// The confirmed document with every pending change on top.
   fn collab_rebuild(&self) -> Option<Document> {
     let mut doc = self.collab_confirmed.clone()?;
     for d in &self.collab_pending {
-      let _ = crate::collab::apply(&mut doc, d);
+      let _ = Self::collab_apply(self.collab_lists, &mut doc, d);
     }
     Some(doc)
   }
@@ -1303,7 +1347,7 @@ impl Engine {
         // never recorded in local history. Callers flush their own delta first.
         let prev = self.doc.clone();
         if local {
-          crate::collab::apply(&mut self.doc, &delta)?;
+          Self::collab_apply(self.collab_lists, &mut self.doc, &delta)?;
           sanitize_links(&mut self.doc, Some(&delta_ids(&delta)));
           self.after_mutation(&prev);
           self.rev += 1;
@@ -1312,20 +1356,21 @@ impl Engine {
         }
         if let Some(c) = self.collab_confirmed.as_mut() {
           // In the relay's order, under this editor's own changes it hasn't ordered yet.
-          crate::collab::apply(c, &delta)?;
+          Self::collab_apply(self.collab_lists, c, &delta)?;
           sanitize_links(c, Some(&delta_ids(&delta)));
           self.doc = self.collab_rebuild().unwrap();
         } else {
-          crate::collab::apply(&mut self.doc, &delta)?;
+          Self::collab_apply(self.collab_lists, &mut self.doc, &delta)?;
           sanitize_links(&mut self.doc, Some(&delta_ids(&delta)));
         }
         let ids = delta_ids(&delta);
+        let lists = self.collab_lists;
         if let Some(g) = self.gesture.as_mut() {
-          let _ = crate::collab::apply(&mut g.doc, &delta);
+          let _ = Self::collab_apply(lists, &mut g.doc, &delta);
           sanitize_links(&mut g.doc, Some(&ids));
         }
         if let Some(g) = self.gesture_undo.as_mut() {
-          let _ = crate::collab::apply(&mut g.doc, &delta);
+          let _ = Self::collab_apply(lists, &mut g.doc, &delta);
           sanitize_links(&mut g.doc, Some(&ids));
         }
         self.refresh_fingerprints();
@@ -1340,10 +1385,15 @@ impl Engine {
           return Ok(json!({}));
         };
         if !rejected {
-          if let Some(c) = self.collab_confirmed.as_mut() {
-            let _ = crate::collab::apply(c, &d);
+          let pruned = match self.collab_confirmed.as_mut() {
+            Some(c) => Self::collab_apply(self.collab_lists, c, &d).unwrap_or_default(),
+            None => vec![],
+          };
+          if pruned.is_empty() {
+            return Ok(json!({}));
           }
-          return Ok(json!({}));
+          // The room dropped a link this editor still shows (something it knew nothing about at
+          // the time): its copy follows, as it does when the room rejects a change.
         }
         // The relay didn't take it: everyone else's copy lacks it, so this one drops it too.
         let Some(doc) = self.collab_rebuild() else { return Ok(json!({})) };
@@ -1468,6 +1518,7 @@ impl Engine {
     let out = match result {
       Ok(v) => {
         self.after_mutation(&prev);
+        self.prune_local(&prev);
         if let Some(b) = before {
           if b.doc != self.doc {
             self.push_past(b, group);
@@ -1542,6 +1593,7 @@ impl Engine {
     self.refresh_fingerprints();
     if !exact {
       self.after_mutation(&prev);
+      self.prune_local(&prev);
     }
     self.future.push(step);
   }
@@ -1568,6 +1620,7 @@ impl Engine {
     self.refresh_fingerprints();
     if !exact {
       self.after_mutation(&prev);
+      self.prune_local(&prev);
     }
     self.past.push(step);
   }
@@ -7797,7 +7850,7 @@ mod r15_link_fix_tests {
         None,
       );
     }
-    e.collab_reset(true, true);
+    e.collab_reset(true, true, false);
     let base = e.doc.clone();
     let mut bad = base.clone();
     bad.get_mut("b").unwrap().interactions.push(Interaction {

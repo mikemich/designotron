@@ -242,7 +242,7 @@ impl Sim {
       .map(|i| {
         let mut e = engine(seed.wrapping_mul(31) + 100 + 2 * i as u64);
         e.load(&json).unwrap();
-        e.collab_reset(true, granular[i]);
+        e.collab_reset(true, granular[i], false);
         e
       })
       .collect();

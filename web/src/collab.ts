@@ -262,6 +262,10 @@ let ordered = false;
 /** The room takes pages, styles and variables per id, so edits to different ones merge
  *  (older relays: whole lists, last writer wins). */
 let granular = false;
+/** The room also takes child orders as moves and comments per message, and every copy drops
+ *  references to deleted styles and variables (needs a relay that says `lists`; older ones
+ *  keep whole lists and last writer wins). */
+let lists = false;
 /** The relay said the owner stopped sharing this room. */
 let roomEnded = false;
 let flushQueued = false;
@@ -351,7 +355,7 @@ function loadShared(doc: unknown, assets: Record<string, string>, fit = true) {
   for (const id of Object.keys(assets ?? {})) sentAssets.add(id);
   getEngine().load(JSON.stringify(doc));
   dispatch({ op: "relayout" });
-  getEngine().collabReset(ordered, granular);
+  getEngine().collabReset(ordered, granular, lists);
   if (fit) requestAnimationFrame(zoomToFit);
 }
 
@@ -366,11 +370,12 @@ function onMessage(m: any) {
       const unsent: unknown[] = joinedOnce && m.doc ? JSON.parse(getEngine().collabUnsent()) : [];
       ordered = !!m.ordered;
       granular = !!m.granular;
+      lists = !!m.lists;
       relayModel = typeof m.model === "number" ? m.model : useCollab.getState().mode === "online" ? 0 : CURRENT;
       // A viewer's engine refuses every edit (comments still work).
       if (m.role === "viewer") dispatch({ op: "setReadOnly", on: true }, { quiet: true });
       if (m.doc) loadShared(m.doc, m.assets, !joinedOnce);
-      else getEngine().collabReset(ordered, granular);
+      else getEngine().collabReset(ordered, granular, lists);
       // Put them back on top of the room's copy; the flush below sends them, so nothing made
       // offline is lost.
       applying = true;
@@ -547,7 +552,7 @@ function connect(join: Record<string, unknown>) {
       if (heardPong && lastPing > lastHeard && now - lastHeard > SILENT_MS && now - lastPing >= PING_MS / 2 - 500) return lost();
       if (now - lastPing >= PING_MS - 500) ping();
     }, PING_MS / 2);
-    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, granular: getEngine().collabGranular(), ...join }));
+    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, granular: getEngine().collabGranular(), lists: getEngine().collabLists(), ...join }));
   };
   socket.onmessage = (e) => ws === socket && onMessage(JSON.parse(e.data));
   socket.onclose = lost;

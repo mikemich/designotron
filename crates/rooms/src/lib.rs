@@ -10,9 +10,14 @@
 //!   document (or one with `reset`) sets the room's document.
 //! - client → `{type:"join", …, granular:true}` when the editor can read pages, styles and
 //!   variables as per-id changes (see `collab::delta`).
-//! - server → `{type:"welcome", you, doc|null, assets, peers, ordered:true, granular:true}`
+//! - client → `{type:"join", …, lists:true}` when the editor can also read child orders as moves
+//!   (`moves`, `pageMoves`) and comments per message (`commentChanges`), and prunes references to
+//!   deleted styles and variables itself (see `collab::DeltaOpts`, `collab::prune_refs`).
+//! - server → `{type:"welcome", you, doc|null, assets, peers, ordered:true, granular:true, lists:true}`
 //!   (`granular`: this room takes per-id changes; editors that sent none get the whole lists
-//!   instead, taken from the room's document)
+//!   instead, taken from the room's document. `lists`: it takes moves and per-message comment
+//!   changes; editors that sent no `lists` get whole child lists and comments, and the layers
+//!   the room pruned, taken from the room's document)
 //! - client ↔ `{type:"delta", delta, assets?}`, `{type:"presence", presence}`
 //! - server → `{type:"ack", rejected?}` to the sender of each delta, at its place in the
 //!   order the room applied changes (`ordered`): editors keep their own unacknowledged
@@ -70,6 +75,9 @@ use serde_json::value::RawValue;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Mutex, Notify};
+
+/// Rooms drop references to deleted tokens from every change they apply (and replay).
+const PRUNE: designotron_engine::collab::ApplyOpts = designotron_engine::collab::ApplyOpts { prune: true };
 
 /// The answer to a client's `{type:"ping"}`.
 const PONG: &str = r#"{"type":"pong"}"#;
@@ -260,6 +268,8 @@ struct Peer {
   presence: Value,
   /// Reads per-id changes of pages, styles and variables.
   granular: bool,
+  /// Also reads moves and per-message comment changes, and prunes dangling references itself.
+  lists: bool,
 }
 
 /// The sending half of one connection.
@@ -297,6 +307,8 @@ struct Incoming<'a> {
   reset: bool,
   #[serde(default)]
   granular: bool,
+  #[serde(default)]
+  lists: bool,
   #[serde(borrow, default)]
   delta: Option<&'a RawValue>,
   #[serde(borrow, default)]
@@ -315,6 +327,8 @@ struct Welcome<'a> {
   ordered: bool,
   /// Pages, styles and variables may travel as per-id changes (see the protocol above).
   granular: bool,
+  /// Child orders may travel as moves and comments per message (see the protocol above).
+  lists: bool,
   /// The document model revision this server understands.
   model: u32,
   /// The id of this room's view-only link (editors, when the server has them).
@@ -434,8 +448,11 @@ const EDITOR_RESERVE: usize = 10;
 /// does anything else. Only comments: new threads, replies appended to existing ones and
 /// resolving. Everything is rebuilt from typed values, so nothing else the viewer put in the
 /// message (pages, styles, variables, unknown keys) can reach the room.
+///
+/// Replies and resolving come either as a whole comment (older editors; the old messages must be
+/// an exact prefix of the new ones) or as `commentChanges` with only `add` and `set.resolved`.
 fn viewer_delta(delta: &Value, doc: &Document) -> Option<Value> {
-  use designotron_engine::model::Comment;
+  use designotron_engine::model::{Comment, CommentMessage};
   let o = delta.as_object()?;
   // The editor always sends these three, empty; anything else but comments is refused.
   let empty = |k: &str| match o.get(k) {
@@ -446,21 +463,30 @@ fn viewer_delta(delta: &Value, doc: &Document) -> Option<Value> {
   };
   if o
     .keys()
-    .any(|k| !matches!(k.as_str(), "comments" | "nodes" | "removed" | "commentsRemoved"))
+    .any(|k| !matches!(k.as_str(), "comments" | "nodes" | "removed" | "commentsRemoved" | "commentChanges"))
     || !empty("nodes")
     || !empty("removed")
     || !empty("commentsRemoved")
   {
     return None;
   }
-  let given = o.get("comments")?.as_object()?;
-  if given.is_empty() || given.len() > VIEWER_MAX_COMMENTS {
+  let none = Map::new();
+  let given = match o.get("comments") {
+    None => &none,
+    Some(v) => v.as_object()?,
+  };
+  let changes = match o.get("commentChanges") {
+    None => &none,
+    Some(v) => v.as_object()?,
+  };
+  if given.len() + changes.len() == 0 || given.len() + changes.len() > VIEWER_MAX_COMMENTS {
     return None;
   }
+  let text_ok = |m: &CommentMessage| m.text.len() <= VIEWER_MAX_TEXT && m.author.len() <= 200;
   let mut out = Map::new();
   for (id, v) in given {
     let c: Comment = serde_json::from_value(v.clone()).ok()?;
-    if &c.id != id || c.messages.iter().any(|m| m.text.len() > VIEWER_MAX_TEXT || m.author.len() > 200) {
+    if &c.id != id || !c.messages.iter().all(text_ok) {
       return None;
     }
     if let Some(old) = doc.comments.get(id) {
@@ -476,7 +502,53 @@ fn viewer_delta(delta: &Value, doc: &Document) -> Option<Value> {
     }
     out.insert(id.clone(), serde_json::to_value(&c).ok()?);
   }
-  Some(json!({ "nodes": {}, "removed": [], "comments": out, "commentsRemoved": [] }))
+  let mut clean = Map::new();
+  for (id, ch) in changes {
+    let ch = ch.as_object()?;
+    // Never `del`, and of `set` only `resolved`.
+    if ch.keys().any(|k| !matches!(k.as_str(), "set" | "add" | "del")) {
+      return None;
+    }
+    if let Some(del) = ch.get("del") {
+      if !del.as_array()?.is_empty() {
+        return None;
+      }
+    }
+    let mut part = Map::new();
+    if let Some(set) = ch.get("set") {
+      let set = set.as_object()?;
+      if set.keys().any(|k| k != "resolved") {
+        return None;
+      }
+      if let Some(r) = set.get("resolved") {
+        part.insert("set".into(), json!({ "resolved": r.as_bool()? }));
+      }
+    }
+    if let Some(add) = ch.get("add") {
+      let add = add.as_array()?;
+      if add.len() > VIEWER_MAX_NEW_MESSAGES {
+        return None;
+      }
+      let msgs: Vec<CommentMessage> = add.iter().map(|m| serde_json::from_value(m.clone()).ok()).collect::<Option<_>>()?;
+      if !msgs.iter().all(text_ok) {
+        return None;
+      }
+      if !msgs.is_empty() {
+        part.insert("add".into(), serde_json::to_value(&msgs).ok()?);
+      }
+    }
+    if !part.is_empty() {
+      clean.insert(id.clone(), Value::Object(part));
+    }
+  }
+  if out.is_empty() && clean.is_empty() {
+    return None;
+  }
+  let mut d = json!({ "nodes": {}, "removed": [], "comments": out, "commentsRemoved": [] });
+  if !clean.is_empty() {
+    d["commentChanges"] = Value::Object(clean);
+  }
+  Some(d)
 }
 
 /// 128 random bits from the OS-seeded hasher keys, as hex.
@@ -1283,6 +1355,7 @@ impl Rooms {
         .collect(),
       ordered: true,
       granular: true,
+      lists: true,
       model: designotron_engine::collab::MODEL_REVISION,
       view: (self.view_links && role == Role::Editor).then(|| view_id(room_id)),
       role: role.name(),
@@ -1313,6 +1386,7 @@ impl Rooms {
         color: color.clone(),
         presence: Value::Null,
         granular: m.granular,
+        lists: m.lists && m.granular,
       },
     );
     self.people.fetch_add(1, Ordering::Relaxed);
@@ -1384,11 +1458,15 @@ impl Rooms {
       None
     };
     let raw: &RawValue = fixed.as_deref().unwrap_or(raw);
-    if let Err(e) = designotron_engine::collab::apply(r.doc.as_mut().unwrap(), &delta) {
-      log::warn!("rejected collab delta: {e}");
-      self.ack(r, id, true);
-      return Step::Go;
-    }
+    // Every copy prunes references to deleted tokens the same way (`collab::prune_refs`).
+    let pruned = match designotron_engine::collab::apply_opts(r.doc.as_mut().unwrap(), &delta, PRUNE) {
+      Ok(pruned) => pruned,
+      Err(e) => {
+        log::warn!("rejected collab delta: {e}");
+        self.ack(r, id, true);
+        return Step::Go;
+      }
+    };
     let (doc_bytes, asset_bytes) = (r.doc_bytes + growth, r.asset_bytes);
     self.set_bytes(r, doc_bytes, asset_bytes);
     // Images are optional for the document to stay consistent: over the limit, peers get
@@ -1416,38 +1494,68 @@ impl Rooms {
         r.compact = true;
       }
     }
-    let out = DeltaOut {
-      kind: "delta",
-      from: id,
-      delta: raw,
-      assets: if keep { m.assets } else { None },
+    let assets_out = if keep { m.assets } else { None };
+    let text_of = |d: &RawValue| {
+      let out = DeltaOut {
+        kind: "delta",
+        from: id,
+        delta: d,
+        assets: assets_out,
+      };
+      Arc::new(serde_json::to_string(&out).unwrap_or_default())
     };
-    let older = r.peers.iter().any(|(pid, p)| *pid != id && !p.granular);
-    let whole = older
-      .then(|| designotron_engine::collab::legacy(&delta, r.doc.as_ref().unwrap()))
+    let doc_now = r.doc.as_ref().unwrap();
+    let others = |f: &dyn Fn(&Peer) -> bool| r.peers.iter().any(|(pid, p)| *pid != id && f(p));
+    let raw_text = others(&|p| p.lists).then(|| text_of(raw));
+    // Editors that predate `lists` get whole child lists and comments, and the layers pruned.
+    let older_lists = others(&|p| !p.lists);
+    let rewritten = older_lists.then(|| designotron_engine::collab::legacy_lists(&delta, doc_now, &pruned)).flatten();
+    let to_raw = |v: &Value| serde_json::value::to_raw_value(v).ok();
+    let rewritten_raw = rewritten.as_ref().and_then(to_raw);
+    let gran_text = match &rewritten_raw {
+      Some(w) => Some(text_of(w)),
+      None => older_lists.then(|| raw_text.clone().unwrap_or_else(|| text_of(raw))),
+    };
+    // Peers that predate per-id changes get the room's whole lists instead.
+    let whole = others(&|p| !p.granular)
+      .then(|| designotron_engine::collab::legacy(rewritten.as_ref().unwrap_or(&delta), doc_now))
       .flatten()
-      .and_then(|w| serde_json::value::to_raw_value(&w).ok());
-    match &whole {
-      // Peers that predate per-id changes get the room's whole lists instead.
-      Some(whole) => {
-        let old = DeltaOut { delta: whole, ..out };
-        let (new, old) = (
-          Arc::new(serde_json::to_string(&out).unwrap_or_default()),
-          Arc::new(serde_json::to_string(&old).unwrap_or_default()),
-        );
-        let to: Vec<(Outbox, Arc<String>)> = r
-          .peers
-          .iter()
-          .filter(|(pid, _)| **pid != id)
-          .map(|(_, p)| (p.out.clone(), if p.granular { new.clone() } else { old.clone() }))
-          .collect();
-        for (o, text) in to {
-          self.put(r, &o, text, false);
-        }
-      }
-      None => self.hold_broadcast(r, id, &out),
+      .and_then(|w| to_raw(&w));
+    let old_text = whole.as_deref().map(text_of).or_else(|| gran_text.clone());
+    let to: Vec<(Outbox, Arc<String>)> = r
+      .peers
+      .iter()
+      .filter(|(pid, _)| **pid != id)
+      .filter_map(|(_, p)| {
+        let text = if p.lists {
+          raw_text.clone()
+        } else if p.granular {
+          gran_text.clone()
+        } else {
+          old_text.clone()
+        };
+        text.map(|t| (p.out.clone(), t))
+      })
+      .collect();
+    for (o, text) in to {
+      self.put(r, &o, text, false);
     }
     self.ack(r, id, false);
+    // An editor that predates `lists` doesn't prune: it is given the layers the room pruned.
+    if !pruned.is_empty() && r.peers.get(&id).is_some_and(|p| !p.lists) {
+      let nothing = json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [] });
+      let fix = designotron_engine::collab::legacy_lists(&nothing, r.doc.as_ref().unwrap(), &pruned)
+        .and_then(|v| serde_json::value::to_raw_value(&v).ok());
+      if let (Some(fix), Some(out)) = (fix, r.peers.get(&id).map(|p| p.out.clone())) {
+        let text = DeltaOut {
+          kind: "delta",
+          from: id,
+          delta: &fix,
+          assets: None,
+        };
+        self.put(r, &out, Arc::new(serde_json::to_string(&text).unwrap_or_default()), false);
+      }
+    }
     if assets.is_some() && !keep {
       return Step::Warn(format!(
         "Images in this change would make the shared file larger than {} MB, so others won't see them.",
@@ -1820,8 +1928,8 @@ fn replay(doc: &mut Document, assets: &mut Map<String, Value>, snapshot_seq: u64
       continue;
     }
     out.last = out.last.max(l.seq);
-    match designotron_engine::collab::apply(doc, &l.delta) {
-      Ok(()) => out.applied += 1,
+    match designotron_engine::collab::apply_opts(doc, &l.delta, PRUNE) {
+      Ok(_) => out.applied += 1,
       Err(e) => log::warn!("skipped a logged change that no longer applies: {e}"),
     }
     for (k, v) in l.assets.iter().flat_map(|a| a.iter()) {
@@ -1963,7 +2071,7 @@ mod tests {
       .expect("told to disconnect");
   }
 
-  fn peer(rooms: &Rooms, granular: bool) -> (Peer, mpsc::UnboundedReceiver<Arc<String>>) {
+  fn peer(rooms: &Rooms, granular: bool, lists: bool) -> (Peer, mpsc::UnboundedReceiver<Arc<String>>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let out = Outbox {
       tx,
@@ -1977,6 +2085,7 @@ mod tests {
         color: "#000".into(),
         presence: Value::Null,
         granular,
+        lists,
         role: Role::Editor,
       },
       rx,
@@ -2003,8 +2112,8 @@ mod tests {
       doc: Some(doc),
       ..Room::default()
     };
-    let (old, mut old_rx) = peer(&rooms, false);
-    let (new, mut new_rx) = peer(&rooms, true);
+    let (old, mut old_rx) = peer(&rooms, false, false);
+    let (new, mut new_rx) = peer(&rooms, true, false);
     r.peers.insert(1, old);
     r.peers.insert(2, new);
     let msg =
@@ -2378,6 +2487,7 @@ mod tests {
             color: "#000".into(),
             presence: Value::Null,
             granular: true,
+            lists: true,
           },
         );
       }
