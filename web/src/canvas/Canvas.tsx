@@ -243,7 +243,7 @@ export function Canvas() {
   const longPress = useRef<(x: number, y: number) => void>(() => {});
   const longPressAt = useRef(0);
   /** What a finger at a client point grabs of the selection box (set each render, read by the pointer handlers). */
-  const touchPick = useRef<(x: number, y: number) => Handle | "rotate" | null>(() => null);
+  const touchPick = useRef<(x: number, y: number) => Handle | "rotate" | null | undefined>(() => undefined);
   /** The touch handlers' hold timer and drag abort, for the native context menu and pointercancel. */
   const holdControl = useRef<{ cancel: () => void; abort: () => void } | null>(null);
   // Alt held with nothing being dragged: show distances from the selection to the hovered layer.
@@ -781,14 +781,13 @@ export function Canvas() {
     let rotating = target.hasAttribute("data-rotate");
     // A finger is wide: the nearest handle in a 44 px zone wins over what is under it, and the
     // rotate ring only starts outside that zone. A mouse keeps the exact DOM target.
-    if (e.pointerType === "touch" || e.pointerType === "pen") {
+    // With handles up, the pick replaces the DOM target (null: neither, so the layer moves), except on the
+    // prototype link dot, which sits beside the e handle.
+    if ((e.pointerType === "touch" || e.pointerType === "pen") && !target.closest?.("[data-link]")) {
       const pick = touchPick.current(e.clientX, e.clientY);
-      if (pick === "rotate") {
-        handle = null;
-        rotating = true;
-      } else if (pick) {
-        handle = pick;
-        rotating = false;
+      if (pick !== undefined) {
+        handle = pick === "rotate" ? null : pick;
+        rotating = pick === "rotate";
       }
     }
     if (handle) {
@@ -1383,7 +1382,7 @@ export function Canvas() {
   const centroid = box ? { x: (box[0].x + box[2].x) / 2, y: (box[0].y + box[2].y) / 2 } : null;
   touchPick.current = (cx, cy) => {
     const r = ref.current?.getBoundingClientRect();
-    if (!r || !box || !showHandles || isLine || editingVector) return null;
+    if (!r || !box || !showHandles || isLine || editingVector) return undefined;
     return pickTouchHandle<Handle>({ x: cx - r.left, y: cy - r.top }, handlePts, box);
   };
   // Handles are bigger under a finger.

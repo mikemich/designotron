@@ -171,6 +171,9 @@ textarea {
 .topbar .save-state[data-state="saving"] .save-dot {
   background: #f5a623;
 }
+.topbar .save-state[data-state="neutral"] .save-dot {
+  background: var(--text-3);
+}
 .topbar .save-state[data-state="failed"] .save-dot {
   background: var(--danger);
 }
@@ -1765,8 +1768,7 @@ a.btn {
   /* The phone note and toasts sit above the sheet instead of under it. */
   body:has(.main:not(.no-left) > .panel:not(.right)) .phone-note,
   body:has(.main:not(.no-right) > .panel.right) .phone-note {
-    bottom: calc(60vh + 12px);
-    bottom: calc(60dvh + 12px);
+    display: none;
   }
   body:has(.main:not(.no-left) > .panel:not(.right)) .toast,
   body:has(.main:not(.no-right) > .panel.right) .toast {

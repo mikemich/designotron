@@ -58,6 +58,15 @@ describe("pickTouchHandle", () => {
     expect(pick({ x: 130 + 15, y: 130 + 15 }, small)).toBe("se");
   });
 
+  it("never takes the middle of a tiny box for a handle", () => {
+    for (const side of [10, 12, 14, 16]) {
+      const tiny = rect(100, 100, side, side);
+      expect(pick({ x: 100 + side / 2, y: 100 + side / 2 }, tiny)).toBeNull();
+    }
+    // Its corner still resizes.
+    expect(pick({ x: 101, y: 101 }, rect(100, 100, 12, 12))).toBe("nw");
+  });
+
   it("works on a rotated box in screen space", () => {
     const a = Math.PI / 6;
     const c = box.map((p) => ({ x: 200 + (p.x - 200) * Math.cos(a) - (p.y - 160) * Math.sin(a), y: 160 + (p.x - 200) * Math.sin(a) + (p.y - 160) * Math.cos(a) }));

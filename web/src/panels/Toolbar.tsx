@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowUpRight,
   ChevronDown,
@@ -51,7 +51,7 @@ import { claudeReady, useChat } from "../ai/chatState";
 import { NAME_CUT_NOTICE, nameWasCut, normalizeName } from "../folders";
 import { FileLocation } from "./FileLocation";
 import { focusPanel } from "./PanelChrome";
-import { isPhone, panelShown } from "../panelState";
+import { isPhone, panelShown, PHONE_QUERY } from "../panelState";
 import { useShortcuts } from "./ShortcutsDialog";
 import { useImport } from "./ImportDialog";
 import { startFrame } from "../prototype";
@@ -121,6 +121,22 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
       : tabView
         ? "Read-only: open in another tab. This tab only shows the file; another tab edits it."
         : undefined;
+  // A phone has room for one sheet (Layers, Design or Claude): restoring panels with Ctrl+\ or turning a
+  // tablet into a phone must not leave two open.
+  useEffect(() => {
+    const enforce = () => {
+      if (!isPhone()) return;
+      const st = useStore.getState();
+      if (st.chatOpen && (st.panels.left || st.panels.right)) {
+        togglePanel("left", false);
+        togglePanel("right", false);
+      } else if (st.panels.left && st.panels.right) togglePanel("left", false);
+    };
+    enforce();
+    const mq = window.matchMedia?.(PHONE_QUERY);
+    mq?.addEventListener?.("change", enforce);
+    return () => mq?.removeEventListener?.("change", enforce);
+  }, [panels, chatOpen]);
   const [menu, setMenu] = useState<{
     x: number;
     y: number;
@@ -420,7 +436,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         />
         {/* A viewer already has the "View only" pill; don't say it twice. */}
         {!viewing && (
-          <span className="small save-state" role="status" title={saveTitle ?? saveLabel} data-state={saveLabel === "Not saved" ? "failed" : saveLabel === "Saving…" ? "saving" : "saved"}>
+          <span className="small save-state" role="status" title={saveTitle ?? saveLabel} data-state={saveLabel === "Not saved" ? "failed" : saveLabel === "Saving…" ? "saving" : saveLabel === "Saved locally" ? "saved" : "neutral"}>
             <span className="save-dot" aria-hidden="true" />
             <span className="save-text">{saveLabel}</span>
             {saveTitle && <span className="sr-only">{saveTitle.slice(saveLabel.length)}</span>}

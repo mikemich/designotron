@@ -33,14 +33,15 @@ export function pickTouchHandle<H extends string>(pt: Pt, handles: { h: H; p: Pt
   if (corners.length !== 4 || !handles.length) return null;
   const shortSide = Math.min(dist(corners[0], corners[1]), dist(corners[1], corners[2]));
   const within = inside(pt, corners);
-  const reach = within && shortSide < SMALL_BOX_SIDE ? SMALL_BOX_RADIUS : TOUCH_HANDLE_RADIUS;
+  // Inside a small box the reach also stays under a quarter of its short side, so the middle of a 10 px layer
+  // (5 px from its edge handles) is never a handle.
+  const reach = within && shortSide < SMALL_BOX_SIDE ? Math.min(SMALL_BOX_RADIUS, shortSide / 4) : TOUCH_HANDLE_RADIUS;
   let best: { h: H; d: number } | null = null;
   for (const { h, p } of handles) {
     const d = dist(pt, p);
     if (!best || d < best.d) best = { h, d };
   }
-  // Strictly inside a small box's reach: the middle of a 16 px layer is 8 px from its edge handles.
-  if (best && (within && shortSide < SMALL_BOX_SIDE ? best.d < reach : best.d <= reach)) return best.h;
+  if (best && best.d <= reach) return best.h;
   if (!within && !(best && best.d <= TOUCH_HANDLE_RADIUS) && corners.some((c) => dist(pt, c) <= ROTATE_RING)) return "rotate";
   return null;
 }

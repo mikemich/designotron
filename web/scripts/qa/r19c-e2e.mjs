@@ -218,6 +218,65 @@ for (const [key, device] of Object.entries(DEVICES)) {
   await c2.close();
 }
 
+{
+  // A layer about 12 screen px wide moves from its middle and never resizes (tiny boxes, DOM handles included).
+  for (const key of ["ipadProP", "iphone15"]) {
+    const { ctx, page, cdp } = await newPage(browser, DEVICES[key]);
+    const { id, scale } = await setup(page, cdp, { x: 40, y: 200, width: Math.round(12 / 1) , height: 12 });
+    const r = await rectOf(page, id);
+    await ev(page, () => window.__dt.zoomToFit());
+    void r;
+    const n0 = await ev(page, (i) => window.__dt.doc().nodes[i], id);
+    const r2 = await rectOf(page, id);
+    const s2 = r2.w / n0.width;
+    await drag(cdp, r2.cx, r2.cy, r2.cx + 30, r2.cy + 20, 8);
+    await sleep(300);
+    const n = await ev(page, (i) => window.__dt.doc().nodes[i], id);
+    check(`${key}: a layer about 12 screen px wide (${(12 * s2).toFixed(1)}) moves from its middle, no resize`, n.width === 12 && n.height === 12 && Math.abs(n.x - (40 + 30 / s2)) <= 1.5 && Math.abs(n.y - (200 + 20 / s2)) <= 1.5, `x ${n.x}, y ${n.y}, ${n.width}x${n.height}`);
+    void scale;
+    await ctx.close();
+  }
+}
+{
+  // Prototype tab, iPad landscape: a finger on the link dot makes a link and does not resize.
+  const { ctx, page, cdp } = await newPage(browser, DEVICES.ipadProL);
+  await ev(page, () =>
+    window.__dt.tool("create_nodes", {
+      nodes: [
+        { type: "frame", name: "A", x: 0, y: 0, width: 300, height: 500, fill: "#FFFFFF", children: [{ type: "rectangle", name: "Card", x: 40, y: 80, width: 200, height: 120, fill: "#3366FF" }] },
+        { type: "frame", name: "B", x: 400, y: 0, width: 300, height: 500, fill: "#EEEEEE" },
+      ],
+    }),
+  );
+  await sleep(300);
+  await ev(page, () => window.__dt.zoomToFit());
+  await sleep(300);
+  const move = page.locator("button[title^='Move']");
+  if ((await move.getAttribute("aria-pressed")) !== "true") await move.click();
+  const card = await byName(page, "Card");
+  const b = await byName(page, "B");
+  const rc = await rectOf(page, card.id);
+  await tap(cdp, rc.cx, rc.cy);
+  await sleep(300);
+  await page.locator("[role=tab]:has-text('Prototype')").first().click();
+  await sleep(400);
+  const dot = await ev(page, () => {
+    const el = document.querySelector("[data-link]");
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  });
+  const rb = await rectOf(page, b.id);
+  const before = canon(await ev(page, (i) => window.__dt.doc().nodes[i], card.id));
+  if (dot) await drag(cdp, dot.x, dot.y, rb.cx, rb.cy, 12);
+  await sleep(400);
+  const after = await ev(page, (i) => window.__dt.doc().nodes[i], card.id);
+  const same = after.width === 200 && after.height === 120 && after.x === 40 && after.y === 80;
+  check("iPad landscape: a touch drag from the link dot keeps the layer's size and place", !!dot && same, JSON.stringify({ dot: !!dot, w: after.width, h: after.height }));
+  check("iPad landscape: ... and makes a prototype link", !!dot && canon(after) !== before && /Navigate|navigate|reactions|interactions|link/i.test(canon(after)), canon(after).slice(0, 160));
+  await ctx.close();
+}
+
 // ---- 4: iPhone sheets ----
 {
   const { ctx, page, cdp } = await newPage(browser, DEVICES.iphone15);
