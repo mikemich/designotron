@@ -602,6 +602,11 @@ pub enum Query {
   OverrideGroups {
     id: NodeId,
   },
+  /// The layers inside instance `id` that carry overrides, in tree order, capped at 20:
+  /// `{ layers: [{ id, name, groups: [{ key, label }] }], more }`.
+  OverriddenLayers {
+    id: NodeId,
+  },
   /// Component properties for the design panel: of a main component or set, the controls of
   /// an instance, or what a layer of a main component can bind to.
   ComponentProps {
@@ -751,6 +756,8 @@ pub enum Query {
     id: NodeId,
   },
   ExportProject,
+  /// The variables as a W3C design tokens file (text).
+  TokensJson,
   /// Names the exported code gives the document's styles and variables (for the Code tab's Inspect).
   InspectNames,
   ToolDefs,
@@ -809,8 +816,8 @@ fn allowed_read_only(cmd: &Command) -> bool {
 
 /// `current`'s comments as they sit in `restored`: on their layer if it exists there, else a
 /// page comment at the position it had on the page; on the first page if its page is gone.
-fn carry_comments(current: &Document, restored: &Document) -> std::collections::BTreeMap<String, crate::model::Comment> {
-  let mut out = current.comments.clone();
+fn carry_comments(current: &Document, restored: &Document) -> Arc<std::collections::BTreeMap<String, crate::model::Comment>> {
+  let mut out = (*current.comments).clone();
   for c in out.values_mut() {
     if let Some(id) = c.node.clone() {
       if restored.get(&id).is_none() {
@@ -828,7 +835,10 @@ fn carry_comments(current: &Document, restored: &Document) -> std::collections::
       None => {}
     }
   }
-  out
+  if out == *current.comments {
+    return Arc::clone(&current.comments);
+  }
+  Arc::new(out)
 }
 
 /// Where a layer dropped into an auto layout frame goes: its index among the frame's children and
@@ -1856,14 +1866,14 @@ impl Engine {
       Command::AddPage { name } => {
         let id = self.gen.next("p_");
         let name = name.unwrap_or_else(|| format!("Page {}", self.doc.pages.len() + 1));
-        self.doc.pages.push(Page {
+        self.doc.pages.push(Arc::new(Page {
           id: id.clone(),
           name,
           children: vec![],
           background: "#F5F5F5".into(),
           flow_start: None,
           guides: Vec::new(),
-        });
+        }));
         self.page = id.clone();
         self.selection.clear();
         Ok(json!({ "id": id }))
@@ -1935,11 +1945,14 @@ impl Engine {
         for c in &mut collections {
           let modes: Vec<String> = c.modes.iter().map(|m| m.id.clone()).collect();
           for v in &mut c.variables {
-            v.values.retain(|m, _| modes.contains(m));
+            if v.values.keys().any(|m| !modes.contains(m)) {
+              Arc::make_mut(v).values.retain(|m, _| modes.contains(m));
+            }
           }
         }
         crate::variables::validate(&collections, &self.doc.variables)?;
-        self.doc.variables = collections;
+        // Equal collections and variables keep their old allocations, so this step shares them.
+        self.doc.variables = crate::variables::intern(collections, &self.doc.variables);
         crate::variables::prune(&mut self.doc);
         Ok(json!({}))
       }
@@ -1961,11 +1974,7 @@ impl Engine {
           None => None,
         };
         for id in &ids {
-          let n = self.doc.get_mut(id).ok_or_else(|| format!("no node {id}"))?;
-          match &var_id {
-            Some(v) => n.bindings.insert(property.clone(), v.clone()),
-            None => n.bindings.remove(&property),
-          };
+          crate::variables::set_binding(&mut self.doc, id, &property, var_id.as_deref())?;
         }
         Ok(json!({}))
       }
@@ -1990,10 +1999,14 @@ impl Engine {
         };
         for id in &ids {
           let n = self.doc.get_mut(id).ok_or_else(|| format!("no node {id}"))?;
-          match &mid {
+          let had = match &mid {
             Some(m) => n.variable_modes.insert(cid.clone(), m.clone()),
             None => n.variable_modes.remove(&cid),
           };
+          if had.is_some() || mid.is_some() {
+            let pin = json!({ "variableModes": { cid.clone(): mid } });
+            components::record_override(&mut self.doc, id, &pin);
+          }
         }
         Ok(json!({}))
       }
@@ -2020,7 +2033,7 @@ impl Engine {
           None => (x, y),
         };
         let id = self.gen.next("c_");
-        self.doc.comments.insert(
+        self.doc.comments_mut().insert(
           id.clone(),
           crate::model::Comment {
             id: id.clone(),
@@ -2035,16 +2048,16 @@ impl Engine {
         Ok(json!({ "id": id }))
       }
       Command::ReplyComment { id, text, author, time } => {
-        let c = self.doc.comments.get_mut(&id).ok_or("no such comment")?;
+        let c = self.doc.comments_mut().get_mut(&id).ok_or("no such comment")?;
         c.messages.push(crate::model::CommentMessage { author, text, time });
         Ok(json!({}))
       }
       Command::ResolveComment { id, resolved } => {
-        self.doc.comments.get_mut(&id).ok_or("no such comment")?.resolved = resolved;
+        self.doc.comments_mut().get_mut(&id).ok_or("no such comment")?.resolved = resolved;
         Ok(json!({}))
       }
       Command::DeleteComment { id } => {
-        self.doc.comments.remove(&id).ok_or("no such comment")?;
+        self.doc.comments_mut().remove(&id).ok_or("no such comment")?;
         Ok(json!({}))
       }
       Command::ImportFigma { file, images } => {
@@ -2241,11 +2254,16 @@ impl Engine {
       Command::Update { ids, patch: p } => {
         // Before anything records the patch (as an instance override, say).
         let p = without_unsafe_links(p);
-        crate::variables::unbind_for_patch(&mut self.doc, &ids, &p);
+        let detached = crate::variables::unbind_for_patch(&mut self.doc, &ids, &p);
         for id in &ids {
           let before = self.doc.get(id).cloned().ok_or_else(|| format!("no node {id}"))?;
           patch::apply(self.doc.get_mut(id).unwrap(), &p)?;
           components::record_override(&mut self.doc, id, &p);
+          // The detach of a layer inside an instance is an override too (`bindings: {x: null}`).
+          if let Some((_, gone)) = detached.iter().find(|(d, _)| d == id) {
+            let unbound: serde_json::Map<String, Value> = gone.iter().map(|g| (g.clone(), Value::Null)).collect();
+            components::record_override(&mut self.doc, id, &json!({ "bindings": unbound }));
+          }
           let keys = before
             .text
             .as_ref()
@@ -2269,11 +2287,15 @@ impl Engine {
           // Editing a linked layer's fill, stroke, effects or grids by hand detaches it (Styles, W3-C);
           // on an instance layer the unlink is an override too, so a main edit doesn't relink it.
           let mut unlinked = serde_json::Map::new();
-          if after.fill_style.is_some() && before.fills != after.fills {
+          // A variable bound in the same patch replaces the style, unless the patch names one too.
+          let binds = |prop: &str, style: &str| {
+            p.get("bindings").and_then(|b| b.get(prop)).is_some_and(|v| v.is_string()) && !p.get(style).is_some_and(|v| v.is_string())
+          };
+          if after.fill_style.is_some() && (before.fills != after.fills || binds("fill", "fillStyle")) {
             self.doc.get_mut(id).unwrap().fill_style = None;
             unlinked.insert("fillStyle".into(), Value::Null);
           }
-          if after.stroke_style.is_some() && before.strokes != after.strokes {
+          if after.stroke_style.is_some() && (before.strokes != after.strokes || binds("stroke", "strokeStyle")) {
             self.doc.get_mut(id).unwrap().stroke_style = None;
             unlinked.insert("strokeStyle".into(), Value::Null);
           }
@@ -2836,7 +2858,7 @@ impl Engine {
       }
       Command::AddColorStyle { name, color } => {
         let id = self.gen.next("s_");
-        self.doc.styles.colors.push(ColorStyle {
+        self.doc.styles_mut().colors.push(ColorStyle {
           id: id.clone(),
           name,
           color: crate::color::normalize(&color),
@@ -2846,7 +2868,7 @@ impl Engine {
       Command::AddTextStyle { name, from } => {
         let t = self.doc.get(&from).and_then(|n| n.text.clone()).ok_or("select a text layer")?;
         let id = self.gen.next("s_");
-        self.doc.styles.texts.push(TextStyle {
+        self.doc.styles_mut().texts.push(TextStyle {
           id: id.clone(),
           name,
           font_family: t.font_family,
@@ -2861,7 +2883,13 @@ impl Engine {
         Ok(json!({ "id": id }))
       }
       Command::UpdateColorStyle { id, name, color } => {
-        let style = self.doc.styles.colors.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
+        let style = self
+          .doc
+          .styles_mut()
+          .colors
+          .iter_mut()
+          .find(|s| s.id == id)
+          .ok_or("no such style")?;
         if let Some(n) = name {
           style.name = n;
         }
@@ -2884,7 +2912,7 @@ impl Engine {
           return Err("the layer has no effects to save as a style".into());
         }
         let id = self.gen.next("s_");
-        self.doc.styles.effects.push(EffectStyle {
+        self.doc.styles_mut().effects.push(EffectStyle {
           id: id.clone(),
           name,
           effects,
@@ -2899,7 +2927,7 @@ impl Engine {
           return Err("the layer has no layout grids to save as a style".into());
         }
         let id = self.gen.next("s_");
-        self.doc.styles.grids.push(GridStyle {
+        self.doc.styles_mut().grids.push(GridStyle {
           id: id.clone(),
           name,
           grids,
@@ -2914,7 +2942,13 @@ impl Engine {
         effects,
         description,
       } => {
-        let style = self.doc.styles.effects.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
+        let style = self
+          .doc
+          .styles_mut()
+          .effects
+          .iter_mut()
+          .find(|s| s.id == id)
+          .ok_or("no such style")?;
         if let Some(v) = name {
           style.name = v;
         }
@@ -2936,7 +2970,7 @@ impl Engine {
         grids,
         description,
       } => {
-        let style = self.doc.styles.grids.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
+        let style = self.doc.styles_mut().grids.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
         if let Some(v) = name {
           style.name = v;
         }
@@ -2953,10 +2987,18 @@ impl Engine {
         Ok(json!({}))
       }
       Command::DeleteStyle { id } => {
-        self.doc.styles.colors.retain(|s| s.id != id);
-        self.doc.styles.texts.retain(|s| s.id != id);
-        self.doc.styles.effects.retain(|s| s.id != id);
-        self.doc.styles.grids.retain(|s| s.id != id);
+        let st = &self.doc.styles;
+        if st.colors.iter().any(|s| s.id == id)
+          || st.texts.iter().any(|s| s.id == id)
+          || st.effects.iter().any(|s| s.id == id)
+          || st.grids.iter().any(|s| s.id == id)
+        {
+          let st = self.doc.styles_mut();
+          st.colors.retain(|s| s.id != id);
+          st.texts.retain(|s| s.id != id);
+          st.effects.retain(|s| s.id != id);
+          st.grids.retain(|s| s.id != id);
+        }
         let is = |l: &Option<String>| l.as_deref() == Some(id.as_str());
         let uses = |n: &Node| is(&n.fill_style) || is(&n.text_style) || is(&n.stroke_style) || is(&n.effect_style) || is(&n.grid_style);
         self.doc.update_where(uses, |n| {
@@ -3003,7 +3045,7 @@ impl Engine {
         auto_line_height,
         letter_spacing,
       } => {
-        let style = self.doc.styles.texts.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
+        let style = self.doc.styles_mut().texts.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
         if let Some(v) = name {
           style.name = v;
         }
@@ -3046,18 +3088,22 @@ impl Engine {
           let stroke = kind.as_deref() == Some("stroke");
           for id in &ids {
             if let Some(n) = self.doc.get_mut(id) {
-              if stroke {
+              // One source per paint: a style replaces the variable bound to the same fill or stroke.
+              let prop = if stroke { "stroke" } else { "fill" };
+              let was_bound = n.bindings.remove(prop).is_some();
+              let mut rec = if stroke {
                 set_stroke_color(n, &c.color);
                 n.stroke_style = Some(style_id.clone());
-                applied.push((
-                  id.clone(),
-                  json!({ "strokes": n.strokes, "strokeWeight": n.stroke_weight, "strokeStyle": style_id }),
-                ));
+                json!({ "strokes": n.strokes, "strokeWeight": n.stroke_weight, "strokeStyle": style_id })
               } else {
                 n.fills = vec![Paint::solid(&c.color)];
                 n.fill_style = Some(style_id.clone());
-                applied.push((id.clone(), json!({ "fills": n.fills, "fillStyle": style_id })));
+                json!({ "fills": n.fills, "fillStyle": style_id })
+              };
+              if let (Some(m), true) = (rec.as_object_mut(), was_bound) {
+                m.insert("bindings".into(), json!({ prop: null }));
               }
+              applied.push((id.clone(), rec));
             }
           }
         } else if let Some(e) = self.doc.styles.effects.iter().find(|s| s.id == style_id).cloned() {
@@ -3736,6 +3782,20 @@ impl Engine {
           .collect();
         json!({ "groups": groups })
       }
+      Query::OverriddenLayers { id } => {
+        let (layers, more) = components::overridden_layers(&self.doc, &id, 20);
+        let layers: Vec<Value> = layers
+          .into_iter()
+          .map(|(lid, name, groups)| {
+            let groups: Vec<Value> = groups
+              .into_iter()
+              .map(|(key, label)| json!({ "key": key, "label": label }))
+              .collect();
+            json!({ "id": lid, "name": name, "groups": groups })
+          })
+          .collect();
+        json!({ "layers": layers, "more": more })
+      }
       Query::OverrideCount { id } => json!({ "count": components::override_count(&self.doc, &id) }),
       Query::ComponentProps { id } => crate::props::describe(&self.doc, &id),
       Query::FrameAt { x, y, exclude } => json!(ops::frame_at(&self.doc, &self.page, Point::new(x, y), &exclude, true)),
@@ -3807,6 +3867,7 @@ impl Engine {
           .collect();
         json!(files)
       }
+      Query::TokensJson => json!(crate::variables::tokens_json_text(&self.doc)),
       Query::InspectNames => codegen::inspect_names(&self.doc),
       Query::ToolDefs => ai::tool_defs(),
       Query::SystemPrompt => json!(ai::SYSTEM_PROMPT),
@@ -5543,7 +5604,7 @@ mod tests {
       })
       .unwrap(),
     );
-    e.doc.styles.texts.push(crate::model::TextStyle {
+    e.doc.styles_mut().texts.push(crate::model::TextStyle {
       id: "ts1".into(),
       name: "H1".into(),
       font_family: "Inter".into(),

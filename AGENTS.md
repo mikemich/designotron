@@ -83,6 +83,16 @@ must never be committed.
   canvas render cache (`render_incremental`) and the JS document copy (`doc_delta`) all work
   from that diff. Only `get_mut` nodes you actually change (use `Document::update_where`), and
   never add per-mutation or per-frame work that scans every node.
+- The document shell is shared between undo steps the same way: `pages: Vec<Arc<Page>>`,
+  `styles: Arc<Styles>`, `variables: Vec<Arc<Collection>>` with `Collection::variables:
+  Vec<Arc<Variable>>`, `comments: Arc<BTreeMap<..>>`. Read through the fields (auto-deref).
+  Mutate only through `Document::page_mut` / `pages_iter_mut`, `styles_mut`, `comments_mut`,
+  `variables::coll_mut(doc, id)` and `variables::var_mut(coll, id)` (all `Arc::make_mut`, so only
+  the part you change is copied). Never rebuild a whole list to change one entry, and a whole-set
+  replacement (`SetVariables`, collab merges) goes through `variables::intern` / `reshare` so equal
+  parts keep their old `Arc`. `Document` equality and `collab::delta` short-circuit on `Arc::ptr_eq`
+  (`model::arc_eq`). JSON is unchanged (`json_golden_tests.rs`). Measure with
+  `cargo run --release -p designotron-engine --example memstep vars300`.
 - Big files on the canvas: `render_incremental` also returns each root's painted bounds and text
   count; `Canvas.tsx` hides roots outside the view (`display="none"`) and draws text under 5 px
   (and, while zooming a page with 400+ texts in view, all text) as the bars `render.rs` emits next

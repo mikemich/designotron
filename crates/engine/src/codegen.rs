@@ -776,7 +776,6 @@ impl<'a> Ctx<'a> {
     self.position(&mut el, &n, place);
     self.limits(&mut el, &n);
     self.visual(&mut el, &n);
-    self.bind_vars(&mut el, &n);
     if self.style_classes {
       self.apply_styles(&mut el, &n);
     }
@@ -844,6 +843,9 @@ impl<'a> Ctx<'a> {
       };
       el.s("align-items", items);
     }
+    // After the layout block (padding and gaps exist by now) and before the scroller split moves
+    // them into the inner box with their bound values.
+    self.bind_vars(&mut el, &n);
     if n.kind.is_container() && !has_mask {
       let child_place = |c: &Node| match n.layout.as_ref() {
         Some(al) if !c.absolute_position => Place::Flow {
@@ -931,7 +933,11 @@ impl<'a> Ctx<'a> {
           let border = if n.stroke_align == StrokeAlign::Center {
             // The inside half is the overlay; the outer half stays an outline, which the frame's
             // own overflow never clips.
-            let half = ov.replacen(&px(n.stroke_weight), &px(n.stroke_weight / 2.0), 1);
+            let half = match ov.split_once("*1px) ") {
+              // A bound weight: `calc(var(--x)*1px) ...` halves as `calc(var(--x)*0.5px) ...`.
+              Some((head, rest)) if head.starts_with("calc(var(") => format!("{head}*0.5px) {rest}"),
+              _ => ov.replacen(&px(n.stroke_weight), &px(n.stroke_weight / 2.0), 1),
+            };
             el.s("outline", half.clone());
             el.s("outline-offset", "0");
             half
@@ -1563,6 +1569,14 @@ impl<'a> Ctx<'a> {
           }
         }
       };
+      // One side of a bound padding; a per-side border comes out of it, as in `padding_value`.
+      let pad_side = |w: f64, name: &str| {
+        if w > 0.0 {
+          format!("max(0px, calc(var({name})*1px - {}px))", fmt(w))
+        } else {
+          format!("calc(var({name})*1px)")
+        }
+      };
       match prop.as_str() {
         "fill" if n.kind == NodeType::Text => set(el, "color", &var),
         "fill" => set(el, "background-color", &var),
@@ -1577,26 +1591,114 @@ impl<'a> Ctx<'a> {
           }
         }
         "cornerRadius" => set(el, "border-radius", &len),
-        "padding" => match border_widths(n).filter(|b| b.iter().any(|w| *w > 0.0)) {
+        "padding" if n.device.is_none() && n.layout.is_some() => match border_widths(n).filter(|b| b.iter().any(|w| *w > 0.0)) {
           // Per-side borders come out of the padding, as in `padding_value`.
-          Some(b) => {
-            let side = |w: f64| {
-              if w > 0.0 {
-                format!("max(0px, calc(var({name})*1px - {}px))", fmt(w))
-              } else {
-                len.clone()
-              }
-            };
-            set(el, "padding", &b.map(side).join(" "));
-          }
-          None => set(el, "padding", &len),
+          Some(b) => el.s("padding", b.map(|w| pad_side(w, &name)).join(" ")),
+          None => el.s("padding", len.clone()),
         },
-        "gap" => {
+        // A device frame's padding adds `env(safe-area-inset-*)`, which a token would drop.
+        "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft" if n.device.is_none() && n.layout.is_some() => {
+          let i = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"]
+            .iter()
+            .position(|k| *k == prop)
+            .unwrap_or(0);
+          let cur = el.styles.iter().find(|(k, _)| k == "padding").map(|(_, v)| v.clone());
+          let mut parts: Vec<String> = match cur.as_deref().map(split_top) {
+            Some(p) if p.len() == 1 => vec![p[0].to_string(); 4],
+            Some(p) if p.len() == 2 => vec![p[0].into(), p[1].into(), p[0].into(), p[1].into()],
+            Some(p) if p.len() == 3 => vec![p[0].into(), p[1].into(), p[2].into(), p[1].into()],
+            Some(p) if p.len() == 4 => p.iter().map(|x| x.to_string()).collect(),
+            _ => vec!["0".to_string(); 4],
+          };
+          let w = border_widths(n).map(|b| b[i]).unwrap_or(0.0);
+          parts[i] = pad_side(w, &name);
+          el.s("padding", parts.join(" "));
+        }
+        "gap" if n.layout.as_ref().is_some_and(|l| l.primary_align != Align::SpaceBetween) => {
           let key = match n.layout.as_ref().map(|l| l.direction) {
             Some(LayoutDirection::Horizontal) => "column-gap",
             _ => "row-gap",
           };
-          set(el, key, &len);
+          el.s(key, len.clone());
+        }
+        "counterGap"
+          if n
+            .layout
+            .as_ref()
+            .is_some_and(|l| l.wrap && l.direction == LayoutDirection::Horizontal) =>
+        {
+          el.s("row-gap", len.clone());
+        }
+        "width" | "height" => {
+          // Only the literal that is the layer's own size: fill, hug and `100%` stay as they are.
+          let (own, keys): (f64, &[&str]) = if prop == "width" {
+            (n.width, &["width", "max-width"])
+          } else {
+            (n.height, &["height", "min-height"])
+          };
+          let root = n.parent.is_none() && n.kind == NodeType::Frame;
+          for (k, val) in el.styles.iter_mut() {
+            // Limits (`max-width` ...) are the layer's own only on a screen's root.
+            if keys.contains(&k.as_str()) && (root || !k.contains('-')) && *val == px(own) {
+              *val = len.clone();
+            }
+          }
+        }
+        "strokeWeight" if side_weights(n).is_none() => {
+          let w = n.stroke_weight;
+          let outside_text = n.kind == NodeType::Text && n.stroke_align == StrokeAlign::Outside;
+          let mut bound = false;
+          for (k, val) in el.styles.iter_mut() {
+            if !matches!(k.as_str(), "outline" | "border" | "border-top" | "-webkit-text-stroke") {
+              continue;
+            }
+            let (lit, rep) = if k == "-webkit-text-stroke" && outside_text {
+              (px(w * 2.0), format!("calc(var({name})*2px)"))
+            } else {
+              (px(w), len.clone())
+            };
+            if let Some(rest) = val.strip_prefix(&format!("{lit} ")) {
+              *val = format!("{rep} {rest}");
+              bound |= k == "outline";
+            }
+          }
+          if bound {
+            let off = match n.stroke_align {
+              StrokeAlign::Inside => Some(format!("calc(var({name})*-1px)")),
+              StrokeAlign::Center => Some(format!("calc(var({name})*-0.5px)")),
+              StrokeAlign::Outside => None,
+            };
+            if let Some(off) = off {
+              set(el, "outline-offset", &off);
+            }
+          }
+        }
+        "lineHeight" | "letterSpacing" => {
+          // An automatic line height (a token of 0 or less) stays automatic.
+          if let Some(t) = n.text.as_ref().filter(|t| prop != "lineHeight" || t.line_height.is_some()) {
+            let (key, lit) = if prop == "lineHeight" {
+              ("line-height", px(t.line_height_px()))
+            } else {
+              ("letter-spacing", px(t.letter_spacing))
+            };
+            for (k, val) in el.styles.iter_mut() {
+              if k == key && *val == lit {
+                *val = len.clone();
+              }
+            }
+          }
+        }
+        // The engine rounds a weight to 100..900; CSS would take the raw value.
+        "fontWeight"
+          if n.kind == NodeType::Text
+            && vars::default_number(self.doc, c, v).is_some_and(|w| w % 100.0 == 0.0 && (100.0..=900.0).contains(&w)) =>
+        {
+          el.s("font-weight", var.clone())
+        }
+        "fontFamily" if n.kind == NodeType::Text => {
+          let stack = crate::render::font_stack(&n.text.as_ref().map(|t| t.font_family.clone()).unwrap_or_default());
+          let generic = stack.rsplit(", ").next().unwrap_or("sans-serif").to_string();
+          set(el, "font-family", &format!("{var}, {generic}"))
         }
         "opacity" => set(el, "opacity", &var),
         "fontSize" => set(el, "font-size", &len),
@@ -1620,7 +1722,12 @@ impl<'a> Ctx<'a> {
         && t.font_weight == style.font_weight
         && t.line_height == style.line_height
         && t.letter_spacing == style.letter_spacing;
-      if same && el.raw.is_none() {
+      // A bound font property is stated inline, where `bind_vars` can replace it with its token
+      // (and one layer's `calc(var(..))` doesn't end up in the class every user of the style shares).
+      let bound = ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing"]
+        .iter()
+        .any(|p| n.bindings.contains_key(*p));
+      if same && !bound && el.raw.is_none() {
         let class = self.names.texts.get(&style.id).cloned().unwrap_or_else(|| text_class(&style.name));
         const OWN: [&str; 5] = ["font-family", "font-size", "font-weight", "line-height", "letter-spacing"];
         let mut decls: Vec<(String, String)> = el.styles.iter().filter(|(k, _)| OWN.contains(&k.as_str())).cloned().collect();
@@ -2731,12 +2838,14 @@ fn tw_class_raw(k: &str, v: &str) -> String {
     ("background-color", _) => format!("bg-[{a}]"),
     ("color", _) => format!("text-[{a}]"),
     ("font-size", _) => format!("text-[length:{a}]"),
+    ("font-weight", _) if v.starts_with("var(") => format!("[font-weight:{a}]"),
     ("font-weight", _) => format!("font-[{a}]"),
     ("line-height", _) => format!("leading-[{a}]"),
     ("letter-spacing", _) => format!("tracking-[{a}]"),
     ("border-radius", _) => format!("rounded-[{a}]"),
     ("opacity", _) => format!("opacity-[{a}]"),
     ("box-shadow", _) => format!("shadow-[{a}]"),
+    ("font-family", _) if v.starts_with("var(") => format!("[font-family:{a}]"),
     ("font-family", _) => {
       let bare: String = v.chars().filter(|c| !matches!(c, '\'' | '"' | '\\' | '[' | ']')).collect();
       format!("font-[{}]", tw_value(&bare).replace(",_", ","))
@@ -3521,6 +3630,14 @@ fn readme_limits(doc: &Document) -> String {
   out
 }
 
+/// The design tokens file and which bound values follow the CSS variables.
+fn readme_tokens(doc: &Document) -> String {
+  if doc.variables.is_empty() {
+    return String::new();
+  }
+  "\n## Design tokens\n\n`tokens.json` has the variables in the W3C design tokens format (colours as hex, aliases as `{group.token}` references, the other modes of each token under `$extensions[\"com.designotron\"].modes`). Colours, padding, gaps, sizes, stroke width, corner radius, opacity and typography bound to a variable use `var(--name)` in the generated code, so editing `src/tokens.css` (or switching a mode) restyles the app. Per-side strokes keep their literal width, and a device frame keeps its safe-area padding. In `tokens.json`, spacing and other numbers are `$type` `number` and colours are hex strings (a strict 2025.10 validator expects `dimension` and colour objects); strings and booleans have no `$type`.\n".to_string()
+}
+
 fn readme_themes(themed: &[(String, Vec<String>)]) -> String {
   if themed.is_empty() {
     return String::new();
@@ -3652,6 +3769,10 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
       path: "src/tokens.css".into(),
       content: crate::variables::tokens_css(doc),
     });
+    files.push(ProjectFile {
+      path: "tokens.json".into(),
+      content: crate::variables::tokens_json_text(doc),
+    });
   }
   files.push(ProjectFile {
     path: "src/main.tsx".into(),
@@ -3701,10 +3822,11 @@ pub fn export_project(doc: &Document, m: &dyn TextMeasurer) -> Vec<ProjectFile> 
   files.push(ProjectFile {
     path: "README.md".into(),
     content: format!(
-      "# {title}\n\nGenerated with [Designotron](https://github.com/mikemich/designotron).\n\n```bash\nnpm install\nnpm run dev\n```\n{}{}{}{}",
+      "# {title}\n\nGenerated with [Designotron](https://github.com/mikemich/designotron).\n\n```bash\nnpm install\nnpm run dev\n```\n{}{}{}{}{}",
       readme_flows(doc, &ctx),
       readme_limits(doc),
       readme_themes(&themed),
+      readme_tokens(doc),
       if credits.is_empty() {
         ""
       } else {
@@ -3731,6 +3853,7 @@ mod tests {
   use crate::doc::{new_document, IdGen};
   use crate::model::{AutoLayout, Interaction};
   use crate::text::HeuristicMeasurer;
+  use std::sync::Arc;
 
   fn sample() -> Document {
     let mut gen = IdGen::new(11);
@@ -3796,18 +3919,18 @@ mod tests {
   #[test]
   fn project_start_skips_a_missing_flow_start() {
     let mut doc = sample();
-    doc.pages[0].flow_start = Some("gone".into());
+    doc.pages_iter_mut().next().unwrap().flow_start = Some("gone".into());
     let start = |doc: &Document| {
       let files = export_project(doc, &HeuristicMeasurer);
       files.iter().find(|f| f.path == "src/App.tsx").unwrap().content.clone()
     };
     assert!(start(&doc).contains("hash : \"Home\";"), "falls back to the first screen");
     // A later page's valid start wins over an earlier page's missing one.
-    let mut other = doc.pages[0].clone();
+    let mut other = (*doc.pages[0]).clone();
     other.id = "p2".into();
     other.children.clear();
     other.flow_start = Some("detail".into());
-    doc.pages.push(other);
+    doc.pages.push(Arc::new(other));
     assert!(start(&doc).contains("hash : \"ProductDetail\";"));
   }
 
@@ -4515,7 +4638,10 @@ mod tests {
       col("b", "theme!", &["Light", "Sepia"]),
       col("c", "主题", &["亮", "暗"]),
       col("d", "颜色", &["亮", "暗"]),
-    ];
+    ]
+    .into_iter()
+    .map(Arc::new)
+    .collect();
     let files = export_project(&doc, &HeuristicMeasurer);
     let ts = &files.iter().find(|f| f.path == "src/tokens.ts").unwrap().content;
     assert!(ts.contains("\"theme\": [\"light\", \"dark\"]"), "{ts}");
@@ -4544,28 +4670,28 @@ mod tests {
   fn style_names_are_unique_and_never_take_a_variables_property() {
     use crate::variables::{Collection, VarKind, VarMode, Variable};
     let mut doc = sample();
-    doc.variables.push(Collection {
+    doc.variables.push(Arc::new(Collection {
       id: "c".into(),
       name: "Color".into(),
       modes: vec![VarMode {
         id: "m".into(),
         name: "Default".into(),
       }],
-      variables: vec![Variable {
+      variables: vec![Arc::new(Variable {
         id: "v".into(),
         name: "Color/Primary".into(),
         kind: VarKind::Color,
         values: BTreeMap::from([("m".into(), json!("#FF0000"))]),
         description: String::new(),
         scopes: Vec::new(),
-      }],
-    });
+      })],
+    }));
     let color = |id: &str, name: &str, c: &str| crate::model::ColorStyle {
       id: id.into(),
       name: name.into(),
       color: c.into(),
     };
-    doc.styles.colors = vec![
+    doc.styles_mut().colors = vec![
       color("c1", "Brand/Primary", "#111111"),
       color("c2", "Brand Primary", "#222222"),
       color("c3", "主色", "#333333"),
@@ -4582,7 +4708,7 @@ mod tests {
       line_height: None,
       letter_spacing: 0.0,
     };
-    doc.styles.texts = vec![
+    doc.styles_mut().texts = vec![
       text("t1", "Heading 1", 20.0),
       text("t2", "Heading-1", 30.0),
       text("t3", "标题", 40.0),
@@ -4618,7 +4744,7 @@ mod tests {
   #[test]
   fn colour_style_on_a_see_through_fill_keeps_its_opacity() {
     let mut doc = sample();
-    doc.styles.colors.push(crate::model::ColorStyle {
+    doc.styles_mut().colors.push(crate::model::ColorStyle {
       id: "cs".into(),
       name: "Brand".into(),
       color: "#7C5CFF".into(),
@@ -4640,7 +4766,7 @@ mod tests {
   fn font_families_with_quotes_are_escaped() {
     let mut doc = sample();
     doc.get_mut("t").unwrap().text.as_mut().unwrap().font_family = "Gill's \"Sans\"".into();
-    doc.styles.texts.push(crate::model::TextStyle {
+    doc.styles_mut().texts.push(crate::model::TextStyle {
       id: "ts".into(),
       name: "Body".into(),
       font_family: "Gill's \"Sans\"".into(),
@@ -4773,7 +4899,7 @@ mod tests {
   fn two_mode_collection_exports_set_mode() {
     use crate::variables::{Collection, VarKind, VarMode, Variable};
     let mut doc = sample();
-    doc.variables.push(Collection {
+    doc.variables.push(Arc::new(Collection {
       id: "c1".into(),
       name: "Theme".into(),
       modes: vec![
@@ -4786,15 +4912,15 @@ mod tests {
           name: "Dark".into(),
         },
       ],
-      variables: vec![Variable {
+      variables: vec![Arc::new(Variable {
         id: "v1".into(),
         name: "Brand/bg".into(),
         kind: VarKind::Color,
         values: BTreeMap::from([("m1".into(), json!("#FFFFFF")), ("m2".into(), json!("#111111"))]),
         description: String::new(),
         scopes: Vec::new(),
-      }],
-    });
+      })],
+    }));
     let files = export_project(&doc, &HeuristicMeasurer);
     let get = |p: &str| files.iter().find(|f| f.path == p).map(|f| f.content.clone());
     let ts = get("src/tokens.ts").expect("tokens.ts");
@@ -4809,7 +4935,7 @@ mod tests {
     );
     assert!(get("README.md").unwrap().contains("setMode(\"theme\", \"dark\")"));
     // One mode: no helper.
-    doc.variables[0].modes.pop();
+    Arc::make_mut(&mut doc.variables[0]).modes.pop();
     let files = export_project(&doc, &HeuristicMeasurer);
     assert!(!files.iter().any(|f| f.path == "src/tokens.ts"));
   }
@@ -4817,7 +4943,7 @@ mod tests {
   #[test]
   fn linked_text_and_colour_styles_become_classes() {
     let mut doc = sample();
-    doc.styles.texts.push(crate::model::TextStyle {
+    doc.styles_mut().texts.push(crate::model::TextStyle {
       id: "ts1".into(),
       name: "Heading 1".into(),
       font_family: "Inter".into(),
@@ -4826,7 +4952,7 @@ mod tests {
       line_height: Some(48.0),
       letter_spacing: -0.5,
     });
-    doc.styles.colors.push(crate::model::ColorStyle {
+    doc.styles_mut().colors.push(crate::model::ColorStyle {
       id: "cs1".into(),
       name: "Brand/Primary".into(),
       color: "#7C5CFF".into(),
@@ -5064,7 +5190,7 @@ mod r8_tests {
   fn start_screen_comes_from_the_hash_and_the_readme_lists_flows_and_limits() {
     let mut doc = sample();
     let page = doc.pages[0].id.clone();
-    doc.pages[0].flow_start = Some("detail".into());
+    doc.pages_iter_mut().next().unwrap().flow_start = Some("detail".into());
     let hero = crate::ops::default_node(NodeType::Rectangle, "hero".into(), "hero.jpg".into());
     doc.insert(hero, None, &page, None);
     let app = project(&doc, "src/App.tsx");
@@ -5476,7 +5602,7 @@ mod r10_tests {
     let mut doc = base();
     add(&mut doc, NodeType::Frame, "s", "Screen", None);
     add(&mut doc, NodeType::Text, "t", "Body", Some("s"));
-    doc.styles.texts.push(crate::model::TextStyle {
+    doc.styles_mut().texts.push(crate::model::TextStyle {
       id: "ts".into(),
       name: "Body".into(),
       font_family: "Inter".into(),
@@ -6181,5 +6307,417 @@ mod r13_tests {
       assert!(src.contains("aria-label=\"Cta\""), "{src}");
       assert!(!src.contains("aria-hidden"), "{src}");
     }
+  }
+}
+
+#[cfg(test)]
+mod r14_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::model::{AutoLayout, DeviceFrame};
+  use crate::text::HeuristicMeasurer;
+  use crate::variables::{Collection, VarKind, VarMode, Variable};
+  use serde_json::json;
+  use std::sync::Arc;
+
+  fn number(id: &str, name: &str, v: f64) -> Variable {
+    Variable {
+      id: id.into(),
+      name: name.into(),
+      kind: VarKind::Number,
+      values: [("m".to_string(), json!(v))].into(),
+      ..Default::default()
+    }
+  }
+
+  /// A fixed-size vertical frame "f" in a document with a Space collection.
+  fn doc_with(mut edit: impl FnMut(&mut Node)) -> Document {
+    let mut gen = IdGen::new(14);
+    let mut doc = new_document(&mut gen, "R14");
+    let page = doc.pages[0].id.clone();
+    doc.variables = vec![Arc::new(Collection {
+      id: "c".into(),
+      name: "Space".into(),
+      modes: vec![VarMode {
+        id: "m".into(),
+        name: "Base".into(),
+      }],
+      variables: ["Space/2", "Space/6", "Space/8"]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| number(&format!("v{}", i + 1), n, [8.0, 24.0, 32.0][i]))
+        .map(Arc::new)
+        .collect(),
+    })];
+    let mut f = crate::ops::default_node(NodeType::Frame, "f".into(), "F".into());
+    f.width = 320.0;
+    f.height = 200.0;
+    f.layout = Some(AutoLayout {
+      direction: LayoutDirection::Vertical,
+      gap: 8.0,
+      padding_top: 24.0,
+      padding_right: 24.0,
+      padding_bottom: 24.0,
+      padding_left: 24.0,
+      ..Default::default()
+    });
+    edit(&mut f);
+    doc.insert(f, None, &page, None);
+    doc
+  }
+
+  fn bind(n: &mut Node, props: &[(&str, &str)]) {
+    for (p, v) in props {
+      n.bindings.insert((*p).into(), (*v).into());
+    }
+  }
+
+  fn react(doc: &Document) -> String {
+    export_react(doc, "f", &HeuristicMeasurer)
+  }
+
+  fn html(doc: &Document) -> String {
+    export_html(doc, "f", &HeuristicMeasurer)
+  }
+
+  fn solid() -> Vec<Paint> {
+    vec![Paint::Solid {
+      color: "#112233".into(),
+      opacity: 1.0,
+      visible: true,
+    }]
+  }
+
+  #[test]
+  fn bound_padding_and_gap_use_the_variables() {
+    let doc = doc_with(|f| bind(f, &[("padding", "v2"), ("gap", "v1")]));
+    let h = html(&doc);
+    assert!(h.contains("padding: calc(var(--space-6)*1px)"), "{h}");
+    assert!(h.contains("row-gap: calc(var(--space-2)*1px)"), "{h}");
+    let r = react(&doc);
+    assert!(r.contains("p-[calc(var(--space-6)*1px)]"), "{r}");
+    assert!(r.contains("gap-y-[calc(var(--space-2)*1px)]"), "{r}");
+  }
+
+  #[test]
+  fn a_horizontal_gap_is_a_column_gap() {
+    let doc = doc_with(|f| {
+      f.layout.as_mut().unwrap().direction = LayoutDirection::Horizontal;
+      bind(f, &[("gap", "v1")]);
+    });
+    assert!(html(&doc).contains("column-gap: calc(var(--space-2)*1px)"));
+  }
+
+  #[test]
+  fn one_bound_side_replaces_only_that_side() {
+    let doc = doc_with(|f| {
+      let l = f.layout.as_mut().unwrap();
+      l.padding_left = 12.0;
+      l.padding_right = 12.0;
+      bind(f, &[("paddingLeft", "v2")]);
+    });
+    let h = html(&doc);
+    assert!(h.contains("padding: 24px 12px 24px calc(var(--space-6)*1px)"), "{h}");
+    let r = react(&doc);
+    assert!(r.contains("pl-[calc(var(--space-6)*1px)]") && r.contains("pt-[24px]"), "{r}");
+  }
+
+  #[test]
+  fn width_and_height_follow_the_variable_only_when_fixed() {
+    let doc = doc_with(|f| bind(f, &[("width", "v3"), ("height", "v3")]));
+    let h = html(&doc);
+    // A screen: max-width and min-height are the design size.
+    assert!(h.contains("max-width: calc(var(--space-8)*1px)"), "{h}");
+    assert!(h.contains("min-height: calc(var(--space-8)*1px)"), "{h}");
+    // A fixed child inside a frame, and a fill one that keeps its flex.
+    let mut doc = doc_with(|_| {});
+    let page = doc.pages[0].id.clone();
+    for (id, fill) in [("fixed", false), ("fill", true)] {
+      let mut c = crate::ops::default_node(NodeType::Rectangle, id.into(), id.into());
+      c.width = 64.0;
+      c.height = 40.0;
+      if fill {
+        c.sizing_h = Sizing::Fill;
+      }
+      bind(&mut c, &[("width", "v3")]);
+      doc.insert(c, Some("f"), &page, None);
+    }
+    let r = react(&doc);
+    assert!(r.contains("w-[calc(var(--space-8)*1px)]"), "{r}");
+    assert_eq!(r.matches("calc(var(--space-8)*1px)").count(), 1, "{r}");
+    assert!(r.contains("self-stretch"), "{r}");
+  }
+
+  #[test]
+  fn stroke_weight_and_its_offset_follow_the_variable() {
+    let doc = doc_with(|f| {
+      f.strokes = solid();
+      f.stroke_weight = 2.0;
+      f.stroke_align = StrokeAlign::Inside;
+      bind(f, &[("strokeWeight", "v1")]);
+    });
+    let h = html(&doc);
+    assert!(h.contains("outline: calc(var(--space-2)*1px) solid #112233"), "{h}");
+    assert!(h.contains("outline-offset: calc(var(--space-2)*-1px)"), "{h}");
+    let doc = doc_with(|f| {
+      f.strokes = solid();
+      f.stroke_weight = 2.0;
+      f.stroke_align = StrokeAlign::Center;
+      bind(f, &[("strokeWeight", "v1")]);
+    });
+    assert!(html(&doc).contains("outline-offset: calc(var(--space-2)*-0.5px)"));
+  }
+
+  #[test]
+  fn a_centre_stroke_overlay_halves_the_bound_weight() {
+    let mut doc = doc_with(|f| {
+      f.strokes = solid();
+      f.stroke_weight = 2.0;
+      f.stroke_align = StrokeAlign::Center;
+      bind(f, &[("strokeWeight", "v1")]);
+    });
+    let page = doc.pages[0].id.clone();
+    let mut c = crate::ops::default_node(NodeType::Rectangle, "abs".into(), "Abs".into());
+    c.absolute_position = true;
+    doc.insert(c, Some("f"), &page, None);
+    let h = html(&doc);
+    assert!(h.contains("outline: calc(var(--space-2)*0.5px) solid #112233"), "{h}");
+  }
+
+  #[test]
+  fn a_wrap_frame_binds_the_counter_gap() {
+    let doc = doc_with(|f| {
+      let l = f.layout.as_mut().unwrap();
+      l.direction = LayoutDirection::Horizontal;
+      l.wrap = true;
+      l.counter_gap = 16.0;
+      bind(f, &[("counterGap", "v2"), ("gap", "v1")]);
+    });
+    let h = html(&doc);
+    assert!(h.contains("row-gap: calc(var(--space-6)*1px)"), "{h}");
+    assert!(h.contains("column-gap: calc(var(--space-2)*1px)"), "{h}");
+  }
+
+  #[test]
+  fn typography_follows_the_variables() {
+    let mut doc = doc_with(|_| {});
+    doc.variables.push(Arc::new(Collection {
+      id: "t".into(),
+      name: "Type".into(),
+      modes: vec![VarMode {
+        id: "m".into(),
+        name: "Base".into(),
+      }],
+      variables: vec![
+        number("lh", "Line", 28.0),
+        number("ls", "Tracking", 1.0),
+        number("fw", "Weight", 700.0),
+        Variable {
+          id: "ff".into(),
+          name: "Family".into(),
+          kind: VarKind::String,
+          values: [("m".to_string(), json!("Inter"))].into(),
+          ..Default::default()
+        },
+      ]
+      .into_iter()
+      .map(Arc::new)
+      .collect(),
+    }));
+    let page = doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Text, "t1".into(), "T".into());
+    {
+      let tx = t.text.as_mut().unwrap();
+      tx.characters = "Hello".into();
+      tx.line_height = Some(28.0);
+      tx.letter_spacing = 1.0;
+      tx.font_weight = 700;
+      tx.font_family = "Inter".into();
+    }
+    bind(
+      &mut t,
+      &[
+        ("lineHeight", "lh"),
+        ("letterSpacing", "ls"),
+        ("fontWeight", "fw"),
+        ("fontFamily", "ff"),
+      ],
+    );
+    doc.insert(t, Some("f"), &page, None);
+    let h = html(&doc);
+    for want in [
+      "line-height: calc(var(--line)*1px)",
+      "letter-spacing: calc(var(--tracking)*1px)",
+      "font-weight: var(--weight)",
+      "font-family: var(--family)",
+    ] {
+      assert!(h.contains(want), "{want}\n{h}");
+    }
+    let r = react(&doc);
+    assert!(r.contains("leading-[calc(var(--line)*1px)]"), "{r}");
+    assert!(r.contains("tracking-[calc(var(--tracking)*1px)]"), "{r}");
+    assert!(r.contains("[font-weight:var(--weight)]"), "{r}");
+    assert!(r.contains("[font-family:var(--family),_sans-serif]"), "{r}");
+  }
+
+  #[test]
+  fn a_device_frame_keeps_its_safe_area_padding() {
+    let doc = doc_with(|f| {
+      f.device = Some(DeviceFrame {
+        preset: "iphone-17".into(),
+        applied: [62.0, 0.0, 34.0, 0.0],
+        ..Default::default()
+      });
+      f.layout.as_mut().unwrap().padding_top = 86.0;
+      f.layout.as_mut().unwrap().padding_bottom = 58.0;
+      bind(f, &[("padding", "v2"), ("paddingTop", "v2")]);
+    });
+    let h = html(&doc);
+    assert!(h.contains("env(safe-area-inset-top"), "{h}");
+    assert!(!h.contains("padding: calc(var("), "{h}");
+  }
+
+  #[test]
+  fn a_scroller_moves_the_bound_padding_inside() {
+    let mut doc = doc_with(|f| {
+      f.overflow = crate::model::Overflow::Vertical;
+      bind(f, &[("padding", "v2"), ("gap", "v1")]);
+    });
+    let page = doc.pages[0].id.clone();
+    let mut pin = crate::ops::default_node(NodeType::Rectangle, "pin".into(), "Pin".into());
+    pin.scroll_behavior = crate::model::ScrollBehavior::Fixed;
+    pin.absolute_position = true;
+    doc.insert(pin, Some("f"), &page, None);
+    let h = html(&doc);
+    assert!(h.contains("padding: calc(var(--space-6)*1px)"), "{h}");
+    assert!(h.contains("row-gap: calc(var(--space-2)*1px)"), "{h}");
+    // On the inner box only.
+    assert_eq!(h.matches("padding: calc(var(--space-6)*1px)").count(), 1, "{h}");
+  }
+
+  #[test]
+  fn output_without_number_bindings_is_unchanged() {
+    let plain = doc_with(|_| {});
+    let h = html(&plain);
+    assert!(
+      h.contains("padding: 24px 24px 24px 24px") && h.contains("row-gap: 8px") && !h.contains("*1px"),
+      "{h}"
+    );
+  }
+
+  #[test]
+  fn duplicate_mode_names_export_with_distinct_slugs() {
+    let mut doc = doc_with(|_| {});
+    let c = Arc::make_mut(&mut doc.variables[0]);
+    c.modes = ["Light", "Dark", "Dark", "Dark 2"]
+      .iter()
+      .enumerate()
+      .map(|(i, n)| VarMode {
+        id: format!("m{i}"),
+        name: (*n).into(),
+      })
+      .collect();
+    let modes = c.modes.clone();
+    for v in c.variables.iter_mut().map(Arc::make_mut) {
+      v.values = modes.iter().enumerate().map(|(i, m)| (m.id.clone(), json!(i as f64))).collect();
+    }
+    let slugs: Vec<String> = c.modes.iter().map(|m| crate::variables::mode_slug(c, m)).collect();
+    assert_eq!(slugs, ["light", "dark", "dark-2", "dark-2-2"]);
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let css = &files.iter().find(|f| f.path == "src/tokens.css").unwrap().content;
+    assert!(css.contains("=\"dark\"") && css.contains("=\"dark-2\""), "{css}");
+    let ts = &files.iter().find(|f| f.path == "src/tokens.ts").unwrap().content;
+    assert!(ts.contains("\"dark\", \"dark-2\""), "{ts}");
+  }
+
+  #[test]
+  fn project_has_tokens_json() {
+    let doc = doc_with(|_| {});
+    let files = export_project(&doc, &HeuristicMeasurer);
+    let json = &files.iter().find(|f| f.path == "tokens.json").unwrap().content;
+    let v: serde_json::Value = serde_json::from_str(json).unwrap();
+    assert_eq!(v["Space"]["Space"]["2"]["$value"], 8.0);
+    let readme = &files.iter().find(|f| f.path == "README.md").unwrap().content;
+    assert!(readme.contains("tokens.json"), "{readme}");
+  }
+
+  /// A text layer "t1" in the Space doc, with extra variables `sz` (20), `lh` (0), `fw` (650),
+  /// `fw2` (700) and a string `ff`.
+  fn text_doc(styled: bool, props: &[(&str, &str)]) -> Document {
+    let mut doc = doc_with(|_| {});
+    let c = Arc::make_mut(&mut doc.variables[0]);
+    c.variables.push(Arc::new(number("sz", "Size", 20.0)));
+    c.variables.push(Arc::new(number("lh", "Lh", 0.0)));
+    c.variables.push(Arc::new(number("fw", "Weight", 650.0)));
+    c.variables.push(Arc::new(number("fw2", "Weight 2", 700.0)));
+    c.variables.push(Arc::new(Variable {
+      id: "ff".into(),
+      name: "Family".into(),
+      kind: VarKind::String,
+      values: [("m".to_string(), json!("Playfair Display"))].into(),
+      ..Default::default()
+    }));
+    let page = doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Text, "t1".into(), "T".into());
+    {
+      let tx = t.text.as_mut().unwrap();
+      tx.characters = "Hello".into();
+      tx.font_size = 20.0;
+      tx.line_height = None;
+      tx.font_weight = 700;
+      tx.font_family = "Playfair Display".into();
+    }
+    if styled {
+      doc.styles_mut().texts.push(crate::model::TextStyle {
+        id: "ts".into(),
+        name: "Body".into(),
+        font_family: "Playfair Display".into(),
+        font_size: 20.0,
+        font_weight: 700,
+        line_height: None,
+        letter_spacing: 0.0,
+      });
+      t.text_style = Some("ts".into());
+    }
+    bind(&mut t, props);
+    doc.insert(t, Some("f"), &page, None);
+    doc
+  }
+
+  fn screen_src(doc: &Document) -> String {
+    let files = export_project(doc, &HeuristicMeasurer);
+    files.iter().find(|f| f.path.starts_with("src/screens/")).unwrap().content.clone()
+  }
+
+  #[test]
+  fn a_styled_text_with_a_bound_size_keeps_the_token_inline() {
+    let src = screen_src(&text_doc(true, &[("fontSize", "sz")]));
+    assert!(src.contains("text-[length:calc(var(--size)*1px)]"), "{src}");
+    assert!(!src.contains("text-body"), "{src}");
+    // Unbound, the style still becomes the shared class.
+    let src = screen_src(&text_doc(true, &[]));
+    assert!(src.contains("text-body"), "{src}");
+  }
+
+  #[test]
+  fn an_automatic_line_height_is_not_bound() {
+    // The token is 0 (auto in the engine), so the literal auto value stays.
+    let src = screen_src(&text_doc(false, &[("lineHeight", "lh")]));
+    assert!(!src.contains("leading-[calc("), "{src}");
+  }
+
+  #[test]
+  fn font_weight_binds_only_on_a_hundred_and_the_family_keeps_a_fallback() {
+    let src = screen_src(&text_doc(false, &[("fontWeight", "fw")]));
+    assert!(!src.contains("[font-weight:var("), "{src}");
+    let h = html(&text_doc(false, &[("fontWeight", "fw2"), ("fontFamily", "ff")]));
+    assert!(h.contains("font-weight: var(--weight-2)"), "{h}");
+    assert!(h.contains("font-family: var(--family), serif"), "{h}");
+  }
+
+  #[test]
+  fn dtcg_numbers_are_integers_when_whole() {
+    let text = crate::variables::tokens_json_text(&doc_with(|_| {}));
+    assert!(text.contains("\"$value\": 8\n") && !text.contains("8.0"), "{text}");
   }
 }

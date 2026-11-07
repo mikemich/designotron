@@ -88,6 +88,7 @@ export function LeftPanel() {
         ))}
       </div>
       <div className="tabpanel" role="tabpanel" id="left-tabpanel" aria-labelledby={`left-tab-${tab}`}>
+        <h2 className="sr-only">{LEFT_TABS.find(([id]) => id === tab)?.[1]}</h2>
         {tab === "layers" ? (
           <>
             <Pages />
@@ -560,6 +561,8 @@ function Layers() {
         handled();
         if (e.repeat) return;
         anchor.current = n.id;
+        // Arrow keys already select the row: Space on a lone selection must not deselect it.
+        if (sel.length === 1 && sel[0] === n.id) return;
         return dispatch({ op: "select", ids: [n.id], mode: "toggle" });
       case "F2":
         handled();

@@ -4,6 +4,7 @@
 //! must rebuild exactly from its per-id delta.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
@@ -116,16 +117,18 @@ fn bench_granular_delta_cost() {
   let collections = (0..5)
     .map(|c| Collection {
       id: format!("c{c}"),
-      name: "c".into(),
+      name: format!("c{c}"),
       modes: vec![mode("m1"), mode("m2")],
       variables: (0..200)
-        .map(|i| Variable {
-          id: format!("v{c}_{i}"),
-          name: format!("var {i}"),
-          values: [("m1".to_string(), json!("#123456")), ("m2".to_string(), json!("#654321"))]
-            .into_iter()
-            .collect(),
-          ..Default::default()
+        .map(|i| {
+          Arc::new(Variable {
+            id: format!("v{c}_{i}"),
+            name: format!("var {i}"),
+            values: [("m1".to_string(), json!("#123456")), ("m2".to_string(), json!("#654321"))]
+              .into_iter()
+              .collect(),
+            ..Default::default()
+          })
         })
         .collect(),
     })
@@ -229,7 +232,7 @@ impl Sim {
           id: "c0".into(),
           name: "c0".into(),
           modes: vec![mode("m1"), mode("m2")],
-          variables: vec![variable],
+          variables: vec![Arc::new(variable)],
         }],
       })
       .unwrap();
@@ -389,7 +392,7 @@ fn local_op(e: &mut Engine, r: &mut Rng, solo: bool) {
       });
     }
     8..=10 => {
-      let cs = random_variables(e.doc.variables.clone(), r);
+      let cs = random_variables(crate::variables::plain(&e.doc.variables), r);
       let _ = e.dispatch(Command::SetVariables { collections: cs });
     }
     11 | 12 => {
@@ -494,12 +497,12 @@ fn random_variables(mut cs: Vec<Collection>, r: &mut Rng) -> Vec<Collection> {
       id: format!("c{}", id(r)),
       name: "n".into(),
       modes: vec![mode("m1")],
-      variables: vec![Variable {
+      variables: vec![Arc::new(Variable {
         id: format!("v{}", id(r)),
         name: "x".into(),
         kind: crate::variables::VarKind::Number,
         ..Default::default()
-      }],
+      })],
     }),
     1 if !cs.is_empty() => {
       cs.remove(r.below(cs.len()));
@@ -507,13 +510,13 @@ fn random_variables(mut cs: Vec<Collection>, r: &mut Rng) -> Vec<Collection> {
     2 if !cs.is_empty() => {
       let k = r.below(cs.len());
       let vid = format!("v{}", id(r));
-      cs[k].variables.push(Variable {
+      cs[k].variables.push(Arc::new(Variable {
         name: format!("y {vid}"),
         id: vid,
         kind: crate::variables::VarKind::Number,
         values: [("m1".to_string(), json!(r.below(9)))].into_iter().collect(),
         ..Default::default()
-      });
+      }));
     }
     3 if !cs.is_empty() => {
       let k = r.below(cs.len());
@@ -528,9 +531,9 @@ fn random_variables(mut cs: Vec<Collection>, r: &mut Rng) -> Vec<Collection> {
         let j = r.below(cs[k].variables.len());
         let m = if r.below(2) == 0 { "m1" } else { "m2" };
         if r.below(3) == 0 {
-          cs[k].variables[j].values.remove(m);
+          Arc::make_mut(&mut cs[k].variables[j]).values.remove(m);
         } else {
-          cs[k].variables[j].values.insert(m.into(), json!(r.below(100)));
+          Arc::make_mut(&mut cs[k].variables[j]).values.insert(m.into(), json!(r.below(100)));
         }
       }
     }
@@ -554,7 +557,7 @@ fn random_variables(mut cs: Vec<Collection>, r: &mut Rng) -> Vec<Collection> {
       if !cs[k].variables.is_empty() {
         let j = r.below(cs[k].variables.len());
         let all = crate::variables::SCOPES;
-        cs[k].variables[j].scopes = if r.below(3) == 0 {
+        Arc::make_mut(&mut cs[k].variables[j]).scopes = if r.below(3) == 0 {
           vec![]
         } else {
           vec![all[r.below(all.len())].to_string()]

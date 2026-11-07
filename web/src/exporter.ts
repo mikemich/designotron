@@ -484,11 +484,19 @@ export async function downloadLayerAsset(id: string) {
   download(f.name.replace(/\//g, "-"), f.data, f.mime);
 }
 
+/** Downloads the variables as a W3C design tokens file (`<name>-tokens.json`). */
+export function exportTokensJson() {
+  const text = query<string>({ q: "tokensJson" });
+  download(`${fileSafe(getDoc().name)}-tokens.json`, text, "application/json");
+}
+
 export async function exportProjectZip() {
   const { files, binaries } = projectFiles();
   const zip = new JSZip();
   for (const f of files) zip.file(f.path, f.content);
   for (const b of binaries) zip.file(b.path, b.dataUrl.split(",")[1], { base64: true });
   const blob = await zip.generateAsync({ type: "blob" });
-  download(`${fileSafe(getDoc().name)}-react.zip`, blob, "application/zip");
+  const name = `${fileSafe(getDoc().name)}-react.zip`;
+  download(name, blob, "application/zip");
+  toast(`Downloaded ${name}`);
 }

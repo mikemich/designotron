@@ -150,9 +150,28 @@ export function resetItems(ids: string[], groups: OverrideGroup[], all: string, 
   return items;
 }
 
+type InsideLayer = { id: string; name: string; groups: OverrideGroup[] };
+
+/** The layers inside instance `id` that differ from its main (the engine caps the list at 20). Asked when the menu opens, not on every change. */
+export function overriddenLayers(id: string): { layers: InsideLayer[]; more: boolean } {
+  return query<{ layers: InsideLayer[]; more: boolean }>({ q: "overriddenLayers", id });
+}
+
+/** The instance's reset menu: its own groups, then the changed layers inside it, one reset each. */
+export function instanceResetItems(id: string, groups: OverrideGroup[], inside: { layers: InsideLayer[]; more: boolean }): MenuItem[] {
+  const items = resetItems([id], groups, "Reset all changes", () => dispatch({ op: "resetInstance", ids: [id] }));
+  if (!inside.layers.length) return items;
+  items.push({ sep: true }, { heading: "Layers inside" });
+  for (const l of inside.layers) {
+    items.push({ label: `${l.name}: ${l.groups.map((g) => g.label).join(", ")}`, onClick: () => A.resetOverrideGroups([l.id]) });
+  }
+  if (inside.more) items.push({ label: "Select a layer to reset one property", disabled: true });
+  return items;
+}
+
 /** A button that opens the reset menu under itself. */
-function ResetButton({ title, items, testId }: { title: string; items: MenuItem[]; testId?: string }) {
-  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+function ResetButton({ title, items, testId }: { title: string; items: MenuItem[] | (() => MenuItem[]); testId?: string }) {
+  const [at, setAt] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   return (
     <>
       <button
@@ -164,12 +183,12 @@ function ResetButton({ title, items, testId }: { title: string; items: MenuItem[
         data-testid={testId}
         onClick={(e) => {
           const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-          setAt({ x: Math.max(8, r.right - 190), y: r.bottom + 2 });
+          setAt({ x: Math.max(8, r.right - 190), y: r.bottom + 2, items: typeof items === "function" ? items() : items });
         }}
       >
         <CornerUpLeft size={13} />
       </button>
-      {at && <Menu x={at.x} y={at.y} items={items} onClose={() => setAt(null)} label={title} />}
+      {at && <Menu x={at.x} y={at.y} items={at.items} onClose={() => setAt(null)} label={title} />}
     </>
   );
 }
@@ -221,7 +240,7 @@ export function InstanceSection({ n }: { n: Node }) {
             <ResetButton
               title="Reset overrides"
               testId="instance-reset"
-              items={resetItems([n.id], groups, "Reset all changes", () => dispatch({ op: "resetInstance", ids: [n.id] }))}
+              items={() => instanceResetItems(n.id, groups, overriddenLayers(n.id))}
             />
           )}
           <IconButton title="Detach instance" onClick={A.detachInstance}>

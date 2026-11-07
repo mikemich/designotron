@@ -2,6 +2,7 @@
 //! bound to layer properties. Bound values are written into the layers after
 //! every change, so rendering, export and lint keep reading plain properties.
 
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -10,14 +11,97 @@ use serde_json::{json, Value};
 
 use crate::model::{Document, NodeId, Paint};
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Collection {
   pub id: String,
   pub name: String,
   /// The first mode is the default.
   pub modes: Vec<VarMode>,
-  pub variables: Vec<Variable>,
+  /// Behind `Arc`s so a copy of the collection shares the variables an edit didn't touch; edit
+  /// through [`var_mut`].
+  pub variables: Vec<Arc<Variable>>,
+}
+
+/// A collection, mutable (copied out of its `Arc` only when shared with an undo snapshot).
+pub fn coll_mut<'a>(doc: &'a mut Document, id: &str) -> Option<&'a mut Collection> {
+  doc.variables.iter_mut().find(|c| c.id == id).map(Arc::make_mut)
+}
+
+/// A variable of `coll`, mutable (copied out of its `Arc` only when shared).
+pub fn var_mut<'a>(coll: &'a mut Collection, id: &str) -> Option<&'a mut Variable> {
+  coll.variables.iter_mut().find(|v| v.id == id).map(Arc::make_mut)
+}
+
+/// Gives `new` (a freshly deserialised set, as the variables dialog sends) the `Arc`s of `old`
+/// wherever content is equal, matched by id and never by position, so a one-value edit leaves
+/// every other collection and variable shared with the undo history. Linear in the variable count.
+pub fn intern(new: Vec<Collection>, old: &[Arc<Collection>]) -> Vec<Arc<Collection>> {
+  let old_by_id: BTreeMap<&str, &Arc<Collection>> = old.iter().map(|c| (c.id.as_str(), c)).collect();
+  new
+    .into_iter()
+    .map(|mut c| {
+      let Some(prev) = old_by_id.get(c.id.as_str()) else {
+        return Arc::new(c);
+      };
+      let prev_vars: BTreeMap<&str, &Arc<Variable>> = prev.variables.iter().map(|v| (v.id.as_str(), v)).collect();
+      for v in &mut c.variables {
+        if let Some(p) = prev_vars.get(v.id.as_str()) {
+          if **p == *v {
+            *v = Arc::clone(p);
+          }
+        }
+      }
+      if c == ***prev {
+        Arc::clone(prev)
+      } else {
+        Arc::new(c)
+      }
+    })
+    .collect()
+}
+
+/// The collections as plain values (what `Command::SetVariables` carries). Cheap: the variables
+/// inside stay shared until edited through `Arc::make_mut`.
+pub fn plain(list: &[Arc<Collection>]) -> Vec<Collection> {
+  list.iter().map(|c| (**c).clone()).collect()
+}
+
+/// Swaps each collection of `new` for the `Arc` of the equal collection of `old` (by id), so a
+/// merge that changed one collection leaves the others shared with the undo history.
+pub fn reshare(new: &mut [Arc<Collection>], old: &[Arc<Collection>]) {
+  for c in new.iter_mut() {
+    if let Some(o) = old.iter().find(|o| o.id == c.id) {
+      if crate::model::arc_eq(o, c) {
+        *c = Arc::clone(o);
+      }
+    }
+  }
+}
+
+impl PartialEq for Collection {
+  /// Destructured on purpose: a field added later must be compared here or this stops compiling.
+  fn eq(&self, o: &Self) -> bool {
+    let Collection {
+      id,
+      name,
+      modes,
+      variables,
+    } = self;
+    *id == o.id && *name == o.name && *modes == o.modes && crate::model::arcs_eq(variables, &o.variables)
+  }
+}
+
+impl Collection {
+  /// A collection from plain variables (they get their `Arc`s here).
+  pub fn new(id: &str, name: &str, modes: Vec<VarMode>, variables: Vec<Variable>) -> Self {
+    Collection {
+      id: id.into(),
+      name: name.into(),
+      modes,
+      variables: variables.into_iter().map(Arc::new).collect(),
+    }
+  }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -128,7 +212,7 @@ pub fn bindable<'a>(doc: &'a Document, prop: &str) -> Vec<(&'a Collection, &'a V
   doc
     .variables
     .iter()
-    .flat_map(|c| c.variables.iter().map(move |v| (c, v)))
+    .flat_map(|c| c.variables.iter().map(move |v| (&**c, &**v)))
     .filter(|(_, v)| v.kind == kind && in_scope(v, prop))
     .collect()
 }
@@ -177,16 +261,16 @@ pub fn check_value(kind: VarKind, v: &Value) -> Result<Value, String> {
 /// variables this change touched (new, or with other values than in `previous`) are checked, so a
 /// cycle two peers made at once can't block every later edit of unrelated variables. A touched
 /// variable also needs values of its type and a name no other variable of its collection has.
-pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(), String> {
+pub fn validate(collections: &[impl Borrow<Collection>], previous: &[Arc<Collection>]) -> Result<(), String> {
   let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
   let mut names: BTreeMap<&str, &str> = BTreeMap::new();
   let old: BTreeMap<&str, &Variable> = previous
     .iter()
     .flat_map(|c| c.variables.iter())
-    .map(|v| (v.id.as_str(), v))
+    .map(|v| (v.id.as_str(), &**v))
     .collect();
   let mut changed: Vec<&str> = Vec::new();
-  for v in collections.iter().flat_map(|c| c.variables.iter()) {
+  for v in collections.iter().flat_map(|c| c.borrow().variables.iter()).map(|v| &**v) {
     if let Some(bad) = v.scopes.iter().find(|s| !SCOPES.contains(&s.as_str())) {
       return Err(format!("unknown variable scope '{bad}'. Scopes: {}", SCOPES.join(", ")));
     }
@@ -209,7 +293,7 @@ pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(
         }
         let shown = collections
           .iter()
-          .flat_map(|c| &c.modes)
+          .flat_map(|c| &c.borrow().modes)
           .find(|m| m.id == *mode)
           .map_or(mode.as_str(), |m| m.name.as_str());
         // Stored numbers are real numbers: "12" would be accepted by `check_value` but never applied.
@@ -222,7 +306,36 @@ pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(
       }
     }
   }
+  // Mode and collection names are unique too (two "Dark" modes would export two blocks, the
+  // later one winning). Judged against `previous` by id, so files that already hold duplicates
+  // can still be edited.
+  let old_modes: BTreeMap<(&str, &str), &str> = previous
+    .iter()
+    .flat_map(|c| c.modes.iter().map(move |m| ((c.id.as_str(), m.id.as_str()), m.name.as_str())))
+    .collect();
+  let old_colls: BTreeMap<&str, &str> = previous.iter().map(|c| (c.id.as_str(), c.name.as_str())).collect();
+  for (i, c) in collections.iter().enumerate() {
+    let c: &Collection = c.borrow();
+    let name = c.name.trim();
+    if old_colls.get(c.id.as_str()).is_none_or(|o| o.trim() != name)
+      && collections
+        .iter()
+        .enumerate()
+        .any(|(j, d)| j != i && d.borrow().name.trim() == name)
+    {
+      return Err(format!("A collection named {name} already exists"));
+    }
+    for (k, m) in c.modes.iter().enumerate() {
+      let name = m.name.trim();
+      if old_modes.get(&(c.id.as_str(), m.id.as_str())).is_none_or(|o| o.trim() != name)
+        && c.modes.iter().enumerate().any(|(l, n)| l != k && n.name.trim() == name)
+      {
+        return Err(format!("{name} already exists in {}", c.name));
+      }
+    }
+  }
   for c in collections {
+    let c = c.borrow();
     for (i, v) in c.variables.iter().enumerate() {
       let renamed = old.get(v.id.as_str()).is_none_or(|o| o.name != v.name);
       if renamed && c.variables.iter().enumerate().any(|(j, w)| j != i && w.name == v.name) {
@@ -517,8 +630,10 @@ pub fn apply(doc: &mut Document) -> bool {
 }
 
 /// Property bindings a direct edit replaces (editing a bound fill detaches its variable).
-pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) {
-  let Some(obj) = patch.as_object() else { return };
+/// Returns what it removed per layer, so a layer inside an instance can record the detach.
+pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) -> Vec<(NodeId, Vec<String>)> {
+  let mut removed: Vec<(NodeId, Vec<String>)> = Vec::new();
+  let Some(obj) = patch.as_object() else { return removed };
   let mut props: Vec<&str> = Vec::new();
   for (k, v) in obj {
     match k.as_str() {
@@ -530,6 +645,9 @@ pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) {
       "height" => props.push("height"),
       "strokeWeight" => props.push("strokeWeight"),
       "visible" => props.push("visible"),
+      // A style replaces the variable too (binding one drops the style).
+      "fillStyle" if v.is_string() => props.push("fill"),
+      "strokeStyle" if v.is_string() => props.push("stroke"),
       "layout" => {
         if v.get("gap").is_some() {
           props.push("gap");
@@ -560,16 +678,105 @@ pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) {
       _ => {}
     }
   }
+  // A prop the patch itself binds keeps that binding.
+  props.retain(|p| !patch["bindings"][*p].is_string());
   if props.is_empty() {
-    return;
+    return removed;
   }
   for id in ids {
+    let gone: Vec<String> = match doc.get(id) {
+      Some(n) => props
+        .iter()
+        .filter(|p| n.bindings.contains_key(**p))
+        .map(|p| p.to_string())
+        .collect(),
+      None => continue,
+    };
+    if gone.is_empty() {
+      continue;
+    }
     if let Some(n) = doc.get_mut(id) {
-      for p in &props {
-        n.bindings.remove(*p);
+      for p in &gone {
+        n.bindings.remove(p);
+      }
+    }
+    removed.push((id.clone(), gone));
+  }
+  removed
+}
+
+/// The merge patch that records a detach on an instance layer: the binding goes, and the value
+/// the variable painted stays (so a mode change or an edit of the main doesn't move it).
+pub fn detach_patch(node: &crate::model::Node, props: &[String]) -> Value {
+  let whole = serde_json::to_value(node).unwrap_or(Value::Null);
+  let mut out = serde_json::Map::new();
+  let mut bindings = serde_json::Map::new();
+  for p in props {
+    bindings.insert(p.clone(), Value::Null);
+    let paths: Vec<Vec<&str>> = match p.as_str() {
+      "fill" => vec![vec!["fills"]],
+      "stroke" => vec![vec!["strokes"]],
+      "cornerRadius" => vec![vec!["cornerRadius"], vec!["cornerRadii"]],
+      "opacity" | "width" | "height" | "strokeWeight" | "visible" => vec![vec![p.as_str()]],
+      "gap" | "counterGap" | "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft" => {
+        vec![vec!["layout", p.as_str()]]
+      }
+      "padding" => ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"]
+        .iter()
+        .map(|k| vec!["layout", *k])
+        .collect(),
+      "fontSize" | "fontFamily" | "fontWeight" | "lineHeight" | "letterSpacing" | "paragraphSpacing" | "characters" => {
+        vec![vec!["text", p.as_str()]]
+      }
+      _ => Vec::new(),
+    };
+    for path in paths {
+      let Some(v) = path.iter().try_fold(&whole, |b, k| b.get(*k)) else {
+        continue;
+      };
+      let mut cur = &mut out;
+      for k in &path[..path.len() - 1] {
+        cur = cur
+          .entry(k.to_string())
+          .or_insert_with(|| Value::Object(Default::default()))
+          .as_object_mut()
+          .unwrap();
+      }
+      cur.insert(path[path.len() - 1].to_string(), v.clone());
+    }
+  }
+  out.insert("bindings".into(), Value::Object(bindings));
+  Value::Object(out)
+}
+
+/// Binds (or, with None, detaches) one property of a layer. A fill or stroke bound to a
+/// variable lets go of its colour style (one source per paint). On a layer inside an instance
+/// the change is recorded as an override, so it survives edits of the main and mode changes.
+pub fn set_binding(doc: &mut Document, id: &str, prop: &str, var: Option<&str>) -> Result<(), String> {
+  let n = doc.get_mut(id).ok_or_else(|| format!("no node {id}"))?;
+  let mut patch = serde_json::Map::new();
+  match var {
+    Some(v) => {
+      n.bindings.insert(prop.to_string(), v.to_string());
+      patch.insert("bindings".into(), json!({ prop: v }));
+      if prop == "fill" && n.fill_style.take().is_some() {
+        patch.insert("fillStyle".into(), Value::Null);
+      }
+      if prop == "stroke" && n.stroke_style.take().is_some() {
+        patch.insert("strokeStyle".into(), Value::Null);
+      }
+    }
+    None => {
+      if n.bindings.remove(prop).is_none() {
+        return Ok(());
+      }
+      if let Value::Object(m) = detach_patch(n, &[prop.to_string()]) {
+        patch = m;
       }
     }
   }
+  crate::components::record_override(doc, id, &Value::Object(patch));
+  Ok(())
 }
 
 /// Drops bindings and mode overrides that point at variables, collections or modes that no longer exist.
@@ -674,13 +881,208 @@ pub fn mode_attr(doc: &Document, c: &Collection) -> String {
 }
 
 /// A mode's value in that attribute: its slug, or `mode-N` when the name has no ASCII letters.
+/// A name that slugs like an earlier mode of the collection gets `-2`, `-3` (by position), so two
+/// modes called "Dark" don't write the same selector.
 pub fn mode_slug(c: &Collection, m: &VarMode) -> String {
-  let name = slug(&m.name);
-  if name.is_empty() {
-    format!("mode-{}", c.modes.iter().position(|x| x.id == m.id).unwrap_or(0) + 1)
-  } else {
-    name
+  let base = |i: usize, x: &VarMode| {
+    let name = slug(&x.name);
+    if name.is_empty() {
+      format!("mode-{}", i + 1)
+    } else {
+      name
+    }
+  };
+  let mut taken: Vec<String> = Vec::new();
+  for (i, x) in c.modes.iter().enumerate() {
+    let out = unique_name(&base(i, x), &taken);
+    if x.id == m.id {
+      return out;
+    }
+    taken.push(out);
   }
+  base(0, m)
+}
+
+/// A number variable's value in its collection's default mode, following aliases.
+pub fn default_number(doc: &Document, c: &Collection, v: &Variable) -> Option<f64> {
+  let (mut c, mut v) = (c, v);
+  for _ in 0..16 {
+    let m = c.modes.first()?;
+    let val = v.values.get(&m.id)?;
+    match val.get("alias").and_then(|a| a.as_str()) {
+      Some(a) => (c, v) = find(doc, a)?,
+      None => return val.as_f64(),
+    }
+  }
+  None
+}
+
+/// A DTCG name part: no `.`, braces or leading `$` (they mean something in references and keys).
+fn dtcg_part(part: &str) -> String {
+  let p: String = part
+    .chars()
+    .filter(|c| !matches!(c, '{' | '}'))
+    .map(|c| if c == '.' { '_' } else { c })
+    .collect();
+  let p = p.trim().trim_start_matches('$').to_string();
+  if p.is_empty() {
+    "_".into()
+  } else {
+    p
+  }
+}
+
+/// `base`, or `base-2`, `base-3` ... until `taken` doesn't hold it.
+fn unique_name(base: &str, taken: &[String]) -> String {
+  let mut out = base.to_string();
+  let mut k = 2;
+  while taken.contains(&out) {
+    out = format!("{base}-{k}");
+    k += 1;
+  }
+  out
+}
+
+/// The variables as a W3C design tokens file: one group per collection, `/` in a name nesting
+/// groups, `$type` and `$value` from the default mode, aliases as `{group.token}` references. The
+/// other modes' values (and what the DTCG format has no field for) sit in a `com.designotron`
+/// extension: `modes` on the token, mode names on the collection group.
+pub fn tokens_json(doc: &Document) -> Value {
+  use serde_json::Map;
+  const EXT: &str = "com.designotron";
+  // Every token's path first, so aliases can point at tokens defined later.
+  let mut paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
+  let mut taken: std::collections::HashSet<Vec<String>> = std::collections::HashSet::new();
+  let mut coll_names: Vec<String> = Vec::new();
+  for c in &doc.variables {
+    let cname = unique_name(&dtcg_part(&c.name), &coll_names);
+    coll_names.push(cname.clone());
+    for v in &c.variables {
+      let mut path = vec![cname.clone()];
+      path.extend(v.name.split('/').map(str::trim).filter(|p| !p.is_empty()).map(dtcg_part));
+      let base = path.clone();
+      let mut k = 2;
+      while taken.contains(&path) {
+        path = base.clone();
+        if let Some(last) = path.last_mut() {
+          *last = format!("{last}-{k}");
+        }
+        k += 1;
+      }
+      taken.insert(path.clone());
+      paths.insert(v.id.clone(), path);
+    }
+  }
+  // A token whose path is also a group (`Space` next to `Space/2`) moves under `$root`.
+  let groups: std::collections::HashSet<Vec<String>> = taken.iter().flat_map(|p| (1..p.len()).map(|n| p[..n].to_vec())).collect();
+  for p in paths.values_mut() {
+    if groups.contains(p) {
+      p.push("$root".into());
+    }
+  }
+  let value = |kind: VarKind, raw: &Value| -> Option<Value> {
+    if let Some(a) = raw.get("alias").and_then(|a| a.as_str()) {
+      let target = paths.get(&find(doc, a)?.1.id)?;
+      return Some(Value::String(format!("{{{}}}", target.join("."))));
+    }
+    Some(match kind {
+      VarKind::Color => json!(crate::color::normalize(raw.as_str()?)),
+      VarKind::Number => {
+        let f = raw.as_f64()?;
+        if f.fract() == 0.0 && f.abs() < 1e15 {
+          json!(f as i64)
+        } else {
+          json!(f)
+        }
+      }
+      VarKind::String => json!(raw.as_str()?),
+      VarKind::Boolean => json!(raw.as_bool()?),
+    })
+  };
+  let mut root = Map::new();
+  for (c, cname) in doc.variables.iter().zip(&coll_names) {
+    let mut mode_names: Vec<String> = Vec::new();
+    for m in &c.modes {
+      let name = unique_name(&m.name, &mode_names);
+      mode_names.push(name);
+    }
+    let mut group = Map::new();
+    group.insert(
+      "$extensions".into(),
+      json!({ EXT: { "id": c.id, "name": c.name, "modes": mode_names } }),
+    );
+    let Some(default) = c.modes.first() else {
+      root.insert(cname.clone(), Value::Object(group));
+      continue;
+    };
+    for v in &c.variables {
+      let raw = v
+        .values
+        .get(&default.id)
+        .or_else(|| c.modes.iter().find_map(|m| v.values.get(&m.id)));
+      let Some(val) = raw.and_then(|r| value(v.kind, r)) else { continue };
+      let path = &paths[&v.id];
+      let mut tok = Map::new();
+      match v.kind {
+        VarKind::Color => tok.insert("$type".into(), json!("color")),
+        VarKind::Number => tok.insert("$type".into(), json!("number")),
+        _ => None,
+      };
+      tok.insert("$value".into(), val);
+      if !v.description.is_empty() {
+        tok.insert("$description".into(), json!(v.description));
+      }
+      let mut ext = Map::new();
+      ext.insert("id".into(), json!(v.id));
+      let shown: Vec<&str> = path[1..].iter().filter(|p| *p != "$root").map(String::as_str).collect();
+      if shown.join("/") != v.name {
+        ext.insert("name".into(), json!(v.name));
+      }
+      match v.kind {
+        VarKind::String => ext.insert("type".into(), json!("string")),
+        VarKind::Boolean => ext.insert("type".into(), json!("boolean")),
+        _ => None,
+      };
+      let mut modes = Map::new();
+      for (m, name) in c.modes.iter().zip(&mode_names).skip(1) {
+        if let Some(mv) = v.values.get(&m.id).and_then(|r| value(v.kind, r)) {
+          modes.insert(name.clone(), mv);
+        }
+      }
+      if !modes.is_empty() {
+        ext.insert("modes".into(), Value::Object(modes));
+      }
+      if !v.scopes.is_empty() {
+        ext.insert("scopes".into(), json!(v.scopes));
+      }
+      tok.insert("$extensions".into(), json!({ EXT: Value::Object(ext) }));
+      let Some((leaf, dirs)) = path[1..].split_last() else { continue };
+      insert_token(&mut group, dirs, leaf, tok);
+    }
+    root.insert(cname.clone(), Value::Object(group));
+  }
+  Value::Object(root)
+}
+
+/// Puts a token at `dirs/leaf`, creating the groups on the way.
+fn insert_token(group: &mut serde_json::Map<String, Value>, dirs: &[String], leaf: &str, tok: serde_json::Map<String, Value>) {
+  match dirs.split_first() {
+    None => {
+      group.insert(leaf.to_string(), Value::Object(tok));
+    }
+    Some((d, rest)) => {
+      if let Value::Object(g) = group.entry(d.clone()).or_insert_with(|| Value::Object(serde_json::Map::new())) {
+        insert_token(g, rest, leaf, tok);
+      }
+    }
+  }
+}
+
+/// `tokens_json` as the text of a `tokens.json` file.
+pub fn tokens_json_text(doc: &Document) -> String {
+  let mut s = serde_json::to_string_pretty(&tokens_json(doc)).unwrap_or_else(|_| "{}".into());
+  s.push('\n');
+  s
 }
 
 /// Summary for Claude: collections, modes and variables with their values by mode name.
@@ -728,7 +1130,7 @@ mod tests {
         id: "m".into(),
         name: "m".into(),
       }],
-      variables: vars,
+      variables: vars.into_iter().map(Arc::new).collect(),
     }
   }
 
@@ -752,12 +1154,14 @@ mod tests {
     })
     .unwrap();
     let mut cyc = ok;
-    cyc.variables[0].values.insert("m".into(), json!({ "alias": "b" }));
+    Arc::make_mut(&mut cyc.variables[0])
+      .values
+      .insert("m".into(), json!({ "alias": "b" }));
     let err = e.dispatch(Command::SetVariables { collections: vec![cyc] }).unwrap_err();
     assert!(err.contains("alias cycle"), "{err}");
     let mut selfref = coll(vec![var("a", VarKind::Number, json!({ "alias": "a" }))]);
     assert!(validate(std::slice::from_ref(&selfref), &[]).is_err());
-    selfref.variables[0].scopes = vec!["nope".into()];
+    Arc::make_mut(&mut selfref.variables[0]).scopes = vec!["nope".into()];
     assert!(validate(&[selfref], &[]).unwrap_err().contains("scope"));
     // The document keeps the last valid set.
     assert_eq!(e.doc.variables[0].variables[0].values["m"], json!(1));
@@ -833,7 +1237,7 @@ mod tests {
       id: "m2".into(),
       name: "Big".into(),
     });
-    for v in &mut c.variables {
+    for v in c.variables.iter_mut().map(Arc::make_mut) {
       let big = match v.id.as_str() {
         "fam" => json!("Times"),
         "wt" => json!(900),
@@ -899,14 +1303,14 @@ mod tests {
       var("x", VarKind::Number, json!(1)),
     ]);
     let mut next = bad.clone();
-    next.variables[2].values.insert("m".into(), json!(2));
-    assert!(validate(std::slice::from_ref(&next), std::slice::from_ref(&bad)).is_ok());
+    Arc::make_mut(&mut next.variables[2]).values.insert("m".into(), json!(2));
+    assert!(validate(std::slice::from_ref(&next), &[Arc::new(bad.clone())]).is_ok());
     // Touching one of the loop's variables is refused.
     let mut touched = bad.clone();
-    touched.variables[0].values.insert("m".into(), alias("b"));
-    touched.variables[1].values.insert("m".into(), alias("a"));
-    touched.variables[0].values.insert("m2".into(), json!(1));
-    assert!(validate(&[touched], std::slice::from_ref(&bad)).is_err());
+    Arc::make_mut(&mut touched.variables[0]).values.insert("m".into(), alias("b"));
+    Arc::make_mut(&mut touched.variables[1]).values.insert("m".into(), alias("a"));
+    Arc::make_mut(&mut touched.variables[0]).values.insert("m2".into(), json!(1));
+    assert!(validate(&[touched], &[Arc::new(bad.clone())]).is_err());
     // A chain `resolve` can't follow is refused; the longest one it can is fine.
     let chain = |n: usize| {
       let mut vars = vec![var("v0", VarKind::Number, json!(1))];
@@ -1003,7 +1407,7 @@ mod tests {
       named("b", "Dup", VarKind::Number, json!(1)),
       named("c", "Fine", VarKind::Number, json!(1)),
     ];
-    let old = vec![coll(bad.clone())];
+    let old = vec![Arc::new(coll(bad.clone()))];
     assert!(validate(&old, &[]).is_err());
     let mut edited = bad;
     edited[2].values.insert("m".into(), json!(2));
@@ -1095,5 +1499,124 @@ mod tests {
       })
       .unwrap_err();
     assert!(err.contains("needs a color variable") && err.contains(", v is number"), "{err}");
+  }
+
+  fn named(id: &str, name: &str, kind: VarKind, vals: &[(&str, Value)]) -> Variable {
+    Variable {
+      id: id.into(),
+      name: name.into(),
+      kind,
+      values: vals.iter().map(|(m, v)| ((*m).to_string(), v.clone())).collect(),
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn modes_with_the_same_name_get_distinct_slugs() {
+    let c = Collection {
+      id: "c".into(),
+      name: "Theme".into(),
+      modes: ["Dark", "Light", "Dark"]
+        .iter()
+        .enumerate()
+        .map(|(i, n)| VarMode {
+          id: format!("m{i}"),
+          name: (*n).into(),
+        })
+        .collect(),
+      variables: vec![],
+    };
+    let slugs: Vec<String> = c.modes.iter().map(|m| mode_slug(&c, m)).collect();
+    assert_eq!(slugs, ["dark", "light", "dark-2"]);
+  }
+
+  #[test]
+  fn tokens_json_is_dtcg_with_modes_in_an_extension() {
+    let mut doc = crate::doc::new_document(&mut crate::doc::IdGen::new(1), "T");
+    doc.variables = vec![
+      Arc::new(Collection {
+        id: "c1".into(),
+        name: "Primitives".into(),
+        modes: vec![VarMode {
+          id: "m".into(),
+          name: "Base".into(),
+        }],
+        variables: vec![
+          named("black", "Black", VarKind::Color, &[("m", json!("#000"))]),
+          named("space", "Space", VarKind::Number, &[("m", json!(4))]),
+          named("space2", "Space/2", VarKind::Number, &[("m", json!(8))]),
+          named("half", "Space/0.5", VarKind::Number, &[("m", json!(2))]),
+          named("flag", "Flags/On", VarKind::Boolean, &[("m", json!(true))]),
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
+      }),
+      Arc::new(Collection {
+        id: "c2".into(),
+        name: "Theme".into(),
+        modes: vec![
+          VarMode {
+            id: "l".into(),
+            name: "Light".into(),
+          },
+          VarMode {
+            id: "d".into(),
+            name: "Dark".into(),
+          },
+        ],
+        variables: vec![
+          named(
+            "bg",
+            "Surface/Bg",
+            VarKind::Color,
+            &[("l", json!("#FFFFFF")), ("d", json!({ "alias": "black" }))],
+          ),
+          named(
+            "glass",
+            "Surface/Glass",
+            VarKind::Color,
+            &[("l", json!("#11223380")), ("d", json!("#112233"))],
+          ),
+          named("font", "Font", VarKind::String, &[("l", json!("Inter")), ("d", json!("Georgia"))]),
+        ]
+        .into_iter()
+        .map(Arc::new)
+        .collect(),
+      }),
+    ];
+    let v = tokens_json(&doc);
+    assert_eq!(
+      v["Primitives"]["Black"],
+      json!({
+        "$type": "color",
+        "$value": "#000000",
+        "$extensions": { "com.designotron": { "id": "black" } }
+      })
+    );
+    // A token that is also a group goes under $root, and an alias to it follows.
+    assert_eq!(v["Primitives"]["Space"]["$root"]["$value"], 4.0);
+    assert_eq!(v["Primitives"]["Space"]["2"]["$type"], "number");
+    // A dot in a name becomes an underscore, the original is kept.
+    assert_eq!(
+      v["Primitives"]["Space"]["0_5"]["$extensions"]["com.designotron"]["name"],
+      "Space/0.5"
+    );
+    // Nested groups, the default mode's value, an alias in another mode, the mode names.
+    let bg = &v["Theme"]["Surface"]["Bg"];
+    assert_eq!(bg["$value"], "#FFFFFF");
+    assert_eq!(bg["$extensions"]["com.designotron"]["modes"]["Dark"], "{Primitives.Black}");
+    assert_eq!(v["Theme"]["$extensions"]["com.designotron"]["modes"], json!(["Light", "Dark"]));
+    // Translucent colours are 8-digit hex.
+    assert_eq!(v["Theme"]["Surface"]["Glass"]["$value"], "#11223380");
+    // Strings and booleans have no $type; the extension says what they are.
+    assert!(v["Theme"]["Font"].get("$type").is_none());
+    assert_eq!(v["Theme"]["Font"]["$extensions"]["com.designotron"]["type"], "string");
+    assert_eq!(v["Primitives"]["Flags"]["On"]["$value"], true);
+    // An alias as the default value is a reference too.
+    Arc::make_mut(&mut Arc::make_mut(&mut doc.variables[1]).variables[0])
+      .values
+      .insert("l".into(), json!({ "alias": "space2" }));
+    assert_eq!(tokens_json(&doc)["Theme"]["Surface"]["Bg"]["$value"], "{Primitives.Space.2}");
   }
 }

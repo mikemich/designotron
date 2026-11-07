@@ -7,6 +7,7 @@
 //! library components become plain frames.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use serde_json::{json, Map, Value};
 
@@ -85,14 +86,14 @@ pub fn import(doc: &mut Document, gen: &mut IdGen, file: &Value, images: &BTreeM
   let mut page_ids = Vec::new();
   for (name, kids, bg, flows) in pages {
     let pid = imp.gen.next("p_");
-    imp.doc.pages.push(Page {
+    imp.doc.pages.push(Arc::new(Page {
       id: pid.clone(),
       name,
       children: Vec::new(),
       background: bg.unwrap_or_else(|| "#F5F5F5".into()),
       flow_start: None,
       guides: Vec::new(),
-    });
+    }));
     for k in &kids {
       imp.convert(k, None, &pid, None);
     }

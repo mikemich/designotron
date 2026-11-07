@@ -63,7 +63,7 @@ const folderRecs = async (pg = p) => (await idb(pg, "dt:folders"))?.folders ?? [
 const entry = async (name, pg = p) => (await index(pg)).find((f) => f.name === name);
 const folderId = async (name, pg = p) => (await folderRecs(pg)).find((f) => f.name === name)?.id;
 
-const toastText = (pg = p) => pg.locator("[role=status] .toast").innerText({ timeout: 3000 }).catch(() => "");
+const toastText = (pg = p) => pg.locator(".toast").innerText({ timeout: 3000 }).catch(() => "");
 const dash = async (pg, hash = "#/") => {
   await pg.goto(URL + "/" + hash);
   await pg.waitForSelector(".files");

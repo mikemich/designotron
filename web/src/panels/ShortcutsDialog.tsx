@@ -35,6 +35,8 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Bring forward / back", `${MOD}] / ${MOD}[`],
       ["Bring to front / send to back", `${FRONT_MOD}] / ${FRONT_MOD}[`],
       ["Flip horizontal / vertical", `${SHIFT}H / ${SHIFT}V`],
+      ["Opacity 10% to 90% / 100%", "1 to 9 / 0"],
+      ["Exact opacity (two digits, typed quickly)", "0 then 5 = 5%"],
       ["Hide / lock", `${SHIFT_MOD}H / ${SHIFT_MOD}L`],
       ["Flatten / outline stroke", `${MOD}E / ${SHIFT_MOD}O`],
       ["Use as mask", `${ALT_MOD}M`],

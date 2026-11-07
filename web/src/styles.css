@@ -1715,7 +1715,7 @@ body:has(.modal-bg) .hint-card {
   border-bottom: 1px solid var(--border);
 }
 .variables-dialog {
-  width: 860px;
+  width: min(1080px, calc(100vw - 32px));
   height: 540px;
 }
 .variables-body {
@@ -1746,13 +1746,103 @@ body:has(.modal-bg) .hint-card {
 }
 .var-table-wrap {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   padding: 12px 14px;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   line-height: 1.6;
 }
+.var-table-wrap.muted {
+  display: block;
+  overflow: auto;
+}
+/* Only the table scrolls: the collection name and the search stay put, the sticky Name column sits flush
+   at the scroller's left edge (no padding for other columns to show through), and focus never lands
+   under the sticky Name column or header. */
+.var-table-scroll {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  scroll-padding-left: 260px;
+  scroll-padding-top: 38px;
+}
+/* Fixed columns: the Name column keeps its width and extra modes scroll sideways (the Name column stays
+   put, opaque in both themes) instead of squeezing every column. */
 .var-table {
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   width: 100%;
+  table-layout: fixed;
+  min-width: calc(260px + var(--modes, 1) * 180px + 36px);
+}
+.var-col-name {
+  width: 260px;
+}
+.var-col-mode {
+  width: 180px;
+}
+.var-col-del {
+  width: 36px;
+}
+.var-table th:first-child,
+.var-table tr[data-variable] td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--panel);
+}
+.var-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel);
+}
+.var-table thead th:first-child {
+  z-index: 3;
+}
+.var-folder td button {
+  position: sticky;
+  left: 0;
+  width: auto;
+  max-width: 260px;
+  display: inline-flex;
+  background: var(--panel);
+}
+.var-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.var-search .textinput {
+  flex: 1;
+}
+.var-coll {
+  justify-content: space-between;
+}
+.var-coll-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.var-coll-count {
+  flex-shrink: 0;
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--panel-3);
+  font-size: 11px;
+  text-align: center;
+}
+.var-coll.dim .var-coll-name {
+  opacity: 0.7;
+}
+.var-empty td {
+  padding: 16px 6px;
 }
 .var-table th,
 .var-table td {

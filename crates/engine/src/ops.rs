@@ -97,7 +97,7 @@ pub fn delete(doc: &mut Document, ids: &[NodeId]) {
   let Document { pages, nodes, .. } = doc;
   for p in pages.iter_mut() {
     if p.flow_start.as_ref().is_some_and(|s| !nodes.contains_key(s)) {
-      p.flow_start = None;
+      Arc::make_mut(p).flow_start = None;
     }
   }
 }

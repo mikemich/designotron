@@ -4,6 +4,8 @@ import { closeEmptyPrompt, dispatch, getDoc, pointerDrag, selectSibling, selecti
 import { useShortcuts } from "./panels/ShortcutsDialog";
 import { focusedByPointer, isMac } from "./ui/controls";
 import { canOpenCursorChat, openCursorChat } from "./follow";
+import { useCollab } from "./collab";
+import { nextOpacity, type PendingDigit } from "./opacityKeys";
 
 function isTyping(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement;
@@ -51,6 +53,30 @@ function cycleRegion(dir: 1 | -1) {
     const target = shown[(((at < 0 ? (dir > 0 ? -1 : 0) : at) + dir * step) % shown.length + shown.length) % shown.length].r.focus();
     if (target) return target.focus();
   }
+}
+
+/** The first digit of a possible two-digit opacity, while its window is open. */
+let pendingDigit: PendingDigit | null = null;
+/** What the first digit left behind (document revision, selection), to tell that nothing else happened since. */
+let afterFirst: { docRev: number; ids: string; changed: boolean } | null = null;
+
+/** Digit keys: opacity of the selection (1-9 = 10-90 %, 0 = 100 %, two quick digits = that percent). */
+function setOpacityByKey(digit: number) {
+  const ids = selection();
+  const key = ids.join(",");
+  if (afterFirst && afterFirst.ids !== key) pendingDigit = null;
+  const had = pendingDigit;
+  const r = nextOpacity(pendingDigit, digit, performance.now());
+  pendingDigit = r.pending;
+  // A pair is one undo step: the first digit's change is undone and the exact value applied, unless
+  // something else changed meanwhile.
+  if (had && !r.pending && afterFirst && afterFirst.changed && afterFirst.ids === key && afterFirst.docRev === useStore.getState().es.docRev) A.undo();
+  afterFirst = null;
+  // The engine detaches an opacity binding like the field does.
+  const before = useStore.getState().es.docRev;
+  dispatch({ op: "update", ids, patch: { opacity: r.value } });
+  const docRev = useStore.getState().es.docRev;
+  if (r.pending) afterFirst = { docRev, ids: key, changed: docRev !== before };
 }
 
 /** Alt+PageDown / Alt+PageUp: the next / previous page. */
@@ -202,6 +228,12 @@ export function installShortcuts(): () => void {
         return has && run(e.shiftKey ? A.selectParent : A.selectChildren);
     }
     if (e.shiftKey || e.altKey) return;
+    // AZERTY types digits shifted, so an unshifted key that isn't a digit falls back to the physical key.
+    const digit = /^[0-9]$/.test(e.key) ? e.key : /^Digit\d$/.test(e.code) ? e.code.slice(5) : "";
+    if (!e.repeat && digit && /^(Digit|Numpad)\d$/.test(e.code) && has && !st.editingVector && !pointerDrag.active) {
+      if (st.es.readOnly || useCollab.getState().viewer) return;
+      return run(() => setOpacityByKey(Number(digit)));
+    }
     const tools: Record<string, Parameters<typeof setTool>[0]> = {
       v: "move",
       f: "frame",

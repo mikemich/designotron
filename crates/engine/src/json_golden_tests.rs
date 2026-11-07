@@ -142,3 +142,134 @@ fn nodes_are_shared_between_clones_until_one_is_edited() {
   assert!(Arc::ptr_eq(&snapshot.nodes[&untouched], &e.doc.nodes[&untouched]));
   assert!(!Arc::ptr_eq(&snapshot.nodes[&dot], &e.doc.nodes[&dot]));
 }
+
+fn same_shell(a: &crate::model::Document, b: &crate::model::Document) -> bool {
+  a.pages.len() == b.pages.len()
+    && a.pages.iter().zip(&b.pages).all(|(x, y)| Arc::ptr_eq(x, y))
+    && Arc::ptr_eq(&a.styles, &b.styles)
+    && a.variables.len() == b.variables.len()
+    && a.variables.iter().zip(&b.variables).all(|(x, y)| Arc::ptr_eq(x, y))
+    && Arc::ptr_eq(&a.comments, &b.comments)
+}
+
+fn comment(e: &mut Engine) {
+  e.dispatch(Command::AddComment {
+    page: None,
+    x: 1.0,
+    y: 2.0,
+    node: None,
+    text: "hi".into(),
+    author: "me".into(),
+    time: 1.0,
+  })
+  .unwrap();
+}
+
+/// 3 collections of 100 color variables, as the variables dialog would hold them.
+fn big_variables(e: &mut Engine) {
+  for c in 0..3 {
+    let vars: Vec<Value> = (0..100)
+      .map(|i| json!({ "name": format!("Token {i}"), "type": "color", "values": { "A": format!("#{:06X}", i * 77 + c), "B": "#112233" } }))
+      .collect();
+    run(
+      e,
+      "define_variables",
+      json!({ "collection": format!("C{c}"), "modes": ["A", "B"], "variables": vars }),
+    );
+  }
+}
+
+#[test]
+fn a_node_edit_shares_the_whole_shell_with_the_step_before() {
+  let mut e = rich();
+  comment(&mut e);
+  let before = e.doc.clone();
+  let dot = e.doc.nodes.values().find(|n| n.name == "Dot").map(|n| n.id.clone()).unwrap();
+  e.dispatch(Command::Update {
+    ids: vec![dot],
+    patch: json!({ "opacity": 0.3 }),
+  })
+  .unwrap();
+  assert_ne!(before, e.doc);
+  assert!(
+    same_shell(&before, &e.doc),
+    "pages, styles, variables and comments must stay shared"
+  );
+}
+
+#[test]
+fn a_variable_edit_shares_every_other_variable_and_collection() {
+  let mut e = Engine::new(Box::new(HeuristicMeasurer), 3);
+  big_variables(&mut e);
+  let before = e.doc.clone();
+  // The dialog sends the whole set, freshly deserialised, with one value changed.
+  let mut cols: Value = serde_json::to_value(&e.doc.variables).unwrap();
+  let mode = cols[1]["variables"][50]["values"]
+    .as_object()
+    .unwrap()
+    .keys()
+    .next()
+    .unwrap()
+    .clone();
+  cols[1]["variables"][50]["values"][&mode] = json!("#ABCDEF");
+  e.dispatch(Command::SetVariables {
+    collections: serde_json::from_value(cols).unwrap(),
+  })
+  .unwrap();
+  assert_ne!(before.variables, e.doc.variables);
+  assert!(Arc::ptr_eq(&before.variables[0], &e.doc.variables[0]));
+  assert!(Arc::ptr_eq(&before.variables[2], &e.doc.variables[2]));
+  assert!(!Arc::ptr_eq(&before.variables[1], &e.doc.variables[1]));
+  let shared = (0..100)
+    .filter(|&i| Arc::ptr_eq(&before.variables[1].variables[i], &e.doc.variables[1].variables[i]))
+    .count();
+  assert_eq!(shared, 99, "only the edited variable is a new allocation");
+  assert!(Arc::ptr_eq(&before.pages[0], &e.doc.pages[0]) && Arc::ptr_eq(&before.styles, &e.doc.styles));
+  // Interning matches by id, never by position: a reordered list still shares.
+  let mut cols: Vec<crate::variables::Collection> = crate::variables::plain(&e.doc.variables);
+  cols.reverse();
+  cols[0].variables.reverse();
+  let now = e.doc.clone();
+  e.dispatch(Command::SetVariables { collections: cols }).unwrap();
+  assert!(Arc::ptr_eq(&now.variables[2].variables[99], &e.doc.variables[0].variables[0]));
+  assert!(Arc::ptr_eq(&now.variables[0], &e.doc.variables[2]));
+  assert!(Arc::ptr_eq(&now.variables[1], &e.doc.variables[1]));
+  // Undo restores the earlier handles exactly.
+  e.dispatch(Command::Undo).unwrap();
+  e.dispatch(Command::Undo).unwrap();
+  assert!(same_shell(&before, &e.doc));
+}
+
+#[test]
+fn a_page_rename_copies_only_that_page() {
+  let mut e = rich();
+  comment(&mut e);
+  let before = e.doc.clone();
+  let page = e.doc.pages[0].id.clone();
+  e.dispatch(Command::RenamePage {
+    id: page,
+    name: "Renamed".into(),
+  })
+  .unwrap();
+  assert_ne!(before, e.doc);
+  assert!(!Arc::ptr_eq(&before.pages[0], &e.doc.pages[0]));
+  assert!(Arc::ptr_eq(&before.styles, &e.doc.styles) && Arc::ptr_eq(&before.comments, &e.doc.comments));
+  assert!(before.variables.iter().zip(&e.doc.variables).all(|(a, b)| Arc::ptr_eq(a, b)));
+}
+
+#[test]
+fn a_document_with_comments_styles_and_variables_round_trips() {
+  let mut e = rich();
+  comment(&mut e);
+  assert!(!e.doc.comments.is_empty() && !e.doc.styles.colors.is_empty() && !e.doc.variables.is_empty());
+  let json = e.to_json();
+  let mut f = Engine::new(Box::new(HeuristicMeasurer), 5);
+  f.load(&json).unwrap();
+  assert_eq!(f.doc, e.doc);
+  assert_eq!(f.to_json(), json);
+  // Equality sees through separate allocations and notices a real difference.
+  let mut g = e.doc.clone();
+  assert_eq!(g, e.doc);
+  g.comments_mut().values_mut().next().unwrap().resolved = true;
+  assert_ne!(g, e.doc);
+}

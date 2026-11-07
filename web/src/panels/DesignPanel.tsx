@@ -1528,8 +1528,16 @@ function VariablesSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
       {visibleRows.map((b) => {
         const cur = common(nodes, (n) => n.bindings?.[b.prop] ?? "");
         // Only variables whose scope covers the property; a variable already bound stays listed.
+        // Grouped by "Collection / folder" (the name up to its last slash); the option shows the leaf name.
         const options = colls.flatMap((c) =>
-          c.variables.filter((v) => v.type === b.kind && (inScope(v, b.prop) || v.id === cur)).map((v) => ({ value: v.id, label: colls.length > 1 ? `${c.name} / ${v.name}` : v.name })),
+          c.variables
+            .filter((v) => v.type === b.kind && (inScope(v, b.prop) || v.id === cur))
+            .map((v) => {
+              const cut = v.name.lastIndexOf("/");
+              const folder = cut > 0 ? v.name.slice(0, cut).trim() : "";
+              const group = [colls.length > 1 ? c.name : "", folder].filter(Boolean).join(" / ");
+              return { value: v.id, label: v.name, group: group || undefined };
+            }),
         );
         return (
           <div key={b.prop} className="row">
@@ -1710,6 +1718,7 @@ function NotesSection({ node }: { node: Node }) {
       <textarea
         key={node.id}
         className="textinput"
+        aria-label="Developer notes"
         placeholder="Notes for developers and Claude (behaviour, data, edge cases)…"
         defaultValue={node.notes}
         onKeyDown={(e) => e.stopPropagation()}

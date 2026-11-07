@@ -159,7 +159,7 @@ async function build(p) {
 const pageText = (p) =>
   p.evaluate(() => {
     const c = document.body.cloneNode(true);
-    c.querySelectorAll(".toast").forEach((t) => t.remove());
+    c.querySelectorAll(".toast, [data-toast-live]").forEach((t) => t.remove());
     return c.textContent;
   });
 const items = async (p) => p.$$eval("[role=menu] [role=menuitem]", (els) => els.map((e) => e.textContent.trim()));
@@ -369,7 +369,7 @@ try {
   await sel(p, btn);
   await sleep(300);
   const plain = await pageText(p);
-  check("a plain component keeps 'Properties' and its empty text", /PropertiesNo properties yet/.test(plain) && !/Component properties/.test(plain) && /No properties yet/.test(plain));
+  check("a plain component keeps 'Properties' and its empty text", /Properties\s*No properties yet/.test(plain) && !/Component properties/.test(plain) && /No properties yet/.test(plain));
   const vs = await tool(p, "create_nodes", {
     nodes: [
       { type: "component", name: "State=Default", x: 0, y: 500, width: 100, height: 40, fill: "#222222" },

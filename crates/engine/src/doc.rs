@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use imbl::ordmap::DiffItem;
 
 use crate::geom::{local_matrix, Mat, Point, Rect};
-use crate::model::{Document, Node, NodeId, NodeType, Page, Styles, SCHEMA_VERSION};
+use crate::model::{Document, Node, NodeId, NodeType, Page, SCHEMA_VERSION};
 
 /// Deterministic, collision-resistant id generator (xorshift seeded per session).
 #[derive(Clone, Debug)]
@@ -56,9 +56,9 @@ pub fn new_document(ids: &mut IdGen, name: &str) -> Document {
     id: ids.next("d_"),
     name: name.into(),
     schema: SCHEMA_VERSION,
-    pages: vec![page],
+    pages: vec![Arc::new(page)],
     nodes: imbl::OrdMap::new(),
-    styles: Styles::default(),
+    styles: Default::default(),
     variables: Vec::new(),
     comments: Default::default(),
     names: Default::default(),
@@ -173,11 +173,27 @@ impl Document {
   }
 
   pub fn page(&self, id: &str) -> Option<&Page> {
-    self.pages.iter().find(|p| p.id == id)
+    self.pages.iter().find(|p| p.id == id).map(|p| &**p)
   }
 
+  /// Copies the page out of its `Arc` only when an undo snapshot shares it.
   pub fn page_mut(&mut self, id: &str) -> Option<&mut Page> {
-    self.pages.iter_mut().find(|p| p.id == id)
+    self.pages.iter_mut().find(|p| p.id == id).map(Arc::make_mut)
+  }
+
+  /// Every page, mutable (each copied if shared). For the page list itself use `self.pages`.
+  pub fn pages_iter_mut(&mut self) -> impl Iterator<Item = &mut Page> {
+    self.pages.iter_mut().map(Arc::make_mut)
+  }
+
+  /// The styles, copied out of their `Arc` only when an undo snapshot shares them.
+  pub fn styles_mut(&mut self) -> &mut crate::model::Styles {
+    Arc::make_mut(&mut self.styles)
+  }
+
+  /// The comment table, copied out of its `Arc` only when an undo snapshot shares it.
+  pub fn comments_mut(&mut self) -> &mut std::collections::BTreeMap<String, crate::model::Comment> {
+    Arc::make_mut(&mut self.comments)
   }
 
   /// Ordered child list (bottom to top) of a parent, or of a page root.
