@@ -1674,7 +1674,8 @@ impl<'a> Ctx<'a> {
           }
         }
         "lineHeight" | "letterSpacing" => {
-          if let Some(t) = n.text.as_ref() {
+          // An automatic line height (a token of 0 or less) stays automatic.
+          if let Some(t) = n.text.as_ref().filter(|t| prop != "lineHeight" || t.line_height.is_some()) {
             let (key, lit) = if prop == "lineHeight" {
               ("line-height", px(t.line_height_px()))
             } else {
@@ -1687,8 +1688,18 @@ impl<'a> Ctx<'a> {
             }
           }
         }
-        "fontWeight" if n.kind == NodeType::Text => el.s("font-weight", var.clone()),
-        "fontFamily" if n.kind == NodeType::Text => set(el, "font-family", &var),
+        // The engine rounds a weight to 100..900; CSS would take the raw value.
+        "fontWeight"
+          if n.kind == NodeType::Text
+            && vars::default_number(self.doc, c, v).is_some_and(|w| w % 100.0 == 0.0 && (100.0..=900.0).contains(&w)) =>
+        {
+          el.s("font-weight", var.clone())
+        }
+        "fontFamily" if n.kind == NodeType::Text => {
+          let stack = crate::render::font_stack(&n.text.as_ref().map(|t| t.font_family.clone()).unwrap_or_default());
+          let generic = stack.rsplit(", ").next().unwrap_or("sans-serif").to_string();
+          set(el, "font-family", &format!("{var}, {generic}"))
+        }
         "opacity" => set(el, "opacity", &var),
         "fontSize" => set(el, "font-size", &len),
         _ => {}
@@ -1711,7 +1722,12 @@ impl<'a> Ctx<'a> {
         && t.font_weight == style.font_weight
         && t.line_height == style.line_height
         && t.letter_spacing == style.letter_spacing;
-      if same && el.raw.is_none() {
+      // A bound font property is stated inline, where `bind_vars` can replace it with its token
+      // (and one layer's `calc(var(..))` doesn't end up in the class every user of the style shares).
+      let bound = ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing"]
+        .iter()
+        .any(|p| n.bindings.contains_key(*p));
+      if same && !bound && el.raw.is_none() {
         let class = self.names.texts.get(&style.id).cloned().unwrap_or_else(|| text_class(&style.name));
         const OWN: [&str; 5] = ["font-family", "font-size", "font-weight", "line-height", "letter-spacing"];
         let mut decls: Vec<(String, String)> = el.styles.iter().filter(|(k, _)| OWN.contains(&k.as_str())).cloned().collect();
@@ -3619,7 +3635,7 @@ fn readme_tokens(doc: &Document) -> String {
   if doc.variables.is_empty() {
     return String::new();
   }
-  "\n## Design tokens\n\n`tokens.json` has the variables in the W3C design tokens format (colours as hex, aliases as `{group.token}` references, the other modes of each token under `$extensions[\"com.designotron\"].modes`). Colours, padding, gaps, sizes, stroke width, corner radius, opacity and typography bound to a variable use `var(--name)` in the generated code, so editing `src/tokens.css` (or switching a mode) restyles the app. Per-side strokes keep their literal width.\n".to_string()
+  "\n## Design tokens\n\n`tokens.json` has the variables in the W3C design tokens format (colours as hex, aliases as `{group.token}` references, the other modes of each token under `$extensions[\"com.designotron\"].modes`). Colours, padding, gaps, sizes, stroke width, corner radius, opacity and typography bound to a variable use `var(--name)` in the generated code, so editing `src/tokens.css` (or switching a mode) restyles the app. Per-side strokes keep their literal width, and a device frame keeps its safe-area padding. In `tokens.json`, spacing and other numbers are `$type` `number` and colours are hex strings (a strict 2025.10 validator expects `dimension` and colour objects); strings and booleans have no `$type`.\n".to_string()
 }
 
 fn readme_themes(themed: &[(String, Vec<String>)]) -> String {
@@ -6532,7 +6548,7 @@ mod r14_tests {
     assert!(r.contains("leading-[calc(var(--line)*1px)]"), "{r}");
     assert!(r.contains("tracking-[calc(var(--tracking)*1px)]"), "{r}");
     assert!(r.contains("[font-weight:var(--weight)]"), "{r}");
-    assert!(r.contains("[font-family:var(--family)]"), "{r}");
+    assert!(r.contains("[font-family:var(--family),_sans-serif]"), "{r}");
   }
 
   #[test]
@@ -6614,5 +6630,84 @@ mod r14_tests {
     assert_eq!(v["Space"]["Space"]["2"]["$value"], 8.0);
     let readme = &files.iter().find(|f| f.path == "README.md").unwrap().content;
     assert!(readme.contains("tokens.json"), "{readme}");
+  }
+
+  /// A text layer "t1" in the Space doc, with extra variables `sz` (20), `lh` (0), `fw` (650),
+  /// `fw2` (700) and a string `ff`.
+  fn text_doc(styled: bool, props: &[(&str, &str)]) -> Document {
+    let mut doc = doc_with(|_| {});
+    doc.variables[0].variables.push(number("sz", "Size", 20.0));
+    doc.variables[0].variables.push(number("lh", "Lh", 0.0));
+    doc.variables[0].variables.push(number("fw", "Weight", 650.0));
+    doc.variables[0].variables.push(number("fw2", "Weight 2", 700.0));
+    doc.variables[0].variables.push(Variable {
+      id: "ff".into(),
+      name: "Family".into(),
+      kind: VarKind::String,
+      values: [("m".to_string(), json!("Playfair Display"))].into(),
+      ..Default::default()
+    });
+    let page = doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Text, "t1".into(), "T".into());
+    {
+      let tx = t.text.as_mut().unwrap();
+      tx.characters = "Hello".into();
+      tx.font_size = 20.0;
+      tx.line_height = None;
+      tx.font_weight = 700;
+      tx.font_family = "Playfair Display".into();
+    }
+    if styled {
+      doc.styles.texts.push(crate::model::TextStyle {
+        id: "ts".into(),
+        name: "Body".into(),
+        font_family: "Playfair Display".into(),
+        font_size: 20.0,
+        font_weight: 700,
+        line_height: None,
+        letter_spacing: 0.0,
+      });
+      t.text_style = Some("ts".into());
+    }
+    bind(&mut t, props);
+    doc.insert(t, Some("f"), &page, None);
+    doc
+  }
+
+  fn screen_src(doc: &Document) -> String {
+    let files = export_project(doc, &HeuristicMeasurer);
+    files.iter().find(|f| f.path.starts_with("src/screens/")).unwrap().content.clone()
+  }
+
+  #[test]
+  fn a_styled_text_with_a_bound_size_keeps_the_token_inline() {
+    let src = screen_src(&text_doc(true, &[("fontSize", "sz")]));
+    assert!(src.contains("text-[length:calc(var(--size)*1px)]"), "{src}");
+    assert!(!src.contains("text-body"), "{src}");
+    // Unbound, the style still becomes the shared class.
+    let src = screen_src(&text_doc(true, &[]));
+    assert!(src.contains("text-body"), "{src}");
+  }
+
+  #[test]
+  fn an_automatic_line_height_is_not_bound() {
+    // The token is 0 (auto in the engine), so the literal auto value stays.
+    let src = screen_src(&text_doc(false, &[("lineHeight", "lh")]));
+    assert!(!src.contains("leading-[calc("), "{src}");
+  }
+
+  #[test]
+  fn font_weight_binds_only_on_a_hundred_and_the_family_keeps_a_fallback() {
+    let src = screen_src(&text_doc(false, &[("fontWeight", "fw")]));
+    assert!(!src.contains("[font-weight:var("), "{src}");
+    let h = html(&text_doc(false, &[("fontWeight", "fw2"), ("fontFamily", "ff")]));
+    assert!(h.contains("font-weight: var(--weight-2)"), "{h}");
+    assert!(h.contains("font-family: var(--family), serif"), "{h}");
+  }
+
+  #[test]
+  fn dtcg_numbers_are_integers_when_whole() {
+    let text = crate::variables::tokens_json_text(&doc_with(|_| {}));
+    assert!(text.contains("\"$value\": 8\n") && !text.contains("8.0"), "{text}");
   }
 }

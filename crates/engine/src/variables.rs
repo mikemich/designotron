@@ -696,6 +696,20 @@ pub fn mode_slug(c: &Collection, m: &VarMode) -> String {
   base(0, m)
 }
 
+/// A number variable's value in its collection's default mode, following aliases.
+pub fn default_number(doc: &Document, c: &Collection, v: &Variable) -> Option<f64> {
+  let (mut c, mut v) = (c, v);
+  for _ in 0..16 {
+    let m = c.modes.first()?;
+    let val = v.values.get(&m.id)?;
+    match val.get("alias").and_then(|a| a.as_str()) {
+      Some(a) => (c, v) = find(doc, a)?,
+      None => return val.as_f64(),
+    }
+  }
+  None
+}
+
 /// A DTCG name part: no `.`, braces or leading `$` (they mean something in references and keys).
 fn dtcg_part(part: &str) -> String {
   let p: String = part
@@ -731,7 +745,7 @@ pub fn tokens_json(doc: &Document) -> Value {
   const EXT: &str = "com.designotron";
   // Every token's path first, so aliases can point at tokens defined later.
   let mut paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
-  let mut taken: Vec<Vec<String>> = Vec::new();
+  let mut taken: std::collections::HashSet<Vec<String>> = std::collections::HashSet::new();
   let mut coll_names: Vec<String> = Vec::new();
   for c in &doc.variables {
     let cname = unique_name(&dtcg_part(&c.name), &coll_names);
@@ -748,12 +762,12 @@ pub fn tokens_json(doc: &Document) -> Value {
         }
         k += 1;
       }
-      taken.push(path.clone());
+      taken.insert(path.clone());
       paths.insert(v.id.clone(), path);
     }
   }
   // A token whose path is also a group (`Space` next to `Space/2`) moves under `$root`.
-  let groups: Vec<Vec<String>> = taken.iter().flat_map(|p| (1..p.len()).map(|n| p[..n].to_vec())).collect();
+  let groups: std::collections::HashSet<Vec<String>> = taken.iter().flat_map(|p| (1..p.len()).map(|n| p[..n].to_vec())).collect();
   for p in paths.values_mut() {
     if groups.contains(p) {
       p.push("$root".into());
@@ -766,7 +780,14 @@ pub fn tokens_json(doc: &Document) -> Value {
     }
     Some(match kind {
       VarKind::Color => json!(crate::color::normalize(raw.as_str()?)),
-      VarKind::Number => json!(raw.as_f64()?),
+      VarKind::Number => {
+        let f = raw.as_f64()?;
+        if f.fract() == 0.0 && f.abs() < 1e15 {
+          json!(f as i64)
+        } else {
+          json!(f)
+        }
+      }
       VarKind::String => json!(raw.as_str()?),
       VarKind::Boolean => json!(raw.as_bool()?),
     })
