@@ -112,12 +112,13 @@ await tool("define_variables", {
   modes: ["Light", "Dark", "Dark B"],
   variables: [{ name: "Surface", type: "color", values: { Light: "#FFFFFF", Dark: "#111111", "Dark B": "#222222" } }],
 });
-// Two modes named Dark: rename the third (define_variables merges by name).
+// Two modes named Dark, as an older file can hold (editing refuses a duplicate name now, so load
+// a document that already has one).
 await page.evaluate(() => {
-  const vars = structuredClone(window.__dt.doc().variables);
-  const theme = vars.find((c) => c.name === "Theme");
+  const d = structuredClone(window.__dt.doc());
+  const theme = d.variables.find((c) => c.name === "Theme");
   theme.modes[2].name = "Dark";
-  window.__dt.dispatch({ op: "setVariables", collections: vars });
+  window.__dt.dispatch({ op: "replaceDocument", doc: d });
 });
 await tool("create_nodes", {
   nodes: [
