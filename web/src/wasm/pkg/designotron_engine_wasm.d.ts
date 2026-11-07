@@ -11,11 +11,17 @@ export class WasmEngine {
    */
   collabDelta(): string;
   /**
+   * Whether this engine reads and writes child orders as moves and comments per message in
+   * deltas (what an editor tells the room it can do when joining).
+   */
+  collabLists(): boolean;
+  /**
    * Starts the collaboration baseline at the current document; `ordered` when the relay
    * acknowledges changes in order, `granular` when it also takes pages, styles and variables
-   * per id (see `Engine::collab_reset`).
+   * per id, `lists` when it also takes child orders as moves and comments per message (see
+   * `Engine::collab_reset`).
    */
-  collabReset(ordered: boolean, granular: boolean): void;
+  collabReset(ordered: boolean, granular: boolean, lists: boolean): void;
   /**
    * What to write to storage so it matches the document: JSON
    * `{token, full, meta, dirty: [layer ids], names: {layer id: name}, removed: [layer ids]}` (see `persist::Plan`).
@@ -91,7 +97,7 @@ export interface InitOutput {
   readonly wasmengine_collabDelta: (a: number) => [number, number];
   readonly wasmengine_collabDowngrade: (a: number, b: number, c: number, d: number) => [number, number];
   readonly wasmengine_collabGranular: (a: number) => number;
-  readonly wasmengine_collabReset: (a: number, b: number, c: number) => void;
+  readonly wasmengine_collabReset: (a: number, b: number, c: number, d: number) => void;
   readonly wasmengine_collabUnsent: (a: number) => [number, number];
   readonly wasmengine_dispatch: (a: number, b: number, c: number) => [number, number, number, number];
   readonly wasmengine_docDelta: (a: number, b: number) => [number, number];
@@ -109,6 +115,7 @@ export interface InitOutput {
   readonly wasmengine_save: (a: number) => [number, number];
   readonly wasmengine_setImageSizes: (a: number, b: number, c: number) => void;
   readonly wasmengine_state: (a: number) => [number, number];
+  readonly wasmengine_collabLists: (a: number) => number;
   readonly __wbindgen_export_0: WebAssembly.Table;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
