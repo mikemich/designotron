@@ -986,6 +986,8 @@ impl Engine {
     self.gesture_undo = None;
     self.collab_confirmed = None;
     self.collab_pending.clear();
+    self.moved_hint.clear();
+    self.step_moved.clear();
     self.fingerprints.clear();
     self.refresh_fingerprints();
     layout::relayout_all(&mut self.doc, self.measurer.as_ref());
@@ -1110,6 +1112,8 @@ impl Engine {
     self.collab_synced = Some(self.doc.clone());
     self.collab_confirmed = ordered.then(|| self.doc.clone());
     self.collab_pending.clear();
+    // What was moved before joining is part of the baseline, not of the first delta.
+    self.moved_hint.clear();
   }
 
   /// This editor's changes the relay hasn't acknowledged, plus any not yet sent, oldest
@@ -1519,9 +1523,9 @@ impl Engine {
     if self.gesture.is_none() {
       self.step_moved.clear();
     }
+    // (Recorded once the command has succeeded and changed something: a no-op or failed one
+    // moved nothing, and a stale name would make the next delta override a peer's move.)
     let moved = moved_by(&cmd);
-    self.moved_hint.extend(moved.iter().cloned());
-    self.step_moved.extend(moved);
     // O(1) with the persistent node map; diffed later to find what needs layout.
     let prev = self.doc.clone();
     let group = if matches!(cmd, Command::Ai { .. }) {
@@ -1544,6 +1548,10 @@ impl Engine {
       Ok(v) => {
         self.after_mutation(&prev);
         self.prune_local(&prev);
+        if prev != self.doc {
+          self.moved_hint.extend(moved.iter().cloned());
+          self.step_moved.extend(moved);
+        }
         if let Some(b) = before {
           if b.doc != self.doc {
             self.push_past(b, group);

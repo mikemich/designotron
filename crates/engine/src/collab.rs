@@ -3869,6 +3869,51 @@ mod tests {
   }
 
   #[test]
+  fn a_command_that_changed_nothing_leaves_no_hint_behind() {
+    // LEAK: A to the back while it is there (nothing changes), then B one step backward: the
+    // delta names B only, so a peer bringing A to the front at once is not overridden.
+    for (x, y) in [(0, 1), (1, 0)] {
+      let mut h = Hub::new(&[Lists, Lists]);
+      let (frame, a, b) = (h.frame(), h.id('A'), h.id('B'));
+      reorder(&mut h.eds[0], &a, ReorderTo::Back);
+      reorder(&mut h.eds[0], &b, ReorderTo::Backward);
+      assert_eq!(h.order(0, &frame), "B,A,C,T");
+      let d = h.eds[0].collab_delta();
+      assert_eq!(d["moves"][&frame], json!([b]), "only the layer that moved");
+      // Again, for real, with the peer.
+      let mut h = Hub::new(&[Lists, Lists]);
+      reorder(&mut h.eds[0], &a, ReorderTo::Back);
+      reorder(&mut h.eds[0], &b, ReorderTo::Backward);
+      reorder(&mut h.eds[1], &a, ReorderTo::Front);
+      h.race(x, y);
+      assert_eq!(h.order(0, &frame), "B,C,T,A", "relay order {x},{y}: A is in front, B stepped back");
+    }
+  }
+
+  #[test]
+  fn a_failed_command_and_what_was_moved_before_joining_leave_no_hint() {
+    let mut h = Hub::new(&[Lists]);
+    let frame = h.frame();
+    // A move into itself fails and names nothing.
+    let _ = h.eds[0].dispatch(Command::MoveToParent {
+      ids: vec![frame.clone()],
+      parent: Some(frame.clone()),
+      index: None,
+    });
+    assert!(h.eds[0].collab_delta().get("moves").is_none());
+    // Moved while alone, then the baseline starts: the first delta names only what moved after.
+    let mut e = engine(5);
+    let first = rect(&mut e, 0.0, None);
+    let second = rect(&mut e, 20.0, None);
+    reorder(&mut e, &first, ReorderTo::Front);
+    e.collab_reset(true, true, true);
+    reorder(&mut e, &second, ReorderTo::Front);
+    let d = e.collab_delta();
+    let page = e.doc.pages[0].id.clone();
+    assert_eq!(d["pageMoves"][&page], json!([second]), "{d}");
+  }
+
+  #[test]
   fn undoing_a_send_backward_after_a_peer_moved_another_layer_puts_the_layer_back() {
     let mut h = Hub::new(&[Lists, Lists]);
     let (frame, b, c) = (h.frame(), h.id('B'), h.id('C'));
