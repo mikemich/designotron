@@ -1,13 +1,43 @@
 //! Structural document operations shared by commands and AI tools.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::doc::{normalize_angle, IdGen};
 use crate::geom::{Point, Rect};
 use crate::model::{Document, Node, NodeId, NodeType, Paint, ShapeProps, TextProps};
 
+thread_local! {
+  /// Test oracle (see `Engine::reference`): `top_most` and `paint_order` take the quadratic road.
+  static REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Switches `top_most` / `paint_order` between the fast versions and the whole-document walks they
+/// replace, for this thread. The engine sets it from `Engine::reference` on every entry point.
+pub(crate) fn set_reference(on: bool) {
+  REFERENCE.with(|r| r.set(on));
+}
+
+fn reference() -> bool {
+  REFERENCE.with(|r| r.get())
+}
+
 /// Drops ids whose ancestor is also in the list (so subtrees are handled once).
 pub fn top_most(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
+  if reference() {
+    return top_most_slow(doc, ids);
+  }
+  let set: HashSet<&str> = ids.iter().map(|i| i.as_str()).collect();
+  ids
+    .iter()
+    .filter(|id| doc.nodes.contains_key(*id))
+    .filter(|id| !doc.ancestors(id).iter().any(|a| set.contains(a.as_str())))
+    .cloned()
+    .collect()
+}
+
+/// `top_most` as it was: `contains` on the list for every ancestor of every id.
+pub(crate) fn top_most_slow(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
   ids
     .iter()
     .filter(|id| doc.nodes.contains_key(*id))
@@ -16,8 +46,70 @@ pub fn top_most(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
     .collect()
 }
 
-/// Sorts ids into paint order (bottom first) within the document.
+/// Sorts ids into paint order (bottom first) within the document. Ids that aren't in the document,
+/// or that no page reaches through its layers' children, are dropped, and so are repeats.
+///
+/// Each id gets its path (page, index of its top-level layer, then its index in each parent on the
+/// way down) and the paths sort in pre-order. That costs the ids' depth plus the children lists of
+/// the parents they sit in, where walking every layer of every page for every id did not.
 pub fn paint_order(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
+  if reference() {
+    return paint_order_slow(doc, ids);
+  }
+  // Top-level layer → (page, index) for the layers the pages list.
+  let mut roots: HashMap<&str, (usize, usize)> = HashMap::new();
+  for (pi, p) in doc.pages.iter().enumerate() {
+    for (ri, r) in p.children.iter().enumerate() {
+      roots.entry(r.as_str()).or_insert((pi, ri));
+    }
+  }
+  // Parent → child → index, built for the parents met.
+  let mut index_in: HashMap<&str, HashMap<&str, usize>> = HashMap::new();
+  let mut seen: HashSet<&str> = HashSet::new();
+  let mut keyed: Vec<(Vec<usize>, &NodeId)> = Vec::new();
+  'ids: for id in ids {
+    if !seen.insert(id.as_str()) {
+      continue;
+    }
+    // Up from the layer; a path longer than the document has layers is a cycle.
+    let mut path: Vec<usize> = Vec::new();
+    let mut cur: &str = id.as_str();
+    loop {
+      let Some(n) = doc.get(cur) else { continue 'ids };
+      match n.parent.as_deref() {
+        Some(p) => {
+          let Some(pn) = doc.get(p) else { continue 'ids };
+          let at = index_in.entry(p).or_insert_with(|| {
+            let mut m: HashMap<&str, usize> = HashMap::with_capacity(pn.children.len());
+            for (i, c) in pn.children.iter().enumerate() {
+              m.entry(c.as_str()).or_insert(i);
+            }
+            m
+          });
+          let Some(i) = at.get(cur) else { continue 'ids };
+          path.push(*i);
+          if path.len() > doc.nodes.len() {
+            continue 'ids;
+          }
+          cur = p;
+        }
+        None => {
+          let Some((pi, ri)) = roots.get(cur) else { continue 'ids };
+          path.push(*ri);
+          path.push(*pi);
+          break;
+        }
+      }
+    }
+    path.reverse();
+    keyed.push((path, id));
+  }
+  keyed.sort();
+  keyed.into_iter().map(|(_, id)| id.clone()).collect()
+}
+
+/// `paint_order` as it was: every layer of every page, in order, kept when it is in the list.
+pub(crate) fn paint_order_slow(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
   let mut out: Vec<NodeId> = Vec::new();
   for p in &doc.pages {
     for nid in doc.page_nodes(&p.id) {
@@ -27,6 +119,92 @@ pub fn paint_order(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
     }
   }
   out
+}
+
+// ---- edits that change neither layout nor pixels (round 18) ----
+//
+// The engine skips re-laying out and re-rendering the layer tree such an edit sits in. Each helper
+// copies the fields it lists from the new layer onto a copy of the old one and asks whether the two
+// are then equal, so a field added to `Node` later is never on the list: a change to it is never
+// neutral, the safe default. Tests change every listed field and compare layout and render output.
+
+/// Copies the named fields of `$from` onto `$to`, the ones that differ (cloning is the cost).
+macro_rules! adopt {
+  ($to:ident, $from:ident, $($f:ident),* $(,)?) => {
+    $(
+      if $to.$f != $from.$f {
+        $to.$f = $from.$f.clone();
+      }
+    )*
+  };
+}
+
+/// True when `new` differs from `old` only in fields `layout::layout_node` never reads: paints,
+/// effects, opacity, blend mode, the name, variable bindings and pins, style links, prototype
+/// interactions, export rows, notes, layout grids, the lock, and the
+/// instance record (an instance's overrides reach its layers through the sync, which changes those
+/// layers themselves). (`stroke_weight` and `visible` are left out on purpose.)
+pub fn layout_neutral(old: &Node, new: &Node) -> bool {
+  // Cheap rejects first: this runs for every changed layer of a big edit.
+  if old.x != new.x
+    || old.y != new.y
+    || old.width != new.width
+    || old.height != new.height
+    || old.visible != new.visible
+    || old.parent != new.parent
+    || old.children.len() != new.children.len()
+  {
+    return false;
+  }
+  let mut a = old.clone();
+  adopt!(
+    a,
+    new,
+    fills,
+    strokes,
+    effects,
+    opacity,
+    blend_mode,
+    name,
+    bindings,
+    variable_modes,
+    fill_style,
+    stroke_style,
+    effect_style,
+    grid_style,
+    text_style,
+    interactions,
+    export_settings,
+    notes,
+    layout_grids,
+    locked,
+    instance
+  );
+  // (Not the colour or link of a text run: a run splits the measured pieces, and a real font's
+  // widths aren't additive, so the same words can measure differently.)
+  a == *new
+}
+
+/// True when `new` differs from `old` only in fields `render` never reads: variable bindings and
+/// pins, the style links (the paints they stand for are fields of their own), export rows, notes and
+/// the instance record (what an instance shows is in its own layers).
+pub fn render_neutral(old: &Node, new: &Node) -> bool {
+  let mut a = old.clone();
+  adopt!(
+    a,
+    new,
+    bindings,
+    variable_modes,
+    fill_style,
+    stroke_style,
+    effect_style,
+    grid_style,
+    text_style,
+    export_settings,
+    notes,
+    instance
+  );
+  a == *new
 }
 
 /// Wraps nodes in a new container placed at their combined bounds.
@@ -471,5 +649,315 @@ mod tests {
     }
     distribute(&mut doc, &["a".into(), "b".into(), "c".into()], true);
     assert_eq!(doc.get("b").unwrap().x, 50.0);
+  }
+
+  /// A random forest over a few pages (some layers missing from their parent's list, which no page
+  /// walk reaches): `paint_order` and `top_most` give what the old whole-document walks gave, for
+  /// id lists with repeats, ancestors next to descendants and ids that aren't there.
+  #[test]
+  fn paint_order_and_top_most_match_the_old_functions() {
+    struct Lcg(u64);
+    impl Lcg {
+      fn below(&mut self, n: usize) -> usize {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((self.0 >> 33) % n.max(1) as u64) as usize
+      }
+    }
+    for seed in 1..=60u64 {
+      let mut r = Lcg(seed);
+      let mut gen = IdGen::new(seed);
+      let mut doc = new_document(&mut gen, "t");
+      for i in 0..r.below(3) {
+        doc.pages.push(Arc::new(crate::model::Page {
+          id: format!("page{i}"),
+          name: format!("Page {i}"),
+          children: Vec::new(),
+          background: "#FFFFFF".into(),
+          flow_start: None,
+          guides: Vec::new(),
+        }));
+      }
+      let mut ids: Vec<String> = Vec::new();
+      for i in 0..(5 + r.below(70)) {
+        let id = format!("n{i}");
+        let parent = if ids.is_empty() || r.below(4) == 0 {
+          None
+        } else {
+          Some(ids[r.below(ids.len())].clone())
+        };
+        let page = match &parent {
+          Some(p) => doc.get(p).unwrap().page.clone(),
+          None => doc.pages[r.below(doc.pages.len())].id.clone(),
+        };
+        let index = (r.below(3) > 0).then(|| r.below(5));
+        doc.insert(
+          Node {
+            id: id.clone(),
+            kind: NodeType::Frame,
+            ..Default::default()
+          },
+          parent.as_deref(),
+          &page,
+          index,
+        );
+        ids.push(id);
+      }
+      // A layer its parent no longer lists (a damaged file): neither walk reaches it.
+      if ids.len() > 4 {
+        let orphan = ids[3].clone();
+        doc.detach(&orphan);
+      }
+      for _ in 0..30 {
+        let mut want: Vec<String> = (0..r.below(25)).map(|_| ids[r.below(ids.len())].clone()).collect();
+        for _ in 0..r.below(3) {
+          want.push(format!("gone{}", r.below(9)));
+        }
+        assert_eq!(
+          paint_order(&doc, &want),
+          paint_order_slow(&doc, &want),
+          "seed {seed}: paint_order of {want:?}"
+        );
+        assert_eq!(
+          top_most(&doc, &want),
+          top_most_slow(&doc, &want),
+          "seed {seed}: top_most of {want:?}"
+        );
+        let tops = top_most(&doc, &want);
+        assert_eq!(paint_order(&doc, &tops), paint_order_slow(&doc, &tops));
+      }
+    }
+  }
+
+  /// A measurer that kerns "AV" like a real font does (the browser's `measureText` isn't additive).
+  struct Kern;
+  impl crate::text::TextMeasurer for Kern {
+    fn measure(&self, text: &str, font: &crate::text::FontSpec) -> f64 {
+      let n = text.chars().count() as f64;
+      n * font.size * 0.6 - text.matches("AV").count() as f64 * font.size * 0.2 + n * font.letter_spacing
+    }
+  }
+
+  /// A laid-out screen with every kind of layer the neutral lists talk about.
+  fn neutral_doc() -> Document {
+    use crate::model::{AutoLayout, Sizing, TextProps, TextRun};
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mk = |id: &str, kind: NodeType, w: f64, h: f64| Node {
+      id: id.into(),
+      kind,
+      width: w,
+      height: h,
+      fills: vec![Paint::solid("#336699")],
+      ..Default::default()
+    };
+    let mut screen = mk("screen", NodeType::Frame, 300.0, 100.0);
+    screen.layout = Some(AutoLayout::default());
+    screen.sizing_v = Sizing::Hug;
+    doc.insert(screen, None, &page, None);
+    let mut text = mk("text", NodeType::Text, 100.0, 20.0);
+    text.text = Some(TextProps {
+      characters: "AVAVAVAV neutral world".into(),
+      auto_resize: crate::model::TextAutoResize::Width,
+      runs: vec![TextRun {
+        start: 1,
+        end: 2,
+        color: Some("#FF0000".into()),
+        ..Default::default()
+      }],
+      ..Default::default()
+    });
+    doc.insert(text, Some("screen"), &page, None);
+    doc.insert(mk("rect", NodeType::Rectangle, 80.0, 40.0), Some("screen"), &page, None);
+    let mut inner = mk("inner", NodeType::Frame, 120.0, 30.0);
+    inner.layout = Some(AutoLayout::default());
+    inner.sizing_v = Sizing::Hug;
+    doc.insert(inner, Some("screen"), &page, None);
+    let mut label = mk("label", NodeType::Text, 50.0, 20.0);
+    label.text = Some(TextProps {
+      characters: "Inner".into(),
+      ..Default::default()
+    });
+    doc.insert(label, Some("inner"), &page, None);
+    crate::layout::relayout_all(&mut doc, &Kern);
+    doc
+  }
+
+  /// A run's colour splits the measured pieces, and a kerning font measures the pair differently:
+  /// dropping it merges them and moves the layout, so it is not a neutral change.
+  #[test]
+  fn a_run_colour_can_change_the_width_of_a_text() {
+    let base = neutral_doc();
+    let mut after = base.clone();
+    after.get_mut("text").unwrap().text.as_mut().unwrap().runs[0].color = None;
+    let mut laid = after.clone();
+    crate::layout::layout_node(&mut laid, "screen", &Kern);
+    assert!(laid != after, "the run colour moved the layout");
+    assert!(!layout_neutral(base.get("text").unwrap(), after.get("text").unwrap()));
+  }
+
+  /// Each field the neutral helpers list, changed on its own: the helper says neutral, and layout
+  /// (for `layout_neutral`) or the canvas markup (for `render_neutral`) really doesn't change.
+  /// Fields not on a list (size, position, visibility, the children, a text's characters) aren't neutral.
+  #[test]
+  fn the_neutral_lists_name_only_fields_layout_and_render_never_read() {
+    use crate::model::{BlendMode, Effect, ExportSetting, Interaction, LayoutGrid};
+    let base = neutral_doc();
+    let m = Kern;
+    type Change = Box<dyn Fn(&mut Node)>;
+    let changes: Vec<(&str, bool, Change)> = vec![
+      // (name, also render-neutral, change)
+      ("fills", false, Box::new(|n| n.fills = vec![Paint::solid("#00FF00")])),
+      ("strokes", false, Box::new(|n| n.strokes = vec![Paint::solid("#00FF00")])),
+      ("effects", false, Box::new(|n| n.effects = vec![Effect::default()])),
+      ("opacity", false, Box::new(|n| n.opacity = 0.5)),
+      ("blend_mode", false, Box::new(|n| n.blend_mode = BlendMode::Multiply)),
+      ("name", false, Box::new(|n| n.name = "Renamed".into())),
+      (
+        "bindings",
+        true,
+        Box::new(|n| n.bindings.insert("fill".into(), "v1".into()).map(|_| ()).unwrap_or(())),
+      ),
+      (
+        "variable_modes",
+        true,
+        Box::new(|n| n.variable_modes.insert("c1".into(), "m1".into()).map(|_| ()).unwrap_or(())),
+      ),
+      ("fill_style", true, Box::new(|n| n.fill_style = Some("s1".into()))),
+      ("stroke_style", true, Box::new(|n| n.stroke_style = Some("s1".into()))),
+      ("effect_style", true, Box::new(|n| n.effect_style = Some("s1".into()))),
+      ("grid_style", true, Box::new(|n| n.grid_style = Some("s1".into()))),
+      ("text_style", true, Box::new(|n| n.text_style = Some("s1".into()))),
+      ("interactions", false, Box::new(|n| n.interactions = vec![Interaction::default()])),
+      (
+        "export_settings",
+        true,
+        Box::new(|n| n.export_settings = vec![ExportSetting::default()]),
+      ),
+      ("notes", true, Box::new(|n| n.notes = "a note".into())),
+      (
+        "instance",
+        true,
+        Box::new(|n| {
+          n.instance = Some(crate::model::InstanceInfo {
+            component_id: "elsewhere".into(),
+            overrides: [("x".to_string(), serde_json::json!({ "bindings": { "fill": "v" } }))]
+              .into_iter()
+              .collect(),
+            ..Default::default()
+          })
+        }),
+      ),
+      ("layout_grids", false, Box::new(|n| n.layout_grids = vec![LayoutGrid::default()])),
+      ("locked", false, Box::new(|n| n.locked = true)),
+    ];
+    for (name, render_too, change) in &changes {
+      for id in ["screen", "text", "rect", "inner", "label"] {
+        let old = base.get(id).unwrap();
+        let mut new = old.clone();
+        change(&mut new);
+        if new == *old {
+          // (A change that doesn't apply to this kind of layer, such as a text run's colour on a rectangle.)
+          continue;
+        }
+        assert!(layout_neutral(old, &new), "{name} on {id} should be layout-neutral");
+        let mut after = base.clone();
+        after.nodes.insert(id.to_string(), Arc::new(new.clone()));
+        let mut laid = after.clone();
+        crate::layout::layout_node(&mut laid, "screen", &m);
+        assert!(laid == after, "{name} on {id}: layout moved something");
+        if *render_too {
+          assert!(render_neutral(old, &new), "{name} on {id} should be render-neutral");
+          let (a, b) = (
+            crate::render::render_root(
+              &base,
+              "screen",
+              &m,
+              crate::render::RenderOptions {
+                mode: crate::render::Mode::Canvas,
+                hidden: &[],
+                editing: None,
+              },
+            ),
+            crate::render::render_root(
+              &after,
+              "screen",
+              &m,
+              crate::render::RenderOptions {
+                mode: crate::render::Mode::Canvas,
+                hidden: &[],
+                editing: None,
+              },
+            ),
+          );
+          assert_eq!(a, b, "{name} on {id}: the canvas changed");
+        } else {
+          assert!(!render_neutral(old, &new), "{name} is not on the render list");
+        }
+      }
+    }
+    // Fields layout reads (or that were left out to be safe) are never neutral.
+    let not_neutral: Vec<(&str, Change)> = vec![
+      ("width", Box::new(|n| n.width += 1.0)),
+      ("x", Box::new(|n| n.x += 1.0)),
+      ("visible", Box::new(|n| n.visible = false)),
+      ("stroke_weight", Box::new(|n| n.stroke_weight = 4.0)),
+      ("corner_radius", Box::new(|n| n.corner_radius = 4.0)),
+      ("children", Box::new(|n| n.children.push("x".into()))),
+      (
+        "characters",
+        Box::new(|n| {
+          if let Some(t) = n.text.as_mut() {
+            t.characters.push('!')
+          }
+        }),
+      ),
+      (
+        "run color",
+        Box::new(|n| {
+          if let Some(r) = n.text.as_mut().and_then(|t| t.runs.first_mut()) {
+            r.color = Some("#0000FF".into());
+          }
+        }),
+      ),
+      (
+        "run link",
+        Box::new(|n| {
+          if let Some(r) = n.text.as_mut().and_then(|t| t.runs.first_mut()) {
+            r.link = Some("https://example.com".into());
+          }
+        }),
+      ),
+      (
+        "run size",
+        Box::new(|n| {
+          if let Some(r) = n.text.as_mut().and_then(|t| t.runs.first_mut()) {
+            r.font_size = Some(30.0)
+          }
+        }),
+      ),
+      (
+        "layout",
+        Box::new(|n| {
+          if let Some(l) = n.layout.as_mut() {
+            l.gap += 4.0
+          }
+        }),
+      ),
+    ];
+    for (name, change) in &not_neutral {
+      let old = base.get("text").unwrap();
+      let mut new = old.clone();
+      change(&mut new);
+      if new != *old {
+        assert!(!layout_neutral(old, &new), "{name} must not be layout-neutral");
+      }
+      let old = base.get("screen").unwrap();
+      let mut new = old.clone();
+      change(&mut new);
+      if new != *old {
+        assert!(!layout_neutral(old, &new), "{name} must not be layout-neutral");
+      }
+    }
   }
 }

@@ -61,6 +61,9 @@ struct Snapshot {
   doc: Document,
   selection: Vec<NodeId>,
   page: String,
+  /// Whether `doc` was a fixed point of the variable passes when the snapshot was taken (false
+  /// for a file just loaded, until the first change has run them over everything).
+  settled: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -945,6 +948,26 @@ pub struct Engine {
   moved_hint: std::collections::HashSet<NodeId>,
   /// Layers moved by the commands of the step being made (a gesture's drags add up).
   step_moved: Vec<NodeId>,
+  /// True once the document is a fixed point of `variables::normalize` + `apply`: every change
+  /// ends in `after_mutation`, which leaves it so, and an exact undo returns to such a state. A
+  /// freshly loaded file is not touched until its first change (so every copy of a shared file
+  /// stays identical after a join), whose passes then cover the whole file; only a settled
+  /// document may use the incremental passes (`variables::apply_since`).
+  vars_settled: bool,
+  /// Mains whose fingerprint was recomputed since the last `after_mutation` finished (it takes
+  /// them again once its own changes are in).
+  fp_touched: HashSet<NodeId>,
+  /// Test oracle: the whole-document passes. When on, `after_mutation` runs `normalize` + `apply`
+  /// over every layer, layout ignores the neutral-change skip, `render_incremental` re-renders
+  /// every changed root, `paint_order`/`top_most` use the quadratic functions and fingerprints
+  /// refresh in full, as before round 18.
+  pub reference: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+  /// How often `after_mutation` ran on this thread (tests count passes).
+  pub(crate) static AFTER_MUTATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The layers a command moves in their parent's order on purpose (reorder, move, drop).
@@ -952,6 +975,87 @@ fn moved_by(cmd: &Command) -> Vec<NodeId> {
   match cmd {
     Command::Reorder { ids, .. } | Command::MoveToParent { ids, .. } | Command::DropInto { ids, .. } => ids.clone(),
     _ => vec![],
+  }
+}
+
+/// Changed node ids between two documents, grouped by the top-level layer they belong to.
+fn changed_roots(prev: &Document, doc: &Document) -> HashMap<NodeId, Vec<NodeId>> {
+  let mut out: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+  // Top-level layer per layer met on the way up (one map for each document), so a thousand
+  // changed layers in one screen share their ancestors' answers.
+  let mut now: HashMap<&str, &str> = HashMap::new();
+  let mut before: HashMap<&str, &str> = HashMap::new();
+  fn root_in<'a>(doc: &'a Document, id: &'a str, memo: &mut HashMap<&'a str, &'a str>) -> &'a str {
+    let mut walked: Vec<&'a str> = Vec::new();
+    let mut cur = id;
+    let root = loop {
+      if let Some(r) = memo.get(cur) {
+        break *r;
+      }
+      walked.push(cur);
+      match doc.get(cur).and_then(|n| n.parent.as_deref()) {
+        // A parent cycle (a damaged document) ends at the layer it came back to, like `ancestors`.
+        Some(p) if !walked.contains(&p) => cur = p,
+        _ => break cur,
+      }
+    };
+    for w in walked {
+      memo.insert(w, root);
+    }
+    root
+  }
+  for item in prev.nodes.diff(&doc.nodes) {
+    let (root, id) = match item {
+      imbl::ordmap::DiffItem::Add(k, _) => (root_in(doc, k, &mut now), k),
+      imbl::ordmap::DiffItem::Update { new: (k, _), .. } => (root_in(doc, k, &mut now), k),
+      imbl::ordmap::DiffItem::Remove(k, _) => (root_in(prev, k, &mut before), k),
+    };
+    out.entry(root.to_string()).or_default().push(id.clone());
+  }
+  out
+}
+
+/// The clipboard text `copy` writes (`variables` and `styles` ride along as `tokens`).
+#[derive(Serialize)]
+struct ClipOut<'a> {
+  #[serde(rename = "type")]
+  kind: &'static str,
+  roots: &'a [NodeId],
+  nodes: &'a [Node],
+  components: &'a [Node],
+  #[serde(flatten)]
+  tokens: std::collections::BTreeMap<&'static str, Value>,
+}
+
+/// The clipboard text `paste` reads. Everything but the layers is kept as it came (`rest` holds
+/// `variables` and `styles`, which `clipboard::merge_tokens` looks for by key).
+#[derive(Deserialize)]
+struct ClipIn {
+  #[serde(rename = "type", default)]
+  kind: Option<String>,
+  roots: Vec<NodeId>,
+  nodes: Vec<Node>,
+  #[serde(default)]
+  components: Option<Value>,
+  #[serde(flatten)]
+  rest: serde_json::Map<String, Value>,
+}
+
+/// Why a clipboard text isn't pasteable, worded as before the clipboard was parsed in one go.
+fn clipboard_error(data: &str) -> String {
+  const NOT_OURS: &str = "clipboard does not contain Designotron layers";
+  let Ok(v) = serde_json::from_str::<Value>(data) else {
+    return NOT_OURS.into();
+  };
+  if v.get("type").and_then(|t| t.as_str()) != Some(CLIPBOARD_TAG) {
+    return NOT_OURS.into();
+  }
+  if let Err(e) = serde_json::from_value::<Vec<Node>>(v["nodes"].clone()) {
+    return e.to_string();
+  }
+  match serde_json::from_value::<Vec<NodeId>>(v["roots"].clone()) {
+    Err(e) => e.to_string(),
+    Ok(_) => NOT_OURS.into(),
   }
 }
 
@@ -997,6 +1101,9 @@ impl Engine {
       collab_lists: false,
       moved_hint: Default::default(),
       step_moved: Vec::new(),
+      vars_settled: false,
+      fp_touched: HashSet::new(),
+      reference: false,
     }
   }
 
@@ -1010,6 +1117,8 @@ impl Engine {
     e.page = self.page.clone();
     e.gen = self.gen.clone();
     e.fingerprints = self.fingerprints.clone();
+    e.vars_settled = self.vars_settled;
+    e.reference = self.reference;
     e.synced = Some(self.doc.clone());
     e
   }
@@ -1039,9 +1148,11 @@ impl Engine {
     self.moved_hint.clear();
     self.step_moved.clear();
     self.fingerprints.clear();
+    self.fp_touched.clear();
     self.refresh_fingerprints();
     layout::relayout_all(&mut self.doc, self.measurer.as_ref());
     self.render_cache = RenderCache::default();
+    self.vars_settled = false;
     self.rev += 1;
     self.doc_rev += 1;
     Ok(())
@@ -1270,6 +1381,15 @@ impl Engine {
                 bounds.insert(root.clone(), json!(rect_array(b)));
               }
             }
+          } else if !self.reference
+            && cache.roots.contains_key(&root)
+            && ids.iter().all(|id| match (prev.get(id), self.doc.get(id)) {
+              (Some(old), Some(new)) => ops::render_neutral(old, new),
+              _ => false,
+            })
+          {
+            // Only bindings, pins, style links, export rows or notes changed: nothing is drawn
+            // differently (the paints a binding writes are changes of their own).
           } else {
             dirty.push(root);
           }
@@ -1348,10 +1468,12 @@ impl Engine {
       doc: self.doc.clone(),
       selection: self.selection.clone(),
       page: self.page.clone(),
+      settled: self.vars_settled,
     }
   }
 
   fn restore(&mut self, s: Snapshot) {
+    self.vars_settled = s.settled;
     self.doc = s.doc;
     self.selection = s.selection;
     self.page = s.page;
@@ -1359,6 +1481,7 @@ impl Engine {
 
   /// Executes a command. Mutations become one undo step (or join the open gesture).
   pub fn dispatch(&mut self, cmd: Command) -> Result<Value, String> {
+    ops::set_reference(self.reference);
     if let Command::SetReadOnly { on } = cmd {
       if self.read_only != on {
         self.read_only = on;
@@ -1437,15 +1560,24 @@ impl Engine {
         }
         let ids = delta_ids(&delta);
         let lists = self.collab_lists;
-        if let Some(g) = self.gesture.as_mut() {
+        // The gesture's base documents (what cancelling or undoing returns to) take the delta too,
+        // with the variable passes and layout that `after_mutation` gives the live one, so a
+        // document restored from them is as settled as any other.
+        for slot in [0, 1] {
+          let Some(mut g) = (if slot == 0 { self.gesture.take() } else { self.gesture_undo.take() }) else {
+            continue;
+          };
+          let old = g.doc.clone();
           let _ = Self::collab_apply(lists, &mut g.doc, &delta);
           sanitize_links(&mut g.doc, Some(&ids));
+          self.settle_base(&mut g.doc, &old, g.settled);
+          if slot == 0 {
+            self.gesture = Some(g);
+          } else {
+            self.gesture_undo = Some(g);
+          }
         }
-        if let Some(g) = self.gesture_undo.as_mut() {
-          let _ = Self::collab_apply(lists, &mut g.doc, &delta);
-          sanitize_links(&mut g.doc, Some(&ids));
-        }
-        self.refresh_fingerprints();
+        self.refresh_fingerprints_since(&prev);
         self.after_mutation(&prev);
         self.collab_synced = Some(self.doc.clone());
         self.rev += 1;
@@ -1470,7 +1602,7 @@ impl Engine {
         // The relay didn't take it: everyone else's copy lacks it, so this one drops it too.
         let Some(doc) = self.collab_rebuild() else { return Ok(json!({})) };
         let prev = std::mem::replace(&mut self.doc, doc);
-        self.refresh_fingerprints();
+        self.refresh_fingerprints_since(&prev);
         self.after_mutation(&prev);
         self.collab_synced = Some(self.doc.clone());
         self.rev += 1;
@@ -1506,6 +1638,8 @@ impl Engine {
         if let Some(base) = self.gesture_undo.take().or(gesture) {
           let prev = self.doc.clone();
           self.restore(base);
+          // (The gesture's changes to main components are gone, and their fingerprints with them.)
+          self.refresh_fingerprints_since(&prev);
           if prev != self.doc {
             self.doc_rev += 1;
           }
@@ -1675,7 +1809,11 @@ impl Engine {
     if self.doc.page(&step.before.page).is_some() {
       self.page = step.before.page.clone();
     }
-    self.refresh_fingerprints();
+    if exact {
+      // The snapshot is as settled as it was when it was taken.
+      self.vars_settled = step.before.settled;
+    }
+    self.refresh_fingerprints_since(&prev);
     if !exact {
       self.after_mutation(&prev);
       self.prune_local(&prev);
@@ -1702,7 +1840,11 @@ impl Engine {
     if self.doc.page(&step.after_page).is_some() {
       self.page = step.after_page.clone();
     }
-    self.refresh_fingerprints();
+    if exact {
+      // (A step's `after` is what `after_mutation` left.)
+      self.vars_settled = true;
+    }
+    self.refresh_fingerprints_since(&prev);
     if !exact {
       self.after_mutation(&prev);
       self.prune_local(&prev);
@@ -1713,17 +1855,32 @@ impl Engine {
   /// Keeps derived state consistent: instances, layout, selection.
   /// Changed node ids grouped by the top-level layer they belong to.
   fn changed_by_root(&self, prev: &Document) -> HashMap<NodeId, Vec<NodeId>> {
-    let mut out: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    let root_in = |doc: &Document, id: &str| doc.ancestors(id).last().cloned().unwrap_or_else(|| id.to_string());
-    for item in prev.nodes.diff(&self.doc.nodes) {
-      let (root, id) = match item {
-        imbl::ordmap::DiffItem::Add(k, _) => (root_in(&self.doc, k), k),
-        imbl::ordmap::DiffItem::Update { new: (k, _), .. } => (root_in(&self.doc, k), k),
-        imbl::ordmap::DiffItem::Remove(k, _) => (root_in(prev, k), k),
-      };
-      out.entry(root).or_default().push(id.clone());
+    changed_roots(prev, &self.doc)
+  }
+
+  /// Variable passes and layout over what changed from `old` to `doc` (a snapshot that took a
+  /// remote delta), the same ones `after_mutation` runs, without instance syncing.
+  fn settle_base(&self, doc: &mut Document, old: &Document, settled: bool) {
+    if self.reference || !settled {
+      crate::variables::normalize(doc);
+      crate::variables::apply(doc);
+    } else {
+      crate::variables::normalize_since(doc, old);
+      crate::variables::apply_since(doc, old);
     }
-    out
+    for root in changed_roots(old, doc).into_keys() {
+      layout::layout_node(doc, &root, self.measurer.as_ref());
+    }
+  }
+
+  /// True when a change inside the tree of `root` can alter its layout: a layer was added or
+  /// removed, or one changed in a field `layout_node` reads (`ops::layout_neutral`).
+  fn needs_layout(&self, prev: &Document, changed: &[NodeId]) -> bool {
+    self.reference
+      || changed.iter().any(|id| match (prev.get(id), self.doc.get(id)) {
+        (Some(old), Some(new)) => !ops::layout_neutral(old, new),
+        _ => true,
+      })
   }
 
   /// True when the only difference in `root`'s tree is the root's own position.
@@ -1742,21 +1899,33 @@ impl Engine {
   }
 
   fn after_mutation(&mut self, prev: &Document) {
+    #[cfg(test)]
+    AFTER_MUTATIONS.with(|c| c.set(c.get() + 1));
     // Layers added to or reordered in a device frame stay below its system UI (before instances
     // of a main device frame sync from it).
-    let device_frames: Vec<NodeId> = self
-      .changed_by_root(prev)
-      .values()
-      .flatten()
-      .filter(|id| self.doc.get(id).is_some_and(|n| n.device.is_some()))
-      .cloned()
+    let device_frames: Vec<NodeId> = prev
+      .nodes
+      .diff(&self.doc.nodes)
+      .filter_map(|item| match item {
+        imbl::ordmap::DiffItem::Add(k, n) | imbl::ordmap::DiffItem::Update { new: (k, n), .. } => n.device.is_some().then(|| k.clone()),
+        imbl::ordmap::DiffItem::Remove(..) => None,
+      })
       .collect();
     for id in &device_frames {
       devices::raise_chrome(&mut self.doc, id);
     }
     crate::props::follow_variants(&mut self.doc, prev);
-    crate::variables::normalize(&mut self.doc);
-    crate::variables::apply(&mut self.doc);
+    // `prev` is a fixed point of the variable passes unless the file was just loaded (or this is
+    // the oracle): then only what changed since can differ. See `variables::apply_since`.
+    let whole = self.reference || !self.vars_settled;
+    if whole {
+      crate::variables::normalize(&mut self.doc);
+      crate::variables::apply(&mut self.doc);
+    } else {
+      crate::variables::normalize_since(&mut self.doc, prev);
+      crate::variables::apply_since(&mut self.doc, prev);
+    }
+    let mid = self.doc.clone();
     for _ in 0..4 {
       let changed = self.changed_components(prev);
       if changed.is_empty() {
@@ -1792,16 +1961,39 @@ impl Engine {
         components::sync_instance(&mut self.doc, &id, &mut self.gen);
       }
     }
+    // What changes from here on (instances resolved in their own mode context, layout) can reach
+    // layers inside a main component after it was fingerprinted: its fingerprint follows below.
+    let fp_base = self.doc.clone();
     // Instances just synced from their mains resolve variables in their own mode context.
-    crate::variables::apply(&mut self.doc);
+    if whole {
+      crate::variables::apply(&mut self.doc);
+    } else {
+      crate::variables::apply_since(&mut self.doc, &mid);
+    }
     // Only trees that changed need layout (layout never reaches across top-level layers),
-    // and moving a whole top-level layer changes nothing inside it.
+    // moving a whole top-level layer changes nothing inside it, and neither do edits to
+    // what layout never reads (paints, bindings, names, ...).
     let by_root = self.changed_by_root(prev);
     for (root, changed) in by_root {
-      if !self.only_moved(prev, &root, &changed) {
+      if !self.only_moved(prev, &root, &changed) && self.needs_layout(prev, &changed) {
         layout::layout_node(&mut self.doc, &root, self.measurer.as_ref());
       }
     }
+    if self.reference {
+      self.refresh_fingerprints();
+    } else {
+      // The mains touched since the last fingerprints were taken (before this pass, from a
+      // remote delta or an undo) and by the passes above.
+      let mut comps = std::mem::take(&mut self.fp_touched);
+      match self.touched_components(&fp_base) {
+        Some(t) => {
+          comps.extend(t);
+          self.refresh_fingerprints_of(comps);
+        }
+        None => self.refresh_fingerprints(),
+      }
+    }
+    self.vars_settled = true;
     self.selection.retain(|i| self.doc.nodes.contains_key(i));
     if self.doc.page(&self.page).is_none() {
       if let Some(p) = self.doc.pages.first() {
@@ -1814,6 +2006,9 @@ impl Engine {
   /// are fingerprinted, so unrelated edits in big files stay cheap).
   fn changed_components(&mut self, prev: &Document) -> Vec<NodeId> {
     let mut comps: Vec<NodeId> = Vec::new();
+    let mut in_comps: HashSet<NodeId> = HashSet::new();
+    // Layers whose chain to the top is already known to hold no (further) main component.
+    let mut walked: HashSet<NodeId> = HashSet::new();
     for item in prev.nodes.diff(&self.doc.nodes) {
       // A set's properties belong to every variant: only a change of those reaches them (moving
       // or renaming the set leaves the variants alone).
@@ -1822,26 +2017,34 @@ impl Engine {
         imbl::ordmap::DiffItem::Add(k, _) | imbl::ordmap::DiffItem::Update { new: (k, _), .. } => (&self.doc, k),
         imbl::ordmap::DiffItem::Remove(k, _) => (prev, k),
       };
-      for id in std::iter::once(k.clone()).chain(doc.ancestors(k)) {
+      // The layer itself, then up its chain until a layer an earlier one already covered.
+      let mut cur = Some(k.clone());
+      let mut first = true;
+      while let Some(id) = cur {
+        if !first && !walked.insert(id.clone()) {
+          break;
+        }
         match self.doc.get(&id) {
           Some(n) if n.kind == NodeType::Component => {
-            if !comps.contains(&id) {
-              comps.push(id);
+            if in_comps.insert(id.clone()) {
+              comps.push(id.clone());
             }
           }
-          Some(n) if n.kind == NodeType::ComponentSet && id == *k && props_changed => {
+          Some(n) if n.kind == NodeType::ComponentSet && first && props_changed => {
             for c in n
               .children
               .iter()
               .filter(|c| self.doc.get(c).map(|c| c.kind == NodeType::Component).unwrap_or(false))
             {
-              if !comps.contains(c) {
+              if in_comps.insert(c.clone()) {
                 comps.push(c.clone());
               }
             }
           }
           _ => {}
         }
+        first = false;
+        cur = doc.get(&id).and_then(|n| n.parent.clone());
       }
     }
     // Instances copy their main's size, so the mains settle (text re-measured, hug applied)
@@ -1852,8 +2055,16 @@ impl Engine {
         roots.push(r);
       }
     }
+    // (Not for a tree whose changes layout never reads.)
+    let by_root = if self.reference || roots.is_empty() {
+      HashMap::new()
+    } else {
+      self.changed_by_root(prev)
+    };
     for r in &roots {
-      layout::layout_node(&mut self.doc, r, self.measurer.as_ref());
+      if self.reference || by_root.get(r).is_none_or(|ids| self.needs_layout(prev, ids)) {
+        layout::layout_node(&mut self.doc, r, self.measurer.as_ref());
+      }
     }
     let mut changed = Vec::new();
     for c in comps {
@@ -1868,7 +2079,97 @@ impl Engine {
     changed
   }
 
+  /// `refresh_fingerprints` for a document that follows `prev` (whose fingerprints are held): a
+  /// main's depends only on its subtree and its set's properties, so only the mains with a changed
+  /// layer in them (and the variants of a changed set) are recomputed, and gone ones dropped.
+  /// (`after_mutation` recomputes them once more when it is done: it may change them again.)
+  fn refresh_fingerprints_since(&mut self, prev: &Document) {
+    if self.reference {
+      return self.refresh_fingerprints();
+    }
+    match self.touched_components(prev) {
+      Some(touched) => {
+        self.fp_touched.extend(touched.iter().cloned());
+        self.refresh_fingerprints_of(touched);
+      }
+      // A change bigger than the mains themselves: hashing them all is cheaper than finding which
+      // (and `after_mutation` hashes them again when it is done).
+      None => {
+        self.refresh_fingerprints();
+        self.fp_touched.extend(self.fingerprints.keys().cloned());
+      }
+    }
+  }
+
+  /// The main components with a layer in the difference between `prev` and the document, and the
+  /// variants of a set that is in it.
+  fn touched_components(&self, prev: &Document) -> Option<Vec<NodeId>> {
+    // More changed layers than the mains hold between them: not worth finding which ones.
+    let mut limit: Option<usize> = None;
+    let mut seen_items = 0usize;
+    let mut touched: Vec<NodeId> = Vec::new();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    for item in prev.nodes.diff(&self.doc.nodes) {
+      seen_items += 1;
+      if seen_items > 256 && seen_items > *limit.get_or_insert_with(|| self.fingerprints.keys().map(|c| self.doc.subtree(c).len()).sum()) {
+        return None;
+      }
+      let (doc, k, old_kind) = match item {
+        imbl::ordmap::DiffItem::Add(k, _) => (&self.doc, k, None),
+        imbl::ordmap::DiffItem::Update { old, new: (k, _) } => (&self.doc, k, Some(old.1.kind)),
+        imbl::ordmap::DiffItem::Remove(k, n) => (prev, k, Some(n.kind)),
+      };
+      if old_kind == Some(NodeType::Component) && seen.insert(k.clone()) {
+        touched.push(k.clone());
+      }
+      let mut cur = Some(k.clone());
+      let mut first = true;
+      while let Some(id) = cur {
+        if !first && seen.contains(&id) {
+          break;
+        }
+        match doc.get(&id) {
+          Some(n) if n.kind == NodeType::Component => {
+            if seen.insert(id.clone()) {
+              touched.push(id.clone());
+            }
+          }
+          // A set's properties belong to every variant.
+          Some(n) if n.kind == NodeType::ComponentSet && first => {
+            for c in &n.children {
+              if self.doc.get(c).is_some_and(|c| c.kind == NodeType::Component) && seen.insert(c.clone()) {
+                touched.push(c.clone());
+              }
+            }
+          }
+          _ => {}
+        }
+        first = false;
+        cur = doc.get(&id).and_then(|n| n.parent.clone());
+      }
+    }
+    Some(touched)
+  }
+
+  /// Recomputes the fingerprint of each of these components (dropping those that are gone).
+  fn refresh_fingerprints_of(&mut self, comps: impl IntoIterator<Item = NodeId>) {
+    for c in comps {
+      if self.doc.get(&c).is_some_and(|n| n.kind == NodeType::Component) {
+        let fp = components::fingerprint(&self.doc, &c);
+        self.fingerprints.insert(c, fp);
+      } else {
+        self.fingerprints.remove(&c);
+      }
+    }
+    // A main that was deleted leaves no fingerprint behind (nothing in a diff names it twice).
+    let doc = &self.doc;
+    self
+      .fingerprints
+      .retain(|k, _| doc.get(k).is_some_and(|n| n.kind == NodeType::Component));
+  }
+
   fn refresh_fingerprints(&mut self) {
+    self.fp_touched.clear();
     self.fingerprints = self
       .doc
       .components()
@@ -2471,7 +2772,8 @@ impl Engine {
       Command::Paste { data, parent, x, y } => self.paste(&data, parent, x, y),
       Command::Update { ids, patch: p } => {
         // Before anything records the patch (as an instance override, say).
-        let p = without_unsafe_links(p);
+        let mut p = without_unsafe_links(p);
+        crate::variables::resolve_names_in_patch(&self.doc, &mut p);
         let detached = crate::variables::unbind_for_patch(&mut self.doc, &ids, &p);
         for id in &ids {
           let before = self.doc.get(id).cloned().ok_or_else(|| format!("no node {id}"))?;
@@ -3229,32 +3531,34 @@ impl Engine {
       }
       Command::DeleteStyle { id } => {
         let st = &self.doc.styles;
-        if st.colors.iter().any(|s| s.id == id)
+        let existed = st.colors.iter().any(|s| s.id == id)
           || st.texts.iter().any(|s| s.id == id)
           || st.effects.iter().any(|s| s.id == id)
-          || st.grids.iter().any(|s| s.id == id)
-        {
+          || st.grids.iter().any(|s| s.id == id);
+        if existed {
           let st = self.doc.styles_mut();
           st.colors.retain(|s| s.id != id);
           st.texts.retain(|s| s.id != id);
           st.effects.retain(|s| s.id != id);
           st.grids.retain(|s| s.id != id);
         }
-        let is = |l: &Option<String>| l.as_deref() == Some(id.as_str());
-        let uses = |n: &Node| is(&n.fill_style) || is(&n.text_style) || is(&n.stroke_style) || is(&n.effect_style) || is(&n.grid_style);
-        self.doc.update_where(uses, |n| {
-          for l in [
-            &mut n.fill_style,
-            &mut n.text_style,
-            &mut n.stroke_style,
-            &mut n.effect_style,
-            &mut n.grid_style,
-          ] {
-            if l.as_deref() == Some(id.as_str()) {
-              *l = None;
+        {
+          let is = |l: &Option<String>| l.as_deref() == Some(id.as_str());
+          let uses = |n: &Node| is(&n.fill_style) || is(&n.text_style) || is(&n.stroke_style) || is(&n.effect_style) || is(&n.grid_style);
+          self.doc.update_where(uses, |n| {
+            for l in [
+              &mut n.fill_style,
+              &mut n.text_style,
+              &mut n.stroke_style,
+              &mut n.effect_style,
+              &mut n.grid_style,
+            ] {
+              if l.as_deref() == Some(id.as_str()) {
+                *l = None;
+              }
             }
-          }
-        });
+          });
+        }
         Ok(json!({}))
       }
       Command::DetachStyle { ids, style_id, kind } => {
@@ -3860,16 +4164,21 @@ impl Engine {
   }
 
   fn paste(&mut self, data: &str, parent: Option<NodeId>, x: Option<f64>, y: Option<f64>) -> Result<Value, String> {
-    let v: Value = serde_json::from_str(data).map_err(|_| "clipboard does not contain Designotron layers")?;
-    if v.get("type").and_then(|t| t.as_str()) != Some(CLIPBOARD_TAG) {
-      return Err("clipboard does not contain Designotron layers".into());
-    }
-    let mut nodes: Vec<Node> = serde_json::from_value(v["nodes"].clone()).map_err(|e| e.to_string())?;
-    let roots: Vec<NodeId> = serde_json::from_value(v["roots"].clone()).map_err(|e| e.to_string())?;
-    let mut comps: Vec<Node> = v
-      .get("components")
-      .and_then(|c| serde_json::from_value(c.clone()).ok())
-      .unwrap_or_default();
+    // Parsed once, straight into layers (no `Value` tree of the whole clipboard to clone from).
+    let clip = match serde_json::from_str::<ClipIn>(data) {
+      Ok(c) if c.kind.as_deref() == Some(CLIPBOARD_TAG) => c,
+      _ => return Err(clipboard_error(data)),
+    };
+    let ClipIn {
+      mut nodes,
+      roots,
+      components,
+      rest,
+      ..
+    } = clip;
+    let roots_set: HashSet<&NodeId> = roots.iter().collect();
+    let v = Value::Object(rest);
+    let mut comps: Vec<Node> = components.and_then(|c| serde_json::from_value(c).ok()).unwrap_or_default();
     // Variables and styles the layers use but this file lacks come along (and the layers follow
     // their new ids), before anything is inserted.
     nodes
@@ -3896,7 +4205,7 @@ impl Engine {
     let bounds = Rect::union_all(
       nodes
         .iter()
-        .filter(|n| roots.contains(&n.id))
+        .filter(|n| roots_set.contains(&n.id))
         .map(|n| Rect::new(n.x, n.y, n.width, n.height)),
     );
     let (ox, oy) = match (x, y, bounds) {
@@ -3910,7 +4219,7 @@ impl Engine {
       c.id = map[&n.id].clone();
       c.children = n.children.iter().filter_map(|ch| map.get(ch).cloned()).collect();
       c.page = page.clone();
-      if roots.contains(&n.id) {
+      if roots_set.contains(&n.id) {
         // Roots carry page-space positions in the clipboard.
         c.x += ox;
         c.y += oy;
@@ -4009,6 +4318,7 @@ impl Engine {
 
   /// Read-only queries.
   pub fn query(&self, q: Query) -> Result<Value, String> {
+    ops::set_reference(self.reference);
     let m = self.measurer.as_ref();
     Ok(match q {
       Query::Pick { x, y, zoom, deep } => json!(interact::pick(&self.doc, &self.page, Point::new(x, y), zoom, &self.selection, deep)),
@@ -4172,11 +4482,15 @@ impl Engine {
       components.extend(sub);
     }
     let tokens = crate::clipboard::attach(&self.doc, &mut nodes, &mut components);
-    let mut out = json!({ "type": CLIPBOARD_TAG, "roots": roots, "nodes": nodes, "components": components });
-    for (key, value) in tokens {
-      out[key] = value;
-    }
-    out.to_string()
+    // Written straight to the string: no `Value` tree of every layer in between.
+    let out = ClipOut {
+      kind: CLIPBOARD_TAG,
+      roots: &roots,
+      nodes: &nodes,
+      components: &components,
+      tokens: tokens.into_iter().collect(),
+    };
+    serde_json::to_string(&out).unwrap_or_default()
   }
 
   /// A subtree for the clipboard: the root detached, at its page-space position.
@@ -8156,6 +8470,10 @@ mod tests {
     }
   }
 }
+
+#[cfg(test)]
+#[path = "lockstep_tests.rs"]
+mod lockstep_tests;
 
 #[cfg(test)]
 mod r15_link_tests {
