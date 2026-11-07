@@ -22,6 +22,9 @@ if (process.env.CHROMIUM) launch.executablePath = process.env.CHROMIUM;
 else if (fs.existsSync("/opt/pw-browsers/chromium")) launch.executablePath = "/opt/pw-browsers/chromium";
 const AXE = [process.env.AXE, "/tmp/claude-0/-home-user-designotron/286bf7bb-781e-5d8f-9708-6c1f94840e4a/scratchpad/qa7/I-a11y/node_modules/axe-core/axe.min.js", path.resolve("node_modules/axe-core/axe.min.js")].find((p) => p && fs.existsSync(p));
 const FIX = path.resolve("scripts/fixtures");
+/** api.figma.com is mocked (never fetched): the sample file after `figmaDelay` ms. */
+let figmaDelay = 0;
+let figmaHits = 0;
 
 const results = [];
 let PROFILE = "";
@@ -46,7 +49,15 @@ async function open({ tour, width = 1440, height = 900, scheme = "dark", file = 
     });
   }
   const page = await ctx.newPage();
-  await page.route("**/*", (r) => (/^(http:\/\/(localhost|127\.0\.0\.1)|data:|blob:|ws:)/.test(r.request().url()) ? r.continue() : r.abort()));
+  await page.route("**/*", async (r) => {
+    const u = r.request().url();
+    if (/^https:\/\/api\.figma\.com\/v1\/files\//.test(u)) {
+      figmaHits++;
+      await sleep(figmaDelay);
+      return r.fulfill({ status: 200, contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: fs.readFileSync(path.join(FIX, "figma-sample.json"), "utf8") });
+    }
+    return /^(http:\/\/(localhost|127\.0\.0\.1)|data:|blob:|ws:)/.test(u) ? r.continue() : r.abort();
+  });
   page.on("pageerror", (e) => check("no page errors", false, String(e)));
   await page.goto(URL);
   await page.waitForSelector(".files", { timeout: 30000 });
@@ -106,6 +117,7 @@ async function suite(tour) {
       await page.waitForFunction(() => !document.querySelector(".claude-note"), null, { timeout: 15000 }).catch(() => {});
       check("dashboard: no 'isn't connected' line once Claude is connected", (await note.count()) === 0);
     } else {
+      await note.waitFor({ timeout: 15000 }).catch(() => {});
       check("dashboard: says Claude isn't connected", (await note.count()) === 1 && /Claude isn't connected on this computer yet/.test(await note.innerText()), await note.innerText().catch(() => ""));
       check("dashboard: 'How to connect' and 'Watch a replay' are there", (await note.getByRole("button", { name: "How to connect" }).count()) === 1 && (await note.getByRole("button", { name: "Watch a replay" }).count()) === 1);
       check("dashboard: setup steps start closed", (await page.locator(".claude-note-steps").count()) === 0);
@@ -191,6 +203,57 @@ async function suite(tour) {
     await toDashboard(page);
     const stored = await storedFiles(page);
     check("figma: exactly one new file, named after the Figma file", stored.length === before + 1 && stored.some((e) => e.name === "Brand Kit"), JSON.stringify(stored.map((e) => e.name)));
+
+    // Not Figma's JSON: the dialog says so and no file is created (no empty "Oops").
+    const countNow = (await storedFiles(page)).length;
+    await trigger.click();
+    await page.waitForSelector(".figma-dialog");
+    await page.locator(".figma-dialog input[type=file]").setInputFiles({ name: "oops.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ name: "Oops" })) });
+    await page.waitForSelector(".figma-dialog .error-box", { timeout: 5000 });
+    check("figma: JSON that isn't Figma's is refused in the dialog", /not a Figma file/.test(await page.locator(".figma-dialog .error-box").innerText()));
+    check("figma: and no empty file is created", (await storedFiles(page)).length === countNow);
+    await page.keyboard.press("Escape");
+    await page.waitForSelector(".figma-dialog", { state: "detached" });
+
+    // Closing mid-fetch cancels the import: opening another file afterwards isn't hijacked or renamed.
+    figmaDelay = 2500;
+    const hitsBefore = figmaHits;
+    await trigger.click();
+    await page.waitForSelector(".figma-dialog");
+    await page.locator(".figma-dialog input.textinput").first().fill("https://www.figma.com/design/ABC123/Name");
+    await page.locator(".figma-dialog input[type=password]").fill("figd_test");
+    await page.locator(".figma-dialog .btn.primary").click();
+    await sleep(400);
+    check("figma: the mocked fetch is under way", figmaHits === hitsBefore + 1);
+    await page.keyboard.press("Escape");
+    await page.waitForSelector(".figma-dialog", { state: "detached" });
+    const namesBefore = (await storedFiles(page)).map((e) => e.name).sort().join("|");
+    await newFile(page);
+    const hashA = page.url();
+    await sleep(4000);
+    const after = (await storedFiles(page)).map((e) => e.name).sort().join("|");
+    check("figma: after closing mid-fetch the new file stays open (no hijack)", page.url() === hashA && (await page.locator("#dt-canvas").count()) === 1);
+    check("figma: and nothing was created or renamed", after === namesBefore.split("|").concat(["Untitled"]).sort().join("|") && (await doc(page)).name === "Untitled", `${namesBefore} -> ${after}`);
+    figmaDelay = 0;
+    await toDashboard(page);
+
+    // Back without Done: the next dialog opens fresh, not on the old result.
+    const sample2 = JSON.parse(fs.readFileSync(path.join(FIX, "figma-sample.json"), "utf8"));
+    await trigger.click();
+    await page.waitForSelector(".figma-dialog");
+    await page.locator(".figma-dialog input[type=file]").setInputFiles({ name: "again.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(sample2)) });
+    await page.waitForSelector("#dt-canvas", { timeout: 30000 });
+    await page.waitForSelector(".figma-dialog", { timeout: 10000 });
+    await toDashboard(page);
+    await trigger.click();
+    await page.waitForSelector(".figma-dialog");
+    const fresh = await page.locator(".figma-dialog").innerText();
+    check("figma: leaving the result view with Back doesn't reopen it next time", !/Imported \d+ layers/.test(fresh) && (await page.locator(".figma-dialog input[type=file]").count()) === 1, fresh.slice(0, 80));
+    await page.keyboard.press("Escape");
+    await page.waitForSelector(".figma-dialog", { state: "detached" });
+    await newFile(page);
+    check("figma: and a plain new file afterwards has no dialog", (await page.locator(".figma-dialog").count()) === 0 && Object.keys((await doc(page)).nodes).length === 0);
+    await toDashboard(page);
 
     // A second import still works (the pending data was cleared) and an empty new file isn't touched.
     await newFile(page);
@@ -283,13 +346,39 @@ async function suite(tour) {
     check("Y-01: Escape reverts and returns to the canvas", a.id === "dt-canvas" && (await doc(page)).nodes[rect].width === 100, JSON.stringify(a));
     // The hex field.
     const hex = page.locator("input[aria-label='Hex colour']").first();
-    await hex.focus();
+    await hex.click();
     await page.keyboard.press("Control+a");
     await page.keyboard.type("336699");
     await page.keyboard.press("Enter");
     await sleep(250);
     a = await active(page);
     check("Y-01: Enter in the hex field commits and returns to the canvas", a.id === "dt-canvas" && (await doc(page)).nodes[rect].fills[0].color.toUpperCase() === "#336699", JSON.stringify(a));
+    // A field reached with Tab keeps focus on Enter (keyboard users go on typing).
+    await run(page, { op: "select", ids: [rect] });
+    await page.locator("#dt-canvas").focus();
+    const Wk = page.getByLabel("Width").first();
+    await Wk.focus();
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Shift+Tab");
+    await page.keyboard.type("120");
+    await page.keyboard.press("Enter");
+    await sleep(250);
+    a = await active(page);
+    check("Y-01: a field reached with Tab keeps focus on Enter", a.label === "Width" && (await doc(page)).nodes[rect].width === 120, JSON.stringify(a));
+    await page.locator("#dt-canvas").focus();
+    // The colour picker's Alpha field (in a popover) keeps focus on Enter, even when clicked.
+    await page.locator(".panel.right .swatch").first().click();
+    await page.waitForSelector(".popover");
+    const alpha = page.locator(".popover input[aria-label='Alpha']");
+    await alpha.click();
+    await page.keyboard.press("Control+a");
+    await page.keyboard.type("50");
+    await page.keyboard.press("Enter");
+    await sleep(250);
+    a = await active(page);
+    check("Y-01: Enter in the colour picker's Alpha field keeps focus in the popover", (await page.locator(".popover").count()) === 1 && (await page.evaluate(() => !!document.activeElement?.closest(".popover"))), JSON.stringify(a));
+    await page.keyboard.press("Escape");
+    await sleep(200);
     // In a dialog Enter does not give the keys to the canvas.
     await page.evaluate(() => window.__dt.tool("define_variables", { collection: "Tokens", modes: ["Value"], variables: [{ name: "Gap", type: "number", value: 8 }] }));
     await run(page, { op: "select", ids: [] });
@@ -307,6 +396,30 @@ async function suite(tour) {
     } else check("Y-01: found a Variables dialog cell", false);
     await page.keyboard.press("Escape");
     await page.waitForSelector(".variables-dialog", { state: "detached" }).catch(() => {});
+    await ctx.close();
+  }
+
+  // ------------------------------------------------------------ Y-01: Enter while editing text must not lose the layer
+  {
+    const { ctx, page } = await open({ tour, file: true });
+    await page.evaluate(() => window.__dt.tool("create_nodes", { nodes: [{ type: "text", name: "Label", text: "Hello world", x: 100, y: 100, fontSize: 24 }] }));
+    const id = Object.values((await doc(page)).nodes).find((n) => n.name === "Label").id;
+    await run(page, { op: "select", ids: [id] });
+    await page.locator("#dt-canvas").focus();
+    await page.keyboard.press("Enter");
+    await sleep(400);
+    await page.keyboard.press("End");
+    await sleep(200);
+    const fsz = page.locator("input[aria-label='Font size']").first();
+    await fsz.click();
+    await page.keyboard.press("Control+a");
+    await page.keyboard.type("40");
+    await page.keyboard.press("Enter");
+    await sleep(500);
+    await page.keyboard.press("Backspace");
+    await sleep(400);
+    const n = (await doc(page)).nodes[id];
+    check("Y-01: Font size 40, Enter, Backspace while editing text keeps the layer and its text", !!n && n.text.characters === "Hello world" && n.text.fontSize === 40, JSON.stringify(n?.text?.characters) + " " + n?.text?.fontSize);
     await ctx.close();
   }
 
@@ -385,7 +498,7 @@ async function suite(tour) {
     check("blank file: the pill reads 'Describe a design for Claude…' and 'Templates'", /Describe a design for Claude…/.test(g.text) && /Templates/.test(g.text), g.text);
     await shot(page, "blank-pill-dark");
     await axeRun(page, "editor with the compact pill");
-    await page.locator(".empty-pill").click();
+    await page.locator(".empty-pill button").first().click();
     await sleep(250);
     check("blank file: clicking the pill expands it to the card with the box focused", (await page.locator(".empty-prompt").count()) === 1 && (await page.evaluate(() => document.activeElement?.id)) === "empty-prompt-input");
     await page.locator(".empty-prompt .empty-close").click();

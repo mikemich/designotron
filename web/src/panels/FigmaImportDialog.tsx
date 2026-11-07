@@ -2,7 +2,7 @@ import { useId, useRef, useState } from "react";
 import { FileJson, Loader2, X } from "lucide-react";
 import { getDoc, useStore, toast } from "../store";
 import { deleteFile } from "../files";
-import { fetchFigmaUrl, figmaFileName, importFigmaJson, importFigmaUrl, type ImportResult } from "../figma";
+import { checkFigmaJson, fetchFigmaUrl, figmaFileName, importFigmaJson, importFigmaUrl, type ImportResult } from "../figma";
 import { useDialog } from "../ui/controls";
 import { reportFailure } from "../errors";
 
@@ -22,16 +22,22 @@ export type FigmaSource = { file: unknown; images: Record<string, string> };
  *  On the dashboard (`onCreate` given) nothing exists yet: Import fetches the data and creates the
  *  file named after the Figma file, which the editor then fills. Cancel just closes. */
 export function FigmaImportDialog({ onCreate }: { onCreate?: (src: FigmaSource, name?: string) => Promise<boolean> }) {
+  /** Set by closing: an import still being fetched is dropped when it arrives (nothing is created). */
+  const closed = useRef(false);
+  /** From the moment the file is being made: closing would race the new file opening, so it waits. */
+  const creating = useRef(false);
   const [url, setUrl] = useState("");
   const [token, setToken] = useState(readToken);
   const [remember, setRemember] = useState(!!readToken());
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<ImportResult | null>(() => useStore.getState().figmaResult);
+  const [result, setResult] = useState<ImportResult | null>(() => (onCreate ? null : useStore.getState().figmaResult));
   const fileRef = useRef<HTMLInputElement>(null);
   const urlId = useId();
   const tokenId = useId();
   const close = async () => {
+    if (creating.current) return;
+    closed.current = true;
     const { figmaOpen, fileId } = useStore.getState();
     useStore.setState({ figmaOpen: false, figmaResult: null });
     // Opened the old way (a tab restored mid-import) and cancelled: don't leave an empty "Untitled" file behind.
@@ -55,11 +61,18 @@ export function FigmaImportDialog({ onCreate }: { onCreate?: (src: FigmaSource, 
   };
   /** Dashboard mode: the file is made from what was fetched, and the dialog goes with the dashboard. */
   const create = async (src: FigmaSource, name?: string) => {
+    if (closed.current) return;
+    checkFigmaJson(src.file);
     setBusy("Creating the file…");
-    if (await onCreate!(src, name)) useStore.setState({ figmaOpen: false });
-    else {
-      setBusy(null);
-      setError("Couldn't create the file.");
+    creating.current = true;
+    try {
+      if (await onCreate!(src, name)) useStore.setState({ figmaOpen: false });
+      else {
+        setBusy(null);
+        setError("Couldn't create the file.");
+      }
+    } finally {
+      creating.current = false;
     }
   };
   const run = async () => {
@@ -72,10 +85,12 @@ export function FigmaImportDialog({ onCreate }: { onCreate?: (src: FigmaSource, 
     }
     try {
       if (onCreate) {
-        const src = await fetchFigmaUrl(url.trim(), token.trim(), setBusy);
+        const src = await fetchFigmaUrl(url.trim(), token.trim(), (m) => !closed.current && setBusy(m));
+        if (closed.current) return;
         await create(src, figmaFileName(src.file));
       } else finish(await importFigmaUrl(url.trim(), token.trim(), setBusy));
     } catch (e) {
+      if (closed.current) return;
       setBusy(null);
       setError(String(e instanceof Error ? e.message : e));
     }
@@ -139,7 +154,7 @@ export function FigmaImportDialog({ onCreate }: { onCreate?: (src: FigmaSource, 
               </div>
               {error && <div className="error-box">{error}</div>}
               <div className="row" style={{ marginTop: 12, justifyContent: "space-between" }}>
-                <button className="btn" onClick={() => fileRef.current?.click()} title="A file saved from GET /v1/files/:key?geometry=paths">
+                <button className="btn" disabled={!!busy} onClick={() => fileRef.current?.click()} title="A file saved from GET /v1/files/:key?geometry=paths">
                   <FileJson size={13} /> Open JSON export…
                 </button>
                 <button className="btn primary" disabled={!url.trim() || !token.trim() || !!busy} onClick={run}>

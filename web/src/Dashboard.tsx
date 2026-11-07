@@ -260,15 +260,16 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   /** The replay of Claude designing a page, in a new file. */
   const watchReplay = async () => {
     if (opening) return;
-    demoWhenOpen(true);
-    if (!(await create(null, "demo"))) demoWhenOpen(false);
+    await create(null, "demo", undefined, (id) => demoWhenOpen(id));
   };
   const claudeOn = useChat((c) => claudeReady(c));
+  /** The bridge is still being looked for (and no API key to fall back on): don't say "not connected" yet. */
+  const connecting = useChat((c) => c.bridgeStatus === "connecting" && !c.apiKey);
   const [setupOpen, setSetupOpen] = useState(false);
   const figmaOpen = useStore((st) => st.figmaOpen);
 
   /** Creates and opens a file in the folder being viewed (Drafts from All files and Drafts); false when it couldn't be created. */
-  const create = async (template: Template | null, key?: string, name?: string): Promise<boolean> => {
+  const create = async (template: Template | null, key?: string, name?: string, onCreated?: (id: string) => void): Promise<boolean> => {
     setOpening(key ?? template?.id ?? "new");
     try {
       try {
@@ -289,6 +290,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
           /* private mode: no reuse */
         }
       }
+      onCreated?.(id);
       onOpen(id);
       return true;
     } catch (err) {
@@ -364,11 +366,12 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   };
   // The dialog opens here; the file is created only when Import has its data (the editor then imports it).
   const importFigma = () => useStore.setState({ figmaOpen: "new" });
+  const mounted = useRef(true);
+  useEffect(() => () => void (mounted.current = false), []);
   const createFromFigma = async (src: FigmaSource, name?: string) => {
-    useStore.setState({ pendingFigma: src });
-    const ok = await create(null, undefined, name);
-    if (!ok) useStore.setState({ pendingFigma: null });
-    return ok;
+    // Closed (or left) while the file was being fetched: nothing is created, and no other file is touched.
+    if (!mounted.current || useStore.getState().figmaOpen !== "new") return false;
+    return create(null, undefined, name, (fileId) => useStore.setState({ pendingFigma: { fileId, ...src } }));
   };
 
   /** A new project (parent null) or folder; its name is typed in place. */
@@ -830,9 +833,9 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
                   {opening === "claude" ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />} Design with Claude
                 </button>
               </div>
-              {!claudeOn && (
-                <div className="claude-note muted small" role="status">
-                  <span>Claude isn't connected on this computer yet. Your idea waits in the new file until it is.</span>{" "}
+              {!claudeOn && !connecting && (
+                <div className="claude-note muted small">
+                  <span role="status">Claude isn't connected on this computer yet. Your idea waits in the new file until it is.</span>{" "}
                   <button className="link-btn" aria-expanded={setupOpen} onClick={() => setSetupOpen(!setupOpen)}>
                     How to connect
                   </button>

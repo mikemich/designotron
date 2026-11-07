@@ -43,20 +43,28 @@ export function EmptyPrompt({ pageId }: { pageId: string }) {
   const pill = compact && !running && !queued;
   if (pill)
     return (
-      <button
-        className="empty-pill"
-        onPointerDown={(e) => e.stopPropagation()}
-        onDoubleClick={(e) => e.stopPropagation()}
-        onClick={() => {
-          setCompact(false);
-          setGrab(true);
-        }}
-      >
-        <Sparkles size={13} />
-        <span>Describe a design for Claude…</span>
+      <div className="empty-pill" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+        <button
+          aria-label="Describe a design for Claude or pick a template"
+          onClick={() => {
+            setCompact(false);
+            setGrab(true);
+          }}
+        >
+          <Sparkles size={13} />
+          <span>Describe a design for Claude…</span>
+        </button>
         <span className="empty-pill-sep" aria-hidden="true" />
-        <span className="muted">Templates</span>
-      </button>
+        <button
+          className="muted"
+          onClick={() => {
+            setCompact(false);
+            setGrab(true);
+          }}
+        >
+          Templates
+        </button>
+      </div>
     );
   return (
     <div className="empty-prompt" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>

@@ -165,8 +165,8 @@ interface Store {
   /** "new": opened from the files dashboard (no file exists until Import); "result": the editor shows the
    *  warnings of an import that just ran (`figmaResult`). */
   figmaOpen: boolean | "new" | "result";
-  /** Fetched Figma data waiting for the new file to open; the editor imports it once and clears it. */
-  pendingFigma: { file: unknown; images: Record<string, string> } | null;
+  /** Fetched Figma data waiting for its new file (`fileId`) to open; that editor imports it once and clears it. */
+  pendingFigma: { fileId: string; file: unknown; images: Record<string, string> } | null;
   /** The warnings shown by the dialog's result view when the import ran as the file opened. */
   figmaResult: { pages: string[]; layers: number; warnings: string[] } | null;
   /** A control on the dashboard to focus once it mounts (its `data-focus-key`), set by flows that end there. */

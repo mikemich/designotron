@@ -2,6 +2,7 @@
 // local bridge when the browser blocks it), download its images, convert in the engine.
 
 import { addAsset, readFileAsDataUrl } from "./assets";
+import { normalizeName } from "./folders";
 import { bridgeChecked, bridgeHttpBase } from "./ai/bridgeClient";
 import { dispatchOrThrow, zoomToFit } from "./store";
 
@@ -110,8 +111,16 @@ export async function importFigmaUrl(url: string, token: string, progress: (s: s
   return importFigmaJson(file, images);
 }
 
-/** The name a fetched Figma file carries, if any. */
+/** The name a fetched Figma file carries, if any (cleaned and capped like any file name). */
 export function figmaFileName(file: unknown): string | undefined {
   const n = (file as { name?: unknown } | null)?.name;
-  return typeof n === "string" && n.trim() ? n.trim() : undefined;
+  return typeof n === "string" ? normalizeName(n).slice(0, 200) || undefined : undefined;
+}
+
+/** What `importFigma` needs: a file's `document.children`, or a `/nodes` response's `nodes`. Checked before a
+ *  file is created for it, so JSON that isn't Figma's makes no empty file. */
+export function checkFigmaJson(file: unknown): void {
+  const f = file as { document?: { children?: unknown }; nodes?: unknown } | null;
+  const ok = Array.isArray(f?.document?.children) || (!!f?.nodes && typeof f.nodes === "object" && !Array.isArray(f.nodes));
+  if (!ok) throw new Error("not a Figma file: expected the JSON from the Figma REST API (/v1/files/:key)");
 }

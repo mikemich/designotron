@@ -118,6 +118,7 @@ export function NumberField(props: {
         value={text}
         aria-label={props.ariaLabel ?? title ?? (typeof label === "string" ? label : undefined)}
         onFocus={(e) => {
+          noteFocusSource(e.target);
           edited.current = false;
           setFocused(true);
           e.target.select();
@@ -143,13 +144,8 @@ export function NumberField(props: {
               setText(fmt(out));
               shown.current = fmt(out);
             }
-            if (document.activeElement === input) {
-              if (leavesFieldOnEnter(input)) {
-                edited.current = false;
-                input.blur();
-                focusCanvas();
-              } else requestAnimationFrame(() => document.activeElement === input && input.select());
-            }
+            edited.current = false;
+            leaveField(input);
           } else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "z" || e.key.toLowerCase() === "y") && !pending()) {
             // Nothing typed since the last commit: undo and redo belong to the design, not the text box.
             e.preventDefault();
@@ -500,9 +496,35 @@ export function common<T, V>(items: T[], get: (t: T) => V): Maybe<V> {
   return same ? first : (MIXED as Maybe<V>);
 }
 
-/** Enter in a panel field hands the keys back to the canvas; fields inside a dialog keep them. */
-export function leavesFieldOnEnter(input: Element) {
-  return !input.closest('[role="dialog"], .modal, .modal-bg');
+/** When the pointer last went down (0 after a key press): a field focused within a second of it was clicked. */
+let lastPointerDown = 0;
+if (typeof window !== "undefined") {
+  window.addEventListener("pointerdown", () => (lastPointerDown = performance.now()), true);
+  window.addEventListener("keydown", () => (lastPointerDown = 0), true);
+}
+
+/** Call from a field's focus handler: remembers whether the pointer put focus there (Tab and keys didn't). */
+export function noteFocusSource(el: HTMLElement) {
+  el.dataset.byPointer = performance.now() - lastPointerDown < 1000 ? "1" : "0";
+}
+
+/** Enter in a Design or Prototype panel field hands the keys back to the canvas (Figma), but only for a
+ *  field the pointer focused: a person who Tabbed in keeps focus there. Dialogs and popovers never leave. */
+export function leavesFieldOnEnter(el: Element) {
+  return !!el.closest(".panel.right") && !el.closest('[role="dialog"], .modal, .modal-bg, .popover') && (el as HTMLElement).dataset.byPointer === "1";
+}
+
+/** The end of Enter in a field (after its value was committed). Returns true when focus moved on.
+ *  While text is being edited the field keeps focus: the canvas would take the next Backspace as
+ *  "delete the layer" (and the text editor only gets focus back on a later frame, and only for a range). */
+export function leaveField(el: HTMLInputElement): boolean {
+  if (document.activeElement !== el || !leavesFieldOnEnter(el) || useStore.getState().editingText) {
+    if (document.activeElement === el) requestAnimationFrame(() => document.activeElement === el && el.select());
+    return false;
+  }
+  el.blur();
+  focusCanvas();
+  return true;
 }
 
 /** Puts keyboard focus on the canvas (after a field or panel gives it up). */

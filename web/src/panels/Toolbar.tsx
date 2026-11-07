@@ -572,7 +572,7 @@ function ShareButton() {
               : "Shared: reconnecting…"
             : "Share for live editing"
         }
-        aria-label="Share"
+        aria-label={role ? `Share, ${status === "live" ? "shared live" : "reconnecting"}` : "Share"}
         onClick={() => useCollab.setState({ dialogOpen: true })}
       >
         <Users size={16} /> <span className="label share-label">Share</span>

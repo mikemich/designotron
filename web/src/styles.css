@@ -1457,21 +1457,35 @@ a.btn {
   max-width: calc(100% - 140px);
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 7px 14px;
+  gap: 4px;
+  padding: 3px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 999px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
   color: var(--text);
   white-space: nowrap;
-  cursor: pointer;
-  font: inherit;
 }
 .empty-pill:hover {
   border-color: var(--accent);
 }
-.empty-pill > span:nth-child(2) {
+.empty-pill button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 11px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  min-width: 0;
+}
+.empty-pill button:hover {
+  background: var(--hover, rgba(127, 127, 127, 0.15));
+}
+.empty-pill button span {
   overflow: hidden;
   text-overflow: ellipsis;
 }

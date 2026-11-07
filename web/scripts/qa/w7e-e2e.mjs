@@ -262,7 +262,7 @@ try {
     check("the hovered menu item is the focused one", (await focused(page)).label.startsWith("Undo"));
     await page.keyboard.press("Escape");
 
-    // Number fields: Enter commits and gives the keys back to the canvas (r15d, Y-01); Tab keeps going.
+    // Number fields keep focus on Enter
     await page.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), box.id);
     await page.waitForSelector("input[aria-label='Width']");
     await kbFocus(page, "input[aria-label='Width']");
@@ -271,13 +271,11 @@ try {
     await page.waitForTimeout(300);
     const w = (await nodeNamed(page, "Box")).width;
     f = await focused(page);
-    check("Enter in the W field commits and hands focus to the canvas", w === 150 && f.id === "dt-canvas", `width ${w}, focus ${JSON.stringify(f)}`);
-    // (Changed in r15d: this used to assert that focus stayed in the field; Figma returns the keys to the canvas.)
-    await kbFocus(page, "input[aria-label='Width']");
+    check("Enter in the W field commits and keeps focus there", w === 150 && f.tag === "INPUT" && f.label === "Width", `width ${w}, focus ${JSON.stringify(f)}`);
     await page.keyboard.press("Control+z");
     await page.waitForTimeout(300);
     const undone = (await nodeNamed(page, "Box")).width;
-    check("Ctrl+Z in a focused, untouched field undoes the design change", undone === 100 && (await focused(page)).tag === "INPUT" && (await page.locator("input[aria-label='Width']").inputValue()) === "100", `width ${undone}`);
+    check("Ctrl+Z in a committed field undoes the design change", undone === 100 && (await focused(page)).tag === "INPUT" && (await page.locator("input[aria-label='Width']").inputValue()) === "100", `width ${undone}`);
     await page.keyboard.press("Control+Shift+z");
     await page.waitForTimeout(300);
     check("Ctrl+Shift+Z redoes it", (await nodeNamed(page, "Box")).width === 150);

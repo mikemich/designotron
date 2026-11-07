@@ -117,17 +117,18 @@ export function askWhenOpen(prompt: string | null) {
 }
 
 /** Play the replay of Claude designing a page once the next file has opened (from the start screen). */
-let demoOnOpen = false;
-export function demoWhenOpen(on: boolean) {
-  demoOnOpen = on;
+let demoOnOpen: string | null = null;
+export function demoWhenOpen(fileId: string | null) {
+  demoOnOpen = fileId;
 }
 
 /** The dashboard fetched a Figma file and made this one for it: import it now, once (taking it out of the
  *  store first, so a second mount can't repeat it). Warnings open the dialog's result view. */
-function runPendingFigma() {
+function runPendingFigma(fileId: string) {
   const pending = useStore.getState().pendingFigma;
   if (!pending) return;
   useStore.setState({ pendingFigma: null });
+  if (pending.fileId !== fileId) return; // meant for another file
   try {
     const r = importFigmaJson(pending.file, pending.images);
     showToast(`Imported ${r.layers} layers from Figma`);
@@ -158,7 +159,7 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
   const figmaOpen = useStore((s) => s.figmaOpen);
   // The Figma import dialog belongs to this file: leaving the file closes it (it stays open to
   // show import warnings, and must not reappear over the next file).
-  useEffect(() => () => useStore.setState({ figmaOpen: false }), []);
+  useEffect(() => () => useStore.setState({ figmaOpen: false, figmaResult: null, pendingFigma: null }), []);
   const pluginsOpen = usePlugins((s) => s.dialogOpen);
   const shareOpen = useCollab((s) => s.dialogOpen);
   const [ready, setReady] = useState(false);
@@ -274,14 +275,15 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
       setReady(true);
       // Two frames: the canvas has its final size by then.
       requestAnimationFrame(() => requestAnimationFrame(zoomToFit));
-      runPendingFigma();
+      runPendingFigma(fileId);
       joinShared();
       // This file's own conversation (after the first paint: it only reads storage).
       await enterFile(fileId);
       if (cancelled) return;
       if (demoOnOpen) {
-        demoOnOpen = false;
-        void playDemo();
+        const mine = demoOnOpen === fileId;
+        demoOnOpen = null;
+        if (mine) void playDemo();
       }
       if (askOnOpen) {
         const prompt = askOnOpen;
@@ -291,6 +293,10 @@ export function Editor({ fileId, onHome }: { fileId: string; onHome: () => void 
     })();
     return () => {
       cancelled = true;
+      // Data or a replay meant for this file that never got to run (the load was cancelled or failed)
+      // must not land in the next file opened.
+      if (useStore.getState().pendingFigma?.fileId === fileId) useStore.setState({ pendingFigma: null });
+      if (demoOnOpen === fileId) demoOnOpen = null;
       // The lock goes once the closing editor's last write has finished (its cleanup runs next).
       const lock = tabRef.current.lock;
       tabRef.current.lock = null;
