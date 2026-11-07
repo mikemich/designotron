@@ -105,7 +105,7 @@ must never be committed.
   markup, and a new `Node` field is never on them. `Node` is `Eq` (marker impl) so `Arc<Node>` equality and
   `imbl` diffs skip shared nodes. `ops::paint_order` sorts by path (no walk of every layer), `copy`/`paste` parse
   and write the clipboard in one go (`ClipIn`/`ClipOut`), `create_nodes` lays out only the top-level layers it
-  touched, and a variable delete prunes layers and instance overrides in one pass (one `after_mutation`).
+  touched, and a variable delete first records what each layer inside an instance shows as an override (`components::keep_values_of_removed`), then prunes the bindings, so it runs one `after_mutation` pass.
   `Engine::reference` switches every one of these back to the whole-document passes: change any of this code
   with `engine/lockstep_tests.rs` in mind (two engines on one random command stream must stay identical,
   documents, canvas, fingerprints and deltas). Measure with `cargo run --release -p designotron-engine --example
