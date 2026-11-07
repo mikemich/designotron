@@ -425,8 +425,8 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
     let cc = &clip_colls[ci];
     // The same id and name: this file is where the layers came from (or a copy of it), so modes
     // match by id even when they were renamed since.
-    let origin = doc.variables.iter().position(|d| d.id == cc.id && d.name == cc.name);
-    let found = origin.or_else(|| doc.variables.iter().position(|d| d.name == cc.name));
+    let origin = doc.variables.iter().position(|d| d.id == cc.id && d.name.trim() == cc.name.trim());
+    let found = origin.or_else(|| doc.variables.iter().position(|d| d.name.trim() == cc.name.trim()));
     let di = match found {
       Some(i) => i,
       None => {
@@ -434,7 +434,7 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
         taken_colls.insert(id.clone());
         doc.variables.push(Collection {
           id,
-          name: cc.name.clone(),
+          name: cc.name.trim().to_string(),
           modes: Vec::new(),
           variables: Vec::new(),
         });
@@ -448,8 +448,8 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
       let hit = d
         .modes
         .iter()
-        .find(|m| m.id == cm.id && (origin.is_some() || m.name == cm.name))
-        .or_else(|| d.modes.iter().find(|m| m.name == cm.name))
+        .find(|m| m.id == cm.id && (origin.is_some() || m.name.trim() == cm.name.trim()))
+        .or_else(|| d.modes.iter().find(|m| m.name.trim() == cm.name.trim()))
         .map(|m| m.id.clone());
       let dest_mode = match hit {
         Some(id) => id,
@@ -460,7 +460,7 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
           let first = c.modes.first().map(|m| m.id.clone());
           c.modes.push(VarMode {
             id: id.clone(),
-            name: cm.name.clone(),
+            name: cm.name.trim().to_string(),
           });
           // Like adding a mode in the dialog: every variable starts with its default mode's value.
           for v in &mut c.variables {
@@ -489,6 +489,9 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
 
   // Variables: match, or add with empty values (filled once every one has its new id).
   let mut fresh: Vec<(usize, usize, usize)> = Vec::new(); // (clipboard coll, clipboard var, destination var)
+                                                          // Variables matched in the destination (clipboard coll, clipboard var, destination var id): they
+                                                          // keep their values, except in modes this paste added to a collection that was already there.
+  let mut matched: Vec<(usize, usize, String)> = Vec::new();
   let mut queue: Vec<String> = used.vars.iter().cloned().collect();
   queue.sort();
   while let Some(vid) = queue.pop() {
@@ -514,7 +517,18 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
       })
       .map(|v| v.id.clone());
     let id = match hit {
-      Some(id) => id,
+      Some(id) => {
+        let added_modes = added_modes_of(&before, &clip_colls[ci], &doc.variables[di], &map);
+        for (cm, _) in &added_modes {
+          if let Some(a) = cv.values.get(cm).and_then(|x| x.get("alias")).and_then(|a| a.as_str()) {
+            queue.push(a.to_string());
+          }
+        }
+        if !added_modes.is_empty() {
+          matched.push((ci, vi, id.clone()));
+        }
+        id
+      }
       None => {
         let id = free_id(&cv.id, "v_", &taken_vars, gen);
         taken_vars.insert(id.clone());
@@ -561,21 +575,26 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
         .or_else(|| cv.values.values().next())
         .cloned()
         .unwrap_or_else(|| default_value(cv.kind));
-      // Source data may be invalid (files from before the type check): a paste never fails on it.
-      let fallback = first.as_ref().and_then(|f| cv.values.get(f));
-      let value = if raw.get("alias").is_some() {
-        remap_alias(raw, &map)
-      } else {
-        crate::variables::check_value(cv.kind, &raw)
-          .ok()
-          .filter(|v| cv.kind != VarKind::Number || v.is_number())
-          .or_else(|| fallback.and_then(|f| crate::variables::check_value(cv.kind, f).ok()))
-          .filter(|v| v.get("alias").is_none())
-          .unwrap_or_else(|| default_value(cv.kind))
-      };
-      values.insert(dm, value);
+      values.insert(dm, pasted_value(cv, raw, first.as_ref(), &map));
     }
     doc.variables[di].variables[pos].values = values;
+  }
+  // A mode the paste added takes the source's values for the variables that were already here too
+  // (aliases included), so the pasted layers look the same in it. Variables the clipboard doesn't
+  // carry keep the default mode's value they were given.
+  for (ci, vi, dest_id) in matched {
+    let cc = &clip_colls[ci];
+    let cv = &cc.variables[vi];
+    let first = cc.modes.first().map(|m| m.id.clone());
+    let Some(di) = dest_of[ci] else { continue };
+    let added_modes = added_modes_of(&before, cc, &doc.variables[di], &map);
+    for (cm, dm) in added_modes {
+      let Some(raw) = cv.values.get(&cm).cloned() else { continue };
+      let value = pasted_value(cv, raw, first.as_ref(), &map);
+      if let Some(v) = doc.variables[di].variables.iter_mut().find(|v| v.id == dest_id) {
+        v.values.insert(dm, value);
+      }
+    }
   }
 
   // Styles.
@@ -623,6 +642,35 @@ pub fn merge_tokens(doc: &mut Document, clip: &Value, gen: &mut IdGen, nodes: &m
 /// then, and adding them isn't a change to something the user had.
 fn d_is_new(before: &[Collection], id: &str) -> bool {
   !before.iter().any(|c| c.id == id)
+}
+
+/// (clipboard mode id, destination mode id) for the modes this paste added to a collection the
+/// destination already had.
+fn added_modes_of(before: &[Collection], cc: &Collection, dest: &Collection, map: &Remap) -> Vec<(String, String)> {
+  let Some(old) = before.iter().find(|c| c.id == dest.id) else {
+    return Vec::new();
+  };
+  cc.modes
+    .iter()
+    .filter_map(|m| map.modes.get(&(cc.id.clone(), m.id.clone())).map(|d| (m.id.clone(), d.clone())))
+    .filter(|(_, d)| !old.modes.iter().any(|o| o.id == *d))
+    .collect()
+}
+
+/// A clipboard value as stored in the destination: aliases follow the remapped variable ids.
+/// Source data may be invalid (files from before the type check): a paste never fails on it.
+fn pasted_value(cv: &Variable, raw: Value, first: Option<&String>, map: &Remap) -> Value {
+  let fallback = first.and_then(|f| cv.values.get(f));
+  if raw.get("alias").is_some() {
+    remap_alias(raw, map)
+  } else {
+    crate::variables::check_value(cv.kind, &raw)
+      .ok()
+      .filter(|v| cv.kind != VarKind::Number || v.is_number())
+      .or_else(|| fallback.and_then(|f| crate::variables::check_value(cv.kind, f).ok()))
+      .filter(|v| v.get("alias").is_none())
+      .unwrap_or_else(|| default_value(cv.kind))
+  }
 }
 
 fn remap_alias(v: Value, map: &Remap) -> Value {
@@ -839,8 +887,13 @@ mod tests {
     let theme = b.doc.variables.iter().find(|c| c.name == "Theme").unwrap();
     assert_eq!(theme.modes.len(), 2);
     let dark = theme.modes.iter().find(|m| m.name == "Dark").unwrap();
-    // Filled from the default mode like the dialog's Add mode.
-    assert_eq!(var_named(&b, "Theme", "Surface").values[&dark.id], json!("#EEEEEE"));
+    // The mode is the source's: Surface's Dark value (an alias to a copied variable) comes along.
+    let target = var_named(&b, "Theme", "Surface").values[&dark.id]["alias"]
+      .as_str()
+      .expect("alias")
+      .to_string();
+    assert!(b.doc.variables.iter().flat_map(|c| &c.variables).any(|v| v.id == target));
+    assert_eq!(var_named(&b, "Theme", "Surface").values[&theme.modes[0].id], json!("#EEEEEE"));
     let screen = b.doc.get(r["created"][0].as_str().unwrap()).unwrap();
     assert_eq!(screen.variable_modes.get(&theme.id), Some(&dark.id));
   }
@@ -1225,6 +1278,27 @@ mod tests_r10_review {
   }
 
   #[test]
+  fn a_paste_matches_collection_and_mode_names_ignoring_surrounding_spaces() {
+    let mut a = old_file(vec![var("v_n", "N", VarKind::Number, json!(3))]);
+    a.doc.variables[0].name = "Theme ".into();
+    a.doc.variables[0].modes[0].name = "Dark ".into();
+    let rect = rect_bound_to(&mut a, "v_n");
+    let mut b = old_file(vec![var("v_m", "M", VarKind::Number, json!(1))]);
+    b.doc.variables[0].id = "vc_other".into();
+    b.doc.variables[0].name = "Theme".into();
+    b.doc.variables[0].modes[0].name = "Dark".into();
+    b.dispatch(Command::Paste {
+      data: a.copy(&[rect]),
+      parent: None,
+      x: None,
+      y: None,
+    })
+    .unwrap();
+    assert_eq!(b.doc.variables.len(), 1);
+    assert_eq!(b.doc.variables[0].modes.len(), 1);
+  }
+
+  #[test]
   fn same_named_variables_in_the_source_stay_two() {
     let mut a = old_file(vec![
       var("v_1", "Dup", VarKind::Number, json!(1)),
@@ -1243,5 +1317,68 @@ mod tests_r10_review {
     let names: Vec<&str> = b.doc.variables[0].variables.iter().map(|v| v.name.as_str()).collect();
     assert_eq!(names.len(), 2);
     assert_ne!(names[0], names[1]);
+  }
+
+  #[test]
+  fn a_mode_the_paste_adds_takes_the_sources_values_aliases_included() {
+    let mut a = engine(7);
+    a.doc.variables = serde_json::from_value(json!([
+      { "id": "c_p", "name": "Primitives", "modes": [{ "id": "m_p", "name": "Mode 1" }], "variables": [
+        { "id": "v_black", "name": "Black", "type": "color", "values": { "m_p": "#000000" } },
+        { "id": "v_white", "name": "White", "type": "color", "values": { "m_p": "#FFFFFF" } } ] },
+      { "id": "c_t", "name": "Theme", "modes": [
+        { "id": "m_l", "name": "Light" }, { "id": "m_d", "name": "Dark" }, { "id": "m_h", "name": "High contrast" }],
+        "variables": [
+        { "id": "v_surf", "name": "Surface", "type": "color", "values": {
+          "m_l": { "alias": "v_white" }, "m_d": "#222222", "m_h": { "alias": "v_black" } } } ] }
+    ]))
+    .unwrap();
+    let frame = rect_bound_to(&mut a, "v_surf");
+    a.doc.get_mut(&frame).unwrap().variable_modes.insert("c_t".into(), "m_h".into());
+    let data = a.copy(std::slice::from_ref(&frame));
+
+    let mut b = engine(8);
+    b.doc.variables = serde_json::from_value(json!([
+      { "id": "d_p", "name": "Primitives", "modes": [{ "id": "dm_p", "name": "Mode 1" }], "variables": [
+        { "id": "dv_white", "name": "White", "type": "color", "values": { "dm_p": "#FFFFFF" } } ] },
+      { "id": "d_t", "name": "Theme", "modes": [{ "id": "dm_l", "name": "Light" }, { "id": "dm_d", "name": "Dark" }],
+        "variables": [
+        { "id": "dv_surf", "name": "Surface", "type": "color", "values": { "dm_l": "#F0F0F0", "dm_d": "#111111" } },
+        { "id": "dv_only", "name": "Only here", "type": "color", "values": { "dm_l": "#ABCDEF", "dm_d": "#123456" } } ] }
+    ]))
+    .unwrap();
+    let r = b
+      .dispatch(Command::Paste {
+        data,
+        parent: None,
+        x: None,
+        y: None,
+      })
+      .unwrap();
+    let theme = b.doc.variables.iter().find(|c| c.name == "Theme").unwrap();
+    let hc = theme
+      .modes
+      .iter()
+      .find(|m| m.name == "High contrast")
+      .expect("mode added")
+      .id
+      .clone();
+    let surface = theme.variables.iter().find(|v| v.name == "Surface").unwrap();
+    // Light and Dark stay the destination's; HC is the source's, its alias to a copied Black.
+    assert_eq!(surface.values["dm_l"], json!("#F0F0F0"));
+    assert_eq!(surface.values["dm_d"], json!("#111111"));
+    let black = b
+      .doc
+      .variables
+      .iter()
+      .flat_map(|c| &c.variables)
+      .find(|v| v.name == "Black")
+      .expect("Black copied");
+    assert_eq!(surface.values[&hc], json!({ "alias": black.id }));
+    // A variable the clipboard doesn't carry takes its Light value.
+    let only = theme.variables.iter().find(|v| v.name == "Only here").unwrap();
+    assert_eq!(only.values[&hc], json!("#ABCDEF"));
+    let pasted = b.doc.get(r["created"][0].as_str().unwrap()).unwrap();
+    assert_eq!(crate::variables::resolve(&b.doc, &pasted.id, "dv_surf"), Some(json!("#000000")));
   }
 }

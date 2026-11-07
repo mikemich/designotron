@@ -116,7 +116,7 @@ fn bench_granular_delta_cost() {
   let collections = (0..5)
     .map(|c| Collection {
       id: format!("c{c}"),
-      name: "c".into(),
+      name: format!("c{c}"),
       modes: vec![mode("m1"), mode("m2")],
       variables: (0..200)
         .map(|i| Variable {

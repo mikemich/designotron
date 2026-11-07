@@ -747,25 +747,27 @@ fn merge_fields<T: Serialize + DeserializeOwned>(cur: &T, from: &T, to: &T, deep
   let (Ok(c), Ok(f), Ok(t)) = (serde_json::to_value(cur), serde_json::to_value(from), serde_json::to_value(to)) else {
     return None;
   };
-  serde_json::from_value(merge_json(&c, &f, &t, deep)).ok()
+  serde_json::from_value(merge_json(&c, &f, &t, deep, false)).ok()
 }
 
-fn merge_json(cur: &Value, from: &Value, to: &Value, deep: bool) -> Value {
+/// `strict`: inside an instance's overrides a `null` is a record (`bindings: {fill: null}` means
+/// "unbound here"), so it differs from a missing key.
+fn merge_json(cur: &Value, from: &Value, to: &Value, deep: bool, strict: bool) -> Value {
   let (Some(c), Some(f), Some(t)) = (cur.as_object(), from.as_object(), to.as_object()) else {
     return if same(cur, from) { to.clone() } else { cur.clone() };
   };
   let mut out = c.clone();
   // Run ranges index into the characters: keep both of someone else's, or take both of ours.
-  let text_theirs = ["characters", "runs"].iter().any(|k| !same_opt(c.get(*k), f.get(*k)));
+  let text_theirs = ["characters", "runs"].iter().any(|k| !same_opt_in(c.get(*k), f.get(*k), strict));
   for k in c.keys().chain(f.keys()).chain(t.keys()).collect::<BTreeSet<_>>() {
     let (cv, fv, tv) = (c.get(k), f.get(k), t.get(k));
-    if same_opt(fv, tv) || (text_theirs && (k == "characters" || k == "runs") && c.contains_key("characters")) {
+    if same_opt_in(fv, tv, strict) || (text_theirs && (k == "characters" || k == "runs") && c.contains_key("characters")) {
       continue; // this step left it alone, or someone else changed this text
     }
     let merged = if k == "children" {
       Some(merge_children(cv, fv, tv))
     } else if let (true, Some(cv), Some(fv), Some(tv)) = (deep, cv, fv, tv) {
-      (cv.is_object() && fv.is_object() && tv.is_object()).then(|| merge_json(cv, fv, tv, true))
+      (cv.is_object() && fv.is_object() && tv.is_object()).then(|| merge_json(cv, fv, tv, true, strict || k == "overrides"))
     } else {
       None
     };
@@ -773,7 +775,7 @@ fn merge_json(cur: &Value, from: &Value, to: &Value, deep: bool) -> Value {
       Some(v) => {
         out.insert(k.clone(), v);
       }
-      None if same_opt(cv, fv) => match tv {
+      None if same_opt_in(cv, fv, strict) => match tv {
         Some(v) => {
           out.insert(k.clone(), v.clone());
         }
@@ -895,6 +897,19 @@ fn same_opt(a: Option<&Value>, b: Option<&Value>) -> bool {
     (Some(a), Some(b)) => same(a, b),
     (None, None) | (Some(Value::Null), None) | (None, Some(Value::Null)) => true,
     _ => false,
+  }
+}
+
+/// `same_opt`, or with `strict` a `null` is not a missing key.
+fn same_opt_in(a: Option<&Value>, b: Option<&Value>, strict: bool) -> bool {
+  if strict {
+    match (a, b) {
+      (Some(a), Some(b)) => same(a, b),
+      (None, None) => true,
+      _ => false,
+    }
+  } else {
+    same_opt(a, b)
   }
 }
 

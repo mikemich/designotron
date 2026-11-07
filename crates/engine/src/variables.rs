@@ -222,6 +222,30 @@ pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(
       }
     }
   }
+  // Mode and collection names are unique too (two "Dark" modes would export two blocks, the
+  // later one winning). Judged against `previous` by id, so files that already hold duplicates
+  // can still be edited.
+  let old_modes: BTreeMap<(&str, &str), &str> = previous
+    .iter()
+    .flat_map(|c| c.modes.iter().map(move |m| ((c.id.as_str(), m.id.as_str()), m.name.as_str())))
+    .collect();
+  let old_colls: BTreeMap<&str, &str> = previous.iter().map(|c| (c.id.as_str(), c.name.as_str())).collect();
+  for (i, c) in collections.iter().enumerate() {
+    let name = c.name.trim();
+    if old_colls.get(c.id.as_str()).is_none_or(|o| o.trim() != name)
+      && collections.iter().enumerate().any(|(j, d)| j != i && d.name.trim() == name)
+    {
+      return Err(format!("A collection named {name} already exists"));
+    }
+    for (k, m) in c.modes.iter().enumerate() {
+      let name = m.name.trim();
+      if old_modes.get(&(c.id.as_str(), m.id.as_str())).is_none_or(|o| o.trim() != name)
+        && c.modes.iter().enumerate().any(|(l, n)| l != k && n.name.trim() == name)
+      {
+        return Err(format!("{name} already exists in {}", c.name));
+      }
+    }
+  }
   for c in collections {
     for (i, v) in c.variables.iter().enumerate() {
       let renamed = old.get(v.id.as_str()).is_none_or(|o| o.name != v.name);
@@ -517,8 +541,10 @@ pub fn apply(doc: &mut Document) -> bool {
 }
 
 /// Property bindings a direct edit replaces (editing a bound fill detaches its variable).
-pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) {
-  let Some(obj) = patch.as_object() else { return };
+/// Returns what it removed per layer, so a layer inside an instance can record the detach.
+pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) -> Vec<(NodeId, Vec<String>)> {
+  let mut removed: Vec<(NodeId, Vec<String>)> = Vec::new();
+  let Some(obj) = patch.as_object() else { return removed };
   let mut props: Vec<&str> = Vec::new();
   for (k, v) in obj {
     match k.as_str() {
@@ -530,6 +556,9 @@ pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) {
       "height" => props.push("height"),
       "strokeWeight" => props.push("strokeWeight"),
       "visible" => props.push("visible"),
+      // A style replaces the variable too (binding one drops the style).
+      "fillStyle" if v.is_string() => props.push("fill"),
+      "strokeStyle" if v.is_string() => props.push("stroke"),
       "layout" => {
         if v.get("gap").is_some() {
           props.push("gap");
@@ -560,16 +589,105 @@ pub fn unbind_for_patch(doc: &mut Document, ids: &[NodeId], patch: &Value) {
       _ => {}
     }
   }
+  // A prop the patch itself binds keeps that binding.
+  props.retain(|p| !patch["bindings"][*p].is_string());
   if props.is_empty() {
-    return;
+    return removed;
   }
   for id in ids {
+    let gone: Vec<String> = match doc.get(id) {
+      Some(n) => props
+        .iter()
+        .filter(|p| n.bindings.contains_key(**p))
+        .map(|p| p.to_string())
+        .collect(),
+      None => continue,
+    };
+    if gone.is_empty() {
+      continue;
+    }
     if let Some(n) = doc.get_mut(id) {
-      for p in &props {
-        n.bindings.remove(*p);
+      for p in &gone {
+        n.bindings.remove(p);
+      }
+    }
+    removed.push((id.clone(), gone));
+  }
+  removed
+}
+
+/// The merge patch that records a detach on an instance layer: the binding goes, and the value
+/// the variable painted stays (so a mode change or an edit of the main doesn't move it).
+pub fn detach_patch(node: &crate::model::Node, props: &[String]) -> Value {
+  let whole = serde_json::to_value(node).unwrap_or(Value::Null);
+  let mut out = serde_json::Map::new();
+  let mut bindings = serde_json::Map::new();
+  for p in props {
+    bindings.insert(p.clone(), Value::Null);
+    let paths: Vec<Vec<&str>> = match p.as_str() {
+      "fill" => vec![vec!["fills"]],
+      "stroke" => vec![vec!["strokes"]],
+      "cornerRadius" => vec![vec!["cornerRadius"], vec!["cornerRadii"]],
+      "opacity" | "width" | "height" | "strokeWeight" | "visible" => vec![vec![p.as_str()]],
+      "gap" | "counterGap" | "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft" => {
+        vec![vec!["layout", p.as_str()]]
+      }
+      "padding" => ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"]
+        .iter()
+        .map(|k| vec!["layout", *k])
+        .collect(),
+      "fontSize" | "fontFamily" | "fontWeight" | "lineHeight" | "letterSpacing" | "paragraphSpacing" | "characters" => {
+        vec![vec!["text", p.as_str()]]
+      }
+      _ => Vec::new(),
+    };
+    for path in paths {
+      let Some(v) = path.iter().try_fold(&whole, |b, k| b.get(*k)) else {
+        continue;
+      };
+      let mut cur = &mut out;
+      for k in &path[..path.len() - 1] {
+        cur = cur
+          .entry(k.to_string())
+          .or_insert_with(|| Value::Object(Default::default()))
+          .as_object_mut()
+          .unwrap();
+      }
+      cur.insert(path[path.len() - 1].to_string(), v.clone());
+    }
+  }
+  out.insert("bindings".into(), Value::Object(bindings));
+  Value::Object(out)
+}
+
+/// Binds (or, with None, detaches) one property of a layer. A fill or stroke bound to a
+/// variable lets go of its colour style (one source per paint). On a layer inside an instance
+/// the change is recorded as an override, so it survives edits of the main and mode changes.
+pub fn set_binding(doc: &mut Document, id: &str, prop: &str, var: Option<&str>) -> Result<(), String> {
+  let n = doc.get_mut(id).ok_or_else(|| format!("no node {id}"))?;
+  let mut patch = serde_json::Map::new();
+  match var {
+    Some(v) => {
+      n.bindings.insert(prop.to_string(), v.to_string());
+      patch.insert("bindings".into(), json!({ prop: v }));
+      if prop == "fill" && n.fill_style.take().is_some() {
+        patch.insert("fillStyle".into(), Value::Null);
+      }
+      if prop == "stroke" && n.stroke_style.take().is_some() {
+        patch.insert("strokeStyle".into(), Value::Null);
+      }
+    }
+    None => {
+      if n.bindings.remove(prop).is_none() {
+        return Ok(());
+      }
+      if let Value::Object(m) = detach_patch(n, &[prop.to_string()]) {
+        patch = m;
       }
     }
   }
+  crate::components::record_override(doc, id, &Value::Object(patch));
+  Ok(())
 }
 
 /// Drops bindings and mode overrides that point at variables, collections or modes that no longer exist.

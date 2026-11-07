@@ -208,6 +208,44 @@ fn instance_name(doc: &Document, comp_id: &str) -> String {
     .map_or_else(|| comp.name.clone(), |p| p.name.clone())
 }
 
+/// The deleted main's name, as far as the instances remember it. Instances start out named after
+/// their main, so a source whose name ends in an auto " <number>" (a duplicate) gets the name most
+/// of the instances share, else its own without the number, provided another instance is named the
+/// plain name or the name and another number (else the number may be part of the name); any other name is kept (the user chose
+/// it). Limit: a main whose name really ends in a number, restored from a lone instance, loses it.
+fn restored_name(doc: &Document, users: &[NodeId], source_name: &str) -> String {
+  let stripped = match source_name.rsplit_once(' ') {
+    Some((head, tail)) if !head.is_empty() && !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => head,
+    _ => return source_name.to_string(),
+  };
+  // Only when another instance carries the plain name (or the name and another number) is the
+  // number an auto-suffix; a lone instance keeps the name it has.
+  let numbered = |name: &str| {
+    name == stripped
+      || name
+        .strip_prefix(stripped)
+        .and_then(|r| r.strip_prefix(' '))
+        .is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+  };
+  if !users
+    .iter()
+    .filter_map(|u| doc.get(u))
+    .any(|n| n.name != source_name && numbered(&n.name))
+  {
+    return source_name.to_string();
+  }
+  let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+  for n in users.iter().filter_map(|u| doc.get(u)) {
+    *counts.entry(n.name.as_str()).or_default() += 1;
+  }
+  if let Some((name, c)) = counts.iter().max_by_key(|(_, c)| **c) {
+    if *c > 1 && counts.values().filter(|x| *x == c).count() == 1 {
+      return name.to_string();
+    }
+  }
+  stripped.to_string()
+}
+
 /// Rebuilds an instance's children from its main component and re-applies overrides.
 /// Nested instances swapped through it are rebuilt from the component they were swapped to.
 pub fn sync_instance(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
@@ -420,6 +458,22 @@ fn group_of(key: &str, sub: Option<&str>) -> &'static str {
   }
 }
 
+/// The property group a binding key (`fill`, `gap`, ...) belongs to besides "variables".
+fn binding_group(prop: &str) -> &'static str {
+  match prop {
+    "fill" => "fill",
+    "stroke" | "strokeWeight" => "stroke",
+    "cornerRadius" => "radius",
+    "width" | "height" => "size",
+    "gap" | "counterGap" | "padding" | "paddingTop" | "paddingRight" | "paddingBottom" | "paddingLeft" => "layout",
+    "opacity" => "appearance",
+    "visible" => "visibility",
+    "characters" => "text",
+    "fontSize" | "fontFamily" | "fontWeight" | "lineHeight" | "letterSpacing" | "paragraphSpacing" => "typography",
+    _ => "variables",
+  }
+}
+
 /// The group of a key inside a `text` override. A change of the runs alone (bolding a word) is
 /// typography; with new characters the runs belong to the text.
 fn text_group(t: &serde_json::Map<String, Value>, sub: &str) -> &'static str {
@@ -467,12 +521,56 @@ pub fn override_groups(doc: &Document, id: &str) -> Vec<(&'static str, &'static 
       // The name a swap brings along isn't a change of its own.
       ("name", _) if m.contains_key(SWAP_KEY) => {}
       ("text", Value::Object(t)) => present.extend(t.keys().map(|s| text_group(t, s))),
+      // A binding belongs to its property's group and to Variables.
+      ("bindings", Value::Object(b)) => {
+        present.insert("variables");
+        present.extend(b.keys().map(|s| binding_group(s)));
+      }
       (k, _) => {
         present.insert(group_of(k, None));
       }
     }
   }
   OVERRIDE_GROUPS.iter().filter(|(g, _)| present.contains(g)).copied().collect()
+}
+
+/// A layer inside an instance that carries overrides: (id, name, groups).
+pub type OverriddenLayer = (NodeId, String, Vec<(&'static str, &'static str)>);
+
+/// The layers inside instance `id` that differ from their main, in tree order, at most `cap`
+/// of them, and whether there were more. Nested instances' layers are included.
+pub fn overridden_layers(doc: &Document, id: &str, cap: usize) -> (Vec<OverriddenLayer>, bool) {
+  let mut out: Vec<OverriddenLayer> = Vec::new();
+  if doc.get(id).is_none_or(|n| n.kind != NodeType::Instance) {
+    return (out, false);
+  }
+  let tree = doc.subtree(id);
+  // Nothing is recorded in this instance, nested ones, or the outer instances that store edits
+  // made through them (a nested instance's layers can be overridden from its outer instance): done.
+  let has_overrides = |i: &String| {
+    doc
+      .get(i)
+      .and_then(|n| n.instance.as_ref())
+      .is_some_and(|x| !x.overrides.is_empty())
+  };
+  if !tree.iter().chain(scope_chain(doc, id).iter()).any(has_overrides) {
+    return (out, false);
+  }
+  for lid in tree.into_iter().skip(1) {
+    if doc.get(&lid).is_none_or(|n| n.master_id.is_none()) {
+      continue;
+    }
+    let groups = override_groups(doc, &lid);
+    if groups.is_empty() {
+      continue;
+    }
+    if out.len() >= cap {
+      return (out, true);
+    }
+    let name = doc.get(&lid).map(|n| n.name.clone()).unwrap_or_default();
+    out.push((lid, name, groups));
+  }
+  (out, false)
 }
 
 /// Drops the parts of an override patch that belong to `groups` (all of them when empty).
@@ -487,6 +585,10 @@ fn strip_groups(patch: &mut Value, groups: &[String]) {
       let keep: Vec<String> = t.keys().filter(|s| !hit(text_group(t, s))).cloned().collect();
       t.retain(|s, _| keep.contains(s));
       !t.is_empty()
+    }
+    ("bindings", Value::Object(b)) => {
+      b.retain(|p, _| !hit("variables") && !hit(binding_group(p)));
+      !b.is_empty()
     }
     (k, _) => !hit(group_of(k, None)),
   });
@@ -633,6 +735,8 @@ pub fn restore_component(doc: &mut Document, prefer: &str, gen: &mut IdGen) -> R
       // An instance of a variant is named after its set: the restored main stands alone, so say so.
       if doc.nodes.values().any(|x| x.kind == NodeType::ComponentSet && x.name == src.name) {
         n.name = format!("{} (restored)", src.name);
+      } else {
+        n.name = restored_name(doc, &users, &src.name);
       }
       for s in [&mut n.sizing_h, &mut n.sizing_v] {
         if *s == Sizing::Fill {
@@ -2045,9 +2149,11 @@ mod tests {
 
   /// Overrides through variant swaps, nested instances and nested swaps.
   mod overrides {
-    use crate::components::{carry_overrides, has_overrides, override_count};
+    use crate::components::{carry_overrides, has_overrides, override_count, ROOT_KEY};
     use crate::engine::{Command, Engine};
     use crate::model::{NodeType, Paint};
+    use crate::patch;
+    use crate::text::HeuristicMeasurer;
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
 
@@ -3605,6 +3711,417 @@ mod tests {
       assert_ne!(width(&k.e, &inst), 400.0);
     }
 
+    // QA round 14 (r14a): bindings, modes and styles on instance layers.
+
+    /// A Theme collection (Light, Dark) with a colour variable `Text/Primary` and a number `Gap`.
+    fn tokens(e: &mut Engine) {
+      e.doc.variables = serde_json::from_value(json!([
+        { "id": "c_t", "name": "Theme", "modes": [{ "id": "m_l", "name": "Light" }, { "id": "m_d", "name": "Dark" }],
+          "variables": [
+            { "id": "v_p", "name": "Primary", "type": "color", "values": { "m_l": "#111111", "m_d": "#EEEEEE" } },
+            { "id": "v_q", "name": "Other", "type": "color", "values": { "m_l": "#AA0000", "m_d": "#0000AA" } },
+            { "id": "v_w", "name": "Wide", "type": "number", "values": { "m_l": 100, "m_d": 140 } } ] }
+      ]))
+      .unwrap();
+    }
+
+    fn bind(e: &mut Engine, id: &str, prop: &str, var: Option<&str>) {
+      e.dispatch(Command::BindVariable {
+        ids: vec![id.to_string()],
+        property: prop.into(),
+        variable: var.map(String::from),
+      })
+      .unwrap();
+    }
+
+    fn mode(e: &mut Engine, id: &str, m: Option<&str>) {
+      e.dispatch(Command::SetVariableMode {
+        ids: vec![id.to_string()],
+        collection: "Theme".into(),
+        mode: m.map(String::from),
+      })
+      .unwrap();
+    }
+
+    fn override_of(e: &Engine, inst: &str, key: &str) -> Value {
+      e.doc
+        .get(inst)
+        .unwrap()
+        .instance
+        .as_ref()
+        .unwrap()
+        .overrides
+        .get(key)
+        .cloned()
+        .unwrap_or(Value::Null)
+    }
+
+    fn bound(e: &Engine, id: &str, prop: &str) -> Option<String> {
+      e.doc.get(id).unwrap().bindings.get(prop).cloned()
+    }
+
+    /// A bound main label, an instance of it inside a frame whose mode can change.
+    fn bound_kit() -> (Kit, String, String, String) {
+      let mut k = kit();
+      tokens(&mut k.e);
+      let main_label = named(&k.e, &k.default, "Label");
+      bind(&mut k.e, &main_label, "fill", Some("v_p"));
+      let frame = shape(&mut k.e, NodeType::Frame, 900.0, None);
+      let inst = instance(&mut k.e, &k.default, Some(&frame));
+      let label = named(&k.e, &inst, "Label");
+      (k, frame, inst, label)
+    }
+
+    #[test]
+    fn a_colour_typed_on_an_instance_layer_survives_mode_changes_and_edits_of_the_main() {
+      let (mut k, frame, inst, label) = bound_kit();
+      assert_eq!(fill_of(&k.e, &label), "#111111");
+      fill(&mut k.e, &label, "#00FF00");
+      assert_eq!(
+        override_of(&k.e, &inst, &named_master(&k.e, &label))["bindings"]["fill"],
+        Value::Null
+      );
+      assert!(bound(&k.e, &label, "fill").is_none());
+      // The main is edited (this re-syncs the copy) and the frame's mode changes.
+      let main_label = named(&k.e, &k.default, "Label");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![main_label.clone()],
+          patch: json!({ "opacity": 0.5 }),
+        })
+        .unwrap();
+      mode(&mut k.e, &frame, Some("Dark"));
+      assert_eq!(fill_of(&k.e, &label), "#00FF00");
+      assert!(bound(&k.e, &label, "fill").is_none());
+      // The main's own label still follows the mode (it is in no frame here, so check the token).
+      assert_eq!(bound(&k.e, &main_label, "fill").as_deref(), Some("v_p"));
+      // Reset "Variables" binds it again.
+      reset(&mut k.e, &label, &["variables"]);
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_p"));
+      assert_eq!(fill_of(&k.e, &label), "#EEEEEE");
+    }
+
+    fn named_master(e: &Engine, id: &str) -> String {
+      e.doc.get(id).unwrap().master_id.clone().unwrap()
+    }
+
+    #[test]
+    fn a_colour_typed_on_the_instance_root_survives_too() {
+      let mut k = kit();
+      tokens(&mut k.e);
+      bind(&mut k.e, &k.default.clone(), "fill", Some("v_p"));
+      let frame = shape(&mut k.e, NodeType::Frame, 900.0, None);
+      let inst = instance(&mut k.e, &k.default, Some(&frame));
+      fill(&mut k.e, &inst, "#00FF00");
+      assert_eq!(override_of(&k.e, &inst, ROOT_KEY)["bindings"]["fill"], Value::Null);
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![k.default.clone()],
+          patch: json!({ "cornerRadius": 9.0 }),
+        })
+        .unwrap();
+      mode(&mut k.e, &frame, Some("Dark"));
+      assert_eq!(fill_of(&k.e, &inst), "#00FF00");
+      reset(&mut k.e, &inst, &["variables"]);
+      assert_eq!(fill_of(&k.e, &inst), "#EEEEEE");
+    }
+
+    #[test]
+    fn typing_a_colour_is_one_undo_step() {
+      let (mut k, _, inst, label) = bound_kit();
+      fill(&mut k.e, &label, "#00FF00");
+      k.e.dispatch(Command::Undo).unwrap();
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_p"));
+      assert_eq!(fill_of(&k.e, &label), "#111111");
+      assert!(k.e.doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides.is_empty());
+      k.e.dispatch(Command::Redo).unwrap();
+      assert_eq!(fill_of(&k.e, &label), "#00FF00");
+      assert!(bound(&k.e, &label, "fill").is_none());
+    }
+
+    #[test]
+    fn rebinding_and_detaching_on_an_instance_layer_are_overrides() {
+      let (mut k, _, inst, label) = bound_kit();
+      let main_label = named(&k.e, &k.default, "Label");
+      bind(&mut k.e, &label, "fill", Some("v_q"));
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![main_label.clone()],
+          patch: json!({ "opacity": 0.5 }),
+        })
+        .unwrap();
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_q"));
+      assert_eq!(fill_of(&k.e, &label), "#AA0000");
+      // Detach: the colour the variable painted stays.
+      bind(&mut k.e, &label, "fill", None);
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![main_label],
+          patch: json!({ "opacity": 0.6 }),
+        })
+        .unwrap();
+      assert!(bound(&k.e, &label, "fill").is_none());
+      assert_eq!(fill_of(&k.e, &label), "#AA0000");
+      reset(&mut k.e, &inst, &[]);
+      reset(&mut k.e, &label, &[]);
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_p"));
+    }
+
+    #[test]
+    fn a_mode_pinned_on_an_instance_root_is_an_override_and_null_removes_it() {
+      let (mut k, _, inst, label) = bound_kit();
+      mode(&mut k.e, &inst, Some("Dark"));
+      assert_eq!(override_of(&k.e, &inst, ROOT_KEY)["variableModes"]["c_t"], "m_d");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![k.default.clone()],
+          patch: json!({ "cornerRadius": 4.0 }),
+        })
+        .unwrap();
+      assert_eq!(
+        k.e.doc.get(&inst).unwrap().variable_modes.get("c_t").map(String::as_str),
+        Some("m_d")
+      );
+      assert_eq!(fill_of(&k.e, &label), "#EEEEEE");
+      mode(&mut k.e, &inst, None);
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![k.default.clone()],
+          patch: json!({ "cornerRadius": 5.0 }),
+        })
+        .unwrap();
+      assert!(k.e.doc.get(&inst).unwrap().variable_modes.is_empty());
+      assert_eq!(fill_of(&k.e, &label), "#111111");
+    }
+
+    #[test]
+    fn override_records_with_null_survive_save_load_and_collab() {
+      let (mut k, _, inst, label) = bound_kit();
+      let base = k.e.doc.clone();
+      fill(&mut k.e, &label, "#00FF00");
+      let key = named_master(&k.e, &label);
+      let want = override_of(&k.e, &inst, &key);
+      // Save and load.
+      let mut e2 = Engine::new(Box::new(HeuristicMeasurer), 3);
+      e2.load(&k.e.to_json()).unwrap();
+      assert_eq!(override_of(&e2, &inst, &key), want);
+      assert_eq!(want["bindings"]["fill"], Value::Null);
+      // A peer applies the delta.
+      let d = crate::collab::delta(&base, &k.e.doc, true, true);
+      let mut peer = base.clone();
+      crate::collab::apply(&mut peer, &d).unwrap();
+      assert_eq!(peer.get(&inst).unwrap().instance.as_ref().unwrap().overrides.get(&key), Some(&want));
+      // And a selective revert takes it back out.
+      let back = crate::collab::revert(&peer, &k.e.doc, &base);
+      assert!(back.get(&inst).unwrap().instance.as_ref().unwrap().overrides.is_empty());
+    }
+
+    #[test]
+    fn an_old_file_without_nulls_loads_and_a_patch_removes_or_adds_bindings() {
+      let (mut k, _, _, label) = bound_kit();
+      let n = k.e.doc.get(&label).unwrap().clone();
+      let mut m = n;
+      patch::apply(&mut m, &json!({ "bindings": { "fill": null } })).unwrap();
+      assert!(m.bindings.is_empty());
+      patch::apply(&mut m, &json!({ "bindings": { "fill": "v_q" } })).unwrap();
+      assert_eq!(m.bindings["fill"], "v_q");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![label.clone()],
+          patch: json!({ "bindings": { "fill": null } }),
+        })
+        .unwrap();
+      assert!(bound(&k.e, &label, "fill").is_none());
+    }
+
+    #[test]
+    fn a_style_and_a_variable_replace_each_other_on_fills_and_strokes() {
+      let mut k = kit();
+      tokens(&mut k.e);
+      k.e
+        .dispatch(Command::AddColorStyle {
+          name: "Brand".into(),
+          color: "#FF00FF".into(),
+        })
+        .unwrap();
+      let sid = k.e.doc.styles.colors[0].id.clone();
+      let r = named(&k.e, &k.default, "Bg");
+      bind(&mut k.e, &r, "fill", Some("v_p"));
+      assert!(bound(&k.e, &r, "fill").is_some());
+      k.e
+        .dispatch(Command::ApplyStyle {
+          ids: vec![r.clone()],
+          style_id: sid.clone(),
+          kind: None,
+        })
+        .unwrap();
+      assert!(bound(&k.e, &r, "fill").is_none());
+      assert_eq!(fill_of(&k.e, &r), "#FF00FF");
+      assert_eq!(k.e.doc.get(&r).unwrap().fill_style.as_deref(), Some(sid.as_str()));
+      bind(&mut k.e, &r, "fill", Some("v_q"));
+      assert!(k.e.doc.get(&r).unwrap().fill_style.is_none());
+      assert_eq!(fill_of(&k.e, &r), "#AA0000");
+      // Strokes.
+      bind(&mut k.e, &r, "stroke", Some("v_p"));
+      k.e
+        .dispatch(Command::ApplyStyle {
+          ids: vec![r.clone()],
+          style_id: sid.clone(),
+          kind: Some("stroke".into()),
+        })
+        .unwrap();
+      assert!(bound(&k.e, &r, "stroke").is_none());
+      assert!(bound(&k.e, &r, "fill").is_some());
+      bind(&mut k.e, &r, "stroke", Some("v_q"));
+      assert!(k.e.doc.get(&r).unwrap().stroke_style.is_none());
+    }
+
+    #[test]
+    fn style_and_variable_choices_on_an_instance_layer_survive_edits_of_the_main() {
+      let mut k = kit();
+      tokens(&mut k.e);
+      k.e
+        .dispatch(Command::AddColorStyle {
+          name: "Brand".into(),
+          color: "#FF00FF".into(),
+        })
+        .unwrap();
+      let sid = k.e.doc.styles.colors[0].id.clone();
+      let main_bg = named(&k.e, &k.default, "Bg");
+      bind(&mut k.e, &main_bg, "fill", Some("v_p"));
+      let inst = instance(&mut k.e, &k.default, None);
+      let bg = named(&k.e, &inst, "Bg");
+      k.e
+        .dispatch(Command::ApplyStyle {
+          ids: vec![bg.clone()],
+          style_id: sid,
+          kind: None,
+        })
+        .unwrap();
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![main_bg.clone()],
+          patch: json!({ "opacity": 0.5 }),
+        })
+        .unwrap();
+      assert!(bound(&k.e, &bg, "fill").is_none());
+      assert_eq!(fill_of(&k.e, &bg), "#FF00FF");
+      bind(&mut k.e, &bg, "fill", Some("v_q"));
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![main_bg],
+          patch: json!({ "opacity": 0.6 }),
+        })
+        .unwrap();
+      assert_eq!(bound(&k.e, &bg, "fill").as_deref(), Some("v_q"));
+      assert!(k.e.doc.get(&bg).unwrap().fill_style.is_none());
+    }
+
+    #[test]
+    fn mode_and_collection_names_must_be_unique_but_old_duplicates_still_save() {
+      let mut k = kit();
+      tokens(&mut k.e);
+      let rename_mode = |e: &mut Engine, name: &str| {
+        let mut cs = e.doc.variables.clone();
+        cs[0].modes[1].name = name.into();
+        e.dispatch(Command::SetVariables { collections: cs })
+      };
+      assert!(rename_mode(&mut k.e, "Light").unwrap_err().contains("already exists"));
+      assert!(rename_mode(&mut k.e, " Light ").is_err());
+      rename_mode(&mut k.e, "Night").unwrap();
+      // A new collection with a taken name.
+      let mut cs = k.e.doc.variables.clone();
+      cs.push(crate::variables::Collection {
+        id: "c_2".into(),
+        name: "Theme".into(),
+        ..Default::default()
+      });
+      assert!(k
+        .e
+        .dispatch(Command::SetVariables { collections: cs })
+        .unwrap_err()
+        .contains("Theme"));
+      let mut cs = k.e.doc.variables.clone();
+      cs.push(crate::variables::Collection {
+        id: "c_2".into(),
+        name: "Spacing".into(),
+        ..Default::default()
+      });
+      cs[1].name = "Theme".into();
+      assert!(k.e.dispatch(Command::SetVariables { collections: cs.clone() }).is_err());
+      cs[1].name = "Spacing".into();
+      k.e.dispatch(Command::SetVariables { collections: cs }).unwrap();
+      // A file that already has two "Dark" modes can still edit a value.
+      let mut dup = k.e.doc.variables.clone();
+      dup[0].modes[0].name = "Night".into();
+      k.e.doc.variables = dup;
+      let mut cs = k.e.doc.variables.clone();
+      cs[0].variables[0].values.insert("m_l".into(), json!("#222222"));
+      k.e.dispatch(Command::SetVariables { collections: cs }).unwrap();
+    }
+
+    #[test]
+    fn overridden_layers_lists_the_changed_layers_inside_an_instance() {
+      let mut k = kit();
+      let inst = instance(&mut k.e, &k.default, None);
+      let label = named(&k.e, &inst, "Label");
+      let bg = named(&k.e, &inst, "Bg");
+      let q = |e: &Engine, id: &str| e.query(crate::engine::Query::OverriddenLayers { id: id.to_string() }).unwrap();
+      assert!(q(&k.e, &inst)["layers"].as_array().unwrap().is_empty());
+      set_text(&mut k.e, &label, "Hi");
+      fill(&mut k.e, &bg, "#FF0000");
+      let r = q(&k.e, &inst);
+      let layers = r["layers"].as_array().unwrap();
+      assert_eq!(layers.len(), 2);
+      assert_eq!(layers[0]["id"], json!(bg));
+      assert_eq!(layers[0]["name"], "Bg");
+      assert_eq!(layers[0]["groups"][0]["key"], "fill");
+      assert_eq!(layers[1]["id"], json!(label));
+      assert_eq!(layers[1]["groups"][0]["key"], "text");
+      assert_eq!(r["more"], false);
+    }
+
+    #[test]
+    fn a_nested_instance_lists_layers_overridden_through_its_outer_instance() {
+      let mut k = kit();
+      let (_, card_inst) = card(&mut k);
+      let nested = nested_instance(&k.e, &card_inst);
+      let label = named(&k.e, &nested, "Label");
+      set_text(&mut k.e, &label, "Through the card");
+      let q = |e: &Engine, id: &str| e.query(crate::engine::Query::OverriddenLayers { id: id.to_string() }).unwrap();
+      // The edit is stored on the card instance, outside the nested instance's own subtree.
+      let card_layers = q(&k.e, &card_inst);
+      assert!(card_layers["layers"].as_array().unwrap().iter().any(|l| l["id"] == json!(label)));
+      let nested_layers = q(&k.e, &nested);
+      let layers = nested_layers["layers"].as_array().unwrap();
+      assert_eq!(layers.len(), 1, "{nested_layers}");
+      assert_eq!(layers[0]["id"], json!(label));
+      assert_eq!(layers[0]["groups"][0]["key"], "text");
+    }
+
+    #[test]
+    fn restoring_a_main_names_it_after_what_its_instances_share() {
+      let mut k = kit();
+      let a = instance(&mut k.e, &k.default, None);
+      let b = instance(&mut k.e, &k.default, None);
+      let c = instance(&mut k.e, &k.default, None);
+      for (i, n) in [(&a, "Button 50"), (&b, "Button"), (&c, "Button")] {
+        k.e
+          .dispatch(Command::Update {
+            ids: vec![i.clone()],
+            patch: json!({ "name": n }),
+          })
+          .unwrap();
+      }
+      k.e
+        .dispatch(Command::Delete {
+          ids: vec![k.default.clone()],
+        })
+        .unwrap();
+      let r = id(k.e.dispatch(Command::RestoreComponent { id: a.clone() }).unwrap());
+      assert_eq!(k.e.doc.get(&r).unwrap().name, "Button");
+    }
+
     /// A "Button" set (State=Default / State=Hover, each a frame with "Bg" and "Label").
     struct Kit {
       e: Engine,
@@ -3786,6 +4303,116 @@ mod tests {
 
     fn font_size(e: &Engine, id: &str) -> f64 {
       e.doc.get(id).unwrap().text.as_ref().unwrap().font_size
+    }
+
+    fn remote_noise(e: &mut Engine, frame: &str) {
+      let mut peer = e.doc.clone();
+      peer.get_mut(frame).unwrap().name = format!("{} x", peer.get(frame).unwrap().name);
+      let d = crate::collab::delta(&e.doc, &peer, true, true);
+      e.dispatch(Command::ApplyRemote { delta: d, local: false }).unwrap();
+    }
+
+    #[test]
+    fn an_update_that_types_a_colour_and_binds_keeps_the_binding_inside_an_instance() {
+      let (mut k, _, inst, label) = bound_kit();
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![label.clone()],
+          patch: json!({ "fills": [{ "type": "solid", "color": "#00FF00" }], "bindings": { "fill": "v_q" } }),
+        })
+        .unwrap();
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_q"));
+      assert_eq!(override_of(&k.e, &inst, &named_master(&k.e, &label))["bindings"]["fill"], "v_q");
+      let main_label = named(&k.e, &k.default, "Label");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![main_label],
+          patch: json!({ "opacity": 0.5 }),
+        })
+        .unwrap();
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_q"));
+    }
+
+    #[test]
+    fn reset_fill_also_clears_the_detach_of_the_fill() {
+      let (mut k, frame, _, label) = bound_kit();
+      fill(&mut k.e, &label, "#00FF00");
+      let g = k.e.query(crate::engine::Query::OverrideGroups { id: label.clone() }).unwrap();
+      let g = g.to_string();
+      assert!(g.contains("fill") && g.contains("variables"), "{g}");
+      reset(&mut k.e, &label, &["fill"]);
+      mode(&mut k.e, &frame, Some("Dark"));
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_p"));
+      assert_eq!(fill_of(&k.e, &label), "#EEEEEE");
+    }
+
+    #[test]
+    fn reset_fill_after_applying_a_style_to_a_bound_instance_layer() {
+      let (mut k, frame, _, label) = bound_kit();
+      k.e
+        .dispatch(Command::AddColorStyle {
+          name: "Brand".into(),
+          color: "#FF00FF".into(),
+        })
+        .unwrap();
+      let sid = k.e.doc.styles.colors[0].id.clone();
+      k.e
+        .dispatch(Command::ApplyStyle {
+          ids: vec![label.clone()],
+          style_id: sid,
+          kind: None,
+        })
+        .unwrap();
+      assert_eq!(fill_of(&k.e, &label), "#FF00FF");
+      reset(&mut k.e, &label, &["fill"]);
+      mode(&mut k.e, &frame, Some("Dark"));
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_p"));
+      assert_eq!(fill_of(&k.e, &label), "#EEEEEE");
+    }
+
+    #[test]
+    fn a_style_only_update_drops_the_binding() {
+      let (mut k, _, _, label) = bound_kit();
+      k.e
+        .dispatch(Command::AddColorStyle {
+          name: "Brand".into(),
+          color: "#FF00FF".into(),
+        })
+        .unwrap();
+      let sid = k.e.doc.styles.colors[0].id.clone();
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![label.clone()],
+          patch: json!({ "fillStyle": sid }),
+        })
+        .unwrap();
+      assert!(bound(&k.e, &label, "fill").is_none());
+    }
+
+    #[test]
+    fn undo_and_redo_keep_the_unbound_record_after_remote_changes() {
+      let (mut k, frame, inst, label) = bound_kit();
+      bind(&mut k.e, &label, "stroke", Some("v_q"));
+      fill(&mut k.e, &label, "#00FF00");
+      let key = named_master(&k.e, &label);
+      remote_noise(&mut k.e, &frame);
+      k.e.dispatch(Command::Undo).unwrap();
+      assert_eq!(bound(&k.e, &label, "fill").as_deref(), Some("v_p"));
+      assert!(override_of(&k.e, &inst, &key)["bindings"].get("fill").is_none());
+      assert_eq!(override_of(&k.e, &inst, &key)["bindings"]["stroke"], "v_q");
+      remote_noise(&mut k.e, &frame);
+      k.e.dispatch(Command::Redo).unwrap();
+      assert_eq!(override_of(&k.e, &inst, &key)["bindings"]["fill"], Value::Null);
+      assert!(bound(&k.e, &label, "fill").is_none());
+      assert_eq!(fill_of(&k.e, &label), "#00FF00");
+      let main_label = named(&k.e, &k.default, "Label");
+      k.e
+        .dispatch(Command::Update {
+          ids: vec![main_label],
+          patch: json!({ "opacity": 0.5 }),
+        })
+        .unwrap();
+      assert!(bound(&k.e, &label, "fill").is_none());
     }
 
     fn fill_of(e: &Engine, id: &str) -> String {
