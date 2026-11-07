@@ -803,11 +803,12 @@ fn set(doc: &mut Document, gen: &mut IdGen, instance: &str, prop: &str, value: O
     return set_swap(doc, gen, instance, &def, value).map(|_| json!({}));
   }
   // A value the component already shows is no value at all.
-  let value = match value {
-    Some(v) => Some(coerce(doc, def.kind, &v)?).filter(|v| *v != baseline(doc, instance, &def)),
+  let requested = match value {
+    Some(v) => Some(coerce(doc, def.kind, &v)?),
     None => None,
   };
-  let shown = value.clone().unwrap_or(Value::Null);
+  let shown = requested.clone().unwrap_or(Value::Null);
+  let value = requested.filter(|v| *v != baseline(doc, instance, &def));
   write_value(doc, instance, prop, value)?;
   let top = outermost(doc, instance);
   components::sync_instance(doc, &top, gen);

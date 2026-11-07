@@ -154,10 +154,10 @@ try {
   dd = await doc();
   check("the instance is now Blue (size and component)", dd.nodes[instId].instance.componentId === blueId && dd.nodes[instId].width === 90, JSON.stringify(dd.nodes[instId].instance));
   const paintedBlue = await page.evaluate((id) => {
-    const el = document.querySelector(`[data-id="${id}"]`) ?? document.getElementById(id);
+    const el = document.querySelector(`#dt-canvas g[data-root="${id}"]`) ?? document.querySelector(`#dt-canvas [data-id="${id}"]`);
     return el ? el.outerHTML.toUpperCase().includes("#3B82F6") : null;
   }, instId);
-  check("the canvas shows the new component (or the id is not addressable in the DOM)", paintedBlue !== false, String(paintedBlue));
+  check("the canvas paints the swapped instance in the new component's colour", paintedBlue === true, String(paintedBlue));
   await shot("c2-swapped");
   await undo();
   dd = await doc();
@@ -204,7 +204,7 @@ try {
   await ctx.close();
   ({ ctx, page } = await openEditor(fileUrl));
   dd = await doc();
-  console.log(`INFO  killed 150 ms after the result: ${named(dd, "Saved 3") ? "kept" : "lost"}`);
+  check("Saved 3: still there after the editor was killed 150 ms after the result", r.ok && !!named(dd, "Saved 3"));
   r = await tool("create_nodes", { nodes: [{ type: "rectangle", name: "Saved 4", x: 0, y: 1400, width: 50, height: 50 }] });
   const extra = await ctx.newPage(); // so closing one page leaves the browser (and its storage) alive
   await page.close(); // pagehide fires

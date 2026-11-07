@@ -267,7 +267,7 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "update_nodes",
-      "description": "Change properties of existing layers. Each update is {id, ...any create_nodes property except children}. Use 'patch' for raw model fields. On an instance, `componentId` swaps it to another main component like the editor's swap (layers with the same name path keep their overrides; one undo step; the result lists `swapped`); pass a variant's id, not a component set's. Editing a typography property, a fill, stroke, effects or grids on a layer that links a style detaches that style (values kept) and the result warns; a typography variable (bind) also replaces a text style. Sizes are 0 to 100000 px and min must not exceed max; the whole call is refused if one update is invalid. Setting new `text` on a mixed-style text layer gives all of it the first character's style (like typing over a selection in Figma); pass `spans` to style parts of it. `svg` is only read by create_nodes.",
+      "description": "Change properties of existing layers. Each update is {id, ...any create_nodes property except children}. Use 'patch' for raw model fields. On an instance, `componentId` swaps it to another main component like the editor's swap (layers with the same name path keep their overrides; one undo step; the result lists `swapped`); pass a variant's id, not a component set's. Changing the fill, stroke, effects or grids of a layer that links a style detaches that style (values kept) and the result warns; a typography variable (bind) also replaces a text style (warns too), while a plain typography value (fontSize, fontWeight, ...) keeps the text style link (textStyle: null detaches it). Sizes are 0 to 100000 px and min must not exceed max; the whole call is refused if one update is invalid. Setting new `text` on a mixed-style text layer gives all of it the first character's style (like typing over a selection in Figma); pass `spans` to style parts of it. `svg` is only read by create_nodes.",
       "input_schema": { "type": "object", "properties": { "updates": { "type": "array", "items": update_item } }, "required": ["updates"] }
     },
     {
@@ -1377,7 +1377,9 @@ pub fn execute(e: &mut Engine, tool: &str, input: &Value) -> Result<Value, Strin
         .collect();
       let mut r = json!({ "fixed": fixed });
       if !skipped.is_empty() {
-        r["skipped"] = json!(skipped);
+        // A big page can have hundreds: list the first 50 and count them all.
+        r["skippedCount"] = json!(skipped.len());
+        r["skipped"] = json!(skipped.iter().take(50).collect::<Vec<_>>());
       }
       Ok(r)
     }
@@ -1670,6 +1672,8 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
       })
       .map_err(|m| cx.err("device", m))?;
     }
+    // The swap itself changes the style links (the new main has its own): judge only the edit.
+    let edited = e.doc.get(id).cloned();
     if let Some(to) = swap_to {
       let from = before.instance.as_ref().map(|i| i.component_id.clone()).unwrap_or_default();
       e.dispatch_inner(Command::SwapComponent {
@@ -1678,7 +1682,7 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
       })?;
       swapped.push(json!({ "id": id, "from": from, "to": to }));
     }
-    if let Some(now) = e.doc.get(id) {
+    if let Some(now) = edited.as_ref() {
       for w in detached_styles(&e.doc, &before, now, u) {
         cx.warn(format!("{id}: {w}"));
       }
@@ -1820,7 +1824,10 @@ fn swap_target(cx: &mut Ctx, doc: &Document, before: &Node, spec: &Value) -> Res
   }
   let name = |id: &str| doc.get(id).map(|c| c.name.clone()).unwrap_or_default();
   let host = crate::components::enclosing_component(doc, &before.id);
-  if to == before.id || doc.is_ancestor(&to, &before.id) || crate::components::would_nest(doc, &to, &host) {
+  // (`swap_component` does nothing for a layer inside an instance when the new main contains the
+  // outer instance's own main.)
+  let recursive = before.master_id.as_ref().is_some_and(|k| doc.is_ancestor(&to, k));
+  if to == before.id || recursive || doc.is_ancestor(&to, &before.id) || crate::components::would_nest(doc, &to, &host) {
     return Err(cx.err(
       "componentId",
       format!(

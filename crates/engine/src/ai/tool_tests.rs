@@ -3646,10 +3646,87 @@ mod r19d {
       .dispatch(ai("update_nodes", json!({ "updates": [{ "id": inner, "componentId": host }] })))
       .unwrap_err();
     assert!(err.contains("can't swap to Host"), "{err}");
+    // A nested instance inside an instance of Host can't become Host either (it used to answer
+    // `swapped` and change nothing).
+    run(&mut e, "create_instance", json!({ "componentId": host, "x": 1500 }));
+    let outer = run(&mut e, "create_instance", json!({ "componentId": host, "x": 1700 }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let nested = e.doc.get(&outer).unwrap().children[0].clone();
+    let err = e
+      .dispatch(ai("update_nodes", json!({ "updates": [{ "id": nested, "componentId": host }] })))
+      .unwrap_err();
+    assert!(err.contains("can't swap to Host"), "{err}");
     // A non-instance only warns.
     let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": frame, "componentId": b }] }));
     assert!(warnings(&r).contains("componentId only swaps instances; ignored"), "{r}");
     assert!(e.doc.get(&frame).unwrap().instance.is_none());
+  }
+
+  #[test]
+  fn a_swap_between_styled_mains_gives_no_detached_warning() {
+    let mut e = engine();
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Red", "color": "#EF4444" }, { "name": "Blue", "color": "#3B82F6" }] }),
+    );
+    let a = one(
+      &mut e,
+      json!({ "type": "component", "name": "A", "width": 20, "height": 20, "fillStyle": "Red" }),
+    );
+    let b = one(
+      &mut e,
+      json!({ "type": "component", "name": "B", "x": 100, "width": 20, "height": 20, "fillStyle": "Blue" }),
+    );
+    let c = one(
+      &mut e,
+      json!({ "type": "component", "name": "C", "x": 200, "width": 20, "height": 20, "fill": "#00FF00" }),
+    );
+    let inst = run(&mut e, "create_instance", json!({ "componentId": a, "x": 400 }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    for to in [&b, &c] {
+      let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": inst, "componentId": to }] }));
+      assert!(r["swapped"].is_array(), "{r}");
+      assert!(r.get("warnings").is_none(), "{r}");
+    }
+  }
+
+  #[test]
+  fn set_reports_the_requested_value_even_when_it_matches_the_main() {
+    let mut e = engine();
+    let comp = one(
+      &mut e,
+      json!({ "type": "component", "name": "Row", "width": 200, "height": 40, "children": [
+        { "type": "text", "name": "T", "text": "Same" } ] }),
+    );
+    let inst = run(&mut e, "create_instance", json!({ "componentId": comp, "x": 400 }))["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let label = child_named(&e, &comp, "T");
+    run(
+      &mut e,
+      "set_component_props",
+      json!({ "ops": [{ "op": "add", "component": comp, "kind": "text", "name": "Title", "bind": label }] }),
+    );
+    let set = run(
+      &mut e,
+      "set_component_props",
+      json!({ "ops": [{ "op": "set", "instance": inst, "prop": "Title", "value": "Same" }] }),
+    );
+    assert_eq!(set["results"][0]["value"], "Same", "{set}");
+  }
+
+  #[test]
+  fn fix_issues_counts_what_it_skipped() {
+    let mut e = engine();
+    bound_logout(&mut e);
+    let r = run(&mut e, "fix_issues", json!({ "kinds": ["lowContrast"] }));
+    assert_eq!(r["skippedCount"], 1, "{r}");
   }
 
   #[test]
