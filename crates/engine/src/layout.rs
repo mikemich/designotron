@@ -407,8 +407,9 @@ fn share_wrapped(doc: &mut Document, m: &dyn TextMeasurer, ax: &Axes, items: &mu
     return;
   }
   for it in items.iter_mut().filter(|i| i.fill_main) {
-    let (lo, hi) = bounds(doc.get(&it.id).unwrap(), ax.horizontal);
-    it.line = lo.max(1.0).min(hi.max(1.0));
+    // The minimum (it wins over a smaller max, as in CSS and `share_main`).
+    let (lo, _) = bounds(doc.get(&it.id).unwrap(), ax.horizontal);
+    it.line = lo.max(1.0);
   }
   let rows = wrap_rows(items, inner, ax.gap);
   for r in rows {

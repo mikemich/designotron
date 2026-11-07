@@ -253,18 +253,23 @@ fn restored_name(doc: &Document, users: &[NodeId], source_name: &str) -> String 
 /// Rebuilds an instance's children from its main component and re-applies overrides.
 /// Nested instances swapped through it are rebuilt from the component they were swapped to.
 pub fn sync_instance(doc: &mut Document, inst_id: &str, gen: &mut IdGen) {
-  let Some(info) = doc.get(inst_id).and_then(|n| n.instance.clone()) else {
+  let Some(info) = doc.get(inst_id).and_then(|n| n.instance.as_ref()) else {
     return;
   };
   if doc.get(&info.component_id).is_none() {
     return;
   }
+  // Overrides of layers the main no longer has go first, so the copies `build` makes of swap
+  // records are the cleaned ones.
+  drop_dangling_overrides(doc, inst_id);
+  let Some(info) = doc.get(inst_id).and_then(|n| n.instance.clone()) else {
+    return;
+  };
   // Reuse ids of existing copies so selection (and overrides keyed by them) survive. The old
   // copies are removed by `build` once it has what it needs from them.
   let mut reuse = Reuse::new(doc, inst_id);
   build(doc, gen, &mut reuse, inst_id, &info, &info.overrides, &Vec::new(), 0);
   reuse.remove_old(doc, &HashSet::new());
-  drop_dangling_overrides(doc, inst_id);
 }
 
 /// Before variables are removed: every layer inside an instance that is bound to one of them
@@ -284,9 +289,46 @@ pub fn keep_values_of_removed(doc: &mut Document, removed: &HashSet<String>) {
       if props.is_empty() {
         return None;
       }
+      // Only layers inside an instance record anything.
+      if n.master_id.is_none() && n.instance.is_none() {
+        return None;
+      }
+      let master = match &n.master_id {
+        Some(m) => doc.get(m),
+        None => n.instance.as_ref().and_then(|i| doc.get(&i.component_id)),
+      };
+      // "Unbound here" stays only where the main binds the property to a variable that stays.
+      let main_keeps = |p: &str| master.and_then(|mn| mn.bindings.get(p)).is_some_and(|v| !removed.contains(v));
+      // A colour the main shows too needs no override: the main keeps its own value.
+      if let Some(mn) = master {
+        let same = props.iter().all(|p| {
+          !main_keeps(p)
+            && match p.as_str() {
+              "fill" => mn.fills == n.fills,
+              "stroke" => mn.strokes == n.strokes,
+              _ => false,
+            }
+        });
+        if same {
+          return None;
+        }
+      }
       let mut p = crate::variables::detach_patch(n, &props);
       if let Value::Object(m) = &mut p {
-        m.remove("bindings");
+        if let Some(mn) = master {
+          if mn.fills == n.fills {
+            m.remove("fills");
+          }
+          if mn.strokes == n.strokes {
+            m.remove("strokes");
+          }
+        }
+        if let Some(Value::Object(b)) = m.get_mut("bindings") {
+          b.retain(|k, _| main_keeps(k));
+          if b.is_empty() {
+            m.remove("bindings");
+          }
+        }
       }
       Some((id.clone(), p))
     })
@@ -310,7 +352,24 @@ pub fn keep_values_of_removed(doc: &mut Document, removed: &HashSet<String>) {
     }
   }
   for (id, p) in patches {
-    record_override(doc, &id, &p);
+    // The common case (a colour or border on a layer of a plain instance, no component property
+    // behind it) goes straight into the override: the value is known to differ from the main's.
+    let plain = p
+      .as_object()
+      .is_some_and(|m| m.keys().all(|k| matches!(k.as_str(), "fills" | "strokes" | "bindings")));
+    let fast = plain.then(|| doc.get(&id)).flatten().and_then(|n| {
+      let mid = n.master_id.clone().filter(|_| n.prop_refs.is_none())?;
+      let scopes = scope_chain(doc, &id);
+      (scopes.len() == 1).then(|| (scopes[0].clone(), mid))
+    });
+    match fast {
+      Some((scope, mid)) => {
+        if let Some(info) = doc.get_mut(&scope).and_then(|n| n.instance.as_mut()) {
+          merge_override(info.overrides.entry(mid).or_insert_with(empty), &patch::sanitize(&p));
+        }
+      }
+      None => record_override(doc, &id, &p),
+    }
   }
 }
 
@@ -344,9 +403,16 @@ fn drop_bindings(o: &mut Value, removed: &HashSet<String>) {
 /// Overrides keyed by a layer the main component (or, in a swap record, the swapped-to
 /// component) no longer has. The instance is only written when something goes.
 fn dangling_overrides(doc: &Document, overrides: &BTreeMap<NodeId, Value>, component: &str) -> Option<BTreeMap<NodeId, Value>> {
+  let has_swap = overrides.values().any(|o| o.get(SWAP_KEY).is_some());
+  if !has_swap && overrides.keys().all(|k| k == ROOT_KEY) {
+    return None;
+  }
   let live: HashSet<NodeId> = doc.subtree(component).into_iter().collect();
+  let dangling = overrides.keys().any(|k| k != ROOT_KEY && !live.contains(k));
+  if !dangling && !has_swap {
+    return None;
+  }
   let mut out = overrides.clone();
-  let before = out.clone();
   out.retain(|k, _| k == ROOT_KEY || live.contains(k));
   for o in out.values_mut() {
     let Some(swap) = o.get_mut(SWAP_KEY) else { continue };
@@ -366,7 +432,7 @@ fn dangling_overrides(doc: &Document, overrides: &BTreeMap<NodeId, Value>, compo
       swap["overrides"] = serde_json::to_value(kept).unwrap_or(Value::Null);
     }
   }
-  (out != before).then_some(out)
+  (out != *overrides).then_some(out)
 }
 
 fn drop_dangling_overrides(doc: &mut Document, inst_id: &str) {
@@ -5007,5 +5073,117 @@ mod r19a_tests {
     let before = overrides(&e, &inst);
     run(&mut e, "delete_nodes", json!({ "ids": [comp] }));
     assert_eq!(overrides(&e, &inst), before);
+  }
+
+  fn two_vars(e: &mut Engine) {
+    run(
+      e,
+      "define_variables",
+      json!({ "collection": "Theme", "modes": ["Light", "Dark"], "variables": [
+        { "name": "text", "values": { "Light": "#222222", "Dark": "#EEEEEE" } },
+        { "name": "muted", "values": { "Light": "#6B7280", "Dark": "#999999" } } ] }),
+    );
+  }
+
+  /// The main binds Body's fill to Theme/muted (kept), the instance rebinds it to Theme/text,
+  /// and Theme/text is deleted: the instance keeps showing text's colour after main edits.
+  #[test]
+  fn probe_override_binding_over_a_kept_main_binding() {
+    let mut e = engine();
+    two_vars(&mut e);
+    let comp = one(
+      &mut e,
+      json!({ "type": "component", "name": "Card", "width": 200, "height": 100, "children": [
+        { "type": "rectangle", "name": "Body", "width": 50, "height": 10, "fill": "#000000", "bind": { "fill": "Theme/muted" } } ] }),
+    );
+    let inst = instance_of(&mut e, &comp, 400.0);
+    let body = child_named(&e, &inst, "Body");
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": body, "bind": { "fill": "Theme/text" } }] }),
+    );
+    assert_eq!(fill_of(&e, &body), "#222222");
+    delete_text(&mut e);
+    assert_eq!(fill_of(&e, &body), "#222222");
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": comp, "cornerRadius": 4 }] }));
+    assert_eq!(fill_of(&e, &body), "#222222", "the value it showed stays");
+    // Still bound to muted? No: the override says unbound here.
+    assert!(e.doc.get(&body).unwrap().bindings.is_empty());
+  }
+
+  /// (engine, swapped-to component, outer main, top instance, nested instance swapped through it)
+  fn swapped_setup() -> (Engine, String, String, String, String) {
+    let mut e = engine();
+    two_vars(&mut e);
+    let inner = one(
+      &mut e,
+      json!({ "type": "component", "name": "Inner", "x": 900, "width": 80, "height": 40, "children": [
+        { "type": "rectangle", "name": "Dot", "width": 10, "height": 10, "fill": "#FF0000" } ] }),
+    );
+    let inner2 = one(
+      &mut e,
+      json!({ "type": "component", "name": "Inner2", "x": 1100, "width": 80, "height": 40, "children": [
+        { "type": "rectangle", "name": "Dot", "width": 10, "height": 10, "fill": "#00FF00" },
+        { "type": "text", "name": "Label", "y": 20, "text": "Hi" } ] }),
+    );
+    let outer = one(
+      &mut e,
+      json!({ "type": "component", "name": "Outer", "x": 900, "y": 200, "width": 200, "height": 100 }),
+    );
+    run(&mut e, "create_instance", json!({ "componentId": inner, "parentId": outer }));
+    let top = instance_of(&mut e, &outer, 1400.0);
+    let nested = e.doc.get(&top).unwrap().children[0].clone();
+    e.dispatch(Command::SwapComponent {
+      id: nested,
+      component_id: inner2.clone(),
+    })
+    .unwrap();
+    let nested = e.doc.get(&top).unwrap().children[0].clone();
+    (e, inner2, outer, top, nested)
+  }
+
+  #[test]
+  fn probe_swapped_nested_keeps_colour() {
+    let (mut e, inner2, outer, top, nested) = swapped_setup();
+    let dot = child_named(&e, &nested, "Dot");
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": dot, "bind": { "fill": "Theme/text" } }] }),
+    );
+    assert_eq!(fill_of(&e, &dot), "#222222");
+    delete_text(&mut e);
+    let dot = child_named(&e, &nested, "Dot");
+    assert_eq!(fill_of(&e, &dot), "#222222");
+    assert!(!overrides(&e, &top).to_string().contains("\"bindings\""), "{}", overrides(&e, &top));
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": inner2, "cornerRadius": 4 }] }));
+    let dot = child_named(&e, &nested, "Dot");
+    assert_eq!(fill_of(&e, &dot), "#222222");
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": outer, "cornerRadius": 4 }] }));
+    let nested = e.doc.get(&top).unwrap().children[0].clone();
+    let dot = child_named(&e, &nested, "Dot");
+    assert_eq!(fill_of(&e, &dot), "#222222");
+  }
+
+  #[test]
+  fn probe_swapped_nested_dangling() {
+    let (mut e, inner2, _outer, top, nested) = swapped_setup();
+    let lab = child_named(&e, &nested, "Label");
+    let dot = child_named(&e, &nested, "Dot");
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": lab, "text": "Yo" }, { "id": dot, "fill": "#123456" }] }),
+    );
+    let main_label = child_named(&e, &inner2, "Label");
+    run(&mut e, "delete_nodes", json!({ "ids": [main_label] }));
+    let nested = e.doc.get(&top).unwrap().children[0].clone();
+    let (t, n) = (overrides(&e, &top).to_string(), overrides(&e, &nested).to_string());
+    assert!(!t.contains(&main_label), "top swap record keeps the dangling key: {t}");
+    assert!(t.contains("#123456"), "the live override stays: {t}");
+    assert!(!n.contains(&main_label), "nested mirror keeps the dangling key: {n}");
+    e.dispatch(Command::Undo).unwrap();
+    assert!(overrides(&e, &top).to_string().contains(&main_label));
   }
 }

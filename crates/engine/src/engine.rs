@@ -2437,8 +2437,8 @@ impl Engine {
         }
         crate::variables::validate(&collections, &self.doc.variables)?;
         // Layers inside instances keep what they show: record it before the bindings go.
-        let kept: std::collections::HashSet<&str> = collections.iter().flat_map(|c| c.variables.iter().map(|v| v.id.as_str())).collect();
-        let removed: std::collections::HashSet<String> = self
+        let kept: HashSet<&str> = collections.iter().flat_map(|c| c.variables.iter().map(|v| v.id.as_str())).collect();
+        let removed: HashSet<String> = self
           .doc
           .variables
           .iter()
