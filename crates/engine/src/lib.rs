@@ -34,6 +34,8 @@ pub mod paths;
 pub mod persist;
 pub mod props;
 pub mod render;
+#[cfg(test)]
+mod rotated_flow_tests;
 pub mod shapes;
 pub mod svg_import;
 pub mod text;

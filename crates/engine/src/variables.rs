@@ -832,9 +832,25 @@ fn css_value(doc: &Document, c: &Collection, v: &Variable, mode: &str) -> Option
   })
 }
 
+/// CSS name of the first number variable in the document, for the examples in the exported
+/// docs (`None` when there isn't one).
+pub fn first_number_token(doc: &Document) -> Option<String> {
+  doc
+    .variables
+    .iter()
+    .find_map(|c| c.variables.iter().find(|v| v.kind == VarKind::Number).map(|v| css_name(c, v)))
+}
+
 /// `:root` block for default modes and a `[data-<collection>="<mode>"]` block per other mode.
 pub fn tokens_css(doc: &Document) -> String {
-  let mut out = String::from("/* Design tokens generated from Designotron variables.\n   Number tokens are unitless, like Figma's: use calc(var(--space-8) * 1px) for lengths. */\n:root {\n");
+  let mut out = String::from("/* Design tokens generated from Designotron variables.\n");
+  match first_number_token(doc) {
+    Some(name) => out.push_str(&format!(
+      "   Number tokens are unitless, like Figma's: use calc(var({name}) * 1px) for lengths. */\n"
+    )),
+    None => out.push_str("   Number tokens are unitless, like Figma's: multiply by 1px to use one as a length. */\n"),
+  }
+  out.push_str(":root {\n");
   for c in &doc.variables {
     let Some(default) = c.modes.first() else { continue };
     for v in &c.variables {

@@ -168,7 +168,19 @@ fn export_scope(id: &str, children_only: bool, hidden: &[NodeId]) -> String {
   s
 }
 
+/// A layer's SVG in its parent's space: bounds from its own transform only. Code export uses it
+/// for vectors, because the ancestors' rotation is applied by their own CSS transform.
+pub fn export_svg_local(doc: &Document, id: &str, m: &dyn TextMeasurer) -> String {
+  let Some(n) = doc.get(id) else { return String::new() };
+  let b = doc.local_matrix(n).bounds_of(n.width, n.height);
+  export_svg_with(doc, id, m, b, Mat::translate(-b.x, -b.y), &[])
+}
+
 fn export_svg_in(doc: &Document, id: &str, m: &dyn TextMeasurer, b: Rect, hidden: &[NodeId]) -> String {
+  export_svg_with(doc, id, m, b, Mat::translate(-b.x, -b.y).mul(&doc.parent_matrix(id)), hidden)
+}
+
+fn export_svg_with(doc: &Document, id: &str, m: &dyn TextMeasurer, b: Rect, place: Mat, hidden: &[NodeId]) -> String {
   let Some(n) = doc.get(id) else { return String::new() };
   let mut r = Renderer {
     doc,
@@ -183,7 +195,6 @@ fn export_svg_in(doc: &Document, id: &str, m: &dyn TextMeasurer, b: Rect, hidden
     scope: export_scope(id, false, hidden),
     bounds: HashMap::new(),
   };
-  let place = Mat::translate(-b.x, -b.y).mul(&doc.parent_matrix(id));
   let body = r.node(&n.id, Some(place));
   format!(
     "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\" fill=\"none\"><defs>{defs}</defs>{body}</svg>",

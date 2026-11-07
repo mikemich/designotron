@@ -377,6 +377,11 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           />
         </div>
       )}
+      {inFlow && nodes.some((n) => (n.sizingH === "fill" || n.sizingV === "fill") && n.rotation % 180 !== 0) && (
+        <div className="muted small" data-testid="fill-rotated-hint">
+          Fill doesn't apply while rotated; it acts as Fixed.
+        </div>
+      )}
       {(sizeable || isText) && <MinMaxFields nodes={nodes} ids={ids} />}
       <div className="grid2">
         <NumberField label={<RotateCw size={11} />} value={common(nodes, (n) => n.rotation)} suffix="°" onChange={(rotation) => update(ids, { rotation })} onScrubStart={begin} onScrubEnd={end} title="Rotation" />
