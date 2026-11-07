@@ -2,6 +2,7 @@
 //! through JSON to the web shell, the bridge, AI tools and `.dtron` files.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -9,29 +10,59 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 pub type NodeId = String;
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+/// Pointer-fast equality: two handles to the same allocation are equal without a deep compare.
+/// (std's `Arc` only does that for `T: Eq`, and these types hold floats.)
+pub fn arc_eq<T: PartialEq>(a: &Arc<T>, b: &Arc<T>) -> bool {
+  Arc::ptr_eq(a, b) || **a == **b
+}
+
+/// [`arc_eq`] over two lists, in order.
+pub fn arcs_eq<T: PartialEq>(a: &[Arc<T>], b: &[Arc<T>]) -> bool {
+  a.len() == b.len() && a.iter().zip(b).all(|(x, y)| arc_eq(x, y))
+}
+
+/// The document. The shell (pages, styles, variables, comments) sits behind `Arc`s, like the
+/// nodes, so an undo step's two copies share everything an edit didn't touch. Read through
+/// the fields as usual; edit through `page_mut`, `pages_mut`, `styles_mut`, `comments_mut`,
+/// `variables::coll_mut` and `variables::var_mut` (all `Arc::make_mut`: they copy only the part
+/// being changed). Serde writes the same JSON as the plain types.
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Document {
   pub id: String,
   pub name: String,
   #[serde(default = "schema_version")]
   pub schema: u32,
-  pub pages: Vec<Page>,
+  pub pages: Vec<Arc<Page>>,
   /// Persistent map: clones share structure, so undo snapshots and diffs are cheap. Nodes sit
   /// behind an `Arc` so a copied B-tree leaf shares them instead of cloning ~1.4 KB each; edit
   /// through `get_mut` / `update_where` (`Arc::make_mut`). Serde writes an `Arc<Node>` as the node.
   pub nodes: imbl::OrdMap<NodeId, std::sync::Arc<Node>>,
   #[serde(default)]
-  pub styles: Styles,
+  pub styles: Arc<Styles>,
   /// Variable collections (tokens with modes).
   #[serde(default)]
-  pub variables: Vec<crate::variables::Collection>,
+  pub variables: Vec<Arc<crate::variables::Collection>>,
   /// Comment threads pinned to the canvas (keyed by id so collaborators merge cleanly).
   #[serde(default)]
-  pub comments: BTreeMap<String, Comment>,
+  pub comments: Arc<BTreeMap<String, Comment>>,
   /// Layer-name counts behind `next_name`; derived from `nodes`, so never saved or compared.
   #[serde(skip)]
   pub(crate) names: crate::doc::NameCache,
+}
+
+impl PartialEq for Document {
+  /// Same as comparing every field, but a shared `Arc` short-circuits (this runs on every command).
+  fn eq(&self, o: &Self) -> bool {
+    self.id == o.id
+      && self.name == o.name
+      && self.schema == o.schema
+      && arcs_eq(&self.pages, &o.pages)
+      && self.nodes == o.nodes
+      && arc_eq(&self.styles, &o.styles)
+      && arcs_eq(&self.variables, &o.variables)
+      && arc_eq(&self.comments, &o.comments)
+  }
 }
 
 /// A comment thread: a pin on a page, optionally attached to a layer so it follows it.

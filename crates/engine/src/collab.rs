@@ -19,7 +19,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::clipboard;
-use crate::model::{Comment, Document, Node, NodeId};
+use crate::model::{arc_eq, arcs_eq, ColorStyle, Comment, Document, EffectStyle, GridStyle, Node, NodeId, TextStyle};
 use crate::variables::{Collection, Variable};
 
 /// Changes from `base` to `doc` as JSON: added nodes in full (`nodes`), changed ones as
@@ -44,7 +44,7 @@ pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> 
     }
   }
   let mut comments = Map::new();
-  for (id, c) in &doc.comments {
+  for (id, c) in doc.comments.iter() {
     if base.comments.get(id) != Some(c) {
       comments.insert(id.clone(), serde_json::to_value(c).unwrap_or(Value::Null));
     }
@@ -207,10 +207,30 @@ pub fn legacy(d: &Value, doc: &Document) -> Option<Value> {
   Some(out)
 }
 
+/// The collections without their variables (new allocations; the variables travel separately).
+fn bare_collections(l: &[Arc<Collection>]) -> Vec<Arc<Collection>> {
+  l.iter()
+    .map(|c| {
+      Arc::new(Collection {
+        id: c.id.clone(),
+        name: c.name.clone(),
+        modes: c.modes.clone(),
+        variables: vec![],
+      })
+    })
+    .collect()
+}
+
 /// Adds the per-id changes of pages, styles and variables from `base` to `doc` to `o`.
 fn granular_parts(base: &Document, doc: &Document, o: &mut Map<String, Value>) {
   // Sent on every flush (every frame of a drag): comparing is cheap, serialising is not.
-  if base.pages == doc.pages && base.styles == doc.styles && base.variables == doc.variables {
+  // (Shared `Arc`s compare equal without a look inside.)
+  let (pages_same, styles_same, vars_same) = (
+    arcs_eq(&base.pages, &doc.pages),
+    arc_eq(&base.styles, &doc.styles),
+    arcs_eq(&base.variables, &doc.variables),
+  );
+  if pages_same && styles_same && vars_same {
     return;
   }
   let mut put = |k: &str, d: Option<Value>| {
@@ -218,42 +238,37 @@ fn granular_parts(base: &Document, doc: &Document, o: &mut Map<String, Value>) {
       o.insert(k.into(), d);
     }
   };
-  if base.pages != doc.pages {
+  if !pages_same {
     put("pageChanges", ListDelta::of(&base.pages, &doc.pages, |p| &p.id, &[]));
   }
-  if base.styles.colors != doc.styles.colors {
+  if !styles_same && base.styles.colors != doc.styles.colors {
     put(
       "colorStyles",
       ListDelta::of(&base.styles.colors, &doc.styles.colors, |s| &s.id, &[]),
     );
   }
-  if base.styles.texts != doc.styles.texts {
+  if !styles_same && base.styles.texts != doc.styles.texts {
     put("textStyles", ListDelta::of(&base.styles.texts, &doc.styles.texts, |s| &s.id, &[]));
   }
-  if base.styles.effects != doc.styles.effects {
+  if !styles_same && base.styles.effects != doc.styles.effects {
     put(
       "effectStyles",
       ListDelta::of(&base.styles.effects, &doc.styles.effects, |s| &s.id, &[]),
     );
   }
-  if base.styles.grids != doc.styles.grids {
+  if !styles_same && base.styles.grids != doc.styles.grids {
     put("gridStyles", ListDelta::of(&base.styles.grids, &doc.styles.grids, |s| &s.id, &[]));
   }
-  if base.variables == doc.variables {
+  if vars_same {
     return;
   }
   // Collections without their variables; a new collection travels whole, with them.
-  let bare = |l: &[Collection]| -> Vec<Collection> {
-    l.iter()
-      .map(|c| Collection {
-        id: c.id.clone(),
-        name: c.name.clone(),
-        modes: c.modes.clone(),
-        variables: vec![],
-      })
-      .collect()
-  };
-  if let Some(mut d) = ListDelta::of(&bare(&base.variables), &bare(&doc.variables), |c| &c.id, &[]) {
+  if let Some(mut d) = ListDelta::of(
+    &bare_collections(&base.variables),
+    &bare_collections(&doc.variables),
+    |c| &c.id,
+    &[],
+  ) {
     if let Some(add) = d.get_mut("add").and_then(|a| a.as_object_mut()) {
       for c in &doc.variables {
         if let Some(slot) = add.get_mut(&c.id) {
@@ -266,7 +281,7 @@ fn granular_parts(base: &Document, doc: &Document, o: &mut Map<String, Value>) {
   // Variables of collections both sides have; a mode's value is merged on its own.
   let mut vars = Map::new();
   for c in &doc.variables {
-    if let Some(b) = base.variables.iter().find(|b| b.id == c.id) {
+    if let Some(b) = base.variables.iter().find(|b| b.id == c.id).filter(|b| !arc_eq(b, c)) {
       if let Some(d) = ListDelta::of(&b.variables, &c.variables, |v| &v.id, &["values"]) {
         vars.insert(c.id.clone(), d);
       }
@@ -286,15 +301,35 @@ fn granular_parts(base: &Document, doc: &Document, o: &mut Map<String, Value>) {
 /// meanwhile) keep their relative order after it.
 struct ListDelta;
 
+/// Equality that lets two handles to one allocation skip the deep compare.
+trait Same {
+  fn same(&self, other: &Self) -> bool;
+}
+
+impl<T: PartialEq> Same for Arc<T> {
+  fn same(&self, other: &Self) -> bool {
+    arc_eq(self, other)
+  }
+}
+
+macro_rules! same_by_eq {
+  ($($t:ty),*) => {$(impl Same for $t {
+    fn same(&self, other: &Self) -> bool {
+      self == other
+    }
+  })*};
+}
+same_by_eq!(ColorStyle, TextStyle, EffectStyle, GridStyle);
+
 impl ListDelta {
-  fn of<T: Serialize + PartialEq>(base: &[T], new: &[T], id: impl Fn(&T) -> &String, nested: &[&str]) -> Option<Value> {
+  fn of<T: Serialize + Same>(base: &[T], new: &[T], id: impl Fn(&T) -> &String, nested: &[&str]) -> Option<Value> {
     let (mut add, mut patch) = (Map::new(), Map::new());
     for n in new {
       match base.iter().find(|b| id(b) == id(n)) {
         None => {
           add.insert(id(n).clone(), serde_json::to_value(n).unwrap_or(Value::Null));
         }
-        Some(b) if b == n => {}
+        Some(b) if b.same(n) => {}
         Some(b) => {
           let p = fields_patch(b, n, nested);
           if !p.is_empty() {
@@ -487,7 +522,7 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
   if let Some(c) = d.get("comments").and_then(|v| v.as_object()) {
     for (id, v) in c {
       let c: Comment = serde_json::from_value(v.clone()).map_err(|e| format!("bad comment {id}: {e}"))?;
-      doc.comments.insert(id.clone(), c);
+      doc.comments_mut().insert(id.clone(), c);
     }
   }
   for id in d
@@ -497,7 +532,7 @@ pub fn apply(doc: &mut Document, d: &Value) -> Result<(), String> {
     .flatten()
     .filter_map(|v| v.as_str())
   {
-    doc.comments.remove(id);
+    doc.comments_mut().remove(id);
   }
   if let Some(v) = d.get("name").and_then(|v| v.as_str()) {
     doc.name = v.to_string();
@@ -525,34 +560,34 @@ fn apply_granular(doc: &mut Document, d: &Value) -> Result<(), String> {
     ListDelta::apply(&mut doc.pages, c, |p| &p.id, &[], "page")?;
   }
   if let Some(c) = d.get("colorStyles") {
-    ListDelta::apply(&mut doc.styles.colors, c, |s| &s.id, &[], "colour style")?;
+    ListDelta::apply(&mut doc.styles_mut().colors, c, |s| &s.id, &[], "colour style")?;
   }
   if let Some(c) = d.get("textStyles") {
-    ListDelta::apply(&mut doc.styles.texts, c, |s| &s.id, &[], "text style")?;
+    ListDelta::apply(&mut doc.styles_mut().texts, c, |s| &s.id, &[], "text style")?;
   }
   if let Some(c) = d.get("effectStyles") {
-    ListDelta::apply(&mut doc.styles.effects, c, |s| &s.id, &[], "effect style")?;
+    ListDelta::apply(&mut doc.styles_mut().effects, c, |s| &s.id, &[], "effect style")?;
   }
   if let Some(c) = d.get("gridStyles") {
-    ListDelta::apply(&mut doc.styles.grids, c, |s| &s.id, &[], "grid style")?;
+    ListDelta::apply(&mut doc.styles_mut().grids, c, |s| &s.id, &[], "grid style")?;
   }
   if let Some(c) = d.get("collectionChanges") {
     // Collections change without their variables, which have their own changes below.
-    let kept: BTreeMap<String, Vec<Variable>> = doc.variables.iter().map(|c| (c.id.clone(), c.variables.clone())).collect();
-    for c in doc.variables.iter_mut() {
-      c.variables.clear();
-    }
-    let done = ListDelta::apply(&mut doc.variables, c, |c| &c.id, &[], "collection");
-    for c in doc.variables.iter_mut() {
-      if let Some(v) = kept.get(&c.id) {
-        c.variables = v.clone();
+    let old = std::mem::take(&mut doc.variables);
+    let mut work = bare_collections(&old);
+    let done = ListDelta::apply(&mut work, c, |c| &c.id, &[], "collection");
+    for c in work.iter_mut() {
+      if let Some(o) = old.iter().find(|o| o.id == c.id) {
+        Arc::make_mut(c).variables = o.variables.clone();
       }
     }
+    crate::variables::reshare(&mut work, &old);
+    doc.variables = work;
     done?;
   }
   if let Some(vars) = d.get("variableChanges").and_then(|v| v.as_object()) {
     for (id, c) in vars {
-      if let Some(coll) = doc.variables.iter_mut().find(|x| x.id == *id) {
+      if let Some(coll) = crate::variables::coll_mut(doc, id) {
         ListDelta::apply(&mut coll.variables, c, |v| &v.id, &["values"], "variable")?;
       }
     }
@@ -607,10 +642,13 @@ fn revert_inner(doc: &Document, from: &Document, to: &Document) -> Document {
     out.name = to.name.clone();
   }
   merge_list(&mut out.pages, &from.pages, &to.pages, |p| &p.id);
-  merge_list(&mut out.styles.colors, &from.styles.colors, &to.styles.colors, |s| &s.id);
-  merge_list(&mut out.styles.texts, &from.styles.texts, &to.styles.texts, |s| &s.id);
-  merge_list(&mut out.styles.effects, &from.styles.effects, &to.styles.effects, |s| &s.id);
-  merge_list(&mut out.styles.grids, &from.styles.grids, &to.styles.grids, |s| &s.id);
+  if !arc_eq(&from.styles, &to.styles) {
+    let styles = out.styles_mut();
+    merge_list(&mut styles.colors, &from.styles.colors, &to.styles.colors, |s| &s.id);
+    merge_list(&mut styles.texts, &from.styles.texts, &to.styles.texts, |s| &s.id);
+    merge_list(&mut styles.effects, &from.styles.effects, &to.styles.effects, |s| &s.id);
+    merge_list(&mut styles.grids, &from.styles.grids, &to.styles.grids, |s| &s.id);
+  }
   merge_collections(&mut out.variables, &from.variables, &to.variables);
   for id in from.comments.keys().chain(to.comments.keys()).collect::<BTreeSet<_>>() {
     let (f, t) = (from.comments.get(id), to.comments.get(id));
@@ -622,15 +660,15 @@ fn revert_inner(doc: &Document, from: &Document, to: &Document) -> Document {
       // messages or resolve stay, and a comment a peer deleted meanwhile stays deleted.
       (Some(f), Some(t), Some(cur)) => {
         if let Some(m) = merge_fields(cur, f, t, false) {
-          out.comments.insert(id.clone(), m);
+          out.comments_mut().insert(id.clone(), m);
         }
       }
       (Some(_), Some(_), None) => {}
       (_, Some(t), _) => {
-        out.comments.insert(id.clone(), t.clone());
+        out.comments_mut().insert(id.clone(), t.clone());
       }
       (_, None, _) => {
-        out.comments.remove(id);
+        out.comments_mut().remove(id);
       }
     }
   }
@@ -669,7 +707,8 @@ fn keep_tokens_in_use(out: &mut Document, doc: &Document) {
     ($list:ident) => {
       for (at, s) in doc.styles.$list.iter().enumerate() {
         if used.styles.contains(&s.id) && !out.styles.$list.iter().any(|o| o.id == s.id) {
-          out.styles.$list.insert(at.min(out.styles.$list.len()), s.clone());
+          let list = &mut out.styles_mut().$list;
+          list.insert(at.min(list.len()), s.clone());
         }
       }
     };
@@ -690,7 +729,7 @@ fn keep_tokens_in_use(out: &mut Document, doc: &Document) {
   let (need, whole) = {
     let mut by_id: HashMap<&str, &Variable> = HashMap::new();
     for v in out.variables.iter().chain(doc.variables.iter()).flat_map(|c| c.variables.iter()) {
-      by_id.entry(v.id.as_str()).or_insert(v);
+      by_id.entry(v.id.as_str()).or_insert(&**v);
     }
     let mut need: HashSet<String> = used.vars.clone();
     let mut queue: Vec<&str> = used.vars.iter().map(|s| s.as_str()).collect();
@@ -710,7 +749,7 @@ fn keep_tokens_in_use(out: &mut Document, doc: &Document) {
         }
       }
       // A dropped collection that is pinned, or holds a needed variable, returns whole.
-      let back: Vec<&Collection> = doc
+      let back: Vec<&Arc<Collection>> = doc
         .variables
         .iter()
         .filter(|c| !live_colls.contains(&c.id) && !whole.contains(&c.id))
@@ -732,6 +771,7 @@ fn keep_tokens_in_use(out: &mut Document, doc: &Document) {
     } else if let Some(o) = out.variables.iter_mut().find(|o| o.id == c.id) {
       for (vat, v) in c.variables.iter().enumerate() {
         if need.contains(&v.id) && !in_out.contains(&v.id) {
+          let o = Arc::make_mut(o);
           o.variables.insert(vat.min(o.variables.len()), v.clone());
         }
       }
@@ -800,8 +840,8 @@ fn merge_children(cur: Option<&Value>, from: Option<&Value>, to: Option<&Value>)
 /// Keyed lists (pages, styles): items the step added are removed, items it removed come back
 /// at their old place, and items it edited are merged field by field. Items others added are
 /// left alone.
-fn merge_list<T: Serialize + DeserializeOwned + Clone + PartialEq>(cur: &mut Vec<T>, from: &[T], to: &[T], id: impl Fn(&T) -> &String) {
-  if from == to {
+fn merge_list<T: Serialize + DeserializeOwned + Clone + Same>(cur: &mut Vec<T>, from: &[T], to: &[T], id: impl Fn(&T) -> &String) {
+  if from.len() == to.len() && from.iter().zip(to).all(|(f, t)| f.same(t)) {
     return;
   }
   let at = |list: &[T], k: &String| list.iter().position(|x| id(x) == k);
@@ -814,7 +854,7 @@ fn merge_list<T: Serialize + DeserializeOwned + Clone + PartialEq>(cur: &mut Vec
   for (i, t) in to.iter().enumerate() {
     match (at(from, id(t)), at(cur, id(t))) {
       (None, None) => cur.insert(i.min(cur.len()), t.clone()),
-      (Some(fi), Some(ci)) if from[fi] != *t => {
+      (Some(fi), Some(ci)) if !from[fi].same(t) => {
         if let Some(m) = merge_fields(&cur[ci], &from[fi], t, true) {
           cur[ci] = m;
         }
@@ -845,13 +885,13 @@ fn restore_order<T: Clone>(cur: &mut [T], from: &[T], to: &[T], id: &impl Fn(&T)
 }
 
 /// Variable collections: like `merge_list`, with each collection's variables merged by id too.
-fn merge_collections(cur: &mut Vec<Collection>, from: &[Collection], to: &[Collection]) {
-  if from == to {
+fn merge_collections(cur: &mut Vec<Arc<Collection>>, from: &[Arc<Collection>], to: &[Arc<Collection>]) {
+  if arcs_eq(from, to) {
     return;
   }
   // Variables of collections that exist on every side are merged on their own; the
   // collections are then merged without them.
-  let mut merged: BTreeMap<String, Vec<Variable>> = BTreeMap::new();
+  let mut merged: BTreeMap<String, Vec<Arc<Variable>>> = BTreeMap::new();
   for t in to {
     if let (Some(f), Some(c)) = (from.iter().find(|f| f.id == t.id), cur.iter().find(|c| c.id == t.id)) {
       let mut vars = c.variables.clone();
@@ -859,11 +899,10 @@ fn merge_collections(cur: &mut Vec<Collection>, from: &[Collection], to: &[Colle
       merged.insert(t.id.clone(), vars);
     }
   }
-  let bare = |l: &[Collection]| -> Vec<Collection> { l.iter().cloned().map(|c| Collection { variables: vec![], ..c }).collect() };
-  let mut out = bare(cur);
-  merge_list(&mut out, &bare(from), &bare(to), |c| &c.id);
+  let mut out = bare_collections(cur);
+  merge_list(&mut out, &bare_collections(from), &bare_collections(to), |c| &c.id);
   for c in out.iter_mut() {
-    c.variables = match merged.remove(&c.id) {
+    Arc::make_mut(c).variables = match merged.remove(&c.id) {
       Some(v) => v,
       None => match (cur.iter().find(|x| x.id == c.id), to.iter().find(|x| x.id == c.id)) {
         (Some(x), _) => x.variables.clone(),
@@ -872,6 +911,7 @@ fn merge_collections(cur: &mut Vec<Collection>, from: &[Collection], to: &[Colle
       },
     };
   }
+  crate::variables::reshare(&mut out, cur);
   *cur = out;
 }
 
@@ -975,7 +1015,9 @@ pub fn repair(doc: &mut Document, before: &Document, touched: &[NodeId]) {
         fixed.push(id.clone());
       }
     }
-    page.children = fixed;
+    if page.children != fixed {
+      Arc::make_mut(page).children = fixed;
+    }
   }
 }
 
@@ -1492,7 +1534,7 @@ mod tests {
         id: "m".into(),
         name: "Mode".into(),
       }],
-      variables: vars,
+      variables: vars.into_iter().map(Arc::new).collect(),
     };
     let set_vars = |room: &mut Room, i: usize, vars: Vec<Variable>| {
       room.editors[i]
@@ -1626,7 +1668,7 @@ mod tests {
           name: m.to_string(),
         })
         .collect(),
-      variables: vars,
+      variables: vars.into_iter().map(Arc::new).collect(),
     }
   }
 
@@ -1646,19 +1688,19 @@ mod tests {
       .unwrap();
     sync(&mut room, 0);
     let edit = |room: &mut Room, i: usize, f: &dyn Fn(&mut Vec<Collection>)| {
-      let mut cs = room.editors[i].doc.variables.clone();
+      let mut cs = crate::variables::plain(&room.editors[i].doc.variables);
       f(&mut cs);
       room.editors[i].dispatch(Command::SetVariables { collections: cs }).unwrap();
     };
     // Different variables, and different modes of one variable, and a different collection.
     edit(&mut room, 0, &|cs| {
-      cs[0].variables[0].values.insert("m1".into(), json!(5.0));
-      cs[1].variables.push(variable("y", &[("m1", 7.0)]));
+      Arc::make_mut(&mut cs[0].variables[0]).values.insert("m1".into(), json!(5.0));
+      cs[1].variables.push(Arc::new(variable("y", &[("m1", 7.0)])));
     });
     edit(&mut room, 1, &|cs| {
-      cs[0].variables[0].values.insert("m2".into(), json!(6.0));
-      cs[0].variables[1].values.insert("m1".into(), json!(8.0));
-      cs[0].variables.push(variable("c", &[("m1", 3.0)]));
+      Arc::make_mut(&mut cs[0].variables[0]).values.insert("m2".into(), json!(6.0));
+      Arc::make_mut(&mut cs[0].variables[1]).values.insert("m1".into(), json!(8.0));
+      cs[0].variables.push(Arc::new(variable("c", &[("m1", 3.0)])));
     });
     concurrent(&mut room);
     assert_documents_converged(&room);
@@ -1670,7 +1712,7 @@ mod tests {
     assert_eq!(room.doc.variables[1].variables.len(), 2);
     // A removed mode value and a removed variable.
     edit(&mut room, 0, &|cs| {
-      cs[0].variables[0].values.remove("m2");
+      Arc::make_mut(&mut cs[0].variables[0]).values.remove("m2");
     });
     edit(&mut room, 1, &|cs| {
       cs[0].variables.retain(|v| v.id != "b");
@@ -1975,7 +2017,7 @@ mod tests {
   fn undo_of_a_variable_reorder_restores_the_order_and_keeps_a_peers_variable() {
     let ids = |room: &Room, i: usize| -> Vec<String> { room.editors[i].doc.variables[0].variables.iter().map(|v| v.id.clone()).collect() };
     let set = |room: &mut Room, i: usize, f: &dyn Fn(&mut Vec<Collection>)| {
-      let mut cs = room.editors[i].doc.variables.clone();
+      let mut cs = crate::variables::plain(&room.editors[i].doc.variables);
       f(&mut cs);
       room.editors[i].dispatch(Command::SetVariables { collections: cs }).unwrap();
       sync(room, i);
@@ -2010,7 +2052,7 @@ mod tests {
     // A peer adds a variable after my reorder: undoing mine keeps theirs.
     set(&mut room, 1, &|cs| {
       let n = cs.iter().position(|c| c.id == "c1").unwrap();
-      cs[n].variables.push(variable("c", &[("m1", 4.0)]));
+      cs[n].variables.push(Arc::new(variable("c", &[("m1", 4.0)])));
     });
     room.editors[0].dispatch(Command::Undo).unwrap();
     let c1 = room.editors[0].doc.variables.iter().find(|c| c.id == "c1").unwrap();

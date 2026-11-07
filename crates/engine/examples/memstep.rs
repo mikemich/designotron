@@ -176,7 +176,13 @@ fn vars300() {
     input: json!({ "nodes": [{ "type": "frame", "name": "Canvas", "width": 2000, "height": 1600, "children": kids }] }),
   })
   .unwrap();
-  let count: usize = serde_json::to_value(&e.doc.variables).unwrap().as_array().unwrap().iter().map(|c| c["variables"].as_array().unwrap().len()).sum();
+  let count: usize = serde_json::to_value(&e.doc.variables)
+    .unwrap()
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|c| c["variables"].as_array().unwrap().len())
+    .sum();
   println!("nodes {} variables {count}", e.doc.nodes.len());
   mark("built (with undo history)");
   let id = e.doc.nodes.values().find(|n| n.name == "Box 7").map(|n| n.id.clone()).unwrap();
@@ -192,14 +198,33 @@ fn vars300() {
     let values = cols[1]["variables"][50]["values"].as_object_mut().unwrap();
     let mode = values.keys().next().unwrap().clone();
     values.insert(mode, json!(format!("#{:06X}", 0x100000 + i)));
-    Command::SetVariables { collections: serde_json::from_value(cols).unwrap() }
+    Command::SetVariables {
+      collections: serde_json::from_value(cols).unwrap(),
+    }
   });
   println!("variable edit      {var:>8.1} KB/step");
-  let ren = per_step(&mut e, 40, |_, i| Command::RenamePage { id: page.clone(), name: format!("Page {i}") });
+  let ren = per_step(&mut e, 40, |_, i| Command::RenamePage {
+    id: page.clone(),
+    name: format!("Page {i}"),
+  });
   println!("page rename        {ren:>8.1} KB/step");
-  e.dispatch(Command::AddComment { page: None, x: 10.0, y: 10.0, node: None, text: "hi".into(), author: "a".into(), time: 1.0 }).unwrap();
+  e.dispatch(Command::AddComment {
+    page: None,
+    x: 10.0,
+    y: 10.0,
+    node: None,
+    text: "hi".into(),
+    author: "a".into(),
+    time: 1.0,
+  })
+  .unwrap();
   let cid = e.doc.comments.keys().next().unwrap().clone();
-  let rep = per_step(&mut e, 40, |_, i| Command::ReplyComment { id: cid.clone(), text: format!("reply {i}"), author: "b".into(), time: i as f64 });
+  let rep = per_step(&mut e, 40, |_, i| Command::ReplyComment {
+    id: cid.clone(),
+    text: format!("reply {i}"),
+    author: "b".into(),
+    time: i as f64,
+  });
   println!("comment reply      {rep:>8.1} KB/step");
 }
 

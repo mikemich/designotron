@@ -461,14 +461,14 @@ pub fn duplicate_page(doc: &mut Document, gen: &mut IdGen, id: &str) -> Result<S
   }
   doc.pages.insert(
     at + 1,
-    Page {
+    Arc::new(Page {
       id: new_id.clone(),
       name: format!("{} copy", src.name),
       children: roots,
-      background: src.background,
+      background: src.background.clone(),
       flow_start,
-      guides: src.guides,
-    },
+      guides: src.guides.clone(),
+    }),
   );
   Ok(new_id)
 }
@@ -508,7 +508,7 @@ pub fn move_to_page(doc: &mut Document, ids: &[NodeId], page: &str) -> Result<Ve
       }
     }
     let sub: HashSet<NodeId> = doc.subtree(&id).into_iter().collect();
-    for c in doc.comments.values_mut() {
+    for c in doc.comments_mut().values_mut() {
       if c.node.as_ref().is_some_and(|n| sub.contains(n)) {
         c.page = page.to_string();
       }

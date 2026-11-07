@@ -809,8 +809,8 @@ fn allowed_read_only(cmd: &Command) -> bool {
 
 /// `current`'s comments as they sit in `restored`: on their layer if it exists there, else a
 /// page comment at the position it had on the page; on the first page if its page is gone.
-fn carry_comments(current: &Document, restored: &Document) -> std::collections::BTreeMap<String, crate::model::Comment> {
-  let mut out = current.comments.clone();
+fn carry_comments(current: &Document, restored: &Document) -> Arc<std::collections::BTreeMap<String, crate::model::Comment>> {
+  let mut out = (*current.comments).clone();
   for c in out.values_mut() {
     if let Some(id) = c.node.clone() {
       if restored.get(&id).is_none() {
@@ -828,7 +828,10 @@ fn carry_comments(current: &Document, restored: &Document) -> std::collections::
       None => {}
     }
   }
-  out
+  if out == *current.comments {
+    return Arc::clone(&current.comments);
+  }
+  Arc::new(out)
 }
 
 /// Where a layer dropped into an auto layout frame goes: its index among the frame's children and
@@ -1856,14 +1859,14 @@ impl Engine {
       Command::AddPage { name } => {
         let id = self.gen.next("p_");
         let name = name.unwrap_or_else(|| format!("Page {}", self.doc.pages.len() + 1));
-        self.doc.pages.push(Page {
+        self.doc.pages.push(Arc::new(Page {
           id: id.clone(),
           name,
           children: vec![],
           background: "#F5F5F5".into(),
           flow_start: None,
           guides: Vec::new(),
-        });
+        }));
         self.page = id.clone();
         self.selection.clear();
         Ok(json!({ "id": id }))
@@ -1935,11 +1938,12 @@ impl Engine {
         for c in &mut collections {
           let modes: Vec<String> = c.modes.iter().map(|m| m.id.clone()).collect();
           for v in &mut c.variables {
-            v.values.retain(|m, _| modes.contains(m));
+            Arc::make_mut(v).values.retain(|m, _| modes.contains(m));
           }
         }
         crate::variables::validate(&collections, &self.doc.variables)?;
-        self.doc.variables = collections;
+        // Equal collections and variables keep their old allocations, so this step shares them.
+        self.doc.variables = crate::variables::intern(collections, &self.doc.variables);
         crate::variables::prune(&mut self.doc);
         Ok(json!({}))
       }
@@ -2020,7 +2024,7 @@ impl Engine {
           None => (x, y),
         };
         let id = self.gen.next("c_");
-        self.doc.comments.insert(
+        self.doc.comments_mut().insert(
           id.clone(),
           crate::model::Comment {
             id: id.clone(),
@@ -2035,16 +2039,16 @@ impl Engine {
         Ok(json!({ "id": id }))
       }
       Command::ReplyComment { id, text, author, time } => {
-        let c = self.doc.comments.get_mut(&id).ok_or("no such comment")?;
+        let c = self.doc.comments_mut().get_mut(&id).ok_or("no such comment")?;
         c.messages.push(crate::model::CommentMessage { author, text, time });
         Ok(json!({}))
       }
       Command::ResolveComment { id, resolved } => {
-        self.doc.comments.get_mut(&id).ok_or("no such comment")?.resolved = resolved;
+        self.doc.comments_mut().get_mut(&id).ok_or("no such comment")?.resolved = resolved;
         Ok(json!({}))
       }
       Command::DeleteComment { id } => {
-        self.doc.comments.remove(&id).ok_or("no such comment")?;
+        self.doc.comments_mut().remove(&id).ok_or("no such comment")?;
         Ok(json!({}))
       }
       Command::ImportFigma { file, images } => {
@@ -2836,7 +2840,7 @@ impl Engine {
       }
       Command::AddColorStyle { name, color } => {
         let id = self.gen.next("s_");
-        self.doc.styles.colors.push(ColorStyle {
+        self.doc.styles_mut().colors.push(ColorStyle {
           id: id.clone(),
           name,
           color: crate::color::normalize(&color),
@@ -2846,7 +2850,7 @@ impl Engine {
       Command::AddTextStyle { name, from } => {
         let t = self.doc.get(&from).and_then(|n| n.text.clone()).ok_or("select a text layer")?;
         let id = self.gen.next("s_");
-        self.doc.styles.texts.push(TextStyle {
+        self.doc.styles_mut().texts.push(TextStyle {
           id: id.clone(),
           name,
           font_family: t.font_family,
@@ -2861,7 +2865,13 @@ impl Engine {
         Ok(json!({ "id": id }))
       }
       Command::UpdateColorStyle { id, name, color } => {
-        let style = self.doc.styles.colors.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
+        let style = self
+          .doc
+          .styles_mut()
+          .colors
+          .iter_mut()
+          .find(|s| s.id == id)
+          .ok_or("no such style")?;
         if let Some(n) = name {
           style.name = n;
         }
@@ -2884,7 +2894,7 @@ impl Engine {
           return Err("the layer has no effects to save as a style".into());
         }
         let id = self.gen.next("s_");
-        self.doc.styles.effects.push(EffectStyle {
+        self.doc.styles_mut().effects.push(EffectStyle {
           id: id.clone(),
           name,
           effects,
@@ -2899,7 +2909,7 @@ impl Engine {
           return Err("the layer has no layout grids to save as a style".into());
         }
         let id = self.gen.next("s_");
-        self.doc.styles.grids.push(GridStyle {
+        self.doc.styles_mut().grids.push(GridStyle {
           id: id.clone(),
           name,
           grids,
@@ -2914,7 +2924,13 @@ impl Engine {
         effects,
         description,
       } => {
-        let style = self.doc.styles.effects.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
+        let style = self
+          .doc
+          .styles_mut()
+          .effects
+          .iter_mut()
+          .find(|s| s.id == id)
+          .ok_or("no such style")?;
         if let Some(v) = name {
           style.name = v;
         }
@@ -2936,7 +2952,7 @@ impl Engine {
         grids,
         description,
       } => {
-        let style = self.doc.styles.grids.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
+        let style = self.doc.styles_mut().grids.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
         if let Some(v) = name {
           style.name = v;
         }
@@ -2953,10 +2969,10 @@ impl Engine {
         Ok(json!({}))
       }
       Command::DeleteStyle { id } => {
-        self.doc.styles.colors.retain(|s| s.id != id);
-        self.doc.styles.texts.retain(|s| s.id != id);
-        self.doc.styles.effects.retain(|s| s.id != id);
-        self.doc.styles.grids.retain(|s| s.id != id);
+        self.doc.styles_mut().colors.retain(|s| s.id != id);
+        self.doc.styles_mut().texts.retain(|s| s.id != id);
+        self.doc.styles_mut().effects.retain(|s| s.id != id);
+        self.doc.styles_mut().grids.retain(|s| s.id != id);
         let is = |l: &Option<String>| l.as_deref() == Some(id.as_str());
         let uses = |n: &Node| is(&n.fill_style) || is(&n.text_style) || is(&n.stroke_style) || is(&n.effect_style) || is(&n.grid_style);
         self.doc.update_where(uses, |n| {
@@ -3003,7 +3019,7 @@ impl Engine {
         auto_line_height,
         letter_spacing,
       } => {
-        let style = self.doc.styles.texts.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
+        let style = self.doc.styles_mut().texts.iter_mut().find(|s| s.id == id).ok_or("no such style")?;
         if let Some(v) = name {
           style.name = v;
         }
@@ -5543,7 +5559,7 @@ mod tests {
       })
       .unwrap(),
     );
-    e.doc.styles.texts.push(crate::model::TextStyle {
+    e.doc.styles_mut().texts.push(crate::model::TextStyle {
       id: "ts1".into(),
       name: "H1".into(),
       font_family: "Inter".into(),

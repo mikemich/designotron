@@ -2,6 +2,7 @@
 //! bound to layer properties. Bound values are written into the layers after
 //! every change, so rendering, export and lint keep reading plain properties.
 
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -10,14 +11,78 @@ use serde_json::{json, Value};
 
 use crate::model::{Document, NodeId, Paint};
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Collection {
   pub id: String,
   pub name: String,
   /// The first mode is the default.
   pub modes: Vec<VarMode>,
-  pub variables: Vec<Variable>,
+  /// Behind `Arc`s so a copy of the collection shares the variables an edit didn't touch; edit
+  /// through [`var_mut`].
+  pub variables: Vec<Arc<Variable>>,
+}
+
+/// A collection, mutable (copied out of its `Arc` only when shared with an undo snapshot).
+pub fn coll_mut<'a>(doc: &'a mut Document, id: &str) -> Option<&'a mut Collection> {
+  doc.variables.iter_mut().find(|c| c.id == id).map(Arc::make_mut)
+}
+
+/// A variable of `coll`, mutable (copied out of its `Arc` only when shared).
+pub fn var_mut<'a>(coll: &'a mut Collection, id: &str) -> Option<&'a mut Variable> {
+  coll.variables.iter_mut().find(|v| v.id == id).map(Arc::make_mut)
+}
+
+/// Gives `new` (a freshly deserialised set, as the variables dialog sends) the `Arc`s of `old`
+/// wherever content is equal, matched by id and never by position, so a one-value edit leaves
+/// every other collection and variable shared with the undo history. Linear in the variable count.
+pub fn intern(new: Vec<Collection>, old: &[Arc<Collection>]) -> Vec<Arc<Collection>> {
+  let old_by_id: BTreeMap<&str, &Arc<Collection>> = old.iter().map(|c| (c.id.as_str(), c)).collect();
+  new
+    .into_iter()
+    .map(|mut c| {
+      let Some(prev) = old_by_id.get(c.id.as_str()) else {
+        return Arc::new(c);
+      };
+      let prev_vars: BTreeMap<&str, &Arc<Variable>> = prev.variables.iter().map(|v| (v.id.as_str(), v)).collect();
+      for v in &mut c.variables {
+        if let Some(p) = prev_vars.get(v.id.as_str()) {
+          if **p == *v {
+            *v = Arc::clone(p);
+          }
+        }
+      }
+      if c == ***prev {
+        Arc::clone(prev)
+      } else {
+        Arc::new(c)
+      }
+    })
+    .collect()
+}
+
+/// The collections as plain values (what `Command::SetVariables` carries). Cheap: the variables
+/// inside stay shared until edited through `Arc::make_mut`.
+pub fn plain(list: &[Arc<Collection>]) -> Vec<Collection> {
+  list.iter().map(|c| (**c).clone()).collect()
+}
+
+/// Swaps each collection of `new` for the `Arc` of the equal collection of `old` (by id), so a
+/// merge that changed one collection leaves the others shared with the undo history.
+pub fn reshare(new: &mut [Arc<Collection>], old: &[Arc<Collection>]) {
+  for c in new.iter_mut() {
+    if let Some(o) = old.iter().find(|o| o.id == c.id) {
+      if crate::model::arc_eq(o, c) {
+        *c = Arc::clone(o);
+      }
+    }
+  }
+}
+
+impl PartialEq for Collection {
+  fn eq(&self, o: &Self) -> bool {
+    self.id == o.id && self.name == o.name && self.modes == o.modes && crate::model::arcs_eq(&self.variables, &o.variables)
+  }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -128,7 +193,7 @@ pub fn bindable<'a>(doc: &'a Document, prop: &str) -> Vec<(&'a Collection, &'a V
   doc
     .variables
     .iter()
-    .flat_map(|c| c.variables.iter().map(move |v| (c, v)))
+    .flat_map(|c| c.variables.iter().map(move |v| (&**c, &**v)))
     .filter(|(_, v)| v.kind == kind && in_scope(v, prop))
     .collect()
 }
@@ -177,16 +242,16 @@ pub fn check_value(kind: VarKind, v: &Value) -> Result<Value, String> {
 /// variables this change touched (new, or with other values than in `previous`) are checked, so a
 /// cycle two peers made at once can't block every later edit of unrelated variables. A touched
 /// variable also needs values of its type and a name no other variable of its collection has.
-pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(), String> {
+pub fn validate(collections: &[impl Borrow<Collection>], previous: &[Arc<Collection>]) -> Result<(), String> {
   let mut edges: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
   let mut names: BTreeMap<&str, &str> = BTreeMap::new();
   let old: BTreeMap<&str, &Variable> = previous
     .iter()
     .flat_map(|c| c.variables.iter())
-    .map(|v| (v.id.as_str(), v))
+    .map(|v| (v.id.as_str(), &**v))
     .collect();
   let mut changed: Vec<&str> = Vec::new();
-  for v in collections.iter().flat_map(|c| c.variables.iter()) {
+  for v in collections.iter().flat_map(|c| c.borrow().variables.iter()).map(|v| &**v) {
     if let Some(bad) = v.scopes.iter().find(|s| !SCOPES.contains(&s.as_str())) {
       return Err(format!("unknown variable scope '{bad}'. Scopes: {}", SCOPES.join(", ")));
     }
@@ -209,7 +274,7 @@ pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(
         }
         let shown = collections
           .iter()
-          .flat_map(|c| &c.modes)
+          .flat_map(|c| &c.borrow().modes)
           .find(|m| m.id == *mode)
           .map_or(mode.as_str(), |m| m.name.as_str());
         // Stored numbers are real numbers: "12" would be accepted by `check_value` but never applied.
@@ -223,6 +288,7 @@ pub fn validate(collections: &[Collection], previous: &[Collection]) -> Result<(
     }
   }
   for c in collections {
+    let c = c.borrow();
     for (i, v) in c.variables.iter().enumerate() {
       let renamed = old.get(v.id.as_str()).is_none_or(|o| o.name != v.name);
       if renamed && c.variables.iter().enumerate().any(|(j, w)| j != i && w.name == v.name) {
@@ -728,7 +794,7 @@ mod tests {
         id: "m".into(),
         name: "m".into(),
       }],
-      variables: vars,
+      variables: vars.into_iter().map(Arc::new).collect(),
     }
   }
 
@@ -752,12 +818,14 @@ mod tests {
     })
     .unwrap();
     let mut cyc = ok;
-    cyc.variables[0].values.insert("m".into(), json!({ "alias": "b" }));
+    Arc::make_mut(&mut cyc.variables[0])
+      .values
+      .insert("m".into(), json!({ "alias": "b" }));
     let err = e.dispatch(Command::SetVariables { collections: vec![cyc] }).unwrap_err();
     assert!(err.contains("alias cycle"), "{err}");
     let mut selfref = coll(vec![var("a", VarKind::Number, json!({ "alias": "a" }))]);
     assert!(validate(std::slice::from_ref(&selfref), &[]).is_err());
-    selfref.variables[0].scopes = vec!["nope".into()];
+    Arc::make_mut(&mut selfref.variables[0]).scopes = vec!["nope".into()];
     assert!(validate(&[selfref], &[]).unwrap_err().contains("scope"));
     // The document keeps the last valid set.
     assert_eq!(e.doc.variables[0].variables[0].values["m"], json!(1));
@@ -833,7 +901,7 @@ mod tests {
       id: "m2".into(),
       name: "Big".into(),
     });
-    for v in &mut c.variables {
+    for v in c.variables.iter_mut().map(Arc::make_mut) {
       let big = match v.id.as_str() {
         "fam" => json!("Times"),
         "wt" => json!(900),
@@ -899,14 +967,14 @@ mod tests {
       var("x", VarKind::Number, json!(1)),
     ]);
     let mut next = bad.clone();
-    next.variables[2].values.insert("m".into(), json!(2));
-    assert!(validate(std::slice::from_ref(&next), std::slice::from_ref(&bad)).is_ok());
+    Arc::make_mut(&mut next.variables[2]).values.insert("m".into(), json!(2));
+    assert!(validate(std::slice::from_ref(&next), &[Arc::new(bad.clone())]).is_ok());
     // Touching one of the loop's variables is refused.
     let mut touched = bad.clone();
-    touched.variables[0].values.insert("m".into(), alias("b"));
-    touched.variables[1].values.insert("m".into(), alias("a"));
-    touched.variables[0].values.insert("m2".into(), json!(1));
-    assert!(validate(&[touched], std::slice::from_ref(&bad)).is_err());
+    Arc::make_mut(&mut touched.variables[0]).values.insert("m".into(), alias("b"));
+    Arc::make_mut(&mut touched.variables[1]).values.insert("m".into(), alias("a"));
+    Arc::make_mut(&mut touched.variables[0]).values.insert("m2".into(), json!(1));
+    assert!(validate(&[touched], &[Arc::new(bad.clone())]).is_err());
     // A chain `resolve` can't follow is refused; the longest one it can is fine.
     let chain = |n: usize| {
       let mut vars = vec![var("v0", VarKind::Number, json!(1))];
@@ -1003,7 +1071,7 @@ mod tests {
       named("b", "Dup", VarKind::Number, json!(1)),
       named("c", "Fine", VarKind::Number, json!(1)),
     ];
-    let old = vec![coll(bad.clone())];
+    let old = vec![Arc::new(coll(bad.clone()))];
     assert!(validate(&old, &[]).is_err());
     let mut edited = bad;
     edited[2].values.insert("m".into(), json!(2));

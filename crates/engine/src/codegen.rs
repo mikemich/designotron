@@ -3731,6 +3731,7 @@ mod tests {
   use crate::doc::{new_document, IdGen};
   use crate::model::{AutoLayout, Interaction};
   use crate::text::HeuristicMeasurer;
+  use std::sync::Arc;
 
   fn sample() -> Document {
     let mut gen = IdGen::new(11);
@@ -3796,18 +3797,18 @@ mod tests {
   #[test]
   fn project_start_skips_a_missing_flow_start() {
     let mut doc = sample();
-    doc.pages[0].flow_start = Some("gone".into());
+    doc.pages_iter_mut().next().unwrap().flow_start = Some("gone".into());
     let start = |doc: &Document| {
       let files = export_project(doc, &HeuristicMeasurer);
       files.iter().find(|f| f.path == "src/App.tsx").unwrap().content.clone()
     };
     assert!(start(&doc).contains("hash : \"Home\";"), "falls back to the first screen");
     // A later page's valid start wins over an earlier page's missing one.
-    let mut other = doc.pages[0].clone();
+    let mut other = (*doc.pages[0]).clone();
     other.id = "p2".into();
     other.children.clear();
     other.flow_start = Some("detail".into());
-    doc.pages.push(other);
+    doc.pages.push(Arc::new(other));
     assert!(start(&doc).contains("hash : \"ProductDetail\";"));
   }
 
@@ -4515,7 +4516,10 @@ mod tests {
       col("b", "theme!", &["Light", "Sepia"]),
       col("c", "主题", &["亮", "暗"]),
       col("d", "颜色", &["亮", "暗"]),
-    ];
+    ]
+    .into_iter()
+    .map(Arc::new)
+    .collect();
     let files = export_project(&doc, &HeuristicMeasurer);
     let ts = &files.iter().find(|f| f.path == "src/tokens.ts").unwrap().content;
     assert!(ts.contains("\"theme\": [\"light\", \"dark\"]"), "{ts}");
@@ -4544,28 +4548,28 @@ mod tests {
   fn style_names_are_unique_and_never_take_a_variables_property() {
     use crate::variables::{Collection, VarKind, VarMode, Variable};
     let mut doc = sample();
-    doc.variables.push(Collection {
+    doc.variables.push(Arc::new(Collection {
       id: "c".into(),
       name: "Color".into(),
       modes: vec![VarMode {
         id: "m".into(),
         name: "Default".into(),
       }],
-      variables: vec![Variable {
+      variables: vec![Arc::new(Variable {
         id: "v".into(),
         name: "Color/Primary".into(),
         kind: VarKind::Color,
         values: BTreeMap::from([("m".into(), json!("#FF0000"))]),
         description: String::new(),
         scopes: Vec::new(),
-      }],
-    });
+      })],
+    }));
     let color = |id: &str, name: &str, c: &str| crate::model::ColorStyle {
       id: id.into(),
       name: name.into(),
       color: c.into(),
     };
-    doc.styles.colors = vec![
+    doc.styles_mut().colors = vec![
       color("c1", "Brand/Primary", "#111111"),
       color("c2", "Brand Primary", "#222222"),
       color("c3", "主色", "#333333"),
@@ -4582,7 +4586,7 @@ mod tests {
       line_height: None,
       letter_spacing: 0.0,
     };
-    doc.styles.texts = vec![
+    doc.styles_mut().texts = vec![
       text("t1", "Heading 1", 20.0),
       text("t2", "Heading-1", 30.0),
       text("t3", "标题", 40.0),
@@ -4618,7 +4622,7 @@ mod tests {
   #[test]
   fn colour_style_on_a_see_through_fill_keeps_its_opacity() {
     let mut doc = sample();
-    doc.styles.colors.push(crate::model::ColorStyle {
+    doc.styles_mut().colors.push(crate::model::ColorStyle {
       id: "cs".into(),
       name: "Brand".into(),
       color: "#7C5CFF".into(),
@@ -4640,7 +4644,7 @@ mod tests {
   fn font_families_with_quotes_are_escaped() {
     let mut doc = sample();
     doc.get_mut("t").unwrap().text.as_mut().unwrap().font_family = "Gill's \"Sans\"".into();
-    doc.styles.texts.push(crate::model::TextStyle {
+    doc.styles_mut().texts.push(crate::model::TextStyle {
       id: "ts".into(),
       name: "Body".into(),
       font_family: "Gill's \"Sans\"".into(),
@@ -4773,7 +4777,7 @@ mod tests {
   fn two_mode_collection_exports_set_mode() {
     use crate::variables::{Collection, VarKind, VarMode, Variable};
     let mut doc = sample();
-    doc.variables.push(Collection {
+    doc.variables.push(Arc::new(Collection {
       id: "c1".into(),
       name: "Theme".into(),
       modes: vec![
@@ -4786,15 +4790,15 @@ mod tests {
           name: "Dark".into(),
         },
       ],
-      variables: vec![Variable {
+      variables: vec![Arc::new(Variable {
         id: "v1".into(),
         name: "Brand/bg".into(),
         kind: VarKind::Color,
         values: BTreeMap::from([("m1".into(), json!("#FFFFFF")), ("m2".into(), json!("#111111"))]),
         description: String::new(),
         scopes: Vec::new(),
-      }],
-    });
+      })],
+    }));
     let files = export_project(&doc, &HeuristicMeasurer);
     let get = |p: &str| files.iter().find(|f| f.path == p).map(|f| f.content.clone());
     let ts = get("src/tokens.ts").expect("tokens.ts");
@@ -4809,7 +4813,7 @@ mod tests {
     );
     assert!(get("README.md").unwrap().contains("setMode(\"theme\", \"dark\")"));
     // One mode: no helper.
-    doc.variables[0].modes.pop();
+    Arc::make_mut(&mut doc.variables[0]).modes.pop();
     let files = export_project(&doc, &HeuristicMeasurer);
     assert!(!files.iter().any(|f| f.path == "src/tokens.ts"));
   }
@@ -4817,7 +4821,7 @@ mod tests {
   #[test]
   fn linked_text_and_colour_styles_become_classes() {
     let mut doc = sample();
-    doc.styles.texts.push(crate::model::TextStyle {
+    doc.styles_mut().texts.push(crate::model::TextStyle {
       id: "ts1".into(),
       name: "Heading 1".into(),
       font_family: "Inter".into(),
@@ -4826,7 +4830,7 @@ mod tests {
       line_height: Some(48.0),
       letter_spacing: -0.5,
     });
-    doc.styles.colors.push(crate::model::ColorStyle {
+    doc.styles_mut().colors.push(crate::model::ColorStyle {
       id: "cs1".into(),
       name: "Brand/Primary".into(),
       color: "#7C5CFF".into(),
@@ -5064,7 +5068,7 @@ mod r8_tests {
   fn start_screen_comes_from_the_hash_and_the_readme_lists_flows_and_limits() {
     let mut doc = sample();
     let page = doc.pages[0].id.clone();
-    doc.pages[0].flow_start = Some("detail".into());
+    doc.pages_iter_mut().next().unwrap().flow_start = Some("detail".into());
     let hero = crate::ops::default_node(NodeType::Rectangle, "hero".into(), "hero.jpg".into());
     doc.insert(hero, None, &page, None);
     let app = project(&doc, "src/App.tsx");
@@ -5476,7 +5480,7 @@ mod r10_tests {
     let mut doc = base();
     add(&mut doc, NodeType::Frame, "s", "Screen", None);
     add(&mut doc, NodeType::Text, "t", "Body", Some("s"));
-    doc.styles.texts.push(crate::model::TextStyle {
+    doc.styles_mut().texts.push(crate::model::TextStyle {
       id: "ts".into(),
       name: "Body".into(),
       font_family: "Inter".into(),
