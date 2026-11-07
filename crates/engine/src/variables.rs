@@ -893,7 +893,13 @@ pub fn normalize_since(doc: &mut Document, base: &Document) {
 /// a name left in it would be dropped as dangling by the next prune.
 pub fn resolve_names_in_patch(doc: &Document, p: &mut Value) {
   if let Some(Value::Object(b)) = p.get_mut("bindings") {
+    let is_id = |s: &str| doc.variables.iter().any(|c| c.variables.iter().any(|v| v.id == s));
     for v in b.values_mut() {
+      // A string that is already a variable id stays as it is, even if another variable is named
+      // like it (as `normalize` leaves id-only layers alone).
+      if v.as_str().is_some_and(is_id) {
+        continue;
+      }
       if let Some((_, var)) = v.as_str().and_then(|s| find(doc, s)) {
         *v = json!(var.id);
       }

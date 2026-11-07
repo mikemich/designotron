@@ -1443,6 +1443,47 @@ fn a_binding_by_name_on_an_instance_layer_survives_pruning() {
   );
 }
 
+/// A binding that is already a variable id keeps that id even when an earlier variable is named
+/// like it (patch name resolution must not rewrite ids, as `normalize` doesn't).
+#[test]
+fn a_binding_by_id_is_not_rewritten_to_a_variable_named_like_that_id() {
+  let mut e = build();
+  let mut cols = variables::plain(&e.doc.variables);
+  cols[0].variables.insert(
+    0,
+    Arc::new(Variable {
+      id: "v_clash".into(),
+      name: "v_fade".into(),
+      kind: VarKind::Number,
+      values: [("m_light".to_string(), json!(0.5)), ("m_dark".to_string(), json!(0.5))]
+        .into_iter()
+        .collect(),
+      ..Default::default()
+    }),
+  );
+  e.dispatch(Command::SetVariables { collections: cols }).unwrap();
+  for inside in [false, true] {
+    let layer = e
+      .doc
+      .nodes
+      .values()
+      .find(|n| (n.name == "Body" || n.name == "Title") && n.master_id.is_some() == inside)
+      .unwrap()
+      .id
+      .clone();
+    e.dispatch(Command::Update {
+      ids: vec![layer.clone()],
+      patch: json!({ "bindings": { "opacity": "v_fade" } }),
+    })
+    .unwrap();
+    assert_eq!(
+      e.doc.get(&layer).unwrap().bindings.get("opacity").map(String::as_str),
+      Some("v_fade"),
+      "inside an instance: {inside}"
+    );
+  }
+}
+
 /// `Resolver` answers what `find` + `mode_for` + `resolve` answer, for every key a binding could
 /// hold (ids, names, `Collection/name`, a name that is another variable's id) from layers at every
 /// depth under different pins.
