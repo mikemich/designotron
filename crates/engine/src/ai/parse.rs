@@ -30,6 +30,7 @@ pub const KNOWN_KEYS: &[&str] = &[
   "overflow",
   "scrollBehavior",
   "absolute",
+  "constraints",
   "minWidth",
   "maxWidth",
   "minHeight",

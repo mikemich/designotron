@@ -14,10 +14,10 @@ use crate::codegen;
 use crate::engine::{Command, Engine};
 use crate::geom::Point;
 use crate::model::{
-  Action, Align, AutoLayout, ColorStyle, Document, Effect, EffectStyle, EffectType, GradientHandles, GradientStop, GridStyle, Interaction,
-  LayoutDirection, LayoutGrid, Node, NodeId, NodeType, Overflow, OverlayBackground, OverlayPosition, OverlaySettings, Paint, RawPath,
-  ScaleMode, ScrollBehavior, Sizing, StrokeAlign, StrokeJoin, SubPath, TextAlignH, TextAlignV, TextAutoResize, TextCase, TextDecoration,
-  TextStyle, Transition, Trigger, VectorData, VectorPoint,
+  Action, Align, AutoLayout, ColorStyle, ConstraintH, ConstraintV, Document, Effect, EffectStyle, EffectType, GradientHandles,
+  GradientStop, GridStyle, Interaction, LayoutDirection, LayoutGrid, Node, NodeId, NodeType, Overflow, OverlayBackground, OverlayPosition,
+  OverlaySettings, Paint, RawPath, ScaleMode, ScrollBehavior, Sizing, StrokeAlign, StrokeJoin, SubPath, TextAlignH, TextAlignV,
+  TextAutoResize, TextCase, TextDecoration, TextStyle, Transition, Trigger, VectorData, VectorPoint,
 };
 use crate::ops::{self, AlignHow, ReorderTo};
 use crate::render;
@@ -127,6 +127,14 @@ fn spec_schema() -> Value {
         }
       },
       "absolute": { "type": "boolean", "description": "Ignore parent auto layout" },
+      "constraints": {
+        "type": "object",
+        "description": "How the layer follows its parent frame when that frame changes size (any size change, including auto layout growing it). In an auto layout parent it takes effect only with absolute: true. Default left / top",
+        "properties": {
+          "horizontal": { "type": "string", "enum": ["left", "right", "left-right", "center", "scale"], "description": "Also accepts Figma's MIN, MAX, STRETCH, CENTER, SCALE" },
+          "vertical": { "type": "string", "enum": ["top", "bottom", "top-bottom", "center", "scale"], "description": "Also accepts Figma's MIN, MAX, STRETCH, CENTER, SCALE" }
+        }
+      },
       "minWidth": { "type": "number", "description": "Minimum width for hug/fill in auto layout (0 clears; 0 to 100000, must not exceed maxWidth)" },
       "maxWidth": { "type": "number", "description": "Maximum width; auto-width text wraps at it (0 clears; 0 to 100000)" },
       "minHeight": { "type": "number", "description": "0 clears; 0 to 100000, must not exceed maxHeight" },
@@ -262,12 +270,12 @@ pub fn tool_defs() -> Value {
     },
     {
       "name": "create_nodes",
-      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), svg (whole SVG markup as editable layers), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). A `type: image` layer is a rectangle with an image fill (give imageUrl or src). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). Top-level layers without x and y go to (0, 0) when that is free, else to the right of the page's content. Returns ids for the created layers.",
+      "description": "Create layers (with nested children) on the current page or inside parentId; build whole screens in one call. Types: frame, text, rectangle, ellipse, vector (svgPath icons), svg (whole SVG markup as editable layers), group, component (a main component: build anything repeated once) and instance (+ componentId: a linked copy; create the component first, then place instances in a second call). A `type: image` layer is a rectangle with an image fill (give imageUrl or src). Link tokens with bind (variables), textStyle / fillStyle (style names from define_styles; fillStyle takes colour styles only, a variable name is an error) and variableModes (theme of a frame). constraints {horizontal, vertical} pin a layer inside its parent frame for when that frame changes size (in auto layout only with absolute: true). Top-level layers without x and y go to (0, 0) when that is free, else to the right of the page's content. Returns ids for the created layers.",
       "input_schema": { "type": "object", "properties": { "parentId": { "type": "string" }, "nodes": { "type": "array", "items": spec } }, "required": ["nodes"] }
     },
     {
       "name": "update_nodes",
-      "description": "Change properties of existing layers. Each update is {id, ...any create_nodes property except children}. Use 'patch' for raw model fields. On an instance, `componentId` swaps it to another main component like the editor's swap (layers with the same name path keep their overrides; one undo step; the result lists `swapped`); pass a variant's id, not a component set's. Changing the fill, stroke, effects or grids of a layer that links a style detaches that style (values kept) and the result warns; a typography variable (bind) also replaces a text style (warns too), while a plain typography value (fontSize, fontWeight, ...) keeps the text style link (textStyle: null detaches it). Sizes are 0 to 100000 px and min must not exceed max; the whole call is refused if one update is invalid. Setting new `text` on a mixed-style text layer gives all of it the first character's style (like typing over a selection in Figma); pass `spans` to style parts of it. `svg` is only read by create_nodes.",
+      "description": "Change properties of existing layers. Each update is {id, ...any create_nodes property except children}. Use 'patch' for raw model fields. On an instance, `componentId` swaps it to another main component like the editor's swap (layers with the same name path keep their overrides; one undo step; the result lists `swapped`); pass a variant's id, not a component set's. Changing the fill, stroke, effects or grids of a layer that links a style detaches that style (values kept) and the result warns; a typography variable (bind) also replaces a text style (warns too), while a plain typography value (fontSize, fontWeight, ...) keeps the text style link (textStyle: null detaches it). Sizes are 0 to 100000 px and min must not exceed max; the whole call is refused if one update is invalid. Setting new `text` on a mixed-style text layer gives all of it the first character's style (like typing over a selection in Figma); pass `spans` to style parts of it. `svg` is only read by create_nodes. `constraints` works here too: {horizontal: left/right/left-right/center/scale, vertical: top/bottom/top-bottom/center/scale}, applied the next time the parent frame changes size.",
       "input_schema": { "type": "object", "properties": { "updates": { "type": "array", "items": update_item } }, "required": ["updates"] }
     },
     {
@@ -1622,6 +1630,9 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
     if spec.get("scrollBehavior").is_some() {
       warn_sticky(&mut cx, &e.doc, id);
     }
+    if spec.get("constraints").is_some_and(|v| !v.is_null()) {
+      warn_constraints(&mut cx, &e.doc, id);
+    }
     // A merge patch can't delete map entries: unbound properties and unpinned collections go
     // through their own commands.
     // Stale keys (a property this build doesn't know, a collection that is gone) are dropped
@@ -2195,6 +2206,75 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
       .collect::<Vec<_>>());
   }
   Ok(r)
+}
+
+/// `constraints: {horizontal, vertical}` of a layer spec. Names are lenient: Figma's MIN / MAX /
+/// STRETCH / CENTER / SCALE work on both axes.
+fn apply_constraints_spec(cx: &mut Ctx, v: &Value, n: &mut Node) -> Result<(), String> {
+  let Some(obj) = v.as_object() else {
+    return Err(cx.err(
+      "constraints",
+      format!(
+        "expected an object like {{\"horizontal\": \"right\", \"vertical\": \"top\"}}, got {}",
+        parse::kind_of(v)
+      ),
+    ));
+  };
+  let mark = cx.enter("constraints");
+  for key in obj.keys().filter(|k| !matches!(k.as_str(), "horizontal" | "vertical")) {
+    cx.warn(format!("unknown key '{key}' ignored (use horizontal and vertical)"));
+  }
+  let h = obj.get("horizontal").filter(|v| !v.is_null()).map(|v| {
+    parse::choice(
+      cx,
+      "horizontal",
+      v,
+      &[
+        (&["left", "min"], ConstraintH::Left),
+        (&["right", "max"], ConstraintH::Right),
+        (&["left-right", "leftright", "stretch"], ConstraintH::LeftRight),
+        (&["center", "centre"], ConstraintH::Center),
+        (&["scale"], ConstraintH::Scale),
+      ],
+      &parse::no_hint,
+    )
+  });
+  let v = obj.get("vertical").filter(|v| !v.is_null()).map(|v| {
+    parse::choice(
+      cx,
+      "vertical",
+      v,
+      &[
+        (&["top", "min"], ConstraintV::Top),
+        (&["bottom", "max"], ConstraintV::Bottom),
+        (&["top-bottom", "topbottom", "stretch"], ConstraintV::TopBottom),
+        (&["center", "centre"], ConstraintV::Center),
+        (&["scale"], ConstraintV::Scale),
+      ],
+      &parse::no_hint,
+    )
+  });
+  cx.leave(mark);
+  if let Some(h) = h {
+    n.constraints.horizontal = h?;
+  }
+  if let Some(v) = v {
+    n.constraints.vertical = v?;
+  }
+  Ok(())
+}
+
+/// A stored constraint that does nothing where the layer is now.
+fn warn_constraints(cx: &mut Ctx, doc: &Document, id: &str) {
+  let Some(n) = doc.get(id) else { return };
+  match n.parent.as_ref().and_then(|p| doc.get(p)) {
+    Some(p) if p.kind.is_frame_like() => {
+      if p.layout.is_some() && !n.absolute_position {
+        cx.warn(format!("{id}: constraints take effect when absolute: true"));
+      }
+    }
+    _ => cx.warn(format!("{id}: constraints apply inside frames")),
+  }
 }
 
 /// Sticky is stored wherever it is set but only does something inside a frame that scrolls
@@ -3125,8 +3205,10 @@ pub fn insert_specs_ex(e: &mut Engine, specs: &[Value], parent: Option<&str>) ->
         tops.push(top);
       }
     }
+    // What this call created is laid out for the first time: its first size isn't a resize.
+    let fresh: HashSet<crate::model::NodeId> = roots.iter().flat_map(|r| e.doc.subtree(r)).collect();
     for top in &tops {
-      crate::layout::layout_node(&mut e.doc, top, e.measurer.as_ref());
+      crate::layout::layout_root_skipping(&mut e.doc, top, e.measurer.as_ref(), &fresh);
     }
   }
   if parent.is_none() {
@@ -3351,6 +3433,9 @@ fn build(e: &mut Engine, cx: &mut Ctx, spec: &Value, parent: Option<&str>, page:
     let index = parent.and_then(|p| crate::devices::before_chrome(&e.doc, p));
     e.doc.insert(n, parent, page, index);
     warn_sticky(cx, &e.doc, &id);
+    if spec.get("constraints").is_some_and(|v| !v.is_null()) {
+      warn_constraints(cx, &e.doc, &id);
+    }
     match spec.get("children") {
       None | Some(Value::Null) => {}
       // An empty list is fine on any layer (models often send `children: []` everywhere).
@@ -3572,6 +3657,9 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
         ));
       }
     }
+  }
+  if let Some(v) = s.get("constraints").filter(|v| !v.is_null()) {
+    apply_constraints_spec(cx, v, n)?;
   }
   match s.get("bind") {
     None | Some(Value::Null) => {}
