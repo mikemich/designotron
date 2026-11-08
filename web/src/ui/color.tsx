@@ -7,6 +7,7 @@ import { addAsset, assetUrl, readFileAsDataUrl } from "../assets";
 import { safeImageSrc } from "../imageSrc";
 import { pickFile } from "../files";
 import { getDoc, useStore } from "../store";
+import { useCollab } from "../collab";
 import { PhotoSearch } from "../panels/PhotoSearch";
 import { paintAriaLabel, paintLabel } from "./paintText";
 import { sliderKey, type SliderKind } from "./sliderKeys";
@@ -583,6 +584,17 @@ export function PaintSwatch(props: { paint: Paint; onChange: (p: Paint) => void;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing, anchor]);
+  // A popover that is open when the role turns viewer (or the tab read-only) closes: its sliders aren't inside the disabled panel.
+  const roTab = useStore((s) => !!s.es.readOnly);
+  const viewer = useCollab((s) => s.viewer);
+  const viewOnly = roTab || viewer;
+  useEffect(() => {
+    if (viewOnly && anchor) {
+      setAnchor(null);
+      props.onClose?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewOnly]);
   // While text is being edited the keyboard stays in the text, so Escape would end the editing and leave
   // the popover open. It closes the popover first (a field inside the popover keeps its own Escape).
   useEffect(() => {

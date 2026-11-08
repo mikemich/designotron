@@ -3692,6 +3692,39 @@ body:has(.phone-note) .toast {
   white-space: nowrap;
   color: var(--text);
 }
+/* R20-D view only: a disabled fieldset wraps the Design and Prototype panels, laid out like its content. */
+.panel-lock-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.panel-lock:disabled .panel-lock-scroll {
+  overflow: auto;
+}
+.panel-lock:disabled .panel-lock-scroll > .scroll {
+  overflow: visible;
+  flex: none;
+}
+fieldset.panel-lock {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.view-only-note {
+  flex-shrink: 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-2);
+  background: var(--panel-2, var(--panel-3));
+  border-bottom: 1px solid var(--border);
+}
 /* W3-F inspect */
 .insp-live {
   font-weight: 500;
@@ -4094,17 +4127,7 @@ button.layer.asset-row:focus-visible {
 .view-only [title="Boolean operations"] {
   display: none;
 }
-.view-only [aria-labelledby="right-tab-design"] input,
-.view-only [aria-labelledby="right-tab-design"] select,
-.view-only [aria-labelledby="right-tab-design"] textarea,
-.view-only [aria-labelledby="right-tab-design"] .btn,
-.view-only [aria-labelledby="right-tab-prototype"] input,
-.view-only [aria-labelledby="right-tab-prototype"] select,
-.view-only [aria-labelledby="right-tab-prototype"] textarea,
-.view-only [aria-labelledby="right-tab-prototype"] .btn {
-  pointer-events: none;
-  opacity: 0.7;
-}
+/* (The design and prototype fields are disabled by their fieldset, `.panel-lock`.) */
 
 /* ---------- Projects and folders (files dashboard) ---------- */
 .dash {

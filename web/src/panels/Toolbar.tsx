@@ -262,16 +262,21 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
     },
   ];
 
-  const toolBtn = (t: Tool, title: string, icon: JSX.Element) => (
-    <button
-      className={"tbtn" + (tool === t ? " active" : "")}
-      title={title}
-      aria-pressed={tool === t}
-      onClick={() => setTool(t)}
-    >
-      {icon}
-    </button>
-  );
+  const toolBtn = (t: Tool, title: string, icon: JSX.Element) => {
+    // Viewers and read-only tabs can look around and comment, not draw.
+    const off = readOnly && t !== "move" && t !== "hand" && t !== "comment";
+    return (
+      <button
+        className={"tbtn" + (tool === t ? " active" : "")}
+        title={off ? `${title.replace(/ \(.*\)$/, "")} (view only)` : title}
+        aria-pressed={tool === t}
+        disabled={off}
+        onClick={() => setTool(t)}
+      >
+        {icon}
+      </button>
+    );
+  };
 
   /** The button that shows or hides a side panel (on a tablet the panel is an overlay). */
   const panelToggle = (side: "left" | "right") => {
@@ -334,7 +339,8 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
               "tbtn" + (SHAPES.some((s) => s.tool === tool) ? " active" : "")
             }
             aria-pressed={SHAPES.some((s) => s.tool === tool)}
-            title={`${shape.label} (${shape.key})`}
+            title={readOnly ? `${shape.label} (view only)` : `${shape.label} (${shape.key})`}
+            disabled={readOnly}
             onClick={() => setTool(shape.tool)}
           >
             {shape.icon}
@@ -342,6 +348,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
           <button
             className="tbtn chevron-btn"
             title="Shape tools"
+            disabled={readOnly}
             {...opens("Shape tools")}
             onClick={(e) =>
               open(e, "Shape tools", [

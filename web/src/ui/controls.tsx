@@ -90,6 +90,8 @@ export function NumberField(props: {
     return out;
   };
   const scrub = (e: React.PointerEvent) => {
+    // Inside a disabled fieldset (view only) the label must not drag the value.
+    if ((e.currentTarget as HTMLElement).closest("label")?.querySelector("input")?.matches(":disabled")) return;
     const start = value === null ? props.autoValue : value;
     if (start === MIXED || start === undefined) return;
     e.preventDefault();

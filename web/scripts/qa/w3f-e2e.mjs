@@ -120,7 +120,7 @@ try {
   check("padding top, right, bottom, left each have a value", padVals.join(",") === "16,8,24,20", padVals.join(","));
   check("Inspect shows the radius", /Radius\s*12/.test((await group("Appearance").innerText()).replace(/\s+/g, " ")));
 
-  const colours = group("Colours");
+  const colours = group("Fill");
   const fillVal = colours.locator(".insp-val").first();
   const hex = (await fillVal.innerText()).trim();
   check("the fill shows as hex by default", /^#[0-9A-F]{6}$/.test(hex), hex);
@@ -145,7 +145,7 @@ try {
   const typo = (await group("Typography").innerText()).replace(/\s+/g, " ");
   check("text linked to a style shows the style name", typo.includes("Heading 1"), typo);
   check("typography shows size, weight and line height", /Size\s*28px/.test(typo) && /Weight\s*700/.test(typo) && /Line height\s*36px/.test(typo), typo);
-  check("a colour style shows its name", (await group("Colours").innerText()).includes("Ink"), (await group("Colours").innerText()).replace(/\s+/g, " "));
+  check("a colour style shows its name", (await group("Fill").innerText()).includes("Ink"), (await group("Fill").innerText()).replace(/\s+/g, " "));
 
   // Mixed text styles, gradients as real CSS, top paint first.
   const title = await byName("Title");
@@ -154,10 +154,10 @@ try {
   check("mixed text styles are listed", (await group("Typography").innerText()).includes("Mixed") && (await group("Typography").innerText()).includes("0-3"), (await group("Typography").innerText()).replace(/\s+/g, " "));
   await page.evaluate(() => window.__dt.tool("create_nodes", { parentId: null, nodes: [{ type: "frame", name: "Grad", x: 0, y: 2000, width: 100, height: 100, fill: "linear-gradient(90deg, #FF0000 0%, #0000FF 100%)" }] }));
   await select("Grad");
-  await group("Colours").getByRole("button", { name: "Token" }).click();
-  const gradText = await group("Colours").locator(".insp-val").first().innerText();
+  await group("Fill").getByRole("button", { name: "Token" }).click();
+  const gradText = await group("Fill").locator(".insp-val").first().innerText();
   check("a gradient shows as a CSS linear-gradient()", /^linear-gradient\(90deg, #ff0000 0%, #0000ff 100%\)$/.test(gradText), gradText);
-  await group("Colours").getByRole("button", { name: "Hex" }).click();
+  await group("Fill").getByRole("button", { name: "Hex" }).click();
 
   // ---------- Assets ----------
   await select("Card");

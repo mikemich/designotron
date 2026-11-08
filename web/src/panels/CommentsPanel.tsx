@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Sparkles } from "lucide-react";
-import { dispatch, query, useStore, zoomToSelection } from "../store";
+import { canvasSize, dispatch, getDoc, noteZooming, query, useStore } from "../store";
+import { panToComment } from "../commentPan";
 import type { CommentPin } from "../types";
 import { Avatar, ago, askClaudeAboutComments } from "../canvas/Comments";
 import { Section } from "../ui/controls";
@@ -14,10 +15,17 @@ export function CommentsPanel() {
   const list = showResolved ? all : open;
   const jump = (c: CommentPin) => {
     if (useStore.getState().es.page !== c.page) dispatch({ op: "setPage", id: c.page });
+    // Select the layer, then pan to the pin at the current zoom (only a speck of a layer gets zoomed).
+    let size = 0;
     if (c.nodeId) {
       dispatch({ op: "select", ids: [c.nodeId] });
-      zoomToSelection();
+      const n = getDoc().nodes[c.nodeId];
+      if (n) size = Math.max(n.width, n.height);
     }
+    const v = useStore.getState().viewport;
+    const next = panToComment(v, c, size, canvasSize());
+    if (next.zoom !== v.zoom) noteZooming();
+    useStore.setState({ viewport: next });
     useStore.setState({ openComment: c.id, draftComment: null });
   };
   return (
