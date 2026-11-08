@@ -672,6 +672,61 @@ fn enabling_text_again_with_the_same_site_keeps_the_counter() {
 }
 
 #[test]
+fn a_change_to_many_long_texts_is_not_refused_as_a_whole() {
+  let mut e = engine(11);
+  e.dispatch(Command::AddPage { name: None }).unwrap();
+  let mut ids = Vec::new();
+  for i in 0..8 {
+    let r = e
+      .dispatch(Command::CreateText {
+        x: 0.0,
+        y: 50.0 * i as f64,
+        characters: "ab".repeat(2000),
+        parent: None,
+      })
+      .unwrap();
+    ids.push(r["id"].as_str().unwrap().to_string());
+  }
+  let runs = |recolour: bool| -> Value {
+    json!((0..2000)
+      .map(|i| {
+        let mut r = json!({ "start": 2 * i, "end": 2 * i + 1, "fontWeight": 700 });
+        if recolour && i % 10 == 0 {
+          r["color"] = json!("#ff0000");
+        }
+        r
+      })
+      .collect::<Vec<_>>())
+  };
+  e.dispatch(Command::Update {
+    ids: ids.clone(),
+    patch: json!({ "text": { "runs": runs(false), "autoResize": "none" } }),
+  })
+  .unwrap();
+  e.collab_reset(true, true, true);
+  e.collab_enable_text(7);
+  let base = e.doc.clone();
+  e.dispatch(Command::Update {
+    ids: ids.clone(),
+    patch: json!({ "text": { "runs": runs(true) } }),
+  })
+  .unwrap();
+  let d = e.collab_delta();
+  let entries = d["text"].as_object().map_or(0, |m| m.len());
+  let whole = ids.iter().filter(|i| d["patch"][i.as_str()].get("text").is_some()).count();
+  assert_eq!(entries + whole, 8, "{entries} entries, {whole} whole");
+  assert!(whole >= 1, "past half the delta's budget the rest travel whole");
+  let mut room = base;
+  apply_opts(&mut room, &d, ApplyOpts { prune: true }).expect("the relay takes the whole delta");
+  for id in &ids {
+    assert_eq!(
+      room.get(id).unwrap().text.as_ref().unwrap().runs,
+      e.doc.get(id).unwrap().text.as_ref().unwrap().runs
+    );
+  }
+}
+
+#[test]
 fn offline_edits_merge_on_rejoin() {
   let (mut sim, id) = hello(&[Text, Text, Text]);
   sim.go_offline(2, 1000);

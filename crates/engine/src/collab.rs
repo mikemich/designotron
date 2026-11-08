@@ -75,6 +75,8 @@ pub fn delta_hinted(base: &Document, doc: &Document, opts: DeltaOpts, hint: &Has
   let mut nodes = Map::new();
   let mut patch = Map::new();
   let mut texts = Map::new();
+  // What the text entries of this delta are estimated to cost a reader (kept within the delta's budget).
+  let mut spent = 0u64;
   let mut moves = Map::new();
   let mut removed = Vec::new();
   for item in base.nodes.diff(&doc.nodes) {
@@ -86,7 +88,7 @@ pub fn delta_hinted(base: &Document, doc: &Document, opts: DeltaOpts, hint: &Has
         }
         // A text that merges per character travels as `text`, never whole in the patch.
         if text {
-          if let Some(entry) = text_entry(doc, k, o, v) {
+          if let Some(entry) = text_entry(doc, k, o, v, &mut spent) {
             p.remove("text");
             if entry.as_object().is_some_and(|e| e.len() > 1) {
               texts.insert(k.clone(), entry);
@@ -168,12 +170,18 @@ pub const TEXT: bool = true;
 
 /// The per-character change of the text layer `id` from `old` to `new`, when it has one: both have
 /// text, it isn't inside an instance (those overrides stay whole) and the two share an epoch.
-fn text_entry(doc: &Document, id: &str, old: &Node, new: &Node) -> Option<Value> {
+fn text_entry(doc: &Document, id: &str, old: &Node, new: &Node, spent: &mut u64) -> Option<Value> {
   let (ot, nt) = (old.text.as_ref()?, new.text.as_ref()?);
   if ot == nt || doc.instance_ancestor(id).is_some() {
     return None;
   }
-  textseq::ops(ot, nt)
+  let (entry, cost) = textseq::ops_costed(ot, nt)?;
+  // Past half the delta's budget the rest travel whole (the room would refuse the delta otherwise).
+  if *spent + cost > textseq::DELTA_BUDGET / 2 {
+    return None;
+  }
+  *spent += cost;
+  Some(entry)
 }
 
 /// A delta in the form peers that predate `text` understand: every `text` entry becomes the layer's

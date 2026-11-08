@@ -693,6 +693,8 @@ struct Parts {
   ins: Vec<Ins>,
   del: Vec<(u64, u32, u32)>,
   sty: Vec<Sty>,
+  /// Pieces the inserts fall into in the old text (what a reader makes of them).
+  pieces: u64,
 }
 
 /// One segment of the new text's sequence: ids in one state in the old text and one in the new.
@@ -858,6 +860,7 @@ fn diff(base: &TextProps, doc: &TextProps, strict: bool) -> Option<Parts> {
     } else {
       (None, Vec::new())
     };
+    parts.pieces += bi.cover(site, ctr, ctr + len).len() as u64;
     parts.ins.push(Ins {
       site,
       ctr,
@@ -964,11 +967,18 @@ fn diff(base: &TextProps, doc: &TextProps, strict: bool) -> Option<Parts> {
 /// The `text` entry of a delta for a text that went from `base` to `doc`: `None` when the two
 /// don't share an epoch (the whole text travels instead). An entry with no changes is `{e}` only.
 pub fn ops(base: &TextProps, doc: &TextProps) -> Option<Value> {
+  ops_costed(base, doc).map(|(e, _)| e)
+}
+
+/// `ops`, and what applying the entry is estimated to cost (for `collab::delta` to keep a delta
+/// within `DELTA_BUDGET`).
+pub fn ops_costed(base: &TextProps, doc: &TextProps) -> Option<(Value, u64)> {
   let parts = diff(base, doc, false)?;
   // An entry the receivers would refuse (too many pieces or characters, or too much work) travels
   // as the whole text instead.
   let seq_len = effective(doc).s.len();
-  if fits(&parts).is_err() || estimate(&parts, seq_len, doc.characters.len(), doc.runs.len()) > ENTRY_BUDGET / 2 {
+  let cost = estimate(&parts, seq_len, doc.characters.len(), doc.runs.len());
+  if fits(&parts).is_err() || cost > ENTRY_BUDGET / 2 {
     return None;
   }
   let mut o = Map::new();
@@ -1023,7 +1033,7 @@ pub fn ops(base: &TextProps, doc: &TextProps) -> Option<Value> {
       .collect();
     o.insert("sty".into(), Value::Array(sty));
   }
-  Some(Value::Object(o))
+  Some((Value::Object(o), cost))
 }
 
 // ---------- Apply ----------
@@ -1123,12 +1133,30 @@ fn estimate(parts: &Parts, spans: usize, n: usize, runs: usize) -> u64 {
   let spans = spans as u64 + 2 * ops;
   let runs = runs as u64 + parts.ins.iter().map(|i| i.runs.len() as u64).sum::<u64>() + 2 * parts.sty.len() as u64;
   let n = n as u64;
-  let mut c = spans + n;
-  for i in &parts.ins {
-    c += spans + n / 8 + runs + i.len as u64 / 4;
-  }
-  c += parts.del.len() as u64 * spans + if parts.del.is_empty() { 0 } else { n + runs };
-  c + parts.sty.len() as u64 * (16 * runs + 4 * spans)
+  let mut c = spans + n + runs;
+  // The reader charges every piece an insert falls into, and every delete a scan of the spans.
+  c += parts.pieces.max(parts.ins.len() as u64) * piece_units(spans, n, runs, 0);
+  c += parts.ins.iter().map(|i| i.len as u64 / 4).sum::<u64>();
+  c += parts.del.len() as u64 * del_units(spans)
+    + if parts.del.is_empty() {
+      0
+    } else {
+      n + runs + parts.del.len() as u64
+    };
+  c + parts.sty.len() as u64 * sty_units(spans, runs)
+}
+
+/// Work units of one piece of `n` characters in a text of `spans` spans, `bytes` bytes and `runs` runs.
+fn piece_units(spans: u64, bytes: u64, runs: u64, n: u64) -> u64 {
+  4 * spans + bytes / 8 + runs + n / 4 + 1
+}
+
+fn del_units(spans: u64) -> u64 {
+  4 * spans + 1
+}
+
+fn sty_units(spans: u64, runs: u64) -> u64 {
+  4 * spans + 32 * runs + 1
 }
 
 fn apply_as(t: &mut TextProps, entry: &Value, local: bool, budget: &mut u64) -> Result<(), String> {
@@ -1432,7 +1460,7 @@ fn apply_ins(t: &mut TextProps, seq: &mut TextSeq, ins: &Ins, same: bool, age: u
 /// What making a piece of `n` characters costs: the spans looked through, the characters moved
 /// and the runs shifted.
 fn piece_cost(t: &TextProps, seq: &TextSeq, n: u32) -> u64 {
-  4 * seq.s.len() as u64 + t.characters.len() as u64 / 8 + t.runs.len() as u64 + n as u64 / 4 + 1
+  piece_units(seq.s.len() as u64, t.characters.len() as u64, t.runs.len() as u64, n as u64)
 }
 
 /// The runs of an insert restricted to its characters `k..k + n`, relative to `k`.
@@ -1455,7 +1483,7 @@ fn apply_del(t: &mut TextProps, seq: &mut TextSeq, del: &[(u64, u32, u32)], age:
   const FRESH: u32 = u32::MAX;
   let mut gone: Vec<(usize, usize)> = Vec::new();
   for &(site, ctr, len) in del {
-    m.charge(4 * seq.s.len() as u64 + 1)?;
+    m.charge(del_units(seq.s.len() as u64))?;
     let (lo, hi) = (ctr as u64, ctr as u64 + len as u64);
     let mut vis = 0usize;
     let mut i = 0;
@@ -1501,7 +1529,7 @@ fn resolve_range(seq: &TextSeq, a: CharId, b: CharId) -> Option<(usize, usize)> 
 }
 
 fn apply_sty(t: &mut TextProps, seq: &TextSeq, sty: &Sty, len: usize, m: &mut Meter) -> Result<(), String> {
-  m.charge(4 * seq.s.len() as u64 + 16 * t.runs.len() as u64 + 1)?;
+  m.charge(sty_units(seq.s.len() as u64, t.runs.len() as u64))?;
   let Some((start, end)) = resolve_range(seq, sty.a, sty.b) else {
     return Ok(());
   };
@@ -2086,15 +2114,17 @@ mod tests {
       apply(&mut t, &e).unwrap();
     }
     assert!(effective(&t).s.iter().all(|s| s.del.is_none()), "the old tombstone is gone");
-    // By count: every other character deleted, one delta.
+    // By count: every other character deleted, in deltas of 100 deletes each.
     let long: String = (0..2000).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
     let mut t = text(&long);
-    let (_, e) = delta_of(&t.clone(), |x| {
-      for i in (0..1000).rev() {
-        local_edit(x, i * 2, i * 2 + 1, "", &mut ids(1)).unwrap();
-      }
-    });
-    apply(&mut t, &e).unwrap();
+    for batch in 0..10 {
+      let (_, e) = delta_of(&t.clone(), |x| {
+        for i in (0..100).rev() {
+          local_edit(x, i * 2, i * 2 + 1, "", &mut ids(1 + batch as u64)).unwrap();
+        }
+      });
+      apply(&mut t, &e).unwrap();
+    }
     assert_eq!(t.characters.chars().count(), 1000);
     assert!(effective(&t).tombstone_spans() <= MAX_TOMBSTONE_SPANS);
   }
@@ -2533,6 +2563,132 @@ mod tests {
     });
     assert!(took < 200, "{took} ms");
     assert_eq!(a, all_gone, "refused entries change nothing");
+  }
+
+  /// Whatever `ops` emits, a reader taking `base` must accept.
+  fn emitted_means_accepted(base: &TextProps, doc: &TextProps) -> bool {
+    match ops(base, doc) {
+      Some(e) => apply(&mut base.clone(), &e).is_ok(),
+      None => true,
+    }
+  }
+
+  #[test]
+  fn many_separate_deletes_are_emitted_only_when_a_reader_takes_them() {
+    let n = 10_000u32;
+    let chars = "a".repeat(n as usize);
+    let seq = TextSeq {
+      e: 3,
+      h: fnv32(&chars),
+      k: 0,
+      s: (0..n)
+        .map(|i| Span {
+          site: 1,
+          ctr: i * 2,
+          len: 1,
+          del: None,
+        })
+        .collect(),
+    };
+    let base = TextProps {
+      seq: Some(seq),
+      ..text(&chars)
+    };
+    let mut emitted = 0;
+    for count in [100usize, 150, 500, 800] {
+      let mut doc = base.clone();
+      for i in (0..count).rev() {
+        local_edit(&mut doc, i * 10, i * 10 + 1, "", &mut ids(2)).unwrap();
+      }
+      assert!(emitted_means_accepted(&base, &doc), "{count} deletes");
+      emitted += ops(&base, &doc).is_some() as usize;
+    }
+    assert!(emitted >= 1, "ordinary sizes still travel as entries");
+  }
+
+  #[test]
+  fn reviving_many_stretches_is_emitted_only_when_a_reader_takes_it() {
+    let visible = 19_744u32;
+    let all = "x".repeat(visible as usize + 256);
+    let mut spans: Vec<Span> = (0..visible)
+      .map(|i| Span {
+        site: 1,
+        ctr: i * 2,
+        len: 1,
+        del: None,
+      })
+      .collect();
+    spans.extend((0..256u32).map(|i| Span {
+      site: 2,
+      ctr: i,
+      len: 1,
+      del: Some(i),
+    }));
+    let mut doc_spans = spans.clone();
+    for sp in doc_spans.iter_mut().filter(|s| s.site == 2) {
+      sp.del = None;
+    }
+    let base_chars = "x".repeat(visible as usize);
+    let base = TextProps {
+      seq: Some(TextSeq {
+        e: 3,
+        h: fnv32(&base_chars),
+        k: 300,
+        s: spans,
+      }),
+      ..text(&base_chars)
+    };
+    let doc = TextProps {
+      seq: Some(TextSeq {
+        e: 3,
+        h: fnv32(&all),
+        k: 300,
+        s: doc_spans,
+      }),
+      ..text(&all)
+    };
+    assert!(valid(base.seq.as_ref().unwrap(), &base.characters) && valid(doc.seq.as_ref().unwrap(), &doc.characters));
+    assert!(emitted_means_accepted(&base, &doc));
+    // And a smaller text takes it as an entry.
+    let small_base_chars = "x".repeat(900);
+    let mut small: Vec<Span> = (0..900u32)
+      .map(|i| Span {
+        site: 1,
+        ctr: i * 2,
+        len: 1,
+        del: None,
+      })
+      .collect();
+    small.extend((0..256u32).map(|i| Span {
+      site: 2,
+      ctr: i,
+      len: 1,
+      del: Some(i),
+    }));
+    let mut small_doc = small.clone();
+    for sp in small_doc.iter_mut().filter(|s| s.site == 2) {
+      sp.del = None;
+    }
+    let sall = "x".repeat(900 + 256);
+    let sb = TextProps {
+      seq: Some(TextSeq {
+        e: 3,
+        h: fnv32(&small_base_chars),
+        k: 9,
+        s: small,
+      }),
+      ..text(&small_base_chars)
+    };
+    let sd = TextProps {
+      seq: Some(TextSeq {
+        e: 3,
+        h: fnv32(&sall),
+        k: 9,
+        s: small_doc,
+      }),
+      ..text(&sall)
+    };
+    assert!(ops(&sb, &sd).is_some() && emitted_means_accepted(&sb, &sd));
   }
 
   #[test]
