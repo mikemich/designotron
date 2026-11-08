@@ -1702,6 +1702,7 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
     }
     if spec.get("scrollBehavior").is_some() {
       warn_sticky(&mut cx, &e.doc, id);
+      warn_sticky_order(&mut cx, &e.doc, id);
     }
     if spec.get("constraints").is_some_and(|v| !v.is_null()) {
       warn_constraints(&mut cx, &e.doc, id);
@@ -2350,19 +2351,48 @@ fn warn_constraints(cx: &mut Ctx, doc: &Document, id: &str) {
   }
 }
 
-/// Sticky is stored wherever it is set but only does something inside a frame that scrolls
-/// vertically: says so when no ancestor does.
+/// Whether the nearest scrolling frame above `id` scrolls vertically with no fixed or sticky
+/// layer in between (the rule code export uses).
+fn sticky_scrolls(doc: &Document, id: &str) -> bool {
+  for a in doc.ancestors(id).iter().filter_map(|a| doc.get(a)) {
+    if a.overflow != Overflow::None {
+      return matches!(a.overflow, Overflow::Vertical | Overflow::Both);
+    }
+    if matches!(a.scroll_behavior, ScrollBehavior::Fixed | ScrollBehavior::Sticky) {
+      return false;
+    }
+  }
+  false
+}
+
+/// Sticky is stored wherever it is set but only does something when the nearest scrolling frame
+/// around it scrolls vertically, with no fixed or sticky layer in between: says so when that fails.
 fn warn_sticky(cx: &mut Ctx, doc: &Document, id: &str) {
   if doc.get(id).is_none_or(|n| n.scroll_behavior != ScrollBehavior::Sticky) {
     return;
   }
-  let scrolls = doc
-    .ancestors(id)
-    .iter()
-    .filter_map(|a| doc.get(a))
-    .any(|a| matches!(a.overflow, Overflow::Vertical | Overflow::Both));
-  if !scrolls {
-    cx.warn("scrollBehavior \"sticky\" is saved, but takes effect only inside a frame that scrolls vertically (set overflow \"vertical\" on a parent frame)");
+  if !sticky_scrolls(doc, id) {
+    cx.warn("scrollBehavior \"sticky\" is saved, but takes effect only when the nearest scrolling frame above it scrolls vertically (set overflow \"vertical\" on that parent frame)");
+  }
+}
+
+/// Later layers are drawn over a stuck one: warns once its siblings are all in place.
+fn warn_sticky_order(cx: &mut Ctx, doc: &Document, id: &str) {
+  let Some(n) = doc.get(id).filter(|n| n.scroll_behavior == ScrollBehavior::Sticky) else {
+    return;
+  };
+  if !sticky_scrolls(doc, id) {
+    return;
+  }
+  let parent = n.parent.as_ref().and_then(|p| doc.get(p));
+  let later = parent
+    .and_then(|p| p.children.iter().position(|c| c == id).map(|i| p.children.len() - i - 1))
+    .unwrap_or(0);
+  if later > 0 {
+    let name = parent.map(|p| p.name.as_str()).unwrap_or_default();
+    cx.warn(format!(
+      "later layers in '{name}' are drawn over it while it sticks; move it to the front (Layers order) to keep it on top"
+    ));
   }
 }
 
@@ -3543,6 +3573,13 @@ fn build(e: &mut Engine, cx: &mut Ctx, spec: &Value, parent: Option<&str>, page:
           build(e, cx, c, Some(&id), page, depth + 1)?;
           cx.leave(mark);
         }
+        // Now that every sibling is in place, a sticky child can tell what covers it.
+        let kids = e.doc.get(&id).map(|n| n.children.clone()).unwrap_or_default();
+        for (i, kid) in kids.iter().enumerate() {
+          let mark = cx.enter(&format!("children[{i}]"));
+          warn_sticky_order(cx, &e.doc, kid);
+          cx.leave(mark);
+        }
       }
       Some(other) => {
         return Err(cx.err(
@@ -4041,14 +4078,6 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
       .map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0)).collect::<Vec<_>>())
       .filter(|a| a.len() == 4)
       .unwrap_or(vec![0.0, 0.0, 24.0, 24.0]);
-    n.vector = Some(VectorData {
-      subpaths: vec![],
-      raw: Some(RawPath {
-        d: d.to_string(),
-        view_box: [vb[0], vb[1], vb[2], vb[3]],
-        fill_rule: String::new(),
-      }),
-    });
     if creating {
       if s.get("width").is_none() {
         n.width = 24.0;
@@ -4063,6 +4092,20 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
         n.strokes.clear();
       }
     }
+    // Editable vectors: the path is mapped from the viewBox onto the final box.
+    let raw = RawPath {
+      d: d.to_string(),
+      view_box: [vb[0], vb[1], vb[2], vb[3]],
+      fill_rule: String::new(),
+    };
+    let subpaths = crate::paths::raw_subpaths(&raw, n.width, n.height);
+    if subpaths.iter().all(|sp| sp.points.is_empty()) {
+      return Err(cx.err(
+        "svgPath",
+        "has no drawable path data (expected SVG path data like \"M2 2h20v20H2z\")",
+      ));
+    }
+    n.vector = Some(VectorData { subpaths, raw: None });
   }
   if let Some(pts) = s.get("points").and_then(|v| v.as_array()) {
     let points: Vec<VectorPoint> = pts

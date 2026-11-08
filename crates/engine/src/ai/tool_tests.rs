@@ -631,6 +631,83 @@ mod prototype {
   }
 
   #[test]
+  fn sticky_uses_the_nearest_scroller_and_warns_about_later_layers() {
+    let mut e = engine();
+    // The nearest scrolling frame scrolls sideways only, though an outer one scrolls vertically.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Outer", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "frame", "name": "Strip", "width": 100, "height": 50, "overflow": "horizontal",
+          "children": [{ "type": "rectangle", "name": "Tab", "width": 20, "height": 20, "scrollBehavior": "sticky" }] }] }] }),
+    );
+    assert!(r.to_string().contains("nearest scrolling frame"), "{r}");
+    // A sticky parent in between breaks the chain too.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Page", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "frame", "name": "Bar", "width": 100, "height": 50, "scrollBehavior": "sticky",
+          "children": [{ "type": "rectangle", "name": "Chip", "width": 20, "height": 20, "scrollBehavior": "sticky" }] }] }] }),
+    );
+    assert!(r.to_string().contains("nearest scrolling frame"), "{r}");
+    // A header first in layer order: later posts cover it, and the warning says how to fix it.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Feed", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "rectangle", "name": "Header", "width": 100, "height": 20 },
+                     { "type": "rectangle", "name": "Post", "width": 100, "height": 200 }] }] }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+    let header = e.doc.nodes.values().find(|n| n.name == "Header").unwrap().id.clone();
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": header, "scrollBehavior": "sticky" }] }),
+    );
+    let text = r.to_string();
+    assert!(
+      text.contains("later layers in 'Feed' are drawn over it") && text.contains("move it to the front"),
+      "{r}"
+    );
+    // create_nodes warns too, once the later siblings exist; a header last in the order is quiet.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Board", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "rectangle", "name": "Top", "width": 100, "height": 20, "scrollBehavior": "sticky" },
+                     { "type": "rectangle", "name": "Item", "width": 100, "height": 200 }] }] }),
+    );
+    assert!(r.to_string().contains("later layers in 'Board'"), "{r}");
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Board2", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "rectangle", "name": "Item2", "width": 100, "height": 200 },
+                     { "type": "rectangle", "name": "Top2", "width": 100, "height": 20, "scrollBehavior": "sticky" }] }] }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+    // Last in the order: no warning.
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": header, "scrollBehavior": "scroll" }] }),
+    );
+    e.dispatch(crate::engine::Command::Reorder {
+      ids: vec![header.clone()],
+      to: crate::ops::ReorderTo::Front,
+    })
+    .unwrap();
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": header, "scrollBehavior": "sticky" }] }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+  }
+
+  #[test]
   fn a_new_interaction_replaces_the_one_with_the_same_trigger() {
     let (mut e, ids) = screens();
     let (home, other, btn) = (&ids[0], &ids[1], &ids[2]);
@@ -1967,6 +2044,91 @@ mod svg {
     assert!(!path.vector.as_ref().unwrap().subpaths.is_empty());
     assert_eq!(path.stroke_weight, 4.0);
     assert!(f.children.iter().all(|c| e.doc.get(c).unwrap().page == e.page));
+  }
+
+  fn outline_of(e: &Engine, id: &str) -> Vec<(f64, f64)> {
+    crate::paths::page_outline(&e.doc, id)
+      .iter()
+      .flat_map(|sp| sp.points.iter().map(|p| (p.x, p.y)))
+      .collect()
+  }
+
+  #[test]
+  fn svg_path_makes_an_editable_vector_with_the_default_icon_box() {
+    let mut e = engine();
+    let id = one(&mut e, json!({ "type": "vector", "svgPath": "M2 2h20v20H2z" }));
+    let n = e.doc.get(&id).unwrap();
+    let v = n.vector.as_ref().unwrap();
+    assert!(v.raw.is_none() && v.subpaths.len() == 1, "{v:?}");
+    assert_eq!((n.width, n.height), (24.0, 24.0));
+    let pts = outline_of(&e, &id);
+    assert_eq!(pts.first(), Some(&(2.0, 2.0)));
+    assert!(pts.contains(&(22.0, 22.0)));
+    // A later width scales the icon with its box (the points follow).
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "width": 48, "height": 48 }] }),
+    );
+    let pts = outline_of(&e, &id);
+    assert!(pts.contains(&(4.0, 4.0)) && pts.contains(&(44.0, 44.0)), "{pts:?}");
+    // The points are editable.
+    e.dispatch(crate::engine::Command::BendVectorSegment {
+      id: id.clone(),
+      sub: 0,
+      seg: 0,
+      t: 0.5,
+      x: 20.0,
+      y: 0.0,
+    })
+    .unwrap();
+  }
+
+  #[test]
+  fn svg_path_maps_the_view_box_onto_the_box_and_takes_arcs_and_relative_commands() {
+    let mut e = engine();
+    // A 48x48 view box with a non-zero origin, shown at 24x24 (half size).
+    let id = one(
+      &mut e,
+      json!({ "type": "vector", "svgPath": "m10 10 h20 v20 h-20 z", "viewBox": [10, 10, 48, 48], "width": 24, "height": 24 }),
+    );
+    let pts = outline_of(&e, &id);
+    let n = e.doc.get(&id).unwrap();
+    let (x, y) = (n.x, n.y);
+    assert!(pts.iter().any(|p| (p.0 - x).abs() < 1e-9 && (p.1 - y).abs() < 1e-9), "{pts:?}");
+    assert!(
+      pts.iter().any(|p| (p.0 - x - 10.0).abs() < 1e-9 && (p.1 - y - 10.0).abs() < 1e-9),
+      "{pts:?}"
+    );
+    let arcs = one(
+      &mut e,
+      json!({ "type": "vector", "svgPath": "M4 12a8 8 0 1 0 16 0a8 8 0 1 0-16 0z" }),
+    );
+    assert!(e.doc.get(&arcs).unwrap().vector.as_ref().unwrap().subpaths[0].points.len() >= 4);
+    // A 0-height line icon keeps its width.
+    let line = one(&mut e, json!({ "type": "vector", "svgPath": "M0 0h24", "height": 0 }));
+    assert!(e.doc.get(&line).unwrap().vector.as_ref().unwrap().raw.is_none());
+  }
+
+  #[test]
+  fn update_nodes_svg_path_replaces_the_points_and_a_bad_path_is_refused() {
+    let mut e = engine();
+    let id = one(&mut e, json!({ "type": "vector", "svgPath": "M2 2h20v20H2z" }));
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "svgPath": "M0 0L24 0L12 24z", "width": 48, "height": 48 }] }),
+    );
+    let pts = outline_of(&e, &id);
+    assert_eq!(pts.len(), 3, "{pts:?}");
+    assert!(e.doc.get(&id).unwrap().vector.as_ref().unwrap().raw.is_none());
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "vector", "svgPath": "nonsense" }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("svgPath"), "{err}");
   }
 
   #[test]

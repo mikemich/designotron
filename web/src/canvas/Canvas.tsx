@@ -32,7 +32,7 @@ import { GuestBar } from "../panels/GuestBar";
 import { reportCursor, useCollab } from "../collab";
 import { assetUrl, noteRemoteImage } from "../assets";
 import { imagesIn } from "../imageAssets";
-import { getScaleStrokes, insertFiles, joinVectorEnds, pasteData, placeImageSource, toggleVectorPointSmooth, vectorPoints } from "../actions";
+import { enterVectorEdit, getScaleStrokes, insertFiles, joinVectorEnds, pasteData, placeImageSource, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu, insideInstance } from "./contextMenu";
 import { limitCandidates, MAX_CANDIDATES, snapPoint } from "./vectorSnap";
 import { pickColorAt } from "./eyedropper";
@@ -1346,8 +1346,8 @@ export function Canvas() {
         useStore.setState({ editingText: n.id });
         return;
       }
-      if (n?.type === "vector" && n.vector && !n.vector.raw) {
-        useStore.setState({ editingVector: n.id });
+      if (n?.type === "vector" && n.vector) {
+        enterVectorEdit(n);
         return;
       }
       if (n && ["group", "frame", "component", "instance", "componentSet"].includes(n.type)) {

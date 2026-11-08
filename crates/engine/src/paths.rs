@@ -372,18 +372,7 @@ pub fn local_outline(n: &Node) -> Option<Vec<SubPath>> {
     NodeType::Vector => {
       let v = n.vector.as_ref()?;
       if let Some(raw) = &v.raw {
-        let [vx, vy, vw, vh] = raw.view_box;
-        let sx = if vw > 0.0 { w / vw } else { 1.0 };
-        let sy = if vh > 0.0 { h / vh } else { 1.0 };
-        let m = Mat {
-          a: sx,
-          b: 0.0,
-          c: 0.0,
-          d: sy,
-          e: -vx * sx,
-          f: -vy * sy,
-        };
-        Some(parse_svg_path(&raw.d).iter().map(|sp| transform(sp, &m)).collect())
+        Some(raw_subpaths(raw, w, h))
       } else {
         Some(v.subpaths.clone())
       }
@@ -391,6 +380,22 @@ pub fn local_outline(n: &Node) -> Option<Vec<SubPath>> {
     NodeType::Text | NodeType::Group => None,
     _ => Some(vec![rounded_rect(w, h, shapes::corner_radii(n))]),
   }
+}
+
+/// A raw SVG path mapped from its `viewBox` onto a `w` x `h` box, as editable subpaths.
+pub fn raw_subpaths(raw: &crate::model::RawPath, w: f64, h: f64) -> Vec<SubPath> {
+  let [vx, vy, vw, vh] = raw.view_box;
+  let sx = if vw > 0.0 { w / vw } else { 1.0 };
+  let sy = if vh > 0.0 { h / vh } else { 1.0 };
+  let m = Mat {
+    a: sx,
+    b: 0.0,
+    c: 0.0,
+    d: sy,
+    e: -vx * sx,
+    f: -vy * sy,
+  };
+  parse_svg_path(&raw.d).iter().map(|sp| transform(sp, &m)).collect()
 }
 
 fn rounded_rect(w: f64, h: f64, r: [f64; 4]) -> SubPath {

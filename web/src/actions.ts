@@ -300,12 +300,27 @@ export function selectChildren() {
   else {
     const only = selection().length === 1 ? doc.nodes[selection()[0]] : null;
     if (only?.type === "text") useStore.setState({ editingText: only.id });
-    else if (only && useStore.getState().tool === "move" && canEditVector(only)) useStore.setState({ editingVector: only.id, vectorPoints: [] });
+    else if (only && useStore.getState().tool === "move" && isVectorLayer(only)) enterVectorEdit(only);
   }
 }
 
-/** A vector with anchors of its own (not an imported raw path), which vector edit can open. */
-export const canEditVector = (n: Node | undefined) => !!n && n.type === "vector" && !!n.vector && !n.vector.raw && !n.locked;
+const isVectorLayer = (n: Node | undefined): n is Node => !!n && n.type === "vector" && !!n.vector && !n.locked;
+const isEvenOdd = (n: Node) => (n.vector?.raw as { fillRule?: string } | null | undefined)?.fillRule?.toLowerCase() === "evenodd";
+
+/** Opens vector edit on a vector. A raw path becomes editable points first (one undo step); an
+ *  even-odd one says to Flatten it instead. Returns whether vector edit opened. */
+export function enterVectorEdit(n: Node): boolean {
+  if (!isVectorLayer(n)) return false;
+  if (n.vector!.raw) {
+    if (isEvenOdd(n)) {
+      toast(`${n.name} uses even-odd filling: Flatten it (${MOD}E) to edit its points`, "error");
+      return false;
+    }
+    if (!dispatch({ op: "makeEditable", ids: [n.id] })) return false;
+  }
+  useStore.setState({ editingVector: n.id, vectorPoints: [] });
+  return true;
+}
 
 // ---------- Keyboard insert ----------
 
