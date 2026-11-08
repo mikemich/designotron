@@ -760,8 +760,9 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     for (const a of frameEl.getAnimations()) a.cancel();
     const dim = overlayDim(top.settings);
     const savedBack = backEl.style.background;
-    const savedAnim = backEl.style.animation;
-    backEl.style.animation = "none";
+    // The dim's own fade-in is over now; finishing it (not clearing `animation`, which would
+    // restart it on a snap-back) leaves the inline background in charge.
+    for (const a of backEl.getAnimations()) a.finish();
     let at = 0;
     let running: ReturnType<typeof ramp> | null = null;
     const set = (v: number) => {
@@ -783,7 +784,6 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       revert: () => {
         frameEl.style.transform = "";
         backEl.style.background = savedBack;
-        backEl.style.animation = savedAnim;
       },
       ms: m.ms,
       ease: m.ease,
@@ -1181,7 +1181,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
           </button>
         )}
       </div>
-      <div className="presenter-viewport" style={{ position: "relative", overflow: "clip", width: frame.width * scale, height: frame.height * scale }}>
+      <div className="presenter-viewport" style={{ position: "relative", width: frame.width * scale, height: frame.height * scale }}>
         {old && m?.kind !== "moveOut" && oldStage}
         {curStage}
         {old && m?.kind === "moveOut" && oldStage}

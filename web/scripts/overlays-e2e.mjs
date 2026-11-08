@@ -81,7 +81,7 @@ async function playTests(page, label, ids) {
 
   // Swap to the menu from a button in the modal: menu sits top right, no dim.
   await hot("To menu").click();
-  await page.waitForTimeout(900);
+  await page.waitForTimeout(400);
   check(`${label}: swap replaces the overlay`, (await overlays(page)) === 1 && (await crumb(page)).includes("Menu"), await crumb(page));
   const menu = await box(page, ".presenter [data-overlay] .overlay-frame");
   check(`${label}: menu at the top right`, Math.abs(menu.x + menu.width - (stage.x + stage.width)) < 3 && Math.abs(menu.y - stage.y) < 3, JSON.stringify(menu));

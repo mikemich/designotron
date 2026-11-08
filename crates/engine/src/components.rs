@@ -2006,8 +2006,8 @@ pub fn is_default_set_outline(n: &Node) -> bool {
 }
 
 /// Removes the legacy default outline from every component set (files, pastes, peers).
-/// Returns how many sets changed.
-pub fn strip_default_set_outline(doc: &mut Document) -> usize {
+/// Returns the ids of the sets that changed.
+pub fn strip_default_set_outline(doc: &mut Document) -> Vec<NodeId> {
   let ids: Vec<NodeId> = doc
     .nodes
     .iter()
@@ -2020,7 +2020,18 @@ pub fn strip_default_set_outline(doc: &mut Document) -> usize {
       n.stroke_dash.clear();
     }
   }
-  ids.len()
+  ids
+}
+
+/// Puts the legacy outline back on `ids` (a collaboration baseline that predates the strip, so
+/// the strip travels to the room as an ordinary change).
+pub fn restore_default_set_outline(doc: &mut Document, ids: &[NodeId]) {
+  for id in ids {
+    if let Some(n) = doc.get_mut(id).filter(|n| n.kind == NodeType::ComponentSet && n.strokes.is_empty()) {
+      n.strokes = vec![crate::model::Paint::solid("#9747FF")];
+      n.stroke_dash = vec![6.0, 4.0];
+    }
+  }
 }
 
 /// The set name and each component's variant properties, derived from component names:
@@ -2430,10 +2441,10 @@ mod tests {
     kept.id = "k".into();
     kept.stroke_weight = 2.0;
     doc.insert(kept, None, &page, None);
-    assert_eq!(strip_default_set_outline(&mut doc), 1);
+    assert_eq!(strip_default_set_outline(&mut doc), vec!["s".to_string()]);
     assert!(doc.get("s").unwrap().strokes.is_empty() && doc.get("s").unwrap().stroke_dash.is_empty());
     assert_eq!(doc.get("k").unwrap().strokes.len(), 1);
-    assert_eq!(strip_default_set_outline(&mut doc), 0);
+    assert!(strip_default_set_outline(&mut doc).is_empty());
   }
 
   #[test]

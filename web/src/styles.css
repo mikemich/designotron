@@ -1418,6 +1418,9 @@ a.btn {
    screen and the entering one's shadow used to fall on the leaving one as a dark strip. */
 .presenter .presenter-viewport {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  /* clip (not hidden) so focus can't scroll the player when a sheet leaves past its edge */
+  overflow: hidden;
+  overflow: clip;
 }
 .presenter .hotspot {
   position: absolute;

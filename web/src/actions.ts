@@ -290,11 +290,6 @@ export function selectChildren() {
 const isVectorLayer = (n: Node | undefined): n is Node => !!n && n.type === "vector" && !!n.vector && !n.locked;
 const isEvenOdd = (n: Node) => (n.vector?.raw as { fillRule?: string } | null | undefined)?.fillRule?.toLowerCase() === "evenodd";
 
-/** A vector vector edit can open: one with anchors of its own, or a raw path (an icon, an older
- *  file) that converts to anchors first. Even-odd raw paths can't convert without changing how
- *  they fill. */
-export const canEditVector = (n: Node | undefined) => isVectorLayer(n) && !(n.vector!.raw && isEvenOdd(n));
-
 /** Opens vector edit on a vector. A raw path becomes editable points first (one undo step); an
  *  even-odd one says to Flatten it instead. Returns whether vector edit opened. */
 export function enterVectorEdit(n: Node): boolean {

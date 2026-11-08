@@ -671,6 +671,23 @@ mod prototype {
       text.contains("later layers in 'Feed' are drawn over it") && text.contains("move it to the front"),
       "{r}"
     );
+    // create_nodes warns too, once the later siblings exist; a header last in the order is quiet.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Board", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "rectangle", "name": "Top", "width": 100, "height": 20, "scrollBehavior": "sticky" },
+                     { "type": "rectangle", "name": "Item", "width": 100, "height": 200 }] }] }),
+    );
+    assert!(r.to_string().contains("later layers in 'Board'"), "{r}");
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Board2", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "rectangle", "name": "Item2", "width": 100, "height": 200 },
+                     { "type": "rectangle", "name": "Top2", "width": 100, "height": 20, "scrollBehavior": "sticky" }] }] }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
     // Last in the order: no warning.
     run(
       &mut e,

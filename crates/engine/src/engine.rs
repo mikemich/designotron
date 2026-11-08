@@ -962,6 +962,9 @@ pub struct Engine {
   synced: Option<Document>,
   /// Document as last sent to collaborators (see `collab_delta`).
   collab_synced: Option<Document>,
+  /// Component sets whose legacy outline `load` removed: the collaboration baseline still has it,
+  /// so the first delta sends the removal to the room.
+  stripped_outlines: Vec<NodeId>,
   /// With a relay that orders changes: the room's document as of every change it has
   /// ordered so far, and this editor's changes it hasn't yet (oldest first). The document
   /// is always `collab_confirmed` with `collab_pending` on top, so once nothing is pending
@@ -1124,6 +1127,7 @@ impl Engine {
       render_cache: RenderCache::default(),
       synced: None,
       collab_synced: None,
+      stripped_outlines: Vec::new(),
       collab_confirmed: None,
       collab_pending: Default::default(),
       collab_granular: false,
@@ -1164,7 +1168,7 @@ impl Engine {
     components::repair_masters(&mut doc);
     // Nor may a crafted link survive: unsafe schemes are dropped from text and prototypes.
     sanitize_links(&mut doc, None);
-    components::strip_default_set_outline(&mut doc);
+    self.stripped_outlines = components::strip_default_set_outline(&mut doc);
     self.page = doc.pages[0].id.clone();
     self.doc = doc;
     self.selection.clear();
@@ -1300,8 +1304,11 @@ impl Engine {
   pub fn collab_reset(&mut self, ordered: bool, granular: bool, lists: bool) {
     self.collab_granular = ordered && granular;
     self.collab_lists = self.collab_granular && lists;
-    self.collab_synced = Some(self.doc.clone());
-    self.collab_confirmed = ordered.then(|| self.doc.clone());
+    let mut base = self.doc.clone();
+    components::restore_default_set_outline(&mut base, &self.stripped_outlines);
+    self.stripped_outlines.clear();
+    self.collab_synced = Some(base.clone());
+    self.collab_confirmed = ordered.then_some(base);
     self.collab_pending.clear();
     // What was moved before joining is part of the baseline, not of the first delta.
     self.moved_hint.clear();
@@ -3934,8 +3941,17 @@ impl Engine {
     {
       return;
     }
-    let sx = if before.width > 0.001 { now.width / before.width } else { 1.0 };
-    let sy = if before.height > 0.001 { now.height / before.height } else { 1.0 };
+    // A box typed down to nothing would flatten the path for good: leave the points alone then.
+    let sx = if before.width > 0.001 && now.width > 0.001 {
+      now.width / before.width
+    } else {
+      1.0
+    };
+    let sy = if before.height > 0.001 && now.height > 0.001 {
+      now.height / before.height
+    } else {
+      1.0
+    };
     if sx == 1.0 && sy == 1.0 {
       return;
     }
@@ -5960,6 +5976,13 @@ mod tests {
     let mut loaded = engine();
     loaded.load(&json).unwrap();
     check(&loaded);
+    // Joining a room: the strip is a change the room hasn't seen, so the first delta sends it.
+    loaded.collab_reset(true, true, false);
+    let d = loaded.collab_delta().to_string();
+    assert!(d.contains(&plain) && d.contains(&filled), "{d}");
+    assert!(!d.contains(&red), "the user's stroke isn't touched: {d}");
+    assert!(!d.contains("fills") && !d.contains("123456"), "only the strokes: {d}");
+    assert!(crate::collab::is_empty(&loaded.collab_delta()), "sent once");
     let mut replaced = engine();
     replaced
       .dispatch(Command::ReplaceDocument {
@@ -8690,7 +8713,7 @@ mod tests {
     }
 
     #[test]
-    fn make_editable_refuses_even_odd_locked_and_device_parts() {
+    fn make_editable_refuses_even_odd_and_locked_and_plain_vectors() {
       let mut e = engine();
       let eo = raw_icon(&mut e, "evenodd");
       let err = e.dispatch(Command::MakeEditable { ids: vec![eo.clone()] }).unwrap_err();
