@@ -1498,7 +1498,9 @@ pub fn tokens_json(doc: &Document) -> Value {
         .values
         .get(&default.id)
         .or_else(|| c.modes.iter().find_map(|m| v.values.get(&m.id)));
-      let Some(val) = raw.and_then(|r| value(v.kind, r)) else { continue };
+      let Some(val) = raw.and_then(|r| value(v.kind, &standing_in(doc, c, v, r))) else {
+        continue;
+      };
       let path = &paths[&v.id];
       let mut tok = Map::new();
       match v.kind {
@@ -1525,7 +1527,7 @@ pub fn tokens_json(doc: &Document) -> Value {
       };
       let mut modes = Map::new();
       for (m, name) in c.modes.iter().zip(&mode_names).skip(1) {
-        if let Some(mv) = v.values.get(&m.id).and_then(|r| value(v.kind, r)) {
+        if let Some(mv) = v.values.get(&m.id).and_then(|r| value(v.kind, &standing_in(doc, c, v, r))) {
           modes.insert(name.clone(), mv);
         }
       }
@@ -1545,6 +1547,22 @@ pub fn tokens_json(doc: &Document) -> Value {
     root.insert(unique_name("Styles", &coll_names), styles);
   }
   Value::Object(root)
+}
+
+/// A mode value as the export should read it: an alias to a deleted variable is replaced by what
+/// `tokens_css` shows for it (the variable's default-mode value, or the alias that stands in).
+fn standing_in(doc: &Document, c: &Collection, v: &Variable, raw: &Value) -> Value {
+  let Some(alias) = raw.get("alias").and_then(|a| a.as_str()) else {
+    return raw.clone();
+  };
+  if find(doc, alias).is_some() {
+    return raw.clone();
+  }
+  match dangling(c, v) {
+    Dangling::Value(x) => x.clone(),
+    Dangling::Alias(next) => json!({ "alias": next }),
+    Dangling::None => raw.clone(),
+  }
 }
 
 /// The colour and text styles as a DTCG group: colours (`$type` `color`) and text styles
@@ -2176,6 +2194,28 @@ mod tests {
     base.get_mut(&f).unwrap().fills = vec![Paint::solid("#654321")];
     assert!(apply_since(&mut since, &base));
     assert_eq!(solid(&since, &f), solid(&full, &f));
+  }
+
+  #[test]
+  fn tokens_json_gives_a_dangling_alias_the_same_fallback_as_tokens_css() {
+    let (e, _) = dangling_file();
+    let json = tokens_json(&e.doc);
+    // Surface's Dark aliases a missing variable: it reads the default mode's alias to Paper.
+    let ext = &json["Theme"]["surface"]["$extensions"]["com.designotron"];
+    assert_eq!(ext["modes"]["dark"], json!("{Prim.paper}"), "{json}");
+    // And a default mode that is a plain colour gives the Dark mode that colour.
+    let mut e = engine();
+    let mut cs = aliased();
+    Arc::make_mut(&mut cs[1].variables[1])
+      .values
+      .insert("dark".into(), json!({ "alias": "missing" }));
+    e.dispatch(Command::SetVariables { collections: cs }).unwrap();
+    let json = tokens_json(&e.doc);
+    assert_eq!(
+      json["Theme"]["base"]["$extensions"]["com.designotron"]["modes"]["dark"],
+      json!("#222222"),
+      "{json}"
+    );
   }
 
   #[test]

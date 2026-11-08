@@ -812,7 +812,7 @@ fn alias_target<'a>(
     .filter(|c| !std::ptr::eq(*c, hit.0) && c.variables.iter().any(|x| x.name == target))
     .map(|c| c.name.as_str())
     .collect();
-  if let Some(w) = ambiguous_name(target, &hit.0.name, &others) {
+  if let Some(w) = ambiguous_name(target, &hit.0.name, &others, "aliased") {
     warnings.push(w);
   }
   Some(hit)
@@ -820,7 +820,7 @@ fn alias_target<'a>(
 
 /// "'Brand' is in A and B; bound A/Brand. Write 'B/Brand' for the other." (`None` when the name
 /// is in no other collection).
-fn ambiguous_name(name: &str, chosen: &str, others: &[&str]) -> Option<String> {
+fn ambiguous_name(name: &str, chosen: &str, others: &[&str], verb: &str) -> Option<String> {
   if others.is_empty() {
     return None;
   }
@@ -832,7 +832,7 @@ fn ambiguous_name(name: &str, chosen: &str, others: &[&str]) -> Option<String> {
   let all: Vec<String> = std::iter::once(chosen).chain(others.iter().copied()).map(String::from).collect();
   let spelled: Vec<String> = others.iter().map(|c| format!("'{c}/{name}'")).collect();
   Some(format!(
-    "'{name}' is in {}; bound {chosen}/{name}. Write {} for {}.",
+    "'{name}' is in {}; {verb} {chosen}/{name}. Write {} for {}.",
     join(&all, "and"),
     join(&spelled, "or"),
     if others.len() == 1 { "the other" } else { "the others" }
@@ -4420,7 +4420,7 @@ fn check_binding(cx: &mut Ctx, doc: &Document, prop: &str, name: &str) -> Result
           .filter(|o| o.id != c.id && o.variables.iter().any(|x| x.name == name))
           .map(|o| o.name.as_str())
           .collect();
-        if let Some(w) = ambiguous_name(name, &c.name, &others) {
+        if let Some(w) = ambiguous_name(name, &c.name, &others, "bound") {
           cx.warn(w);
         }
       }

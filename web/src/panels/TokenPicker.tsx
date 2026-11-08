@@ -102,6 +102,7 @@ export function TokenList({ items, selectedId, actions = [], placeholder = "Sear
           role="combobox"
           aria-label={`Search ${label}`}
           aria-expanded="true"
+          aria-haspopup="tree"
           aria-controls={id}
           aria-activedescendant={active >= 0 ? rowId(active) : undefined}
           placeholder={placeholder}
@@ -117,7 +118,7 @@ export function TokenList({ items, selectedId, actions = [], placeholder = "Sear
       <div className="sr-only" role="status" aria-live="polite">
         {query.trim() ? `${model.matched} match${model.matched === 1 ? "" : "es"}` : ""}
       </div>
-      <div ref={listRef} id={id} className="tp-list" role="listbox" aria-label={label} style={{ maxHeight }}>
+      <div ref={listRef} id={id} className="tp-list" role="tree" aria-label={label} style={{ maxHeight }}>
         {rows.map((r, i) => (
           <Row key={r.key} r={r} i={i} id={rowId(i)} active={i === active} selected={r.type === "item" && r.item.id === selectedId} onRun={() => run(r)} />
         ))}
@@ -139,7 +140,7 @@ function Row({ r, i, id, active, selected, onRun }: { r: PickerRow; i: number; i
   const common = {
     id,
     "data-row": i,
-    role: "option" as const,
+    role: "treeitem" as const,
     "aria-selected": selected || undefined,
     // Keeping the pointer from taking focus leaves the caret in the search field.
     onMouseDown: (e: React.MouseEvent) => e.preventDefault(),

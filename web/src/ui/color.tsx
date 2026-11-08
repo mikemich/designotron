@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Image as ImageIcon, Pipette, Plus, RotateCw, Trash2 } from "lucide-react";
 import type { GradientHandles, GradientPaintType, ImageCrop, ImageFilters, Paint } from "../types";
 import { addStop } from "../gradient";
@@ -101,6 +101,8 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
   };
   const hueRgb = hsvToRgb(hsv.h, 1, 1);
   const styles = getDoc().styles.colors;
+  // Rebuilt only when the styles change, not on every frame of an HSV drag.
+  const styleItems = useMemo(() => styles.map((s) => ({ id: s.id, name: s.name, description: s.description, preview: { type: "color" as const, color: s.color } })), [styles]);
   const pct = (v: number) => Math.round(v * 100);
   /** A key on one of the sliders: the new colour from `sliderKey`, emitted like a drag. */
   const sliderKeys = (e: React.KeyboardEvent, kind: SliderKind) => {
@@ -221,7 +223,7 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
               placeholder="Search colour styles"
               maxHeight={180}
               autoFocus={false}
-              items={styles.map((s) => ({ id: s.id, name: s.name, description: s.description, preview: { type: "color", color: s.color } }))}
+              items={styleItems}
               onPick={(item) => {
                 const s = styles.find((x) => x.id === item.id);
                 if (!s) return;

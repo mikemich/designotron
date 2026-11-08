@@ -740,7 +740,7 @@ function DetailsPopover({ variable, anchor, onDescription, onSelectUsers, onClos
     <Popover anchor={anchor} onClose={onClose} label={`Details of ${variable.name}`} width={260}>
       <div className="var-details">
         <div className="small muted">Description</div>
-        <Commit value={variable.description ?? ""} label="Description" title="What this variable is for" onCommit={(d) => onDescription(d.trim())} />
+        <DescriptionField value={variable.description ?? ""} onCommit={onDescription} />
         <div className="small muted" data-var-usage>
           {text}
         </div>
@@ -751,6 +751,41 @@ function DetailsPopover({ variable, anchor, onDescription, onSelectUsers, onClos
         )}
       </div>
     </Popover>
+  );
+}
+
+/**
+ * The description field: commits on Enter, on blur and when the popover goes away, so a click outside
+ * (which closes the popover before the field blurs) keeps what was typed.
+ */
+function DescriptionField({ value, onCommit }: { value: string; onCommit: (d: string) => void }) {
+  const [text, setText] = useState(value);
+  const latest = useRef(text);
+  const saved = useRef(value);
+  const commit = useRef(onCommit);
+  latest.current = text;
+  commit.current = onCommit;
+  const flush = () => {
+    const t = latest.current.trim();
+    if (t === saved.current) return;
+    saved.current = t;
+    commit.current(t);
+  };
+  useEffect(() => flush, []);
+  return (
+    <input
+      className="textinput"
+      aria-label="Description"
+      title="What this variable is for"
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={flush}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") flush();
+        else if (e.key === "Escape") setText(saved.current);
+      }}
+    />
   );
 }
 

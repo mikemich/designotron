@@ -80,7 +80,11 @@ export function pickerRows(items: PickerItem[], query: string, open: (key: strin
   };
   if (grouped) {
     const byGroup = new Map<string, PickerItem[]>();
-    for (const i of hits) byGroup.set(i.group ?? "", [...(byGroup.get(i.group ?? "") ?? []), i]);
+    for (const i of hits) {
+      const list = byGroup.get(i.group ?? "");
+      if (list) list.push(i);
+      else byGroup.set(i.group ?? "", [i]);
+    }
     for (const [group, list] of byGroup) {
       const key = `c:${group}`;
       const isOpen = searching || open(key);

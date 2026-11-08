@@ -4490,7 +4490,7 @@ mod r21b {
       e.doc.variables[2].variables[0].values.values().next().unwrap(),
       &json!({ "alias": first })
     );
-    assert!(r["warnings"].to_string().contains("'Brand' is in A and B; bound A/Brand"), "{r}");
+    assert!(r["warnings"].to_string().contains("'Brand' is in A and B; aliased A/Brand"), "{r}");
     // The exact Collection/name still wins over everything.
     run(
       &mut e,

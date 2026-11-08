@@ -251,6 +251,12 @@ check("clicking the chip re-targets the alias", (await aliasOfMode("Dark")) === 
 await dispatch({ op: "undo" });
 await settle();
 check("one undo puts it back", (await aliasOfMode("Dark")) === (await brand(2)));
+// The Details popover keeps a description that was typed when the person clicks outside.
+await row.locator("[data-var-details]").click();
+await page.locator('input[aria-label="Description"]').fill("Card background");
+await page.locator(".variables-dialog .modal-head b").click();
+await settle();
+check("a description typed in Details survives a click outside", (await varNamed("Theme", "Surface/Card")).v.description === "Card background", JSON.stringify((await varNamed("Theme", "Surface/Card")).v.description));
 
 // ---------- 5. Create variable: focus, folder "+" ----------
 await page.locator(".var-coll", { hasText: "Primitives" }).first().click();
@@ -461,7 +467,7 @@ console.log(`TIMING picker at 2,000 styles: open ${open2.join("/")} ms (median $
 await applyBtn.click();
 await page.waitForSelector("[data-token-picker] input");
 await page.keyboard.insertText("style");
-const drawn = await page.locator("[data-token-picker] [role=option]").count();
+const drawn = await page.locator("[data-token-picker] [data-row]").count();
 check("at most 200 rows are drawn, with a note for the rest", drawn <= 201 && (await page.locator("[data-tp-more]").count()) === 1, `${drawn} rows`);
 await page.keyboard.press("Escape");
 await page.keyboard.press("Escape");
