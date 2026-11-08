@@ -59,6 +59,16 @@ export function startFrame(doc: Doc, pageId: string | undefined): string | null 
   return ofType("frame") ?? ofType("component");
 }
 
+/** Where Present starts for a selection: the top-level frame or component of this page that holds
+ *  the first selected layer, else the flow start (`startFrame`). A component set isn't a screen, and
+ *  neither is a selection on another page. */
+export function presentStart(doc: Doc, pageId: string | undefined, selection: string[]): string | null {
+  let top = selection.length ? doc.nodes[selection[0]] : undefined;
+  while (top?.parent && doc.nodes[top.parent]) top = doc.nodes[top.parent];
+  if (top && !top.parent && top.page === pageId && SCREEN_TYPES.includes(top.type)) return top.id;
+  return startFrame(doc, pageId);
+}
+
 /** A link's destination that no longer exists (deleted frame). */
 export const isMissingDestination = (doc: Doc, i: Interaction) =>
   (i.action === "navigate" || i.action === "openOverlay" || i.action === "swapOverlay") && !!i.destination && !doc.nodes[i.destination];

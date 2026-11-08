@@ -25,6 +25,7 @@ import { ALT_MOD, MOD } from "./ui/controls";
 import { openTextGesture } from "./canvas/TextEditor";
 import type { DeviceFrame, Node, Rect, Tool } from "./types";
 import { hasDeviceUi, type DevicePreset } from "./panels/presetList";
+import { presentStart } from "./prototype";
 
 const CLIPBOARD_TAG = "designotron/nodes";
 
@@ -813,4 +814,11 @@ export const DEVICE_DEFAULTS: DeviceFrame = {
 /** Puts a device (or none) on a screen frame; `resize` also gives it the preset's size. One undo step. */
 export function setDevice(id: string, device: DeviceFrame | null, resize: boolean) {
   return dispatch({ op: "setDevice", id, device, resize });
+}
+
+/** Present from the frame holding the selection (else the flow start): the Play button and Ctrl+Alt+Enter. */
+export function startPresenting() {
+  const first = presentStart(getDoc(), currentPage(), selection());
+  if (first) useStore.setState({ presenting: first });
+  else toast("Nothing to present yet: add a frame (F) first. Presenting plays your frames as a clickable prototype.");
 }
