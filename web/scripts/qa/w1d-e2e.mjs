@@ -110,8 +110,10 @@ try {
   await dispatch({ op: "select", ids: [] });
   await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter");
-  const go = await hotspotBox(id("Go"));
-  await page.mouse.click(go.x + 5, go.y + 5);
+  // A link that can't act gets no hotspot at all (round 21), so there is nothing to click.
+  check("a dangling link has no hotspot", (await page.locator(`.presenter [data-hotspot="${id("Go")}"]`).count()) === 0);
+  const go = await page.locator(".presenter").first().boundingBox();
+  await page.mouse.click(go.x + go.width / 2, go.y + go.height / 2);
   await page.waitForTimeout(300);
   check("player ignores the dangling link", (await page.locator(".presenter").count()) === 1 && (await crumb()) === "Home", await crumb());
   await closePresenter();

@@ -68,6 +68,8 @@ async function newFile() {
   await page.goto(URL);
   await page.click("button:has-text('New design file')");
   await page.waitForSelector("#dt-canvas");
+  // A new file focuses its "What do you want to design?" prompt; Escape leaves it for the canvas.
+  await page.keyboard.press("Escape");
   await page.waitForTimeout(300);
   await dt(() => window.__dt.setViewport({ zoom: 1, x: 0, y: 0 }));
 }

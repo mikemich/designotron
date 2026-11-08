@@ -90,7 +90,7 @@ async function buildSheet(page, close = "drag") {
   return { s1, sheet, open, grab, closeBtn };
 }
 async function present(page) {
-  await page.click("button[title='Present']");
+  await page.click("[title^='Present (']");
   await page.waitForSelector(".presenter");
   await sleep(300);
 }

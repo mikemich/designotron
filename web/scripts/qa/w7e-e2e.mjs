@@ -103,7 +103,8 @@ try {
     check("Enter on a file card opens the editor", opened);
     await page.waitForTimeout(600);
     const f = await focused(page);
-    check("a newly opened file focuses the canvas", f.id === "dt-canvas", JSON.stringify(f));
+    // An empty file puts focus in the "What do you want to design?" prompt (round 21); any other focuses the canvas.
+    check("a newly opened file focuses the canvas or its empty-file prompt", f.id === "dt-canvas" || f.id === "empty-prompt-input", JSON.stringify(f));
 
 
     // The "more" button: named, and its menu opens at the button and is operable.
@@ -170,7 +171,7 @@ try {
     const home = f.label;
     await page.keyboard.press("End");
     f = await focused(page);
-    check("Home and End jump to the first and last item", home.startsWith("Back to files") && f.label.startsWith("Manage plugins"), `${home} / ${f.label}`);
+    check("Home and End jump to the first and last item", home.startsWith("Back to files") && f.label.startsWith("About Designotron"), `${home} / ${f.label}`);
     await page.keyboard.press("Home");
     await page.keyboard.type("k");
     f = await focused(page);

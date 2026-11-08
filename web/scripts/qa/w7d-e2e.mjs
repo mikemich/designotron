@@ -35,7 +35,7 @@ const context_ = () => page.evaluate(() => window.__dt.contextLine());
 async function quickActions() {
   await page.click(".chat-input .ibtn[title='Quick actions']");
   await page.waitForSelector(".menu .item");
-  const state = await page.$$eval(".menu .item", (els) => Object.fromEntries(els.map((e) => [e.textContent.trim(), e.disabled])));
+  const state = await page.$$eval(".menu .item", (els) => Object.fromEntries(els.map((e) => [(e.querySelector(".item-text > span:first-child") ?? e.querySelector("span") ?? e).textContent.trim(), e.disabled])));
   await page.keyboard.press("Escape");
   await page.waitForSelector(".menu", { state: "detached" }).catch(() => {});
   return state;
