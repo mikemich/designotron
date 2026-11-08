@@ -25,14 +25,43 @@ interface View {
   y: number;
 }
 
+/** Gives every id in the markup a prefix (and the references to it), so the preview's defs can't
+ *  clash with the canvas drawn behind the dialog. */
+function prefixIds(svg: string): string {
+  return svg
+    .replace(/(\sid=")([^"]+)"/g, '$1vp_$2"')
+    .replace(/url\(#([^)]+)\)/g, "url(#vp_$1)")
+    .replace(/(href="#)([^"]+)"/g, '$1vp_$2"');
+}
+
+/** While a dialog is open, keeps editor shortcuts (Ctrl+Z, Delete, arrows, cut and paste) from
+ *  reaching the document behind it: keys from outside the dialog (focus not inside yet) and
+ *  Ctrl/⌘ combos from inside are stopped. Escape and Tab stay (the dialog's own handlers). */
+export function shieldEditor(inside: (t: EventTarget | null) => boolean): () => void {
+  const stop = (e: Event) => {
+    if (e.type === "keydown") {
+      const k = e as KeyboardEvent;
+      if (k.key === "Escape" || k.key === "Tab") return;
+      if (inside(k.target) && !k.ctrlKey && !k.metaKey) return;
+    }
+    e.stopPropagation();
+  };
+  const events = ["keydown", "cut", "copy", "paste"];
+  for (const t of events) window.addEventListener(t, stop, true);
+  return () => {
+    for (const t of events) window.removeEventListener(t, stop, true);
+  };
+}
+
 /** Draws one page of a stored version with a throwaway engine, so the open document, its
  *  selection, undo history and autosave are never touched. */
-async function renderVersionPage(json: string, page: string): Promise<Rendered> {
+async function renderVersionPage(json: string, page: string, live: () => boolean): Promise<Rendered | null> {
   await bootEngine();
+  if (!live()) return null;
   const probe = new WasmEngine(1);
   try {
     probe.load(json);
-    const svg = resolveAssets(probe.render(page, "", ""));
+    const svg = prefixIds(resolveAssets(probe.render(page, "", "")));
     const doc = JSON.parse(json) as { pages?: PageInfo[] };
     const roots = doc.pages?.find((p) => p.id === page)?.children ?? [];
     let box: Rendered["box"] = null;
@@ -48,10 +77,12 @@ async function renderVersionPage(json: string, page: string): Promise<Rendered> 
 
 /** A read-only look at a saved version: the page drawn and fitted, zoom and pan, with Restore,
  *  Duplicate as file and Close. */
-export function VersionPreview(props: { fileId: string; version: Version; label: string; onRestore: () => void; onDuplicate: () => void; onClose: () => void }) {
+export function VersionPreview(props: { fileId: string; version: Version; label: string; onRestore: () => void; onDuplicate: () => void | Promise<unknown>; onClose: () => void }) {
   const { fileId, version, label } = props;
   const ref = useDialog(props.onClose);
   const stage = useRef<HTMLDivElement>(null);
+  const root = useRef<HTMLDivElement>(null);
+  const [busy, setBusy] = useState(false);
   const [json, setJson] = useState<string | null>(null);
   const [pages, setPages] = useState<PageInfo[]>([]);
   const [page, setPage] = useState("");
@@ -100,9 +131,9 @@ export function VersionPreview(props: { fileId: string; version: Version; label:
     setOut(null);
     // Let "Rendering…" paint before the (synchronous) load and draw.
     const t = setTimeout(() => {
-      renderVersionPage(json, page).then(
+      renderVersionPage(json, page, () => live).then(
         (r) => {
-          if (!live) return;
+          if (!live || !r) return;
           setOut(r);
           requestAnimationFrame(() => live && fit(r.box));
         },
@@ -136,12 +167,14 @@ export function VersionPreview(props: { fileId: string; version: Version; label:
     return () => el.removeEventListener("wheel", onWheel);
   }, [json, failed]);
 
+  useEffect(() => shieldEditor((t) => !!root.current?.contains(t as Node)), []);
+
   const drag = useRef<{ x: number; y: number } | null>(null);
   const when = new Date(version.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" });
 
   return (
-    <div className="modal-bg" onPointerDown={(e) => e.target === e.currentTarget && props.onClose()}>
-      <div ref={ref} className="modal version-preview" role="dialog" aria-modal="true" aria-label={`Preview of ${label}`}>
+    <div ref={root} className="modal-bg" onPointerDown={(e) => e.target === e.currentTarget && props.onClose()}>
+      <div ref={ref} className="modal version-preview" role="dialog" aria-modal="true" aria-label={`Preview of ${label}`} tabIndex={-1}>
         <div className="modal-head vp-head">
           <div className="vp-title">
             <b>{label}</b>
@@ -163,8 +196,12 @@ export function VersionPreview(props: { fileId: string; version: Version; label:
         <div
           ref={stage}
           className="vp-stage"
+          tabIndex={0}
+          aria-label="Preview, read-only. Drag to pan, Ctrl or ⌘ and scroll to zoom."
           onPointerDown={(e) => {
             if (e.button !== 0) return;
+            // Focus stays in the dialog, so plain keys never reach the editor.
+            e.currentTarget.focus({ preventScroll: true });
             drag.current = { x: e.clientX, y: e.clientY };
             e.currentTarget.setPointerCapture(e.pointerId);
           }}
@@ -197,7 +234,18 @@ export function VersionPreview(props: { fileId: string; version: Version; label:
         </div>
         <div className="confirm-actions vp-actions">
           <span className="muted small vp-hint">Ctrl or ⌘ and scroll to zoom, drag to pan</span>
-          <button className="btn" onClick={props.onDuplicate} disabled={failed}>
+          <button
+            className="btn"
+            disabled={failed || busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await props.onDuplicate();
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
             Duplicate as file
           </button>
           <button className="btn" onClick={props.onClose}>

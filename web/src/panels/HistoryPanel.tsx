@@ -5,7 +5,7 @@ import { deleteVersion, getFileMeta, listVersions, loadVersion, newDocId, newFil
 import { IconButton, Section } from "../ui/controls";
 import { attempt, reportFailure } from "../errors";
 import { ConfirmDialog } from "../dashboard/ConfirmDialog";
-import { VersionPreview } from "./VersionPreview";
+import { VersionPreview, shieldEditor } from "./VersionPreview";
 import { nextVersionName, notifyVersions, onVersionsChange } from "../versionEvents";
 
 /** Saves an automatic version when the last one is older than this. */
@@ -51,10 +51,12 @@ export function HistoryPanel() {
       document.removeEventListener("visibilitychange", shown);
     };
   }, [fileId]);
+  // The delete question is a dialog of its own: editor shortcuts don't reach the document behind it.
+  useEffect(() => (deleting ? shieldEditor((t) => !!(t as HTMLElement | null)?.closest?.("[role=alertdialog]")) : undefined), [deleting]);
   if (!fileId) return null;
   const changed = () => {
+    // Delivered to this tab's own list as well.
     notifyVersions(fileId);
-    refresh();
   };
 
   const save = async () => {

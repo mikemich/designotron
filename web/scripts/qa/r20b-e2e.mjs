@@ -304,6 +304,58 @@ const saveNamed = async (page, name) => {
   await page.close();
 }
 
+// ---------- 7. Editor shortcuts stay out of both dialogs ----------
+{
+  const page = await openNew();
+  await addRect(page, "Box", "#AA0000");
+  await addRect(page, "Box2", "#00AA00", 100);
+  await waitSaved(page);
+  await openHistory(page);
+  await saveNamed(page, "S1");
+  await waitFor(async () => (await names(page)).includes("S1"));
+  const ids = await page.evaluate(() => Object.values(window.__dt.doc().nodes).map((n) => n.id));
+  await page.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), ids[0]);
+  const snap = () => page.evaluate(() => ({ doc: JSON.stringify(window.__dt.doc()), rev: window.__dt.state().docRev, sel: window.__dt.state().selection.join(","), tool: [...document.querySelectorAll(".tbtn.active")].map((b) => b.getAttribute("title")).filter((t) => !/panel/i.test(t ?? "")).join(",") }));
+  const keys = async () => {
+    for (const k of ["Delete", "ArrowRight", "r", "Control+z", "Control+Shift+z", "Control+a", "Control+d"]) await page.keyboard.press(k);
+    await sleep(150);
+  };
+  const before = await snap();
+  check("a layer is selected for the key test", before.sel !== "", before.sel);
+
+  // The delete confirmation.
+  await (await rowBtn(page, rowOf(page, "S1"), "Delete")).click();
+  const confirm = page.getByRole("alertdialog");
+  await confirm.waitFor();
+  await keys();
+  const afterConfirm = await snap();
+  check("keys behind the delete confirmation change nothing", canon(afterConfirm) === canon(before), `${afterConfirm.tool} ${afterConfirm.rev} vs ${before.rev} sel ${afterConfirm.sel} vs ${before.sel} docsame ${afterConfirm.doc === before.doc}`);
+  await confirm.getByRole("button", { name: "Cancel" }).click();
+
+  // The preview, before and after a drag to pan.
+  await (await rowBtn(page, rowOf(page, "S1"), "Preview this version")).click();
+  const dlg = page.getByRole("dialog", { name: "Preview of S1" });
+  await dlg.locator(".vp-svg").waitFor();
+  await keys();
+  const inPreview = await snap();
+  check("keys in the preview change nothing", canon(inPreview) === canon(before), `${inPreview.tool} ${inPreview.rev} vs ${before.rev}`);
+  const box = await dlg.locator(".vp-stage").boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 50, box.y + box.height / 2 + 30, { steps: 3 });
+  await page.mouse.up();
+  check("focus stays inside the dialog after a drag", await page.evaluate(() => !!document.activeElement?.closest("[role=dialog]")));
+  await keys();
+  const afterDrag = await snap();
+  check("keys after a drag to pan change nothing", canon(afterDrag) === canon(before), `${afterDrag.tool} ${afterDrag.rev} vs ${before.rev}`);
+  check("preview ids can't clash with the canvas", !(await dlg.locator(".vp-svg [id]:not([id^=vp_])").count()));
+  await page.keyboard.press("Tab");
+  check("Tab stays in the dialog", await page.evaluate(() => !!document.activeElement?.closest("[role=dialog]")));
+  await page.keyboard.press("Escape");
+  check("Escape still closes it", await dlg.waitFor({ state: "detached" }).then(() => true, () => false));
+  await page.close();
+}
+
 check("no browser dialogs fired", dialogs.length === 0, dialogs.join(" | "));
 check("no page errors", errors.length === 0, errors.join(" | "));
 await ctx.close();

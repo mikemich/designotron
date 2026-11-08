@@ -16,7 +16,7 @@ function isTyping(e: KeyboardEvent): boolean {
 
 /** Menus and dialogs own their keys; the canvas shortcuts stay out (⌘ combos still pass). */
 function inOverlay(e: KeyboardEvent): boolean {
-  return !!(e.target as HTMLElement | null)?.closest?.("[role=menu], .menu, [role=dialog]");
+  return !!(e.target as HTMLElement | null)?.closest?.("[role=menu], .menu, [role=dialog], [role=alertdialog]");
 }
 
 /** Focus on the canvas itself: Tab and Enter-insert belong to the design there, and to the focused
@@ -267,7 +267,7 @@ export function installShortcuts(): () => void {
   // except inside a dialog: so it listens first, on the way down.
   const onRegionKey = (e: KeyboardEvent) => {
     if (e.key !== "F6" || e.metaKey || e.ctrlKey || e.altKey || useStore.getState().presenting) return;
-    if ((e.target as HTMLElement | null)?.closest?.("[role=dialog]")) return;
+    if ((e.target as HTMLElement | null)?.closest?.("[role=dialog], [role=alertdialog]")) return;
     e.preventDefault();
     cycleRegion(e.shiftKey ? -1 : 1);
   };
