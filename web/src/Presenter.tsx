@@ -433,14 +433,18 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       for (const s of inner) clip = overlap(clip, { ...s.rect, x: s.rect.x + shiftX, y: s.rect.y + shiftY });
       const A = off(posBefore, stickyA);
       const B = off(scrolls.current.pos, sticky(scrolls.current.pos));
-      const plan = planSmart(frozen.side, liveSide(instance), {
-        at: { x: ib.x - fb.x + shiftX, y: ib.y - fb.y + shiftY },
-        offsetA: A,
-        offsetB: B,
-        clip,
-      });
-      // The old state's engine copy has drawn what it was needed for.
-      frozen.free();
+      let plan: ReturnType<typeof planSmart> = null;
+      try {
+        plan = planSmart(frozen.side, liveSide(instance), {
+          at: { x: ib.x - fb.x + shiftX, y: ib.y - fb.y + shiftY },
+          offsetA: A,
+          offsetB: B,
+          clip,
+        });
+      } finally {
+        // The old state's engine copy has drawn what it was needed for.
+        frozen.free();
+      }
       if (plan) {
         const rest = buildSceneWithout(inFrame, [instance]);
         const pos = new Map(scrolls.current.pos);
@@ -746,10 +750,13 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       const done = e.type === "pointerup" && completes(p, speed);
       // A restart or the player closing cuts the release off: then nothing is settled or reverted.
       let cancelled = false;
-      dragging.current = () => {
+      const cancel = () => {
         cancelled = true;
         mm.cancel?.();
+        // A later drag must be able to start (a restart doesn't close the player).
+        if (dragging.current === cancel) dragging.current = null;
       };
+      dragging.current = cancel;
       const end = (reached: unknown, then: () => void) => {
         if (!cancelled && reached !== false) then();
         if (!cancelled) dragging.current = null;

@@ -561,6 +561,23 @@ await sleep(200);
   await page.keyboard.press("r"); // inside the snap-back
   await sleep(1000);
   check("12: R during a snap-back stays restarted (not undone)", (await crumb()) === "R1", await crumb());
+  // ... and a drag still works afterwards.
+  await hot(ids.Go).click();
+  await sleep(200);
+  const hb3b = await hot(ids.Rdrag).boundingBox();
+  const bx = hb3b.x + hb3b.width - 20;
+  const by = hb3b.y + 40;
+  await page.mouse.move(bx, by);
+  await page.mouse.down();
+  for (let i = 1; i <= 8; i++) {
+    await page.mouse.move(bx - (i * 28) / 8 * 10 / 10 * 1, by);
+    await sleep(15);
+  }
+  await page.mouse.move(bx - 230, by);
+  await sleep(250);
+  await page.mouse.up();
+  await sleep(900);
+  check("12: a 70% drag after the R completes", (await crumb()) === "R3", await crumb());
 }
 await closePresent();
 // Closing during a Change to snap-back leaves no stale player engine for the next Present.
@@ -584,6 +601,19 @@ await present("Home");
   await present("Home");
   const nm = await page.evaluate((c) => window.__dt.smart.name(c), car);
   check("12: closing during a snap-back leaves no stale engine (the next Present sees the edit)", nm === "Carousel renamed", String(nm));
+  const hb5 = await hot(car).boundingBox();
+  const cx = hb5.x + hb5.width - 10;
+  const cy = hb5.y + 50;
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  for (let i = 1; i <= 8; i++) {
+    await page.mouse.move(cx - (i * 210) / 8, cy);
+    await sleep(15);
+  }
+  await sleep(250);
+  await page.mouse.up();
+  await sleep(700);
+  check("12: a drag works after closing and re-presenting", (await page.evaluate((c) => window.__dt.smart.variant(c), car)) === slideId(2));
 }
 await closePresent();
 // Change to inside the top overlay: the pieces sit in the overlay, half way.
