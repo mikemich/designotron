@@ -2184,6 +2184,60 @@ body:has(.modal-bg) .hint-card {
   }
 }
 
+/* Version preview (read-only look before restoring) */
+.version-preview {
+  width: min(960px, calc(100vw - 32px));
+  height: min(680px, calc(100vh - 64px));
+}
+.vp-head {
+  gap: 8px;
+}
+.vp-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.vp-title b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vp-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--canvas);
+  cursor: grab;
+  touch-action: none;
+}
+.vp-stage:active {
+  cursor: grabbing;
+}
+.vp-svg {
+  display: block;
+  user-select: none;
+}
+.vp-note {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
+}
+.vp-actions .vp-hint {
+  margin-right: auto;
+}
+@media (max-width: 640px) {
+  .vp-actions {
+    flex-wrap: wrap;
+  }
+  .vp-actions .vp-hint {
+    display: none;
+  }
+}
+
 /* Modal + variables editor */
 .modal-bg {
   position: fixed;

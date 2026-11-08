@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
-import { Copy, History, RotateCcw, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Copy, Eye, History, RotateCcw, Trash2 } from "lucide-react";
 import { dispatchOrThrow, getDoc, getEngine, toast, useStore } from "../store";
 import { deleteVersion, getFileMeta, listVersions, loadVersion, newDocId, newFileId, withSuffix, renameVersion, saveFile, saveVersion, type Version } from "../files";
 import { IconButton, Section } from "../ui/controls";
 import { attempt, reportFailure } from "../errors";
+import { ConfirmDialog } from "../dashboard/ConfirmDialog";
+import { VersionPreview } from "./VersionPreview";
+import { nextVersionName, notifyVersions, onVersionsChange } from "../versionEvents";
 
 /** Saves an automatic version when the last one is older than this. */
 export const AUTO_VERSION_MS = 10 * 60 * 1000;
@@ -30,21 +33,37 @@ export function HistoryPanel() {
   const [versions, setVersions] = useState<Version[]>([]);
   const [name, setName] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
+  const [previewing, setPreviewing] = useState<Version | null>(null);
+  const [deleting, setDeleting] = useState<Version | null>(null);
+  const list = useRef<HTMLDivElement>(null);
   const refresh = () => {
     if (fileId) listVersions(fileId).then(setVersions, (e) => reportFailure("read the versions", e));
   };
+  // The list follows versions saved anywhere (the automatic one, another tab) and is reread when the tab shows again.
   useEffect(() => {
     refresh();
+    if (!fileId) return;
+    const off = onVersionsChange(fileId, refresh);
+    const shown = () => document.visibilityState === "visible" && refresh();
+    document.addEventListener("visibilitychange", shown);
+    return () => {
+      off();
+      document.removeEventListener("visibilitychange", shown);
+    };
   }, [fileId]);
   if (!fileId) return null;
+  const changed = () => {
+    notifyVersions(fileId);
+    refresh();
+  };
 
   const save = async () => {
     if (useStore.getState().tabView) return toast("This tab only shows the file. Edit it in the other tab to save a version.", "error");
     const saved = await attempt("save the version", () =>
-      saveVersion(fileId, name.trim() || `Version ${versions.filter((v) => !v.auto).length + 1}`, getEngine().save()),
+      saveVersion(fileId, name.trim() || nextVersionName(versions), getEngine().save()),
     );
     if (saved) setName("");
-    refresh();
+    changed();
   };
   const restore = async (v: Version) => {
     if (useStore.getState().tabView) return toast("This tab only shows the file. Restore in the tab that edits it.", "error");
@@ -58,7 +77,7 @@ export function HistoryPanel() {
       dispatchOrThrow({ op: "replaceDocument", doc, keepComments: true });
       toast(`Restored “${versionLabel(v)}”. Undo to go back.`);
     });
-    refresh();
+    changed();
   };
   const duplicate = async (v: Version) => {
     await attempt("duplicate the version", async () => {
@@ -73,7 +92,7 @@ export function HistoryPanel() {
   };
 
   return (
-    <div className="scroll history">
+    <div className="scroll history" ref={list} tabIndex={-1}>
       <Section title="Save a version">
         <div className="row">
           <input
@@ -114,7 +133,7 @@ export function HistoryPanel() {
                   // Unchanged (focus, then blur) is not a rename: an automatic version stays automatic.
                   const next = e.target.value.trim();
                   if (next && next !== versionLabel(v) && next !== v.name) await attempt("rename the version", () => renameVersion(fileId, v.id, e.target.value.trim()));
-                  refresh();
+                  changed();
                 }}
               />
             ) : (
@@ -125,17 +144,52 @@ export function HistoryPanel() {
             )}
             <div className="muted small">{ago(v.createdAt)}</div>
           </div>
+          <IconButton title="Preview this version" onClick={() => setPreviewing(v)}>
+            <Eye size={13} />
+          </IconButton>
           <IconButton title="Restore this version" onClick={() => restore(v)}>
             <RotateCcw size={13} />
           </IconButton>
           <IconButton title="Duplicate as a new file" onClick={() => duplicate(v)}>
             <Copy size={13} />
           </IconButton>
-          <IconButton title="Delete" onClick={() => attempt("delete the version", () => deleteVersion(fileId, v.id)).then(refresh)}>
+          <IconButton title="Delete" onClick={() => setDeleting(v)}>
             <Trash2 size={13} />
           </IconButton>
         </div>
       ))}
+      {previewing && (
+        <VersionPreview
+          fileId={fileId}
+          version={previewing}
+          label={versionLabel(previewing)}
+          onClose={() => setPreviewing(null)}
+          onDuplicate={() => duplicate(previewing)}
+          onRestore={async () => {
+            const v = previewing;
+            // A view-only tab keeps the preview open with today's refusal.
+            if (useStore.getState().tabView) return restore(v);
+            setPreviewing(null);
+            await restore(v);
+          }}
+        />
+      )}
+      {deleting && (
+        <ConfirmDialog
+          title="Delete version"
+          message={`Delete “${versionLabel(deleting)}”? This can't be undone.`}
+          confirmLabel="Delete"
+          onCancel={() => setDeleting(null)}
+          onConfirm={async () => {
+            const v = deleting;
+            setDeleting(null);
+            await attempt("delete the version", () => deleteVersion(fileId, v.id));
+            changed();
+            // The row (and its button) is gone: keep keyboard focus in the list.
+            setTimeout(() => list.current?.focus(), 0);
+          }}
+        />
+      )}
     </div>
   );
 }

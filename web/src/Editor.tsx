@@ -56,6 +56,7 @@ import {
   type SavePlan,
 } from "./files";
 import { AUTO_VERSION_MS } from "./panels/HistoryPanel";
+import { notifyVersions } from "./versionEvents";
 import { nodeSvg, svgToPngBlob } from "./exporter";
 import { readFileAsDataUrl } from "./assets";
 import { failureText, reportFailure } from "./errors";
@@ -712,6 +713,7 @@ function EditorInner({ fileId, onHome }: { fileId: string; onHome: () => void })
             // the save that just finished).
             try {
               await saveVersion(fileId, "Automatic version", engine.save(), true);
+              notifyVersions(fileId);
             } catch (err) {
               noteEngineError(err);
               console.error(err);
