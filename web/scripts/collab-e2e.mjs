@@ -66,7 +66,7 @@ try {
   await owner.fill(".share-dialog input.textinput >> nth=0", "Olga");
   if (RELAY) {
     // The relay field sits behind "Use a different relay" when one is built in.
-    if (!(await owner.locator(".share-dialog input.mono").count())) await owner.click("text=Use a different relay");
+    if (!(await owner.locator(".share-dialog input.mono").count())) await owner.click(".share-dialog >> text=Use a different relay");
     await owner.fill(".share-dialog input.mono", RELAY);
     await owner.click("button:has-text('Share online')");
   } else {

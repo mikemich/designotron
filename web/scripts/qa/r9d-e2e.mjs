@@ -376,7 +376,7 @@ if (process.env.E2E_RELAY) {
   await waitSaved(A);
   await A.click(".tbtn[title='Share for live editing']");
   await A.fill(".share-dialog input.textinput >> nth=0", "Olga");
-  if (!(await A.locator(".share-dialog input.mono").count())) await A.click("text=Use a different relay");
+  if (!(await A.locator(".share-dialog input.mono").count())) await A.click(".share-dialog >> text=Use a different relay");
   await A.fill(".share-dialog input.mono", RELAY);
   await A.click("button:has-text('Share online')");
   await A.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 10000 });

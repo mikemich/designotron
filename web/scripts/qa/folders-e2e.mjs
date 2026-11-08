@@ -237,9 +237,11 @@ try {
   await p.locator(`button[aria-label="More actions for ${tgt}"]`).focus();
   await p.keyboard.press("Enter");
   await sleep(200);
-  await p.keyboard.press("ArrowDown");
-  await p.keyboard.press("ArrowDown");
-  await p.keyboard.press("ArrowDown");
+  // Walk the menu to "Move to…" by its text (the menu gained "Open in new tab" in round 20).
+  for (let i = 0; i < 10; i++) {
+    await p.keyboard.press("ArrowDown");
+    if (/Move to/.test(await p.evaluate(() => document.activeElement?.textContent ?? ""))) break;
+  }
   const onMove = await p.evaluate(() => document.activeElement?.textContent ?? "");
   await p.keyboard.press("Enter");
   await p.waitForSelector(".move-dialog");
