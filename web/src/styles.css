@@ -848,6 +848,12 @@ button.swatch > i {
 .dt-content .zoom-lod .gk {
   display: inline;
 }
+/* A background blur's copy of what lies below it is the costliest thing the canvas paints, so it
+   waits until zooming or panning stops (`render.rs` marks it `dt-bb`). */
+.dt-content .zooming .dt-bb,
+.dt-content .moving .dt-bb {
+  display: none;
+}
 .canvas .overlay {
   pointer-events: none;
 }

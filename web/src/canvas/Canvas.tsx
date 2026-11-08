@@ -271,6 +271,8 @@ export function Canvas() {
   // roots far outside the view can be left out of the layout and painting.
   const rootInfo = useRef(new Map<string, { b: Rect; texts: number }>());
   const culled = useRef(new Set<string>());
+  const lastView = useRef(useStore.getState().viewport);
+  const movingTimer = useRef<ReturnType<typeof setTimeout>>();
   /** Hides roots outside the view and turns on the cheap zoom look when the view is heavy. */
   const applyView = () => {
     const host = contentRef.current;
@@ -298,6 +300,15 @@ export function Canvas() {
       }
     }
     host.classList.toggle("zoom-lod", z && texts > ZOOM_TEXT_BUDGET);
+    host.classList.toggle("zooming", z);
+    // Panning repaints a background blur's copies as often as zooming does, so they wait for it too.
+    const last = lastView.current;
+    if (last.x !== vp.x || last.y !== vp.y || last.zoom !== vp.zoom) {
+      lastView.current = { x: vp.x, y: vp.y, zoom: vp.zoom };
+      host.classList.add("moving");
+      clearTimeout(movingTimer.current);
+      movingTimer.current = setTimeout(() => host.classList.remove("moving"), 150);
+    }
   };
   useLayoutEffect(() => {
     const host = contentRef.current;
