@@ -3639,6 +3639,20 @@ body:has(.phone-note) .toast {
   color: var(--text);
 }
 /* R20-D view only: a disabled fieldset wraps the Design and Prototype panels, laid out like its content. */
+.panel-lock-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.panel-lock:disabled .panel-lock-scroll {
+  overflow: auto;
+}
+.panel-lock:disabled .panel-lock-scroll > .scroll {
+  overflow: visible;
+  flex: none;
+}
 fieldset.panel-lock {
   display: flex;
   flex-direction: column;

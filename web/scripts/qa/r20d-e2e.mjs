@@ -106,6 +106,31 @@ async function viewOnlyChecks(p, who, rectName) {
   check(`${who}: the Code tab copies a value`, /Copied/.test(live), live);
   await rightTab(p, "design");
   // axe on the right panel: the locked scroll area must be a focusable region, and nothing serious is new.
+  // The first run comes straight after selection changes made while on Design (no tab round trip).
+  await dispatch(p, { op: "select", ids: [] });
+  await rightTab(p, "design");
+  await sleep(200);
+  const axeIds = async () => {
+    const AXE = process.env.AXE ?? "/tmp/claude-0/-home-user-designotron/286bf7bb-781e-5d8f-9708-6c1f94840e4a/scratchpad/qa7/I-a11y/node_modules/axe-core/axe.min.js";
+    if (!fs.existsSync(AXE)) return null;
+    if (!(await p.evaluate(() => !!window.axe))) await p.addScriptTag({ path: AXE });
+    return p.evaluate(async () => {
+      const r = await window.axe.run({ include: [["#panel-right"]] }, { resultTypes: ["violations"] });
+      return r.violations.filter((x) => x.impact === "serious" || x.impact === "critical").map((x) => x.id);
+    });
+  };
+  await dispatch(p, { op: "select", ids: [rect.id] });
+  await sleep(200);
+  const v1 = await axeIds();
+  if (v1) check(`${who}: axe, nothing selected -> a layer on Design`, v1.length === 0, v1.join(","));
+  const others = Object.values((await doc(p)).nodes).filter((n) => n.id !== rect.id && n.type !== "page");
+  if (others.length) {
+    await dispatch(p, { op: "select", ids: [others[0].id] });
+    await sleep(200);
+    const v2 = await axeIds();
+    if (v2) check(`${who}: axe, one layer -> another on Design`, v2.length === 0, v2.join(","));
+    await dispatch(p, { op: "select", ids: [rect.id] });
+  }
   const AXE = process.env.AXE ?? "/tmp/claude-0/-home-user-designotron/286bf7bb-781e-5d8f-9708-6c1f94840e4a/scratchpad/qa7/I-a11y/node_modules/axe-core/axe.min.js";
   if (fs.existsSync(AXE)) {
     if (!(await p.evaluate(() => !!window.axe))) await p.addScriptTag({ path: AXE });
@@ -122,7 +147,7 @@ let editLink = "";
 {
   const octx = await newContext();
   const owner = await openNew(octx, RELAY);
-  await tool(owner, "create_nodes", { nodes: [{ type: "rectangle", name: "Card", x: 100, y: 100, width: 120, height: 80, fill: "#3366ff" }] });
+  await tool(owner, "create_nodes", { nodes: [{ type: "rectangle", name: "Card", x: 100, y: 100, width: 120, height: 80, fill: "#3366ff" }, { type: "rectangle", name: "Other", x: 300, y: 100, width: 60, height: 60, fill: "#ff9900" }] });
   await owner.click(".tbtn[title='Share for live editing']");
   await owner.fill(".share-dialog input.textinput >> nth=0", "Olga");
   if (!(await owner.locator(".share-dialog input.mono").count())) await owner.click(".share-dialog >> text=Use a different relay").catch(() => {});
@@ -174,7 +199,7 @@ let editLink = "";
 {
   const ctx = await newContext();
   const A = await openNew(ctx);
-  await tool(A, "create_nodes", { nodes: [{ type: "rectangle", name: "Card", x: 100, y: 100, width: 120, height: 80, fill: "#3366ff" }] });
+  await tool(A, "create_nodes", { nodes: [{ type: "rectangle", name: "Card", x: 100, y: 100, width: 120, height: 80, fill: "#3366ff" }, { type: "rectangle", name: "Other", x: 300, y: 100, width: 60, height: 60, fill: "#ff9900" }] });
   await sleep(1500);
   const id = await A.evaluate(() => location.hash.match(/file\/([^/?]+)/)?.[1]);
   const B = await track(await ctx.newPage());

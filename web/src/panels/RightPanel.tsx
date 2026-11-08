@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Play, Plus, Trash2 } from "lucide-react";
 import { dispatch, query, useDoc, useSelection, useStore, type RightTab } from "../store";
 import { DesignPanel } from "./DesignPanel";
@@ -27,20 +27,6 @@ export function RightPanel() {
   const engineReadOnly = useStore((s) => !!s.es.readOnly);
   const viewer = useCollab((s) => s.viewer);
   const viewOnly = engineReadOnly || viewer;
-  // Every control in a locked panel is disabled, so its scroll area is a focusable region of its own (keyboard scrolling).
-  const lock = useRef<HTMLFieldSetElement>(null);
-  useEffect(() => {
-    const el = lock.current?.firstElementChild as HTMLElement | null;
-    if (!el || !viewOnly) return;
-    el.tabIndex = 0;
-    el.setAttribute("role", "region");
-    el.setAttribute("aria-label", tab === "design" ? "Design properties, view only" : "Prototype properties, view only");
-    return () => {
-      el.removeAttribute("tabindex");
-      el.removeAttribute("role");
-      el.removeAttribute("aria-label");
-    };
-  });
   // Arrow keys move between tabs (only the selected one is a Tab stop).
   const onKeyDown = (e: React.KeyboardEvent) => {
     // A tab that was clicked leaves the arrows to the design (they nudge the selection).
@@ -85,8 +71,16 @@ export function RightPanel() {
         )}
         {(tab === "design" || tab === "prototype") && (
           // Always the same element, so a role change never remounts the panel (an open colour popover would lose its onClose).
-          <fieldset ref={lock} disabled={viewOnly} className="panel-lock">
-            {tab === "design" ? <DesignPanel /> : <PrototypePanel />}
+          <fieldset disabled={viewOnly} className="panel-lock">
+            {/* Every control in a locked panel is disabled, so the scroll area is a focusable region of its own (keyboard scrolling). */}
+            <div
+              className="panel-lock-scroll"
+              tabIndex={viewOnly ? 0 : undefined}
+              role={viewOnly ? "region" : undefined}
+              aria-label={viewOnly ? (tab === "design" ? "Design properties, view only" : "Prototype properties, view only") : undefined}
+            >
+              {tab === "design" ? <DesignPanel /> : <PrototypePanel />}
+            </div>
           </fieldset>
         )}
         {tab === "code" && <CodePanel />}

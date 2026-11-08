@@ -36,7 +36,7 @@ describe("strokeRows", () => {
     ]);
   });
   it("lists per-side weights when they differ", () => {
-    expect(strokeRows({ ...base, strokeWeights: [1, 2, 3, 4] })[0].v).toBe("1px 2px 3px 4px")
+    expect(strokeRows({ ...base, strokeWeights: [1, 2, 3, 4] })[0].v).toBe("1px 2px 3px 4px");
     expect(strokeRows({ ...base, type: "ellipse", strokeWeights: [1, 2, 3, 4] })[0].v).toBe("2px");
     expect(strokeRows({ ...base, strokeWeights: [3, 3, 3, 3] })[0].v).toBe("3px");
   });
