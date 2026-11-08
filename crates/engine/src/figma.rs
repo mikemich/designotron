@@ -1051,7 +1051,9 @@ impl Import<'_> {
       // A transition without a duration plays for 300 ms, like Figma's default.
       let d = t.and_then(|t| num(t, "duration")).map(|d| to_ms(d, unit)).unwrap_or(300.0);
       out.insert("durationMs".into(), json!(d));
-      let curve = t.and_then(|t| t.get("easing")).filter(|e| str_of(e, "type") == Some("CUSTOM_CUBIC_BEZIER"));
+      let curve = t
+        .and_then(|t| t.get("easing"))
+        .filter(|e| str_of(e, "type") == Some("CUSTOM_CUBIC_BEZIER"));
       if let Some(c) = curve.and_then(|e| e.get("easingFunctionCubicBezier")) {
         let p: Vec<f64> = ["x1", "y1", "x2", "y2"].iter().filter_map(|k| num(c, k)).collect();
         if p.len() == 4 && p.iter().all(|v| v.is_finite()) && (0.0..=1.0).contains(&p[0]) && (0.0..=1.0).contains(&p[2]) {
@@ -1875,23 +1877,45 @@ mod tests {
       "Home",
       json!({ "overflowDirection": "VERTICAL_SCROLLING" }),
       vec![
-        rect("1:2", "Swipe", nav("ON_DRAG", json!({ "type": "SMART_ANIMATE", "duration": 400,
-          "easing": { "type": "CUSTOM_CUBIC_BEZIER", "easingFunctionCubicBezier": { "x1": 0.1, "y1": 0.2, "x2": 0.3, "y2": 1.4 } } }))),
-        rect("1:3", "BadCurve", nav("ON_CLICK", json!({ "type": "DISSOLVE",
-          "easing": { "type": "CUSTOM_CUBIC_BEZIER", "easingFunctionCubicBezier": { "x1": 2.0, "y1": 0.2, "x2": 0.3, "y2": 1.4 } } }))),
+        rect(
+          "1:2",
+          "Swipe",
+          nav(
+            "ON_DRAG",
+            json!({ "type": "SMART_ANIMATE", "duration": 400,
+          "easing": { "type": "CUSTOM_CUBIC_BEZIER", "easingFunctionCubicBezier": { "x1": 0.1, "y1": 0.2, "x2": 0.3, "y2": 1.4 } } }),
+          ),
+        ),
+        rect(
+          "1:3",
+          "BadCurve",
+          nav(
+            "ON_CLICK",
+            json!({ "type": "DISSOLVE",
+          "easing": { "type": "CUSTOM_CUBIC_BEZIER", "easingFunctionCubicBezier": { "x1": 2.0, "y1": 0.2, "x2": 0.3, "y2": 1.4 } } }),
+          ),
+        ),
         rect("1:4", "Header", json!({ "scrollBehavior": "STICKY_SCROLLS" })),
         rect("1:5", "Bar", json!({ "scrollBehavior": "FIXED" })),
         rect("1:6", "Old", json!({ "isFixed": true })),
         rect("1:7", "Plain", json!({ "scrollBehavior": "SCROLLS" })),
         frame("1:8", "Row", json!({ "overflowDirection": "HORIZONTAL_SCROLLING" }), vec![]),
-        frame("1:9", "Both", json!({ "overflowDirection": "HORIZONTAL_AND_VERTICAL_SCROLLING" }), vec![]),
+        frame(
+          "1:9",
+          "Both",
+          json!({ "overflowDirection": "HORIZONTAL_AND_VERTICAL_SCROLLING" }),
+          vec![],
+        ),
         frame("1:10", "NoScroll", json!({ "overflowDirection": "NONE" }), vec![]),
       ],
     )]);
     let (doc, r) = run(&file);
     let w = warnings(&r);
     let swipe = &named(&doc, "Swipe").interactions[0];
-    assert_eq!((swipe.trigger, swipe.transition, swipe.duration_ms), (Trigger::OnDrag, Transition::SmartAnimate, 400.0));
+    assert_eq!(
+      (swipe.trigger, swipe.transition, swipe.duration_ms),
+      (Trigger::OnDrag, Transition::SmartAnimate, 400.0)
+    );
     assert_eq!(swipe.bezier, Some([0.1, 0.2, 0.3, 1.4]));
     assert_eq!(swipe.easing, crate::model::Easing::EaseOut, "ease out stays as the fallback");
     let bad = &named(&doc, "BadCurve").interactions[0];
@@ -1899,7 +1923,10 @@ mod tests {
     assert!(!w.iter().any(|x| x.contains("ON_DRAG")), "{w:?}");
     let sb = |n: &str| named(&doc, n).scroll_behavior;
     assert_eq!(sb("Header"), ScrollBehavior::Sticky);
-    assert_eq!((sb("Bar"), sb("Old"), sb("Plain")), (ScrollBehavior::Fixed, ScrollBehavior::Fixed, ScrollBehavior::Scroll));
+    assert_eq!(
+      (sb("Bar"), sb("Old"), sb("Plain")),
+      (ScrollBehavior::Fixed, ScrollBehavior::Fixed, ScrollBehavior::Scroll)
+    );
     let ov = |n: &str| named(&doc, n).overflow;
     assert_eq!(
       (ov("Home"), ov("Row"), ov("Both"), ov("NoScroll")),

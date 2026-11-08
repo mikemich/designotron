@@ -1727,7 +1727,14 @@ impl<'a> Ctx<'a> {
           };
           if let Some(d) = dir {
             v.insert("dir".into(), json!(d));
-            el.s("touch-action", if matches!(d, Direction::Left | Direction::Right) { "pan-y" } else { "pan-x" });
+            el.s(
+              "touch-action",
+              if matches!(d, Direction::Left | Direction::Right) {
+                "pan-y"
+              } else {
+                "pan-x"
+              },
+            );
           }
           el.swipe = Some(serde_json::Value::Object(v).to_string());
         }
@@ -1770,7 +1777,8 @@ impl<'a> Ctx<'a> {
     w.s("height", px((content_h - c.y).max(c.height)));
     w.s("pointer-events", "none");
     w.s("z-index", z.to_string());
-    ce.styles.retain(|(k, _)| !matches!(k.as_str(), "position" | "left" | "top" | "right" | "bottom"));
+    ce.styles
+      .retain(|(k, _)| !matches!(k.as_str(), "position" | "left" | "top" | "right" | "bottom"));
     if own_w {
       ce.styles.retain(|(k, _)| k != "width");
     }
@@ -9532,14 +9540,25 @@ mod w4ab_tests {
     assert!(html.contains("position:sticky;top:0") || html.contains("position:sticky"), "{html}");
     // The wrapper starts at the header's y and ends where the 600 px section ends: 300 px.
     let wrap = tag_with(&html, "pointer-events:none");
-    assert!(wrap.contains("position:absolute") && wrap.contains("top:300px") && wrap.contains("height:300px"), "{wrap}");
+    assert!(
+      wrap.contains("position:absolute") && wrap.contains("top:300px") && wrap.contains("height:300px"),
+      "{wrap}"
+    );
     assert!(wrap.contains("left:0") && wrap.contains("width:390px"), "{wrap}");
     // The layer inside fills it, sticks, and takes pointers itself.
     let inner = tag_with(&html, "pointer-events:auto");
-    assert!(inner.contains("position:sticky") && inner.contains("top:0") && !inner.contains("top:300px"), "{inner}");
+    assert!(
+      inner.contains("position:sticky") && inner.contains("top:0") && !inner.contains("top:300px"),
+      "{inner}"
+    );
     // The later Badge is positioned in layer order, above the sticky wrapper.
     let z = |tag: &str| -> usize {
-      tag.split("z-index:").nth(1).and_then(|r| r.split(';').next()).and_then(|v| v.trim_end_matches('"').parse().ok()).unwrap_or(0)
+      tag
+        .split("z-index:")
+        .nth(1)
+        .and_then(|r| r.split(';').next())
+        .and_then(|v| v.trim_end_matches('"').parse().ok())
+        .unwrap_or(0)
     };
     let badge = tag_with(&html, "width:40px");
     assert!(z(wrap) >= 1 && z(badge) > z(wrap), "wrapper {wrap}, badge {badge}");
@@ -9597,7 +9616,10 @@ mod w4ab_tests {
     assert!(!html.contains("pointer-events:none"), "no wrapper in flow: {html}");
     // The React export spells it as classes.
     let react = export_react(&doc, "list", &HeuristicMeasurer);
-    assert!(react.contains("sticky") && react.contains("top-0") && react.contains("z-[1]"), "{react}");
+    assert!(
+      react.contains("sticky") && react.contains("top-0") && react.contains("z-[1]"),
+      "{react}"
+    );
     // In a row the layer is kept from stretching to the row's height.
     doc.get_mut("list").unwrap().layout.as_mut().unwrap().direction = LayoutDirection::Horizontal;
     doc.get_mut("head").unwrap().sizing_v = Sizing::Fixed;
@@ -9637,14 +9659,23 @@ mod w4ab_tests {
     assert!(home.contains("data-dt-swipe="), "{home}");
     let step = home.split("data-dt-swipe=").nth(1).unwrap().replace("\\\"", "\"");
     assert!(step.contains("\"to\":\"Detail\"") && step.contains("\"dir\":\"left\""), "{step}");
-    assert!(home.contains("touch-pan-y"), "a horizontal swipe leaves vertical scrolling to the browser: {home}");
+    assert!(
+      home.contains("touch-pan-y"),
+      "a horizontal swipe leaves vertical scrolling to the browser: {home}"
+    );
     assert!(!home.contains("cursor-pointer"), "a swipe is not a click: {home}");
     let app = file(&doc, "src/App.tsx");
-    assert!(app.contains("[data-dt-swipe]") && app.contains("along < 24") && app.contains("pointerup"), "{app}");
+    assert!(
+      app.contains("[data-dt-swipe]") && app.contains("along < 24") && app.contains("pointerup"),
+      "{app}"
+    );
     // Smart animate has no direction: any direction of 24 px counts.
     let doc = swipe_doc(Transition::SmartAnimate, Direction::Left);
     let home = file(&doc, "src/screens/Home.tsx").replace("\\\"", "\"");
-    assert!(home.contains("data-dt-swipe=") && !home.contains("\"dir\"") && !home.contains("touch-pan"), "{home}");
+    assert!(
+      home.contains("data-dt-swipe=") && !home.contains("\"dir\"") && !home.contains("touch-pan"),
+      "{home}"
+    );
     // The single-layer HTML export is not interactive.
     assert!(!export_html(&doc, "home", &HeuristicMeasurer).contains("data-dt-swipe"));
     // An On drag that can't resolve its action (no destination) writes nothing.

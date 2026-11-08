@@ -1668,6 +1668,26 @@ mod interaction_tests {
   }
 
   #[test]
+  fn revision_4_values_round_trip_and_older_files_load_unchanged() {
+    let n: Node = serde_json::from_value(serde_json::json!({
+      "scrollBehavior": "sticky",
+      "interactions": [{ "trigger": "onDrag", "action": "back", "bezier": [0.1, 0.2, 0.3, 0.4] }]
+    }))
+    .unwrap();
+    assert_eq!(n.scroll_behavior, ScrollBehavior::Sticky);
+    assert_eq!(n.interactions[0].trigger, Trigger::OnDrag);
+    assert_eq!(n.interactions[0].bezier, Some([0.1, 0.2, 0.3, 0.4]));
+    let v = serde_json::to_value(&n).unwrap();
+    assert_eq!(v["scrollBehavior"], "sticky");
+    assert_eq!(v["interactions"][0]["trigger"], "onDrag");
+    assert_eq!(v["interactions"][0]["bezier"], serde_json::json!([0.1, 0.2, 0.3, 0.4]));
+    // A revision 3 interaction has no curve and doesn't write one.
+    let old: Interaction = serde_json::from_str(r#"{"trigger":"onClick","action":"back"}"#).unwrap();
+    assert_eq!(old.bezier, None);
+    assert!(serde_json::to_value(&old).unwrap().get("bezier").is_none());
+  }
+
+  #[test]
   fn old_interactions_load_with_overlay_defaults() {
     let i: Interaction =
       serde_json::from_str(r#"{"trigger":"onClick","action":"navigate","destination":"a","transition":"dissolve"}"#).unwrap();

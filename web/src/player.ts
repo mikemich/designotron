@@ -243,6 +243,8 @@ export interface ScrollerScene {
   scrollers: ScrollerScene[];
   /** Layers painted after this scroller, drawn over it (in the container that holds it). */
   above: AboveScene | null;
+  /** Sticky layers of this scroller (only scrollers that scroll vertically have any). */
+  sticky: StickyScene[];
   /** This scroller's own layer, then the hotspot owners above it (for a click on its empty area). */
   chain: string[];
 }
@@ -255,11 +257,41 @@ export interface AboveScene {
   hotspots: Hotspot[];
 }
 
+/** A layer's background blur, drawn live behind a fixed or sticky layer: an underlay with CSS
+ *  `backdrop-filter`, so the content that scrolls under the layer is blurred. `blur` is the
+ *  CSS radius in px (the layer's blur / 2, as in code export). */
+export interface Backdrop {
+  blur: number;
+  /** CSS border-radius of the layer ("50%" for an ellipse). */
+  radius: string;
+}
+
 export interface FixedScene {
   id: string;
   svg: string;
   rect: Rect;
   hotspots: Hotspot[];
+  /** The layer's own box (the picture's `rect` can be bigger: shadows), for the backdrop. */
+  box: Rect;
+  backdrop: Backdrop | null;
+}
+
+/** A layer that scrolls with its scroller until it reaches the top, then stays while its parent
+ *  is in view (`position: sticky` in the view). */
+export interface StickyScene {
+  id: string;
+  svg: string;
+  /** The picture, frame coordinates. */
+  crop: Rect;
+  /** The layer's own box, frame coordinates. */
+  box: Rect;
+  /** Where it stops: the bottom of its parent (of the scroller's content when the parent is the
+   *  scroller), frame coordinates. */
+  limit: number;
+  hotspots: Hotspot[];
+  /** Layers painted after it, which cover it where they overlap. */
+  above: AboveScene | null;
+  backdrop: Backdrop | null;
 }
 
 export interface Scene {
@@ -291,6 +323,16 @@ const isInside = (doc: Doc, id: string, ancestor: string) => {
   return false;
 };
 
+/** The live backdrop of a fixed or sticky layer: it has a visible background blur and is a
+ *  frame, rectangle or ellipse (other shapes show none). */
+export function backdropOf(n: Node): Backdrop | null {
+  const e = n.effects?.find((x) => x.type === "backgroundBlur" && x.visible !== false && x.blur > 0);
+  if (!e || n.rotation) return null;
+  if (n.type === "ellipse") return { blur: e.blur / 2, radius: "50%" };
+  if (n.type === "rectangle" || FRAME_LIKE.includes(n.type)) return { blur: e.blur / 2, radius: radiusOf(n) };
+  return null;
+}
+
 const radiusOf = (n: Node) => (n.cornerRadii ? n.cornerRadii.map((r) => `${r}px`).join(" ") : n.cornerRadius ? `${n.cornerRadius}px` : "0");
 
 /** Whether the children of `n` extend past its box in a direction it scrolls. */
@@ -320,6 +362,8 @@ export function buildScene(frameId: string): Scene {
   // 1. Scrollers (outermost first) and fixed layers.
   const infos: Info[] = [];
   const fixedIds: string[] = [];
+  // Sticky layers: inside a scroller that scrolls vertically, not inside a fixed or sticky layer.
+  const stickies: { id: string; scroller: string; parent: string }[] = [];
   const top = overflows(doc, frame, fb);
   if (top) infos.push({ id: frameId, parent: null, rect: fb, overflow: frame.overflow ?? "none" });
   const walk = (id: string, scroller: string | null) => {
@@ -329,6 +373,13 @@ export function buildScene(frameId: string): Scene {
       if (top && id === frameId && c.scrollBehavior === "fixed" && (!frame.layout || c.absolutePosition)) {
         fixedIds.push(cid);
         continue;
+      }
+      if (c.scrollBehavior === "sticky" && scroller) {
+        const o = infos.find((i) => i.id === scroller)?.overflow;
+        if (o === "vertical" || o === "both") {
+          stickies.push({ id: cid, scroller, parent: id });
+          continue;
+        }
       }
       let next = scroller;
       if (c.overflow && c.overflow !== "none") {
@@ -380,6 +431,22 @@ export function buildScene(frameId: string): Scene {
   }
   const rootOwner = new Map<string, string>();
   for (const [o, list] of aboveRoots) for (const r of list) rootOwner.set(r, o);
+  // Layers painted after a sticky layer cover it: each is a picture of its own over it.
+  const stickySet = new Set(stickies.map((t) => t.id));
+  const stickyAbove = new Map<string, string[]>();
+  const stickyRootOwner = new Map<string, string>();
+  for (const t of stickies) {
+    const list: string[] = [];
+    for (let x: string | null = t.id; x && x !== t.scroller; x = doc.nodes[x].parent) {
+      const sibs = doc.nodes[doc.nodes[x].parent!].children;
+      for (const sib of sibs.slice(sibs.indexOf(x) + 1)) {
+        if (doc.nodes[sib]?.visible === false || fixedSet.has(sib) || infoOf.has(sib) || stickySet.has(sib) || rootOwner.has(sib) || stickyRootOwner.has(sib) || list.includes(sib)) continue;
+        list.push(sib);
+        stickyRootOwner.set(sib, t.id);
+      }
+    }
+    stickyAbove.set(t.id, list);
+  }
   const visit = (id: string) => {
     const n = doc.nodes[id];
     if (!n) return;
@@ -412,11 +479,15 @@ export function buildScene(frameId: string): Scene {
     // A fixed layer owns its subtree; otherwise the innermost scroller that is a proper ancestor.
     let key = "";
     const fixed = line.find((l) => fixedSet.has(l));
+    const sticky = line.find((l) => stickySet.has(l));
     if (fixed) key = "fixed:" + fixed;
+    else if (sticky) key = "sticky:" + sticky;
     else {
       key = line.slice(1).find((l) => infoOf.has(l)) ?? "";
       const root = line.find((l) => rootOwner.has(l));
       if (root && !line.slice(1).slice(0, line.indexOf(root)).some((l) => infoOf.has(l))) key = "above:" + rootOwner.get(root);
+      const sroot = line.find((l) => stickyRootOwner.has(l));
+      if (sroot && !line.slice(1).slice(0, line.indexOf(sroot)).some((l) => infoOf.has(l))) key = "stickyabove:" + stickyRootOwner.get(sroot);
     }
     if (!into.has(key)) into.set(key, []);
     into.get(key)!.push(h);
@@ -437,9 +508,25 @@ export function buildScene(frameId: string): Scene {
     });
     return { pieces, hotspots: into.get("above:" + scroller) ?? [] };
   };
+  const stickyAboveScene = (sticky: string): AboveScene | null => {
+    const roots = stickyAbove.get(sticky);
+    if (!roots?.length) return null;
+    const pieces = roots.map((id) => {
+      // Other sticky layers and scrollers inside keep their own pictures.
+      const hide = [...infos.filter((i) => isInside(doc, i.id, id)).flatMap((i) => kids(i.id)), ...stickies.filter((t) => t.id !== id && isInside(doc, t.id, id)).map((t) => t.id)];
+      const r = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id, hide, withBounds: true });
+      return { svg: inlineAssets(r.svg), x: r.x - fb.x, y: r.y - fb.y, width: r.width, height: r.height };
+    });
+    return { pieces, hotspots: into.get("stickyabove:" + sticky) ?? [] };
+  };
+  // Boxes of sticky layers and their parents, in one query.
+  const stickyIds = [...new Set(stickies.flatMap((t) => [t.id, t.parent]))];
+  const stickyBox = new Map<string, Rect>();
+  if (stickyIds.length) for (const it of pq<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids: stickyIds }).items) stickyBox.set(it.id, rel(it.bounds));
   const byId = new Map<string, ScrollerScene>();
   const build = (i: Info): ScrollerScene => {
-    const hide = [...infos.filter((o) => o.parent === i.id).flatMap((o) => kids(o.id)), ...(rootsIn.get(i.id) ?? [])];
+    const mine = stickies.filter((t) => t.scroller === i.id);
+    const hide = [...infos.filter((o) => o.parent === i.id).flatMap((o) => kids(o.id)), ...(rootsIn.get(i.id) ?? []), ...mine.flatMap((t) => [t.id, ...(stickyAbove.get(t.id) ?? [])])];
     if (i.id === frameId) hide.push(...fixedIds);
     const c = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id: i.id, hide, childrenOnly: true });
     const rect = rel(i.rect);
@@ -452,15 +539,38 @@ export function buildScene(frameId: string): Scene {
       hotspots: into.get(i.id) ?? [],
       scrollers: infos.filter((o) => o.parent === i.id).map(build),
       above: aboveScene(i.id),
+      sticky: [],
       chain: lineage(i.id).filter((l) => withHotspot.has(l)),
     };
+    const contentBottom = Math.max(rect.y + rect.height, s.content.y + s.content.height);
+    s.sticky = mine.flatMap<StickyScene>((t) => {
+      const box = stickyBox.get(t.id);
+      if (!box) return [];
+      const r = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id: t.id, withBounds: true });
+      const parent = stickyBox.get(t.parent);
+      const limit = t.parent === i.id || !parent ? contentBottom : parent.y + parent.height;
+      return [
+        {
+          id: t.id,
+          svg: inlineAssets(r.svg),
+          crop: { x: r.x - fb.x, y: r.y - fb.y, width: r.width, height: r.height },
+          box,
+          limit: Math.max(limit, box.y + box.height),
+          hotspots: into.get("sticky:" + t.id) ?? [],
+          above: stickyAboveScene(t.id),
+          backdrop: backdropOf(doc.nodes[t.id]),
+        },
+      ];
+    });
     byId.set(i.id, s);
     return s;
   };
   const scrollers = infos.filter((i) => i.parent === null).map(build);
   const fixed = fixedIds.map<FixedScene>((id) => {
     const c = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id, withBounds: true });
-    return { id, svg: inlineAssets(c.svg), rect: rel(c), hotspots: into.get("fixed:" + id) ?? [] };
+    const backdrop = backdropOf(doc.nodes[id]);
+    const box = backdrop ? rel(pq<{ items: { bounds: Rect }[] }>({ q: "bounds", ids: [id] }).items[0]?.bounds ?? c) : rel(c);
+    return { id, svg: inlineAssets(c.svg), rect: rel(c), hotspots: into.get("fixed:" + id) ?? [], box, backdrop };
   });
   return { id: frameId, width: frame.width, height: frame.height, base, hotspots: into.get("") ?? [], scrollers, fixed, keyed, byId, all };
 }

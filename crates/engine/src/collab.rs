@@ -176,7 +176,10 @@ fn downgrade_in_place(v: &mut Value, model: u32) {
         o.remove("crop");
       }
       if let Some(Value::Array(list)) = o.get_mut("interactions") {
-        *list = std::mem::take(list).into_iter().filter_map(|i| downgrade_interaction(i, model)).collect();
+        *list = std::mem::take(list)
+          .into_iter()
+          .filter_map(|i| downgrade_interaction(i, model))
+          .collect();
       }
       o.values_mut().for_each(|x| downgrade_in_place(x, model));
     }
@@ -1968,7 +1971,11 @@ mod tests {
     assert_eq!(list.as_array().unwrap().len(), 2);
     assert_eq!(list[0]["trigger"], "mouseEnter");
     assert_eq!(list[0]["transition"], "push");
-    assert_eq!(list[1]["bezier"], json!([0.1, 0.2, 0.3, 0.4]), "bezier is left for old code to ignore");
+    assert_eq!(
+      list[1]["bezier"],
+      json!([0.1, 0.2, 0.3, 0.4]),
+      "bezier is left for old code to ignore"
+    );
     assert_eq!(out["nodes"]["a"]["fills"][0]["type"], "angularGradient");
     assert_eq!(out["nodes"]["a"]["scrollBehavior"], "scroll");
     assert_eq!(out["patch"]["b"]["scrollBehavior"], "scroll");
@@ -1978,7 +1985,10 @@ mod tests {
     let out = downgrade(&d, 0);
     let list = out["nodes"]["a"]["interactions"].as_array().unwrap();
     assert_eq!(list.len(), 2);
-    assert_eq!((list[0]["trigger"].clone(), list[0]["transition"].clone()), (json!("onHover"), json!("slideDown")));
+    assert_eq!(
+      (list[0]["trigger"].clone(), list[0]["transition"].clone()),
+      (json!("onHover"), json!("slideDown"))
+    );
     assert_eq!(out["nodes"]["a"]["fills"][0]["type"], "radialGradient");
     assert_eq!(out["nodes"]["a"]["scrollBehavior"], "scroll");
     // Revision 4 is the identity.

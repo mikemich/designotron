@@ -519,15 +519,41 @@ mod prototype {
       "set_prototype",
       json!({ "nodeId": btn, "trigger": "click", "destinationId": other, "easing": "linear", "bezier": [0, 0, 1, 1] }),
     );
-    let click = e.doc.get(btn).unwrap().interactions.iter().find(|i| i.trigger == Trigger::OnClick).unwrap().clone();
-    assert_eq!((click.easing, click.bezier), (crate::model::Easing::Linear, Some([0.0, 0.0, 1.0, 1.0])));
+    let click = e
+      .doc
+      .get(btn)
+      .unwrap()
+      .interactions
+      .iter()
+      .find(|i| i.trigger == Trigger::OnClick)
+      .unwrap()
+      .clone();
+    assert_eq!(
+      (click.easing, click.bezier),
+      (crate::model::Easing::Linear, Some([0.0, 0.0, 1.0, 1.0]))
+    );
     // A new interaction without a bezier has none.
-    run(&mut e, "set_prototype", json!({ "nodeId": btn, "trigger": "click", "destinationId": other, "easing": "ease_in" }));
-    let click = e.doc.get(btn).unwrap().interactions.iter().find(|i| i.trigger == Trigger::OnClick).unwrap().clone();
+    run(
+      &mut e,
+      "set_prototype",
+      json!({ "nodeId": btn, "trigger": "click", "destinationId": other, "easing": "ease_in" }),
+    );
+    let click = e
+      .doc
+      .get(btn)
+      .unwrap()
+      .interactions
+      .iter()
+      .find(|i| i.trigger == Trigger::OnClick)
+      .unwrap()
+      .clone();
     assert_eq!(click.bezier, None);
     // The saved JSON names the new values; unset curves are not written.
     let json = serde_json::to_string(&e.doc.get(btn).unwrap().interactions).unwrap();
-    assert!(json.contains("\"onDrag\"") && json.contains("\"bezier\":[0.1,0.1,0.9,0.9]"), "{json}");
+    assert!(
+      json.contains("\"onDrag\"") && json.contains("\"bezier\":[0.1,0.1,0.9,0.9]"),
+      "{json}"
+    );
     assert_eq!(json.matches("bezier").count(), 1, "{json}");
     // Errors: not four numbers, x outside 0-1, custom without a curve.
     for bad in [
@@ -556,7 +582,10 @@ mod prototype {
         "children": [{ "type": "frame", "name": "Section", "width": 100, "height": 300,
           "children": [{ "type": "rectangle", "name": "Header", "width": 100, "height": 20, "scrollBehavior": "sticky" }] }] }] }),
     );
-    assert!(r.get("warnings").is_none(), "no 'not supported' warning, and none inside a scroller: {r}");
+    assert!(
+      r.get("warnings").is_none(),
+      "no 'not supported' warning, and none inside a scroller: {r}"
+    );
     let header = e.doc.nodes.values().find(|n| n.name == "Header").unwrap().id.clone();
     assert_eq!(e.doc.get(&header).unwrap().scroll_behavior, ScrollBehavior::Sticky);
     // A horizontal-only frame gets a warning, and the value is kept.
@@ -567,18 +596,37 @@ mod prototype {
         "children": [{ "type": "rectangle", "name": "Tab", "width": 20, "height": 20, "scrollBehavior": "Sticky" }] }] }),
     );
     let text = r.to_string();
-    assert!(text.contains("sticky") && text.contains("scrolls vertically") && !text.contains("not supported"), "{r}");
+    assert!(
+      text.contains("sticky") && text.contains("scrolls vertically") && !text.contains("not supported"),
+      "{r}"
+    );
     let tab = e.doc.nodes.values().find(|n| n.name == "Tab").unwrap().id.clone();
     assert_eq!(e.doc.get(&tab).unwrap().scroll_behavior, ScrollBehavior::Sticky);
     // update_nodes: quiet inside a scroller, a warning outside one.
-    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": header, "scrollBehavior": "fixed" }] }));
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": header, "scrollBehavior": "fixed" }] }),
+    );
     assert!(r.get("warnings").is_none(), "{r}");
-    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": header, "scrollBehavior": "sticky" }] }));
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": header, "scrollBehavior": "sticky" }] }),
+    );
     assert!(r.get("warnings").is_none(), "{r}");
     assert_eq!(e.doc.get(&header).unwrap().scroll_behavior, ScrollBehavior::Sticky);
-    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": tab, "scrollBehavior": "scroll" }] }));
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": tab, "scrollBehavior": "scroll" }] }),
+    );
     assert!(r.get("warnings").is_none(), "{r}");
-    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": tab, "scrollBehavior": "sticky" }] }));
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": tab, "scrollBehavior": "sticky" }] }),
+    );
     assert!(r.to_string().contains("scrolls vertically"), "{r}");
   }
 

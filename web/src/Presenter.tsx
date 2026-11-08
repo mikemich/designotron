@@ -29,12 +29,14 @@ import {
   smartable,
   swapVariant,
   type AboveScene,
+  type Backdrop,
   type FixedScene,
   type Hotspot,
   type Motion,
   type Piece,
   type Scene,
   type ScrollerScene,
+  type StickyScene,
 } from "./player";
 
 /** Undoes what an interaction did (While hovering / While pressing). */
@@ -1050,13 +1052,36 @@ function AboveView({ a, origin, interactive, spot }: { a: AboveScene; origin: Re
   );
 }
 
+/** The live background blur behind a fixed or sticky layer: what scrolls under it is blurred. */
+const backdropStyle = (b: Backdrop): React.CSSProperties => ({ backdropFilter: `blur(${b.blur}px)`, WebkitBackdropFilter: `blur(${b.blur}px)`, borderRadius: b.radius, pointerEvents: "none" });
+
 /** A fixed layer: drawn above the scrolling box, never moves. */
 function FixedView({ f, interactive, spot }: { f: FixedScene; interactive: boolean; spot: (h: Hotspot, origin: Rect) => React.ReactNode }) {
   const none: Rect = { x: 0, y: 0, width: 0, height: 0 };
   return (
     <>
+      {f.backdrop && <div data-backdrop={f.id} style={{ position: "absolute", left: f.box.x, top: f.box.y, width: f.box.width, height: f.box.height, ...backdropStyle(f.backdrop) }} />}
       <div data-fixed={f.id} style={{ position: "absolute", left: f.rect.x, top: f.rect.y, width: f.rect.width, height: f.rect.height }} dangerouslySetInnerHTML={{ __html: f.svg }} />
       {interactive && f.hotspots.map((h) => spot(h, none))}
+    </>
+  );
+}
+
+/** A sticky layer: it scrolls with the content until its top reaches the top of the box, then
+ *  stays there while its parent is in view. Pure CSS: a wrapper as tall as the layer's travel and
+ *  a `position: sticky` element inside it (`data-sticky` marks it). The layers painted after it
+ *  come next and scroll normally, so they cover it where they overlap. */
+function StickyView({ t, origin, interactive, spot }: { t: StickyScene; origin: Rect; interactive: boolean; spot: (h: Hotspot, origin: Rect) => React.ReactNode }) {
+  return (
+    <>
+      <div data-sticky-range={t.id} style={{ position: "absolute", left: t.box.x - origin.x, top: t.box.y - origin.y, width: t.box.width, height: t.limit - t.box.y, pointerEvents: "none" }}>
+        <div data-sticky={t.id} style={{ position: "sticky", top: 0, width: t.box.width, height: t.box.height }}>
+          {t.backdrop && <div data-backdrop={t.id} style={{ position: "absolute", inset: 0, ...backdropStyle(t.backdrop) }} />}
+          <div style={{ position: "absolute", left: t.crop.x - t.box.x, top: t.crop.y - t.box.y, width: t.crop.width, height: t.crop.height, pointerEvents: "none" }} dangerouslySetInnerHTML={{ __html: t.svg }} />
+          {interactive && <div style={{ pointerEvents: "auto" }}>{t.hotspots.map((h) => spot(h, t.box))}</div>}
+        </div>
+      </div>
+      {t.above && <AboveView a={t.above} origin={origin} interactive={interactive} spot={spot} />}
     </>
   );
 }
@@ -1116,6 +1141,9 @@ function ScrollerView({
             <ScrollerView s={n} origin={s.rect} interactive={interactive} scrolls={scrolls} scrollEls={scrollEls} spot={spot} click={click} />
             {n.above && <AboveView a={n.above} origin={s.rect} interactive={interactive} spot={spot} />}
           </Fragment>
+        ))}
+        {s.sticky.map((t) => (
+          <StickyView key={t.id} t={t} origin={s.rect} interactive={interactive} spot={spot} />
         ))}
       </div>
     </div>

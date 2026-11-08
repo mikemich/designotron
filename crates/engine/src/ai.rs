@@ -2213,7 +2213,10 @@ fn warn_sticky(cx: &mut Ctx, doc: &Document, id: &str) {
 
 /// `[x1, y1, x2, y2]` of a custom timing curve: four finite numbers, the x values within 0 to 1.
 fn bezier_of(cx: &Ctx, v: &Value) -> Result<[f64; 4], String> {
-  let nums: Option<Vec<f64>> = v.as_array().filter(|a| a.len() == 4).and_then(|a| a.iter().map(Value::as_f64).collect());
+  let nums: Option<Vec<f64>> = v
+    .as_array()
+    .filter(|a| a.len() == 4)
+    .and_then(|a| a.iter().map(Value::as_f64).collect());
   let Some(n) = nums.filter(|n| n.iter().all(|x| x.is_finite())) else {
     return Err(cx.err("bezier", "must be four numbers [x1, y1, x2, y2]"));
   };

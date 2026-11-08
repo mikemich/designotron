@@ -2454,7 +2454,11 @@ mod tests {
     assert_eq!(welcomes[0]["model"], 4, "the room says its own model");
     assert_eq!(node(&welcomes[1])["scrollBehavior"], "sticky");
     assert_eq!(node(&welcomes[1])["interactions"].as_array().unwrap().len(), 2);
-    assert_eq!(node(&welcomes[2])["interactions"][0]["transition"], "slideLeft", "revision 2 gets the old names too");
+    assert_eq!(
+      node(&welcomes[2])["interactions"][0]["transition"],
+      "slideLeft",
+      "revision 2 gets the old names too"
+    );
     // A change from Ana: raw for Cai, downgraded for Ben and Dan, and the room keeps it whole.
     h.delta_text(ana, &v4_change(&frame)).await;
     h.commit().await;

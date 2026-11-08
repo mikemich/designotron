@@ -287,7 +287,11 @@ fn revision_4_values_are_written_only_when_used_and_round_trip() {
   let home = e.doc.nodes.values().find(|n| n.name == "Home").map(|n| n.id.clone()).unwrap();
   let photo = e.doc.nodes.values().find(|n| n.name == "Photo").map(|n| n.id.clone()).unwrap();
   let button = e.doc.nodes.values().find(|n| n.name == "Button").map(|n| n.id.clone()).unwrap();
-  run(&mut e, "update_nodes", json!({ "updates": [{ "id": home, "overflow": "vertical" }, { "id": photo, "scrollBehavior": "sticky" }] }));
+  run(
+    &mut e,
+    "update_nodes",
+    json!({ "updates": [{ "id": home, "overflow": "vertical" }, { "id": photo, "scrollBehavior": "sticky" }] }),
+  );
   run(
     &mut e,
     "set_prototype",
@@ -300,13 +304,17 @@ fn revision_4_values_are_written_only_when_used_and_round_trip() {
   let interaction = &json[json[..at].rfind('{').unwrap()..=end];
   // Pinned: the field order is the struct's (easing is left out at its default).
   assert!(interaction.contains("\"bezier\":[0.25,0.1,0.25,1.0]"), "{interaction}");
-  assert_eq!(fnv(&json) == fnv(&before), false);
+  assert_ne!(fnv(&json), fnv(&before));
   let mut f = Engine::new(Box::new(HeuristicMeasurer), 3);
   f.load(&json).unwrap();
   assert_eq!(f.doc, e.doc);
   assert_eq!(f.to_json(), json);
   // Taking the values away again gives the revision 3 bytes back.
-  run(&mut e, "update_nodes", json!({ "updates": [{ "id": photo, "scrollBehavior": "scroll" }] }));
+  run(
+    &mut e,
+    "update_nodes",
+    json!({ "updates": [{ "id": photo, "scrollBehavior": "scroll" }, { "id": home, "overflow": "none" }] }),
+  );
   run(&mut e, "set_prototype", json!({ "nodeId": button, "clear": true }));
   assert_eq!(e.to_json(), before);
   assert_eq!((before.len(), fnv(&before)), (TO_JSON_LEN, TO_JSON_HASH));
