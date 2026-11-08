@@ -100,9 +100,12 @@ export function FigmaImportDialog({ onCreate }: { onCreate?: (src: FigmaSource, 
     try {
       const json = JSON.parse(await f.text());
       if (onCreate) await create({ file: json, images: {} }, figmaFileName(json) ?? (f.name.replace(/\.json$/i, "").trim() || undefined));
-      else finish(importFigmaJson(json));
+      else {
+        checkFigmaJson(json);
+        finish(importFigmaJson(json));
+      }
     } catch (e) {
-      setError(plainError(e, "That file isn't a Figma JSON export: it isn't valid JSON."));
+      setError(plainError(e, { json: "That file isn't a Figma JSON export: it isn't valid JSON." }));
     }
   };
 

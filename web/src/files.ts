@@ -10,6 +10,7 @@ import {
 } from "idb-keyval";
 import { allAssets, assetDataUrl, loadAssets, referencedAssets } from "./assets";
 import { dropConversation } from "./ai/conversations";
+import { WasmEngine } from "./wasm/pkg/designotron_engine_wasm";
 import { bootEngine, documentLoads, toast } from "./store";
 
 import {
@@ -1126,7 +1127,6 @@ const NEWER_FILE = "This file was made with a newer version of Designotron. Upda
 /** The engine's complaint about a document it can't load ("" when it loads after all). */
 async function loadError(json: string): Promise<string> {
   await bootEngine();
-  const { WasmEngine } = await import("./wasm/pkg/designotron_engine_wasm");
   const probe = new WasmEngine(1);
   try {
     probe.load(json);

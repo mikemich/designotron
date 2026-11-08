@@ -13,15 +13,17 @@ function readsAsSentence(msg: string): boolean {
 
 /** One plain sentence for any thrown value; never empty and never a raw exception name.
  * Our own errors and messages that already read as sentences pass through unchanged. The raw
- * error stays in the console (`reportFailure` logs it). `jsonWhat` names what was being parsed
- * when a SyntaxError means "not valid JSON". */
-export function plainError(err: unknown, jsonWhat?: string): string {
+ * error stays in the console (`reportFailure` logs it). `json` words the SyntaxError case;
+ * `storage` says the error came from storage, so InvalidStateError and NotFoundError read as such. */
+export function plainError(err: unknown, opts: { json?: string; storage?: boolean } = {}): string {
   const name = typeof err === "object" && err && "name" in err ? String((err as { name: unknown }).name) : "";
-  const msg = (err instanceof Error ? err.message : typeof err === "string" ? err : "").trim();
+  let msg = (err instanceof Error ? err.message : typeof err === "string" ? err : "").trim();
+  // Messages written for Claude (and the engine's) start lowercase; they still read as sentences.
+  if (typeof err === "string" || (err instanceof Error && name === "Error")) msg = msg.replace(/^./, (c) => c.toUpperCase());
   if (name === "QuotaExceededError" || /quota/i.test(msg)) return STORAGE_FULL;
-  if (name === "SecurityError" || name === "InvalidStateError") return STORAGE_BLOCKED;
-  if (["NotFoundError", "VersionError", "UnknownError", "DataError"].includes(name)) return STORAGE_UNREADABLE;
-  if (name === "SyntaxError") return jsonWhat ?? "That file isn't valid JSON.";
+  if (name === "SecurityError" || (opts.storage && name === "InvalidStateError")) return STORAGE_BLOCKED;
+  if (["VersionError", "UnknownError", "DataError"].includes(name) || (opts.storage && name === "NotFoundError")) return STORAGE_UNREADABLE;
+  if (name === "SyntaxError") return opts.json ?? "That file isn't valid JSON.";
   if (name === "AbortError") return "Cancelled.";
   if (name === "TypeError" && /failed to fetch|networkerror|load failed/i.test(msg)) return NO_CONNECTION;
   if (msg && readsAsSentence(msg)) return msg;
@@ -30,7 +32,7 @@ export function plainError(err: unknown, jsonWhat?: string): string {
 
 /** "Couldn't rename the file: <reason>" for a failed storage (or other) operation. */
 export function failureText(what: string, err: unknown): string {
-  const reason = plainError(err);
+  const reason = plainError(err, { storage: true });
   // "Something went wrong." adds nothing after "Couldn't <what>".
   return reason === "Something went wrong." ? `Couldn't ${what}.` : `Couldn't ${what}: ${reason}`;
 }

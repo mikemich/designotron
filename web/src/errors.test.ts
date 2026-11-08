@@ -11,8 +11,6 @@ describe("plainError", () => {
     [named("QuotaExceededError", "The quota has been exceeded"), /storage is full/],
     [new Error("Quota exceeded for this origin"), /storage is full/],
     [named("SecurityError", "The operation is insecure"), /isn't allowing storage/],
-    [named("InvalidStateError"), /isn't allowing storage/],
-    [named("NotFoundError"), /couldn't be read/],
     [named("VersionError"), /couldn't be read/],
     [named("UnknownError"), /couldn't be read/],
     [named("DataError"), /couldn't be read/],
@@ -25,8 +23,23 @@ describe("plainError", () => {
     expect(plainError(err)).toMatch(want);
   });
 
+  it("maps InvalidStateError and NotFoundError only for storage callers", () => {
+    expect(plainError(named("InvalidStateError"), { storage: true })).toMatch(/isn't allowing storage/);
+    expect(plainError(named("NotFoundError"), { storage: true })).toMatch(/couldn't be read/);
+    expect(plainError(named("InvalidStateError"))).toBe("Something went wrong.");
+    expect(plainError(named("NotFoundError"))).toBe("Something went wrong.");
+  });
+
+  it("capitalises lowercase messages written for Claude or the engine", () => {
+    expect(plainError(new Error("importing a website needs the Designotron bridge running (setup steps in the Claude panel)"))).toBe(
+      "Importing a website needs the Designotron bridge running (setup steps in the Claude panel)",
+    );
+    expect(plainError("not a Figma file: expected the JSON")).toBe("Not a Figma file: expected the JSON");
+    expect(plainError(new Error("unexpected end at position 4"))).toBe("Something went wrong.");
+  });
+
   it("names what was parsed for a SyntaxError", () => {
-    expect(plainError(new SyntaxError("x"), "That file isn't a Figma JSON export: it isn't valid JSON.")).toMatch(/Figma JSON export/);
+    expect(plainError(new SyntaxError("x"), { json: "That file isn't a Figma JSON export: it isn't valid JSON." })).toMatch(/Figma JSON export/);
   });
 
   it("passes our own sentences through", () => {

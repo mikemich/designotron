@@ -230,6 +230,16 @@ for (const [label, init] of [
   t = await toastText(page);
   check("newer file: an unknown trigger says 'newer version', not 'damaged'", /newer version/.test(t) && !/damaged/.test(t), t);
   check("newer file: and stays on the dashboard", (await page.locator("#dt-canvas").count()) === 0);
+  // The same file dropped onto the dashboard: also the newer-version message, not a Figma hint.
+  await page.evaluate(async (text) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File([text], "teleport.dtron", { type: "application/json" }));
+    const dash = document.querySelector(".dash");
+    for (const type of ["dragenter", "dragover", "drop"]) dash.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+  }, fs.readFileSync(crafted, "utf8"));
+  await page.waitForFunction(() => /newer version|Figma export/.test(document.querySelector(".toast.error")?.textContent ?? ""), null, { timeout: 8000 }).catch(() => {});
+  t = await toastText(page);
+  check("newer file: dropped onto the dashboard it says 'newer version', not Figma export", /newer version/.test(t) && !/Figma/.test(t), t);
   await ctx.close();
 }
 

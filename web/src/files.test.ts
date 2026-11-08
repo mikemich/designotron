@@ -170,10 +170,9 @@ describe("storage that the browser refuses", () => {
 
   it("recovers after an open that fails asynchronously (onerror)", async () => {
     const real = indexedDB.open.bind(indexedDB);
-    let first = true;
+    let opens = 0;
     vi.spyOn(indexedDB, "open").mockImplementation((...a: Parameters<typeof real>) => {
-      if (!first) return real(...a);
-      first = false;
+      if (opens++ >= 2) return real(...a);
       const req: Partial<IDBOpenDBRequest> = {};
       setTimeout(() => (req.onerror as (() => void) | null | undefined)?.call(req as IDBOpenDBRequest), 0);
       return req as IDBOpenDBRequest;
@@ -182,6 +181,8 @@ describe("storage that the browser refuses", () => {
     const files = await import("./files");
     await files.saveFile("m2", "Mem", DOC("Mem"));
     expect(files.persistentStorage()).toBe(false);
+    // The first probe's open fails too; the failed store is forgotten, so the second one opens again.
+    expect(await files.probeStorage()).toBe(false);
     expect(await files.probeStorage()).toBe(true);
     expect(await raw("dt:file:m2")).toBeTruthy();
   });

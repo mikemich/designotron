@@ -353,7 +353,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
         let figma = false;
         try {
           const j = JSON.parse(await f.text());
-          figma = !!(j && (j.document || (j.nodes && !j.pages)));
+          figma = !!(j && j.format !== "designotron" && (j.document || (j.nodes && !j.pages)));
         } catch {
           /* not JSON: the error above stands */
         }
