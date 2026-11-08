@@ -195,6 +195,48 @@ try {
     await page.context().close();
   }
 
+  // ---- 2b. A sticky layer after a carousel is drawn once ----
+  {
+    const page = await newPage();
+    await open(page);
+    const r = await tool(page, "create_nodes", {
+      nodes: [
+        {
+          type: "frame", name: "Home", x: 0, y: 0, width: 390, height: 844, fill: "#FFFFFF", overflow: "vertical",
+          children: [
+            { type: "frame", name: "Carousel", x: 0, y: 0, width: 390, height: 120, fill: "#E2E8F0", overflow: "horizontal", children: [{ type: "rectangle", name: "Slides", x: 0, y: 0, width: 1000, height: 120, fill: "#94A3B8" }] },
+            { type: "rectangle", name: "Tabs", x: 0, y: 140, width: 390, height: 48, fill: "#FF00AA", scrollBehavior: "sticky" },
+            { type: "frame", name: "List", x: 0, y: 200, width: 390, height: 1500, fill: "#F8FAFC", children: [{ type: "rectangle", name: "Section", x: 0, y: 600, width: 390, height: 100, fill: "#10B981" }] },
+          ],
+        },
+      ],
+    });
+    await setStart(page, ids(r).Home);
+    await present(page);
+    const tabs = await nodeId(page, "Tabs");
+    const copies = await page.evaluate(() => (document.querySelector(".presenter").innerHTML.match(/ff00aa/gi) ?? []).length);
+    check("carousel, sticky Tabs, list: Tabs is drawn once", copies === 1, copies);
+    check("and it is the sticky one", (await page.locator(`.presenter [data-sticky="${tabs}"]`).count()) === 1);
+    await scrollTo(page, 300);
+    const t = await topIn(page, `.presenter [data-sticky="${tabs}"]`);
+    check("Tabs sticks at the top while the list scrolls", Math.abs(t) <= 1, t);
+    await shot(page, "sticky-after-carousel");
+    await leave(page);
+    // The same when the sticky layer sits inside a section that comes after the carousel.
+    await tool(page, "update_nodes", { updates: [{ id: tabs, scrollBehavior: "scroll" }] });
+    const r2 = await tool(page, "create_nodes", {
+      parentId: ids(r).Home,
+      nodes: [{ type: "frame", name: "Sec", x: 0, y: 700, width: 390, height: 400, fill: "#FFFFFF", children: [{ type: "rectangle", name: "Tabs2", x: 0, y: 20, width: 390, height: 48, fill: "#00AAFF", scrollBehavior: "sticky" }] }],
+    }).catch(() => null);
+    if (r2) {
+      await present(page);
+      const c2 = await page.evaluate(() => (document.querySelector(".presenter").innerHTML.match(/00aaff/gi) ?? []).length);
+      check("a sticky layer inside a later section is drawn once", c2 === 1, c2);
+      await leave(page);
+    }
+    await page.context().close();
+  }
+
   // ---- 3. Background blur behind a fixed bar ----
   {
     const page = await newPage();
@@ -655,6 +697,7 @@ try {
         await p.close();
       } finally {
         server.close();
+        fs.rmSync(dir, { recursive: true, force: true });
       }
     }
     await page.context().close();

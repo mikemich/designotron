@@ -160,6 +160,13 @@ pub fn downgrade(value: &Value, relay_model: u32) -> Value {
   v
 }
 
+/// `downgrade` in place, for a value the caller owns (no copy). A model at this build's is left alone.
+pub fn downgrade_value(v: &mut Value, relay_model: u32) {
+  if relay_model < MODEL_REVISION {
+    downgrade_in_place(v, relay_model);
+  }
+}
+
 fn downgrade_in_place(v: &mut Value, model: u32) {
   match v {
     Value::Array(a) => a.iter_mut().for_each(|x| downgrade_in_place(x, model)),

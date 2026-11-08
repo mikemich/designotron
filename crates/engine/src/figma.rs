@@ -1071,7 +1071,7 @@ impl Import<'_> {
         Some("EASE_OUT_BACK") => Some("easeOutBack"),
         Some("EASE_IN_AND_OUT_BACK") => Some("easeInOutBack"),
         Some(_) => {
-          self.note("Springs and named easings play as Ease out");
+          self.note("Springs, named easings and invalid custom curves play as Ease out");
           None
         }
       };

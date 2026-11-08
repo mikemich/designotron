@@ -286,9 +286,30 @@ fn for_model(text: &Arc<String>, model: u32) -> Arc<String> {
     return text.clone();
   }
   match serde_json::from_str::<Value>(text) {
-    Ok(v) => Arc::new(designotron_engine::collab::downgrade(&v, model).to_string()),
+    Ok(mut v) => {
+      designotron_engine::collab::downgrade_value(&mut v, model);
+      Arc::new(v.to_string())
+    }
     Err(_) => text.clone(),
   }
+}
+
+/// The document as one editor can read it. Only the document is rewritten, and only for editors
+/// below this build's model; the images next to it are never parsed or copied.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum DocOut<'a> {
+  Raw(&'a Document),
+  Older(Value),
+}
+
+fn doc_for(doc: &Document, model: u32) -> DocOut<'_> {
+  if model >= MODEL_REVISION {
+    return DocOut::Raw(doc);
+  }
+  let mut v = serde_json::to_value(doc).unwrap_or(Value::Null);
+  designotron_engine::collab::downgrade_value(&mut v, model);
+  DocOut::Older(v)
 }
 
 /// `for_model` for one message sent to several peers: one rewrite per distinct model.
@@ -355,7 +376,7 @@ struct Welcome<'a> {
   #[serde(rename = "type")]
   kind: &'static str,
   you: u64,
-  doc: Option<&'a Document>,
+  doc: Option<DocOut<'a>>,
   assets: &'a Map<String, Value>,
   peers: Vec<PeerInfo<'a>>,
   /// Deltas are acknowledged in order (see the protocol above).
@@ -387,7 +408,7 @@ struct PeerInfo<'a> {
 struct Reload<'a> {
   #[serde(rename = "type")]
   kind: &'static str,
-  doc: &'a Option<Document>,
+  doc: Option<DocOut<'a>>,
   assets: &'a Map<String, Value>,
 }
 
@@ -1371,11 +1392,16 @@ impl Rooms {
       return Step::Close(BUSY.into());
     }
     let none = Map::new();
+    let own_model = m.model.unwrap_or(UNSAID_MODEL).min(MODEL_REVISION);
     let welcome = Welcome {
       kind: "welcome",
       you: id,
       // Omitted when this editor's own document became the room's.
-      doc: if adopt { None } else { r.doc.as_ref() },
+      doc: if adopt {
+        None
+      } else {
+        r.doc.as_ref().map(|d| doc_for(d, own_model))
+      },
       assets: if adopt { &none } else { &r.assets },
       peers: r
         .peers
@@ -1396,8 +1422,7 @@ impl Rooms {
       role: role.name(),
     };
     let welcome = serde_json::to_string(&welcome).unwrap_or_default();
-    // An editor at an older model is sent the file as it can read it.
-    let welcome = for_model(&Arc::new(welcome), m.model.unwrap_or(UNSAID_MODEL).min(MODEL_REVISION));
+    let welcome = Arc::new(welcome);
     if adopt && self.data_dir.is_some() {
       // The sharer is told once its file is saved (the commit that follows snapshots it).
       self.put(r, out, welcome, true);
@@ -1406,13 +1431,26 @@ impl Rooms {
     }
     if adopt && !r.peers.is_empty() {
       // A reset replaces everyone's document.
-      let reload = Reload {
-        kind: "reload",
-        doc: &r.doc,
-        assets: &r.assets,
-      };
-      let reload = serde_json::to_string(&reload).unwrap_or_default();
-      self.hold_text(r, id, reload);
+      // One text per model among the others: older editors get the document they can read.
+      let mut texts: HashMap<u32, Arc<String>> = HashMap::new();
+      let to: Vec<(Outbox, Arc<String>)> = r
+        .peers
+        .values()
+        .map(|p| {
+          let text = texts.entry(p.model).or_insert_with(|| {
+            let reload = Reload {
+              kind: "reload",
+              doc: r.doc.as_ref().map(|d| doc_for(d, p.model)),
+              assets: &r.assets,
+            };
+            Arc::new(serde_json::to_string(&reload).unwrap_or_default())
+          });
+          (p.out.clone(), text.clone())
+        })
+        .collect();
+      for (out, text) in to {
+        self.put(r, &out, text, false);
+      }
     }
     r.peers.insert(
       id,
@@ -1595,7 +1633,14 @@ impl Rooms {
           delta: &fix,
           assets: None,
         };
-        self.put(r, &out, Arc::new(serde_json::to_string(&text).unwrap_or_default()), false);
+        // It carries whole layers from the room's document: in the sender's model.
+        let model = r.peers.get(&id).map_or(UNSAID_MODEL, |p| p.model);
+        self.put(
+          r,
+          &out,
+          for_model(&Arc::new(serde_json::to_string(&text).unwrap_or_default()), model),
+          false,
+        );
       }
     }
     if assets.is_some() && !keep {
@@ -1777,15 +1822,14 @@ impl Rooms {
 
   fn hold_text(&self, room: &mut Room, from: u64, text: String) {
     let text = Arc::new(text);
-    let mut texts = ModelTexts::default();
-    let to: Vec<(Outbox, Arc<String>)> = room
+    let to: Vec<Outbox> = room
       .peers
       .iter()
       .filter(|(id, _)| **id != from)
-      .map(|(_, p)| (p.out.clone(), texts.get(&text, p.model)))
+      .map(|(_, p)| p.out.clone())
       .collect();
-    for (out, text) in to {
-      self.put(room, &out, text, false);
+    for out in to {
+      self.put(room, &out, text.clone(), false);
     }
   }
 
@@ -2532,8 +2576,10 @@ mod tests {
   async fn a_pruned_layer_reaches_older_peers_whole_and_lists_peers_prune_themselves() {
     let dir = tmp_dir("lists-prune");
     let mut h = Harness::open(&dir).await;
-    let (doc, ids) = lists_doc();
+    let (mut doc, ids) = lists_doc();
     let (rect, var) = (ids[5].clone(), ids[6].clone());
+    // The pruned layer is a revision 4 one: an editor without `model` must get it as scroll.
+    doc["nodes"][&rect]["scrollBehavior"] = json!("sticky");
     let (ana, _, mut ana_rx) = h.join_as_welcomed(Some(doc), true).await;
     let (_ben, mut ben_rx) = h.join_as(None, false, true, true).await;
     let (cai, mut cai_rx) = h.join_as(None, false, true, false).await;
@@ -2583,6 +2629,15 @@ mod tests {
     assert_eq!(got[1]["type"], "delta");
     assert_eq!(got[1]["delta"]["nodes"][&rect]["id"], json!(rect));
     assert!(got[1]["delta"]["nodes"][&rect]["bindings"].as_object().is_none_or(|b| b.is_empty()));
+    assert_eq!(
+      got[1]["delta"]["nodes"][&rect]["scrollBehavior"].as_str().unwrap_or("scroll"),
+      "scroll",
+      "the repair is in the sender's model too"
+    );
+    assert_eq!(
+      cai_got[0]["delta"]["nodes"][&rect]["scrollBehavior"].as_str().unwrap_or("scroll"),
+      "scroll"
+    );
   }
 
   #[test]

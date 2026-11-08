@@ -1619,7 +1619,9 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
         }
       }
     }
-    warn_sticky(&mut cx, &e.doc, id);
+    if spec.get("scrollBehavior").is_some() {
+      warn_sticky(&mut cx, &e.doc, id);
+    }
     // A merge patch can't delete map entries: unbound properties and unpinned collections go
     // through their own commands.
     // Stale keys (a property this build doesn't know, a collection that is gone) are dropped

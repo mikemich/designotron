@@ -399,6 +399,7 @@ export function buildScene(frameId: string): Scene {
   const owners: { id: string; its: Interaction[] }[] = [];
   const keyed: Keyed[] = [];
   const fixedSet = new Set(fixedIds);
+  const stickySet = new Set(stickies.map((t) => t.id));
   // Layers painted after a scroller are drawn over it, each as a picture of its own (so the
   // ancestors between it and the container lose their clipping and opacity there). Every such
   // layer goes over the last scroller that comes before it, so a badge between two carousels is
@@ -419,7 +420,7 @@ export function buildScene(frameId: string): Scene {
       for (let x: string | null = sc.id; x && x !== node; x = doc.nodes[x].parent) {
         const sibs = doc.nodes[doc.nodes[x].parent!].children;
         for (const sib of sibs.slice(sibs.indexOf(x) + 1)) {
-          if (doc.nodes[sib]?.visible === false || fixedSet.has(sib) || infoOf.has(sib) || all.includes(sib)) continue;
+          if (doc.nodes[sib]?.visible === false || fixedSet.has(sib) || infoOf.has(sib) || stickySet.has(sib) || all.includes(sib)) continue;
           all.push(sib);
           let owner: string | null = null;
           for (const o of mine) if ((order.get(o.id) ?? 0) < (order.get(sib) ?? 0) && !isInside(doc, o.id, sib)) owner = o.id;
@@ -432,7 +433,6 @@ export function buildScene(frameId: string): Scene {
   const rootOwner = new Map<string, string>();
   for (const [o, list] of aboveRoots) for (const r of list) rootOwner.set(r, o);
   // Layers painted after a sticky layer cover it: each is a picture of its own over it.
-  const stickySet = new Set(stickies.map((t) => t.id));
   const stickyAbove = new Map<string, string[]>();
   const stickyRootOwner = new Map<string, string>();
   for (const t of stickies) {
@@ -440,12 +440,19 @@ export function buildScene(frameId: string): Scene {
     for (let x: string | null = t.id; x && x !== t.scroller; x = doc.nodes[x].parent) {
       const sibs = doc.nodes[doc.nodes[x].parent!].children;
       for (const sib of sibs.slice(sibs.indexOf(x) + 1)) {
-        if (doc.nodes[sib]?.visible === false || fixedSet.has(sib) || infoOf.has(sib) || stickySet.has(sib) || rootOwner.has(sib) || stickyRootOwner.has(sib) || list.includes(sib)) continue;
+        if (doc.nodes[sib]?.visible === false || fixedSet.has(sib) || infoOf.has(sib) || stickySet.has(sib) || stickyRootOwner.has(sib) || list.includes(sib)) continue;
         list.push(sib);
         stickyRootOwner.set(sib, t.id);
       }
     }
     stickyAbove.set(t.id, list);
+  }
+  // A layer after a sticky layer covers it, so it is drawn after the sticky layer (in its list)
+  // and no longer over the scroller that came before.
+  for (const [o, list] of aboveRoots) {
+    const kept = list.filter((r) => !stickyRootOwner.has(r));
+    aboveRoots.set(o, kept);
+    for (const r of list) if (!kept.includes(r)) rootOwner.delete(r);
   }
   const visit = (id: string) => {
     const n = doc.nodes[id];
@@ -502,7 +509,7 @@ export function buildScene(frameId: string): Scene {
     if (!roots?.length) return null;
     const pieces = roots.map((id) => {
       // A scroller inside keeps its own picture: leave its children out here.
-      const hide = infos.filter((i) => isInside(doc, i.id, id)).flatMap((i) => kids(i.id));
+      const hide = [...infos.filter((i) => isInside(doc, i.id, id)).flatMap((i) => kids(i.id)), ...stickies.filter((t) => isInside(doc, t.id, id)).map((t) => t.id)];
       const r = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id, hide, withBounds: true });
       return { svg: inlineAssets(r.svg), x: r.x - fb.x, y: r.y - fb.y, width: r.width, height: r.height };
     });

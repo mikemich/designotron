@@ -1059,6 +1059,8 @@ impl<'a> Ctx<'a> {
         el.styles.retain(|(k, _)| !moves(k));
         // The scroller follows the corners; the outer box still clips what it clipped.
         inner.s("border-radius", "inherit");
+        // Its own stacking context: sticky layers (z-index) stay below the fixed layers next to it.
+        inner.s("isolation", "isolate");
         if n.clip_content {
           el.s("overflow", "hidden");
         }
@@ -3887,21 +3889,30 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
   } else {
     handler
   };
-  // A component reference takes no data attributes: its swipe isn't written.
+  // A component reference takes no data attributes: its swipe sits on a box around it that has
+  // no box of its own (`display: contents`), so `closest("[data-dt-swipe]")` still finds it.
   let handler = match (&el.swipe, &el.component_ref) {
     (Some(swipe), None) => format!("{handler} data-dt-swipe={}", jsx_attr_value(swipe)),
     _ => handler,
   };
   if let Some(name) = &el.component_ref {
+    let mut line = String::new();
     match &el.slot {
       Some(slot) => {
         let expr = format!("{slot} ?? <{name} className={class_attr}{handler} />");
         match &el.show_if {
-          Some(cond) => out.push_str(&format!("{pad}{{{cond} && ({expr})}}\n")),
-          None => out.push_str(&format!("{pad}{{{expr}}}\n")),
+          Some(cond) => line.push_str(&format!("{pad}{{{cond} && ({expr})}}\n")),
+          None => line.push_str(&format!("{pad}{{{expr}}}\n")),
         }
       }
-      None => out.push_str(&format!("{pad}<{name} className={class_attr}{handler} />\n")),
+      None => line.push_str(&format!("{pad}<{name} className={class_attr}{handler} />\n")),
+    }
+    match &el.swipe {
+      Some(swipe) => out.push_str(&format!(
+        "{pad}<div data-dt-swipe={} style={{{{ display: \"contents\" }}}}>\n{line}{pad}</div>\n",
+        jsx_attr_value(swipe)
+      )),
+      None => out.push_str(&line),
     }
     return;
   }
@@ -9682,6 +9693,55 @@ mod w4ab_tests {
     let mut doc = swipe_doc(Transition::Dissolve, Direction::Left);
     doc.get_mut("card").unwrap().interactions[0].destination = None;
     assert!(!file(&doc, "src/screens/Home.tsx").contains("data-dt-swipe"));
+  }
+
+  #[test]
+  fn a_fixed_layer_stays_above_sticky_layers_of_the_scroller_beside_it() {
+    let mut doc = home(Overflow::Vertical);
+    add(&mut doc, NodeType::Frame, "bar", Some("home"), 390.0, 60.0, 0.0);
+    {
+      let b = doc.get_mut("bar").unwrap();
+      b.absolute_position = true;
+      b.scroll_behavior = ScrollBehavior::Fixed;
+    }
+    let html = tight(export_html(&doc, "home", &HeuristicMeasurer));
+    // The scrolling box holds the sticky layers in a stacking context of its own, and the fixed
+    // bar (a sibling after it, z-index auto) paints above all of it.
+    let inner = tag_with(&html, "isolation:isolate");
+    assert!(inner.contains("overflow-y:auto") && inner.contains("position:absolute"), "{inner}");
+    assert!(
+      html.find("isolation:isolate").unwrap() < html.find("height:60px").unwrap(),
+      "{html}"
+    );
+    assert!(html.contains("position:sticky"), "{html}");
+  }
+
+  #[test]
+  fn an_instance_with_on_drag_gets_a_swipe_box_around_it() {
+    let mut doc = swipe_doc(Transition::Push, Direction::Left);
+    add(&mut doc, NodeType::Component, "comp", None, 100.0, 50.0, 0.0);
+    doc.get_mut("comp").unwrap().x = 2000.0;
+    let page = doc.pages[0].id.clone();
+    let mut gen = IdGen::new(77);
+    let inst = crate::components::create_instance(&mut doc, "comp", Some("home"), &page, 0.0, 0.0, &mut gen).unwrap();
+    doc.get_mut(&inst).unwrap().interactions.push(Interaction {
+      trigger: Trigger::OnDrag,
+      destination: Some("detail".into()),
+      transition: Transition::Push,
+      direction: Direction::Left,
+      ..Default::default()
+    });
+    let home = file(&doc, "src/screens/Home.tsx").replace("\\\"", "\"");
+    assert!(
+      home.contains("display: \"contents\"") && home.matches("data-dt-swipe=").count() == 2,
+      "{home}"
+    );
+    let at = home.rfind("data-dt-swipe=").unwrap();
+    assert!(
+      home[at..].contains("\"to\":\"Detail\"") && home[at..].contains("<Comp"),
+      "{}",
+      &home[at..]
+    );
   }
 
   #[test]
