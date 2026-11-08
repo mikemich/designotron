@@ -241,6 +241,28 @@ if (process.env.PERF !== "0") {
   const pOff = med(paint.off);
   const pOn = med(paint.on);
   console.log(`perf paint (screenshot mean over 6 zoom levels), off: ${paint.off.map((v) => v.toFixed(0)).join(" ")} ms; on: ${paint.on.map((v) => v.toFixed(0)).join(" ")} ms; median off ${pOff.toFixed(0)} on ${pOn.toFixed(0)} (${((pOn / pOff - 1) * 100).toFixed(0)}%)`);
+  // Panning: the same screenshot timing at one zoom, six offsets, effects off and on.
+  const panCost = async () => {
+    const t = [];
+    for (let i = 0; i < 6; i++) {
+      await page.evaluate((i) => window.__dt.setViewport({ x: 100 - i * 37, y: 80 - i * 23, zoom: 0.7 }), i);
+      await sleep(150);
+      const t0 = performance.now();
+      await page.screenshot({ clip: { x: 300, y: 100, width: 600, height: 500 } });
+      t.push(performance.now() - t0);
+    }
+    return t.reduce((a, b) => a + b, 0) / t.length;
+  };
+  const pan = { off: [], on: [] };
+  for (let i = 0; i < 3; i++) {
+    for (const on of [false, true]) {
+      await setBlur(on);
+      await sleep(400);
+      pan[on ? "on" : "off"].push(await panCost());
+    }
+  }
+  console.log(`perf pan (screenshot mean over 6 offsets), off: ${pan.off.map((v) => v.toFixed(0)).join(" ")} ms; on: ${pan.on.map((v) => v.toFixed(0)).join(" ")} ms; median off ${med(pan.off).toFixed(0)} on ${med(pan.on).toFixed(0)} (${((med(pan.on) / med(pan.off) - 1) * 100).toFixed(0)}%)`);
+  await setBlur(true);
   // The hide-while-zooming rule: the copies are display:none while the view zooms and come back.
   const bbDisplay = () => page.evaluate(() => getComputedStyle(document.querySelector(".dt-bb")).display);
   await setBlur(true);
@@ -255,6 +277,11 @@ if (process.env.PERF !== "0") {
   const during = await bbDisplay();
   await sleep(500);
   check("backdrops are hidden while zooming and back after it", during === "none" && (await bbDisplay()) !== "none", `during ${during}`);
+  await page.mouse.wheel(0, 40);
+  await sleep(40);
+  const panning = await bbDisplay();
+  await sleep(500);
+  check("backdrops are hidden while panning and back after it", panning === "none" && (await bbDisplay()) !== "none", `during ${panning}`);
   // What a zoom frame costs with the rule (the class stays until the view changes): the same six views.
   const paintZoomingOff = [];
   for (let i = 0; i < 3; i++) {

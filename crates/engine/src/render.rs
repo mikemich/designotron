@@ -46,6 +46,11 @@ struct Renderer<'a> {
   /// Above 0 while a background blur's copy of the content below is being painted: no canvas
   /// hooks, no text bars, no nested blur.
   backdrop: u32,
+  /// Page-space box a background blur's copy still needs (the layer grown by 3 sigma): inside the
+  /// copy, `list` leaves out the siblings that miss it, at any depth.
+  cull: Option<Rect>,
+  /// Image pattern ids by paint (address), size and padding, so a copy reuses the original's.
+  images: HashMap<(usize, u64, u64, u64), String>,
 }
 
 /// Renders all roots of a page as SVG markup (`<defs>` + content), page coordinates.
@@ -60,6 +65,8 @@ pub fn render_page(doc: &Document, page: &str, m: &dyn TextMeasurer, opts: Rende
     bounds: HashMap::new(),
     stop: None,
     backdrop: 0,
+    cull: None,
+    images: HashMap::new(),
   };
   let roots = doc.page(page).map(|p| p.children.clone()).unwrap_or_default();
   let body = r.list(&roots);
@@ -79,6 +86,8 @@ pub fn render_root(doc: &Document, root: &str, m: &dyn TextMeasurer, opts: Rende
     bounds: HashMap::new(),
     stop: None,
     backdrop: 0,
+    cull: None,
+    images: HashMap::new(),
   };
   let body = r.node(root, None);
   if r.defs.is_empty() {
@@ -134,6 +143,8 @@ pub fn export_svg_parts(doc: &Document, id: &str, m: &dyn TextMeasurer, hidden: 
     bounds: HashMap::new(),
     stop: Some((id.to_string(), false)),
     backdrop: 0,
+    cull: None,
+    images: HashMap::new(),
   };
   let place = Mat::translate(-b.x, -b.y).mul(&doc.abs_matrix(id));
   let body = r.children(n);
@@ -215,6 +226,8 @@ fn export_svg_with(doc: &Document, id: &str, m: &dyn TextMeasurer, b: Rect, plac
     bounds: HashMap::new(),
     stop: Some((id.to_string(), true)),
     backdrop: 0,
+    cull: None,
+    images: HashMap::new(),
   };
   let body = r.node(&n.id, Some(place));
   format!(
@@ -478,12 +491,15 @@ impl<'a> Renderer<'a> {
       }
       attrs.push_str(" visibility=\"hidden\"");
     }
-    if let Some(f) = self.effects_filter(n) {
-      attrs.push_str(&format!(" filter=\"url(#{f})\""));
-    }
+    let fx = self.effects_filter(n);
     let backdrop = self.backdrop(n);
     let body = self.body(n);
-    format!("<g{attrs}>{backdrop}{body}</g>")
+    match fx {
+      // The shadows are cast by the layer alone, not by the blurred copy under it.
+      Some(f) if !backdrop.is_empty() => format!("<g{attrs}>{backdrop}<g filter=\"url(#{f})\">{body}</g></g>"),
+      Some(f) => format!("<g{attrs} filter=\"url(#{f})\">{body}</g>"),
+      None => format!("<g{attrs}>{backdrop}{body}</g>"),
+    }
   }
 
   /// Canvas markup with its editor hooks (not inside a background blur's copy).
@@ -500,7 +516,7 @@ impl<'a> Renderer<'a> {
         n.kind,
         NodeType::Rectangle | NodeType::Ellipse | NodeType::Polygon | NodeType::Star | NodeType::Vector
       );
-    if self.backdrop > 0 || !eligible || n.width <= 0.0 || n.height <= 0.0 {
+    if self.backdrop > 0 || n.is_mask || !eligible || n.width <= 0.0 || n.height <= 0.0 {
       return String::new();
     }
     let Some(blur) = n
@@ -527,6 +543,7 @@ impl<'a> Renderer<'a> {
       let b = abs_n.bounds_of(n.width, n.height);
       Rect::new(b.x - margin, b.y - margin, b.width + 2.0 * margin, b.height + 2.0 * margin)
     };
+    self.cull = Some(cull);
     self.backdrop += 1;
     let doc = self.doc;
     let mut abs_a = doc.abs_matrix(&path[from]);
@@ -538,17 +555,7 @@ impl<'a> Renderer<'a> {
       }
       let own_fills = i > from || self.stop.as_ref().is_none_or(|(_, fills)| *fills);
       let upto = a.children.iter().position(|c| *c == path[i + 1]).unwrap_or(0);
-      let mut kids: Vec<NodeId> = Vec::new();
-      for c in &a.children[..upto] {
-        let Some(k) = doc.get(c) else { continue };
-        if !k.is_mask {
-          let lb = local_render_bounds(doc, self.m, &mut self.bounds, k);
-          if intersect(&mat_bounds(&abs_a.mul(&doc.local_matrix(k)), &lb), &cull).is_none() {
-            continue;
-          }
-        }
-        kids.push(c.clone());
-      }
+      let kids = &a.children[..upto];
       let mut part = String::new();
       let geo = Geo::Rect {
         w: a.width,
@@ -558,7 +565,7 @@ impl<'a> Renderer<'a> {
       if own_fills && a.kind.is_frame_like() {
         part.push_str(&self.fills(a, &geo));
       }
-      let content = self.list(&kids);
+      let content = self.list(kids);
       if a.kind.is_frame_like() && a.clip_content && !content.is_empty() {
         let cid = self.id("clip");
         self
@@ -578,6 +585,7 @@ impl<'a> Renderer<'a> {
       }
     }
     self.backdrop -= 1;
+    self.cull = None;
     if below.is_empty() {
       return String::new();
     }
@@ -591,9 +599,9 @@ impl<'a> Renderer<'a> {
       self.geometry(n)
     };
     let (cid, fid) = (self.id("bbc"), self.id("bbf"));
-    self
-      .defs
-      .push_str(&format!("<clipPath id=\"{cid}\">{}</clipPath>", geo_el(&geo, "")));
+    // Inside a clipPath only `clip-rule` counts, so an even-odd vector keeps its holes.
+    let clip = geo_el(&geo, "").replace(" fill-rule=", " clip-rule=");
+    self.defs.push_str(&format!("<clipPath id=\"{cid}\">{clip}</clipPath>"));
     self.defs.push_str(&format!(
       "<filter id=\"{fid}\" filterUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" color-interpolation-filters=\"sRGB\"><feGaussianBlur stdDeviation=\"{}\"/></filter>",
       fmt(-margin),
@@ -674,7 +682,22 @@ impl<'a> Renderer<'a> {
   fn list(&mut self, ids: &[String]) -> String {
     let mut out = String::new();
     let mut masked: Option<(String, String)> = None;
+    // Inside a background blur's copy only what reaches the blurred layer is painted.
+    let cull = self.cull.filter(|_| self.backdrop > 0);
+    let parent = cull.map(|_| {
+      let p = ids.first().and_then(|c| self.doc.get(c)).and_then(|n| n.parent.clone());
+      p.map_or(Mat::IDENTITY, |p| self.doc.abs_matrix(&p))
+    });
     for c in ids {
+      if let (Some(cull), Some(parent)) = (&cull, &parent) {
+        let doc = self.doc;
+        if let Some(k) = doc.get(c).filter(|k| !k.is_mask) {
+          let lb = local_render_bounds(doc, self.m, &mut self.bounds, k);
+          if intersect(&mat_bounds(&parent.mul(&doc.local_matrix(k)), &lb), cull).is_none() {
+            continue;
+          }
+        }
+      }
       let is_mask = self.doc.get(c).map(|m| m.is_mask && m.visible).unwrap_or(false);
       if is_mask {
         if let Some((mid, body)) = masked.take() {
@@ -979,7 +1002,12 @@ impl<'a> Renderer<'a> {
         filters,
         ..
       } => {
+        let key = (std::ptr::from_ref(p) as usize, w.to_bits(), h.to_bits(), pad.to_bits());
+        if let Some(pid) = self.images.get(&key) {
+          return format!("url(#{pid})");
+        }
         let pid = self.id("img");
+        self.images.insert(key, pid.clone());
         let ip = paint::ImagePaint {
           src,
           scale_mode: *scale_mode,
@@ -2637,5 +2665,105 @@ mod w4ad_tests {
     t.effects = vec![bg_blur(20.0)];
     doc.insert(t, Some("f"), &page, None);
     assert_eq!(count(&canvas(&doc, "f"), "dt-bb"), 1);
+  }
+
+  #[test]
+  fn a_list_inside_a_container_is_culled_to_the_rows_near_the_card() {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut s = crate::ops::default_node(NodeType::Frame, "s".into(), "S".into());
+    (s.width, s.height) = (400.0, 5000.0);
+    doc.insert(s, None, &page, None);
+    let mut list = crate::ops::default_node(NodeType::Frame, "list".into(), "List".into());
+    (list.width, list.height) = (400.0, 4400.0);
+    doc.insert(list, Some("s"), &page, None);
+    for i in 0..100 {
+      let mut r = crate::ops::default_node(NodeType::Rectangle, format!("row{i}"), format!("row{i}"));
+      (r.x, r.y, r.width, r.height) = (0.0, f64::from(i) * 44.0, 400.0, 40.0);
+      r.fills = vec![model::Paint::solid("#123456")];
+      doc.insert(r, Some("list"), &page, None);
+    }
+    let mut nav = crate::ops::default_node(NodeType::Rectangle, "nav".into(), "Nav".into());
+    (nav.width, nav.height) = (400.0, 64.0);
+    nav.effects = vec![bg_blur(20.0)];
+    doc.insert(nav, Some("s"), &page, None);
+    let svg = canvas(&doc, "s");
+    let copied = count(&svg, "#123456") - 100;
+    assert!((2..=4).contains(&copied), "{copied} rows copied");
+  }
+
+  #[test]
+  fn an_even_odd_vector_clips_with_clip_rule() {
+    let mut doc = glass();
+    let page = doc.pages[0].id.clone();
+    let mut v = crate::ops::default_node(NodeType::Vector, "ring".into(), "ring".into());
+    (v.x, v.y, v.width, v.height) = (0.0, 0.0, 100.0, 100.0);
+    v.vector = Some(model::VectorData {
+      subpaths: vec![],
+      raw: Some(model::RawPath {
+        d: "M0 0H100V100H0Z M25 25H75V75H25Z".into(),
+        view_box: [0.0, 0.0, 100.0, 100.0],
+        fill_rule: "evenodd".into(),
+      }),
+    });
+    v.effects = vec![bg_blur(10.0)];
+    doc.insert(v, Some("f"), &page, None);
+    let svg = canvas(&doc, "f");
+    assert!(svg.contains("clip-rule=\"evenodd\""), "{svg}");
+  }
+
+  #[test]
+  fn a_mask_layer_gets_no_backdrop() {
+    let mut doc = glass();
+    doc.get_mut("card").unwrap().is_mask = true;
+    assert!(!canvas(&doc, "f").contains("dt-bb"));
+  }
+
+  #[test]
+  fn a_glass_cards_shadow_is_the_one_it_has_without_the_blur() {
+    let drop = Effect {
+      y: 8.0,
+      blur: 16.0,
+      ..Effect::default()
+    };
+    let inner = Effect {
+      kind: EffectType::InnerShadow,
+      ..Effect::default()
+    };
+    let mut doc = glass();
+    doc.get_mut("card").unwrap().effects = vec![bg_blur(20.0), drop.clone(), inner.clone()];
+    let glass_svg = canvas(&doc, "f");
+    doc.get_mut("card").unwrap().effects = vec![drop, inner];
+    let plain = canvas(&doc, "f");
+    let filter = |s: &str| {
+      let i = s.find("<filter id=\"f_fx").expect("shadow filter");
+      let rest = &s[i..];
+      rest[rest.find('>').unwrap()..rest.find("</filter>").unwrap()].to_string()
+    };
+    assert_eq!(filter(&glass_svg), filter(&plain));
+    // the filter wraps the card's own paint only, after the copy
+    let card = card_group(&glass_svg);
+    let at = card.find("<g filter=\"url(#f_fx").expect("inner filter group");
+    assert!(card[..at].contains("dt-bb") && !card[at..].contains("dt-bb"), "{card}");
+  }
+
+  #[test]
+  fn copies_reuse_the_originals_image_pattern() {
+    let mut doc = glass();
+    doc.get_mut("blue").unwrap().fills = vec![Paint::Image {
+      src: "asset:a".into(),
+      scale_mode: model::ScaleMode::Fill,
+      opacity: 1.0,
+      visible: true,
+      crop: None,
+      credit: None,
+      scaling_factor: 1.0,
+      rotation: 0.0,
+      filters: None,
+    }];
+    let svg = canvas(&doc, "f");
+    assert_eq!(count(&svg, "<pattern"), 1, "{svg}");
+    assert_eq!(count(&svg, "fill=\"url(#f_img"), 2, "used by the layer and its copy");
   }
 }
