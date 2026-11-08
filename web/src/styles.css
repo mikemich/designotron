@@ -283,6 +283,20 @@ textarea {
 .menu .item:focus-visible .kbd {
   color: #e0f0ff;
 }
+/* A menu item with a muted second line (why it is disabled). */
+.menu .item .item-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.menu .item .item-hint {
+  color: var(--text-3);
+  font-size: 11px;
+}
+.menu .item:hover .item-hint,
+.menu .item:focus-visible .item-hint {
+  color: #e0f0ff;
+}
 .menu .sep {
   height: 1px;
   background: #3a3a3a;
@@ -1272,7 +1286,7 @@ button.swatch > i {
 }
 .copy-line {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   margin: 4px 0;
   background: var(--bg);
@@ -1283,9 +1297,12 @@ button.swatch > i {
 .copy-line code {
   flex: 1;
   min-width: 0;
-  overflow-x: auto;
-  white-space: nowrap;
+  /* The whole command is visible: it wraps instead of scrolling sideways. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: visible;
   font-size: 11px;
+  padding-top: 3px;
 }
 .copy-line button {
   flex: none;
@@ -1295,6 +1312,55 @@ button.swatch > i {
   border-radius: 4px;
   background: var(--panel-3);
   color: var(--text);
+}
+.no-cli-card {
+  line-height: 1.55;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+.past-menu .item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  text-align: left;
+}
+.past-menu .item:hover:not(:disabled),
+.past-menu .item:focus-visible {
+  background: var(--panel-3);
+}
+.past-menu .item:disabled {
+  opacity: 0.5;
+}
+.past-menu .item .past-date {
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.past-menu .past-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.past-menu .past-row .item {
+  flex: 1;
+  min-width: 0;
+}
+.past-menu .past-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.past-menu .past-del {
+  flex: none;
+}
+.past-menu .past-empty {
+  padding: 6px 10px;
+  color: var(--text-3);
 }
 .status-dot {
   width: 8px;
@@ -3027,6 +3093,48 @@ button.plugin-log-line {
 }
 
 /* ---------- Keyboard shortcuts ---------- */
+/* Help menu dialogs (About, Feedback). */
+.help-dialog {
+  width: 420px;
+}
+.help-dialog.wide {
+  width: 520px;
+}
+.help-body {
+  padding: 14px;
+  overflow-y: auto;
+}
+.help-body p {
+  line-height: 1.55;
+}
+.help-body textarea {
+  width: 100%;
+  resize: vertical;
+}
+.help-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 8px 0 0;
+}
+.help-facts dt {
+  color: var(--text-3);
+}
+.help-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.help-details {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--bg);
+  border-radius: var(--radius);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 140px;
+  overflow-y: auto;
+}
 .shortcuts-dialog {
   width: min(860px, calc(100vw - 32px));
 }

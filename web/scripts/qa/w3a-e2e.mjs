@@ -78,7 +78,7 @@ const present = async (p, frame) => {
   await dispatch({ op: "setFlowStart", page: pg, id: ids[frame] }, p);
   // Present starts at the selected frame when there is one (Wave 4): clear the selection.
   await dispatch({ op: "select", ids: [] }, p);
-  await p.click("button[title='Present']");
+  await p.click("button[title^='Present']");
   await p.waitForSelector(".presenter");
   await sleep(250);
 };

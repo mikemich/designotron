@@ -179,7 +179,7 @@ try {
 
   // Present from Home.
   await page.evaluate((i) => window.__dt.dispatch({ op: "select", ids: [i] }), id("Home"));
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present']");
   await page.waitForSelector(".presenter", { timeout: 5000 });
   await page.waitForTimeout(500);
   const ids = Object.fromEntries(["Open modal", "Menu button", "Close", "To menu", "Item modal", "Item settings"].map((n) => [n, id(n)]));
@@ -207,7 +207,7 @@ try {
   // Manual position and "close on outside click" off.
   await tool("set_prototype", { nodeId: ids["Open modal"], clear: true, action: "open_overlay", destinationId: id("Modal"), overlay: { position: "manual", offsetX: 10, offsetY: 60, closeOnClickOutside: false } });
   await page.evaluate((i) => window.__dt.dispatch({ op: "select", ids: [i] }), id("Home"));
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present']");
   await page.waitForSelector(".presenter");
   await page.waitForTimeout(400);
   const hs = await box(page, `.presenter [data-hotspot="${ids["Open modal"]}"]`);
@@ -226,7 +226,7 @@ try {
   await page.keyboard.press("Escape");
   await page.waitForTimeout(100);
   await tool("set_prototype", { nodeId: id("Home"), trigger: "delay", action: "open_overlay", destinationId: id("Modal") });
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present']");
   await page.waitForSelector(".presenter");
   await page.waitForSelector(".presenter .overlay-frame", { timeout: 4000 });
   check("after-delay opens the overlay", (await overlays(page)) === 1);
@@ -243,7 +243,7 @@ try {
   check("parent overlay frame built", parent.ok);
   await tool("set_prototype", { nodeId: parentId, trigger: "delay", action: "open_overlay", destinationId: id("Menu"), overlay: { position: "top_right", background: "none" } });
   await tool("set_prototype", { nodeId: ids["Open modal"], clear: true, action: "open_overlay", destinationId: parentId });
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present']");
   await page.waitForSelector(".presenter");
   await page.locator(`.presenter [data-hotspot="${ids["Open modal"]}"]`).click();
   await page.waitForFunction(() => document.querySelectorAll(".presenter .overlay-backdrop").length === 2, null, { timeout: 4000 });
@@ -263,7 +263,7 @@ try {
     const n = window.__dt.doc().nodes[i];
     window.__dt.dispatch({ op: "update", ids: [i], patch: { interactions: n.interactions.map((x) => ({ ...x, delayMs: 3000 })) } });
   }, id("Home"));
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present']");
   await page.waitForSelector(".presenter");
   // The frame's own after-delay interaction must not leave a click-swallowing hotspot over its children.
   check("after-delay on a frame makes no hotspot", (await page.locator(`.presenter [data-hotspot="${id("Home")}"]`).count()) === 0);
@@ -303,7 +303,7 @@ try {
   const present = async () => {
     // Present starts on the selected frame: clear the selection to start on the flow start.
     await page.evaluate(() => window.__dt.dispatch({ op: "select", ids: [] }));
-    await page.click("button[title='Present']");
+    await page.click("button[title^='Present']");
     await page.waitForSelector(".presenter");
     await page.waitForTimeout(300);
   };

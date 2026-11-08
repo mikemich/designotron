@@ -290,7 +290,10 @@ class BridgeClient {
 
   private reportError(raw: string) {
     this.turnError = true;
-    push({ kind: "error", text: explainError(raw) });
+    const text = explainError(raw);
+    // An error we have no words for gets a next step; the raw message stays in the tooltip.
+    if (text === raw) push({ kind: "error", text: `${raw.trim().replace(/[.!?]*$/, ".")} Try again, or check the bridge in the panel settings.`, title: raw });
+    else push({ kind: "error", text });
   }
 
   /** Renders Claude Code `stream-json` events. */

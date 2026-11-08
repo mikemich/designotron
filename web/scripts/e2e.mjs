@@ -365,7 +365,7 @@ try {
   await page.evaluate(() => window.__dt.zoomToFit());
   await page.waitForTimeout(300);
   await shot("05-after-edits");
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present']");
   await page.waitForSelector(".presenter", { timeout: 5000 });
   await page.waitForTimeout(300);
   await shot("06-present");

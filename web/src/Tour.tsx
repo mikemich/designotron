@@ -17,6 +17,13 @@ interface Hint {
   when: () => boolean;
 }
 
+/** True while a shown hint still applies. The Claude hint ends once the panel is open (opening it
+ *  was the lesson); the others end when their condition stops holding. */
+export function stillRelevant(hint: Pick<Hint, "id" | "when">, chatOpen: boolean): boolean {
+  if (hint.id === "claude" && chatOpen) return false;
+  return hint.when();
+}
+
 const hasLayers = () => {
   const doc = getDoc();
   const page = doc.pages.find((p) => p.id === useStore.getState().es.page) ?? doc.pages[0];
@@ -47,6 +54,19 @@ const HINTS: Hint[] = [
   },
 ];
 
+const RESET_EVENT = "dt:tips-reset";
+
+/** Help, Show tips again: forgets which hints were seen and dismissed, so they come back as they become relevant. */
+export function resetTips() {
+  try {
+    localStorage.removeItem(KEY);
+    for (const h of HINTS) localStorage.removeItem(`dt:hint:${h.id}`);
+  } catch {
+    /* storage unavailable: the hints that were dismissed stay dismissed */
+  }
+  window.dispatchEvent(new Event(RESET_EVENT));
+}
+
 const seen = (id: string): boolean => {
   try {
     return localStorage.getItem(KEY) === "1" || localStorage.getItem(`dt:hint:${id}`) === "1";
@@ -62,6 +82,26 @@ export function Tour() {
   const demo = useDemo((s) => s.caption !== null);
   const [hint, setHint] = useState<Hint | null>(null);
   const [rect, setRect] = useState<DOMRect | null>(null);
+  // Bumped by "Show tips again" so the next hint is picked even though nothing else changed.
+  const [reset, setReset] = useState(0);
+  useEffect(() => {
+    const on = () => setReset((n) => n + 1);
+    window.addEventListener(RESET_EVENT, on);
+    return () => window.removeEventListener(RESET_EVENT, on);
+  }, []);
+
+  // A shown hint goes as soon as it no longer applies. Opening Claude counts as having seen its hint.
+  useEffect(() => {
+    if (!hint || stillRelevant(hint, chatOpen)) return;
+    if (hint.id === "claude") {
+      try {
+        localStorage.setItem(`dt:hint:${hint.id}`, "1");
+      } catch {
+        /* storage unavailable */
+      }
+    }
+    setHint(null);
+  }, [hint, rev, selection, chatOpen]);
 
   // Pick the first relevant hint not seen yet, after things settle.
   useEffect(() => {
@@ -71,7 +111,7 @@ export function Tour() {
       setHint(HINTS.find((h) => !seen(h.id) && h.when()) ?? null);
     }, 1200);
     return () => clearTimeout(t);
-  }, [rev, selection, chatOpen, hint, demo]);
+  }, [rev, selection, chatOpen, hint, demo, reset]);
 
   useLayoutEffect(() => {
     const measure = () => {

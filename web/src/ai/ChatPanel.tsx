@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Check,
+  History,
   ImagePlus,
   Loader2,
   Plus,
@@ -15,7 +16,9 @@ import {
 import {
   MODELS,
   attachImage,
+  deletePastConversation,
   newConversation,
+  openPastConversation,
   patchItem,
   push,
   registerComposer,
@@ -32,7 +35,9 @@ import {
 } from "./chatState";
 import { bridgeHttpBase } from "./bridgeClient";
 import { getDoc, toast, useStore } from "../store";
-import { focusCanvas, Menu, MOD, Seg, SelectField, type MenuItem } from "../ui/controls";
+import { focusCanvas, Menu, MOD, Popover, Seg, SelectField, type MenuItem } from "../ui/controls";
+import { ConfirmDialog } from "../dashboard/ConfirmDialog";
+import { loadPast, relativeDate, type PastConversation } from "./conversations";
 import { imagesFrom } from "./images";
 import { Markdown } from "./markdown";
 import { isPhone } from "../panels/PhoneNote";
@@ -144,6 +149,8 @@ export function ChatPanel() {
   const [settings, setSettings] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [past, setPast] = useState<{ anchor: DOMRect; list: PastConversation[] | null } | null>(null);
+  const [delPast, setDelPast] = useState<PastConversation | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -203,6 +210,8 @@ export function ChatPanel() {
 
   const quickItems: MenuItem[] = QUICK_ACTIONS.map((a) => ({
     label: a.label,
+    // A disabled item says what it is waiting for.
+    hint: a.needsSelection && !hasSelection ? "Select layers first" : a.needsImage && !pending.length ? "Attach a screenshot first (paste or drop one into the panel)" : a.needsContent && !hasContent ? "Add something to this page first" : undefined,
     disabled:
       (a.needsSelection && !hasSelection) || (a.needsImage && !pending.length) || (a.needsContent && !hasContent),
     onClick: () => {
@@ -231,6 +240,21 @@ export function ChatPanel() {
           onClick={newConversation}
         >
           <Plus size={14} />
+        </button>
+        <button
+          className={"ibtn" + (past ? " on" : "")}
+          title="Past conversations"
+          aria-label="Past conversations"
+          aria-haspopup="menu"
+          aria-expanded={!!past}
+          onClick={(e) => {
+            const anchor = e.currentTarget.getBoundingClientRect();
+            setPast({ anchor, list: null });
+            const file = useChat.getState().chatFile;
+            void (file ? loadPast(file) : Promise.resolve([])).then((list) => setPast((p) => (p ? { ...p, list } : p)));
+          }}
+        >
+          <History size={14} />
         </button>
         <button
           className={"ibtn" + (settings ? " on" : "")}
@@ -296,7 +320,7 @@ export function ChatPanel() {
               />
               {bridgeStatus === "connected"
                 ? claude?.available === false
-                  ? "Bridge running, but `claude` CLI not found"
+                  ? "Bridge running, but Claude Code isn't installed"
                   : `Bridge connected${claude?.version ? ` · Claude Code ${claude.version}` : ""}`
                 : bridgeStatus === "connecting"
                   ? "Connecting to bridge…"
@@ -380,7 +404,7 @@ export function ChatPanel() {
             </div>
             <div className="suggestions">
               {SUGGESTIONS.map((s) => (
-                <button key={s} onClick={() => send(s)} disabled={!ready}>
+                <button key={s} onClick={() => send(s)} disabled={!ready} title={ready ? undefined : "Connect Claude first"}>
                   {s}
                 </button>
               ))}
@@ -602,6 +626,50 @@ export function ChatPanel() {
           )}
         </div>
       </div>
+      {past && (
+        <Popover anchor={past.anchor} width={300} label="Past conversations" onClose={() => setPast(null)}>
+          <div className="past-menu" role="menu" aria-label="Past conversations">
+            {past.list === null ? (
+              <div className="past-empty">Loading…</div>
+            ) : past.list.length === 0 ? (
+              <div className="past-empty">No past conversations</div>
+            ) : (
+              past.list.map((c) => (
+                <div key={c.id} className="past-row" role="none">
+                  <button
+                    className="item"
+                    role="menuitem"
+                    disabled={running}
+                    title={running ? "Wait for Claude to finish, or stop it" : c.title}
+                    onClick={() => {
+                      setPast(null);
+                      void openPastConversation(c.id);
+                    }}
+                  >
+                    <span className="past-title">{c.title}</span>
+                    <span className="past-date">{relativeDate(c.savedAt)}</span>
+                  </button>
+                  <button className="ibtn past-del" aria-label={`Delete conversation: ${c.title}`} title="Delete" onClick={() => (setPast(null), setDelPast(c))}>
+                    <X size={12} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </Popover>
+      )}
+      {delPast && (
+        <ConfirmDialog
+          title="Delete this conversation?"
+          message={`"${delPast.title}" is removed from this browser's history for this file. The design isn't affected.`}
+          confirmLabel="Delete"
+          onCancel={() => setDelPast(null)}
+          onConfirm={() => {
+            void deletePastConversation(delPast.id);
+            setDelPast(null);
+          }}
+        />
+      )}
       {menu && (
         <Menu
           x={menu.x}
@@ -620,6 +688,8 @@ function ConnectCard({ alone }: { alone: boolean }) {
   const queued = useChat((s) => s.queued);
   const mode = useChat((s) => s.mode);
   const savedKey = useChat((s) => s.apiKey);
+  // The bridge answers but has no Claude Code: the install steps would send people to a bridge they have.
+  const noCli = useChat((s) => s.mode === "bridge" && s.bridgeStatus === "connected" && s.claude?.available === false);
   const [key, setKey] = useState("");
   const save = () => {
     if (!key.trim()) return;
@@ -670,12 +740,18 @@ function ConnectCard({ alone }: { alone: boolean }) {
         </button>
       )}
       {/* Open while Claude isn't connected, also with a message waiting: that is when the steps are needed. */}
-      <details open={alone && mode === "bridge" && !isPhone()}>
-        <summary>
-          <b>Have Claude Pro or Max?</b> Use it at no extra cost
-        </summary>
-        <ClaudeSetupSteps />
-      </details>
+      {noCli ? (
+        <div className="no-cli-card" role="status">
+          <b>The bridge is running.</b> Install Claude Code and sign in once (run <code>claude</code>, then <code>/login</code>), then restart the bridge.
+        </div>
+      ) : (
+        <details open={alone && mode === "bridge" && !isPhone()}>
+          <summary>
+            <b>Have Claude Pro or Max?</b> Use it at no extra cost
+          </summary>
+          <ClaudeSetupSteps />
+        </details>
+      )}
     </div>
   );
 }

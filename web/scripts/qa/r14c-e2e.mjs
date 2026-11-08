@@ -599,7 +599,7 @@ const openVariables = async (page) => {
   await shot(page, "12-editor-1000");
   await axeRun(page, "editor (1000, Design overlay)");
   await page.keyboard.press("Escape");
-  await page.locator(".tbtn[title='Present']").click();
+  await page.locator(".tbtn[title^='Present']").click();
   await page.waitForSelector(".presenter");
   await sleep(500);
   await axeRun(page, "presenter");

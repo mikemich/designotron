@@ -3,7 +3,7 @@ import { Loader2, Sparkles, X } from "lucide-react";
 import { askClaude, claudeReady, discardQueued, sendQueued, useChat, useQueueConfirm } from "../ai/chatState";
 import { playDemo } from "../Demo";
 import { TEMPLATES } from "../templates";
-import { closeEmptyPrompt, dispatch, zoomToFit } from "../store";
+import { closeEmptyPrompt, dispatch, useStore, zoomToFit } from "../store";
 
 const IDEAS = ["A landing page for a coffee subscription", "A habit tracker mobile app, 3 screens", "An admin dashboard for an online store"];
 
@@ -30,6 +30,22 @@ export function EmptyPrompt({ pageId, forceCompact = false }: { pageId: string; 
   useEffect(() => {
     if (grab && !compact) input.current?.focus();
   }, [grab, compact]);
+  // A new or untouched file: the card takes focus, so typing goes into it (a bare "a" would pick the
+  // Frame tool and the card would vanish). Not on a page someone just emptied (something to undo),
+  // and never over a dialog, a menu or another field.
+  const untouched = useStore((s) => !s.es.canUndo);
+  useEffect(() => {
+    if (compact || !untouched) return;
+    const free = () => {
+      const a = document.activeElement;
+      return !a || a === document.body || !!a.closest(".canvas");
+    };
+    const t = requestAnimationFrame(() => {
+      if (free() && !document.querySelector(".modal-bg, .menu, .hint-card")) input.current?.focus();
+    });
+    return () => cancelAnimationFrame(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const ready = useChat((s) => claudeReady(s));
   const queued = useChat((s) => s.queued);
   const running = useChat((s) => s.running);
@@ -120,6 +136,13 @@ export function EmptyPrompt({ pageId, forceCompact = false }: { pageId: string; 
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
               e.stopPropagation();
+              // The prompt now holds focus on a new file, and the global shortcuts leave text fields alone:
+              // the Claude panel's own key still has to work from here.
+              if ((e.ctrlKey || e.metaKey) && e.key === "/") {
+                e.preventDefault();
+                useStore.setState((s) => ({ chatOpen: !s.chatOpen }));
+                return;
+              }
               if (e.key === "Escape") {
                 closeEmptyPrompt(pageId);
                 return;

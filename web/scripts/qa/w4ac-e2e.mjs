@@ -375,14 +375,14 @@ const closePresenter = async () => {
 {
   const f = await fixture();
   check("present: nothing selected starts on the flow start", await (async () => {
-    await page.locator(".topbar .tbtn[title='Present']").click();
+    await page.locator(".topbar .tbtn[title^='Present']").click();
     await page.waitForSelector(".presenter");
     return (await crumb()) === "Home";
   })());
   await closePresenter();
   await run({ op: "select", ids: [f.child] });
   await page.waitForTimeout(150);
-  await page.locator(".topbar .tbtn[title='Present']").click();
+  await page.locator(".topbar .tbtn[title^='Present']").click();
   await page.waitForSelector(".presenter");
   check("present: a child of the second frame starts on that frame", (await crumb()) === "Settings", await crumb());
   await closePresenter();
@@ -395,7 +395,7 @@ const closePresenter = async () => {
   await page.keyboard.press("Control+Alt+Enter");
   await page.waitForTimeout(400);
   check("shortcut: with nothing selected it starts on the flow start", (await page.locator(".presenter").count()) === 1 && (await crumb()) === "Home");
-  check("present: the Play button declares the shortcut", /Alt\+Enter/.test((await page.locator(".topbar .tbtn[title='Present']").getAttribute("aria-keyshortcuts")) ?? ""));
+  check("present: the Play button declares the shortcut", /Alt\+Enter/.test((await page.locator(".topbar .tbtn[title^='Present']").getAttribute("aria-keyshortcuts")) ?? ""));
   await closePresenter();
 }
 
@@ -403,7 +403,7 @@ const closePresenter = async () => {
   // Full screen.
   const f = await fixture();
   void f;
-  await page.locator(".topbar .tbtn[title='Present']").click();
+  await page.locator(".topbar .tbtn[title^='Present']").click();
   await page.waitForSelector(".presenter");
   const fsBtn = page.locator('.presenter .bar button[aria-label="Full screen (F)"]');
   check("fullscreen: the bar has a Full screen button", (await fsBtn.count()) === 1);
@@ -435,7 +435,7 @@ const closePresenter = async () => {
     window.__origReq = Element.prototype.requestFullscreen;
     Element.prototype.requestFullscreen = () => Promise.reject(new Error("denied"));
   });
-  await page.locator(".topbar .tbtn[title='Present']").click();
+  await page.locator(".topbar .tbtn[title^='Present']").click();
   await page.waitForSelector(".presenter");
   await page.locator('.presenter .bar button[aria-label="Full screen (F)"]').click();
   await page.waitForTimeout(400);
@@ -448,7 +448,7 @@ const closePresenter = async () => {
   await dt(() => {
     delete Element.prototype.requestFullscreen;
   });
-  await page.locator(".topbar .tbtn[title='Present']").click();
+  await page.locator(".topbar .tbtn[title^='Present']").click();
   await page.waitForSelector(".presenter");
   check("fullscreen: without requestFullscreen there is no button", (await page.locator('.presenter .bar button[aria-label="Full screen (F)"]').count()) === 0);
   await page.keyboard.press("f");
@@ -464,7 +464,7 @@ const closePresenter = async () => {
   // Q-1: hover waits for real movement after a screen appears under a still pointer.
   const f = await fixture();
   void f;
-  await page.locator(".topbar .tbtn[title='Present']").click();
+  await page.locator(".topbar .tbtn[title^='Present']").click();
   await page.waitForSelector(".presenter");
   await page.waitForTimeout(400);
   const vp = await page.locator(".presenter-viewport").boundingBox();
@@ -514,7 +514,7 @@ const closePresenter = async () => {
   const pageId = await dt(() => window.__dt.doc().pages[0].id);
   await run({ op: "setFlowStart", page: pageId, id: home });
   await run({ op: "select", ids: [] });
-  await page.locator(".topbar .tbtn[title='Present']").click();
+  await page.locator(".topbar .tbtn[title^='Present']").click();
   await page.waitForSelector(".presenter");
   await page.waitForTimeout(400);
   const vp = await page.locator(".presenter-viewport").boundingBox();

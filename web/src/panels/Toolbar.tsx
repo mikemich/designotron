@@ -54,6 +54,8 @@ import { FileLocation } from "./FileLocation";
 import { focusPanel } from "./PanelChrome";
 import { isPhone, panelShown, PHONE_QUERY } from "../panelState";
 import { useShortcuts } from "./ShortcutsDialog";
+import { HelpDialogs, openHelpPage, useHelp } from "./HelpDialogs";
+import { resetTips } from "../Tour";
 import { useImport } from "./ImportDialog";
 import { pasteOverSelection, SAME_PROPS, TIDY_KBD } from "../canvas/contextMenu";
 
@@ -245,11 +247,6 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
       label: "Variables…",
       onClick: () => useStore.setState({ variablesOpen: true }),
     },
-    {
-      label: "Keyboard shortcuts",
-      kbd: "?",
-      onClick: () => useShortcuts.setState({ open: true }),
-    },
     { sep: true },
     { heading: "Plugins" },
     ...usePlugins
@@ -260,6 +257,23 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
       label: "Manage plugins…",
       onClick: () => usePlugins.setState({ dialogOpen: true }),
     },
+    { sep: true },
+    { heading: "Help" },
+    {
+      label: "Keyboard shortcuts",
+      kbd: "?",
+      onClick: () => useShortcuts.setState({ open: true }),
+    },
+    {
+      label: "Show tips again",
+      onClick: () => {
+        resetTips();
+        toast("Tips will show again as they become relevant.");
+      },
+    },
+    { label: "Help and documentation", onClick: openHelpPage },
+    { label: "Send feedback…", onClick: () => useHelp.setState({ dialog: "feedback" }) },
+    { label: "About Designotron", onClick: () => useHelp.setState({ dialog: "about" }) },
   ];
 
   const toolBtn = (t: Tool, title: string, icon: JSX.Element) => {
@@ -537,7 +551,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         </button>
         <button
           className="tbtn"
-          title="Present"
+          title={`Present (${ALT_MOD}Enter)`}
           aria-keyshortcuts={isMac ? "Meta+Alt+Enter" : "Control+Alt+Enter"}
           onClick={A.startPresenting}
         >
@@ -556,6 +570,7 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         {panelToggle("right")}
       </div>
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
+      <HelpDialogs />
       {renameAt && (
         <Popover anchor={renameAt} width={260} label="Rename file" onClose={() => setRenameAt(null)}>
           <form

@@ -69,7 +69,7 @@ const setStart = (page, id) =>
     window.__dt.dispatch({ op: "setFlowStart", page: pg.id, id: f });
   }, id);
 const present = async (page) => {
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present']");
   await page.waitForSelector(".presenter");
   await page.waitForTimeout(500);
 };

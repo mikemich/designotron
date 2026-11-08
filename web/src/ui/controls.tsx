@@ -420,6 +420,8 @@ export interface MenuItem {
   sep?: boolean;
   heading?: string;
   disabled?: boolean;
+  /** A muted second line (also the item's tooltip): why a disabled item is, or what it does. */
+  hint?: string;
 }
 
 /** Whether the last thing the person did was press a key (not click or touch): a menu they
@@ -551,7 +553,9 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
             role="menuitem"
             tabIndex={-1}
             disabled={it.disabled}
-            style={it.disabled ? { opacity: 0.4 } : undefined}
+            style={it.disabled ? { opacity: it.hint ? 0.55 : 0.4 } : undefined}
+            title={it.hint}
+            aria-description={it.hint}
             onClick={() => {
               // Focus returns before the item runs, so a dialog it opens remembers the opener
               // and an item that moves focus (a text box, the canvas) wins.
@@ -560,7 +564,14 @@ export function Menu(props: { x: number; y: number; items: MenuItem[]; onClose: 
               it.onClick?.();
             }}
           >
-            <span>{it.label}</span>
+            {it.hint ? (
+              <span className="item-text">
+                <span>{it.label}</span>
+                <span className="item-hint">{it.hint}</span>
+              </span>
+            ) : (
+              <span>{it.label}</span>
+            )}
             {it.kbd && <span className="kbd">{it.kbd}</span>}
           </button>
         ),
