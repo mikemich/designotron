@@ -54,16 +54,6 @@ pub fn layout_root_skipping(doc: &mut Document, id: &str, m: &dyn TextMeasurer, 
       if resized {
         layout_node(doc, &cid, m);
       }
-      // Float noise from a scale or a half step would make a file look edited on open.
-      let r = |v: f64| (v * 1e6).round() / 1e6;
-      if doc
-        .get(&cid)
-        .is_some_and(|c| [c.x, c.y, c.width, c.height].iter().any(|v| r(*v) != *v))
-      {
-        doc.modify(&cid, |c| {
-          (c.x, c.y, c.width, c.height) = (r(c.x), r(c.y), r(c.width), r(c.height));
-        });
-      }
     }
   }
 }
@@ -771,6 +761,12 @@ fn apply_constraints_with(doc: &mut Document, frame_id: &str, old_w: f64, old_h:
         c.y *= sy;
         c.height = (c.height * sy).max(1.0);
       }
+    }
+    if !deep {
+      // Float noise from a scale or a half step would make a file look edited on open. Only
+      // what a constraint computed is rounded: layout places everything else.
+      let r = |v: f64| (v * 1e6).round() / 1e6;
+      (c.x, c.y, c.width, c.height) = (r(c.x), r(c.y), r(c.width), r(c.height));
     }
     let kind = c.kind;
     if deep && kind.is_frame_like() {

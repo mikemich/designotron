@@ -4269,4 +4269,33 @@ mod r20c {
       assert!(a.doc.nodes == b.doc.nodes, "peers differ after {t}");
     }
   }
+
+  #[test]
+  fn layout_placed_children_are_not_rounded_when_a_frame_with_a_pinned_child_resizes() {
+    let mut a = engine();
+    let r = run(
+      &mut a,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Stack", "width": 300, "height": 200, "layout": { "direction": "vertical" }, "children": [
+        { "type": "frame", "name": "Row", "width": "fill", "height": 60, "layout": { "direction": "horizontal", "gap": 0, "padding": 0 }, "children": [
+          { "type": "rectangle", "width": "fill", "height": 20 }, { "type": "rectangle", "width": "fill", "height": 20 }, { "type": "rectangle", "width": "fill", "height": 20 },
+          { "type": "rectangle", "name": "Pin", "width": 10, "height": 10, "absolute": true, "x": 290, "y": 0, "constraints": { "horizontal": "right", "vertical": "top" } }] }] }] }),
+    );
+    let stack = created(&r)[0].clone();
+    let mut b = engine();
+    b.load(&a.to_json()).unwrap();
+    a.collab_reset(false, true, true);
+    b.collab_reset(false, true, true);
+    run(&mut a, "update_nodes", json!({ "updates": [{ "id": stack, "width": 301 }] }));
+    let row = a.doc.get(&stack).unwrap().children[0].clone();
+    let third = a.doc.get(&row).unwrap().children[2].clone();
+    assert!(
+      a.doc.get(&third).unwrap().x.fract().abs() > 1e-7,
+      "the Fill child sits at 100.333..."
+    );
+    fixed_point(&a, "stack 301");
+    let d = serde_json::to_value(a.collab_delta()).unwrap();
+    b.dispatch(Command::ApplyRemote { delta: d, local: false }).unwrap();
+    assert!(a.doc.nodes == b.doc.nodes, "peers differ");
+  }
 }
