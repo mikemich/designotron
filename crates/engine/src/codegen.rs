@@ -1589,7 +1589,7 @@ impl<'a> Ctx<'a> {
           };
           table.entry(screen).or_default().push(serde_json::Value::Object(v));
         }
-        Trigger::OnHover | Trigger::MouseEnter | Trigger::MouseLeave => {}
+        Trigger::OnHover | Trigger::MouseEnter | Trigger::MouseLeave | Trigger::OnDrag => {}
       }
     }
     if el.navigate.is_some() || el.url.is_some() {

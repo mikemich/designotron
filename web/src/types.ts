@@ -145,7 +145,7 @@ export interface VectorPoint {
 }
 
 export interface Interaction {
-  trigger: "onClick" | "onHover" | "onPress" | "afterDelay" | "mouseEnter" | "mouseLeave" | "mouseDown" | "mouseUp" | "key";
+  trigger: "onClick" | "onHover" | "onPress" | "afterDelay" | "mouseEnter" | "mouseLeave" | "mouseDown" | "mouseUp" | "key" | "onDrag";
   delayMs: number;
   action: "navigate" | "back" | "openUrl" | "scrollTo" | "openOverlay" | "closeOverlay" | "swapOverlay" | "changeTo";
   destination: string | null;
@@ -159,6 +159,8 @@ export interface Interaction {
   direction?: Direction;
   /** The engine leaves the key out for "easeOut". */
   easing?: Easing;
+  /** Custom timing curve [x1, y1, x2, y2] (CSS cubic-bezier); replaces `easing` when set. */
+  bezier?: [number, number, number, number] | null;
   /** Placement and behaviour for openOverlay / swapOverlay. */
   overlay: OverlaySettings;
   /** Navigate to, Swap overlay and Change to: the screen that opens keeps the scroll position of the one it replaces. The engine leaves the key out when off. */
@@ -286,7 +288,7 @@ export interface Node {
   /** Frames: scrolling directions in the prototype player; the engine leaves the key out for "none". */
   overflow?: Overflow;
   /** Children of a scrolling frame; the engine leaves the key out for "scroll". */
-  scrollBehavior?: "scroll" | "fixed";
+  scrollBehavior?: "scroll" | "fixed" | "sticky";
   /** Export rows; the engine leaves the key out when there are none. */
   exportSettings?: ExportSetting[];
   notes: string;

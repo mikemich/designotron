@@ -161,4 +161,5 @@ export const TRIGGER_LABELS: Record<Interaction["trigger"], string> = {
   mouseDown: "Mouse down",
   mouseUp: "Mouse up",
   key: "Key",
+  onDrag: "On drag",
 };

@@ -1235,6 +1235,9 @@ pub enum Trigger {
   MouseUp,
   /// A key or key combination, see `Interaction::key`.
   Key,
+  /// The pointer drags the layer (past a few pixels); with Smart animate, Move in, Move out or
+  /// Push the change follows the pointer and completes or snaps back on release.
+  OnDrag,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1334,6 +1337,9 @@ pub enum ScrollBehavior {
   #[default]
   Scroll,
   Fixed,
+  /// Scrolls with the content until its top reaches the top of the vertically scrolling frame
+  /// around it, then stays there while its parent is still in view (CSS `position: sticky`).
+  Sticky,
 }
 
 impl ScrollBehavior {
@@ -1359,6 +1365,10 @@ pub struct Interaction {
   pub direction: Direction,
   #[serde(skip_serializing_if = "Easing::is_default")]
   pub easing: Easing,
+  /// A custom timing curve `[x1, y1, x2, y2]` (CSS `cubic-bezier`); when set it replaces `easing`
+  /// (which older editors still play). Not saved when unset.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub bezier: Option<[f64; 4]>,
   /// Placement and behaviour of the overlay for `OpenOverlay` / `SwapOverlay`.
   pub overlay: OverlaySettings,
   /// Navigate to, Swap overlay and Change to: the screen that opens starts scrolled where the

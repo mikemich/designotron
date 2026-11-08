@@ -2156,6 +2156,7 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
     key,
     direction,
     easing,
+    bezier: None,
     overlay,
     preserve_scroll,
   });
