@@ -403,7 +403,7 @@ export interface Doc {
   pages: Page[];
   nodes: Record<string, Node>;
   styles: {
-    colors: { id: string; name: string; color: string }[];
+    colors: { id: string; name: string; color: string; /** Where to use it; left out when empty. */ description?: string }[];
     texts: {
       id: string;
       name: string;
@@ -417,6 +417,8 @@ export interface Doc {
       paragraphSpacing?: number;
       case?: "original" | "upper" | "lower" | "title";
       decoration?: "none" | "underline" | "strikethrough";
+      /** Where to use it; left out when empty. */
+      description?: string;
     }[];
     /** Left out of files that have none. */
     effects?: EffectStyle[];

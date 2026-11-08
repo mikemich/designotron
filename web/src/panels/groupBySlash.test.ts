@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { folderSize, groupBySlash } from "./groupBySlash";
+import { folderSize, groupBySlash, renameFolder } from "./groupBySlash";
 
 const names = (xs: string[]) => groupBySlash(xs, (x) => x);
 
@@ -53,5 +53,35 @@ describe("groupBySlash", () => {
       (o) => o.name,
     );
     expect(t.folders[0].items.map((e) => e.item.id)).toEqual([1, 2]);
+  });
+});
+
+describe("renameFolder", () => {
+  const list = ["Brand/Primary/500", "Brand/Primary/600", "Brand/Danger", "Brand", "Neutral/Ink"];
+
+  it("renames the prefix of every item inside, nested folders too", () => {
+    const r = renameFolder(list, "Brand", "Accent");
+    expect(r.collision).toBeNull();
+    expect(r.renames).toEqual([
+      { index: 0, name: "Accent/Primary/500" },
+      { index: 1, name: "Accent/Primary/600" },
+      { index: 2, name: "Accent/Danger" },
+    ]);
+    expect(renameFolder(list, "Brand/Primary", "Core/Blue").renames.map((x) => x.name)).toEqual(["Core/Blue/500", "Core/Blue/600"]);
+  });
+
+  it("leaves an item with the folder's own name and other folders alone", () => {
+    expect(renameFolder(list, "Brand", "Accent").renames.some((x) => x.index === 3 || x.index === 4)).toBe(false);
+  });
+
+  it("refuses a clash with another item or between two new names", () => {
+    expect(renameFolder(["A/x", "B/x"], "A", "B")).toEqual({ renames: [], collision: "B/x" });
+    expect(renameFolder(["A/x", "B/X"], "A", "B").collision).toBe("B/x");
+    expect(renameFolder(["A/x", "A/y"], "A", "A")).toEqual({ renames: [], collision: null });
+    expect(renameFolder(["A/x"], "A", "  ").renames).toEqual([]);
+  });
+
+  it("reads names the way groupBySlash does", () => {
+    expect(renameFolder([" A / x ", "A//y"], "A", "B").renames.map((r) => r.name)).toEqual(["B/x", "B/y"]);
   });
 });

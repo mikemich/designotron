@@ -41,6 +41,8 @@ import { LayerPropsSection } from "./PropertyControls";
 import { DeviceSection, isDeviceTarget, resizeToPreset } from "./DeviceSection";
 import { PresetPicker } from "./PresetPicker";
 import { ApplyStyleButton, BoundChip, CreateStyleButton, StyleChip } from "./StyleControls";
+import { TokenPicker, type PickerItem } from "./TokenPicker";
+import { resolveValue } from "./variableImpact";
 import { inScope } from "./variableScopes";
 import { framePosition, ownCoordinate } from "./groupOffset";
 import { isOpenPath } from "../canvas/vectorSnap";
@@ -1626,32 +1628,64 @@ function VariablesSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         const cur = common(nodes, (n) => n.bindings?.[b.prop] ?? "");
         // Only variables whose scope covers the property; a variable already bound stays listed.
         // Grouped by "Collection / folder" (the name up to its last slash); the option shows the leaf name.
-        const options = colls.flatMap((c) =>
-          c.variables
-            .filter((v) => v.type === b.kind && (inScope(v, b.prop) || v.id === cur))
-            .map((v) => {
-              const cut = v.name.lastIndexOf("/");
-              const folder = cut > 0 ? v.name.slice(0, cut).trim() : "";
-              const group = [colls.length > 1 ? c.name : "", folder].filter(Boolean).join(" / ");
-              return { value: v.id, label: v.name, group: group || undefined };
-            }),
-        );
+        const count = colls.reduce((n, c) => n + c.variables.filter((v) => v.type === b.kind && (inScope(v, b.prop) || v.id === cur)).length, 0);
         return (
           <div key={b.prop} className="row">
             <span className="muted small" style={{ width: 64 }}>
               {b.label}
             </span>
-            <SelectField
-              ariaLabel="Bound variable"
-              value={cur === MIXED ? "" : cur}
-              options={[{ value: "", label: options.length ? "Not bound" : `No ${b.kind} variables` }, ...options]}
-              onChange={(v) => dispatch({ op: "bindVariable", ids, property: b.prop, variable: v || null })}
-            />
+            <BoundVariableButton prop={b.prop} kind={b.kind} ids={ids} cur={cur === MIXED ? MIXED : cur} count={count} />
           </div>
         );
       })}
       {!visibleRows.length && !(frames && multiMode.length) && <div className="muted small">Click + to bind fill, radius, spacing or text to a variable.</div>}
     </Section>
+  );
+}
+
+/**
+ * The "Bound variable" field: a button with the bound name (or "Not bound") that opens the token
+ * picker, with Detach first. The list is built when it opens, not per render.
+ */
+function BoundVariableButton({ prop, kind, ids, cur, count }: { prop: string; kind: VarKind; ids: string[]; cur: string | typeof MIXED; count: number }) {
+  const doc = useDoc();
+  const [open, setOpen] = useState<{ anchor: DOMRect; items: PickerItem[] } | null>(null);
+  const bound = cur === MIXED || !cur ? undefined : doc.variables.flatMap((c) => c.variables).find((v) => v.id === cur);
+  const text = cur === MIXED ? "Mixed" : !cur ? (count ? "Not bound" : `No ${kind} variables`) : (bound?.name ?? "Missing variable");
+  const show = (e: React.MouseEvent) => {
+    const d = getDoc();
+    const colls = d.variables ?? [];
+    // Only variables whose scope covers the property; a variable already bound stays listed.
+    const items: PickerItem[] = colls.flatMap((c) =>
+      c.variables
+        .filter((v) => v.type === kind && (inScope(v, prop) || v.id === cur))
+        .map((v): PickerItem => {
+          const shown = kind === "color" ? resolveValue(colls, v.id, c.modes[0]?.id ?? "") : undefined;
+          return { id: v.id, name: v.name, group: c.name, description: v.description, preview: typeof shown === "string" ? { type: "color", color: shown } : { type: "icon", icon: kind } };
+        }),
+    );
+    setOpen({ anchor: (e.currentTarget as HTMLElement).getBoundingClientRect(), items });
+  };
+  return (
+    <>
+      <button className="wf-pick-btn" aria-label={`Bound variable: ${text}`} aria-haspopup="dialog" data-bound-pick={prop} title={bound?.description || undefined} onClick={show} disabled={!count && !cur}>
+        <Variable size={13} className="wf-purple" />
+        <span className={cur ? "" : "muted"}>{text}</span>
+      </button>
+      {open && (
+        <TokenPicker
+          anchor={open.anchor}
+          label={`${kind} variables`}
+          placeholder="Search variables"
+          emptyText={`No ${kind} variables`}
+          items={open.items}
+          selectedId={typeof cur === "string" ? cur : null}
+          actions={cur ? [{ label: "Detach", onClick: () => dispatch({ op: "bindVariable", ids, property: prop, variable: null }) }] : []}
+          onPick={(v) => dispatch({ op: "bindVariable", ids, property: prop, variable: v.id })}
+          onClose={() => setOpen(null)}
+        />
+      )}
+    </>
   );
 }
 

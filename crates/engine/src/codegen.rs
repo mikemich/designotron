@@ -5704,6 +5704,7 @@ mod tests {
       id: id.into(),
       name: name.into(),
       color: c.into(),
+      ..Default::default()
     };
     doc.styles_mut().colors = vec![
       color("c1", "Brand/Primary", "#111111"),
@@ -5763,6 +5764,7 @@ mod tests {
       id: "cs".into(),
       name: "Brand".into(),
       color: "#7C5CFF".into(),
+      ..Default::default()
     });
     let b = doc.get_mut("btn").unwrap();
     b.fill_style = Some("cs".into());
@@ -5979,6 +5981,7 @@ mod tests {
       id: "cs1".into(),
       name: "Brand/Primary".into(),
       color: "#7C5CFF".into(),
+      ..Default::default()
     });
     {
       let t = doc.get_mut("t").unwrap();
@@ -8014,6 +8017,7 @@ mod r15_tests {
       id: "cs".into(),
       name: h.into(),
       color: "#112233".into(),
+      ..Default::default()
     });
     doc.styles_mut().texts.push(crate::model::TextStyle {
       id: "ts".into(),
@@ -8440,6 +8444,7 @@ mod r16c_tests {
       id: "cs".into(),
       name: "Brand/Primary".into(),
       color: "#5B3DF5".into(),
+      ..Default::default()
     });
     {
       let f = doc.get_mut("f0").unwrap();

@@ -1,16 +1,18 @@
 // Colour and text styles: the applied-style chips in the design panel, the "apply style"
 // menus, and the editable style lists in the Assets tab.
 
-import { useState } from "react";
-import { Grid3x3, LayoutGrid, Pencil, Pilcrow, Plus, Sparkles, Trash2, Unlink, Variable as VariableIcon } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Crosshair, Grid3x3, LayoutGrid, Pencil, Pilcrow, Plus, Sparkles, Trash2, Unlink, Variable as VariableIcon } from "lucide-react";
 import { fontLabel, fontStatus, useFontEpoch } from "../fontStatus";
 import { dispatch, dispatchOrThrow, FONTS, getDoc, toast, useDoc, useStore } from "../store";
 import type { Doc, Effect, EffectType, LayoutGrid as GridSpec, Node } from "../types";
-import { common, IconButton, Menu, MIXED, NumberField, Popover, SelectField, type MenuItem } from "../ui/controls";
+import { common, IconButton, MIXED, NumberField, Popover, SelectField } from "../ui/controls";
 import { ColorPicker, cssColor } from "../ui/color";
-import { addDefaultTextStyle, batch, deleteStyle, nextName, updateColorStyle, updateEffectStyle, updateGridStyle, updateTextStyle } from "../componentOps";
+import { addDefaultTextStyle, batch, deleteStyle, nextName, renameStyleFolder, selectLayersUsing, setStyleDescription, updateColorStyle, updateEffectStyle, updateGridStyle, updateTextStyle } from "../componentOps";
 import { InlineInput } from "./InlineInput";
 import { FolderTree } from "./FolderTree";
+import { layersUsing } from "./layersUsing";
+import { TokenPicker, type PickerItem } from "./TokenPicker";
 import { parseLetterSpacing, parseLineHeight } from "./textUnits";
 import "./workflow.css";
 
@@ -134,26 +136,41 @@ const APPLY_TITLE: Record<StyleKind, string> = {
   grid: "Apply grid style",
 };
 
-/** Header button listing the file's styles of one kind to apply to `ids`. */
+/** The picker rows for a kind of style: swatch, "Ag" or icon in front, the description as the title. */
+export function styleItems(doc: Doc, kind: StyleKind): PickerItem[] {
+  if (kind === "fill" || kind === "stroke") return doc.styles.colors.map((s) => ({ id: s.id, name: s.name, description: s.description, preview: { type: "color", color: s.color } }));
+  if (kind === "text") return doc.styles.texts.map((s) => ({ id: s.id, name: s.name, description: s.description, preview: { type: "text", family: s.fontFamily, weight: s.fontWeight } }));
+  const list = kind === "effect" ? (doc.styles.effects ?? []) : (doc.styles.grids ?? []);
+  return list.map((s) => ({ id: s.id, name: s.name, description: s.description, preview: { type: "icon", icon: kind } }));
+}
+
+/** Header button opening a searchable, foldered list of the file's styles of one kind to apply to `ids`. */
 export function ApplyStyleButton({ kind, ids }: { kind: StyleKind; ids: string[] }) {
-  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
-  const open = (e: React.MouseEvent) => {
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  const [open, setOpen] = useState<{ anchor: DOMRect; items: PickerItem[]; current: string | null } | null>(null);
+  const show = (e: React.MouseEvent) => {
     const doc = getDoc();
-    const styles: { id: string; name: string }[] =
-      kind === "fill" || kind === "stroke" ? doc.styles.colors : kind === "text" ? doc.styles.texts : kind === "effect" ? (doc.styles.effects ?? []) : (doc.styles.grids ?? []);
-    const items: MenuItem[] = [{ heading: { fill: "Colour styles", stroke: "Colour styles", text: "Text styles", effect: "Effect styles", grid: "Grid styles" }[kind] }];
-    for (const s of styles) items.push({ label: s.name, onClick: () => dispatch({ op: "applyStyle", ids, styleId: s.id, kind: kind === "stroke" ? "stroke" : null }) });
-    if (!styles.length) items.push({ label: "No styles yet", disabled: true });
-    items.push({ sep: true }, { label: "Manage styles in Assets", onClick: () => useStore.setState({ leftTab: "assets" }) });
-    setMenu({ x: r.left - 200, y: r.bottom + 4, items });
+    const key = LINK_KEY[kind];
+    const linked = common(ids.map((id) => doc.nodes[id]).filter(Boolean), (n) => n[key] ?? null);
+    setOpen({ anchor: (e.currentTarget as HTMLElement).getBoundingClientRect(), items: styleItems(doc, kind), current: typeof linked === "string" ? linked : null });
   };
   return (
     <>
-      <IconButton title={APPLY_TITLE[kind]} onClick={open}>
+      <IconButton title={APPLY_TITLE[kind]} onClick={show}>
         <LayoutGrid size={13} />
       </IconButton>
-      {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
+      {open && (
+        <TokenPicker
+          anchor={open.anchor}
+          label={KIND_TITLE[kind].replace(" (stroke)", "") + "s"}
+          placeholder={`Search ${kind === "fill" || kind === "stroke" ? "colour" : kind} styles`}
+          emptyText="No styles yet"
+          items={open.items}
+          selectedId={open.current}
+          actions={[{ label: "Manage styles in Assets", onClick: () => useStore.setState({ leftTab: "assets" }) }]}
+          onPick={(s) => dispatch({ op: "applyStyle", ids, styleId: s.id, kind: kind === "stroke" ? "stroke" : null })}
+          onClose={() => setOpen(null)}
+        />
+      )}
     </>
   );
 }
@@ -200,6 +217,7 @@ export function ColorStylesSection({ filter = "" }: { filter?: string }) {
     if (ok) setEditing(id);
   };
   const shown = doc.styles.colors.filter((s) => matches(s.name, filter) || editing === s.id);
+  if (filter.trim() && !shown.length) return null;
   return (
     <div className="section" data-styles="colour">
       <div className="section-head">
@@ -211,6 +229,7 @@ export function ColorStylesSection({ filter = "" }: { filter?: string }) {
       {doc.styles.colors.length === 0 && <div className="muted small">Shared colours. Select a layer and click + to save its fill.</div>}
       <FolderTree
         scope="colour"
+        onRenameFolder={(from, to) => renameStyleFolder("colors", from, to)}
         items={shown}
         name={styleName}
         forceOpen={!!filter.trim() || editing !== null}
@@ -227,7 +246,7 @@ function ColorStyleRow({ s, label, depth, sel, editing, setEditing }: { s: Color
   const hex = s.color.toUpperCase().endsWith("FF") && s.color.length === 9 ? s.color.slice(0, 7).toUpperCase() : s.color.toUpperCase();
   return (
     <div className={"wf-style" + (editing ? " editing" : "")} style={depthStyle(depth)}>
-      <div className="wf-style-row" onClick={() => sel.length && dispatch({ op: "applyStyle", ids: sel, styleId: s.id })} title={sel.length ? `Apply ${s.name} to selection` : s.name}>
+      <div className="wf-style-row" onClick={() => sel.length && dispatch({ op: "applyStyle", ids: sel, styleId: s.id })} title={(sel.length ? `Apply ${s.name} to selection` : s.name) + (s.description ? `\n${s.description}` : "")}>
         <div
           className="swatch"
           title="Edit colour"
@@ -243,11 +262,13 @@ function ColorStyleRow({ s, label, depth, sel, editing, setEditing }: { s: Color
           {label}
         </span>
         <span className="muted small">{hex}</span>
-        <StyleRowTools editing={editing} setEditing={setEditing} onDelete={() => deleteStyle(s.id)} />
+        <StyleRowTools editing={editing} setEditing={setEditing} onDelete={() => deleteStyle(s.id)} onSelectUsers={() => selectLayersUsing(s.id, s.name)} />
       </div>
       {editing && (
         <div className="wf-style-edit">
           <InlineInput label="Name" value={s.name} autoFocus title="Style name" onCommit={(name) => (name.trim() ? updateColorStyle(s.id, { name: name.trim() }) : false)} />
+          <InlineInput label="Info" value={s.description ?? ""} title="Description" placeholder="Where to use it" onCommit={(description) => setStyleDescription(s.id, description)} />
+          <UsageLine id={s.id} name={s.name} />
           <InlineInput
             label="Hex"
             value={hex.replace("#", "")}
@@ -294,6 +315,7 @@ export function TextStylesSection({ filter = "" }: { filter?: string }) {
     if (ok) setEditing(getDoc().styles.texts.length - 1);
   };
   const shown = doc.styles.texts.map((s, i) => ({ s, i })).filter(({ s, i }) => matches(s.name, filter) || editing === i);
+  if (filter.trim() && !shown.length) return null;
   return (
     <div className="section" data-styles="text">
       <div className="section-head">
@@ -305,6 +327,7 @@ export function TextStylesSection({ filter = "" }: { filter?: string }) {
       {doc.styles.texts.length === 0 && <div className="muted small">Shared type settings. Select a text layer and click + to save its style.</div>}
       <FolderTree
         scope="text"
+        onRenameFolder={(from, to) => renameStyleFolder("texts", from, to)}
         items={shown}
         name={(x) => x.s.name}
         forceOpen={!!filter.trim() || editing !== null}
@@ -323,7 +346,7 @@ function TextStyleRow({ s, label, depth, index, sel, editing, setEditing }: { s:
   const weights = WEIGHTS.some((w) => w.value === s.fontWeight) ? WEIGHTS : [...WEIGHTS, { value: s.fontWeight, label: String(s.fontWeight) }];
   return (
     <div className={"wf-style" + (editing ? " editing" : "")} style={depthStyle(depth)}>
-      <div className="wf-style-row" onClick={() => sel.length && dispatch({ op: "applyStyle", ids: sel, styleId: s.id })} title={sel.length ? `Apply ${s.name} to selection` : s.name}>
+      <div className="wf-style-row" onClick={() => sel.length && dispatch({ op: "applyStyle", ids: sel, styleId: s.id })} title={(sel.length ? `Apply ${s.name} to selection` : s.name) + (s.description ? `\n${s.description}` : "")}>
         <span className="wf-ag" style={{ fontFamily: s.fontFamily, fontWeight: s.fontWeight }}>
           Ag
         </span>
@@ -331,11 +354,13 @@ function TextStyleRow({ s, label, depth, index, sel, editing, setEditing }: { s:
           {label}
         </span>
         <span className="muted small">{textStyleLabel(s)}</span>
-        <StyleRowTools editing={editing} setEditing={setEditing} onDelete={() => deleteStyle(s.id)} />
+        <StyleRowTools editing={editing} setEditing={setEditing} onDelete={() => deleteStyle(s.id)} onSelectUsers={() => selectLayersUsing(s.id, s.name)} />
       </div>
       {editing && (
         <div className="wf-style-edit">
           <InlineInput label="Name" value={s.name} autoFocus title="Style name" onCommit={(name) => set({ name })} />
+          <InlineInput label="Info" value={s.description ?? ""} title="Description" placeholder="Where to use it" onCommit={(description) => setStyleDescription(s.id, description)} />
+          <UsageLine id={s.id} name={s.name} />
           <SelectField value={s.fontFamily} options={fontOptions} onChange={(fontFamily) => set({ fontFamily })} title="Font" />
           <div className="grid2">
             <SelectField value={s.fontWeight} options={weights} onChange={(fontWeight) => set({ fontWeight })} title="Weight" />
@@ -435,6 +460,7 @@ export function EffectStylesSection({ filter = "" }: { filter?: string }) {
     if (r) setEditing(r.id);
   };
   const shown = styles.filter((s) => matches(s.name, filter) || editing === s.id);
+  if (filter.trim() && !shown.length) return null;
   return (
     <div className="section" data-styles="effect">
       <div className="section-head">
@@ -446,6 +472,7 @@ export function EffectStylesSection({ filter = "" }: { filter?: string }) {
       {styles.length === 0 && <div className="muted small">Shared shadows and blurs. Select a layer with effects and click + to save them.</div>}
       <FolderTree
         scope="effect"
+        onRenameFolder={(from, to) => renameStyleFolder("effects", from, to)}
         items={shown}
         name={styleName}
         forceOpen={!!filter.trim() || editing !== null}
@@ -466,12 +493,13 @@ function EffectStyleRow({ s, label, depth, sel, editing, setEditing }: { s: Effe
           {label}
         </span>
         <span className="muted small">{effectSummary(s.effects)}</span>
-        <StyleRowTools editing={editing} setEditing={setEditing} onDelete={() => deleteStyle(s.id)} />
+        <StyleRowTools editing={editing} setEditing={setEditing} onDelete={() => deleteStyle(s.id)} onSelectUsers={() => selectLayersUsing(s.id, s.name)} />
       </div>
       {editing && (
         <div className="wf-style-edit">
           <InlineInput label="Name" value={s.name} autoFocus title="Style name" onCommit={(name) => (name.trim() ? updateEffectStyle(s.id, { name: name.trim() }) : false)} />
           <InlineInput label="Info" value={s.description ?? ""} title="Description" placeholder="Where to use it" onCommit={(description) => updateEffectStyle(s.id, { description })} />
+          <UsageLine id={s.id} name={s.name} />
           {s.effects.map((e, i) => {
             const shadow = e.type === "dropShadow" || e.type === "innerShadow";
             return (
@@ -523,6 +551,7 @@ export function GridStylesSection({ filter = "" }: { filter?: string }) {
     if (r) setEditing(r.id);
   };
   const shown = styles.filter((s) => matches(s.name, filter) || editing === s.id);
+  if (filter.trim() && !shown.length) return null;
   return (
     <div className="section" data-styles="grid">
       <div className="section-head">
@@ -534,6 +563,7 @@ export function GridStylesSection({ filter = "" }: { filter?: string }) {
       {styles.length === 0 && <div className="muted small">Shared layout grids. Select a frame with a layout grid and click + to save it.</div>}
       <FolderTree
         scope="grid"
+        onRenameFolder={(from, to) => renameStyleFolder("grids", from, to)}
         items={shown}
         name={styleName}
         forceOpen={!!filter.trim() || editing !== null}
@@ -554,12 +584,13 @@ function GridStyleRow({ s, label, depth, sel, editing, setEditing }: { s: GridSt
           {label}
         </span>
         <span className="muted small">{gridSummary(s.grids)}</span>
-        <StyleRowTools editing={editing} setEditing={setEditing} onDelete={() => deleteStyle(s.id)} />
+        <StyleRowTools editing={editing} setEditing={setEditing} onDelete={() => deleteStyle(s.id)} onSelectUsers={() => selectLayersUsing(s.id, s.name)} />
       </div>
       {editing && (
         <div className="wf-style-edit">
           <InlineInput label="Name" value={s.name} autoFocus title="Style name" onCommit={(name) => (name.trim() ? updateGridStyle(s.id, { name: name.trim() }) : false)} />
           <InlineInput label="Info" value={s.description ?? ""} title="Description" placeholder="Where to use it" onCommit={(description) => updateGridStyle(s.id, { description })} />
+          <UsageLine id={s.id} name={s.name} />
           {s.grids.map((g, i) => (
             <div key={i} className="wf-fx">
               <div className="row">
@@ -596,13 +627,38 @@ export function textStyleLabel(s: { fontSize: number; lineHeight: number | null 
   return `${n(s.fontSize)}/${s.lineHeight == null ? "Auto" : n(s.lineHeight)}`;
 }
 
+/** How many styles of every kind a search matches (the Assets tab shows "No matches" at zero). */
+export function styleMatchCount(doc: Doc, filter: string): number {
+  const lists: { name: string }[][] = [doc.styles.colors, doc.styles.texts, doc.styles.effects ?? [], doc.styles.grids ?? []];
+  return lists.reduce((n, l) => n + l.filter((s) => matches(s.name, filter)).length, 0);
+}
+
 function matches(name: string, filter: string): boolean {
   return name.toLowerCase().includes(filter.trim().toLowerCase());
 }
 
-function StyleRowTools({ editing, setEditing, onDelete }: { editing: boolean; setEditing: (on: boolean) => void; onDelete: () => void }) {
+/** "Used by 12 layers (3 on other pages)" and the button that selects them: counted once, when the row opens. */
+export function UsageLine({ id, name }: { id: string; name: string }) {
+  const usage = useMemo(() => layersUsing(getDoc(), useStore.getState().es.page, id), [id]);
+  const text = !usage.here.length && !usage.other ? "Not used by any layer" : `Used by ${usage.here.length} layer${usage.here.length === 1 ? "" : "s"}` + (usage.other ? ` (${usage.other} on other pages)` : "");
+  return (
+    <div className="wf-usage small" data-usage>
+      <span className="muted">{text}</span>
+      {(usage.here.length > 0 || usage.other > 0) && (
+        <button className="btn" onClick={() => selectLayersUsing(id, name)}>
+          Select layers using this
+        </button>
+      )}
+    </div>
+  );
+}
+
+function StyleRowTools({ editing, setEditing, onDelete, onSelectUsers }: { editing: boolean; setEditing: (on: boolean) => void; onDelete: () => void; onSelectUsers: () => void }) {
   return (
     <span className={"wf-style-tools" + (editing ? " pinned" : "")} onClick={(e) => e.stopPropagation()}>
+      <IconButton title="Select layers using this" onClick={onSelectUsers}>
+        <Crosshair size={12} />
+      </IconButton>
       <IconButton title={editing ? "Done editing" : "Edit style"} on={editing} onClick={() => setEditing(!editing)}>
         <Pencil size={12} />
       </IconButton>

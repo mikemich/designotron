@@ -505,7 +505,8 @@ try {
     return { frame, tile };
   }, varId);
   await page.click(".section:has-text('Variables') .ibtn[title='Bind a property']");
-  await page.locator(".section:has-text('Variables') .row:has-text('Fill') select").selectOption(varId);
+  await page.locator("[data-bound-pick='fill']").click();
+  await page.locator(`[data-tp-item="${varId}"]`).click();
   const light = await page.evaluate((id) => window.__dt.doc().nodes[id].fills[0].color, themed.tile);
   await page.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), themed.frame);
   const modeSelect = page.locator(".section:has-text('Variables') .row").first().locator("select");

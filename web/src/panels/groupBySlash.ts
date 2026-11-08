@@ -47,6 +47,39 @@ export function groupBySlash<T>(items: T[], name: (item: T) => string): Folder<T
   return root;
 }
 
+export interface FolderRename {
+  /** The items that move, with their new full names (by position in `names`). */
+  renames: { index: number; name: string }[];
+  /** The first new name that another item already has (or two new names share), else null. */
+  collision: string | null;
+}
+
+/**
+ * Renames the folder `from` ("Brand/Primary") to `to` in the full names of every item inside it,
+ * nested folders included: "Brand/Primary/500" becomes "Accent/500". Names are compared by their
+ * trimmed segments, as `groupBySlash` reads them. Nothing changes when the new name would clash.
+ */
+export function renameFolder(names: string[], from: string, to: string): FolderRename {
+  const parts = (s: string) => s.split("/").map((p) => p.trim()).filter((p) => p !== "");
+  const src = parts(from);
+  const dst = parts(to);
+  const renames: { index: number; name: string }[] = [];
+  if (!src.length || !dst.length || src.join("/") === dst.join("/")) return { renames, collision: null };
+  names.forEach((full, index) => {
+    const segs = parts(full);
+    // Only items inside the folder (a name equal to the folder itself is an item next to it).
+    if (segs.length > src.length && src.every((s, i) => segs[i] === s)) renames.push({ index, name: [...dst, ...segs.slice(src.length)].join("/") });
+  });
+  const moved = new Set(renames.map((r) => r.index));
+  const taken = new Set(names.filter((_, i) => !moved.has(i)).map((n) => parts(n).join("/").toLowerCase()));
+  for (const r of renames) {
+    const key = r.name.toLowerCase();
+    if (taken.has(key)) return { renames: [], collision: r.name };
+    taken.add(key);
+  }
+  return { renames, collision: null };
+}
+
 /** How many items a folder holds, including nested folders. */
 export function folderSize<T>(f: Folder<T>): number {
   return f.items.length + f.folders.reduce((n, g) => n + folderSize(g), 0);

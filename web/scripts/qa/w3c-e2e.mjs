@@ -79,7 +79,7 @@ const toastText = (p) => p.$$eval("[role=status], .toast", (els) => els.map((e) 
   // Alias Space/card to Space/base through the cell's Alias button.
   const row = p.locator("tr[data-variable='Space/card']");
   await row.locator("button[aria-label^='Alias']").click();
-  await p.getByRole("menuitem", { name: "Space/base" }).click();
+  await p.locator("[data-tp-name='Space/base']").click();
   await sleep(150);
   let d = await doc(p);
   const vars = d.variables[0].variables;
@@ -91,7 +91,7 @@ const toastText = (p) => p.$$eval("[role=status], .toast", (els) => els.map((e) 
 
   // Cycle: base -> card is refused with a message.
   await p.locator("tr[data-variable='Space/base'] button[aria-label^='Alias']").click();
-  await p.getByRole("menuitem", { name: "Space/card" }).click();
+  await p.locator("[data-tp-name='Space/card']").click();
   await sleep(200);
   d = await doc(p);
   check("an alias cycle is refused and nothing changes", !d.variables[0].variables.find((v) => v.name === "Space/base").values[mode]?.alias);
@@ -116,11 +116,15 @@ const toastText = (p) => p.$$eval("[role=status], .toast", (els) => els.map((e) 
   // Binding pickers only list variables whose scope covers the property.
   const box = await named(p, "Box");
   await select(p, [box.id]);
-  await p.locator("[aria-label='Bound variable']").first().waitFor({ state: "attached" }).catch(() => {});
   await p.locator(".section-head:has-text('Variables') button").first().click();
+  // The picker (r21b) lists the variables a property offers; "Not bound" stands in for the old empty option.
   const optionsFor = async (label) => {
-    const row = p.locator(".row", { hasText: label }).filter({ has: p.locator("select[aria-label='Bound variable']") }).first();
-    return row.locator("select option").allTextContents();
+    const row = p.locator(".row", { hasText: label }).filter({ has: p.locator("[data-bound-pick]") }).first();
+    await row.locator("[data-bound-pick]").click();
+    await p.waitForSelector("[data-token-picker]");
+    const names = await p.locator("[data-token-picker] [data-tp-item]").evaluateAll((els) => els.map((e) => e.getAttribute("data-tp-name")));
+    await p.keyboard.press("Escape");
+    return ["Not bound", ...names];
   };
   const radiusOpts = await optionsFor("Radius");
   const gapOpts = await optionsFor("Gap");
@@ -168,7 +172,7 @@ const toastText = (p) => p.$$eval("[role=status], .toast", (els) => els.map((e) 
   // Apply to Card B through the header menu.
   await select(p, [b.id]);
   await p.getByRole("button", { name: "Apply effect style" }).click();
-  await p.getByRole("menuitem").filter({ hasText: /Effect 1/ }).click();
+  await p.locator("[data-tp-item]").filter({ hasText: /Effect 1/ }).click();
   await sleep(150);
   const b1 = await named(p, "Card B");
   check("applying copies the effects and links", b1.effects.length === 1 && b1.effectStyle === d.styles.effects[0].id);
@@ -201,7 +205,7 @@ const toastText = (p) => p.$$eval("[role=status], .toast", (els) => els.map((e) 
   await select(p, [a.id]);
   await p.getByRole("button", { name: "Add stroke" }).click();
   await p.getByRole("button", { name: "Apply colour style to stroke" }).click();
-  await p.getByRole("menuitem", { name: "Brand/Ink" }).click();
+  await p.locator("[data-tp-name='Brand/Ink']").click();
   await sleep(150);
   const a3 = await named(p, "Card A");
   d = await doc(p);

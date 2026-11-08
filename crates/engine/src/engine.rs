@@ -630,6 +630,11 @@ pub enum Command {
     grids: Option<Vec<LayoutGrid>>,
     description: Option<String>,
   },
+  /// Sets the description of a colour, text, effect or grid style (empty clears it).
+  SetStyleDescription {
+    id: String,
+    description: String,
+  },
   DeleteStyle {
     id: String,
   },
@@ -2476,6 +2481,8 @@ impl Engine {
           .collect();
         if !removed.is_empty() {
           crate::components::keep_values_of_removed(&mut self.doc, &removed);
+          // Aliases of a removed variable keep what each mode showed (read from the old set).
+          crate::variables::inline_removed_aliases(&self.doc, &mut collections, &removed);
         }
         // Equal collections and variables keep their old allocations, so this step shares them.
         self.doc.variables = crate::variables::intern(collections, &self.doc.variables);
@@ -3471,6 +3478,7 @@ impl Engine {
           id: id.clone(),
           name,
           color: crate::color::normalize(&color),
+          ..Default::default()
         });
         Ok(json!({ "id": id }))
       }
@@ -3489,6 +3497,7 @@ impl Engine {
           paragraph_spacing: Some(t.paragraph_spacing),
           case: Some(t.case),
           decoration: Some(t.decoration),
+          description: String::new(),
         });
         if let Some(n) = self.doc.get_mut(&from) {
           n.text_style = Some(id.clone());
@@ -3597,6 +3606,22 @@ impl Engine {
         self
           .doc
           .update_where(|n| n.grid_style.as_deref() == Some(id.as_str()), |n| n.layout_grids = grids.clone());
+        Ok(json!({}))
+      }
+      Command::SetStyleDescription { id, description } => {
+        let description = description.trim().to_string();
+        let st = self.doc.styles_mut();
+        if let Some(s) = st.colors.iter_mut().find(|s| s.id == id) {
+          s.description = description;
+        } else if let Some(s) = st.texts.iter_mut().find(|s| s.id == id) {
+          s.description = description;
+        } else if let Some(s) = st.effects.iter_mut().find(|s| s.id == id) {
+          s.description = description;
+        } else if let Some(s) = st.grids.iter_mut().find(|s| s.id == id) {
+          s.description = description;
+        } else {
+          return Err("no such style".into());
+        }
         Ok(json!({}))
       }
       Command::DeleteStyle { id } => {

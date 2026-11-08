@@ -366,6 +366,7 @@ pub fn tool_defs() -> Value {
           "type": { "type": "string", "enum": ["color", "number", "string", "boolean"], "description": "Default color for a new variable; an existing variable keeps its type when omitted" },
           "value": { "description": "Same value in every mode; {\"alias\": \"Collection/name\"} makes it an alias of another variable of the same type" },
           "values": { "type": "object", "description": "Mode name → value (or an alias object)" },
+          "description": { "type": "string", "description": "Where to use it (shown in the picker and the Variables dialog)" },
           "scopes": { "type": "array", "items": { "type": "string", "enum": ["fill", "stroke", "cornerRadius", "size", "gap", "opacity", "strokeWidth", "textContent", "fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "paragraphSpacing"] }, "description": "Limit where the variable is offered in the editor (default: everywhere its type fits). Binding it elsewhere only warns." }
         }, "required": ["name"] } }
       }, "required": ["collection"] }
@@ -376,8 +377,8 @@ pub fn tool_defs() -> Value {
       "input_schema": { "type": "object", "properties": {
         "rename": { "type": "array", "description": "Rename styles: [{from, to}] (names or ids)", "items": { "type": "object", "properties": { "from": { "type": "string" }, "to": { "type": "string" } }, "required": ["from", "to"] } },
         "delete": { "type": "array", "items": { "type": "string" }, "description": "Names (or ids) of styles to delete" },
-        "colors": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "color": { "type": "string", "description": "Hex colour; anything unreadable is an error" } }, "required": ["name", "color"] } },
-        "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": ["number", "string"], "description": "px, or \"10%\" / \"0.05em\" of fontSize" }, "italic": { "type": ["boolean", "null"] }, "paragraphSpacing": { "type": ["number", "null"] }, "textCase": { "type": ["string", "null"], "enum": ["original", "upper", "lower", "title", null] }, "decoration": { "type": ["string", "null"], "enum": ["none", "underline", "strikethrough", null] } }, "required": ["name", "fontSize"], "description": "italic, paragraphSpacing, textCase and decoration are optional: a style that doesn't set one leaves linked layers' own value; null on an existing style stops it setting the field" } },
+        "colors": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "color": { "type": "string", "description": "Hex colour; anything unreadable is an error" }, "description": { "type": "string", "description": "Where to use it" } }, "required": ["name", "color"] } },
+        "texts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string", "description": "Where to use it" }, "fontFamily": { "type": "string" }, "fontSize": { "type": "number" }, "fontWeight": { "type": ["number", "string"] }, "lineHeight": { "type": ["number", "string"], "description": "px, or a multiple of fontSize below 4" }, "letterSpacing": { "type": ["number", "string"], "description": "px, or \"10%\" / \"0.05em\" of fontSize" }, "italic": { "type": ["boolean", "null"] }, "paragraphSpacing": { "type": ["number", "null"] }, "textCase": { "type": ["string", "null"], "enum": ["original", "upper", "lower", "title", null] }, "decoration": { "type": ["string", "null"], "enum": ["none", "underline", "strikethrough", null] } }, "required": ["name", "fontSize"], "description": "italic, paragraphSpacing, textCase and decoration are optional: a style that doesn't set one leaves linked layers' own value; null on an existing style stops it setting the field" } },
         "effects": { "type": "array", "description": "Effect styles: {name, description, shadow: {x, y, blur, spread, color, inset} or an array of them, blur (layer blur px), backgroundBlur (px)}", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "shadow": { "type": ["object", "array", "string"] }, "blur": { "type": "number" }, "backgroundBlur": { "type": "number" } }, "required": ["name"] } },
         "grids": { "type": "array", "description": "Grid styles: {name, description, grids: [{pattern:'columns'|'rows'|'grid', count, gutter, margin, size}]}", "items": { "type": "object", "properties": { "name": { "type": "string" }, "description": { "type": "string" }, "grids": { "type": "array", "items": { "type": "object" } } }, "required": ["name", "grids"] } }
       } }
@@ -704,6 +705,9 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
       }
       var.scopes = list;
     }
+    if let Some(d) = spec.get("description").and_then(|v| v.as_str()) {
+      var.description = d.trim().to_string();
+    }
     // A value must fit the variable's type; the error names the variable and the mode.
     let norm = |v: &Value, mode: &str| -> Result<Value, String> {
       crate::variables::check_value(kind, v).map_err(|m| format!("{vname} ({mode}): {m}"))
@@ -725,6 +729,7 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
   }
   // Aliases are written by name ("Collection/name"); store the variable id.
   let lookup = all.clone();
+  let mut alias_warnings: Vec<String> = Vec::new();
   for (ci, c) in all.iter_mut().enumerate() {
     for v in c.variables.iter_mut() {
       // Only variables this call wrote are resolved: stored aliases (ids) of the others stay as
@@ -737,9 +742,7 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
         let Some(target) = val.get("alias").and_then(|a| a.as_str()).map(String::from) else {
           continue;
         };
-        let found = lookup.iter().flat_map(|c| c.variables.iter().map(move |x| (c, x))).find(|(c, x)| {
-          x.id == target || format!("{}/{}", c.name, x.name) == target || (x.name == target && !c.variables.iter().any(|y| y.id == target))
-        });
+        let found = alias_target(&lookup, idx, &target, &mut alias_warnings);
         match found {
           Some((_, x)) if x.kind == v.kind => *val = json!({ "alias": x.id }),
           Some((_, x)) => {
@@ -757,7 +760,7 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
   }
   if !editing {
     e.dispatch_inner(Command::SetVariables { collections: all })?;
-    return Ok(touched_collections(e, &[name]));
+    return Ok(with_warnings(touched_collections(e, &[name]), alias_warnings));
   }
   let (layers, aliases) = deletion_impact(e, &all, &gone);
   if !renamed.is_empty() {
@@ -775,7 +778,73 @@ fn define_variables(e: &mut Engine, input: &Value) -> Result<Value, String> {
   }
   e.dispatch_inner(Command::SetVariables { collections: all })?;
   let new_name = rename_coll.as_deref().unwrap_or(name);
-  Ok(editing_result(e, summary_note, layers, aliases, &[name, new_name]))
+  Ok(with_warnings(
+    editing_result(e, summary_note, layers, aliases, &[name, new_name]),
+    alias_warnings,
+  ))
+}
+
+/// The variable an alias written by name points at: an id, then `Collection/name`, then the bare
+/// name in the collection being written (`idx`), then the bare name in the first other collection
+/// that has it, which warns when several do.
+fn alias_target<'a>(
+  all: &'a [crate::variables::Collection],
+  idx: usize,
+  target: &str,
+  warnings: &mut Vec<String>,
+) -> Option<(&'a crate::variables::Collection, &'a crate::variables::Variable)> {
+  let each = || all.iter().flat_map(|c| c.variables.iter().map(move |x| (c, &**x)));
+  if let Some(hit) = each().find(|(_, x)| x.id == target) {
+    return Some(hit);
+  }
+  if let Some(hit) = each().find(|(c, x)| format!("{}/{}", c.name, x.name) == target) {
+    return Some(hit);
+  }
+  if let Some(hit) = all
+    .get(idx)
+    .and_then(|c| c.variables.iter().find(|x| x.name == target).map(|x| (c, &**x)))
+  {
+    return Some(hit);
+  }
+  let hit = each().find(|(_, x)| x.name == target)?;
+  let others: Vec<&str> = all
+    .iter()
+    .filter(|c| !std::ptr::eq(*c, hit.0) && c.variables.iter().any(|x| x.name == target))
+    .map(|c| c.name.as_str())
+    .collect();
+  if let Some(w) = ambiguous_name(target, &hit.0.name, &others, "aliased") {
+    warnings.push(w);
+  }
+  Some(hit)
+}
+
+/// "'Brand' is in A and B; bound A/Brand. Write 'B/Brand' for the other." (`None` when the name
+/// is in no other collection).
+fn ambiguous_name(name: &str, chosen: &str, others: &[&str], verb: &str) -> Option<String> {
+  if others.is_empty() {
+    return None;
+  }
+  let join = |items: &[String], word: &str| match items.split_last() {
+    Some((last, rest)) if !rest.is_empty() => format!("{} {word} {last}", rest.join(", ")),
+    Some((last, _)) => last.clone(),
+    None => String::new(),
+  };
+  let all: Vec<String> = std::iter::once(chosen).chain(others.iter().copied()).map(String::from).collect();
+  let spelled: Vec<String> = others.iter().map(|c| format!("'{c}/{name}'")).collect();
+  Some(format!(
+    "'{name}' is in {}; {verb} {chosen}/{name}. Write {} for {}.",
+    join(&all, "and"),
+    join(&spelled, "or"),
+    if others.len() == 1 { "the other" } else { "the others" }
+  ))
+}
+
+/// A tool result with a `warnings` list added when there is anything to say.
+fn with_warnings(mut result: Value, warnings: Vec<String>) -> Value {
+  if !warnings.is_empty() {
+    result["warnings"] = json!(warnings);
+  }
+  result
 }
 
 /// `{collections, others}`: only the collections a define_variables call touched, and how many
@@ -821,7 +890,11 @@ fn editing_result(e: &Engine, mut note: serde_json::Map<String, Value>, layers: 
       ));
     }
     if aliases > 0 {
-      parts.push(format!("{} now point at a missing variable", plural(aliases, "alias", "aliases")));
+      parts.push(format!(
+        "{} now {} the deleted variable's value",
+        plural(aliases, "alias", "aliases"),
+        if aliases == 1 { "uses" } else { "use" }
+      ));
     }
     note.insert("note".into(), json!(parts.join("; ")));
   }
@@ -2488,6 +2561,7 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
       Some(v) => parse::color(&cx, "color", v)?,
       None => return Err(cx.err("color", "required")),
     };
+    let description = c.get("description").and_then(|v| v.as_str()).map(String::from);
     match e.doc.styles.colors.iter().find(|s| s.name == name).map(|s| s.id.clone()) {
       Some(id) => {
         e.dispatch_inner(Command::UpdateColorStyle {
@@ -2495,10 +2569,22 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
           name: None,
           color: Some(color),
         })?;
+        if let Some(description) = description {
+          e.dispatch_inner(Command::SetStyleDescription {
+            id: id.clone(),
+            description,
+          })?;
+        }
         updated.push(json!(id));
       }
       None => {
         let r = e.dispatch_inner(Command::AddColorStyle { name, color })?;
+        if let (Some(description), Some(id)) = (description, r["id"].as_str()) {
+          e.dispatch_inner(Command::SetStyleDescription {
+            id: id.to_string(),
+            description,
+          })?;
+        }
         created.push(r["id"].clone());
       }
     }
@@ -2551,8 +2637,15 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
     .filter(|(k, _)| t.get(*k).is_some_and(|v| v.is_null()))
     .map(|(_, c)| c.to_string())
     .collect();
+    let description = t.get("description").and_then(|v| v.as_str()).map(String::from);
     match existing {
       Some(s) => {
+        if let Some(description) = description {
+          e.dispatch_inner(Command::SetStyleDescription {
+            id: s.id.clone(),
+            description,
+          })?;
+        }
         e.dispatch_inner(Command::UpdateTextStyle {
           id: s.id.clone(),
           name: None,
@@ -2584,6 +2677,7 @@ fn define_styles(e: &mut Engine, input: &Value) -> Result<Value, String> {
           paragraph_spacing,
           case,
           decoration,
+          description: description.unwrap_or_default().trim().to_string(),
         });
         created.push(json!(id));
       }
@@ -4317,7 +4411,19 @@ fn check_binding(cx: &mut Ctx, doc: &Document, prop: &str, name: &str) -> Result
     cx.err(&key, format!("{prop} can't be bound to a variable; bindable: {}", props.join(", ")))
   })?;
   match crate::variables::find(doc, name) {
-    Some((_, v)) if v.kind == kind => {
+    Some((c, v)) if v.kind == kind => {
+      // A bare name that several collections have binds the first; say so.
+      if v.id != name && v.name == name {
+        let others: Vec<&str> = doc
+          .variables
+          .iter()
+          .filter(|o| o.id != c.id && o.variables.iter().any(|x| x.name == name))
+          .map(|o| o.name.as_str())
+          .collect();
+        if let Some(w) = ambiguous_name(name, &c.name, &others, "bound") {
+          cx.warn(w);
+        }
+      }
       if !crate::variables::in_scope(v, prop) {
         cx.warn(format!(
           "variable '{name}' is scoped to {} and isn't offered for {prop} in the editor; bound anyway",

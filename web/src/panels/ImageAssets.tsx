@@ -9,7 +9,7 @@ import { IconButton } from "../ui/controls";
 
 /** Pictures the file uses (image fills), one row per source: thumbnail, layers using it, and Place.
  *  Mounted only while the Assets tab shows; the list follows the document 300 ms after it stops changing. */
-export function ImageAssets({ filter }: { filter: string }) {
+export function ImageAssets({ filter, onShown }: { filter: string; /** Told how many rows the search leaves (the Assets tab shows "No matches" when nothing does). */ onShown?: (n: number) => void }) {
   const docRev = useStore((s) => s.es.docRev);
   const selection = useStore((s) => s.es.selection);
   const [entries, setEntries] = useState<ImageEntry[]>(() => imagesIn(getDoc(), null));
@@ -20,6 +20,12 @@ export function ImageAssets({ filter }: { filter: string }) {
   const q = filter.trim().toLowerCase();
   const shown = q ? entries.filter((e) => e.uses.some((u) => u.name.toLowerCase().includes(q))) : entries;
   const thumb = (src: string) => (!safeImageSrc(src) ? "" : isAssetSrc(src) ? assetUrl(src.slice(6)) ?? "" : src);
+  useEffect(() => {
+    onShown?.(shown.length);
+    return () => onShown?.(0);
+  }, [shown.length]);
+  // A search that leaves no picture hides the section (the tab says "No matches" when nothing is left anywhere).
+  if (q && shown.length === 0) return null;
 
   /** Selects the layers using the picture on this page, or goes to the first page that has one. */
   const select = (e: ImageEntry) => {
