@@ -976,8 +976,13 @@ pub fn ops_costed(base: &TextProps, doc: &TextProps) -> Option<(Value, u64)> {
   let parts = diff(base, doc, false)?;
   // An entry the receivers would refuse (too many pieces or characters, or too much work) travels
   // as the whole text instead.
-  let seq_len = effective(doc).s.len();
-  let cost = estimate(&parts, seq_len, doc.characters.len(), doc.runs.len());
+  // (A reader makes the inserts before it deletes, on a text as big as the bigger of the two.)
+  let spans = effective(doc).s.len().max(effective(base).s.len());
+  let ins_bytes: usize = parts.ins.iter().map(|i| i.chars.as_ref().map_or(0, |c| c.len())).sum();
+  let ins_runs: usize = parts.ins.iter().map(|i| i.runs.len()).sum();
+  let bytes = doc.characters.len().max(base.characters.len() + ins_bytes);
+  let runs = doc.runs.len().max(base.runs.len() + ins_runs);
+  let cost = estimate(&parts, spans, bytes, runs);
   if fits(&parts).is_err() || cost > ENTRY_BUDGET / 2 {
     return None;
   }
@@ -2689,6 +2694,30 @@ mod tests {
       ..text(&sall)
     };
     assert!(ops(&sb, &sd).is_some() && emitted_means_accepted(&sb, &sd));
+  }
+
+  #[test]
+  fn a_big_delete_with_scattered_inserts_is_emitted_only_when_a_reader_takes_it() {
+    // 200k characters, 198k of them deleted, and 650 inserts spread over the rest.
+    let base = text(&"a".repeat(200_000));
+    let mut doc = base.clone();
+    local_edit(&mut doc, 2_000, 200_000, "", &mut ids(2)).unwrap();
+    for i in (0..650).rev() {
+      local_edit(&mut doc, i * 3, i * 3, "x", &mut ids(2)).unwrap();
+    }
+    assert!(emitted_means_accepted(&base, &doc));
+    // 100k characters with 50k runs, the middle deleted, 300 and 500 inserts.
+    let chars = "ab".repeat(50_000);
+    let mut base = text(&chars);
+    base.runs = (0..50_000).map(|i| bold(i * 2, i * 2 + 1)).collect();
+    for n in [300usize, 500] {
+      let mut doc = base.clone();
+      local_edit(&mut doc, 20_000, 90_000, "", &mut ids(3)).unwrap();
+      for i in (0..n).rev() {
+        local_edit(&mut doc, i * 7, i * 7, "y", &mut ids(3)).unwrap();
+      }
+      assert!(emitted_means_accepted(&base, &doc), "{n} inserts");
+    }
   }
 
   #[test]
