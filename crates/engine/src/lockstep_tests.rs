@@ -351,6 +351,8 @@ impl Run {
     let mut a = build();
     let mut b = build();
     let mut peer = build();
+    // Its own id sequence: a peer that replayed `a`'s draws would make the same ids as the engines.
+    peer.gen = crate::doc::IdGen::new(8);
     if loaded {
       // A file just opened: not yet settled, so the first change runs the passes over everything.
       let json = a.to_json();
@@ -1943,4 +1945,129 @@ fn run_colour_and_link_changes_lay_out_like_the_whole_file_passes_with_a_kerning
     assert_eq!(ra, rb);
     assert!(a.doc == b.doc, "{c:?}: the documents differ");
   }
+}
+
+/// A generated id never replaces a layer that exists: forced by rewinding the id generator to the
+/// draw that made an instance, then adding a layer to its main so the instance grows a copy. The
+/// copy used to take the instance's own id and list itself as its child.
+#[test]
+fn a_new_copy_never_takes_an_existing_id() {
+  {
+    let skip = 0;
+    let mut e = build();
+    let main = e
+      .doc
+      .nodes
+      .values()
+      .find(|n| n.kind == NodeType::Component && n.name == "Card")
+      .unwrap()
+      .id
+      .clone();
+    let r = ai(
+      &mut e,
+      "create_nodes",
+      json!({"nodes":[{"type":"rectangle","name":"Loose","width":20,"height":20}]}),
+    );
+    let loose = r["created"][0]["id"].as_str().unwrap().to_string();
+    let known: std::collections::HashSet<NodeId> = e.doc.nodes.keys().cloned().collect();
+    let before = e.gen.clone();
+    e.dispatch(Command::CreateInstance {
+      component_id: main.clone(),
+      x: 0.0,
+      y: 0.0,
+      parent: None,
+      anchor: None,
+      into_components: false,
+    })
+    .unwrap();
+    let inst = e
+      .doc
+      .nodes
+      .values()
+      .find(|n| n.kind == NodeType::Instance && !known.contains(&n.id))
+      .unwrap()
+      .id
+      .clone();
+    // The next draw repeats the instance's id; moving a layer into the main makes the instance grow a copy.
+    e.gen = before;
+    e.dispatch(Command::MoveToParent {
+      ids: vec![loose],
+      parent: Some(main),
+      index: None,
+    })
+    .unwrap();
+    for n in e.doc.nodes.values() {
+      assert!(!n.children.contains(&n.id), "skip {skip}: {} lists itself", n.id);
+      for c in &n.children {
+        assert_eq!(
+          e.doc.get(c).and_then(|c| c.parent.as_deref()),
+          Some(n.id.as_str()),
+          "skip {skip}: {c}"
+        );
+      }
+    }
+    assert_eq!(
+      e.doc.get(&inst).map(|n| n.kind),
+      Some(NodeType::Instance),
+      "skip {skip}: the instance survives"
+    );
+  }
+}
+
+/// A file with a layer in its own children, and one with a two-layer loop, is repaired on load:
+/// layout returns and the tree is sound. A sound file loads byte-identical.
+#[test]
+fn load_repairs_self_children_and_cycles() {
+  let mut e = build();
+  let sound = e.to_json();
+  e.load(&sound).unwrap();
+  assert_eq!(e.to_json(), sound, "a sound file is untouched");
+  let mut v: Value = serde_json::from_str(&sound).unwrap();
+  let nodes = v["nodes"].as_object_mut().unwrap();
+  let rows: Vec<String> = nodes
+    .iter()
+    .filter(|(_, n)| n["type"] == "frame" && n["parent"].is_null())
+    .map(|(k, _)| k.clone())
+    .take(2)
+    .collect();
+  let (a, b) = (rows[0].clone(), rows[1].clone());
+  nodes.get_mut(&a).unwrap()["children"].as_array_mut().unwrap().push(json!(a));
+  // a and b become each other's parent and child.
+  nodes.get_mut(&a).unwrap()["parent"] = json!(b);
+  nodes.get_mut(&b).unwrap()["parent"] = json!(a);
+  nodes.get_mut(&b).unwrap()["children"].as_array_mut().unwrap().push(json!(a));
+  nodes.get_mut(&a).unwrap()["children"].as_array_mut().unwrap().push(json!(b));
+  e.load(&v.to_string()).unwrap();
+  for n in e.doc.nodes.values() {
+    assert!(!n.children.contains(&n.id));
+    assert!(!e.doc.ancestors(&n.id).contains(&n.id));
+  }
+  crate::layout::relayout_all(&mut e.doc, &HeuristicMeasurer);
+}
+
+/// Layout stops at an absurdly deep chain instead of overflowing the stack.
+#[test]
+fn layout_stops_on_a_very_deep_chain() {
+  let mut e = build();
+  let page = e.doc.pages[0].id.clone();
+  let template = e.doc.nodes.values().find(|n| n.kind == NodeType::Frame).unwrap().as_ref().clone();
+  let mut parent: Option<String> = None;
+  let mut first = String::new();
+  for i in 0..3000 {
+    let id = format!("deep_{i}");
+    let mut n = template.clone();
+    n.id = id.clone();
+    n.parent = parent.clone();
+    n.children = Vec::new();
+    n.page = page.clone();
+    n.layout = None;
+    if let Some(p) = &parent {
+      e.doc.get_mut(p).unwrap().children.push(id.clone());
+    } else {
+      first = id.clone();
+    }
+    e.doc.nodes.insert(id.clone(), std::sync::Arc::new(n));
+    parent = Some(id);
+  }
+  crate::layout::layout_node(&mut e.doc, &first, &HeuristicMeasurer);
 }

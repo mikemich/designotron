@@ -1155,8 +1155,7 @@ impl Engine {
       return Err("document has no pages".into());
     }
     // Files and links can come from anyone: never let a parent cycle hang layout or rendering.
-    let ids: Vec<NodeId> = doc.nodes.keys().cloned().collect();
-    doc.break_parent_cycles(&ids);
+    doc.repair_tree();
     components::repair_masters(&mut doc);
     // Nor may a crafted link survive: unsafe schemes are dropped from text and prototypes.
     sanitize_links(&mut doc, None);

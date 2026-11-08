@@ -174,7 +174,7 @@ pub fn create_instance(
   if would_nest(doc, comp_id, &parent.and_then(|p| enclosing_component(doc, p))) {
     return None;
   }
-  let id = gen.next("n_");
+  let id = doc.fresh_id(gen, "n_");
   let name = instance_name(doc, comp_id);
   // An instance of a hugging main hugs too; Fill depends on a parent the instance doesn't have yet.
   let hug = |s: Sizing| if s == Sizing::Hug { Sizing::Hug } else { Sizing::Fixed };
@@ -876,7 +876,12 @@ pub fn restore_component(doc: &mut Document, prefer: &str, gen: &mut IdGen) -> R
     }
     let new = match wanted {
       Some(m) if doc.get(&m).is_none() && !used.contains(&m) => m,
-      _ => gen.next("n_"),
+      _ => loop {
+        let id = doc.fresh_id(gen, "n_");
+        if !used.contains(&id) {
+          break id;
+        }
+      },
     };
     used.insert(new.clone());
     map.insert(old.clone(), new);
@@ -1912,7 +1917,13 @@ impl Reuse {
           .filter(|i| !self.used.contains(**i) && !picked.contains(**i))
           .map(|i| (*i).clone())
       };
-      let id = reused.unwrap_or_else(|| gen.next("n_"));
+      let id = reused.unwrap_or_else(|| loop {
+        // Never an id the document has (the instance's own, say) or one handed out already.
+        let id = doc.fresh_id(gen, "n_");
+        if !self.used.contains(&id) && !picked.contains(&id) {
+          break id;
+        }
+      });
       picked.push(id.clone());
       out.insert(cid.clone(), id);
     }

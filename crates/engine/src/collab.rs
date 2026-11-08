@@ -1823,6 +1823,7 @@ pub fn repair(doc: &mut Document, before: &Document, touched: &[NodeId]) {
       .children
       .iter()
       .chain(earlier.iter())
+      .filter(|c| c.as_str() != id.as_str())
       .filter(|c| doc.get(c).map(|cn| cn.parent.as_deref() == Some(id.as_str())).unwrap_or(false) && seen.insert((*c).clone()))
       .cloned()
       .collect();

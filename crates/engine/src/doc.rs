@@ -237,6 +237,24 @@ impl Document {
     out
   }
 
+  /// A fresh id from `gen` that no node of the document has (a generated id never replaces a
+  /// node that exists, whatever the generator's seed).
+  pub fn fresh_id(&self, gen: &mut IdGen, prefix: &str) -> String {
+    loop {
+      let id = gen.next(prefix);
+      if !self.nodes.contains_key(&id) {
+        return id;
+      }
+    }
+  }
+
+  /// Repairs a loaded or damaged tree: a node that is its own child or ancestor is cut loose, and
+  /// children lists keep only nodes that point back. A sound document is left untouched.
+  pub fn repair_tree(&mut self) {
+    let ids: Vec<NodeId> = self.nodes.keys().cloned().collect();
+    self.break_parent_cycles(&ids);
+  }
+
   /// Makes every node in `ids` that is its own ancestor top-level, and keeps only children
   /// that point back at their parent, so walking the tree (either way) always ends.
   pub fn break_parent_cycles<'a>(&mut self, ids: impl IntoIterator<Item = &'a NodeId>) {
@@ -262,6 +280,7 @@ impl Document {
       let kids: Vec<NodeId> = n
         .children
         .iter()
+        .filter(|c| c.as_str() != id.as_str())
         .filter(|c| self.get(c).map(|cn| cn.parent.as_deref() == Some(id.as_str())).unwrap_or(false))
         .cloned()
         .collect();
