@@ -758,6 +758,7 @@ fn local_op_in(e: &mut Engine, r: &mut Rng, solo: bool, rich: bool) {
       patches: true,
       granular: true,
       lists: true,
+      text: false,
     },
   ));
   let mut by_moves = before.clone();

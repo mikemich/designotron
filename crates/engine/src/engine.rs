@@ -75,6 +75,15 @@ pub enum SelectMode {
   Toggle,
 }
 
+/// The characters, runs and sequence of a text layer at one moment (what `RevertText` moves between).
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TextState {
+  pub characters: String,
+  pub runs: Vec<crate::model::TextRun>,
+  pub seq: Option<crate::textseq::TextSeq>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Command {
@@ -372,6 +381,26 @@ pub enum Command {
     /// the old ones across the edit.
     #[serde(default)]
     runs: Option<Vec<crate::model::TextRun>>,
+  },
+  /// Replaces the characters `start..end` (code points) of a text layer with `text`: what typing,
+  /// deleting and pasting plain text do. In a room that merges text, the new characters get ids of
+  /// this editor and the deleted ones become tombstones, so other people's typing around them
+  /// survives (see `textseq`). Runs follow `SetText`'s remapping.
+  EditText {
+    id: NodeId,
+    start: usize,
+    end: usize,
+    text: String,
+  },
+  /// Makes the change that took a text layer from `from` to `to` again (the editor's own undo and
+  /// redo inside a text): when the text is still `from` it becomes `to` exactly, else the step's
+  /// own characters are reversed and everyone else's stay (`textseq::revert`). Fails with
+  /// "the text changed" when the two don't share a sequence epoch. Returns `{start, end}`, the
+  /// changed range in code points, for the caret.
+  RevertText {
+    id: NodeId,
+    from: TextState,
+    to: TextState,
   },
   /// Applies style overrides to characters `start..end` of a text layer.
   /// `style` uses TextRun field names; `clear` lists overrides to remove.
@@ -709,6 +738,20 @@ pub enum Query {
     #[serde(default)]
     to: Option<usize>,
   },
+  /// The character before each caret index (`null` = the start), as ids; against `seq` (an older
+  /// state the editor kept) when given, else the current text.
+  TextAnchors {
+    id: NodeId,
+    indices: Vec<usize>,
+    #[serde(default)]
+    seq: Option<crate::textseq::TextSeq>,
+  },
+  /// The current caret index of each anchor from `TextAnchors` (a deleted anchor maps to where it
+  /// was, an unknown one to `null`).
+  TextIndices {
+    id: NodeId,
+    anchors: Vec<Option<crate::textseq::CharId>>,
+  },
   Bounds {
     ids: Vec<NodeId>,
     /// Also give each item's `painted` bounds: everything it draws (shadows, outside strokes, blurs),
@@ -969,6 +1012,11 @@ pub struct Engine {
   /// The room also understands child orders as moves and comments per message, and every
   /// copy of the document drops references to deleted tokens (`collab::DeltaOpts`, `prune_refs`).
   pub(crate) collab_lists: bool,
+  /// The room merges text layers per character (`collab_enable_text`): edits make character ids and
+  /// deltas carry `text` entries. Off, texts travel whole and lose their sequence when edited.
+  collab_text: bool,
+  /// Where this editor's new character ids come from (its site and a counter that only grows).
+  text_ids: crate::textseq::SiteIds,
   /// Layers moved on purpose by commands since the last `collab_delta` (`collab::moved_hinted`).
   moved_hint: std::collections::HashSet<NodeId>,
   /// Layers moved by the commands of the step being made (a gesture's drags add up).
@@ -1124,6 +1172,8 @@ impl Engine {
       collab_pending: Default::default(),
       collab_granular: false,
       collab_lists: false,
+      collab_text: false,
+      text_ids: Default::default(),
       moved_hint: Default::default(),
       step_moved: Vec::new(),
       vars_settled: false,
@@ -1295,11 +1345,25 @@ impl Engine {
   pub fn collab_reset(&mut self, ordered: bool, granular: bool, lists: bool) {
     self.collab_granular = ordered && granular;
     self.collab_lists = self.collab_granular && lists;
+    self.collab_text = false;
     self.collab_synced = Some(self.doc.clone());
     self.collab_confirmed = ordered.then(|| self.doc.clone());
     self.collab_pending.clear();
     // What was moved before joining is part of the baseline, not of the first delta.
     self.moved_hint.clear();
+  }
+
+  /// Turns on per-character text merging for the room joined with the last `collab_reset` (the room
+  /// said `text`; needs `lists`). `site` is a random number nobody else uses (0 is the base
+  /// of every text and is never used); call it again with a fresh one after every (re)join.
+  pub fn collab_enable_text(&mut self, site: u64) {
+    self.collab_text = self.collab_lists;
+    self.text_ids = crate::textseq::SiteIds { site: site.max(1), ctr: 0 };
+  }
+
+  /// Whether texts are merging per character right now.
+  pub fn collab_text(&self) -> bool {
+    self.collab_text
   }
 
   /// This editor's changes the relay hasn't acknowledged, plus any not yet sent, oldest
@@ -1321,6 +1385,7 @@ impl Engine {
       patches: ordered,
       granular: self.collab_granular,
       lists: self.collab_lists,
+      text: self.collab_text,
     }
   }
 
@@ -1350,6 +1415,52 @@ impl Engine {
     if !crate::collab::prune_refs(&mut self.doc, scope).is_empty() {
       // A main component's link may be the one that went: its instances follow.
       self.after_mutation(&pruned_from);
+    }
+  }
+
+  /// After a local change: gives every text it changed a sequence that describes it, so that a
+  /// change that knows nothing about sequences (a paste with runs, a plugin, Claude, a variable, a
+  /// component property, an undo that fell back to the whole-text rule) merges as the smallest edit
+  /// (`textseq::fixup`). Texts not merging (no text room, inside an instance, new layers) lose any
+  /// sequence. Looks only at the layers that changed.
+  fn text_fixup(&mut self, prev: &Document) {
+    // (layer, true: give it a sequence made from its old one / false: it has none)
+    let mut fixes: Vec<(NodeId, bool)> = Vec::new();
+    for item in prev.nodes.diff(&self.doc.nodes) {
+      let (new, old) = match item {
+        imbl::ordmap::DiffItem::Add(_, n) => (n, None),
+        imbl::ordmap::DiffItem::Update { old: (_, o), new: (_, n) } => (n, Some(o)),
+        imbl::ordmap::DiffItem::Remove(..) => continue,
+      };
+      let Some(t) = new.text.as_ref() else { continue };
+      let old_t = old.and_then(|o| o.text.as_ref());
+      if old_t == Some(t) {
+        continue;
+      }
+      let merges = self.collab_text && old_t.is_some() && self.doc.instance_ancestor(&new.id).is_none();
+      if !merges {
+        if t.seq.is_some() {
+          fixes.push((new.id.clone(), false));
+        }
+      } else if !t.seq.as_ref().is_some_and(|s| crate::textseq::valid(s, &t.characters)) {
+        fixes.push((new.id.clone(), true));
+      }
+    }
+    for (id, merge) in fixes {
+      let Some(mut t) = self.doc.get(&id).and_then(|n| n.text.clone()) else {
+        continue;
+      };
+      match prev.get(&id).and_then(|n| n.text.as_ref()) {
+        Some(old) if merge => {
+          crate::textseq::fixup(old, &mut t, &mut self.text_ids);
+        }
+        _ => t.seq = None,
+      }
+      if self.doc.get(&id).and_then(|n| n.text.as_ref()) != Some(&t) {
+        if let Some(n) = self.doc.get_mut(&id) {
+          n.text = Some(t);
+        }
+      }
     }
   }
 
@@ -1567,7 +1678,7 @@ impl Engine {
         // never recorded in local history. Callers flush their own delta first.
         let prev = self.doc.clone();
         if local {
-          Self::collab_apply(self.collab_lists, &mut self.doc, &delta)?;
+          crate::collab::apply_local(&mut self.doc, &delta, crate::collab::ApplyOpts { prune: self.collab_lists })?;
           sanitize_links(&mut self.doc, Some(&delta_ids(&delta)));
           self.after_mutation(&prev);
           self.rev += 1;
@@ -1618,7 +1729,10 @@ impl Engine {
             Some(c) => Self::collab_apply(self.collab_lists, c, &d).unwrap_or_default(),
             None => vec![],
           };
-          if pruned.is_empty() {
+          // A text change is re-applied on the room's document, so this copy's bookkeeping (clock,
+          // deletion stamps, forgotten stretches) is the room's: the copies stay equal.
+          let texts = d.get("text").is_some_and(|t| t.as_object().is_some_and(|m| !m.is_empty()));
+          if pruned.is_empty() && !texts {
             return Ok(json!({}));
           }
           // The room dropped a link this editor still shows (something it knew nothing about at
@@ -1760,6 +1874,7 @@ impl Engine {
       Ok(v) => {
         self.after_mutation(&prev);
         self.prune_local(&prev);
+        self.text_fixup(&prev);
         if prev != self.doc {
           self.moved_hint.extend(moved.iter().cloned());
           self.step_moved.extend(moved);
@@ -1845,6 +1960,7 @@ impl Engine {
     if !exact {
       self.after_mutation(&prev);
       self.prune_local(&prev);
+      self.text_fixup(&prev);
     }
     self.future.push(step);
   }
@@ -1876,6 +1992,7 @@ impl Engine {
     if !exact {
       self.after_mutation(&prev);
       self.prune_local(&prev);
+      self.text_fixup(&prev);
     }
     self.past.push(step);
   }
@@ -2908,14 +3025,54 @@ impl Engine {
         let n = self.doc.get_mut(&id).ok_or("no such node")?;
         patch::apply(n, &p)?;
         drop_unsafe_links(n);
-        // The name follows the text until the user renames the layer.
-        let auto_name = |s: &str| -> String { s.trim_start().chars().take(40).collect() };
-        let old_name: String = old.chars().take(40).collect();
-        if n.name.is_empty() || n.name == "Text" || n.name == old_name || n.name == auto_name(&old) {
-          n.name = auto_name(&characters);
-        }
+        follow_name(n, &old, &characters);
         components::record_override(&mut self.doc, &id, &p);
         Ok(json!({}))
+      }
+      Command::EditText { id, start, end, text } => {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut t = self.doc.get(&id).and_then(|n| n.text.clone()).ok_or("not a text layer")?;
+        let old = t.characters.clone();
+        let merges = self.collab_text && self.doc.instance_ancestor(&id).is_none();
+        if !merges || crate::textseq::local_edit(&mut t, start, end, &text, &mut self.text_ids).is_err() {
+          crate::text::edit_text(&mut t, start, end, &text);
+          t.seq = None;
+        }
+        let p = json!({ "text": { "characters": t.characters, "runs": t.runs } });
+        let n = self.doc.get_mut(&id).ok_or("no such node")?;
+        follow_name(n, &old, &t.characters);
+        n.text = Some(t);
+        drop_unsafe_links(n);
+        components::record_override(&mut self.doc, &id, &p);
+        Ok(json!({}))
+      }
+      Command::RevertText { id, from, to } => {
+        let cur = self.doc.get(&id).and_then(|n| n.text.clone()).ok_or("not a text layer")?;
+        let merges = self.collab_text && self.doc.instance_ancestor(&id).is_none();
+        let with = |s: TextState| crate::model::TextProps {
+          characters: s.characters,
+          runs: s.runs,
+          seq: s.seq.filter(|_| merges),
+          ..cur.clone()
+        };
+        let (from, to) = (with(from), with(to));
+        let reverted = if merges { crate::textseq::revert(&cur, &from, &to) } else { None };
+        let mut new = match reverted {
+          Some(r) => r,
+          // Nobody changed the text since: the step's other end, exactly.
+          None if cur.characters == from.characters && cur.runs == from.runs => crate::model::TextProps { seq: None, ..to },
+          None => return Err("the text changed".into()),
+        };
+        // (A restored sequence must describe the characters it comes with.)
+        new.seq = new.seq.filter(|s| merges && crate::textseq::valid(s, &new.characters));
+        let (start, end) = crate::textseq::changed_range(&cur.characters, &new.characters);
+        let p = json!({ "text": { "characters": new.characters, "runs": new.runs } });
+        let n = self.doc.get_mut(&id).ok_or("no such node")?;
+        follow_name(n, &cur.characters, &new.characters);
+        n.text = Some(new);
+        drop_unsafe_links(n);
+        components::record_override(&mut self.doc, &id, &p);
+        Ok(json!({ "start": start, "end": end }))
       }
       Command::StyleText {
         id,
@@ -4428,6 +4585,14 @@ impl Engine {
         }
         None => Value::Null,
       },
+      Query::TextAnchors { id, indices, seq } => match self.doc.get(&id).and_then(|n| n.text.as_ref()) {
+        Some(t) => json!({ "anchors": crate::textseq::anchors(t, seq.as_ref(), &indices) }),
+        None => Value::Null,
+      },
+      Query::TextIndices { id, anchors } => match self.doc.get(&id).and_then(|n| n.text.as_ref()) {
+        Some(t) => json!({ "indices": crate::textseq::indices(t, &anchors) }),
+        None => Value::Null,
+      },
       Query::OverrideGroups { id } => {
         let groups: Vec<Value> = components::override_groups(&self.doc, &id)
           .into_iter()
@@ -4602,6 +4767,10 @@ impl Engine {
     for nid in self.doc.subtree(root) {
       if let Some(n) = self.doc.get(&nid) {
         let mut c = n.clone();
+        // (A copy starts a new history: it carries no character ids.)
+        if let Some(t) = c.text.as_mut() {
+          t.seq = None;
+        }
         if nid == root {
           let local = self.doc.local_matrix(n).bounds_of(n.width, n.height);
           c.x = b.x + (n.x - local.x);
@@ -4664,9 +4833,18 @@ fn recolor_stroke(n: &mut Node, color: &str) {
   }
 }
 
+/// The layer's name follows its text until the user renames it.
+fn follow_name(n: &mut Node, old: &str, new: &str) {
+  let auto_name = |s: &str| -> String { s.trim_start().chars().take(40).collect() };
+  let old_name: String = old.chars().take(40).collect();
+  if n.name.is_empty() || n.name == "Text" || n.name == old_name || n.name == auto_name(old) {
+    n.name = auto_name(new);
+  }
+}
+
 /// Ids of the nodes a peer's delta adds or patches.
 fn delta_ids(d: &Value) -> Vec<NodeId> {
-  ["nodes", "patch"]
+  ["nodes", "patch", "text"]
     .iter()
     .filter_map(|k| d.get(*k).and_then(|v| v.as_object()))
     .flat_map(|m| m.keys().cloned())

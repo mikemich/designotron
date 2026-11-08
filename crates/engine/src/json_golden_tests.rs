@@ -319,3 +319,45 @@ fn revision_4_values_are_written_only_when_used_and_round_trip() {
   assert_eq!(e.to_json(), before);
   assert_eq!((before.len(), fnv(&before)), (TO_JSON_LEN, TO_JSON_HASH));
 }
+
+#[test]
+fn a_text_sequence_is_written_only_when_set_and_round_trips() {
+  let mut e = rich();
+  let before = e.to_json();
+  assert!(!before.contains("\"seq\""));
+  assert_eq!((before.len(), fnv(&before)), (TO_JSON_LEN, TO_JSON_HASH));
+  let id = e
+    .doc
+    .nodes
+    .values()
+    .find(|n| n.text.is_some() && e.doc.instance_ancestor(&n.id).is_none())
+    .map(|n| n.id.clone())
+    .unwrap();
+  e.collab_reset(true, true, true);
+  e.collab_enable_text(193847261);
+  e.dispatch(Command::EditText {
+    id: id.clone(),
+    start: 0,
+    end: 0,
+    text: "ab".into(),
+  })
+  .unwrap();
+  let json = e.to_json();
+  assert!(json.contains("\"seq\":{\"e\":"), "{json}");
+  let t = e.doc.get(&id).unwrap().text.clone().unwrap();
+  let seq = serde_json::to_value(&t.seq).unwrap();
+  assert_eq!(seq["s"][0], json!([193847261, 0, 2]));
+  let mut f = Engine::new(Box::new(HeuristicMeasurer), 3);
+  f.load(&json).unwrap();
+  assert_eq!(f.doc.get(&id).unwrap().text, e.doc.get(&id).unwrap().text);
+  assert_eq!(f.to_json(), json);
+  // Editing alone (not in a text room) drops it again.
+  f.dispatch(Command::EditText {
+    id,
+    start: 0,
+    end: 1,
+    text: String::new(),
+  })
+  .unwrap();
+  assert!(!f.to_json().contains("\"seq\""));
+}

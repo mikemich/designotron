@@ -152,6 +152,26 @@ fn main() {
       .unwrap();
     });
   }
+  if run("edittext") {
+    // One keystroke in a text room, as the shell does it: EditText, then the delta it sends, then
+    // the room's ack (which re-applies the change on the room's document).
+    e.collab_reset(true, true, true);
+    e.collab_enable_text(193_847_261);
+    let mut at = e.doc.get(&greet).unwrap().text.as_ref().unwrap().characters.chars().count();
+    time("edittext: EditText + delta + ack (typing in a room)", 20, &mut e, &mut |e, _| {
+      e.dispatch(Command::EditText {
+        id: greet.clone(),
+        start: at,
+        end: at,
+        text: "x".into(),
+      })
+      .unwrap();
+      at += 1;
+      std::hint::black_box(e.collab_delta());
+      e.dispatch(Command::CollabAck { rejected: false }).unwrap();
+    });
+    e.collab_reset(false, false, false);
+  }
   if run("update1") {
     time("update1: Update one rect opacity", 20, &mut e, &mut |e, i| {
       e.dispatch(Command::Update {

@@ -201,6 +201,27 @@ impl WasmEngine {
     designotron_engine::collab::GRANULAR
   }
 
+  /// Turns on per-character text merging for the room joined with the last `collabReset` (the
+  /// room's welcome said `text`). `site` is a random 48-bit number nobody else uses; call it again
+  /// with a fresh one after every (re)join, before re-applying unsent deltas.
+  #[wasm_bindgen(js_name = collabEnableText)]
+  pub fn collab_enable_text(&mut self, site: f64) {
+    self.inner.collab_enable_text(site as u64);
+  }
+
+  /// Whether texts are merging per character right now.
+  #[wasm_bindgen(js_name = collabText)]
+  pub fn collab_text(&self) -> bool {
+    self.inner.collab_text()
+  }
+
+  /// Whether this engine reads and writes text layers as per-character changes in deltas (what an
+  /// editor tells the room it can do when joining).
+  #[wasm_bindgen(js_name = collabTextSupported)]
+  pub fn collab_text_supported(&self) -> bool {
+    designotron_engine::collab::TEXT
+  }
+
   /// `json` (a delta or document) as a relay that knows only model `relay_model` can store it
   /// (see `collab::downgrade`). Applied to what is sent, never to the editor's own copy.
   #[wasm_bindgen(js_name = collabDowngrade)]

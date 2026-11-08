@@ -20,17 +20,21 @@ use serde_json::{json, Map, Value};
 
 use crate::clipboard;
 use crate::model::{arc_eq, arcs_eq, ColorStyle, Comment, Document, EffectStyle, GridStyle, Node, NodeId, TextStyle};
+use crate::textseq;
 use crate::variables::{Collection, Variable};
 
 /// What `delta_with` writes: `patches` as per-property patches (peers that predate them get
 /// whole nodes), `granular` pages, styles and variables per id, `lists` child orders as moves
 /// and comments per message (see `moved`, `place` and `comment_changes`). `lists` needs both
-/// others; a room says whether it takes it in its welcome.
+/// others; a room says whether it takes it in its welcome. `text` (which needs `lists`) sends the
+/// characters, runs and props of a text layer as per-character changes (`text`, see `textseq`)
+/// instead of the whole `text` object.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DeltaOpts {
   pub patches: bool,
   pub granular: bool,
   pub lists: bool,
+  pub text: bool,
 }
 
 /// `delta_with` without `lists`: the form every peer since per-id changes understands.
@@ -42,6 +46,7 @@ pub fn delta(base: &Document, doc: &Document, patches: bool, granular: bool) -> 
       patches,
       granular,
       lists: false,
+      text: false,
     },
   )
 }
@@ -61,17 +66,35 @@ pub fn delta_with(base: &Document, doc: &Document, opts: DeltaOpts) -> Value {
 
 /// `delta_with`, with the layers the person moved on purpose (see `moved_hinted`).
 pub fn delta_hinted(base: &Document, doc: &Document, opts: DeltaOpts, hint: &HashSet<NodeId>) -> Value {
-  let DeltaOpts { patches, granular, lists } = opts;
+  let DeltaOpts {
+    patches,
+    granular,
+    lists,
+    text,
+  } = opts;
   let mut nodes = Map::new();
   let mut patch = Map::new();
+  let mut texts = Map::new();
   let mut moves = Map::new();
   let mut removed = Vec::new();
   for item in base.nodes.diff(&doc.nodes) {
     match item {
       imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, v) } if patches => {
-        let p = node_patch(o, v);
+        let mut p = node_patch(o, v);
         if lists && o.children != v.children {
           moves.insert(k.clone(), json!(moved_hinted(&o.children, &v.children, hint)));
+        }
+        // A text that merges per character travels as `text`, never whole in the patch.
+        if text {
+          if let Some(entry) = text_entry(doc, k, o, v) {
+            p.remove("text");
+            if entry.as_object().is_some_and(|e| e.len() > 1) {
+              texts.insert(k.clone(), entry);
+            }
+            if p.is_empty() {
+              continue;
+            }
+          }
         }
         patch.insert(k.clone(), Value::Object(p));
       }
@@ -102,6 +125,9 @@ pub fn delta_hinted(base: &Document, doc: &Document, opts: DeltaOpts, hint: &Has
   }
   if !moves.is_empty() {
     o.insert("moves".into(), Value::Object(moves));
+  }
+  if !texts.is_empty() {
+    o.insert("text".into(), Value::Object(texts));
   }
   if !changes.is_empty() {
     o.insert("commentChanges".into(), Value::Object(changes));
@@ -134,6 +160,43 @@ pub fn delta_hinted(base: &Document, doc: &Document, opts: DeltaOpts, hint: &Has
     }
   }
   out
+}
+
+/// This engine can read and write text layers as per-character changes (the `text` part of a room's
+/// welcome; see `DeltaOpts` and `textseq`).
+pub const TEXT: bool = true;
+
+/// The per-character change of the text layer `id` from `old` to `new`, when it has one: both have
+/// text, it isn't inside an instance (those overrides stay whole) and the two share an epoch.
+fn text_entry(doc: &Document, id: &str, old: &Node, new: &Node) -> Option<Value> {
+  let (ot, nt) = (old.text.as_ref()?, new.text.as_ref()?);
+  if ot == nt || doc.instance_ancestor(id).is_some() {
+    return None;
+  }
+  textseq::ops(ot, nt)
+}
+
+/// A delta in the form peers that predate `text` understand: every `text` entry becomes the layer's
+/// whole text from `doc` (the room's document, after applying the delta) in `patch`, without its
+/// sequence. `None` when `d` has no `text`.
+pub fn legacy_text(d: &Value, doc: &Document) -> Option<Value> {
+  let texts = d.get("text")?.as_object()?;
+  let mut out = d.clone();
+  let o = out.as_object_mut()?;
+  o.remove("text");
+  let patch = o.entry("patch").or_insert_with(|| json!({})).as_object_mut()?;
+  for id in texts.keys() {
+    let Some(t) = doc.get(id).and_then(|n| n.text.as_ref()) else {
+      continue;
+    };
+    let mut v = serde_json::to_value(t).ok()?;
+    v.as_object_mut()?.remove("seq");
+    match patch.get_mut(id).and_then(|p| p.as_object_mut()) {
+      Some(p) => drop(p.insert("text".into(), v)),
+      None => drop(patch.insert(id.clone(), json!({ "text": v }))),
+    }
+  }
+  Some(out)
 }
 
 /// Which generation of the document model this build understands. Rooms say it in their welcome, so
@@ -1174,6 +1237,7 @@ pub fn is_empty(d: &Value) -> bool {
     && empty("moves")
     && empty("pageMoves")
     && empty("commentChanges")
+    && empty("text")
     && ["name", "pages", "styles", "variables"].iter().all(|k| d.get(*k).is_none())
     && !is_granular(d)
 }
@@ -1203,6 +1267,19 @@ pub fn apply_opts(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<
   out
 }
 
+thread_local! {
+  /// Set while `apply_local` runs: text entries are applied as this editor's own change.
+  static LOCAL_TEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `apply_opts` for changes this editor re-applies as its own (see `textseq::apply_local`).
+pub fn apply_local(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<NodeId>, String> {
+  LOCAL_TEXT.with(|l| l.set(true));
+  let out = apply_opts(doc, d, opts);
+  LOCAL_TEXT.with(|l| l.set(false));
+  out
+}
+
 fn apply_inner(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<NodeId>, String> {
   let before = doc.clone();
   let mut touched: Vec<NodeId> = Vec::new();
@@ -1211,6 +1288,7 @@ fn apply_inner(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<Nod
       let n: Node = serde_json::from_value(v.clone()).map_err(|e| format!("bad node {id}: {e}"))?;
       doc.nodes.insert(id.clone(), Arc::new(n));
       touched.push(id.clone());
+      drop_stale_seq(doc, id);
     }
   }
   let moves = d.get("moves").and_then(|v| v.as_object());
@@ -1228,6 +1306,9 @@ fn apply_inner(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<Nod
       let n = new;
       doc.nodes.insert(id.clone(), Arc::new(n));
       touched.push(id.clone());
+      if p.contains_key("text") {
+        drop_stale_seq(doc, id);
+      }
     }
   }
   for id in d
@@ -1239,6 +1320,22 @@ fn apply_inner(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<Nod
   {
     if doc.nodes.remove(id).is_some() {
       touched.push(id.to_string());
+    }
+  }
+  // Characters, runs and props of text layers that merge per character.
+  if let Some(texts) = d.get("text").and_then(|v| v.as_object()) {
+    for (id, entry) in texts {
+      let Some(mut t) = doc.get(id).and_then(|n| n.text.clone()) else {
+        continue;
+      };
+      let applied = if LOCAL_TEXT.with(|l| l.get()) {
+        textseq::apply_local(&mut t, entry)
+      } else {
+        textseq::apply(&mut t, entry)
+      };
+      applied.map_err(|e| format!("bad text {id}: {e}"))?;
+      doc.modify(id, |n| n.text = Some(t));
+      touched.push(id.clone());
     }
   }
   if let Some(c) = d.get("comments").and_then(|v| v.as_object()) {
@@ -1297,6 +1394,21 @@ fn apply_inner(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<Nod
   } else {
     prune_refs(doc, Scope::Nodes(&touched))
   })
+}
+
+/// A text whose stored sequence doesn't describe its characters (a whole text arrived from a peer
+/// that doesn't know sequences) is plain again, the same on every copy.
+fn drop_stale_seq(doc: &mut Document, id: &str) {
+  let stale = doc
+    .get(id)
+    .and_then(|n| n.text.as_ref())
+    .and_then(|t| t.seq.as_ref().map(|s| !textseq::valid(s, &t.characters)))
+    .unwrap_or(false);
+  if stale {
+    if let Some(t) = doc.get_mut(id).and_then(|n| n.text.as_mut()) {
+      t.seq = None;
+    }
+  }
 }
 
 /// The strings of a JSON array (anything else is empty).
@@ -1407,9 +1519,9 @@ fn revert_inner(doc: &Document, from: &Document, to: &Document) -> Document {
   for item in from.nodes.diff(&to.nodes) {
     match item {
       imbl::ordmap::DiffItem::Update { old: (_, o), new: (k, v) } if out.get(k).is_some() => {
-        let n = merge_fields(out.get(k).unwrap(), o, v, true)
-          .map(Arc::new)
-          .unwrap_or_else(|| v.clone());
+        let cur = out.get(k).unwrap();
+        let n = merge_fields(cur, o, v, true).map(Arc::new).unwrap_or_else(|| v.clone());
+        let n = merge_text(cur, o, v, n);
         out.nodes.insert(k.clone(), n);
         touched.push(k.clone());
       }
@@ -1464,6 +1576,38 @@ fn revert_inner(doc: &Document, from: &Document, to: &Document) -> Document {
   let base = doc.clone();
   repair(&mut out, &base, &touched);
   out
+}
+
+/// A text layer reverted three ways: when any of the three texts carries merge data and they share
+/// an epoch, the step's own characters (and runs and sequence) are reversed (`textseq::revert`) and
+/// everyone else's stay; the other text props are already merged in `merged`. Otherwise
+/// `merged` stands (the whole-text rule), with its sequence dropped if it no longer fits.
+fn merge_text(cur: &Node, from: &Node, to: &Node, merged: Arc<Node>) -> Arc<Node> {
+  if let (Some(c), Some(f), Some(t)) = (cur.text.as_ref(), from.text.as_ref(), to.text.as_ref()) {
+    if [c, f, t].iter().any(|x| x.seq.is_some()) {
+      if let Some(r) = textseq::revert(c, f, t) {
+        let mut n = (*merged).clone();
+        if let Some(m) = n.text.as_mut() {
+          m.characters = r.characters;
+          m.runs = r.runs;
+          m.seq = r.seq;
+        }
+        return Arc::new(n);
+      }
+    }
+  }
+  let stale = merged
+    .text
+    .as_ref()
+    .is_some_and(|t| t.seq.as_ref().is_some_and(|s| !textseq::valid(s, &t.characters)));
+  if !stale {
+    return merged;
+  }
+  let mut n = (*merged).clone();
+  if let Some(t) = n.text.as_mut() {
+    t.seq = None;
+  }
+  Arc::new(n)
 }
 
 /// True when `out` lacks a style, variable or collection that `doc` has: the only case in which

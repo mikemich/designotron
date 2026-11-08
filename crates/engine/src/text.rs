@@ -817,8 +817,15 @@ pub fn remap_runs(old: &str, new: &str, runs: &[TextRun]) -> Vec<TextRun> {
     .take(max_suffix)
     .take_while(|(x, y)| x == y)
     .count();
-  let del_end = a.len() - suffix; // removed old range: prefix..del_end
-  let ins_len = b.len() - suffix - prefix;
+  splice_runs(runs, prefix, a.len() - suffix, b.len() - suffix - prefix, b.len())
+}
+
+/// Runs after the characters `start..end` were replaced by `ins_len` new ones (`new_len`
+/// characters in all). Typing at the end of a styled run extends it (like a word processor);
+/// a replaced range takes the style of the run it started in or after; runs after the edit
+/// shift. `remap_runs` is this with the edit found by a prefix/suffix diff.
+pub fn splice_runs(runs: &[TextRun], start: usize, end: usize, ins_len: usize, new_len: usize) -> Vec<TextRun> {
+  let (prefix, del_end) = (start, end);
   let map = |i: usize, is_end: bool| -> usize {
     if i < prefix || (i == prefix && !is_end) {
       i
@@ -846,8 +853,21 @@ pub fn remap_runs(old: &str, new: &str, runs: &[TextRun]) -> Vec<TextRun> {
     })
     .filter(|r| r.end > r.start)
     .collect();
-  normalize_runs(&mut out, b.len());
+  normalize_runs(&mut out, new_len);
   out
+}
+
+/// Replaces the characters `start..end` (code points, clamped) of `t` with `text`, keeping the
+/// runs attached as `splice_runs` does.
+pub fn edit_text(t: &mut TextProps, start: usize, end: usize, text: &str) {
+  let len = t.characters.chars().count();
+  let (start, end) = (start.min(len), end.min(len));
+  let end = end.max(start);
+  let byte = |i: usize| t.characters.char_indices().nth(i).map_or(t.characters.len(), |(b, _)| b);
+  let (a, b) = (byte(start), byte(end));
+  let ins_len = text.chars().count();
+  t.characters.replace_range(a..b, text);
+  t.runs = splice_runs(&t.runs, start, end, ins_len, len - (end - start) + ins_len);
 }
 
 /// Applies style overrides (a run with `start`/`end` ignored) to `start..end`.
