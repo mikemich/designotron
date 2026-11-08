@@ -298,6 +298,7 @@ export function Canvas() {
       }
     }
     host.classList.toggle("zoom-lod", z && texts > ZOOM_TEXT_BUDGET);
+    host.classList.toggle("zooming", z);
   };
   useLayoutEffect(() => {
     const host = contentRef.current;

@@ -198,6 +198,12 @@ fn build() -> Engine {
     "cornerRadius",
     "v_radius",
   );
+  // Glass: a background blur on every fifth rectangle, so the canvas copies what lies below it.
+  e.dispatch(Command::Update {
+    ids: rects.iter().step_by(5).cloned().collect(),
+    patch: json!({ "effects": [{"type": "backgroundBlur", "color": "#00000040", "x": 0, "y": 0, "blur": 12, "spread": 0, "visible": true}] }),
+  })
+  .unwrap();
   bind(&mut e, &frames, "gap", "v_gap");
   bind(&mut e, &names, "opacity", "v_fade");
   bind(
@@ -562,7 +568,10 @@ impl Run {
         let color = self.r.hex();
         let op = (self.r.below(100) as f64) / 100.0;
         let x = self.r.below(300) as f64;
-        let patch = match self.r.below(8) {
+        let patch = match self.r.below(9) {
+          8 => {
+            json!({ "effects": [{"type": "backgroundBlur", "color": "#00000040", "x": 0, "y": 0, "blur": x / 10.0, "spread": 0, "visible": self.r.chance(70)}] })
+          }
           0 => json!({ "fills": [{"type": "solid", "color": color}] }),
           1 => json!({ "opacity": op }),
           2 => json!({ "x": x }),
