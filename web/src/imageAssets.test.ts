@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fitNative, imagesIn, isAssetSrc } from "./imageAssets";
+import { downscaleSize, fitNative, imagesIn, isAssetSrc } from "./imageAssets";
 import type { Doc, Node, Paint } from "./types";
 
 const img = (src: string, extra: Partial<Extract<Paint, { type: "image" }>> = {}): Paint => ({ type: "image", src, scaleMode: "fill", opacity: 1, visible: true, ...extra });
@@ -72,5 +72,21 @@ describe("fitNative", () => {
     expect(fitNative(5000, 1000)).toEqual({ width: 4096, height: 819 });
     expect(fitNative(1000, 8192)).toEqual({ width: 500, height: 4096 });
     expect(fitNative(1, 20000)).toEqual({ width: 1, height: 4096 });
+  });
+});
+
+describe("downscaleSize", () => {
+  it("leaves images that fit alone", () => {
+    expect(downscaleSize(4096, 100)).toBeNull();
+    expect(downscaleSize(1200, 800)).toBeNull();
+  });
+
+  it("scales the long side to 4096 and keeps the aspect ratio", () => {
+    expect(downscaleSize(8000, 6000)).toEqual({ width: 4096, height: 3072 });
+    expect(downscaleSize(3000, 12288)).toEqual({ width: 1000, height: 4096 });
+  });
+
+  it("never rounds a thin side to zero", () => {
+    expect(downscaleSize(40960, 1)).toEqual({ width: 4096, height: 1 });
   });
 });

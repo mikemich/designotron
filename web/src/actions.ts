@@ -1,7 +1,8 @@
 // User-level actions shared by menus, keyboard shortcuts and context menus.
 
-import { addAsset, assetUrl, imageSize, knownImageSize, readFileAsDataUrl } from "./assets";
-import { fitNative } from "./imageAssets";
+import { addAsset, assetUrl, imageSize, knownImageSize, svgSize } from "./assets";
+import { MAX_IMAGE_SIDE, fitNative, prepareImageFile } from "./imageAssets";
+import { gridLayout, pastePlacement, scaledMessage } from "./imageDrop";
 import { exportPdf, exportProjectZip, fileSafe, pdfFrames } from "./exporter";
 import { download, getFileMeta, importDtron, pickFile, toDtron } from "./files";
 import {
@@ -128,7 +129,23 @@ export type BoolOp = "union" | "subtract" | "intersect" | "exclude";
 export const booleanOp = (operation: BoolOp) => selection().length > 1 && dispatch({ op: "booleanOp", ids: selection(), operation });
 export const flatten = () => selection().length && dispatch({ op: "flatten", ids: selection() });
 export const outlineStroke = () => selection().length && dispatch({ op: "outlineStroke", ids: selection() });
-export const useAsMask = () => selection().length && dispatch({ op: "useAsMask", ids: selection() });
+export function useAsMask() {
+  if (!selection().length) return;
+  const r = dispatch<{ id: string; isMask?: boolean }>({ op: "useAsMask", ids: selection() });
+  if (!r?.id) return;
+  const doc = getDoc();
+  const n = doc.nodes[r.id];
+  if (!n) return;
+  if (r.isMask === undefined) {
+    // Several layers were grouped: the bottom one (first in the group) is the mask.
+    const mask = doc.nodes[n.children[0]];
+    if (mask) toast(`“${mask.name}” now masks the layers above it (in Figma too, the bottom layer is the mask).`);
+  } else if (r.isMask) {
+    // One layer turned into a mask: it clips the siblings painted above it, so a top layer clips nothing.
+    const siblings = n.parent && doc.nodes[n.parent] ? doc.nodes[n.parent].children : doc.pages.find((p) => p.id === currentPage())?.children;
+    if (siblings && siblings.indexOf(n.id) === siblings.length - 1) toast(`“${n.name}” is a mask, but nothing is above it to clip. A mask clips the layers above it in its group.`);
+  }
+}
 export const reorder = (to: "front" | "back" | "forward" | "backward") => dispatch({ op: "reorder", ids: selection(), to });
 export const align = (how: "left" | "hCenter" | "right" | "top" | "vCenter" | "bottom") => dispatch({ op: "align", ids: selection(), how });
 export const distribute = (horizontal: boolean) => dispatch({ op: "distribute", ids: selection(), horizontal });
@@ -468,11 +485,18 @@ export function cut(e: ClipboardEvent) {
 export async function pasteFromClipboardData(e: ClipboardEvent) {
   const dt = e.clipboardData;
   if (!dt) return;
-  const image = [...dt.files].find((f) => f.type.startsWith("image/"));
-  if (image) {
+  const images = [...dt.files].filter((f) => f.type.startsWith("image/"));
+  if (images.length) {
     e.preventDefault();
-    const c = viewportCenter();
-    await insertImageFile(image, c.x, c.y);
+    // Into the selected frame (or the selected layer's frame) when it is in view, else the view centre as before.
+    const frame = pasteTarget();
+    const box = frame ? query<{ union: Rect | null }>({ q: "bounds", ids: [frame] }).union : null;
+    const { w, h } = canvasSize();
+    const a = screenToPage(0, 0);
+    const z = screenToPage(w, h);
+    const place = pastePlacement(box, { x: a.x, y: a.y, width: z.x - a.x, height: z.y - a.y });
+    if (images.length === 1 && !place.inFrame) await insertImageFile(images[0], place.at.x, place.at.y);
+    else await insertFiles(images, place.at, place.inFrame ? frame : undefined);
     return;
   }
   const text = dt.getData("text/plain");
@@ -612,14 +636,106 @@ export function isSvgText(text: string): boolean {
 }
 
 export async function insertImageFile(file: File, x: number, y: number) {
-  const url = await readFileAsDataUrl(file);
-  const id = addAsset(url);
-  // Its own size; only a side over 4096 px is scaled down.
-  const own = await imageSize(url);
-  const { width, height } = fitNative(own.width, own.height);
+  let img;
+  try {
+    img = await prepareImageFile(file);
+  } catch {
+    toast(`Couldn't read “${file.name}” as an image`, "error");
+    return;
+  }
+  if (img.scaledFrom) toast(scaledMessage(1, MAX_IMAGE_SIDE));
+  const id = addAsset(img.url);
+  // Its own size; only a side over 4096 px was scaled down.
+  const { width, height } = fitNative(img.width, img.height);
   // The frame under the drop point takes the image (the engine reads x and y as page coordinates).
   const parent = query<string | null>({ q: "frameAt", x, y, exclude: [] });
   dispatch({ op: "createImage", src: "asset:" + id, x: x - width / 2, y: y - height / 2, width, height, name: file.name.replace(/\.\w+$/, ""), parent });
+}
+
+/** A file ready to be placed: everything slow (reading, measuring, scaling) is done, so the batch can be applied in one go. */
+type Prepared =
+  | { kind: "image"; name: string; url: string; width: number; height: number; scaled: boolean }
+  | { kind: "svg"; name: string; text: string; width: number; height: number };
+
+/**
+ * Drops or pastes several files at once. Every file is read, measured and scaled first; then all of them
+ * are placed in one gesture (one undo step) in a grid centred on `at`, and the new layers are selected.
+ * SVGs become vectors as for a single drop, or an image when the importer refuses them. The frame under
+ * `at` (or `parent`) takes every layer. `.dtron` and `.json` files open as new files, after the rest.
+ * One file takes the single-file paths, so its placement is what it always was.
+ */
+export async function insertFiles(files: File[], at: { x: number; y: number }, parent?: string | null): Promise<void> {
+  const isSvg = (f: File) => f.type === "image/svg+xml" || /\.svg$/i.test(f.name);
+  const media = files.filter((f) => isSvg(f) || f.type.startsWith("image/"));
+  const projects = files.filter((f) => !media.includes(f) && (f.name.endsWith(".dtron") || f.name.endsWith(".json")));
+  if (media.length === 1 && parent === undefined) await (isSvg(media[0]) ? insertSvgFile(media[0], at.x, at.y) : insertImageFile(media[0], at.x, at.y));
+  else if (media.length) await placeBatch(media, at, parent, isSvg);
+  for (const f of projects) await openDtronFile(f);
+}
+
+async function placeBatch(media: File[], at: { x: number; y: number }, parent: string | null | undefined, isSvg: (f: File) => boolean) {
+  // A view-only visitor or a read-only tab can't add layers: say so once, not per file.
+  if (useStore.getState().es.readOnly || useCollab.getState().viewer) {
+    toast("This file is view-only", "error");
+    return;
+  }
+  const prepared: Prepared[] = [];
+  const failed: string[] = [];
+  for (const f of media) {
+    try {
+      if (isSvg(f) && f.size <= 8 * 1024 * 1024) {
+        const text = await f.text();
+        if (isSvgText(text)) {
+          const s = svgSize(text) ?? { width: 100, height: 100 };
+          prepared.push({ kind: "svg", name: f.name.replace(/\.\w+$/, "") || "SVG", text, width: Math.max(1, Math.round(s.width)), height: Math.max(1, Math.round(s.height)) });
+          continue;
+        }
+      }
+      const img = await prepareImageFile(f);
+      const size = fitNative(img.width, img.height);
+      prepared.push({ kind: "image", name: f.name.replace(/\.\w+$/, "") || "Image", url: img.url, ...size, scaled: !!img.scaledFrom });
+    } catch {
+      failed.push(f.name);
+    }
+  }
+  if (failed.length) toast(failed.length === 1 ? `Couldn't read “${failed[0]}” as an image` : `Couldn't read ${failed.length} files as images (skipped)`, "error");
+  if (!prepared.length) return;
+  const spots = gridLayout(prepared, at);
+  const frame = parent === undefined ? query<string | null>({ q: "frameAt", x: at.x, y: at.y, exclude: [] }) : parent;
+  const created: string[] = [];
+  let withChanges = 0;
+  let asImage = 0;
+  // From here on nothing is awaited: a collaborator's change can't land between the first layer and the last.
+  dispatch({ op: "beginGesture" });
+  try {
+    prepared.forEach((p, i) => {
+      const { x, y } = spots[i];
+      if (p.kind === "svg") {
+        try {
+          const r = dispatchOrThrow<{ id: string; warnings?: string[] }>({ op: "importSvg", svg: p.text, x: x + p.width / 2, y: y + p.height / 2, parent: frame, name: p.name });
+          created.push(r.id);
+          if (r.warnings?.length) withChanges++;
+          return;
+        } catch {
+          // Refused markup (text, filters, too big): an image of it, as for a single drop.
+          asImage++;
+        }
+        const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(p.text.replace(/^﻿/, "").trim());
+        const r = dispatch<{ id: string }>({ op: "createImage", src: "asset:" + addAsset(url), x, y, width: p.width, height: p.height, name: p.name, parent: frame });
+        if (r?.id) created.push(r.id);
+        return;
+      }
+      const r = dispatch<{ id: string }>({ op: "createImage", src: "asset:" + addAsset(p.url), x, y, width: p.width, height: p.height, name: p.name, parent: frame });
+      if (r?.id) created.push(r.id);
+    });
+  } finally {
+    dispatch({ op: "endGesture" });
+  }
+  if (created.length) dispatch({ op: "select", ids: created });
+  const scaled = prepared.filter((p) => p.kind === "image" && p.scaled).length;
+  if (scaled) toast(scaledMessage(scaled, MAX_IMAGE_SIDE));
+  else if (asImage) toast(`${asImage === 1 ? "1 SVG was" : `${asImage} SVGs were`} placed as ${asImage === 1 ? "an image" : "images"}: the importer can't read ${asImage === 1 ? "it" : "them"} as vectors.`);
+  else if (withChanges) toast(`${withChanges === 1 ? "1 SVG was" : `${withChanges} SVGs were`} placed as editable vectors, with some changes.`);
 }
 
 /** An image the file already holds (`asset:<id>` or a URL) as a new layer at its own size, centred on a point (the view centre by default). */

@@ -327,7 +327,7 @@ async function apiJson(env: PhotoEnv, provider: ProviderId, url: string): Promis
     try {
       return JSON.parse(text);
     } catch {
-      throw new PhotoError("http", `${spec.label} sent something that isn't JSON`);
+      throw new PhotoError("http", `${spec.label} sent an answer Designotron couldn't read. Try again in a moment.`);
     }
   } finally {
     clearTimeout(timer);

@@ -50,6 +50,8 @@ import { parseLetterSpacing, parseLineHeight } from "./textUnits";
 
 const begin = () => dispatch({ op: "beginGesture" });
 const end = () => dispatch({ op: "endGesture" });
+/** Whether a fill popover holds an undo gesture open (see the fill row's `setP`). */
+let paintPopoverOpen = false;
 
 function update(ids: string[], patch: Record<string, unknown>) {
   if (ids.length) dispatch({ op: "update", ids, patch });
@@ -1227,6 +1229,22 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
           if (onRange && np.type === "solid" && (p.type !== "solid" || np.color !== p.color) && styleTextSelection({ color: np.color })) return;
           // Anything else changes the real fill (the shown colour may be the range's, not the fill's).
           const next = onRange && np.type === "solid" && real.type === "solid" ? { ...np, color: real.color } : np;
+          // A new kind of paint or a new image is an undo step of its own; the sliders after it are the next one.
+          // Switching to Image is the first half of choosing one: it stays open until the image arrives.
+          const newSource = next.type !== real.type || (next.type === "image" && real.type === "image" && next.src !== real.src);
+          if (newSource && paintPopoverOpen) {
+            const joins = real.type === "image" && !real.src;
+            if (!joins) {
+              end();
+              begin();
+            }
+            set(list.map((x, j) => (j === i ? next : x)));
+            if (!(next.type === "image" && !next.src)) {
+              end();
+              begin();
+            }
+            return;
+          }
           set(list.map((x, j) => (j === i ? next : x)));
         };
         return (
@@ -1237,11 +1255,13 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
                 onChange={setP}
                 onOpen={() => {
                   begin();
+                  paintPopoverOpen = true;
                   // Gradient handles and the crop frame show on the canvas while the popover is open.
                   if (nodes.length === 1) useStore.setState({ paintEdit: { id: ids[0], key: keyName, index: i } });
                 }}
                 onClose={() => {
                   useStore.setState({ paintEdit: null });
+                  paintPopoverOpen = false;
                   end();
                 }}
               />

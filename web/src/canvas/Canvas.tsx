@@ -32,7 +32,7 @@ import { GuestBar } from "../panels/GuestBar";
 import { reportCursor, useCollab } from "../collab";
 import { assetUrl, noteRemoteImage } from "../assets";
 import { imagesIn } from "../imageAssets";
-import { getScaleStrokes, insertImageFile, insertSvgFile, joinVectorEnds, openDtronFile, pasteData, placeImageSource, toggleVectorPointSmooth, vectorPoints } from "../actions";
+import { getScaleStrokes, insertFiles, joinVectorEnds, pasteData, placeImageSource, toggleVectorPointSmooth, vectorPoints } from "../actions";
 import { canvasMenu, insideInstance } from "./contextMenu";
 import { limitCandidates, MAX_CANDIDATES, snapPoint } from "./vectorSnap";
 import { pickColorAt } from "./eyedropper";
@@ -1390,11 +1390,8 @@ export function Canvas() {
   async function onDrop(e: React.DragEvent) {
     e.preventDefault();
     const p = pagePt(e);
-    for (const f of [...e.dataTransfer.files]) {
-      if (f.type === "image/svg+xml" || /\.svg$/i.test(f.name)) await insertSvgFile(f, p.x, p.y);
-      else if (f.type.startsWith("image/")) await insertImageFile(f, p.x, p.y);
-      else if (f.name.endsWith(".dtron") || f.name.endsWith(".json")) await openDtronFile(f);
-    }
+    // Several files are laid out in a grid and placed as one undo step.
+    await insertFiles([...e.dataTransfer.files], p);
     const comp = e.dataTransfer.getData("application/x-designotron-component");
     const main = comp ? getDoc().nodes[comp] : null;
     // Centred on the pointer; the frame under the pointer (not the corner) is the parent,

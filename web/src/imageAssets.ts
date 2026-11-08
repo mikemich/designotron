@@ -1,5 +1,6 @@
 // Images of the open file, for the Assets tab (pure: it walks the JS copy of the document).
 
+import { readFileAsDataUrl, tryImageSize } from "./assets";
 import type { Doc, ImageCredit, Node, Paint } from "./types";
 
 export interface ImageUse {
@@ -28,6 +29,68 @@ export function fitNative(width: number, height: number, max = MAX_IMAGE_SIDE): 
   if (!(long > max)) return { width, height };
   const k = max / long;
   return { width: Math.max(1, Math.round(width * k)), height: Math.max(1, Math.round(height * k)) };
+}
+
+/** The size an image of `width` x `height` is stored at: scaled to `max` on the long side, or null when it fits. */
+export function downscaleSize(width: number, height: number, max = MAX_IMAGE_SIDE): { width: number; height: number } | null {
+  if (!(Math.max(width, height) > max)) return null;
+  return fitNative(width, height, max);
+}
+
+export interface PreparedImage {
+  /** The data URL to store as the asset. */
+  url: string;
+  width: number;
+  height: number;
+  /** The natural size, when the image was scaled down to fit `MAX_IMAGE_SIDE`. */
+  scaledFrom?: { width: number; height: number };
+}
+
+/**
+ * Reads an image file for placing: its bytes as a data URL and its size. A raster image over 4096 px on
+ * the long side is redrawn at 4096 (JPEG as JPEG at quality 0.92, WebP as WebP where the browser can
+ * write it, anything else as PNG). GIF (animation) and SVG (vectors) are never touched, and a file that
+ * fits keeps its bytes. Throws when the browser can't decode the file.
+ */
+export async function prepareImageFile(file: Blob): Promise<PreparedImage> {
+  const url = await readFileAsDataUrl(file);
+  const own = await tryImageSize(url);
+  if (!own) throw new Error("not an image the browser can read");
+  const small = downscaleSize(own.width, own.height);
+  const type = (file.type || /^data:([^;,]+)/.exec(url)?.[1] || "").toLowerCase();
+  if (!small || type === "image/gif" || type === "image/svg+xml") return { url, width: own.width, height: own.height };
+  try {
+    const scaled = await redraw(file, small.width, small.height, type);
+    return { url: await readFileAsDataUrl(scaled), width: small.width, height: small.height, scaledFrom: own };
+  } catch {
+    // Couldn't redraw (no canvas, out of memory): keep the original; the layer is still capped by fitNative.
+    return { url, ...fitNative(own.width, own.height) };
+  }
+}
+
+async function redraw(file: Blob, width: number, height: number, type: string): Promise<Blob> {
+  // The orientation is applied once, here; the canvas then holds upright pixels.
+  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+  try {
+    const mime = type === "image/jpeg" || type === "image/jpg" ? "image/jpeg" : type === "image/webp" ? "image/webp" : "image/png";
+    let blob: Blob | null;
+    if (typeof OffscreenCanvas !== "undefined") {
+      const c = new OffscreenCanvas(width, height);
+      c.getContext("2d")!.drawImage(bitmap, 0, 0, width, height);
+      blob = await c.convertToBlob({ type: mime, quality: 0.92 });
+    } else {
+      const c = document.createElement("canvas");
+      c.width = width;
+      c.height = height;
+      c.getContext("2d")!.drawImage(bitmap, 0, 0, width, height);
+      blob = await new Promise<Blob | null>((res) => c.toBlob(res, mime, 0.92));
+    }
+    // A browser that can't write WebP hands back PNG, and the blob's own type says so.
+    if (!blob) throw new Error("no pixels");
+    return blob;
+  } finally {
+    bitmap.close();
+  }
 }
 
 /** Every image paint of the layers on a page (`pageId`) or all pages (null), one entry per source in the
