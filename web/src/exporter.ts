@@ -5,6 +5,7 @@ import { assetDataUrl, assetExt, externalizeDataUrls, inlineAssets, referencedAs
 import { download } from "./files";
 import { buildPdf, deflate, splitRgba, type PdfPage } from "./pdf";
 import { currentPage, getDoc, query, toast } from "./store";
+import { plainError } from "./errors";
 import type { ExportSetting, Node, Rect } from "./types";
 
 /** Largest canvas browsers will allocate: 16384 px per side and about 268 megapixels in all. */
@@ -89,7 +90,7 @@ async function rasterise(svg: string, scale: number, background?: string, forceB
     canvas.width = Math.max(1, Math.min(MAX_SIDE, Math.round(w * scale)));
     canvas.height = Math.max(1, Math.min(MAX_SIDE, Math.round(h * scale)));
     const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("the browser could not allocate an image this large");
+    if (!ctx) throw new Error("The browser could not allocate an image this large");
     if (background || forceBackground) {
       ctx.fillStyle = background ?? "#FFFFFF";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -228,7 +229,7 @@ export interface ExportFile {
 /** One exported file for a layer and a row. A raster that is too large is scaled down with a toast. */
 export async function renderExport(id: string, row: ExportSetting): Promise<ExportFile> {
   const node = getDoc().nodes[id];
-  if (!node) throw new Error("the layer no longer exists");
+  if (!node) throw new Error("The layer no longer exists");
   const svg = nodeSvg(id);
   // A "/" in the layer name is a folder inside a zip, as in Figma.
   const base = zipPath(node.name);
@@ -264,7 +265,7 @@ export async function exportLayers(ids: string[]) {
       try {
         files.push(await renderExport(id, row));
       } catch (err) {
-        toast(`Could not export ${node.name}: ${err instanceof Error ? err.message : String(err)}`, "error");
+        toast(`Could not export ${node.name}: ${plainError(err)}`, "error");
       }
     }
   }
@@ -350,13 +351,13 @@ export async function exportPdf(ids: string[]) {
       const used = canvas.width / Math.max(w, 1);
       if (used < PDF_SCALE - 0.01) toast(`${doc.nodes[id].name} is large, so its PDF page is rendered at ${Math.round(used * 100) / 100}x`);
       const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("the browser could not read the image back");
+      if (!ctx) throw new Error("The browser could not read the image back");
       const { rgb, alpha } = splitRgba(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
       // Only the compressed bytes stay, so a long document doesn't hold every page's pixels.
       pages.push({ widthPt: w, heightPt: h, pxW: canvas.width, pxH: canvas.height, rgbZ: await deflate(rgb), alphaZ: alpha ? await deflate(alpha) : undefined });
       canvas.width = canvas.height = 0;
     } catch (err) {
-      toast(`Could not export ${doc.nodes[id].name}: ${err instanceof Error ? err.message : String(err)}`, "error");
+      toast(`Could not export ${doc.nodes[id].name}: ${plainError(err)}`, "error");
     }
   }
   if (!pages.length) return;
@@ -372,7 +373,7 @@ export async function copyAsPng(id: string) {
   const node = getDoc().nodes[id];
   if (!node) return;
   try {
-    if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) throw new Error("this browser can't copy images");
+    if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) throw new Error("This browser can't copy images");
     const svg = nodeSvg(id);
     const { w, h } = svgSize(svg);
     // The promise goes in unresolved so the copy still counts as the user's click while it renders.
@@ -380,7 +381,7 @@ export async function copyAsPng(id: string) {
     await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
     toast(`Copied ${node.name} as PNG`);
   } catch (err) {
-    toast(`Could not copy as PNG: ${err instanceof Error ? err.message : String(err)}`, "error");
+    toast(`Could not copy as PNG: ${plainError(err)}`, "error");
   }
 }
 
@@ -397,7 +398,7 @@ export async function copyText(text: string, done: string, what: string) {
     await navigator.clipboard.writeText(text);
     toast(done);
   } catch (err) {
-    toast(`Could not copy as ${what}: ${err instanceof Error ? err.message : String(err)}`, "error");
+    toast(`Could not copy as ${what}: ${plainError(err)}`, "error");
   }
 }
 

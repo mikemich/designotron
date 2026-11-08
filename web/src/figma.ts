@@ -14,6 +14,8 @@ export function parseFigmaUrl(url: string): { key: string; nodeId: string | null
   return { key: m[1], nodeId: node ? node.replace(/-/g, ":") : null };
 }
 
+const COULD_NOT_REACH = "Couldn't reach the Figma API. Check your connection, or start the Designotron bridge (setup steps in the Claude panel) and try again.";
+
 async function api(path: string, query: string, token: string): Promise<any> {
   const direct = `https://api.figma.com/v1/${path}${query ? `?${query}` : ""}`;
   let res: Response | null = null;
@@ -25,20 +27,23 @@ async function api(path: string, query: string, token: string): Promise<any> {
       await bridgeChecked();
       res = await fetch(`${bridgeHttpBase()}/bridge/figma?path=${encodeURIComponent(path)}&query=${encodeURIComponent(query)}&token=${encodeURIComponent(token)}`);
     } catch {
-      throw new Error("Couldn't reach the Figma API. Check your connection, or start the Designotron bridge (setup steps in the Claude panel) and try again.");
+      throw new Error(COULD_NOT_REACH);
     }
   }
   const text = await res.text();
   if (!res.ok) {
-    let msg = text;
+    if (res.status === 403) throw new Error("Figma refused the token. Create a personal access token with file read access (Figma → Settings → Security).");
+    if (res.status === 404) throw new Error("File not found. Check the link, and that the token's account can open the file.");
+    // An empty body or a gateway error is the dev proxy (or the bridge) failing to reach Figma.
+    if (!text.trim() || [500, 502, 503, 504].includes(res.status)) throw new Error(COULD_NOT_REACH);
+    let msg = "";
     try {
-      msg = JSON.parse(text).err ?? JSON.parse(text).message ?? text;
+      const j = JSON.parse(text);
+      msg = typeof j.err === "string" ? j.err : typeof j.message === "string" ? j.message : "";
     } catch {
-      /* plain text */
+      /* not JSON */
     }
-    if (res.status === 403) msg = "Figma refused the token. Create a personal access token with file read access (Figma → Settings → Security).";
-    if (res.status === 404) msg = "File not found. Check the link, and that the token's account can open the file.";
-    throw new Error(msg);
+    throw new Error(msg || `Figma answered with an error (${res.status}).`);
   }
   return JSON.parse(text);
 }
@@ -122,5 +127,5 @@ export function figmaFileName(file: unknown): string | undefined {
 export function checkFigmaJson(file: unknown): void {
   const f = file as { document?: { children?: unknown }; nodes?: unknown } | null;
   const ok = Array.isArray(f?.document?.children) || (!!f?.nodes && typeof f.nodes === "object" && !Array.isArray(f.nodes));
-  if (!ok) throw new Error("not a Figma file: expected the JSON from the Figma REST API (/v1/files/:key)");
+  if (!ok) throw new Error("This is not a Figma file: expected the JSON from the Figma REST API (/v1/files/:key)");
 }

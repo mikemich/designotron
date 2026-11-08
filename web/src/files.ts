@@ -2,6 +2,7 @@
 
 import {
   createStore,
+  type UseStore,
   get as idbGet,
   set as idbSet,
   del as idbDel,
@@ -9,7 +10,7 @@ import {
 } from "idb-keyval";
 import { allAssets, assetDataUrl, loadAssets, referencedAssets } from "./assets";
 import { dropConversation } from "./ai/conversations";
-import { documentLoads, toast } from "./store";
+import { bootEngine, documentLoads, toast } from "./store";
 
 import {
   FolderGoneError,
@@ -192,7 +193,7 @@ async function get(key: string): Promise<unknown> {
   await ensureOpen();
   if (idbOk) {
     try {
-      const v = await idbGet(key);
+      const v = await idbGet(key, keyval);
       idbWorked = true;
       if (v !== undefined) idbHadData = true;
       return v;
@@ -213,7 +214,7 @@ async function set(key: string, value: unknown): Promise<void> {
   memoryWrites++;
   if (idbOk) {
     try {
-      await idbSet(key, value);
+      await idbSet(key, value, keyval);
       idbWrote = true;
     } catch (err) {
       if (!mayGiveUp(err)) throw err;
@@ -229,7 +230,7 @@ async function del(key: string): Promise<void> {
   memoryWrites++;
   if (idbOk) {
     try {
-      await idbDel(key);
+      await idbDel(key, keyval);
       idbWrote = true;
     } catch (err) {
       if (!mayGiveUp(err)) throw err;
@@ -247,7 +248,7 @@ async function getMany(keys: string[]): Promise<unknown[]> {
   await ensureOpen();
   if (idbOk) {
     try {
-      const v = await idbGetMany(keys);
+      const v = await idbGetMany(keys, keyval);
       idbWorked = true;
       if (v.some((x) => x !== undefined)) idbHadData = true;
       return v;
@@ -266,7 +267,24 @@ interface Writes {
   del: string[];
 }
 
-const keyval = createStore("keyval-store", "keyval");
+/** The idb-keyval store, opened on first use and forgotten when the open fails, so a later probe
+ * opens again. `createStore` calls `indexedDB.open` at once, so it must never run at import (a
+ * browser that refuses IndexedDB would fail this whole module) and idb-keyval's own cached default
+ * store is never used (it would keep a rejected open forever). */
+let kvStore: UseStore | null = null;
+const keyval: UseStore = (mode, cb) => {
+  let s: UseStore;
+  try {
+    s = kvStore ??= createStore("keyval-store", "keyval");
+  } catch (err) {
+    kvStore = null;
+    return Promise.reject(err);
+  }
+  return s(mode, cb).catch((err) => {
+    if (kvStore === s) kvStore = null;
+    throw err;
+  });
+};
 
 /**
  * Reads `readKeys`, lets `decide` (synchronously) choose what to write and delete from what
@@ -433,8 +451,8 @@ export async function probeStorage(): Promise<boolean> {
   if (probing) return false;
   probing = true;
   try {
-    await idbSet(probeKey, 1);
-    await idbDel(probeKey);
+    await idbSet(probeKey, 1, keyval);
+    await idbDel(probeKey, keyval);
     // Copy until a pass finds nothing new in memory; then switch over in the same breath (no
     // await between the check and the switch), so no write can reach memory and be wiped.
     for (let pass = 0; pass < 8; pass++) {
@@ -1062,15 +1080,26 @@ export function toDtron(docJson: string): string {
   return JSON.stringify(file);
 }
 
-/** Accepts a `.dtron` wrapper or a bare document JSON; returns document JSON. */
-export function fromDtron(text: string): string {
+/** The `.dtron` wrapper version and document schema this editor writes (mirrors `model::SCHEMA_VERSION`). */
+const DTRON_VERSION = 1;
+const SCHEMA_VERSION = 1;
+
+/** What a `.dtron` text holds: the document JSON and the versions it was written with (a missing
+ * one counts as 1). */
+export function readDtron(text: string): { json: string; version: number; schema: number } {
   const v = JSON.parse(text);
+  const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? x : 1);
   if (v && v.format === "designotron") {
     loadAssets(v.assets);
-    return JSON.stringify(v.document);
+    return { json: JSON.stringify(v.document), version: num(v.version), schema: num(v.document?.schema) };
   }
-  if (v && Array.isArray(v.pages) && v.nodes) return text;
+  if (v && Array.isArray(v.pages) && v.nodes) return { json: text, version: 1, schema: num(v.schema) };
   throw new Error("Not a Designotron file");
+}
+
+/** Accepts a `.dtron` wrapper or a bare document JSON; returns document JSON. */
+export function fromDtron(text: string): string {
+  return readDtron(text).json;
 }
 
 export function download(name: string, data: BlobPart, mime: string) {
@@ -1092,17 +1121,44 @@ export function pickFile(accept: string): Promise<File | null> {
   });
 }
 
-/** Saves a .dtron file's contents as a new file (never over an open one) and returns its id. */
-export async function importDtron(text: string, fallbackName: string, folder?: string): Promise<string> {
-  let json: string;
+const NEWER_FILE = "This file was made with a newer version of Designotron. Update the app to open it.";
+
+/** The engine's complaint about a document it can't load ("" when it loads after all). */
+async function loadError(json: string): Promise<string> {
+  await bootEngine();
+  const { WasmEngine } = await import("./wasm/pkg/designotron_engine_wasm");
+  const probe = new WasmEngine(1);
   try {
-    json = fromDtron(text);
+    probe.load(json);
+    return "";
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  } finally {
+    probe.free();
+  }
+}
+
+/** Saves a .dtron file's contents as a new file (never over an open one) and returns its id.
+ * A file made by a newer editor opens with a warning, or is refused as "newer" (not "damaged")
+ * when this editor can't read it. Opening a name you already have makes a new copy and says so. */
+export async function importDtron(text: string, fallbackName: string, folder?: string): Promise<string> {
+  let file: ReturnType<typeof readDtron>;
+  try {
+    file = readDtron(text);
   } catch {
     throw new Error("That isn't a Designotron file, or it's damaged.");
   }
-  if (!(await documentLoads(json))) throw new Error("That Designotron file is damaged and can't be opened.");
+  const newer = file.version > DTRON_VERSION || file.schema > SCHEMA_VERSION;
+  if (!(await documentLoads(file.json))) {
+    if (newer || /unknown variant/.test(await loadError(file.json))) throw new Error(NEWER_FILE);
+    throw new Error("That Designotron file is damaged and can't be opened.");
+  }
+  const name: string = JSON.parse(file.json).name || fallbackName;
+  const exists = (await listFiles()).some((f) => f.name === name);
   const id = newFileId();
-  await saveFile(id, JSON.parse(json).name || fallbackName, json, { folder });
+  await saveFile(id, name, file.json, { folder });
+  if (newer) toast("This file was made with a newer version of Designotron; parts of it may be missing.", "error");
+  else if (exists) toast(`Opened as a new file (you already have \u201C${name}\u201D).`);
   return id;
 }
 

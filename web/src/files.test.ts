@@ -3,7 +3,20 @@
 import "fake-indexeddb/auto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("./store", () => ({ documentLoads: async () => true, toast: () => {} }));
+const mocks = vi.hoisted(() => ({ toast: vi.fn() }));
+vi.mock("./store", () => ({
+  bootEngine: async () => {},
+  documentLoads: async (json: string) => !json.includes("onTeleport"),
+  toast: mocks.toast,
+}));
+vi.mock("./wasm/pkg/designotron_engine_wasm", () => ({
+  WasmEngine: class {
+    load(json: string) {
+      if (json.includes("onTeleport")) throw new Error("unknown variant `onTeleport`, expected one of `onClick`");
+    }
+    free() {}
+  },
+}));
 vi.mock("./assets", () => ({
   allAssets: () => ({}),
   assetDataUrl: () => null,
@@ -134,5 +147,72 @@ describe("duplicating a file", () => {
     expect((await files.getFileMeta(nid!))?.folder).toBe("fo1");
     // The original is untouched.
     expect(JSON.parse((await files.loadFile("f1"))!).id).toBe("d_orig");
+  });
+});
+
+describe("storage that the browser refuses", () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it("loads when indexedDB.open throws, works in memory, and the probe recovers", async () => {
+    const open = vi.spyOn(indexedDB, "open").mockImplementation(() => {
+      throw new DOMException("denied", "SecurityError");
+    });
+    vi.resetModules();
+    const files = await import("./files");
+    await files.saveFile("m1", "Mem", DOC("Mem"));
+    expect((await files.listFiles()).map((f) => f.id)).toContain("m1");
+    expect(files.persistentStorage()).toBe(false);
+    open.mockRestore();
+    expect(await files.probeStorage()).toBe(true);
+    expect(files.persistentStorage()).toBe(true);
+    expect(await raw("dt:file:m1")).toBeTruthy();
+  });
+
+  it("recovers after an open that fails asynchronously (onerror)", async () => {
+    const real = indexedDB.open.bind(indexedDB);
+    let first = true;
+    vi.spyOn(indexedDB, "open").mockImplementation((...a: Parameters<typeof real>) => {
+      if (!first) return real(...a);
+      first = false;
+      const req: Partial<IDBOpenDBRequest> = {};
+      setTimeout(() => (req.onerror as (() => void) | null | undefined)?.call(req as IDBOpenDBRequest), 0);
+      return req as IDBOpenDBRequest;
+    });
+    vi.resetModules();
+    const files = await import("./files");
+    await files.saveFile("m2", "Mem", DOC("Mem"));
+    expect(files.persistentStorage()).toBe(false);
+    expect(await files.probeStorage()).toBe(true);
+    expect(await raw("dt:file:m2")).toBeTruthy();
+  });
+});
+
+describe("importing a .dtron", () => {
+  const wrap = (version: number, doc: object) => JSON.stringify({ format: "designotron", version, document: doc, assets: {} });
+  const base = { name: "Imp", schema: 1, pages: [{ id: "p", name: "Page 1", children: [] }], nodes: {} };
+  beforeEach(() => mocks.toast.mockClear());
+
+  it("opens a newer file that loads, with a warning", async () => {
+    const files = await fresh();
+    const id = await files.importDtron(wrap(99, base), "x");
+    expect(await files.loadFile(id)).toBeTruthy();
+    expect(mocks.toast.mock.calls[0][0]).toMatch(/newer version/);
+  });
+
+  it("refuses a newer file it can't read as 'newer', not 'damaged'", async () => {
+    const files = await fresh();
+    await expect(files.importDtron(wrap(99, { ...base, trigger: "onTeleport" }), "x")).rejects.toThrow(/newer version/);
+    // Even without a version bump: the engine's own "unknown variant" says so.
+    await expect(files.importDtron(wrap(1, { ...base, trigger: "onTeleport" }), "x")).rejects.toThrow(/newer version/);
+    await expect(files.importDtron("{}", "x")).rejects.toThrow(/Designotron file/);
+  });
+
+  it("makes a new copy each time and says when the name exists", async () => {
+    const files = await fresh();
+    const a = await files.importDtron(wrap(1, base), "x");
+    expect(mocks.toast).not.toHaveBeenCalled();
+    const b = await files.importDtron(wrap(1, base), "x");
+    expect(b).not.toBe(a);
+    expect(mocks.toast.mock.calls[0][0]).toContain("you already have");
   });
 });
