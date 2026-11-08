@@ -469,6 +469,16 @@ export function pasteTarget(): string | null {
   return n.parent && doc.nodes[n.parent] && ["frame", "component"].includes(doc.nodes[n.parent].type) ? n.parent : null;
 }
 
+/** Whether a layer, or any layer above it, is an instance, a part of one (`masterId`) or hidden. */
+function inInstanceOrHidden(id: string): boolean {
+  const doc = getDoc();
+  let n: Node | undefined = doc.nodes[id];
+  for (let hops = 0; n && hops < 1000; n = n.parent ? doc.nodes[n.parent] : undefined, hops++) {
+    if (n.type === "instance" || n.masterId || n.visible === false) return true;
+  }
+  return false;
+}
+
 export function copyToClipboardData(e: ClipboardEvent) {
   const ids = selection();
   if (!ids.length) return;
@@ -489,7 +499,9 @@ export async function pasteFromClipboardData(e: ClipboardEvent) {
   if (images.length) {
     e.preventDefault();
     // Into the selected frame (or the selected layer's frame) when it is in view, else the view centre as before.
-    const frame = pasteTarget();
+    // Not into an instance (or a frame inside one) or a hidden frame: those can't take new layers or show them.
+    const target = pasteTarget();
+    const frame = target && !inInstanceOrHidden(target) ? target : null;
     const box = frame ? query<{ union: Rect | null }>({ q: "bounds", ids: [frame] }).union : null;
     const { w, h } = canvasSize();
     const a = screenToPage(0, 0);
@@ -706,6 +718,9 @@ async function placeBatch(media: File[], at: { x: number; y: number }, parent: s
   let withChanges = 0;
   let asImage = 0;
   // From here on nothing is awaited: a collaborator's change can't land between the first layer and the last.
+  // A paint popover may hold a gesture open (its undo step): close it for the batch and open it again after.
+  const inside = useStore.getState().es.inGesture;
+  if (inside) dispatch({ op: "endGesture" });
   dispatch({ op: "beginGesture" });
   try {
     prepared.forEach((p, i) => {
@@ -720,7 +735,7 @@ async function placeBatch(media: File[], at: { x: number; y: number }, parent: s
           // Refused markup (text, filters, too big): an image of it, as for a single drop.
           asImage++;
         }
-        const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(p.text.replace(/^﻿/, "").trim());
+        const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(p.text.replace(/^\uFEFF/, "").trim());
         const r = dispatch<{ id: string }>({ op: "createImage", src: "asset:" + addAsset(url), x, y, width: p.width, height: p.height, name: p.name, parent: frame });
         if (r?.id) created.push(r.id);
         return;
@@ -730,12 +745,16 @@ async function placeBatch(media: File[], at: { x: number; y: number }, parent: s
     });
   } finally {
     dispatch({ op: "endGesture" });
+    if (inside) dispatch({ op: "beginGesture" });
   }
   if (created.length) dispatch({ op: "select", ids: created });
+  // One toast with every note: scaled images, SVGs placed as images, SVGs that came in with changes.
   const scaled = prepared.filter((p) => p.kind === "image" && p.scaled).length;
-  if (scaled) toast(scaledMessage(scaled, MAX_IMAGE_SIDE));
-  else if (asImage) toast(`${asImage === 1 ? "1 SVG was" : `${asImage} SVGs were`} placed as ${asImage === 1 ? "an image" : "images"}: the importer can't read ${asImage === 1 ? "it" : "them"} as vectors.`);
-  else if (withChanges) toast(`${withChanges === 1 ? "1 SVG was" : `${withChanges} SVGs were`} placed as editable vectors, with some changes.`);
+  const notes: string[] = [];
+  if (scaled) notes.push(scaledMessage(scaled, MAX_IMAGE_SIDE));
+  if (asImage) notes.push(`${asImage === 1 ? "1 SVG was" : `${asImage} SVGs were`} placed as ${asImage === 1 ? "an image" : "images"}: the importer can't read ${asImage === 1 ? "it" : "them"} as vectors.`);
+  if (withChanges) notes.push(`${withChanges === 1 ? "1 SVG was" : `${withChanges} SVGs were`} placed as editable vectors, with some changes.`);
+  if (notes.length) toast(notes.join(" "));
 }
 
 /** An image the file already holds (`asset:<id>` or a URL) as a new layer at its own size, centred on a point (the view centre by default). */

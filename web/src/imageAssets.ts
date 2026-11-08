@@ -59,13 +59,45 @@ export async function prepareImageFile(file: Blob): Promise<PreparedImage> {
   const small = downscaleSize(own.width, own.height);
   const type = (file.type || /^data:([^;,]+)/.exec(url)?.[1] || "").toLowerCase();
   if (!small || type === "image/gif" || type === "image/svg+xml") return { url, width: own.width, height: own.height };
+  // Animated PNG, WebP and AVIF would lose their frames on a canvas: like a GIF, they keep their bytes.
+  if (isAnimated(new Uint8Array(await file.slice(0, SNIFF_BYTES).arrayBuffer()))) return { url, ...fitNative(own.width, own.height) };
   try {
     const scaled = await redraw(file, small.width, small.height, type);
+    // Some formats grow when redrawn (an optimised PNG, a well compressed WebP): keep the original then.
+    if (scaled.size >= file.size) return { url, ...fitNative(own.width, own.height) };
     return { url: await readFileAsDataUrl(scaled), width: small.width, height: small.height, scaledFrom: own };
   } catch {
     // Couldn't redraw (no canvas, out of memory): keep the original; the layer is still capped by fitNative.
     return { url, ...fitNative(own.width, own.height) };
   }
+}
+
+/** How much of a file is read to tell whether it is animated. */
+const SNIFF_BYTES = 64 * 1024;
+
+/** Whether the start of an image file says it is animated: an APNG (an `acTL` chunk before the first `IDAT`),
+ *  an animated WebP (the animation flag of `VP8X`, or an `ANIM` chunk) or an AVIF sequence (the `avis` brand). */
+export function isAnimated(b: Uint8Array): boolean {
+  const ascii = (at: number, s: string) => b.length >= at + s.length && [...s].every((c, i) => b[at + i] === c.charCodeAt(0));
+  if (ascii(1, "PNG")) {
+    for (let at = 8; at + 8 <= b.length; ) {
+      const len = ((b[at] << 24) | (b[at + 1] << 16) | (b[at + 2] << 8) | b[at + 3]) >>> 0;
+      if (ascii(at + 4, "acTL")) return true;
+      if (ascii(at + 4, "IDAT")) return false;
+      at += 12 + len;
+    }
+    return false;
+  }
+  if (ascii(0, "RIFF") && ascii(8, "WEBP")) {
+    if (ascii(12, "VP8X") && b.length > 20 && (b[20] & 0x02) !== 0) return true;
+    for (let at = 12; at + 4 <= b.length; at++) if (ascii(at, "ANIM")) return true;
+    return false;
+  }
+  if (ascii(4, "ftyp")) {
+    const size = Math.min(((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]) >>> 0, b.length);
+    for (let at = 8; at + 4 <= size; at += 4) if (ascii(at, "avis")) return true;
+  }
+  return false;
 }
 
 async function redraw(file: Blob, width: number, height: number, type: string): Promise<Blob> {
@@ -76,13 +108,17 @@ async function redraw(file: Blob, width: number, height: number, type: string): 
     let blob: Blob | null;
     if (typeof OffscreenCanvas !== "undefined") {
       const c = new OffscreenCanvas(width, height);
-      c.getContext("2d")!.drawImage(bitmap, 0, 0, width, height);
+      const g = c.getContext("2d")!;
+      g.imageSmoothingQuality = "high";
+      g.drawImage(bitmap, 0, 0, width, height);
       blob = await c.convertToBlob({ type: mime, quality: 0.92 });
     } else {
       const c = document.createElement("canvas");
       c.width = width;
       c.height = height;
-      c.getContext("2d")!.drawImage(bitmap, 0, 0, width, height);
+      const g = c.getContext("2d")!;
+      g.imageSmoothingQuality = "high";
+      g.drawImage(bitmap, 0, 0, width, height);
       blob = await new Promise<Blob | null>((res) => c.toBlob(res, mime, 0.92));
     }
     // A browser that can't write WebP hands back PNG, and the blob's own type says so.

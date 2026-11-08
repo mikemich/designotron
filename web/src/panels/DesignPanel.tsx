@@ -50,8 +50,6 @@ import { parseLetterSpacing, parseLineHeight } from "./textUnits";
 
 const begin = () => dispatch({ op: "beginGesture" });
 const end = () => dispatch({ op: "endGesture" });
-/** Whether a fill popover holds an undo gesture open (see the fill row's `setP`). */
-let paintPopoverOpen = false;
 
 function update(ids: string[], patch: Record<string, unknown>) {
   if (ids.length) dispatch({ op: "update", ids, patch });
@@ -1169,6 +1167,17 @@ function isClosedVector(n: Node): boolean {
 function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: Node[]; ids: string[]; keyName: "fills" | "strokes" }) {
   const paints = common(nodes, (n) => n[keyName]);
   const list: Paint[] = paints === MIXED ? [] : paints;
+  // Whether a fill popover holds an undo gesture open (see the row's `setP`); a section that goes away with one open closes it.
+  const popOpen = useRef(false);
+  useEffect(
+    () => () => {
+      if (popOpen.current) {
+        popOpen.current = false;
+        end();
+      }
+    },
+    [],
+  );
   // While characters of the text being edited are selected, the first visible solid fill row shows
   // their colour and a colour edit there styles just the range. The real fills are never replaced.
   let rangeTop = -1;
@@ -1232,7 +1241,7 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
           // A new kind of paint or a new image is an undo step of its own; the sliders after it are the next one.
           // Switching to Image is the first half of choosing one: it stays open until the image arrives.
           const newSource = next.type !== real.type || (next.type === "image" && real.type === "image" && next.src !== real.src);
-          if (newSource && paintPopoverOpen) {
+          if (newSource && popOpen.current) {
             const joins = real.type === "image" && !real.src;
             if (!joins) {
               end();
@@ -1255,13 +1264,13 @@ function PaintsSection({ title, nodes, ids, keyName }: { title: string; nodes: N
                 onChange={setP}
                 onOpen={() => {
                   begin();
-                  paintPopoverOpen = true;
+                  popOpen.current = true;
                   // Gradient handles and the crop frame show on the canvas while the popover is open.
                   if (nodes.length === 1) useStore.setState({ paintEdit: { id: ids[0], key: keyName, index: i } });
                 }}
                 onClose={() => {
                   useStore.setState({ paintEdit: null });
-                  paintPopoverOpen = false;
+                  popOpen.current = false;
                   end();
                 }}
               />

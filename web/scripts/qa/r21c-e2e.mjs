@@ -269,6 +269,53 @@ try {
     check("a selected frame out of view is ignored (view centre, as before)", n?.parent === cf.id, n?.parent);
   }
 
+  // ===== 3b. Not into an instance, or a frame inside one =====
+  {
+    await newFile();
+    await view();
+    const made = (await tool("create_nodes", { nodes: [{ type: "frame", name: "Main", x: 100, y: 100, width: 300, height: 200, fill: "#FFFFFF", children: [{ type: "frame", name: "Part", x: 20, y: 20, width: 100, height: 100, fill: "#EEEEEE" }] }] })).result.created[0].id;
+    await run({ op: "createComponent", ids: [made] });
+    const comp = Object.values(await nodes()).find((n) => n.type === "component");
+    await run({ op: "createInstance", componentId: comp.id, x: 600, y: 100, parent: null });
+    const all = await nodes();
+    const inst = Object.values(all).find((n) => n.type === "instance");
+    const part = Object.values(all).find((n) => n.name === "Part" && n.masterId);
+    check("a frame inside an instance exists", !!inst && !!part);
+    await run({ op: "select", ids: [part.id] });
+    await paste({ name: "into-inst.png", w: 40, h: 40 });
+    await sleep(500);
+    const n = Object.values(await nodes()).find((x) => x.name === "into-inst");
+    const under = (id) => {
+      for (let c = all[id]; c; c = c.parent ? all[c.parent] : null) if (c.id === inst.id) return true;
+      return false;
+    };
+    check("pasting with a frame inside an instance selected does not go into the instance", !!n && !(n.parent && (under(n.parent) || (all[n.parent] ?? {}).masterId)), n?.parent);
+  }
+
+  // ===== 3c. A paste while a paint popover is open keeps the popover's undo steps =====
+  {
+    await newFile();
+    await view();
+    const id = (await tool("create_nodes", { nodes: [{ type: "rectangle", name: "Pop", x: 100, y: 100, width: 100, height: 100, fill: "#3366FF" }] })).result.created[0].id;
+    await run({ op: "select", ids: [id] });
+    await sleep(300);
+    await page.locator(".panel.right button.swatch").first().click();
+    await page.waitForSelector(".popover");
+    await page.click(".popover .paint-type button:has-text('Linear')");
+    await sleep(200);
+    await paste({ name: "during.png", w: 50, h: 50 });
+    await waitLayers(1);
+    await sleep(300);
+    await page.keyboard.press("Escape");
+    await sleep(200);
+    const type = async () => (await nodes())[id].fills[0].type;
+    check("the paste happened and the gradient is still there", (await type()) === "linearGradient");
+    await undo();
+    check("first undo removes the pasted image only", (await layers()).length === 0 && (await type()) === "linearGradient", `${(await layers()).length} ${await type()}`);
+    await undo();
+    check("second undo restores the solid fill", (await type()) === "solid", await type());
+  }
+
   // ===== 4. Choosing an image is its own undo step =====
   {
     await newFile();

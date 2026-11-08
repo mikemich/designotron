@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { downscaleSize, fitNative, imagesIn, isAssetSrc } from "./imageAssets";
+import { downscaleSize, fitNative, imagesIn, isAnimated, isAssetSrc } from "./imageAssets";
 import type { Doc, Node, Paint } from "./types";
 
 const img = (src: string, extra: Partial<Extract<Paint, { type: "image" }>> = {}): Paint => ({ type: "image", src, scaleMode: "fill", opacity: 1, visible: true, ...extra });
@@ -88,5 +88,38 @@ describe("downscaleSize", () => {
 
   it("never rounds a thin side to zero", () => {
     expect(downscaleSize(40960, 1)).toEqual({ width: 4096, height: 1 });
+  });
+});
+
+describe("isAnimated", () => {
+  const ascii = (s: string) => [...s].map((c) => c.charCodeAt(0));
+  const chunk = (name: string, len: number) => [0, 0, 0, len, ...ascii(name), ...new Array(len + 4).fill(0)];
+  const png = (...chunks: number[][]) => new Uint8Array([0x89, ...ascii("PNG"), 13, 10, 26, 10, ...chunks.flat()]);
+
+  it("finds an APNG by its acTL chunk before the first IDAT", () => {
+    expect(isAnimated(png(chunk("IHDR", 13), chunk("acTL", 8), chunk("IDAT", 4)))).toBe(true);
+  });
+
+  it("does not call a plain PNG animated, nor one with acTL only after the image data", () => {
+    expect(isAnimated(png(chunk("IHDR", 13), chunk("IDAT", 4)))).toBe(false);
+    expect(isAnimated(png(chunk("IHDR", 13), chunk("IDAT", 4), chunk("acTL", 8)))).toBe(false);
+  });
+
+  it("reads the animation flag of a WebP's VP8X chunk, or an ANIM chunk", () => {
+    const head = [...ascii("RIFF"), 0, 0, 0, 0, ...ascii("WEBP"), ...ascii("VP8X"), 10, 0, 0, 0];
+    expect(isAnimated(new Uint8Array([...head, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0]))).toBe(true);
+    expect(isAnimated(new Uint8Array([...head, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0]))).toBe(false);
+    expect(isAnimated(new Uint8Array([...ascii("RIFF"), 0, 0, 0, 0, ...ascii("WEBP"), ...ascii("VP8 "), 4, 0, 0, 0, 0, 0, 0, 0, ...ascii("ANIM")]))).toBe(true);
+  });
+
+  it("finds an AVIF sequence by its avis brand, but not a still AVIF", () => {
+    const ftyp = (brand: string) => new Uint8Array([0, 0, 0, 16, ...ascii("ftyp"), ...ascii(brand), 0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(isAnimated(ftyp("avis"))).toBe(true);
+    expect(isAnimated(ftyp("avif"))).toBe(false);
+  });
+
+  it("is false for JPEG, GIF-less junk and short input", () => {
+    expect(isAnimated(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]))).toBe(false);
+    expect(isAnimated(new Uint8Array([]))).toBe(false);
   });
 });
