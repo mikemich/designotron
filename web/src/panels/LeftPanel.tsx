@@ -358,7 +358,13 @@ function RenameInput({ value, label, tabs, onDone }: { value: string; label: str
 }
 
 export function nodeIcon(n: Node, size = 13) {
-  if (n.isMask) return <SquareDashed size={size} />;
+  if (n.isMask) {
+    return (
+      <span className="mask-icon" title="Mask: clips the layers above it" aria-label="Mask: clips the layers above it" role="img" style={{ display: "inline-flex" }}>
+        <SquareDashed size={size} />
+      </span>
+    );
+  }
   switch (n.type) {
     case "frame":
       return n.layout ? <Frame size={size} /> : <Hash size={size} />;

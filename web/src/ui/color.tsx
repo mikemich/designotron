@@ -3,10 +3,12 @@ import { Image as ImageIcon, Pipette, Plus, RotateCw, Trash2 } from "lucide-reac
 import type { GradientHandles, GradientPaintType, ImageCrop, ImageFilters, Paint } from "../types";
 import { addStop } from "../gradient";
 import { NumberField, Popover, Seg, SelectField } from "./controls";
-import { addAsset, assetUrl, readFileAsDataUrl } from "../assets";
+import { addAsset, assetUrl } from "../assets";
+import { MAX_IMAGE_SIDE, prepareImageFile } from "../imageAssets";
+import { scaledMessage } from "../imageDrop";
 import { safeImageSrc } from "../imageSrc";
 import { pickFile } from "../files";
-import { getDoc, useStore } from "../store";
+import { getDoc, toast, useStore } from "../store";
 import { useCollab } from "../collab";
 import { PhotoSearch } from "../panels/PhotoSearch";
 import { paintAriaLabel, paintLabel } from "./paintText";
@@ -420,8 +422,16 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
               className="btn"
               onClick={async () => {
                 const f = await pickFile("image/*");
-                // Another file is not the photo whose credit this paint carried.
-                if (f) props.onChange({ ...p, src: "asset:" + addAsset(await readFileAsDataUrl(f)), credit: undefined });
+                if (!f) return;
+                try {
+                  // Over 4096 px on the long side it is scaled down first (GIF and SVG are kept as they are).
+                  const img = await prepareImageFile(f);
+                  if (img.scaledFrom) toast(scaledMessage(1, MAX_IMAGE_SIDE));
+                  // Another file is not the photo whose credit this paint carried.
+                  props.onChange({ ...p, src: "asset:" + addAsset(img.url), credit: undefined });
+                } catch {
+                  toast(`Couldn't read “${f.name}” as an image`, "error");
+                }
               }}
             >
               Choose image…
