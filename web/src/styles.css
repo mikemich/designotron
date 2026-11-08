@@ -3639,7 +3639,7 @@ body:has(.phone-note) .toast {
   color: var(--text);
 }
 /* R20-D view only: a disabled fieldset wraps the Design and Prototype panels, laid out like its content. */
-fieldset.view-only {
+fieldset.panel-lock {
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -4059,17 +4059,7 @@ button.layer.asset-row:focus-visible {
 .view-only [title="Boolean operations"] {
   display: none;
 }
-.view-only [aria-labelledby="right-tab-design"] input,
-.view-only [aria-labelledby="right-tab-design"] select,
-.view-only [aria-labelledby="right-tab-design"] textarea,
-.view-only [aria-labelledby="right-tab-design"] .btn,
-.view-only [aria-labelledby="right-tab-prototype"] input,
-.view-only [aria-labelledby="right-tab-prototype"] select,
-.view-only [aria-labelledby="right-tab-prototype"] textarea,
-.view-only [aria-labelledby="right-tab-prototype"] .btn {
-  pointer-events: none;
-  opacity: 0.7;
-}
+/* (The design and prototype fields are disabled by their fieldset, `.panel-lock`.) */
 
 /* ---------- Projects and folders (files dashboard) ---------- */
 .dash {

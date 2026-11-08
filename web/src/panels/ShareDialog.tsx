@@ -398,7 +398,6 @@ export function ShareDialog() {
   );
 }
 
-/** "host/path" of a link, for showing where it opens. */
 /** The link's own host and port, e.g. `127.0.0.1:7275`. */
 function linkHost(link: string | null): string {
   try {
@@ -408,6 +407,7 @@ function linkHost(link: string | null): string {
   }
 }
 
+/** "host/path" of a link, for showing where it opens. */
 function hostOf(link: string | null): string {
   try {
     const u = new URL(link ?? "");

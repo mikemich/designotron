@@ -3,7 +3,7 @@ import { panToComment } from "./commentPan";
 import { constraintsText, strokeRows } from "./panels/inspectStroke";
 
 const solid = [{ type: "solid", color: "#000000", opacity: 1, visible: true }] as never;
-const base = { strokes: solid, strokeWeight: 2, strokeAlign: "inside" as const, strokeDash: [], strokeWeights: undefined, shape: null };
+const base = { type: "rectangle" as const, strokes: solid, strokeWeight: 2, strokeAlign: "inside" as const, strokeDash: [], strokeWeights: undefined, shape: null };
 
 describe("panToComment", () => {
   const canvas = { w: 800, h: 600 };
@@ -12,6 +12,9 @@ describe("panToComment", () => {
     expect(v.zoom).toBe(2);
     expect(v.x + 100 * v.zoom).toBe(400);
     expect(v.y + 50 * v.zoom).toBe(300);
+  });
+  it("never zooms out", () => {
+    expect(panToComment({ x: 0, y: 0, zoom: 16 }, { x: 0, y: 0 }, 0.4, canvas).zoom).toBe(16);
   });
   it("goes to 100% only when the layer would be under 8px", () => {
     expect(panToComment({ x: 0, y: 0, zoom: 0.25 }, { x: 10, y: 10 }, 3, canvas).zoom).toBe(1);
@@ -33,12 +36,13 @@ describe("strokeRows", () => {
     ]);
   });
   it("lists per-side weights when they differ", () => {
-    expect(strokeRows({ ...base, strokeWeights: [1, 2, 3, 4] })[0].v).toBe("1 2 3 4px (top right bottom left)");
+    expect(strokeRows({ ...base, strokeWeights: [1, 2, 3, 4] })[0].v).toBe("1px 2px 3px 4px")
+    expect(strokeRows({ ...base, type: "ellipse", strokeWeights: [1, 2, 3, 4] })[0].v).toBe("2px");
     expect(strokeRows({ ...base, strokeWeights: [3, 3, 3, 3] })[0].v).toBe("3px");
   });
   it("lists caps for lines", () => {
     const rows = strokeRows({ ...base, shape: { pointCount: 0, innerRadius: 0, startCap: "round", endCap: "none" } });
-    expect(rows.at(-1)).toEqual({ k: "Caps", v: "round, none" });
+    expect(rows.at(-1)).toEqual({ k: "Caps", v: "Round to None" });
   });
 });
 

@@ -66,8 +66,8 @@ const tool = (p, name, input) => p.evaluate(([n, i]) => window.__dt.tool(n, i), 
 const dispatch = (p, cmd) => p.evaluate((c) => window.__dt.dispatch(c), cmd);
 const shot = (p, name) => (SHOTS ? p.screenshot({ path: `${SHOTS}/${name}.png` }) : Promise.resolve());
 const rightTab = (p, name) => p.click(`#right-tab-${name}`);
-const enabledFields = (p) => p.locator("fieldset.view-only :is(input, select, textarea, button):not(:disabled)").count();
-const allFields = (p) => p.locator("fieldset.view-only :is(input, select, textarea, button)").count();
+const enabledFields = (p) => p.locator("fieldset.panel-lock :is(input, select, textarea, button):not(:disabled)").count();
+const allFields = (p) => p.locator("fieldset.panel-lock :is(input, select, textarea, button)").count();
 const toasts = (p) => p.$$eval(".toast, [role=status]", (els) => els.map((e) => e.textContent).join(" | "));
 
 /** The view-only checks shared by a viewer and a read-only tab. */
@@ -75,12 +75,12 @@ async function viewOnlyChecks(p, who, rectName) {
   const rect = await named(p, rectName);
   await dispatch(p, { op: "select", ids: [rect.id] });
   await rightTab(p, "design");
-  await p.waitForSelector("fieldset.view-only");
+  await p.waitForSelector("fieldset.panel-lock:disabled");
   check(`${who}: the Design tab has fields, all disabled`, (await allFields(p)) > 5 && (await enabledFields(p)) === 0, `${await allFields(p)} fields, ${await enabledFields(p)} enabled`);
   const note = await p.locator(".view-only-note[role=note]").innerText();
   check(`${who}: the note is shown`, /View only|Read-only/.test(note), note);
   // Dragging the X label must not move the layer, and must not raise the engine's "can't edit" toast.
-  const lbl = p.locator("fieldset.view-only .lbl", { hasText: /^X$/ }).first();
+  const lbl = p.locator("fieldset.panel-lock .lbl", { hasText: /^X$/ }).first();
   const box = await lbl.boundingBox();
   await p.mouse.move(box.x + 4, box.y + 4);
   await p.mouse.down();
@@ -90,7 +90,7 @@ async function viewOnlyChecks(p, who, rectName) {
   check(`${who}: scrubbing X changes nothing`, (await named(p, rectName)).x === rect.x, `${rect.x} -> ${(await named(p, rectName)).x}`);
   check(`${who}: ...and shows no "can't edit" toast`, !/can.t edit|view the file/i.test(await toasts(p)), await toasts(p));
   await rightTab(p, "prototype");
-  check(`${who}: the Prototype tab is disabled too`, (await p.locator("fieldset.view-only").count()) === 1 && (await enabledFields(p)) === 0);
+  check(`${who}: the Prototype tab is disabled too`, (await p.locator("fieldset.panel-lock:disabled").count()) === 1 && (await enabledFields(p)) === 0);
   // Tools.
   const off = async (title) => p.locator(`.tbtn[title^="${title}"]`).first().isDisabled();
   check(`${who}: drawing tools are disabled`, (await off("Rectangle")) && (await off("Frame")) && (await off("Text")) && (await off("Pen")));
@@ -105,6 +105,16 @@ async function viewOnlyChecks(p, who, rectName) {
   const live = await p.locator(".insp-live").innerText();
   check(`${who}: the Code tab copies a value`, /Copied/.test(live), live);
   await rightTab(p, "design");
+  // axe on the right panel: the locked scroll area must be a focusable region, and nothing serious is new.
+  const AXE = process.env.AXE ?? "/tmp/claude-0/-home-user-designotron/286bf7bb-781e-5d8f-9708-6c1f94840e4a/scratchpad/qa7/I-a11y/node_modules/axe-core/axe.min.js";
+  if (fs.existsSync(AXE)) {
+    if (!(await p.evaluate(() => !!window.axe))) await p.addScriptTag({ path: AXE });
+    const v = await p.evaluate(async () => {
+      const r = await window.axe.run({ include: [["#panel-right"]] }, { resultTypes: ["violations"] });
+      return r.violations.filter((x) => x.impact === "serious" || x.impact === "critical").map((x) => x.id);
+    });
+    check(`${who}: axe finds no serious violation on the right panel`, v.length === 0, v.join(","));
+  } else console.log("SKIP  axe (axe-core not found)");
 }
 
 // ---------------------------------------------------------------- 1 + 3: viewer, and the Share text
@@ -139,6 +149,24 @@ let editLink = "";
   await rightTab(viewer, "design");
   await shot(viewer, "viewer-design");
   await vctx.close();
+
+  // An open colour popover closes when the role turns viewer, and no gesture is left open.
+  const owner2 = owner;
+  await dispatch(owner2, { op: "select", ids: [(await named(owner2, "Card")).id] });
+  await rightTab(owner2, "design");
+  await owner2.locator("#panel-right .swatch").first().click();
+  await owner2.waitForSelector(".popover");
+  check("a colour popover opens while editing", (await owner2.locator(".popover").count()) === 1);
+  await owner2.evaluate(() => window.__dt.collabSet({ viewer: true }));
+  await sleep(300);
+  check("...and closes when the role turns viewer", (await owner2.locator(".popover").count()) === 0);
+  await owner2.evaluate(() => window.__dt.collabSet({ viewer: false }));
+  await sleep(200);
+  await dispatch(owner2, { op: "select", ids: [(await named(owner2, "Card")).id] });
+  check("...leaving no gesture open", (await owner2.evaluate(() => window.__dt.state().inGesture)) === false);
+  await owner2.evaluate(() => window.__dt.collabSet({ viewer: true }));
+  await sleep(100);
+  await owner2.evaluate(() => window.__dt.collabSet({ viewer: false }));
   await octx.close();
 }
 
@@ -161,7 +189,7 @@ let editLink = "";
   await sleep(300);
   await dispatch(B, { op: "select", ids: [(await named(B, "Card")).id] });
   await rightTab(B, "design");
-  check("after Edit here the fields are enabled again", (await B.locator("fieldset.view-only").count()) === 0 && (await B.locator("#panel-right input:not(:disabled)").count()) > 5);
+  check("after Edit here the fields are enabled again", (await B.locator("fieldset.panel-lock:disabled").count()) === 0 && (await B.locator("#panel-right input:not(:disabled)").count()) > 5);
   check("...and the drawing tools too", !(await B.locator('.tbtn[title^="Rectangle"]').first().isDisabled()));
   await ctx.close();
 }
@@ -248,7 +276,7 @@ const page = await openNew(ctx);
   check("...the weight and position ('2px', 'inside')", /2px/.test(strokeText) && /inside/.test(strokeText), strokeText);
   check("...and the dash ('Dashed 6, 4')", /Dashed 6, 4/.test(strokeText), strokeText);
   const fillTitle = (await page.locator("[data-testid=inspect] .insp-title").allInnerTexts()).join("|");
-  const fillGroup = (await group("Colours").count()) ? group("Colours") : group("Fill");
+  const fillGroup = group("Fill");
   const fillText = await fillGroup.innerText();
   check("...the fill group has no stroke row", !/Stroke|inside|Dashed/.test(fillText) && /Fill/.test(fillText), fillTitle);
   await shot(page, "inspect-stroke");

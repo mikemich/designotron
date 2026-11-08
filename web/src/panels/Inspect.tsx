@@ -148,7 +148,7 @@ export function Inspect({ node }: { node: Node }) {
       {(info.fills.length > 0 || info.strokes.length > 0) && (
         <>
           {info.fills.length > 0 && (
-            <Group title={info.strokes.length > 0 ? "Colours" : "Fill"} actions={formatSeg}>
+            <Group title="Fill" actions={formatSeg}>
               {info.fills.map((c, i) => (
                 <ColorRow key={`f${i}`} kind="Fill" c={c} format={format} val={val} />
               ))}
@@ -162,6 +162,7 @@ export function Inspect({ node }: { node: Node }) {
               {strokeInfo.map((row) => (
                 <Row key={row.k} k={row.k}>
                   {row.k === "Weight" || row.k === "Dash" ? val(row.v, `Stroke ${row.k.toLowerCase()}`) : <span className="muted">{row.v}</span>}
+                  {row.note && <span className="muted small"> {row.note}</span>}
                 </Row>
               ))}
             </Group>

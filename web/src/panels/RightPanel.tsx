@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Play, Plus, Trash2 } from "lucide-react";
 import { dispatch, query, useDoc, useSelection, useStore, type RightTab } from "../store";
 import { DesignPanel } from "./DesignPanel";
@@ -27,6 +27,20 @@ export function RightPanel() {
   const engineReadOnly = useStore((s) => !!s.es.readOnly);
   const viewer = useCollab((s) => s.viewer);
   const viewOnly = engineReadOnly || viewer;
+  // Every control in a locked panel is disabled, so its scroll area is a focusable region of its own (keyboard scrolling).
+  const lock = useRef<HTMLFieldSetElement>(null);
+  useEffect(() => {
+    const el = lock.current?.firstElementChild as HTMLElement | null;
+    if (!el || !viewOnly) return;
+    el.tabIndex = 0;
+    el.setAttribute("role", "region");
+    el.setAttribute("aria-label", tab === "design" ? "Design properties, view only" : "Prototype properties, view only");
+    return () => {
+      el.removeAttribute("tabindex");
+      el.removeAttribute("role");
+      el.removeAttribute("aria-label");
+    };
+  });
   // Arrow keys move between tabs (only the selected one is a Tab stop).
   const onKeyDown = (e: React.KeyboardEvent) => {
     // A tab that was clicked leaves the arrows to the design (they nudge the selection).
@@ -69,8 +83,12 @@ export function RightPanel() {
             {viewer ? "View only. Copy values from the Code tab." : "Read-only: this file is open for editing in another tab."}
           </div>
         )}
-        {tab === "design" && (viewOnly ? <fieldset disabled className="view-only"><DesignPanel /></fieldset> : <DesignPanel />)}
-        {tab === "prototype" && (viewOnly ? <fieldset disabled className="view-only"><PrototypePanel /></fieldset> : <PrototypePanel />)}
+        {(tab === "design" || tab === "prototype") && (
+          // Always the same element, so a role change never remounts the panel (an open colour popover would lose its onClose).
+          <fieldset ref={lock} disabled={viewOnly} className="panel-lock">
+            {tab === "design" ? <DesignPanel /> : <PrototypePanel />}
+          </fieldset>
+        )}
         {tab === "code" && <CodePanel />}
         {tab === "review" && <ReviewPanel />}
         {tab === "app" && <AppPanel />}

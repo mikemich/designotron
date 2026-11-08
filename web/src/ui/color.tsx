@@ -585,7 +585,9 @@ export function PaintSwatch(props: { paint: Paint; onChange: (p: Paint) => void;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing, anchor]);
   // A popover that is open when the role turns viewer (or the tab read-only) closes: its sliders aren't inside the disabled panel.
-  const viewOnly = useStore((s) => !!s.es.readOnly) || useCollab((s) => s.viewer);
+  const roTab = useStore((s) => !!s.es.readOnly);
+  const viewer = useCollab((s) => s.viewer);
+  const viewOnly = roTab || viewer;
   useEffect(() => {
     if (viewOnly && anchor) {
       setAnchor(null);
