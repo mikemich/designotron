@@ -153,7 +153,9 @@ export function ChatPanel() {
   const [dragOver, setDragOver] = useState(false);
   const [past, setPast] = useState<{ anchor: DOMRect; list: PastConversation[] | null } | null>(null);
   // A read-only tab or a viewer can read the history but not change it (the editing tab owns it).
-  const readOnly = useStore((s) => !!s.es.readOnly) || useCollab((s) => s.viewer);
+  // Both hooks run on every render (a short-circuit would skip one and break the hook order).
+  const viewer = useCollab((s) => s.viewer);
+  const readOnly = useStore((s) => !!s.es.readOnly) || viewer;
   const RO_TITLE = "This file is open for editing in another tab";
   const [delPast, setDelPast] = useState<PastConversation | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);

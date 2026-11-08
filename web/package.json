@@ -1,6 +1,6 @@
 {
   "name": "designotron-web",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Designotron editor (web shell over the Rust/WASM engine)",
   "type": "module",
   "license": "MIT",
