@@ -7,6 +7,10 @@ export function clearMeasureCache(): void;
 export class WasmEngine {
   free(): void;
   /**
+   * Whether texts are merging per character right now.
+   */
+  collabText(): boolean;
+  /**
    * Local changes since the last call, for collaborators (`{full}` the first time).
    */
   collabDelta(): string;
@@ -61,9 +65,20 @@ export class WasmEngine {
    */
   collabDowngrade(json: string, relay_model: number): string;
   /**
+   * Turns on per-character text merging for the room joined with the last `collabReset` (the
+   * room's welcome said `text`). `site` is a random 48-bit number nobody else uses; call it again
+   * with a fresh one after every (re)join, before re-applying unsent deltas.
+   */
+  collabEnableText(site: number): void;
+  /**
    * JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
    */
   renderIncremental(page: string, hidden: string, reset: boolean, editing: string): string;
+  /**
+   * Whether this engine reads and writes text layers as per-character changes in deltas (what an
+   * editor tells the room it can do when joining).
+   */
+  collabTextSupported(): boolean;
   constructor(seed: number);
   rev(): number;
   /**
@@ -96,8 +111,10 @@ export interface InitOutput {
   readonly clearMeasureCache: () => void;
   readonly wasmengine_collabDelta: (a: number) => [number, number];
   readonly wasmengine_collabDowngrade: (a: number, b: number, c: number, d: number) => [number, number];
+  readonly wasmengine_collabEnableText: (a: number, b: number) => void;
   readonly wasmengine_collabGranular: (a: number) => number;
   readonly wasmengine_collabReset: (a: number, b: number, c: number, d: number) => void;
+  readonly wasmengine_collabText: (a: number) => number;
   readonly wasmengine_collabUnsent: (a: number) => [number, number];
   readonly wasmengine_dispatch: (a: number, b: number, c: number) => [number, number, number, number];
   readonly wasmengine_docDelta: (a: number, b: number) => [number, number];
@@ -116,6 +133,7 @@ export interface InitOutput {
   readonly wasmengine_setImageSizes: (a: number, b: number, c: number) => void;
   readonly wasmengine_state: (a: number) => [number, number];
   readonly wasmengine_collabLists: (a: number) => number;
+  readonly wasmengine_collabTextSupported: (a: number) => number;
   readonly __wbindgen_export_0: WebAssembly.Table;
   readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
