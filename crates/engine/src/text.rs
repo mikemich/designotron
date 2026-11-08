@@ -817,8 +817,15 @@ pub fn remap_runs(old: &str, new: &str, runs: &[TextRun]) -> Vec<TextRun> {
     .take(max_suffix)
     .take_while(|(x, y)| x == y)
     .count();
-  let del_end = a.len() - suffix; // removed old range: prefix..del_end
-  let ins_len = b.len() - suffix - prefix;
+  splice_runs(runs, prefix, a.len() - suffix, b.len() - suffix - prefix, b.len())
+}
+
+/// Runs after the characters `start..end` were replaced by `ins_len` new ones (`new_len`
+/// characters in all). Typing at the end of a styled run extends it (like a word processor);
+/// a replaced range takes the style of the run it started in or after; runs after the edit
+/// shift. `remap_runs` is this with the edit found by a prefix/suffix diff.
+pub fn splice_runs(runs: &[TextRun], start: usize, end: usize, ins_len: usize, new_len: usize) -> Vec<TextRun> {
+  let (prefix, del_end) = (start, end);
   let map = |i: usize, is_end: bool| -> usize {
     if i < prefix || (i == prefix && !is_end) {
       i
@@ -846,36 +853,90 @@ pub fn remap_runs(old: &str, new: &str, runs: &[TextRun]) -> Vec<TextRun> {
     })
     .filter(|r| r.end > r.start)
     .collect();
-  normalize_runs(&mut out, b.len());
+  normalize_runs(&mut out, new_len);
   out
 }
 
-/// Applies style overrides (a run with `start`/`end` ignored) to `start..end`.
+/// Replaces the characters `start..end` (code points, clamped) of `t` with `text`, keeping the
+/// runs attached as `splice_runs` does.
+pub fn edit_text(t: &mut TextProps, start: usize, end: usize, text: &str) {
+  let len = t.characters.chars().count();
+  let (start, end) = (start.min(len), end.min(len));
+  let end = end.max(start);
+  let byte = |i: usize| t.characters.char_indices().nth(i).map_or(t.characters.len(), |(b, _)| b);
+  let (a, b) = (byte(start), byte(end));
+  let ins_len = text.chars().count();
+  t.characters.replace_range(a..b, text);
+  t.runs = splice_runs(&t.runs, start, end, ins_len, len - (end - start) + ins_len);
+}
+
+/// Applies style overrides (a run with `start`/`end` ignored) to `start..end`. Works on the runs
+/// (their number, not the length of the text, is its cost).
 pub fn style_range(runs: &[TextRun], len: usize, start: usize, end: usize, patch: &TextRun, clear: &[&str]) -> Vec<TextRun> {
   let (start, end) = (start.min(len), end.min(len));
   if start >= end {
     return runs.to_vec();
   }
-  // Explode into per-character override sets, apply, then re-merge.
-  let mut per_char: Vec<TextRun> = vec![TextRun::default(); len];
-  for r in runs {
-    for slot in per_char.iter_mut().take(r.end.min(len)).skip(r.start.min(len)) {
-      *slot = r.clone();
-    }
-  }
-  for slot in per_char.iter_mut().take(end).skip(start) {
-    merge_style(slot, patch);
+  let mut out: Vec<TextRun> = Vec::with_capacity(runs.len() + 3);
+  let mut at = start; // next unstyled position inside the range
+  let styled = |mut r: TextRun| {
+    merge_style(&mut r, patch);
     for key in clear {
-      clear_key(slot, key);
+      clear_key(&mut r, key);
     }
-  }
-  let mut out: Vec<TextRun> = Vec::new();
-  for (i, r) in per_char.into_iter().enumerate() {
-    match out.last_mut() {
-      Some(last) if last.end == i && last.same_style(&r) => last.end = i + 1,
-      _ => out.push(TextRun { start: i, end: i + 1, ..r }),
+    r
+  };
+  let mut inside: Vec<TextRun> = Vec::new();
+  for r in runs {
+    let (rs, re) = (r.start.min(len), r.end.min(len));
+    if re <= rs {
+      continue;
     }
+    if re <= start || rs >= end {
+      out.push(TextRun {
+        start: rs,
+        end: re,
+        ..r.clone()
+      });
+      continue;
+    }
+    if rs < start {
+      out.push(TextRun {
+        start: rs,
+        end: start,
+        ..r.clone()
+      });
+    }
+    if re > end {
+      out.push(TextRun {
+        start: end,
+        end: re,
+        ..r.clone()
+      });
+    }
+    let (s, e) = (rs.max(start), re.min(end));
+    if s > at {
+      inside.push(styled(TextRun {
+        start: at,
+        end: s,
+        ..TextRun::default()
+      }));
+    }
+    inside.push(styled(TextRun {
+      start: s,
+      end: e,
+      ..r.clone()
+    }));
+    at = e;
   }
+  if at < end {
+    inside.push(styled(TextRun {
+      start: at,
+      end,
+      ..TextRun::default()
+    }));
+  }
+  out.extend(inside);
   normalize_runs(&mut out, len);
   out
 }
@@ -949,6 +1010,79 @@ mod tests {
       end,
       font_weight: Some(700),
       ..Default::default()
+    }
+  }
+
+  /// The per-character form `style_range` used to have.
+  fn style_range_by_char(runs: &[TextRun], len: usize, start: usize, end: usize, patch: &TextRun, clear: &[&str]) -> Vec<TextRun> {
+    let (start, end) = (start.min(len), end.min(len));
+    if start >= end {
+      return runs.to_vec();
+    }
+    let mut per_char: Vec<TextRun> = vec![TextRun::default(); len];
+    for r in runs {
+      for slot in per_char.iter_mut().take(r.end.min(len)).skip(r.start.min(len)) {
+        *slot = r.clone();
+      }
+    }
+    for slot in per_char.iter_mut().take(end).skip(start) {
+      merge_style(slot, patch);
+      for key in clear {
+        clear_key(slot, key);
+      }
+    }
+    let mut out: Vec<TextRun> = Vec::new();
+    for (i, r) in per_char.into_iter().enumerate() {
+      match out.last_mut() {
+        Some(last) if last.end == i && last.same_style(&r) => last.end = i + 1,
+        _ => out.push(TextRun { start: i, end: i + 1, ..r }),
+      }
+    }
+    normalize_runs(&mut out, len);
+    out
+  }
+
+  #[test]
+  fn style_range_on_runs_matches_the_per_character_version() {
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = |m: usize| {
+      x ^= x << 13;
+      x ^= x >> 7;
+      x ^= x << 17;
+      (x % m as u64) as usize
+    };
+    for _ in 0..3000 {
+      let len = next(30);
+      let mut runs: Vec<TextRun> = Vec::new();
+      let mut at = 0;
+      while at < len && next(3) != 0 {
+        let s = at + next(4);
+        let e = (s + 1 + next(5)).min(len);
+        if s < e {
+          runs.push(TextRun {
+            start: s,
+            end: e,
+            font_weight: [Some(700), None, Some(400)][next(3)],
+            italic: [None, Some(true)][next(2)],
+            color: (next(2) == 0).then(|| "#f00".to_string()),
+            ..Default::default()
+          });
+        }
+        at = e;
+      }
+      normalize_runs(&mut runs, len);
+      let (a, b) = (next(len + 2), next(len + 2));
+      let patch = TextRun {
+        font_weight: [Some(700), None][next(2)],
+        font_size: [None, Some(12.0)][next(2)],
+        ..Default::default()
+      };
+      let clear: Vec<&str> = vec![vec![], vec!["italic"], vec!["fontWeight", "color"]].swap_remove(next(3));
+      assert_eq!(
+        style_range(&runs, len, a, b, &patch, &clear),
+        style_range_by_char(&runs, len, a, b, &patch, &clear),
+        "len {len} {a}..{b} runs {runs:?} patch {patch:?} clear {clear:?}"
+      );
     }
   }
 

@@ -3029,6 +3029,8 @@ fn find_type(cx: &Ctx, t: &str) -> Result<FindType, String> {
 /// Cuts a very long text layer's characters (and the style runs past them) for the model.
 fn cap_text(m: &mut Map<String, Value>) {
   let Some(Value::Object(t)) = m.get_mut("text") else { return };
+  // (The character ids that merge concurrent edits are the engine's business, not the model's.)
+  t.remove("seq");
   let len = t.get("characters").and_then(|c| c.as_str()).map(|c| c.chars().count()).unwrap_or(0);
   if len <= TEXT_CAP {
     return;

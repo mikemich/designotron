@@ -80,6 +80,10 @@ pub fn fingerprint(doc: &Document, comp_id: &str) -> u64 {
 
 fn strip_position(n: &Node, is_root: bool) -> Node {
   let mut c = n.clone();
+  // (A text's character ids are merge bookkeeping: copies never have them.)
+  if let Some(t) = c.text.as_mut() {
+    t.seq = None;
+  }
   if is_root {
     c.x = 0.0;
     c.y = 0.0;
@@ -1482,6 +1486,9 @@ fn build(
     let Some(src) = doc.get(cid).cloned() else { continue };
     bound |= src.prop_refs.is_some();
     let mut n = src.clone();
+    if let Some(t) = n.text.as_mut() {
+      t.seq = None;
+    }
     n.id = map[cid].clone();
     n.parent = src.parent.as_ref().and_then(|p| map.get(p).cloned());
     n.children = src.children.iter().filter_map(|c| map.get(c).cloned()).collect();
@@ -1500,6 +1507,9 @@ fn build(
 
   // Root takes the component's visual props; position and placement stay with the instance.
   let mut root = comp.clone();
+  if let Some(t) = root.text.as_mut() {
+    t.seq = None;
+  }
   root.id = inst.id.clone();
   root.kind = NodeType::Instance;
   root.name = inst.name.clone();

@@ -182,6 +182,7 @@ pub fn layout_neutral(old: &Node, new: &Node) -> bool {
   );
   // (Not the colour or link of a text run: a run splits the measured pieces, and a real font's
   // widths aren't additive, so the same words can measure differently.)
+  adopt_seq(&mut a, new);
   a == *new
 }
 
@@ -204,7 +205,16 @@ pub fn render_neutral(old: &Node, new: &Node) -> bool {
     notes,
     instance
   );
+  adopt_seq(&mut a, new);
   a == *new
+}
+
+/// The character ids of a text (`TextProps::seq`) are bookkeeping for merging: they never reach
+/// layout or markup, so a change that only touches them is neutral.
+fn adopt_seq(a: &mut Node, new: &Node) {
+  if let (Some(at), Some(nt)) = (a.text.as_mut(), new.text.as_ref()) {
+    at.seq = nt.seq.clone();
+  }
 }
 
 /// Wraps nodes in a new container placed at their combined bounds.
