@@ -11,7 +11,7 @@ import { bridge, type Attachment } from "./bridgeClient";
 import { runApiAgent, resetApiConversation, abortApiAgent, hasApiConversation } from "./apiAgent";
 import { contextLine, setToolFile } from "./tools";
 import { queueJoin } from "./queue";
-import { loadConversation, saveConversation, serialize } from "./conversations";
+import { addPast, loadConversation, loadPast, restore, saveConversation, savePast, serialize, updatePast, worthArchiving, type ChatRecord } from "./conversations";
 
 export type ChatItem =
   | {
@@ -280,11 +280,19 @@ function saveNow(opts: { force?: boolean } = {}) {
 /** Tells other tabs a conversation was written, so a tab showing the same file (a view-only one,
  *  or the one that takes over) reads it again when it isn't busy itself. */
 let chatCh: BroadcastChannel | null = null;
+/** Open Past conversations lists refresh when another tab changes the history. */
+const pastListeners = new Set<() => void>();
+export function onPastChanged(fn: () => void): () => void {
+  pastListeners.add(fn);
+  return () => void pastListeners.delete(fn);
+}
+export const isHistoryReadOnly = () => readOnlyNow();
 try {
   chatCh = new BroadcastChannel("dt-chat");
   chatCh.onmessage = (ev) => {
     const s = useChat.getState();
-    if (ev.data?.fileId && ev.data.fileId === s.chatFile && !dirty && !s.running) reloadConversation();
+    if (ev.data?.fileId && ev.data.fileId === s.chatFile && ev.data.past) pastListeners.forEach((f) => f());
+    else if (ev.data?.fileId && ev.data.fileId === s.chatFile && !dirty && !s.running) reloadConversation();
   };
 } catch {
   /* no BroadcastChannel */
@@ -448,14 +456,78 @@ function hookRights() {
   useCollab.subscribe(rightsChanged);
 }
 
-/** Starts a fresh conversation in this file: the running turn (if any) stops, the saved record
- *  and Claude Code session are forgotten. */
+const pastId = () => (globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`);
+
+/** Tells the other tabs the past-conversations list of `file` changed. */
+const pastChanged = (file: string) => chatCh?.postMessage({ fileId: file, past: true });
+
+/** Sets a conversation aside in the file's history (a no-op for one without messages). */
+function archive(file: string, rec: ChatRecord): Promise<void> {
+  // A read-only tab or a viewer never writes: the editing tab owns the history.
+  if (readOnlyNow() || !worthArchiving(rec)) return Promise.resolve();
+  return updatePast(file, (list) => addPast(list, rec, pastId())).then(() => pastChanged(file));
+}
+
+/** Starts a fresh conversation in this file: the running turn (if any) stops, the current
+ *  conversation goes to the file's history, and the Claude Code session is forgotten. */
 export function newConversation() {
-  const file = useChat.getState().chatFile;
+  const st = useChat.getState();
+  const file = st.chatFile;
+  // (Read-only: the conversation is cleared here but nothing is archived, so nothing is lost for the editing tab.)
+  const rec = serialize(st.items, st.sessionId);
   dropTurn();
   useChat.setState({ items: [], sessionId: null, queued: null, draft: "" });
   resetApiConversation(file);
-  if (file) apiLost.delete(file);
+  if (file) {
+    apiLost.delete(file);
+    void archive(file, rec);
+  }
+}
+
+/** Makes a past conversation the current one (the current one goes to the history in its place).
+ *  Refused while a turn runs. In bridge mode the next message resumes that conversation's Claude Code
+ *  session; API mode doesn't keep messages, so it shows them for reference only. */
+export async function openPastConversation(id: string): Promise<boolean> {
+  const file = useChat.getState().chatFile;
+  if (!file || useChat.getState().running || readOnlyNow()) return false;
+  const list = await loadPast(file);
+  const entry = list.find((e) => e.id === id);
+  const r = entry && restore(entry.record);
+  const st = useChat.getState();
+  if (!entry) {
+    toast("That conversation is no longer in the history.");
+    return false;
+  }
+  if (!r || st.chatFile !== file || st.running || readOnlyNow()) return false;
+  const rest = list.filter((e) => e.id !== id);
+  const current = serialize(st.items, st.sessionId);
+  await savePast(file, worthArchiving(current) ? addPast(rest, current, pastId()) : rest);
+  // Ids stay unique across files and conversations, so a late patch can't hit another item.
+  const base = nextId - 1;
+  nextId += r.nextId - 1;
+  resetApiConversation(file);
+  useChat.setState({
+    items: r.items.map((i) => ({ ...i, id: i.id + base }) as ChatItem),
+    sessionId: r.sessionId,
+    // A message waiting to send goes back to the box (as Stop does) and attached images stay attached.
+    draft: joinText(r.draft, st.draft, st.queued),
+    queued: null,
+  });
+  apiLost.add(file);
+  if (useChat.getState().mode === "api") {
+    apiLost.delete(file);
+    push({ kind: "system", text: "Earlier messages are shown for reference; Claude starts a new conversation." });
+  }
+  pastChanged(file);
+  return true;
+}
+
+/** Removes one conversation from the file's history. */
+export async function deletePastConversation(id: string): Promise<void> {
+  const file = useChat.getState().chatFile;
+  if (!file || readOnlyNow()) return;
+  await updatePast(file, (list) => list.filter((e) => e.id !== id));
+  pastChanged(file);
 }
 
 /** The labels of prompts that were queued, so they show short when they finally go out. */
@@ -519,7 +591,7 @@ export async function send(prompt: string, opts: { label?: string } = {}) {
       return;
     }
     if (st.claude && !st.claude.available) {
-      push({ kind: "error", text: "The bridge couldn't find the `claude` CLI. Install Claude Code and sign in with your Pro/Max account (`claude` then /login)." });
+      push({ kind: "error", text: "The bridge is running, but Claude Code isn't installed on this computer. Install it and sign in once (run claude, then /login), then restart the bridge." });
       return;
     }
     useChat.setState({ running: true });
@@ -641,6 +713,7 @@ export function stop() {
   // A message queued behind this turn goes back to the box (the person stopped to say something
   // else, not to send that).
   useChat.setState({ running: false, queued: null, draft: joinText(st.draft, st.queued) });
+  if (st.running) push({ kind: "system", text: "Stopped. Anything Claude already made stays; Ctrl/Cmd+Z undoes the turn." });
 }
 
 // A turn that starts on an empty page shows Claude's work: the view fits it as soon as

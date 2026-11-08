@@ -301,7 +301,7 @@ try {
     check("closing the Claude panel with its X leaves focus on its toolbar button", f.tag !== "BODY" && f.id === "claude-toggle", JSON.stringify(f));
 
     // Presenter
-    await kbFocus(page, ".tbtn[title='Present']");
+    await kbFocus(page, ".tbtn[title^='Present (']");
     await page.keyboard.press("Enter");
     await page.waitForSelector(".presenter");
     await page.waitForTimeout(200);
@@ -316,7 +316,7 @@ try {
     await page.keyboard.press("Escape");
     await page.waitForSelector(".presenter", { state: "detached" });
     f = await focused(page);
-    check("leaving the presenter returns focus to the Present button", (await page.evaluate(() => document.activeElement.title)) === "Present", JSON.stringify(f));
+    check("leaving the presenter returns focus to the Present button", (await page.evaluate(() => document.activeElement.title)).startsWith("Present"), JSON.stringify(f));
 
     // Labels, roles and live regions
     check("tool buttons report pressed", (await page.getAttribute(".tbtn[title^='Move']", "aria-pressed")) === "true" && (await page.getAttribute(".tbtn[title^='Hand']", "aria-pressed")) === "false");

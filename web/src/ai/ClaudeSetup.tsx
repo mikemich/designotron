@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Check } from "lucide-react";
+import { bridgeHttpBase } from "./bridgeClient";
 
 const INSTALL_CMD = "curl -fsSL https://raw.githubusercontent.com/mikemich/designotron/main/install.sh | sh";
 const RUN_CMD = "~/.local/bin/designotron";
@@ -26,6 +27,7 @@ export function CopyLine({ text }: { text: string }) {
 
 /** The steps for Pro or Max: install Claude Code, then the bridge. Used by the chat panel and the dashboard. */
 export function ClaudeSetupSteps() {
+  const bridge = bridgeHttpBase();
   return (
     <>
       <div style={{ margin: "6px 0" }}>The Designotron bridge runs your own Claude Code on this computer:</div>
@@ -53,8 +55,8 @@ export function ClaudeSetupSteps() {
       </ol>
       <div className="muted">
         This page connects on its own a few seconds later. If it doesn't (Safari and Brave can stop websites from reaching your computer), use the copy of the editor the bridge serves at{" "}
-        <a href="http://127.0.0.1:5174" target="_blank" rel="noreferrer">
-          127.0.0.1:5174
+        <a href={bridge} target="_blank" rel="noreferrer">
+          {bridge.replace(/^https?:\/\//, "")}
         </a>
         .
       </div>

@@ -71,6 +71,7 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
       ["Zoom in / out", `${MOD}+ / ${MOD}−`],
       ["Rulers / layout grids", `${SHIFT}R / ${SHIFT_MOD}4`],
       ["Claude panel", `${MOD}/`],
+      ["Present from the selected frame", `${ALT_MOD}Enter`],
       ["Show / hide the side panels", `${MOD}\\`],
       ["Cursor chat (with others in the file)", "/"],
       ["Stop following someone", "Esc"],
