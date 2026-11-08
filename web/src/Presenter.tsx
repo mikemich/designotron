@@ -57,6 +57,7 @@ import {
   type SmartPlan,
   type Vec,
 } from "./smart";
+import { closeMotion, closeVector, dimAt, dragTransform, leaveAnimation } from "./presenterOverlay";
 
 /** Undoes what an interaction did (While hovering / While pressing). */
 type Revert = () => void;
@@ -78,6 +79,13 @@ interface OpenOverlay {
   y: number;
   w: number;
   h: number;
+}
+
+/** An overlay that has closed and is still drawn while it leaves (the reverse of how it came in). */
+interface Closing {
+  key: number;
+  o: OpenOverlay;
+  motion: Motion;
 }
 
 /** A change of screen in progress: the screen that is leaving and how it plays. */
@@ -189,6 +197,9 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   // Open overlays, topmost last. Navigating to another frame closes them all.
   const [overlays, setOverlays] = useState<OpenOverlay[]>([]);
   const overlayKey = useRef(0);
+  // Overlays that have closed and are still leaving; they take no clicks, focus or Tab stops.
+  const [closing, setClosing] = useState<Closing[]>([]);
+  const closingTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
   const [flash, setFlash] = useState(false);
   // Options (remembered per browser) and the menu that sets them.
   const [prefs, setPrefs] = useState(loadPrefs);
@@ -294,6 +305,28 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     startMotion(current.id, id, m, manual);
     setHistory((h) => [...h, { id, via: m }]);
   };
+  /** Closes the topmost overlay with the reverse of its opening animation (or the close
+   *  interaction's own directional transition, `via`). It leaves the open list at once, so focus,
+   *  Tab and hotspots go with it; a copy keeps drawing until the animation is over. */
+  const closeTop = (via: Motion | null = null) => {
+    const t = overlays[overlays.length - 1];
+    if (!t) return;
+    setOverlays((o) => o.filter((x) => x.key !== t.key));
+    const motion = closeMotion(t.motion, via, reducedMotion());
+    if (motion.kind === "instant") return;
+    setClosing((c) => [...c, { key: t.key, o: t, motion }]);
+    const timer = setTimeout(() => {
+      closingTimers.current.delete(timer);
+      setClosing((c) => c.filter((x) => x.key !== t.key));
+    }, motion.ms + 60);
+    closingTimers.current.add(timer);
+  };
+  /** A restart or the player closing: nothing is left leaving. */
+  const dropClosing = () => {
+    for (const t of closingTimers.current) clearTimeout(t);
+    closingTimers.current.clear();
+    setClosing([]);
+  };
   /** R: back to the start screen with nothing open, as if the prototype had just been opened. */
   const restart = () => {
     hovering.current?.();
@@ -305,13 +338,14 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     setLeaving(null);
     setSmart(null);
     setOverlays([]);
+    dropClosing();
     setHistory([{ id: start, via: INSTANT }]);
     setRestarts((r) => r + 1);
     setRevision((r) => r + 1);
   };
   // Back closes the topmost overlay before leaving the frame, and plays the way in reversed.
   const back = () => {
-    if (overlays.length) return setOverlays((o) => o.slice(0, -1));
+    if (overlays.length) return closeTop();
     if (history.length < 2) return;
     startMotion(current.id, history[history.length - 2].id, reverseMotion(current.via));
     setHistory((h) => h.slice(0, -1));
@@ -376,7 +410,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       const undo = snapshot();
       navigate(it.destination, motionOf(it), it.preserveScroll);
       return undo;
-    } else if (it.action === "closeOverlay") setOverlays((o) => o.slice(0, -1));
+    } else if (it.action === "closeOverlay") closeTop(motionOf(it));
     else if ((it.action === "openOverlay" || it.action === "swapOverlay") && it.destination && frame) {
       const dest = doc.nodes[it.destination];
       if (!dest) return null;
@@ -598,7 +632,8 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   const dragVec = (it: Interaction, source: string, inFrame: string): Vec | null => {
     const rev = playerRevision();
     if (vecCache.current.rev !== rev) vecCache.current = { rev, map: new Map() };
-    const key = [it.action, it.destination, it.transition, it.direction, source, inFrame].join("|");
+    const topOverlay = overlays[overlays.length - 1];
+    const key = [it.action, it.destination, it.transition, it.direction, source, inFrame, topOverlay?.key].join("|");
     const cache = vecCache.current.map;
     if (cache.has(key)) return cache.get(key)!;
     let out: Vec | null = null;
@@ -620,6 +655,9 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         const mt = matchTrees(d.nodes, inst, d.nodes, it.destination);
         out = smartVector(mt, measure(liveSide(inst), liveSide(it.destination), mt), source);
       }
+    } else if (it.action === "closeOverlay" && topOverlay && topOverlay.id === inFrame) {
+      // The sheet follows the finger the way it will leave: the reverse of how it came in.
+      out = closeVector(closeMotion(topOverlay.motion, m, reducedMotion()), { w: topOverlay.w, h: topOverlay.h });
     }
     cache.set(key, out);
     return out;
@@ -629,7 +667,8 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
    *  an instant or dissolve, reduced motion, an action that isn't a screen change). */
   const beginManual = (it: Interaction, from: Rect, source: string, inFrame: string): Manual | null => {
     const m = playable(motionOf(it));
-    const vec = m.kind === "instant" ? null : dragVec(it, source, inFrame);
+    // A Close overlay follows the finger whatever its own transition says (the way out is the opening reversed).
+    const vec = m.kind === "instant" && !(it.action === "closeOverlay" && !reducedMotion()) ? null : dragVec(it, source, inFrame);
     const base = inFrame === current.id && !overlays.length;
     if (vec && it.action === "navigate" && it.destination && base) {
       const back = snapshot();
@@ -703,8 +742,52 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       }
       return null;
     }
+    const top = overlays[overlays.length - 1];
+    if (vec && it.action === "closeOverlay" && top && top.id === inFrame) return beginClose(top, vec, m);
     go(it, from, source, inFrame);
     return null;
+  };
+  /** A Close overlay drag: the overlay frame follows the pointer along `vec` and the dim behind it
+   *  fades with it. Nothing is rendered per frame; styles are set on the elements. Releasing past
+   *  half way (or with a flick) removes the overlay, otherwise it snaps back and stays open. */
+  const beginClose = (top: OpenOverlay, vec: Vec, via: Motion): Manual | null => {
+    const root = rootRef.current;
+    const frameEl = root?.querySelector<HTMLElement>(`[data-overlay-frame][data-overlay-key="${top.key}"]`);
+    const backEl = frameEl?.closest<HTMLElement>(".overlay-backdrop");
+    if (!frameEl || !backEl) return null;
+    const m = closeMotion(top.motion, via, false);
+    // The opening animation is over or cut short: the drag owns the transform from here.
+    for (const a of frameEl.getAnimations()) a.cancel();
+    const dim = overlayDim(top.settings);
+    const savedBack = backEl.style.background;
+    const savedAnim = backEl.style.animation;
+    backEl.style.animation = "none";
+    let at = 0;
+    let running: ReturnType<typeof ramp> | null = null;
+    const set = (v: number) => {
+      at = Math.min(1.5, Math.max(-0.5, v));
+      frameEl.style.transform = dragTransform(vec, at);
+      backEl.style.background = dimAt(dim, Math.min(1, Math.max(0, at)));
+    };
+    set(0);
+    return {
+      vec,
+      set,
+      ramp: (to, ms, ease) => (running = ramp(at, to, ms, ease, set)).done,
+      cancel: () => running?.cancel(),
+      // Already off screen: the overlay just goes, with no second animation.
+      settle: () => {
+        setOverlays((o) => o.filter((x) => x.key !== top.key));
+        say("Closed");
+      },
+      revert: () => {
+        frameEl.style.transform = "";
+        backEl.style.background = savedBack;
+        backEl.style.animation = savedAnim;
+      },
+      ms: m.ms,
+      ease: m.ease,
+    };
   };
   /** The animation layers go; what the change did stays. */
   const finishMotion = () => {
@@ -808,6 +891,8 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   // delay → Back" firing while a modal is open must close the modal).
   const goRef = useRef(go);
   goRef.current = go;
+  const closeTopRef = useRef(closeTop);
+  closeTopRef.current = closeTop;
   const top = overlays.length ? overlays[overlays.length - 1] : null;
   // The base frame's delayed interaction runs once per visit to the frame; each overlay starts
   // its own once, when it opens (see OverlayLayer), so closing an overlay never restarts either.
@@ -874,7 +959,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       if (k.top && run(sceneFor(k.top.id), k.top)) return;
       if (k.top && e.key === "Escape") {
         e.preventDefault();
-        setOverlays((o) => o.slice(0, -1));
+        closeTopRef.current();
         return;
       }
       if (run(k.scene, null)) return;
@@ -891,7 +976,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         return;
       }
       if (e.key === "Escape") {
-        if (k.overlays.length) setOverlays((o) => o.slice(0, -1));
+        if (k.overlays.length) closeTopRef.current();
         else if (!remixUrl) useStore.setState({ presenting: null });
       }
       const i = k.frames.indexOf(k.current.id);
@@ -1096,7 +1181,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
           </button>
         )}
       </div>
-      <div className="presenter-viewport" style={{ position: "relative", overflow: "hidden", width: frame.width * scale, height: frame.height * scale }}>
+      <div className="presenter-viewport" style={{ position: "relative", overflow: "clip", width: frame.width * scale, height: frame.height * scale }}>
         {old && m?.kind !== "moveOut" && oldStage}
         {curStage}
         {old && m?.kind === "moveOut" && oldStage}
@@ -1114,7 +1199,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
             }}
           />
         )}
-        {overlays.length > 0 && (
+        {(overlays.length > 0 || closing.length > 0) && (
           <div className="overlays" style={{ width: frame.width, height: frame.height, transform: `scale(${scale})` }}>
             {overlays.map((o, i) => (
               <OverlayLayer
@@ -1124,15 +1209,18 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
                 isTop={i === overlays.length - 1}
                 scrolls={scrolls}
                 scrollEls={scrollEls}
-                onClose={() => setOverlays((l) => l.slice(0, -1))}
+                onClose={() => closeTop()}
                 onAct={(h, it) => go(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, h.id, o.id)}
                 onHover={hover}
                 onPress={(h, it, pointerId, tap) => press(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, h.id, o.id, pointerId, tap)}
                 onDrag={(h, it, pointerId, x, y) => dragStart(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, h.id, o.id, pointerId, x, y)}
-                dragVec={() => null}
+                dragVec={(h, it) => dragVec(it, h.id, o.id)}
                 hidden={smart?.overlay === o.key}
                 onDelay={(it, from) => goRef.current(it, from, o.id, o.id)}
               />
+            ))}
+            {closing.map((c) => (
+              <OverlayLayer key={`leaving-${c.key}`} overlay={c.o} leaving={c.motion} scene={sceneFor(c.o.id)} isTop={false} scrolls={scrolls} scrollEls={scrollEls} onClose={() => {}} onAct={() => null} onHover={() => {}} onPress={() => {}} onDrag={() => {}} dragVec={() => null} hidden={false} onDelay={() => {}} />
             ))}
           </div>
         )}
@@ -1184,8 +1272,11 @@ function OverlayLayer({
   dragVec,
   hidden,
   onDelay,
+  leaving,
 }: {
   overlay: OpenOverlay;
+  /** The overlay has closed and plays this on its way out: no clicks, focus or hotspots. */
+  leaving?: Motion;
   scene: Scene;
   isTop: boolean;
   scrolls: Scrolls;
@@ -1205,7 +1296,7 @@ function OverlayLayer({
   useEffect(() => {
     const node = pdoc().nodes[o.id];
     const delayed = node?.interactions.find((i) => i.trigger === "afterDelay");
-    if (!node || !delayed) return;
+    if (!node || !delayed || leaving) return;
     const t = setTimeout(() => onDelay(delayed, { x: o.x, y: o.y, width: node.width, height: node.height }), delayed.delayMs || 800);
     return () => clearTimeout(t);
   }, []);
@@ -1214,12 +1305,13 @@ function OverlayLayer({
   const clipX = n.width > o.w + 0.5;
   const clipY = n.height > o.h + 0.5;
   const m = o.motion;
-  const a = m.kind === "instant" ? undefined : m.kind === "dissolve" || m.kind === "smart" ? motionAnimation(m, true) : `dt-in-${m.dir} ${m.ms}ms ${m.easing} both`;
+  const a = leaving ? leaveAnimation(leaving) : m.kind === "instant" ? undefined : m.kind === "dissolve" || m.kind === "smart" ? motionAnimation(m, true) : `dt-in-${m.dir} ${m.ms}ms ${m.easing} both`;
+  const backAnim = leaving ? `dt-dim-out ${Math.min(leaving.ms, 300)}ms ${leaving.easing} both` : m.kind === "instant" ? undefined : `dt-dissolve ${Math.min(m.ms, 300)}ms ${m.easing}`;
   return (
     <div
       className="overlay-backdrop"
-      data-overlay={o.id}
-      style={{ background: overlayDim(o.settings), animation: m.kind === "instant" ? undefined : `dt-dissolve ${Math.min(m.ms, 300)}ms ${m.easing}` }}
+      {...(leaving ? { "data-overlay-leaving": o.id } : { "data-overlay": o.id })}
+      style={{ background: overlayDim(o.settings), animation: backAnim, pointerEvents: leaving ? "none" : undefined }}
       onClick={(e) => {
         e.stopPropagation();
         if (isTop && o.settings.closeOnClickOutside) onClose();
@@ -1228,6 +1320,7 @@ function OverlayLayer({
       <div
         className={"overlay-frame" + (clipX || clipY ? " overlay-scrolls" : "")}
         data-overlay-frame={o.id}
+        data-overlay-key={o.key}
         style={{ left: o.x, top: o.y, width: o.w, height: o.h, animation: a, overflowX: clipX ? "auto" : undefined, overflowY: clipY ? "auto" : undefined }}
         ref={(el) => {
           // An overlay swapped in with Preserve scroll position starts where the one it replaces was.
@@ -1242,7 +1335,7 @@ function OverlayLayer({
         onClick={(e) => e.stopPropagation()}
       >
         <div style={{ position: "relative", width: n.width, height: n.height, visibility: hidden ? "hidden" : undefined }}>
-          <SceneView scene={scene} flash={false} interactive tabbable={isTop} scrolls={scrolls} scrollEls={scrollEls} onAct={onAct} onHover={onHover} onPress={onPress} onDrag={onDrag} dragVec={dragVec} />
+          <SceneView scene={scene} flash={false} interactive={!leaving} tabbable={isTop} scrolls={scrolls} scrollEls={scrollEls} onAct={onAct} onHover={onHover} onPress={onPress} onDrag={onDrag} dragVec={dragVec} />
         </div>
       </div>
     </div>

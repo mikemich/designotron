@@ -458,6 +458,10 @@ pub enum Command {
   Flatten {
     ids: Vec<NodeId>,
   },
+  /// Turns raw-path vectors (imported icons, older files) into editable points, keeping the layer.
+  MakeEditable {
+    ids: Vec<NodeId>,
+  },
   /// Converts strokes into filled vector shapes.
   OutlineStroke {
     ids: Vec<NodeId>,
@@ -1160,6 +1164,7 @@ impl Engine {
     components::repair_masters(&mut doc);
     // Nor may a crafted link survive: unsafe schemes are dropped from text and prototypes.
     sanitize_links(&mut doc, None);
+    components::strip_default_set_outline(&mut doc);
     self.page = doc.pages[0].id.clone();
     self.doc = doc;
     self.selection.clear();
@@ -2351,6 +2356,7 @@ impl Engine {
       | Command::CreateComponents { ids }
       | Command::BooleanOp { ids, .. }
       | Command::Flatten { ids }
+      | Command::MakeEditable { ids }
       | Command::OutlineStroke { ids }
       | Command::UseAsMask { ids }
       | Command::MoveToPage { ids, .. } => ids,
@@ -2631,6 +2637,7 @@ impl Engine {
           return Err("document has no pages".into());
         }
         sanitize_links(&mut doc, None);
+        components::strip_default_set_outline(&mut doc);
         if keep_comments {
           doc.comments = carry_comments(&self.doc, &doc);
         }
@@ -2850,6 +2857,7 @@ impl Engine {
           }
           drop_unsafe_links(self.doc.get_mut(id).unwrap());
           self.scale_group_to_patch(id, &before);
+          self.scale_vector_to_patch(id, &before, &p);
           let after = self.doc.get(id).unwrap().clone();
           if after.kind.is_frame_like() && (after.width != before.width || after.height != before.height) {
             layout::apply_constraints(&mut self.doc, id, before.width, before.height);
@@ -3131,6 +3139,45 @@ impl Engine {
         };
         let id = self.replace_with_vector(&ids, sps, &name)?;
         Ok(json!({ "id": id }))
+      }
+      Command::MakeEditable { ids } => {
+        let mut done = Vec::new();
+        let mut evenodd: Option<String> = None;
+        for id in &ids {
+          let Some(n) = self.doc.get(id) else { continue };
+          let Some(raw) = n
+            .vector
+            .as_ref()
+            .and_then(|v| v.raw.as_ref())
+            .filter(|_| n.kind == NodeType::Vector)
+          else {
+            continue;
+          };
+          if n.locked {
+            continue;
+          }
+          if raw.fill_rule.eq_ignore_ascii_case("evenodd") {
+            evenodd = Some(n.name.clone());
+            continue;
+          }
+          let subpaths = crate::paths::raw_subpaths(raw, n.width, n.height);
+          if subpaths.iter().all(|sp| sp.points.is_empty()) {
+            continue;
+          }
+          let n = self.doc.get_mut(id).unwrap();
+          n.vector = Some(VectorData { subpaths, raw: None });
+          let p = json!({ "vector": n.vector });
+          components::record_override(&mut self.doc, id, &p);
+          done.push(id.clone());
+        }
+        if done.is_empty() {
+          return Err(if let Some(name) = evenodd {
+            format!("{name} uses even-odd filling: Flatten it (Ctrl/Cmd+E) to edit its points")
+          } else {
+            "select a vector icon with a raw path (nothing to make editable)".into()
+          });
+        }
+        Ok(json!({ "ids": done }))
       }
       Command::OutlineStroke { ids } => {
         let mut created = Vec::new();
@@ -3874,6 +3921,39 @@ impl Engine {
       let p = json!({ "x": n.x, "y": n.y, "width": n.width, "height": n.height });
       components::record_override(&mut self.doc, &d, &p);
     }
+  }
+
+  /// Typing a new W or H on an editable vector scales its points with the box, like the resize
+  /// handles do (a raw path scales through its viewBox; a patch carrying the path itself wins).
+  fn scale_vector_to_patch(&mut self, id: &str, before: &Node, patch: &Value) {
+    let Some(now) = self.doc.get(id) else { return };
+    if now.kind != NodeType::Vector
+      || patch.get("vector").is_some()
+      || (now.width == before.width && now.height == before.height)
+      || now.vector.as_ref().is_none_or(|v| v.raw.is_some() || v.subpaths.is_empty())
+    {
+      return;
+    }
+    let sx = if before.width > 0.001 { now.width / before.width } else { 1.0 };
+    let sy = if before.height > 0.001 { now.height / before.height } else { 1.0 };
+    if sx == 1.0 && sy == 1.0 {
+      return;
+    }
+    let n = self.doc.get_mut(id).unwrap();
+    if let Some(v) = n.vector.as_mut() {
+      for sp in &mut v.subpaths {
+        for pt in &mut sp.points {
+          pt.x *= sx;
+          pt.in_x *= sx;
+          pt.out_x *= sx;
+          pt.y *= sy;
+          pt.in_y *= sy;
+          pt.out_y *= sy;
+        }
+      }
+    }
+    let p = json!({ "vector": n.vector });
+    components::record_override(&mut self.doc, id, &p);
   }
 
   /// Whether `id` is positioned by its parent's auto layout (not absolutely placed).
@@ -5786,6 +5866,108 @@ mod tests {
     let page = e.page.clone();
     let svg = e.render(&page, &[], None);
     assert!(svg.contains("<mask id=") && svg.contains("mask=\"url(#"), "{svg}");
+  }
+
+  /// A component set made the usual way, plus its export SVG, canvas SVG, HTML and React code.
+  fn set_with(e: &mut Engine, edit: impl FnOnce(&mut Node)) -> String {
+    let a = rect(e, 0.0, 0.0, 40.0, 40.0, None);
+    let b = rect(e, 100.0, 0.0, 40.0, 40.0, None);
+    let made = e.dispatch(Command::CreateComponents { ids: vec![a, b] }).unwrap();
+    let ids: Vec<NodeId> = made["ids"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|v| v.as_str().unwrap().to_string())
+      .collect();
+    let set = id_of(&e.dispatch(Command::CombineVariants { ids }).unwrap());
+    edit(e.doc.get_mut(&set).unwrap());
+    set
+  }
+
+  fn legacy_outline(n: &mut Node) {
+    n.strokes = vec![Paint::solid("#9747ff")];
+    n.stroke_dash = vec![6.0, 4.0];
+    n.stroke_weight = 1.0;
+  }
+
+  #[test]
+  fn a_new_component_set_has_no_stroke_and_the_canvas_draws_its_outline() {
+    let mut e = engine();
+    let set = set_with(&mut e, |_| {});
+    let n = e.doc.get(&set).unwrap();
+    assert!(n.strokes.is_empty() && n.stroke_dash.is_empty());
+    assert_eq!(n.corner_radius, 6.0);
+    let page = e.page.clone();
+    let canvas = e.render(&page, &[], None);
+    assert_eq!(canvas.matches("dt-set-outline").count(), 1, "{canvas}");
+    let m = e.measurer.as_ref();
+    let export = render::export_svg(&e.doc, &set, m);
+    assert!(
+      !export.contains("dt-set-outline") && !export.contains("9747FF") && !export.contains("stroke-dasharray"),
+      "{export}"
+    );
+  }
+
+  #[test]
+  fn the_legacy_set_stroke_is_never_drawn_or_exported_but_a_changed_one_is() {
+    let mut e = engine();
+    let set = set_with(&mut e, legacy_outline);
+    let m = e.measurer.as_ref();
+    let export = render::export_svg(&e.doc, &set, m);
+    assert!(!export.contains("stroke-dasharray") && !export.contains("9747"), "{export}");
+    let page = e.page.clone();
+    let canvas = e.render(&page, &[], None);
+    assert_eq!(
+      canvas.matches("stroke-dasharray=\"6 4\"").count(),
+      1,
+      "only the chrome outline: {canvas}"
+    );
+    let html = codegen::export_html(&e.doc, &set, m);
+    assert!(!html.contains("dashed") && !html.contains("9747"), "{html}");
+    let react = codegen::export_react(&e.doc, &set, m);
+    assert!(!react.contains("dashed") && !react.contains("9747"), "{react}");
+    // The user changed the weight: it is a real stroke now, drawn and exported.
+    let set2 = set_with(&mut e, |n| {
+      legacy_outline(n);
+      n.stroke_weight = 2.0;
+    });
+    let m = e.measurer.as_ref();
+    assert!(render::export_svg(&e.doc, &set2, m).contains("stroke-dasharray=\"6 4\""));
+    assert!(codegen::export_html(&e.doc, &set2, m).contains("dashed"));
+    assert!(codegen::export_react(&e.doc, &set2, m).contains("dashed"));
+  }
+
+  #[test]
+  fn loading_and_replacing_a_document_strip_only_the_exact_default_outline() {
+    let mut e = engine();
+    let plain = set_with(&mut e, legacy_outline);
+    let red = set_with(&mut e, |n| {
+      n.strokes = vec![Paint::solid("#FF0000")];
+      n.stroke_dash = vec![6.0, 4.0];
+    });
+    let filled = set_with(&mut e, |n| {
+      legacy_outline(n);
+      n.fills = vec![Paint::solid("#123456")];
+    });
+    let json = serde_json::to_string(&e.doc).unwrap();
+    let check = |e: &Engine| {
+      assert!(e.doc.get(&plain).unwrap().strokes.is_empty() && e.doc.get(&plain).unwrap().stroke_dash.is_empty());
+      assert_eq!(e.doc.get(&red).unwrap().strokes, vec![Paint::solid("#FF0000")]);
+      assert_eq!(e.doc.get(&red).unwrap().stroke_dash, vec![6.0, 4.0]);
+      let f = e.doc.get(&filled).unwrap();
+      assert!(f.strokes.is_empty() && f.fills == vec![Paint::solid("#123456")], "fill kept");
+    };
+    let mut loaded = engine();
+    loaded.load(&json).unwrap();
+    check(&loaded);
+    let mut replaced = engine();
+    replaced
+      .dispatch(Command::ReplaceDocument {
+        doc: serde_json::from_str(&json).unwrap(),
+        keep_comments: false,
+      })
+      .unwrap();
+    check(&replaced);
   }
 
   #[test]
@@ -8445,6 +8627,192 @@ mod tests {
           y: 0.0,
         })
         .is_err());
+    }
+
+    /// A 24x24 raw square icon shown at 48x48.
+    fn raw_icon(e: &mut Engine, fill_rule: &str) -> String {
+      let id = path(e, true);
+      let n = e.doc.get_mut(&id).unwrap();
+      n.x = 10.0;
+      n.y = 20.0;
+      n.width = 48.0;
+      n.height = 48.0;
+      n.vector = Some(crate::model::VectorData {
+        subpaths: vec![],
+        raw: Some(crate::model::RawPath {
+          d: "M2 2h20v20H2z".into(),
+          view_box: [0.0, 0.0, 24.0, 24.0],
+          fill_rule: fill_rule.into(),
+        }),
+      });
+      id
+    }
+
+    fn outline(e: &Engine, id: &str) -> Vec<(f64, f64)> {
+      crate::paths::page_outline(&e.doc, id)
+        .iter()
+        .flat_map(|sp| sp.points.iter().map(|p| (p.x, p.y)))
+        .collect()
+    }
+
+    #[test]
+    fn make_editable_keeps_the_outline_the_layer_and_undoes_in_one_step() {
+      let mut e = engine();
+      let id = raw_icon(&mut e, "");
+      let before = outline(&e, &id);
+      assert_eq!(before.len(), 4);
+      let d_before = e.doc.get(&id).unwrap().vector.clone();
+      e.dispatch(Command::MakeEditable { ids: vec![id.clone()] }).unwrap();
+      let n = e.doc.get(&id).unwrap();
+      assert!(n.vector.as_ref().unwrap().raw.is_none() && !n.vector.as_ref().unwrap().subpaths.is_empty());
+      let after = outline(&e, &id);
+      assert_eq!(before.len(), after.len());
+      for (a, b) in before.iter().zip(&after) {
+        assert!((a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6, "{a:?} vs {b:?}");
+      }
+      // Now it edits.
+      e.dispatch(Command::BendVectorSegment {
+        id: id.clone(),
+        sub: 0,
+        seg: 0,
+        t: 0.5,
+        x: 30.0,
+        y: 10.0,
+      })
+      .unwrap();
+      e.dispatch(Command::Undo).unwrap();
+      assert!(
+        e.doc.get(&id).unwrap().vector.as_ref().unwrap().raw.is_none(),
+        "the bend was its own step"
+      );
+      e.dispatch(Command::Undo).unwrap();
+      assert_eq!(e.doc.get(&id).unwrap().vector, d_before, "one undo restores the raw path");
+    }
+
+    #[test]
+    fn make_editable_refuses_even_odd_locked_and_device_parts() {
+      let mut e = engine();
+      let eo = raw_icon(&mut e, "evenodd");
+      let err = e.dispatch(Command::MakeEditable { ids: vec![eo.clone()] }).unwrap_err();
+      assert!(err.contains("Flatten"), "{err}");
+      assert!(e.doc.get(&eo).unwrap().vector.as_ref().unwrap().raw.is_some());
+      let locked = raw_icon(&mut e, "");
+      e.doc.get_mut(&locked).unwrap().locked = true;
+      assert!(e.dispatch(Command::MakeEditable { ids: vec![locked.clone()] }).is_err());
+      assert!(e.doc.get(&locked).unwrap().vector.as_ref().unwrap().raw.is_some());
+      // A plain editable vector has nothing to convert.
+      let plain = path(&mut e, false);
+      assert!(e.dispatch(Command::MakeEditable { ids: vec![plain] }).is_err());
+      // Several: the convertible ones convert, the even-odd one stays.
+      let ok = raw_icon(&mut e, "");
+      e.dispatch(Command::MakeEditable {
+        ids: vec![eo.clone(), ok.clone()],
+      })
+      .unwrap();
+      assert!(e.doc.get(&ok).unwrap().vector.as_ref().unwrap().raw.is_none());
+      assert!(e.doc.get(&eo).unwrap().vector.as_ref().unwrap().raw.is_some());
+    }
+
+    #[test]
+    fn make_editable_in_an_instance_records_an_override() {
+      let mut e = engine();
+      let icon = raw_icon(&mut e, "");
+      let comp = id_of(&e.dispatch(Command::CreateComponent { ids: vec![icon] }).unwrap());
+      let inst = id_of(
+        &e.dispatch(Command::CreateInstance {
+          component_id: comp.clone(),
+          x: 400.0,
+          y: 0.0,
+          parent: None,
+          anchor: None,
+          into_components: false,
+        })
+        .unwrap(),
+      );
+      let inner = e
+        .doc
+        .subtree(&inst)
+        .into_iter()
+        .find(|i| e.doc.get(i).is_some_and(|n| n.kind == NodeType::Vector))
+        .unwrap();
+      e.dispatch(Command::MakeEditable { ids: vec![inner.clone()] }).unwrap();
+      assert!(e.doc.get(&inner).unwrap().vector.as_ref().unwrap().raw.is_none());
+      assert!(
+        !e.doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides.is_empty(),
+        "recorded on the instance"
+      );
+    }
+
+    #[test]
+    fn typing_width_or_height_scales_the_points() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      // (100,100) (150,150) (200,100): 100 x 50.
+      let n = e.doc.get(&id).unwrap();
+      assert_eq!((n.width, n.height), (100.0, 50.0));
+      e.dispatch(Command::Update {
+        ids: vec![id.clone()],
+        patch: json!({ "width": 200 }),
+      })
+      .unwrap();
+      let pts: Vec<(f64, f64)> = points(&e, &id).iter().map(|p| (p.x, p.y)).collect();
+      assert_eq!(pts, vec![(0.0, 0.0), (100.0, 50.0), (200.0, 0.0)]);
+      e.dispatch(Command::Update {
+        ids: vec![id.clone()],
+        patch: json!({ "height": 25 }),
+      })
+      .unwrap();
+      let pts: Vec<(f64, f64)> = points(&e, &id).iter().map(|p| (p.x, p.y)).collect();
+      assert_eq!(pts, vec![(0.0, 0.0), (100.0, 25.0), (200.0, 0.0)]);
+      // A patch that carries the path itself is taken as it is.
+      let v = e.doc.get(&id).unwrap().vector.clone();
+      e.dispatch(Command::Update {
+        ids: vec![id.clone()],
+        patch: json!({ "width": 10, "vector": v }),
+      })
+      .unwrap();
+      assert_eq!(points(&e, &id)[2].x, 200.0);
+      // Moving doesn't scale.
+      e.dispatch(Command::Update {
+        ids: vec![id.clone()],
+        patch: json!({ "x": 5 }),
+      })
+      .unwrap();
+      assert_eq!(points(&e, &id)[2].x, 200.0);
+    }
+
+    #[test]
+    fn typing_width_in_an_instance_records_the_scaled_path() {
+      let mut e = engine();
+      let vec = path(&mut e, false);
+      let comp = id_of(&e.dispatch(Command::CreateComponent { ids: vec![vec] }).unwrap());
+      let inst = id_of(
+        &e.dispatch(Command::CreateInstance {
+          component_id: comp,
+          x: 400.0,
+          y: 0.0,
+          parent: None,
+          anchor: None,
+          into_components: false,
+        })
+        .unwrap(),
+      );
+      let inner = e
+        .doc
+        .subtree(&inst)
+        .into_iter()
+        .find(|i| e.doc.get(i).is_some_and(|n| n.kind == NodeType::Vector))
+        .unwrap();
+      e.dispatch(Command::Update {
+        ids: vec![inner.clone()],
+        patch: json!({ "width": 200 }),
+      })
+      .unwrap();
+      assert_eq!(points(&e, &inner)[2].x, 200.0);
+      assert!(
+        !e.doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides.is_empty(),
+        "recorded on the instance"
+      );
     }
 
     #[test]

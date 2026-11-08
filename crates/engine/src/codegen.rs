@@ -2534,7 +2534,12 @@ impl<'a> Ctx<'a> {
       }
       if let (Some(weights), Some(Paint::Solid { color, opacity, .. })) = (side_weights(n), n.strokes.iter().find(|p| p.visible())) {
         side_strokes(el, n, weights, &color::css_with_opacity(color, *opacity));
-      } else if let Some(Paint::Solid { color, opacity, .. }) = n.strokes.iter().find(|p| p.visible()) {
+      } else if let Some(Paint::Solid { color, opacity, .. }) = n
+        .strokes
+        .iter()
+        .find(|p| p.visible())
+        .filter(|_| !crate::components::is_default_set_outline(n))
+      {
         if n.stroke_weight > 0.0 {
           let style = if n.stroke_dash.is_empty() { "solid" } else { "dashed" };
           let c = color::css_with_opacity(color, *opacity);

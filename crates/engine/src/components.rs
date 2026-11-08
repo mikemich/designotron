@@ -1985,12 +1985,42 @@ pub fn combine_as_variants(doc: &mut Document, ids: &[NodeId], gen: &mut IdGen) 
     set.width += pad * 2.0;
     set.height += pad * 2.0;
     set.name = set_name;
-    set.strokes = vec![crate::model::Paint::solid("#9747FF")];
-    set.stroke_dash = vec![6.0, 4.0];
+    // The purple dashed outline is editor chrome (drawn by the canvas), not a stroke.
     set.corner_radius = 6.0;
   }
   props::merge_into_set(doc, &comps, &set_id);
   Some(set_id)
+}
+
+/// Whether `n` is a component set carrying exactly the outline older versions wrote into it as
+/// a stroke (#9747FF, solid, dash 6 4, weight 1). Anything else on a set is the user's stroke.
+pub fn is_default_set_outline(n: &Node) -> bool {
+  n.kind == NodeType::ComponentSet
+    && matches!(n.strokes.as_slice(), [crate::model::Paint::Solid { color, opacity, visible: true }]
+      if color.eq_ignore_ascii_case("#9747FF") && *opacity == 1.0)
+    && n.stroke_dash == [6.0, 4.0]
+    && n.stroke_weight == 1.0
+    && n.stroke_style.is_none()
+    && n.stroke_weights.is_none()
+    && !n.bindings.contains_key("stroke")
+}
+
+/// Removes the legacy default outline from every component set (files, pastes, peers).
+/// Returns how many sets changed.
+pub fn strip_default_set_outline(doc: &mut Document) -> usize {
+  let ids: Vec<NodeId> = doc
+    .nodes
+    .iter()
+    .filter(|(_, n)| is_default_set_outline(n))
+    .map(|(id, _)| id.clone())
+    .collect();
+  for id in &ids {
+    if let Some(n) = doc.get_mut(id) {
+      n.strokes.clear();
+      n.stroke_dash.clear();
+    }
+  }
+  ids.len()
 }
 
 /// The set name and each component's variant properties, derived from component names:
@@ -2341,6 +2371,69 @@ mod tests {
     assert_eq!(t.characters, "Buy now");
     assert_eq!(t.font_size, 30.0);
     assert_eq!(doc.get(&inst).unwrap().x, 300.0);
+  }
+
+  #[test]
+  fn only_the_exact_default_set_outline_counts_as_chrome() {
+    use crate::model::Paint;
+    let legacy = || Node {
+      id: "s".into(),
+      kind: NodeType::ComponentSet,
+      strokes: vec![Paint::solid("#9747FF")],
+      stroke_dash: vec![6.0, 4.0],
+      stroke_weight: 1.0,
+      ..Default::default()
+    };
+    assert!(is_default_set_outline(&legacy()));
+    type Tweak = (&'static str, Box<dyn Fn(&mut Node)>);
+    let tweaks: Vec<Tweak> = vec![
+      ("colour", Box::new(|n| n.strokes = vec![Paint::solid("#FF0000")])),
+      ("dash", Box::new(|n| n.stroke_dash = vec![4.0, 4.0])),
+      ("no dash", Box::new(|n| n.stroke_dash.clear())),
+      ("weight", Box::new(|n| n.stroke_weight = 2.0)),
+      (
+        "opacity",
+        Box::new(|n| {
+          n.strokes = vec![Paint::Solid {
+            color: "#9747FF".into(),
+            opacity: 0.5,
+            visible: true,
+          }]
+        }),
+      ),
+      (
+        "hidden",
+        Box::new(|n| {
+          n.strokes = vec![Paint::Solid {
+            color: "#9747FF".into(),
+            opacity: 1.0,
+            visible: false,
+          }]
+        }),
+      ),
+      ("second paint", Box::new(|n| n.strokes.push(Paint::solid("#000000")))),
+      ("stroke style", Box::new(|n| n.stroke_style = Some("s1".into()))),
+      ("bound stroke", Box::new(|n| drop(n.bindings.insert("stroke".into(), "v1".into())))),
+      ("side weights", Box::new(|n| n.stroke_weights = Some([1.0; 4]))),
+      ("a frame", Box::new(|n| n.kind = NodeType::Frame)),
+    ];
+    for (what, f) in tweaks {
+      let mut n = legacy();
+      f(&mut n);
+      assert!(!is_default_set_outline(&n), "{what} must be kept");
+    }
+    let mut gen = IdGen::new(1);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    doc.insert(legacy(), None, &page, None);
+    let mut kept = legacy();
+    kept.id = "k".into();
+    kept.stroke_weight = 2.0;
+    doc.insert(kept, None, &page, None);
+    assert_eq!(strip_default_set_outline(&mut doc), 1);
+    assert!(doc.get("s").unwrap().strokes.is_empty() && doc.get("s").unwrap().stroke_dash.is_empty());
+    assert_eq!(doc.get("k").unwrap().strokes.len(), 1);
+    assert_eq!(strip_default_set_outline(&mut doc), 0);
   }
 
   #[test]
