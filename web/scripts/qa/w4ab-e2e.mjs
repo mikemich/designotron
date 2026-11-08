@@ -237,6 +237,39 @@ try {
     await page.context().close();
   }
 
+  // ---- 2c. A later section that holds a carousel must not paint over it ----
+  {
+    const page = await newPage();
+    await open(page);
+    const r = await tool(page, "create_nodes", {
+      nodes: [
+        {
+          type: "frame", name: "Home", x: 0, y: 0, width: 390, height: 844, fill: "#FFFFFF", overflow: "vertical",
+          children: [
+            { type: "rectangle", name: "Tabs", x: 0, y: 0, width: 390, height: 48, fill: "#FF00AA", scrollBehavior: "sticky" },
+            {
+              type: "frame", name: "Section", x: 0, y: 100, width: 390, height: 1400, fill: "#FFFFFF",
+              children: [{ type: "frame", name: "Cards", x: 0, y: 50, width: 390, height: 140, fill: "#3344CC", overflow: "horizontal", children: [{ type: "rectangle", name: "Card", x: 0, y: 0, width: 1000, height: 140, fill: "#12AB34" }] }],
+            },
+          ],
+        },
+      ],
+    });
+    await setStart(page, ids(r).Home);
+    await present(page);
+    const order = await page.evaluate(() => {
+      const p = document.querySelector(".presenter");
+      const scrollers = [...p.querySelectorAll("[data-scroller]")];
+      const cards = scrollers[scrollers.length - 1];
+      const holder = [...p.querySelectorAll("svg")].find((s) => /3344cc/i.test(s.outerHTML) && !cards.contains(s));
+      const slides = [...p.querySelectorAll("svg")].find((s) => /12ab34/i.test(s.outerHTML));
+      return { scrollers: scrollers.length, holderBefore: !!holder && !!(holder.compareDocumentPosition(cards) & Node.DOCUMENT_POSITION_FOLLOWING), slidesInCards: !!slides && cards.contains(slides) };
+    });
+    check("the section holding the carousel is drawn under the carousel", order.scrollers === 2 && order.holderBefore, JSON.stringify(order));
+    check("the carousel's content is inside the carousel", order.slidesInCards, JSON.stringify(order));
+    await page.context().close();
+  }
+
   // ---- 3. Background blur behind a fixed bar ----
   {
     const page = await newPage();

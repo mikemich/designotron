@@ -300,6 +300,8 @@ fn for_model(text: &Arc<String>, model: u32) -> Arc<String> {
 #[serde(untagged)]
 enum DocOut<'a> {
   Raw(&'a Document),
+  /// Already text, with nothing in it that needs rewriting.
+  Text(Box<RawValue>),
   Older(Value),
 }
 
@@ -307,7 +309,16 @@ fn doc_for(doc: &Document, model: u32) -> DocOut<'_> {
   if model >= MODEL_REVISION {
     return DocOut::Raw(doc);
   }
-  let mut v = serde_json::to_value(doc).unwrap_or(Value::Null);
+  // Revisions 3 and up differ only by the names On drag and sticky: look for them in the text
+  // before building a tree.
+  let text = serde_json::to_string(doc).unwrap_or_default();
+  if model >= 3 && !text.contains("\"onDrag\"") && !text.contains("\"sticky\"") {
+    if let Ok(raw) = RawValue::from_string(text) {
+      return DocOut::Text(raw);
+    }
+    return DocOut::Raw(doc);
+  }
+  let mut v = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
   designotron_engine::collab::downgrade_value(&mut v, model);
   DocOut::Older(v)
 }

@@ -441,6 +441,8 @@ export function buildScene(frameId: string): Scene {
       const sibs = doc.nodes[doc.nodes[x].parent!].children;
       for (const sib of sibs.slice(sibs.indexOf(x) + 1)) {
         if (doc.nodes[sib]?.visible === false || fixedSet.has(sib) || infoOf.has(sib) || stickySet.has(sib) || stickyRootOwner.has(sib) || list.includes(sib)) continue;
+        // A layer with a scroller inside would paint over that scroller as one picture: it doesn't cover the sticky layer.
+        if (infos.some((i) => isInside(doc, i.id, sib))) continue;
         list.push(sib);
         stickyRootOwner.set(sib, t.id);
       }
