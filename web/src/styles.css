@@ -380,6 +380,14 @@ textarea {
   gap: 6px;
   margin-bottom: 6px;
 }
+.export-error:empty {
+  display: none;
+}
+.export-error {
+  margin: -2px 0 6px;
+  font-size: 11px;
+  color: #ff8a73; /* same contrast fix as .var-import-report.error: --danger is 3.2:1 on the panel */
+}
 .muted {
   color: var(--text-2);
 }

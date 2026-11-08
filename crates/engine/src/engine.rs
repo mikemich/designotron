@@ -1897,7 +1897,7 @@ impl Engine {
       crate::variables::apply_since(doc, old);
     }
     for root in changed_roots(old, doc).into_keys() {
-      layout::layout_node(doc, &root, self.measurer.as_ref());
+      layout::layout_root(doc, &root, self.measurer.as_ref());
     }
   }
 
@@ -2004,7 +2004,7 @@ impl Engine {
     let by_root = self.changed_by_root(prev);
     for (root, changed) in by_root {
       if !self.only_moved(prev, &root, &changed) && self.needs_layout(prev, &changed) {
-        layout::layout_node(&mut self.doc, &root, self.measurer.as_ref());
+        layout::layout_root(&mut self.doc, &root, self.measurer.as_ref());
       }
     }
     if self.reference {
@@ -2091,7 +2091,7 @@ impl Engine {
     };
     for r in &roots {
       if self.reference || by_root.get(r).is_none_or(|ids| self.needs_layout(prev, ids)) {
-        layout::layout_node(&mut self.doc, r, self.measurer.as_ref());
+        layout::layout_root(&mut self.doc, r, self.measurer.as_ref());
       }
     }
     let mut changed = Vec::new();
@@ -2338,7 +2338,9 @@ impl Engine {
   /// command, and it fails when nothing is left (the Device section turns system UI on and off).
   fn without_chrome(&self, mut cmd: Command) -> Result<Command, String> {
     let wrap = match &cmd {
-      Command::AddAutoLayout { ids } => !(ids.len() == 1 && self.doc.get(&ids[0]).is_some_and(|n| n.kind.is_frame_like())),
+      Command::AddAutoLayout { ids } => {
+        !(ids.len() == 1 && self.doc.get(&ids[0]).is_some_and(|n| n.kind.is_frame_like() && n.layout.is_none()))
+      }
       _ => true,
     };
     let ids = match &mut cmd {
@@ -3216,12 +3218,28 @@ impl Engine {
         Ok(json!({ "id": id }))
       }
       Command::AddAutoLayout { ids } => {
-        let target = if ids.len() == 1 && self.doc.get(&ids[0]).map(|n| n.kind.is_frame_like()).unwrap_or(false) {
+        // A frame without a layout gets one; a frame that has one is wrapped like a multi-selection,
+        // so its settings are never reset.
+        let target = if ids.len() == 1
+          && self
+            .doc
+            .get(&ids[0])
+            .map(|n| n.kind.is_frame_like() && n.layout.is_none())
+            .unwrap_or(false)
+        {
           ids[0].clone()
         } else {
+          // A lone layer that sits outside its parent's flow hands that to the wrapper.
+          let lone_absolute = ids.len() == 1 && self.doc.get(&ids[0]).is_some_and(|n| n.absolute_position);
           let id = ops::wrap_in_frame(&mut self.doc, &ids, &mut self.gen, NodeType::Frame).ok_or("nothing selected")?;
           if let Some(n) = self.doc.get_mut(&id) {
             n.fills.clear();
+            n.absolute_position = lone_absolute;
+          }
+          if lone_absolute {
+            if let Some(c) = self.doc.get_mut(&ids[0]) {
+              c.absolute_position = false;
+            }
           }
           id
         };
@@ -7507,6 +7525,47 @@ mod tests {
       .unwrap(),
     );
     assert_eq!(e.doc.get(&inst).unwrap().name, "Button");
+  }
+
+  #[test]
+  fn shift_a_on_an_auto_layout_frame_wraps_it_and_keeps_its_settings() {
+    let mut e = engine();
+    let f = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 40.0,
+        y: 40.0,
+        width: 200.0,
+        height: 200.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    rect(&mut e, 0.0, 0.0, 50.0, 50.0, Some(f.clone()));
+    e.dispatch(Command::AddAutoLayout { ids: vec![f.clone()] }).unwrap();
+    update_ids(
+      &mut e,
+      vec![f.clone()],
+      json!({ "layout": { "direction": "vertical", "gap": 24, "paddingLeft": 16, "paddingRight": 16, "paddingTop": 16, "paddingBottom": 16 } }),
+    );
+    let before = e.doc.get(&f).unwrap().layout.clone().unwrap();
+    assert_eq!((before.gap, before.padding_left), (24.0, 16.0));
+    let wrapper = id_of(&e.dispatch(Command::AddAutoLayout { ids: vec![f.clone()] }).unwrap());
+    assert_ne!(wrapper, f);
+    assert_eq!(
+      e.doc.get(&f).unwrap().layout.clone().unwrap(),
+      before,
+      "the inner layout is never reset"
+    );
+    assert_eq!(e.doc.get(&f).unwrap().parent.as_deref(), Some(wrapper.as_str()));
+    let w = e.doc.get(&wrapper).unwrap();
+    assert!(w.layout.is_some() && w.fills.is_empty());
+    assert_eq!((w.sizing_h, w.sizing_v), (Sizing::Hug, Sizing::Hug));
+    assert_eq!(e.selection, vec![wrapper.clone()]);
+    e.dispatch(Command::Undo).unwrap();
+    assert!(e.doc.get(&wrapper).is_none());
+    assert_eq!(e.doc.get(&f).unwrap().layout.clone().unwrap(), before);
+    assert!(e.doc.get(&f).unwrap().parent.is_none());
   }
 
   #[test]

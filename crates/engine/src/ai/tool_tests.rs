@@ -4035,3 +4035,146 @@ mod r19d {
     assert!(text("set_component_props").contains("unused"));
   }
 }
+
+mod r20c {
+  use super::*;
+  use crate::model::{ConstraintH, ConstraintV};
+
+  /// A 300 x 120 auto layout card with a flow label and an absolute badge: (card, label, badge).
+  fn card(e: &mut Engine) -> (String, String, String) {
+    let r = run(
+      e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Card", "width": 300, "height": 120, "layout": { "direction": "horizontal" }, "children": [
+        { "type": "rectangle", "name": "Label", "width": 100, "height": 20 },
+        { "type": "rectangle", "name": "Badge", "width": 20, "height": 20, "absolute": true, "x": 270, "y": 5 }
+      ] }] }),
+    );
+    let card = created(&r)[0].clone();
+    let kids = e.doc.get(&card).unwrap().children.clone();
+    (card, kids[0].clone(), kids[1].clone())
+  }
+
+  fn warns(r: &Value) -> String {
+    r["warnings"].to_string()
+  }
+
+  #[test]
+  fn constraints_are_accepted_in_every_spelling_and_shown_by_get_nodes() {
+    let mut e = engine();
+    let (card, _, badge) = card(&mut e);
+    for (h, v, eh, ev) in [
+      ("right", "bottom", ConstraintH::Right, ConstraintV::Bottom),
+      ("left-right", "top-bottom", ConstraintH::LeftRight, ConstraintV::TopBottom),
+      ("leftRight", "topBottom", ConstraintH::LeftRight, ConstraintV::TopBottom),
+      ("stretch", "stretch", ConstraintH::LeftRight, ConstraintV::TopBottom),
+      ("centre", "center", ConstraintH::Center, ConstraintV::Center),
+      ("scale", "SCALE", ConstraintH::Scale, ConstraintV::Scale),
+      ("MAX", "MAX", ConstraintH::Right, ConstraintV::Bottom),
+      ("MIN", "MIN", ConstraintH::Left, ConstraintV::Top),
+      ("CENTER", "STRETCH", ConstraintH::Center, ConstraintV::TopBottom),
+    ] {
+      let r = run(
+        &mut e,
+        "update_nodes",
+        json!({ "updates": [{ "id": badge, "constraints": { "horizontal": h, "vertical": v } }] }),
+      );
+      assert!(!warns(&r).contains("unknown key"), "{h} {v}: {r}");
+      let n = e.doc.get(&badge).unwrap();
+      assert_eq!((n.constraints.horizontal, n.constraints.vertical), (eh, ev), "{h} {v}");
+    }
+    // One axis only leaves the other as it was.
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": badge, "constraints": { "horizontal": "right" } }] }),
+    );
+    let n = e.doc.get(&badge).unwrap();
+    assert_eq!(
+      (n.constraints.horizontal, n.constraints.vertical),
+      (ConstraintH::Right, ConstraintV::TopBottom)
+    );
+    let r = run(&mut e, "get_nodes", json!({ "ids": [badge], "depth": 1 }));
+    let text = r.to_string();
+    assert!(text.contains("constraints") && text.contains("\"right\""), "{text}");
+    let _ = card;
+  }
+
+  #[test]
+  fn a_bad_constraint_is_an_error_that_lists_the_values() {
+    let mut e = engine();
+    let (_, _, badge) = card(&mut e);
+    let err = e
+      .dispatch(ai(
+        "update_nodes",
+        json!({ "updates": [{ "id": badge, "constraints": { "horizontal": "middle" } }] }),
+      ))
+      .unwrap_err();
+    assert!(
+      err.contains("constraints.horizontal") && err.contains("left") && err.contains("scale"),
+      "{err}"
+    );
+    let err = e
+      .dispatch(ai(
+        "update_nodes",
+        json!({ "updates": [{ "id": badge, "constraints": { "vertical": "left" } }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("constraints.vertical") && err.contains("top-bottom"), "{err}");
+    let err = e
+      .dispatch(ai("update_nodes", json!({ "updates": [{ "id": badge, "constraints": "right" }] })))
+      .unwrap_err();
+    assert!(err.contains("object"), "{err}");
+    // Nothing changed.
+    assert_eq!(e.doc.get(&badge).unwrap().constraints.horizontal, ConstraintH::Left);
+  }
+
+  #[test]
+  fn constraints_on_a_flow_child_or_outside_a_frame_warn_but_are_stored() {
+    let mut e = engine();
+    let (_, label, badge) = card(&mut e);
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": label, "constraints": { "horizontal": "right" } }] }),
+    );
+    assert!(warns(&r).contains("constraints take effect when absolute: true"), "{r}");
+    assert_eq!(e.doc.get(&label).unwrap().constraints.horizontal, ConstraintH::Right);
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": badge, "constraints": { "horizontal": "right" } }] }),
+    );
+    assert!(!warns(&r).contains("constraints"), "{r}");
+    let top = one(
+      &mut e,
+      json!({ "type": "rectangle", "width": 10, "height": 10, "constraints": { "vertical": "bottom" } }),
+    );
+    assert_eq!(e.doc.get(&top).unwrap().constraints.vertical, ConstraintV::Bottom);
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": top, "constraints": { "vertical": "center" } }] }),
+    );
+    assert!(warns(&r).contains("constraints apply inside frames"), "{r}");
+  }
+
+  #[test]
+  fn create_nodes_sets_constraints_on_an_absolute_child_that_then_follows_a_resize() {
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Card", "width": 300, "height": 120, "layout": { "direction": "horizontal" }, "children": [
+        { "type": "rectangle", "name": "Close", "width": 20, "height": 20, "absolute": true, "x": 270, "y": 0, "constraints": { "horizontal": "right", "vertical": "top" } },
+        { "type": "rectangle", "name": "Flow", "width": 50, "height": 20, "constraints": { "horizontal": "right" } }
+      ] }] }),
+    );
+    assert!(warns(&r).contains("constraints take effect when absolute: true"), "{r}");
+    let card = created(&r)[0].clone();
+    let close = e.doc.get(&card).unwrap().children[0].clone();
+    assert_eq!(e.doc.get(&close).unwrap().constraints.horizontal, ConstraintH::Right);
+    run(&mut e, "update_nodes", json!({ "updates": [{ "id": card, "width": 400 }] }));
+    assert_eq!(e.doc.get(&close).unwrap().x, 370.0);
+  }
+}
