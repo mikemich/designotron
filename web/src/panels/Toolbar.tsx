@@ -21,6 +21,7 @@ import {
   Redo2,
   Scaling,
   Sparkles,
+  Spline,
   Square,
   Star,
   Triangle,
@@ -41,7 +42,7 @@ import {
   zoomToSelection,
 } from "../store";
 import type { Tool } from "../types";
-import { Menu, MOD, Popover, SHIFT, type MenuItem, ALT_MOD, SHIFT_MOD } from "../ui/controls";
+import { isMac, Menu, MOD, Popover, SHIFT, type MenuItem, ALT_MOD, SHIFT_MOD } from "../ui/controls";
 import { runPlugin, usePlugins } from "../plugins";
 import { myColor, useCollab } from "../collab";
 import { startSpotlight, stopSpotlight, toggleFollow, useFollow } from "../follow";
@@ -54,7 +55,6 @@ import { focusPanel } from "./PanelChrome";
 import { isPhone, panelShown, PHONE_QUERY } from "../panelState";
 import { useShortcuts } from "./ShortcutsDialog";
 import { useImport } from "./ImportDialog";
-import { startFrame } from "../prototype";
 import { pasteOverSelection, SAME_PROPS, TIDY_KBD } from "../canvas/contextMenu";
 
 /** Below this width the top bar drops the rarer tool buttons (they move into the Shape tools menu). */
@@ -101,6 +101,8 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
   const doc = useDoc();
   const viewing = useCollab((s) => s.viewer);
   const readOnly = !!es.readOnly || viewing;
+  const editingVector = useStore((s) => !!s.editingVector);
+  const vectorBend = useStore((s) => s.vectorBend);
   const tabView = useStore((s) => s.tabView);
   const engineFailed = useStore((s) => s.engineFailed);
   // A tab that only shows the file, or a viewer, saves nothing: say that, never "Saved locally".
@@ -313,6 +315,17 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         </button>
         {panelToggle("left")}
         {toolBtn("move", "Move (V)", <MousePointer2 size={16} />)}
+        {editingVector && (
+          <button
+            className={"tbtn" + (vectorBend ? " active" : "")}
+            aria-pressed={vectorBend}
+            aria-label="Bend"
+            title={`Bend (hold ${isMac ? "⌘" : "Ctrl"} in vector edit)`}
+            onClick={() => useStore.setState({ vectorBend: !vectorBend })}
+          >
+            <Spline size={16} />
+          </button>
+        )}
         {/* Drawing tools are hidden on phones (view, comment, present and Claude only). */}
         <span className="draw-tools">
           {toolBtn("frame", "Frame (F)", <Hash size={16} />)}
@@ -518,12 +531,8 @@ export function Toolbar({ onHome }: { onHome: () => void }) {
         <button
           className="tbtn"
           title="Present"
-          onClick={() => {
-            const page = doc.pages.find((p) => p.id === es.page);
-            const first = startFrame(doc, page?.id);
-            if (first) useStore.setState({ presenting: first });
-            else toast("Nothing to present yet: add a frame (F) first. Presenting plays your frames as a clickable prototype.");
-          }}
+          aria-keyshortcuts={isMac ? "Meta+Alt+Enter" : "Control+Alt+Enter"}
+          onClick={A.startPresenting}
         >
           <Play size={16} />
         </button>

@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, RotateCcw, Settings2, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Maximize2, Minimize2, RotateCcw, Settings2, X } from "lucide-react";
 import { toast, useStore } from "./store";
 import type { Interaction, OverlaySettings, Rect } from "./types";
 import { REPO_URL } from "./panels/GuestBar";
@@ -7,6 +7,7 @@ import { DEFAULT_OVERLAY, overlayBox, overlayDim, TRIGGER_LABELS } from "./proto
 import { loadPrefs, savePrefs } from "./presenterPrefs";
 import { inlineAssets } from "./assets";
 import { focusedByPointer } from "./ui/controls";
+import { canFullscreen, exitFullscreenIfInside, isFullscreenIn, toggleFullscreen } from "./fullscreen";
 import {
   buildScene,
   carryScroll,
@@ -102,6 +103,14 @@ function cancelKeyPresses() {
 }
 /** The pointer id a key press uses (real pointers are never negative). */
 const KEY_POINTER = -1;
+/** Where the pointer last was (window coordinates); null until it first moves. A screen that appears
+ *  under a still pointer gets boundary events from the browser: hover waits for real movement from here. */
+let lastPointer: { x: number; y: number } | null = null;
+if (typeof window !== "undefined") {
+  window.addEventListener("pointermove", (e) => (lastPointer = { x: e.clientX, y: e.clientY }), { capture: true, passive: true });
+}
+/** Pointer movement that counts as real: at least this far (px) from where the screen appeared. */
+const HOVER_ARM_DISTANCE = 1;
 const within = (b: DOMRect, x: number, y: number) => x >= b.left && x <= b.right && y >= b.top && y <= b.bottom;
 
 /** The presenter's polite live region; `setter.current` sets what it says. */
@@ -133,6 +142,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   // Moves on every restart (R): screens, scrollers and timers start over even on the same frame.
   const [restarts, setRestarts] = useState(0);
   const [leaving, setLeaving] = useState<Leaving | null>(null);
+  const [full, setFull] = useState(false);
   const [smart, setSmart] = useState<Smart | null>(null);
   const motionKey = useRef(0);
   // Moves when the player's own engine changes (a Change to), so scenes are rebuilt.
@@ -477,6 +487,12 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         setMenu(false);
         return;
       }
+      // Escape in full screen only leaves full screen (the browser usually takes it before the page).
+      if (e.key === "Escape" && isFullscreenIn(rootRef.current)) {
+        e.preventDefault();
+        void toggleFullscreen(rootRef.current);
+        return;
+      }
       const t = e.target as HTMLElement | null;
       if (t && (["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) || t.isContentEditable)) return;
       const k = keys.current;
@@ -508,6 +524,12 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         restartRef.current();
         return;
       }
+      // F toggles full screen, after the screens' own Key triggers like R.
+      if (name === "F" && canFullscreen() && !t?.closest(".bar-menu")) {
+        e.preventDefault();
+        fullRef.current();
+        return;
+      }
       if (e.key === "Escape") {
         if (k.overlays.length) setOverlays((o) => o.slice(0, -1));
         else if (!remixUrl) useStore.setState({ presenting: null });
@@ -518,6 +540,26 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  const fullRef = useRef(() => {});
+  fullRef.current = () => {
+    void toggleFullscreen(rootRef.current).then((ok) => {
+      if (!ok) toast("Full screen isn't available here");
+    });
+  };
+  // Full screen follows the browser (Escape, F11, the system): the button's state and the fit. Closing the
+  // presenter leaves full screen.
+  useEffect(() => {
+    const el = rootRef.current;
+    const onChange = () => {
+      setFull(isFullscreenIn(rootRef.current));
+      window.dispatchEvent(new Event("resize"));
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      exitFullscreenIfInside(el);
+    };
   }, []);
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
@@ -672,6 +714,11 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
             </div>
           )}
         </div>
+        {canFullscreen() && (
+          <button className="tbtn" title="Full screen (F)" aria-label="Full screen (F)" aria-pressed={full} onClick={() => fullRef.current()}>
+            {full ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          </button>
+        )}
         {remixUrl ? (
           <>
             <a className="btn primary remix" href={remixUrl} target="_blank" rel="noopener" title="Open your own editable copy in Designotron">
@@ -867,7 +914,13 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
   const is = (t: Interaction["trigger"]) => (i: Interaction) => i.trigger === t;
   // How many hotspots of each owner's chain the pointer is inside; fire on 0 → 1 and 1 → 0 only.
   const inside = useRef(new Map<string, number>());
+  // Hover waits for real pointer movement after the screen appears (see the effect below). The hotspots
+  // the pointer is in, so a boundary event the browser sends twice never counts twice.
+  const armed = useRef(false);
+  const entered = useRef(new Set<string>());
   const enter = (h: Hotspot) => {
+    if (!armed.current || entered.current.has(h.id)) return;
+    entered.current.add(h.id);
     for (const owner of h.chain) {
       const o = byId.get(owner);
       if (!o) continue;
@@ -881,6 +934,7 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
     }
   };
   const leave = (h: Hotspot) => {
+    if (!entered.current.delete(h.id)) return;
     // Deferred so moving between a parent and its child (leave, then enter) doesn't re-fire.
     setTimeout(() => {
       for (const owner of h.chain) {
@@ -893,6 +947,37 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
       }
     }, 0);
   };
+  const enterRef = useRef(enter);
+  enterRef.current = enter;
+  useEffect(() => {
+    if (armed.current) return;
+    const start = lastPointer ? { ...lastPointer } : null;
+    const stop = () => {
+      window.removeEventListener("pointermove", onMove, true);
+      window.removeEventListener("pointerdown", onDown, true);
+    };
+    const arm = (x: number, y: number) => {
+      stop();
+      armed.current = true;
+      // The pointer is over layers that appeared under it: they are entered now.
+      for (const el of document.elementsFromPoint(x, y)) {
+        const id = el.getAttribute("data-hotspot");
+        const h = id && el.getAttribute("data-scene") === scene.id ? byId.get(id) : undefined;
+        if (h) enterRef.current(h);
+      }
+    };
+    const onMove = (e: PointerEvent) => {
+      if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) < HOVER_ARM_DISTANCE) return;
+      arm(e.clientX, e.clientY);
+    };
+    // A touch has no hovering: its press is real input at once.
+    const onDown = (e: PointerEvent) => {
+      if (e.pointerType !== "mouse") arm(e.clientX, e.clientY);
+    };
+    window.addEventListener("pointermove", onMove, true);
+    window.addEventListener("pointerdown", onDown, true);
+    return stop;
+  }, []);
   /** The click a tap on `chain` runs: the nearest layer with one (a press on the way owns the tap). */
   const clickOf = (chain: string[]) => {
     for (const owner of chain) {
@@ -967,6 +1052,7 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
         key={h.id}
         className={"hotspot" + (flash ? " hint-flash" : "")}
         data-hotspot={h.id}
+        data-scene={scene.id}
         {...a11y}
         onKeyDown={
           hit

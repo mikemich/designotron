@@ -273,6 +273,17 @@ pub enum Command {
     seg: usize,
     t: f64,
   },
+  /// Vector edit mode: bends segment `seg` of subpath `sub` so the curve passes through the
+  /// page-space point (`x`, `y`) at parameter `t`. Gesture-relative: every move of one drag
+  /// applies from the gesture's base, so the drag's last pointer position decides the shape.
+  BendVectorSegment {
+    id: NodeId,
+    sub: usize,
+    seg: usize,
+    t: f64,
+    x: f64,
+    y: f64,
+  },
   /// Deletes anchors (`[subpath, index]` pairs), joining their neighbours. Deleting all
   /// but one anchor deletes the layer.
   DeleteVectorPoints {
@@ -1717,7 +1728,10 @@ impl Engine {
     } else {
       None
     };
-    let gesture_relative = matches!(cmd, Command::Translate { .. } | Command::Resize { .. } | Command::Rotate { .. });
+    let gesture_relative = matches!(
+      cmd,
+      Command::Translate { .. } | Command::Resize { .. } | Command::Rotate { .. } | Command::BendVectorSegment { .. }
+    );
     // Inside a gesture there's no undo snapshot, but a command that fails still has to leave
     // nothing behind: AI tools change several layers before they can fail on a later one.
     let rollback = self.gesture.is_some().then(|| self.snapshot());
@@ -2678,6 +2692,14 @@ impl Engine {
           vector_edit::insert_point(sp, seg, t)
         })?;
         Ok(json!({ "index": index }))
+      }
+      Command::BendVectorSegment { id, sub, seg, t, x, y } => {
+        let target = self.doc.abs_matrix(&id).invert().apply(Point::new(x, y));
+        self.edit_vector(&id, true, |v| {
+          let sp = v.subpaths.get_mut(sub).ok_or("no such subpath")?;
+          vector_edit::bend_segment(sp, seg, t, target)
+        })?;
+        Ok(json!({}))
       }
       Command::DeleteVectorPoints { id, points } => {
         // Decide on a copy first: a refused delete must leave the path (and any open
@@ -8078,6 +8100,114 @@ mod tests {
       assert_eq!(crate::shapes::vector_d(e.doc.get(&id).unwrap()), d_before);
       e.dispatch(Command::Redo).unwrap();
       assert_eq!(points(&e, &id).len(), 4);
+    }
+
+    #[test]
+    fn bending_a_segment_passes_through_the_pointer_and_undoes() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      let d_before = crate::shapes::vector_d(e.doc.get(&id).unwrap());
+      // The first segment's middle is (125, 125); pull it to (110, 140).
+      e.dispatch(Command::BendVectorSegment {
+        id: id.clone(),
+        sub: 0,
+        seg: 0,
+        t: 0.5,
+        x: 110.0,
+        y: 140.0,
+      })
+      .unwrap();
+      let m = e.doc.abs_matrix(&id);
+      let c = vector_edit::segment(&e.doc.get(&id).unwrap().vector.as_ref().unwrap().subpaths[0], 0);
+      let at = m.apply(vector_edit::cubic_at(&c, 0.5));
+      assert!((at.x - 110.0).abs() < 1e-6 && (at.y - 140.0).abs() < 1e-6, "{at:?}");
+      assert_eq!(points(&e, &id).len(), 3);
+      e.dispatch(Command::Undo).unwrap();
+      assert_eq!(crate::shapes::vector_d(e.doc.get(&id).unwrap()), d_before);
+    }
+
+    #[test]
+    fn a_bend_drag_is_one_step_and_applies_from_the_base() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      let d_before = crate::shapes::vector_d(e.doc.get(&id).unwrap());
+      let depth = e.past.len();
+      let bend = |x: f64, y: f64| Command::BendVectorSegment {
+        id: id.clone(),
+        sub: 0,
+        seg: 0,
+        t: 0.5,
+        x,
+        y,
+      };
+      e.dispatch(Command::BeginGesture).unwrap();
+      for (x, y) in [(120.0, 130.0), (90.0, 160.0), (60.0, 150.0)] {
+        e.dispatch(bend(x, y)).unwrap();
+      }
+      e.dispatch(Command::EndGesture).unwrap();
+      assert_eq!(e.past.len(), depth + 1);
+      let dragged = e.doc.get(&id).unwrap().clone();
+      // The same final point in one go gives the same path, box included.
+      e.dispatch(Command::Undo).unwrap();
+      assert_eq!(crate::shapes::vector_d(e.doc.get(&id).unwrap()), d_before);
+      e.dispatch(bend(60.0, 150.0)).unwrap();
+      let once = e.doc.get(&id).unwrap();
+      assert_eq!(once.vector, dragged.vector);
+      assert_eq!(
+        (once.x, once.y, once.width, once.height),
+        (dragged.x, dragged.y, dragged.width, dragged.height)
+      );
+    }
+
+    #[test]
+    fn bending_in_an_instance_records_an_override_and_raw_paths_refuse() {
+      let mut e = engine();
+      let vec = path(&mut e, false);
+      let comp = id_of(&e.dispatch(Command::CreateComponent { ids: vec![vec] }).unwrap());
+      let inst = id_of(
+        &e.dispatch(Command::CreateInstance {
+          component_id: comp,
+          x: 400.0,
+          y: 0.0,
+          parent: None,
+          anchor: None,
+          into_components: false,
+        })
+        .unwrap(),
+      );
+      let inner = e
+        .doc
+        .subtree(&inst)
+        .into_iter()
+        .find(|i| e.doc.get(i).map(|n| n.kind == NodeType::Vector).unwrap_or(false))
+        .expect("the instance has a vector");
+      let main_before = crate::shapes::vector_d(e.doc.get(&inner).unwrap());
+      e.dispatch(Command::BendVectorSegment {
+        id: inner.clone(),
+        sub: 0,
+        seg: 0,
+        t: 0.5,
+        x: 430.0,
+        y: 160.0,
+      })
+      .unwrap();
+      assert_ne!(crate::shapes::vector_d(e.doc.get(&inner).unwrap()), main_before);
+      assert!(
+        !e.doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides.is_empty(),
+        "the bend is recorded on the instance"
+      );
+      let raw = path(&mut e, false);
+      e.doc.get_mut(&raw).unwrap().vector.as_mut().unwrap().raw = Some(Default::default());
+      assert!(e
+        .dispatch(Command::BendVectorSegment {
+          id: raw,
+          sub: 0,
+          seg: 0,
+          t: 0.5,
+          x: 0.0,
+          y: 0.0,
+        })
+        .is_err());
     }
 
     #[test]

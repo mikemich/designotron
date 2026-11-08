@@ -18,6 +18,11 @@ const NEAREST_SAMPLES: usize = 32;
 /// Golden-section refinement steps around the best sample.
 const NEAREST_REFINE: usize = 40;
 
+/// The parameter range a bend works in; nearer the ends the pull would blow up.
+const BEND_T_MIN: f64 = 0.1;
+/// cos(1 degree): how collinear two handles must be to count as one smooth anchor.
+const BEND_SMOOTH_COS: f64 = 0.999_847_695_156_391_3;
+
 /// The point on a vector's path nearest to a query point.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +115,78 @@ pub fn insert_point(sp: &mut SubPath, seg: usize, t: f64) -> Result<usize, Strin
   };
   sp.points.insert(seg + 1, new);
   Ok(seg + 1)
+}
+
+/// Bends segment `seg` so the curve passes through `target` (node-local) at parameter `t`,
+/// the way Inkscape's curve drag does: the handles share the pull by a weight that moves
+/// from the start handle (near the start) to the end handle (near the end). A smooth
+/// neighbour (opposite, collinear handles) keeps its other handle opposite the changed one.
+pub fn bend_segment(sp: &mut SubPath, seg: usize, t: f64, target: Point) -> Result<(), String> {
+  if seg >= segment_count(sp) {
+    return Err("no such segment".into());
+  }
+  let t = t.clamp(BEND_T_MIN, 1.0 - BEND_T_MIN);
+  let n = sp.points.len();
+  let (ia, ib) = (seg, (seg + 1) % n);
+  let (old_a, old_b) = (sp.points[ia], sp.points[ib]);
+  let at = cubic_at(&segment(sp, seg), t);
+  let (dx, dy) = (target.x - at.x, target.y - at.y);
+  let w = bend_weight(t);
+  let ka = (1.0 - w) / (3.0 * t * (1.0 - t) * (1.0 - t));
+  let kb = w / (3.0 * t * t * (1.0 - t));
+  {
+    let a = &mut sp.points[ia];
+    a.out_x += dx * ka;
+    a.out_y += dy * ka;
+  }
+  {
+    let b = &mut sp.points[ib];
+    b.in_x += dx * kb;
+    b.in_y += dy * kb;
+  }
+  // `ia != ib`: a subpath with a segment has two anchors or more.
+  let a = sp.points[ia];
+  if let Some((x, y)) = keep_opposite((old_a.in_x, old_a.in_y), (old_a.out_x, old_a.out_y), (a.out_x, a.out_y)) {
+    sp.points[ia].in_x = x;
+    sp.points[ia].in_y = y;
+  }
+  let b = sp.points[ib];
+  if let Some((x, y)) = keep_opposite((old_b.out_x, old_b.out_y), (old_b.in_x, old_b.in_y), (b.in_x, b.in_y)) {
+    sp.points[ib].out_x = x;
+    sp.points[ib].out_y = y;
+  }
+  Ok(())
+}
+
+/// Inkscape's share of the pull that goes to the end handle at parameter `t`.
+fn bend_weight(t: f64) -> f64 {
+  let cube = |x: f64| x * x * x;
+  if t <= 1.0 / 6.0 {
+    0.0
+  } else if t <= 0.5 {
+    cube((6.0 * t - 1.0) / 2.0) / 2.0
+  } else if t <= 5.0 / 6.0 {
+    1.0 - cube((6.0 * (1.0 - t) - 1.0) / 2.0) / 2.0
+  } else {
+    1.0
+  }
+}
+
+/// The new value of a smooth anchor's untouched handle `other`, given the handle that changed
+/// from `old_moved` to `moved`. None when the anchor wasn't smooth (the two old handles weren't
+/// opposite within 1 degree) or the changed handle vanished. The untouched handle keeps its
+/// length, or follows the changed one when the two were equal within 1%.
+fn keep_opposite(other: (f64, f64), old_moved: (f64, f64), moved: (f64, f64)) -> Option<(f64, f64)> {
+  let (lo, lm, ln) = (other.0.hypot(other.1), old_moved.0.hypot(old_moved.1), moved.0.hypot(moved.1));
+  if lo < 1e-9 || lm < 1e-9 || ln < 1e-9 {
+    return None;
+  }
+  let cos = -(other.0 * old_moved.0 + other.1 * old_moved.1) / (lo * lm);
+  if cos < BEND_SMOOTH_COS {
+    return None;
+  }
+  let len = if (lo - lm).abs() <= lm * 0.01 { ln } else { lo };
+  Some((-moved.0 / ln * len, -moved.1 / ln * len))
 }
 
 /// Deletes anchors given as `[subpath, index]`. Neighbours of a deleted interior anchor are
@@ -638,6 +715,99 @@ mod tests {
     assert!((p.out_x - third).abs() < 1e-9 && p.out_y.abs() < 1e-9, "{p:?}");
     set_smooth(&mut v, &[[0, 1]], false);
     assert!(!is_smooth(&v.subpaths[0].points[1]));
+  }
+
+  #[test]
+  fn bending_a_straight_line_passes_through_the_target() {
+    let mut sp = SubPath {
+      points: vec![VectorPoint::at(0.0, 0.0), VectorPoint::at(200.0, 0.0)],
+      closed: false,
+    };
+    bend_segment(&mut sp, 0, 0.5, Point::new(100.0, 50.0)).unwrap();
+    let m = cubic_at(&segment(&sp, 0), 0.5);
+    assert!((m.x - 100.0).abs() < EPS && (m.y - 50.0).abs() < EPS, "{m:?}");
+    assert!(sp.points[0].out_y > 0.0 && sp.points[1].in_y > 0.0);
+  }
+
+  #[test]
+  fn bending_a_curve_hits_the_target_at_any_t() {
+    for &t in &[0.1, 0.2, 0.35, 0.5, 0.7, 0.9] {
+      let mut sp = curvy(false);
+      let here = cubic_at(&segment(&sp, 1), t);
+      let target = Point::new(here.x + 13.0, here.y - 27.0);
+      bend_segment(&mut sp, 1, t, target).unwrap();
+      let m = cubic_at(&segment(&sp, 1), t);
+      assert!((m.x - target.x).abs() < EPS && (m.y - target.y).abs() < EPS, "t={t}: {m:?}");
+    }
+  }
+
+  #[test]
+  fn bend_clamps_t_near_the_ends() {
+    let mut a = curvy(false);
+    let mut b = curvy(false);
+    let target = Point::new(30.0, 70.0);
+    bend_segment(&mut a, 0, 0.0, target).unwrap();
+    bend_segment(&mut b, 0, 0.1, target).unwrap();
+    assert_eq!(a, b);
+    let m = cubic_at(&segment(&a, 0), 0.1);
+    assert!((m.x - 30.0).abs() < EPS && (m.y - 70.0).abs() < EPS);
+    assert!(bend_segment(&mut a, 9, 0.5, target).is_err());
+  }
+
+  #[test]
+  fn bend_keeps_smooth_neighbours_smooth_and_corners_alone() {
+    // Anchor 1 is smooth with unequal handles; anchors 0 and 2 are corners.
+    let mut sp = SubPath {
+      points: vec![
+        VectorPoint::at(0.0, 0.0),
+        VectorPoint {
+          in_x: -30.0,
+          out_x: 60.0,
+          ..VectorPoint::at(100.0, 0.0)
+        },
+        VectorPoint {
+          in_y: -20.0,
+          ..VectorPoint::at(200.0, 0.0)
+        },
+      ],
+      closed: false,
+    };
+    let before = sp.clone();
+    bend_segment(&mut sp, 1, 0.5, Point::new(150.0, 60.0)).unwrap();
+    let p = sp.points[1];
+    assert!(p.out_y != 0.0);
+    assert!((p.in_x * p.out_y - p.in_y * p.out_x).abs() < 1e-6, "collinear");
+    assert!(p.in_x * p.out_x + p.in_y * p.out_y < 0.0, "opposite");
+    assert!((p.in_x.hypot(p.in_y) - 30.0).abs() < 1e-6, "keeps its length");
+    assert_eq!(sp.points[0], before.points[0]);
+    assert_eq!((sp.points[2].out_x, sp.points[2].out_y), (0.0, 0.0));
+  }
+
+  #[test]
+  fn bend_keeps_equal_handles_equal() {
+    let mut sp = SubPath {
+      points: vec![
+        VectorPoint::at(0.0, 0.0),
+        VectorPoint {
+          in_x: -40.0,
+          out_x: 40.0,
+          ..VectorPoint::at(100.0, 0.0)
+        },
+        VectorPoint::at(200.0, 0.0),
+      ],
+      closed: false,
+    };
+    bend_segment(&mut sp, 1, 0.5, Point::new(150.0, 60.0)).unwrap();
+    let p = sp.points[1];
+    assert!((p.in_x.hypot(p.in_y) - p.out_x.hypot(p.out_y)).abs() < 1e-6);
+  }
+
+  #[test]
+  fn bending_the_closing_segment_works() {
+    let mut sp = square(true);
+    bend_segment(&mut sp, 3, 0.5, Point::new(-20.0, 5.0)).unwrap();
+    let m = cubic_at(&segment(&sp, 3), 0.5);
+    assert!((m.x + 20.0).abs() < EPS && (m.y - 5.0).abs() < EPS);
   }
 
   fn square(closed: bool) -> SubPath {

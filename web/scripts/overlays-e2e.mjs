@@ -301,6 +301,8 @@ try {
   const cardsPage = Object.values(dc.pages)[0].id;
   await page.evaluate(([pg, f]) => window.__dt.dispatch({ op: "setFlowStart", page: pg, id: f }), [cardsPage, cid("Cards")]);
   const present = async () => {
+    // Present starts on the selected frame: clear the selection to start on the flow start.
+    await page.evaluate(() => window.__dt.dispatch({ op: "select", ids: [] }));
     await page.click("button[title='Present']");
     await page.waitForSelector(".presenter");
     await page.waitForTimeout(300);
