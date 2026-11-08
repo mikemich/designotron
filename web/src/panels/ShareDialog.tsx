@@ -325,7 +325,7 @@ export function ShareDialog() {
                   )}
                   {linkLocalOnly && mode === "online" && (
                     <div className="muted small share-local-only" style={{ marginTop: 8 }}>
-                      This link works on this computer only (it names localhost).
+                      This link works on this computer only (it points at {linkHost(link)}).
                     </div>
                   )}
                   <div className="muted small" style={{ marginTop: 8 }}>
@@ -399,6 +399,15 @@ export function ShareDialog() {
 }
 
 /** "host/path" of a link, for showing where it opens. */
+/** The link's own host and port, e.g. `127.0.0.1:7275`. */
+function linkHost(link: string | null): string {
+  try {
+    return new URL(link ?? "").host || "localhost";
+  } catch {
+    return "localhost";
+  }
+}
+
 function hostOf(link: string | null): string {
   try {
     const u = new URL(link ?? "");

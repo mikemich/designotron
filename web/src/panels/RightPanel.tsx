@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Play, Plus, Trash2 } from "lucide-react";
 import { dispatch, query, useDoc, useSelection, useStore, type RightTab } from "../store";
 import { DesignPanel } from "./DesignPanel";
@@ -10,6 +10,7 @@ import type { Direction, Easing, Interaction, Node, Overflow, OverlaySettings } 
 import { DEFAULT_OVERLAY, enclosingSets, isMissingDestination, newInteraction, overlayDim, rememberMotion, SCREEN_TYPES, scrollTargets, startFrame, TRIGGER_LABELS } from "../prototype";
 import { keyName } from "../player";
 import { PanelClose } from "./PanelChrome";
+import { useCollab } from "../collab";
 
 const TABS: { id: RightTab; label: string }[] = [
   { id: "design", label: "Design" },
@@ -22,6 +23,10 @@ const TABS: { id: RightTab; label: string }[] = [
 export function RightPanel() {
   const tab = useStore((s) => s.rightTab);
   const set = (rightTab: RightTab) => useStore.setState({ rightTab });
+  // A viewer, or a tab that only shows the file, can't edit: the Design and Prototype fields say so.
+  const engineReadOnly = useStore((s) => !!s.es.readOnly);
+  const viewer = useCollab((s) => s.viewer);
+  const viewOnly = engineReadOnly || viewer;
   // Arrow keys move between tabs (only the selected one is a Tab stop).
   const onKeyDown = (e: React.KeyboardEvent) => {
     // A tab that was clicked leaves the arrows to the design (they nudge the selection).
@@ -59,8 +64,13 @@ export function RightPanel() {
       <div className="tabpanel" role="tabpanel" id="right-tabpanel" aria-labelledby={"right-tab-" + tab}>
         {/* The section titles below are level 3; this keeps the heading outline in order. */}
         <h2 className="sr-only">{TABS.find((t) => t.id === tab)?.label}</h2>
-        {tab === "design" && <DesignPanel />}
-        {tab === "prototype" && <PrototypePanel />}
+        {viewOnly && (tab === "design" || tab === "prototype") && (
+          <div className="view-only-note" role="note">
+            {viewer ? "View only. Copy values from the Code tab." : "Read-only: this file is open for editing in another tab."}
+          </div>
+        )}
+        {tab === "design" && (viewOnly ? <fieldset disabled className="view-only"><DesignPanel /></fieldset> : <DesignPanel />)}
+        {tab === "prototype" && (viewOnly ? <fieldset disabled className="view-only"><PrototypePanel /></fieldset> : <PrototypePanel />)}
         {tab === "code" && <CodePanel />}
         {tab === "review" && <ReviewPanel />}
         {tab === "app" && <AppPanel />}
@@ -78,6 +88,7 @@ function PrototypePanel() {
   const isTop = n && !n.parent && SCREEN_TYPES.includes(n.type);
   const start = startFrame(doc, page?.id);
   const present = () => start && useStore.setState({ presenting: start });
+  const list = useRef<HTMLDivElement>(null);
   return (
     <div className="scroll">
       <Section title="Flow">
@@ -102,15 +113,25 @@ function PrototypePanel() {
         <Section
           title="Interactions"
           actions={
-            <IconButton title="Add interaction" onClick={() => dispatch({ op: "setInteractions", id: n.id, interactions: [...n.interactions, newInteraction(frames.find((f) => f.id !== n.id)?.id ?? null)] })}>
+            <IconButton title="Add interaction" onClick={() => {
+                // No destination is guessed: the picker takes the focus so the next step is choosing one.
+                dispatch({ op: "setInteractions", id: n.id, interactions: [...n.interactions, newInteraction(null)] });
+                requestAnimationFrame(() => {
+                  const all = list.current?.querySelectorAll<HTMLElement>('[aria-label="Destination"]');
+                  all?.[all.length - 1]?.focus();
+                });
+              }}
+            >
               <Plus size={14} />
             </IconButton>
           }
         >
-          {n.interactions.length === 0 && <div className="muted small">No interactions on “{n.name}”.</div>}
-          {n.interactions.map((it, i) => (
-            <InteractionEditor key={i} node={n} index={i} frames={frames} />
-          ))}
+          <div ref={list}>
+            {n.interactions.length === 0 && <div className="muted small">No interactions on “{n.name}”.</div>}
+            {n.interactions.map((it, i) => (
+              <InteractionEditor key={i} node={n} index={i} frames={frames} />
+            ))}
+          </div>
           {isTop && (
             <button className="btn block" onClick={() => page && dispatch({ op: "setFlowStart", page: page.id, id: n.id })}>
               Set “{n.name}” as starting point
