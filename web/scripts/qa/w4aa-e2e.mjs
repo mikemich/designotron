@@ -57,6 +57,8 @@ const shot = (name) => page.screenshot({ path: path.join(OUT, `w4aa-${name}.png`
 const present = async (frame) => {
   const pg = await page.evaluate(() => window.__dt.state().page);
   await dispatch({ op: "setFlowStart", page: pg, id: ids[frame] });
+  // Present starts at the selected frame when there is one: clear the selection.
+  await dispatch({ op: "select", ids: [] });
   await page.click("button[title='Present']");
   await page.waitForSelector(".presenter");
   await sleep(300);
@@ -251,6 +253,7 @@ await closePresent();
   await p2.evaluate(([qq, b, i]) => window.__dt.dispatch({ op: "setInteractions", id: qq, interactions: [{ ...i, destination: b }] }), [q, rb, interaction({})]);
   const pg = await p2.evaluate(() => window.__dt.state().page);
   await p2.evaluate(([a, g]) => window.__dt.dispatch({ op: "setFlowStart", page: g, id: a }), [ra, pg]);
+  await p2.evaluate(() => window.__dt.dispatch({ op: "select", ids: [] }));
   await p2.click("button[title='Present']");
   await p2.waitForSelector(".presenter");
   await sleep(200);
