@@ -863,3 +863,16 @@ export function ramp(from: number, to: number, ms: number, ease: Ease, apply: (v
   }
   return { done, cancel: stop };
 }
+
+// ---------- sticky layers (Change to inside a scroller) ----------
+
+/** How far a sticky layer is pushed down while its scroller is at `scrollTop`: nothing until the
+ *  layer's top reaches the scroller's top, then it holds there until its parent's bottom takes it
+ *  away. All y values are in the same (screen frame) coordinates, at design positions. */
+export function stickyShift(scrollTop: number, boxTop: number, scrollerTop: number, boxBottom: number, parentBottom: number): number {
+  return Math.min(Math.max(0, scrollTop - (boxTop - scrollerTop)), Math.max(0, parentBottom - boxBottom));
+}
+
+/** Where a layer sits relative to its design position when its scroller is scrolled by `scrollTop`
+ *  (content moves up) and a sticky layer is pushed down by `shift`. */
+export const stickyOffset = (negScroll: number, shift: number) => negScroll + shift;

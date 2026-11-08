@@ -16,6 +16,8 @@ import {
   planSmart,
   rubberBand,
   smartVector,
+  stickyOffset,
+  stickyShift,
   touchActionFor,
   velocityAlong,
   type Nodes,
@@ -278,5 +280,26 @@ describe("On drag", () => {
     expect(touchActionFor(dragAxis(v))).toBe("pan-y");
     // A layer inside the moving track moves with it.
     expect(smartVector(m, measure(A, B, m), idOf(a.nodes, "Track", "S1"))).toEqual({ x: -300, y: 0 });
+  });
+});
+
+describe("sticky layers", () => {
+  it("sticks at the scroller's top and leaves with its parent", () => {
+    // Layer top 40, scroller top 0, box bottom 90 (height 50), parent bottom 200.
+    const at = (top: number) => stickyShift(top, 40, 0, 90, 200);
+    expect(at(0)).toBe(0); // not reached yet
+    expect(at(40)).toBe(0);
+    expect(at(100)).toBe(60); // held at the top: pushed down by what it scrolled past
+    expect(at(1000)).toBe(110); // the parent's bottom takes it away (200 - 90)
+  });
+  it("is never negative, even when the box is already past the parent", () => {
+    expect(stickyShift(500, 40, 0, 300, 200)).toBe(0);
+    expect(stickyShift(-50, 40, 0, 90, 200)).toBe(0);
+  });
+  it("the offset is minus the scroll plus the push (the layer stays where the screen shows it)", () => {
+    const shift = stickyShift(100, 40, 0, 90, 200); // 60
+    expect(stickyOffset(-100, shift)).toBe(-40); // content at 40 shows at 40 - 100 + 60 = 0
+    expect(40 + stickyOffset(-100, shift)).toBe(0);
+    expect(stickyOffset(-100, 0)).toBe(-100); // a plain layer just scrolls
   });
 });

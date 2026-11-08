@@ -47,6 +47,8 @@ import {
   rubberBand,
   smartVector,
   SmartTween,
+  stickyShift,
+  stickyOffset,
   touchActionFor,
   velocityAlong,
   type SmartPlan,
@@ -97,8 +99,6 @@ interface Smart {
   manual?: boolean;
   /** Pieces inside this overlay: they show over the overlays and its own picture is hidden. */
   overlay?: number;
-  /** Gives back the copy of the old state's engine. */
-  free?: () => void;
 }
 
 /** A change a drag is following: progress 0 is where it started, 1 is done. */
@@ -113,6 +113,8 @@ interface Manual {
   revert: Revert;
   ms: number;
   ease: Ease;
+  /** Stops a ramp that is running (a restart or the player closing cut the release off). */
+  cancel?: () => void;
 }
 
 /** A drag drives the screen animations: they start paused (one `animation` value, so the shorthand isn't mixed with a longhand). */
@@ -402,7 +404,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     const frozen = smartOk ? frozenSide(instance) : null;
     const posBefore = new Map(scrolls.current.pos);
     const inner = scrollersOf(sc, instance);
-    const sticky = (pos: Map<string, { left: number; top: number }>) => stickyShift(sc, instance, inFrame, pos);
+    const sticky = (pos: Map<string, { left: number; top: number }>) => stickyAmount(sc, instance, inFrame, pos);
     const stickyA = frozen ? sticky(posBefore) : 0;
     if (!swapVariant(instance, it.destination!)) {
       frozen?.free();
@@ -416,27 +418,29 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       const ib = pq<{ union: Rect }>({ q: "bounds", ids: [instance] }).union;
       const off = (pos: Map<string, { left: number; top: number }>, dy: number): Vec => {
         let x = 0;
-        let y = dy;
+        let y = 0;
         for (const s of inner) {
           const p = pos.get(s.id);
           x -= p?.left ?? 0;
           y -= p?.top ?? 0;
         }
         const ov = topO && inTop ? pos.get(`ov:${topO.key}`) : null;
-        return { x: x - (ov?.left ?? 0), y: y - (ov?.top ?? 0) };
+        return { x: x - (ov?.left ?? 0), y: stickyOffset(y - (ov?.top ?? 0), dy) };
       };
       const shiftX = topO && inTop ? topO.x : 0;
       const shiftY = topO && inTop ? topO.y : 0;
       let clip: Rect | null = topO && inTop ? { x: topO.x, y: topO.y, width: topO.w, height: topO.h } : null;
       for (const s of inner) clip = overlap(clip, { ...s.rect, x: s.rect.x + shiftX, y: s.rect.y + shiftY });
-      const A = off(posBefore, -stickyA);
-      const B = off(scrolls.current.pos, -sticky(scrolls.current.pos));
+      const A = off(posBefore, stickyA);
+      const B = off(scrolls.current.pos, sticky(scrolls.current.pos));
       const plan = planSmart(frozen.side, liveSide(instance), {
         at: { x: ib.x - fb.x + shiftX, y: ib.y - fb.y + shiftY },
         offsetA: A,
         offsetB: B,
         clip,
       });
+      // The old state's engine copy has drawn what it was needed for.
+      frozen.free();
       if (plan) {
         const rest = buildSceneWithout(inFrame, [instance]);
         const pos = new Map(scrolls.current.pos);
@@ -453,13 +457,14 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
             view
           );
         const key = ++motionKey.current;
-        sm = { key, motion: m, plan, backdrop, manual, overlay: inTop ? topO!.key : undefined, free: frozen.free };
+        sm = { key, motion: m, plan, backdrop, manual, overlay: inTop ? topO!.key : undefined };
         setSmart(sm);
         setLeaving({ key, id: inFrame, motion: { ...m, kind: "dissolve" }, pos: new Map(), manual });
-      } else frozen.free();
+      }
     }
     setRevision((r) => r + 1);
-    say(`Changed to ${pdoc().nodes[it.destination!]?.name ?? "another variant"}`);
+    // A drag says it when the change is kept (a snap-back says nothing).
+    if (!manual) say(`Changed to ${pdoc().nodes[it.destination!]?.name ?? "another variant"}`);
     return {
       smart: sm,
       undo: () => {
@@ -469,7 +474,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   };
 
   /** How far a sticky layer holding `instance` is pushed down by a scroller's position (0 when none). */
-  const stickyShift = (sc: Scene, instance: string, inFrame: string, pos: Map<string, { left: number; top: number }>): number => {
+  const stickyAmount = (sc: Scene, instance: string, inFrame: string, pos: Map<string, { left: number; top: number }>): number => {
     const d = pdoc();
     const chain: string[] = [];
     for (let at: string | null = instance; at && at !== inFrame; at = (d.nodes[at]?.parent as string | null | undefined) ?? null) chain.push(at);
@@ -482,10 +487,8 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       const box = items.find((i) => i.id === id)?.bounds;
       const parent = items.find((i) => i.id === n.parent)?.bounds;
       if (!box || !parent) return 0;
-      const top = pos.get(s.id)?.top ?? 0;
       const frameAt = pq<{ union: Rect }>({ q: "bounds", ids: [inFrame] }).union;
-      const rel = box.y - frameAt.y - s.rect.y;
-      return Math.min(Math.max(0, top - rel), Math.max(0, parent.y + parent.height - (box.y + box.height)));
+      return stickyShift(pos.get(s.id)?.top ?? 0, box.y - frameAt.y, s.rect.y, box.y + box.height - frameAt.y, parent.y + parent.height - frameAt.y);
     }
     return 0;
   };
@@ -613,7 +616,13 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     const vec = m.kind === "instant" ? null : dragVec(it, source, inFrame);
     const base = inFrame === current.id && !overlays.length;
     if (vec && it.action === "navigate" && it.destination && base) {
-      const undo = snapshot();
+      const back = snapshot();
+      // A snap-back puts the screen back as it was, scrolled where it was.
+      const pos = new Map(scrolls.current.pos);
+      const undo = () => {
+        carried.current = pos;
+        back();
+      };
       const dest = it.destination;
       flushSync(() => navigate(dest, m, it.preserveScroll, true));
       if (m.kind === "smart") {
@@ -639,7 +648,17 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         for (const a of anims) a.currentTime = at * m.ms;
       };
       set(0);
-      return { vec, set, ramp: (to, ms, ease) => ramp(at, to, ms, ease, set).done, settle: finishMotion, revert: undo, ms: m.ms, ease: m.ease };
+      let running: ReturnType<typeof ramp> | null = null;
+      return {
+        vec,
+        set,
+        ramp: (to, ms, ease) => (running = ramp(at, to, ms, ease, set)).done,
+        cancel: () => running?.cancel(),
+        settle: finishMotion,
+        revert: undo,
+        ms: m.ms,
+        ease: m.ease,
+      };
     }
     if (vec && it.action === "changeTo" && m.kind === "smart") {
       const held: { r: ReturnType<typeof changeVariant> } = { r: null };
@@ -654,7 +673,10 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
           vec,
           set: (v) => tw.seek(v, linear),
           ramp: (to, ms, ease) => tw.play(to, ms, ease),
-          settle: finishMotion,
+          settle: () => {
+            finishMotion();
+            say(`Changed to ${pdoc().nodes[it.destination!]?.name ?? "another variant"}`);
+          },
           revert: () => {
             finishMotion();
             r.undo();
@@ -680,6 +702,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     if (dragging.current) return;
     const samples: { t: number; x: number; y: number }[] = [{ t: performance.now(), x: x0, y: y0 }];
     let manual: Manual | null | undefined; // undefined: still a press
+    let once = false; // the action ran once at the slop
     let at = 0;
     const stop = () => {
       window.removeEventListener("pointermove", move);
@@ -690,15 +713,15 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       if (e.pointerId !== pointerId) return;
       samples.push({ t: performance.now(), x: e.clientX, y: e.clientY });
       if (samples.length > 30) samples.shift();
+      if (once) return;
       if (manual === undefined) {
         if (Math.hypot(e.clientX - x0, e.clientY - y0) < DRAG_SLOP) return;
         // The drag takes over: a While pressing on the layer is put back first.
         pressUndo.current?.();
         manual = beginManual(it, from, source, inFrame);
         if (!manual) {
-          stop();
-          dragging.current = null;
-          armSwallow();
+          // Done; the click that follows the release is swallowed when the pointer comes up.
+          once = true;
           return;
         }
       }
@@ -713,6 +736,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       const mm = manual;
       if (!mm) {
         dragging.current = null;
+        if (once) armSwallow();
         return;
       }
       armSwallow();
@@ -720,12 +744,18 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       const speed = velocityAlong(samples, { x: mm.vec.x / len, y: mm.vec.y / len });
       const p = Math.min(1, Math.max(0, at));
       const done = e.type === "pointerup" && completes(p, speed);
-      dragging.current = () => {};
-      const end = () => {
-        dragging.current = null;
+      // A restart or the player closing cuts the release off: then nothing is settled or reverted.
+      let cancelled = false;
+      dragging.current = () => {
+        cancelled = true;
+        mm.cancel?.();
       };
-      if (done) mm.ramp(1, (1 - p) * mm.ms, mm.ease).then(() => (mm.settle(), end()));
-      else mm.ramp(0, p * mm.ms, mm.ease).then(() => (mm.revert(), end()));
+      const end = (reached: unknown, then: () => void) => {
+        if (!cancelled && reached !== false) then();
+        if (!cancelled) dragging.current = null;
+      };
+      if (done) mm.ramp(1, (1 - p) * mm.ms, mm.ease).then((r) => end(r, mm.settle));
+      else mm.ramp(0, p * mm.ms, mm.ease).then((r) => end(r, mm.revert));
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -749,7 +779,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   // Test hook: freeze the running smart animate at a moment and read what it draws.
   useEffect(() => {
     const dt = ((globalThis as any).__dt ??= {});
-    dt.smart = { seek: (p: number) => smartCtl.current?.seek(p), state: () => smartCtl.current?.state() ?? null, variant: (id: string) => pdoc().nodes[id]?.instance?.componentId ?? null };
+    dt.smart = { seek: (p: number) => smartCtl.current?.seek(p), state: () => smartCtl.current?.state() ?? null, variant: (id: string) => pdoc().nodes[id]?.instance?.componentId ?? null, name: (id: string) => pdoc().nodes[id]?.name ?? null };
     return () => {
       delete dt.smart;
     };
@@ -1072,7 +1102,6 @@ function SmartLayer({ smart, width, height, scale, ctl, onDone }: { smart: Smart
       live = false;
       tw.cancel();
       if (ctl.current === tw) ctl.current = null;
-      smart.free?.();
     };
   }, []);
   return (
@@ -1268,7 +1297,7 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
           ? { tabIndex: 0, role: "button", "aria-label": `${name || "Button"}, ${TRIGGER_LABELS.onDrag.toLowerCase()}` }
           : { "aria-hidden": true as const };
     const dragKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
-      if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ") || !dragger) return;
+      if (e.target !== e.currentTarget || e.repeat || (e.key !== "Enter" && e.key !== " ") || !dragger) return;
       if (focusedByPointer(e.currentTarget)) return;
       e.preventDefault();
       e.stopPropagation();

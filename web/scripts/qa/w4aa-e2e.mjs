@@ -160,7 +160,7 @@ check("1: Title (colour only) is live and half way between colours", title?.kind
 const avatar = (await pieceInfo("Avatar"));
 check("1: Avatar (image resize) is morph (old + new)", avatar.length === 2 && avatar.every((a) => a.kind === "morph"), JSON.stringify(avatar.map((a) => a.kind)));
 const cardEl = (await pieceInfo("Card"))[0];
-check("1: Card own piece is live (fill kept, box moves)", !!cardEl && ["live", "move"].includes(cardEl.kind), cardEl?.kind);
+check("1: Card own piece only moves (same look: drawn once and translated)", cardEl?.kind === "move", cardEl?.kind);
 const iconNow = (await pieceInfo("Icon"))[0];
 await smart("seek", 0);
 const icon0 = (await pieceInfo("Icon"))[0];
@@ -484,6 +484,139 @@ const median = sorted[Math.floor(sorted.length / 2)];
 const worst = sorted[sorted.length - 1];
 console.log(`INFO  rAF deltas during the tween: n=${during.length} median=${median?.toFixed(1)} max=${worst?.toFixed(1)}`);
 check("11: 40 live pieces: median frame <= 20 ms, none over 60 ms", median <= 20 && worst <= 60, `median ${median?.toFixed(1)}, max ${worst?.toFixed(1)}`);
+await closePresent();
+
+// ---------- 12: review fixes: scroll kept on snap-back, a cut-off release, Change to in an overlay ----------
+await tool("create_nodes", {
+  nodes: [
+    { type: "frame", name: "SS", x: 9600, y: 0, width: 390, height: 600, fill: "#FFFFFF", children: [{ type: "rectangle", name: "SBody", x: 0, y: 0, width: 390, height: 1500, fill: "#EEEEEE" }, { type: "rectangle", name: "Sdrag", x: 20, y: 300, width: 300, height: 100, fill: "#FF0066" }] },
+    { type: "frame", name: "R1", x: 10200, y: 0, width: 390, height: 600, fill: "#FFFFFF", children: [{ type: "rectangle", name: "Go", x: 20, y: 100, width: 200, height: 100, fill: "#00AA66" }] },
+    { type: "frame", name: "R2", x: 10800, y: 0, width: 390, height: 600, fill: "#FFFF99", children: [{ type: "rectangle", name: "Rdrag", x: 20, y: 100, width: 300, height: 100, fill: "#0066FF" }] },
+    { type: "frame", name: "R3", x: 11400, y: 0, width: 390, height: 600, fill: "#FF99FF" },
+    { type: "frame", name: "OvHost", x: 12000, y: 0, width: 600, height: 800, fill: "#FFFFFF", children: [{ type: "rectangle", name: "OpenOv", x: 20, y: 20, width: 120, height: 50, fill: "#FF8800" }] },
+    { type: "frame", name: "OvModal", x: 12800, y: 0, width: 300, height: 200, fill: "#FFFFFF" },
+  ],
+});
+await refresh();
+{
+  const dd3 = await doc();
+  const child = (parent, name) => Object.values(dd3.nodes).find((n) => n.name === name && n.parent === parent).id;
+  ids.Sdrag = child(ids.SS, "Sdrag");
+  ids.Go = child(ids.R1, "Go");
+  ids.Rdrag = child(ids.R2, "Rdrag");
+  ids.OpenOv = child(ids.OvHost, "OpenOv");
+  await dispatch({ op: "update", ids: [ids.SS], patch: { overflow: "vertical" } });
+  const push = (dest) => interaction({ trigger: "onDrag", destination: dest, transition: "push", direction: "left", durationMs: 600, easing: "easeOut" });
+  await dispatch({ op: "setInteractions", id: ids.Sdrag, interactions: [push(ids.P2)] });
+  await dispatch({ op: "setInteractions", id: ids.Go, interactions: [interaction({ transition: "instant", durationMs: 0, destination: ids.R2 })] });
+  await dispatch({ op: "setInteractions", id: ids.Rdrag, interactions: [push(ids.R3)] });
+  await dispatch({ op: "setInteractions", id: ids.OpenOv, interactions: [interaction({ action: "openOverlay", destination: ids.OvModal, transition: "instant", durationMs: 0 })] });
+  ids.Toggle2 = (await dispatch({ op: "createInstance", componentId: offId, x: 12850, y: 100, parent: ids.OvModal })).id;
+}
+const slowDrag = async (box, dx) => {
+  const x0 = box.x + box.width - 20;
+  const y0 = box.y + 40;
+  await page.mouse.move(x0, y0);
+  await page.mouse.down();
+  for (let i = 1; i <= 6; i++) {
+    await page.mouse.move(x0 + (dx * i) / 6, y0);
+    await sleep(15);
+  }
+  await sleep(250); // no flick
+  await page.mouse.up();
+};
+// A short Push drag on a scrolled screen snaps back with the scroll where it was.
+await present("SS");
+{
+  const sc2 = page.locator(".presenter [data-scroller]").first();
+  const b2 = await sc2.boundingBox();
+  await page.mouse.move(b2.x + 200, b2.y + 100);
+  await page.mouse.wheel(0, 200);
+  await sleep(300);
+  const before = await sc2.evaluate((e) => e.scrollTop);
+  const hb2 = await hot(ids.Sdrag).boundingBox();
+  await slowDrag(hb2, -39);
+  await sleep(900);
+  const after = await page.locator(".presenter [data-scroller]").first().evaluate((e) => e.scrollTop);
+  check("12: a short Push drag on a scrolled screen snaps back with the scroll unchanged", before >= 150 && Math.abs(after - before) <= 1 && (await crumb()) === "SS", `${before} -> ${after}, ${await crumb()}`);
+}
+await closePresent();
+// R during a snap-back does not undo the restart.
+await present("R1");
+await hot(ids.Go).click();
+await sleep(200);
+{
+  check("12: setup: R1 -> R2", (await crumb()) === "R2");
+  const hb3 = await hot(ids.Rdrag).boundingBox();
+  const x0 = hb3.x + hb3.width - 20;
+  const y0 = hb3.y + 40;
+  await page.mouse.move(x0, y0);
+  await page.mouse.down();
+  for (let i = 1; i <= 6; i++) {
+    await page.mouse.move(x0 - (i * 40) / 6, y0);
+    await sleep(15);
+  }
+  await sleep(250);
+  await page.mouse.up();
+  await page.keyboard.press("r"); // inside the snap-back
+  await sleep(1000);
+  check("12: R during a snap-back stays restarted (not undone)", (await crumb()) === "R1", await crumb());
+}
+await closePresent();
+// Closing during a Change to snap-back leaves no stale player engine for the next Present.
+await present("Home");
+{
+  const hb4 = await hot(car).boundingBox();
+  const x0 = hb4.x + hb4.width - 10;
+  const y0 = hb4.y + 50;
+  await page.mouse.move(x0, y0);
+  await page.mouse.down();
+  for (let i = 1; i <= 5; i++) {
+    await page.mouse.move(x0 - (i * 24) / 5, y0);
+    await sleep(15);
+  }
+  await sleep(250);
+  await page.mouse.up();
+  await page.keyboard.press("Escape"); // inside the snap-back
+  await page.waitForSelector(".presenter", { state: "detached" });
+  await sleep(500);
+  await dispatch({ op: "update", ids: [car], patch: { name: "Carousel renamed" } });
+  await present("Home");
+  const nm = await page.evaluate((c) => window.__dt.smart.name(c), car);
+  check("12: closing during a snap-back leaves no stale engine (the next Present sees the edit)", nm === "Carousel renamed", String(nm));
+}
+await closePresent();
+// Change to inside the top overlay: the pieces sit in the overlay, half way.
+await present("OvHost");
+{
+  await hot(ids.OpenOv).click();
+  await sleep(300);
+  const ob = await page.locator(`.presenter [data-overlay-frame]`).boundingBox();
+  const tb2 = await hot(ids.Toggle2).boundingBox();
+  await page.mouse.click(tb2.x + 10, tb2.y + 10);
+  await sleep(100);
+  await smart("seek", 0.5);
+  const kn = (await pieceInfo("Knob"))[0];
+  // Instance at overlay-local (50, 100); the knob goes from x 4 to 96 (half way: 50) and sits at y 4.
+  check("12: Change to in the overlay: the knob piece is half way inside the overlay", !!kn && near(kn.x, ob.x + 50 + 50, 3) && near(kn.y, ob.y + 100 + 4, 3), `${JSON.stringify(kn && [kn.x, kn.y])} vs ${ob.x + 100}, ${ob.y + 104}`);
+  const hidden = await page.evaluate(() => getComputedStyle(document.querySelector("[data-overlay-frame] > div")).visibility);
+  check("12: the overlay's own picture waits while the pieces play", hidden === "hidden", hidden);
+  const clip = await page.evaluate(() => document.querySelector(".presenter .smart-layer > div:last-child > div")?.style.clipPath ?? "");
+  check("12: the pieces are clipped to the overlay box", /inset\(/.test(clip), clip);
+}
+await page.keyboard.press("Escape"); // closes the overlay
+await closePresent();
+await present("OvHost");
+{
+  await hot(ids.OpenOv).click();
+  await sleep(300);
+  const tb3 = await hot(ids.Toggle2).boundingBox();
+  await page.mouse.click(tb3.x + 10, tb3.y + 10);
+  await sleep(1300);
+  const vis = await page.evaluate(() => getComputedStyle(document.querySelector("[data-overlay-frame] > div")).visibility);
+  check("12: when it ends the pieces go and the overlay picture is back", (await page.locator(".presenter .smart-layer [data-smart]").count()) === 0 && vis !== "hidden", vis);
+}
+await page.keyboard.press("Escape");
 await closePresent();
 
 check("no page errors", errors.length === 0, errors.slice(0, 3).join(" | "));
