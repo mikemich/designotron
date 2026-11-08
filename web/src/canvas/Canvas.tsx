@@ -623,20 +623,20 @@ export function Canvas() {
     setVHover(null);
     setBendReady(false);
     if (!editingVector) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        // This Escape is ours: the global shortcut would otherwise see vector edit already closed and clear the selection.
-        e.stopPropagation();
-        // Mid-drag, Escape takes the drag back first (the bend or anchor move), like the other drags.
-        const d = drag.current;
-        if (d && (d.kind === "bend" || d.kind === "vector")) {
-          drag.current = null;
-          pointerDrag.active = false;
-          dispatch({ op: "cancelGesture" });
-          setSnapMark(null);
-        }
-        useStore.setState({ editingVector: null });
+    // Capture phase, before the global Escape shortcut closes vector edit (and this effect with it):
+    // an Escape mid-drag takes a bend or anchor drag back. It stops nothing and changes no store state.
+    const onCancel = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const d = drag.current;
+      if (d && (d.kind === "bend" || d.kind === "vector")) {
+        drag.current = null;
+        pointerDrag.active = false;
+        dispatch({ op: "cancelGesture" });
+        setSnapMark(null);
       }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") useStore.setState({ editingVector: null });
       // Enter leaves too: selectChildren (the Enter shortcut) toggles vector edit.
       else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "j") {
         // A field or a dialog keeps its own keys.
@@ -646,10 +646,12 @@ export function Canvas() {
         joinVectorEnds();
       }
     };
-    // Capture phase: the global Escape shortcut also leaves vector edit, and by then this listener
-    // would be gone, with the bend or anchor drag still running.
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    window.addEventListener("keydown", onCancel, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onCancel, true);
+      window.removeEventListener("keydown", onKey);
+    };
   }, [editingVector]);
 
   const local = (e: { clientX: number; clientY: number }): Pt => {

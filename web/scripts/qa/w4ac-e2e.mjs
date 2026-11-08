@@ -255,6 +255,26 @@ await newFile();
   check("escape (anchor drag): no undo step was left", !(await node(id)));
 }
 
+// ---------- 5d. Escape in vector edit still belongs to menus and fields ----------
+await newFile();
+{
+  const id = await mkVector([pt(100, 100), pt(300, 100)]);
+  await enterEdit(id);
+  await page.mouse.click(...(await S(600, 400)), { button: "right" });
+  await page.waitForTimeout(250);
+  check("escape: the canvas menu opens in vector edit", (await page.locator(".menu").count()) === 1);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
+  check("escape: closes the menu and vector edit stays", (await page.locator(".menu").count()) === 0 && (await edit()).id === id, JSON.stringify(await edit()));
+  const x = page.locator('[aria-label="X position"]').first();
+  const before = await x.inputValue();
+  await x.click();
+  await x.fill("777");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
+  check("escape: in the X field reverts what was typed", (await x.inputValue()) === before && (await node(id)).x !== 777, `${before} -> ${await x.inputValue()}`);
+}
+
 // ---------- 5c. A bend grabbed near the end of a long segment does not hook ----------
 await newFile();
 {

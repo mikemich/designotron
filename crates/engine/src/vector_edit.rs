@@ -128,6 +128,10 @@ pub fn bend_segment(sp: &mut SubPath, seg: usize, t: f64, target: Point) -> Resu
     return Err("no such segment".into());
   }
   let grabbed = t.clamp(0.0, 1.0);
+  // A grab on an anchor itself has nothing to pull.
+  if !(1e-6..=1.0 - 1e-6).contains(&grabbed) {
+    return Ok(());
+  }
   let t = t.clamp(BEND_T_MIN, 1.0 - BEND_T_MIN);
   let n = sp.points.len();
   let (ia, ib) = (seg, (seg + 1) % n);
@@ -793,8 +797,10 @@ mod tests {
   #[test]
   fn bend_at_the_very_end_stays_finite() {
     let mut sp = curvy(false);
+    let before = sp.clone();
     bend_segment(&mut sp, 0, 0.0, Point::new(0.0, 50.0)).unwrap();
-    assert!(sp.points.iter().all(|p| p.out_x.is_finite() && p.in_x.is_finite()));
+    bend_segment(&mut sp, 0, 1.0, Point::new(0.0, 50.0)).unwrap();
+    assert_eq!(sp, before, "a grab on an anchor is a no-op");
   }
 
   #[test]
