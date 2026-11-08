@@ -4,11 +4,8 @@ import { X } from "lucide-react";
 import { getDoc, toast } from "../store";
 import { useDialog } from "../ui/controls";
 import { REPO_URL } from "./GuestBar";
+import { APP_VERSION, MODEL_REVISION } from "../appInfo";
 
-/** The app version (keep in step with web/package.json). */
-export const APP_VERSION = "0.1.0";
-/** The document model revision this editor writes (keep in step with `collab::MODEL_REVISION`). */
-export const MODEL_REVISION = 4;
 /** Where bug reports go. The app only shows this address; it never opens or fetches it. */
 export const ISSUES_URL = `${REPO_URL}/issues`;
 
@@ -99,6 +96,7 @@ function AboutDialog() {
 function FeedbackDialog() {
   const close = () => useHelp.setState({ dialog: null });
   const [text, setText] = useState("");
+  const [details] = useState(() => feedbackDetails());
   return (
     <Shell title="Send feedback" close={close} wide>
       <p className="muted small" style={{ marginTop: 0 }}>
@@ -108,9 +106,9 @@ function FeedbackDialog() {
       <div className="muted small" style={{ margin: "10px 0 4px" }}>
         Details (no layers, text or images from your file):
       </div>
-      <pre className="help-details">{feedbackDetails()}</pre>
+      <pre className="help-details">{details}</pre>
       <div className="row" style={{ gap: 6, margin: "6px 0 14px" }}>
-        <button className="btn primary" onClick={() => void copy(`${text.trim() ? `${text.trim()}\n\n` : ""}${feedbackDetails()}`, "Copied. Paste it into your issue.")}>
+        <button className="btn primary" onClick={() => void copy(`${text.trim() ? `${text.trim()}\n\n` : ""}${details}`, "Copied. Paste it into your issue.")}>
           Copy details
         </button>
       </div>

@@ -201,7 +201,7 @@ try {
   await dispatch({ op: "select", ids: [f.id] });
   const pg = await p.evaluate(() => window.__dt.state().page);
   await dispatch({ op: "setFlowStart", page: pg, id: f.id });
-  await p.click("button[title^='Present']");
+  await p.click("button[title^='Present (']");
   await p.waitForSelector(".presenter");
   await sleep(300);
   const barId = (await named("Status bar")).id;

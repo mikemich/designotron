@@ -3092,7 +3092,6 @@ button.plugin-log-line {
   color: var(--text-2);
 }
 
-/* ---------- Keyboard shortcuts ---------- */
 /* Help menu dialogs (About, Feedback). */
 .help-dialog {
   width: 420px;
@@ -3135,6 +3134,7 @@ button.plugin-log-line {
   max-height: 140px;
   overflow-y: auto;
 }
+/* ---------- Keyboard shortcuts ---------- */
 .shortcuts-dialog {
   width: min(860px, calc(100vw - 32px));
 }

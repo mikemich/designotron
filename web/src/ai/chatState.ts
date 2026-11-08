@@ -280,11 +280,19 @@ function saveNow(opts: { force?: boolean } = {}) {
 /** Tells other tabs a conversation was written, so a tab showing the same file (a view-only one,
  *  or the one that takes over) reads it again when it isn't busy itself. */
 let chatCh: BroadcastChannel | null = null;
+/** Open Past conversations lists refresh when another tab changes the history. */
+const pastListeners = new Set<() => void>();
+export function onPastChanged(fn: () => void): () => void {
+  pastListeners.add(fn);
+  return () => void pastListeners.delete(fn);
+}
+export const isHistoryReadOnly = () => readOnlyNow();
 try {
   chatCh = new BroadcastChannel("dt-chat");
   chatCh.onmessage = (ev) => {
     const s = useChat.getState();
-    if (ev.data?.fileId && !ev.data.past && ev.data.fileId === s.chatFile && !dirty && !s.running) reloadConversation();
+    if (ev.data?.fileId && ev.data.fileId === s.chatFile && ev.data.past) pastListeners.forEach((f) => f());
+    else if (ev.data?.fileId && ev.data.fileId === s.chatFile && !dirty && !s.running) reloadConversation();
   };
 } catch {
   /* no BroadcastChannel */
@@ -455,7 +463,8 @@ const pastChanged = (file: string) => chatCh?.postMessage({ fileId: file, past: 
 
 /** Sets a conversation aside in the file's history (a no-op for one without messages). */
 function archive(file: string, rec: ChatRecord): Promise<void> {
-  if (!worthArchiving(rec)) return Promise.resolve();
+  // A read-only tab or a viewer never writes: the editing tab owns the history.
+  if (readOnlyNow() || !worthArchiving(rec)) return Promise.resolve();
   return updatePast(file, (list) => addPast(list, rec, pastId())).then(() => pastChanged(file));
 }
 
@@ -464,6 +473,7 @@ function archive(file: string, rec: ChatRecord): Promise<void> {
 export function newConversation() {
   const st = useChat.getState();
   const file = st.chatFile;
+  // (Read-only: the conversation is cleared here but nothing is archived, so nothing is lost for the editing tab.)
   const rec = serialize(st.items, st.sessionId);
   dropTurn();
   useChat.setState({ items: [], sessionId: null, queued: null, draft: "" });
@@ -479,12 +489,16 @@ export function newConversation() {
  *  session; API mode doesn't keep messages, so it shows them for reference only. */
 export async function openPastConversation(id: string): Promise<boolean> {
   const file = useChat.getState().chatFile;
-  if (!file || useChat.getState().running) return false;
+  if (!file || useChat.getState().running || readOnlyNow()) return false;
   const list = await loadPast(file);
   const entry = list.find((e) => e.id === id);
   const r = entry && restore(entry.record);
   const st = useChat.getState();
-  if (!entry || !r || st.chatFile !== file || st.running) return false;
+  if (!entry) {
+    toast("That conversation is no longer in the history.");
+    return false;
+  }
+  if (!r || st.chatFile !== file || st.running || readOnlyNow()) return false;
   const rest = list.filter((e) => e.id !== id);
   const current = serialize(st.items, st.sessionId);
   await savePast(file, worthArchiving(current) ? addPast(rest, current, pastId()) : rest);
@@ -495,9 +509,9 @@ export async function openPastConversation(id: string): Promise<boolean> {
   useChat.setState({
     items: r.items.map((i) => ({ ...i, id: i.id + base }) as ChatItem),
     sessionId: r.sessionId,
-    draft: joinText(r.draft, st.draft),
+    // A message waiting to send goes back to the box (as Stop does) and attached images stay attached.
+    draft: joinText(r.draft, st.draft, st.queued),
     queued: null,
-    pending: [],
   });
   apiLost.add(file);
   if (useChat.getState().mode === "api") {
@@ -511,7 +525,7 @@ export async function openPastConversation(id: string): Promise<boolean> {
 /** Removes one conversation from the file's history. */
 export async function deletePastConversation(id: string): Promise<void> {
   const file = useChat.getState().chatFile;
-  if (!file) return;
+  if (!file || readOnlyNow()) return;
   await updatePast(file, (list) => list.filter((e) => e.id !== id));
   pastChanged(file);
 }

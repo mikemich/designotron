@@ -77,13 +77,11 @@ describe("past conversations", () => {
     expect(await loadConversation("fp")).toBeNull();
   });
 
-  it("two tabs adding in turn keep each other's entries", async () => {
+  it("two tabs adding at once keep both entries", async () => {
     await Promise.all([updatePast("ft", (l) => addPast(l, rec("tab one"), "t1", 1)), updatePast("ft", (l) => addPast(l, rec("tab two"), "t2", 2))]);
-    const ids = (await loadPast("ft")).map((e) => e.id).sort();
-    // Each update reads the latest list before it writes (the two transactions queue in storage).
-    expect(ids.length).toBeGreaterThanOrEqual(1);
-    await updatePast("ft", (l) => addPast(l, rec("tab three"), "t3", 3));
-    expect((await loadPast("ft")).map((e) => e.id)).toContain("t3");
+    expect((await loadPast("ft")).map((e) => e.id).sort()).toEqual(["t1", "t2"]);
+    await updatePast("ft", () => []);
+    expect(await loadPast("ft")).toEqual([]);
   });
 
   it("ignores malformed lists and never throws when storage fails", async () => {

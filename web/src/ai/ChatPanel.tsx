@@ -18,6 +18,7 @@ import {
   attachImage,
   deletePastConversation,
   newConversation,
+  onPastChanged,
   openPastConversation,
   patchItem,
   push,
@@ -35,6 +36,7 @@ import {
 } from "./chatState";
 import { bridgeHttpBase } from "./bridgeClient";
 import { getDoc, toast, useStore } from "../store";
+import { useCollab } from "../collab";
 import { focusCanvas, Menu, MOD, Popover, Seg, SelectField, type MenuItem } from "../ui/controls";
 import { ConfirmDialog } from "../dashboard/ConfirmDialog";
 import { loadPast, relativeDate, type PastConversation } from "./conversations";
@@ -150,6 +152,9 @@ export function ChatPanel() {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [past, setPast] = useState<{ anchor: DOMRect; list: PastConversation[] | null } | null>(null);
+  // A read-only tab or a viewer can read the history but not change it (the editing tab owns it).
+  const readOnly = useStore((s) => !!s.es.readOnly) || useCollab((s) => s.viewer);
+  const RO_TITLE = "This file is open for editing in another tab";
   const [delPast, setDelPast] = useState<PastConversation | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
@@ -159,6 +164,15 @@ export function ChatPanel() {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
   }, [items]);
   useEffect(() => inputRef.current?.focus(), []);
+  // The open Past conversations list follows changes made in other tabs.
+  const pastOpen = !!past;
+  useEffect(() => {
+    if (!pastOpen) return;
+    return onPastChanged(() => {
+      const file = useChat.getState().chatFile;
+      if (file) void loadPast(file).then((list) => setPast((p) => (p ? { ...p, list } : p)));
+    });
+  }, [pastOpen]);
   // Closing the panel (the X, Ctrl+/ or the toolbar) must not leave focus on the page body.
   useEffect(
     () => () => {
@@ -628,19 +642,18 @@ export function ChatPanel() {
       </div>
       {past && (
         <Popover anchor={past.anchor} width={300} label="Past conversations" onClose={() => setPast(null)}>
-          <div className="past-menu" role="menu" aria-label="Past conversations">
+          <div className="past-menu" role="list" aria-label="Past conversations">
             {past.list === null ? (
               <div className="past-empty">Loading…</div>
             ) : past.list.length === 0 ? (
               <div className="past-empty">No past conversations</div>
             ) : (
               past.list.map((c) => (
-                <div key={c.id} className="past-row" role="none">
+                <div key={c.id} className="past-row" role="listitem">
                   <button
                     className="item"
-                    role="menuitem"
-                    disabled={running}
-                    title={running ? "Wait for Claude to finish, or stop it" : c.title}
+                    disabled={running || readOnly}
+                    title={readOnly ? RO_TITLE : running ? "Wait for Claude to finish, or stop it" : c.title}
                     onClick={() => {
                       setPast(null);
                       void openPastConversation(c.id);
@@ -649,7 +662,7 @@ export function ChatPanel() {
                     <span className="past-title">{c.title}</span>
                     <span className="past-date">{relativeDate(c.savedAt)}</span>
                   </button>
-                  <button className="ibtn past-del" aria-label={`Delete conversation: ${c.title}`} title="Delete" onClick={() => (setPast(null), setDelPast(c))}>
+                  <button className="ibtn past-del" aria-label={`Delete conversation: ${c.title}`} title={readOnly ? RO_TITLE : "Delete"} disabled={readOnly} onClick={() => (setPast(null), setDelPast(c))}>
                     <X size={12} />
                   </button>
                 </div>

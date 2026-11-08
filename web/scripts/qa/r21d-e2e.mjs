@@ -116,6 +116,27 @@ const connected = (page) => page.waitForFunction(() => window.__dt.chat().bridge
   await b.ctx.close();
 }
 
+// The card comes back after Ctrl+Z without taking the keys, so redo still works.
+{
+  const { ctx, page } = await open();
+  await newFile(page);
+  await page.waitForSelector(".empty-prompt");
+  await sleep(300);
+  await page.locator(".empty-divider + .suggestions button", { hasText: "Landing page" }).click();
+  await sleep(800);
+  const roots = () => page.evaluate(() => window.__dt.doc().pages.find((p) => p.id === window.__dt.state().page).children.length);
+  check("1: the template built layers", (await roots()) > 0);
+  await page.keyboard.press("Control+z");
+  await page.waitForSelector(".empty-prompt", { timeout: 5000 });
+  await sleep(500);
+  const a = await active(page);
+  check("1: after Ctrl+Z the card is back and doesn't take focus", a.id !== "empty-prompt-input", JSON.stringify(a));
+  await page.keyboard.press("Control+Shift+z");
+  await sleep(500);
+  check("1: Ctrl+Shift+Z brings the layers back", (await roots()) > 0);
+  await ctx.close();
+}
+
 // ---------------------------------------------------------------- 2. the Ask Claude hint
 {
   const { ctx, page } = await open({ tour: false, prefs: { "dt:hint:layers": "1", "dt:hint:design": "1" } });
@@ -310,7 +331,7 @@ const connected = (page) => page.waitForFunction(() => window.__dt.chat().bridge
 {
   const { ctx, page } = await open();
   await newFile(page);
-  const title = await page.locator(".topbar .tbtn[title^='Present']").getAttribute("title");
+  const title = await page.locator(".topbar .tbtn[title^='Present (']").getAttribute("title");
   check("7: the Present button's title has the shortcut", /^Present \((Ctrl\+Alt\+|⌥⌘)Enter\)$/.test(title ?? ""), title);
   await page.locator(".topbar [title='Main menu']").click();
   await page.locator(".menu .item", { hasText: "Keyboard shortcuts" }).click();
@@ -382,7 +403,7 @@ const connected = (page) => page.waitForFunction(() => window.__dt.chat().bridge
   await page.locator(".help-dialog button:has-text('Copy details')").click();
   await sleep(300);
   const clip = await page.evaluate(() => navigator.clipboard.readText());
-  check("9: Copy details puts the message and the details on the clipboard", /The thing did the other thing/.test(clip) && /Designotron 0\.1\.0 \(model revision 4\)/.test(clip) && /Layers in this file: \d+/.test(clip), clip.slice(0, 200));
+  check("9: Copy details puts the message and the details on the clipboard", /The thing did the other thing/.test(clip) && /Designotron \d+\.\d+\.\d+ \(model revision 4\)/.test(clip) && /Layers in this file: \d+/.test(clip), clip.slice(0, 200));
   check("9: the details carry no layer or file content", !/rectangle/i.test(clip));
   const addr = await page.evaluate(() => document.querySelector(".help-dialog .copy-line code")?.textContent ?? "");
   check("9: the issues address is shown as text", /^https:\/\/github\.com\/[^ ]+\/issues$/.test(addr), addr);
@@ -394,7 +415,7 @@ const connected = (page) => page.waitForFunction(() => window.__dt.chat().bridge
   await page.locator(".menu .item", { hasText: "About Designotron" }).click();
   await page.waitForSelector(".help-dialog");
   const about = await page.locator(".help-dialog").innerText();
-  check("9: About shows version, model revision and licence", /0\.1\.0/.test(about) && /\b4\b/.test(about) && /MIT/.test(about), about.replace(/\n/g, " | ").slice(0, 200));
+  check("9: About shows version, model revision and licence", /\d+\.\d+\.\d+/.test(about) && /\b4\b/.test(about) && /MIT/.test(about), about.replace(/\n/g, " | ").slice(0, 200));
   await page.keyboard.press("Escape");
   // Show tips again: the tour was finished in this profile; the hint comes back.
   check("9: before: no hint", (await page.locator(".hint-card").count()) === 0);

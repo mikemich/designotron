@@ -301,7 +301,7 @@ try {
     check("closing the Claude panel with its X leaves focus on its toolbar button", f.tag !== "BODY" && f.id === "claude-toggle", JSON.stringify(f));
 
     // Presenter
-    await kbFocus(page, ".tbtn[title^='Present']");
+    await kbFocus(page, ".tbtn[title^='Present (']");
     await page.keyboard.press("Enter");
     await page.waitForSelector(".presenter");
     await page.waitForTimeout(200);

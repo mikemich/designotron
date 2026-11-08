@@ -133,7 +133,7 @@ const overlayCount = (p) => p.locator(".presenter .overlay-backdrop").count();
 async function present(p) {
   // Present starts at the selected frame when there is one: clear the selection.
   await p.evaluate(() => window.__dt.dispatch({ op: "select", ids: [] }));
-  await p.click("button[title^='Present']");
+  await p.click("button[title^='Present (']");
   await p.waitForSelector(".presenter");
   await sleep(250);
 }

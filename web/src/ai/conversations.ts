@@ -3,7 +3,7 @@
 // Records live in IndexedDB next to the files (`dt:chat:<fileId>`); they are user text in the
 // same origin as the files, never sent anywhere.
 
-import { get, set, del } from "idb-keyval";
+import { get, set, del, update } from "idb-keyval";
 
 /** A chat item as stored: no screenshots, and images are only counted. */
 export type StoredItem =
@@ -191,10 +191,18 @@ export async function savePast(fileId: string, list: readonly PastConversation[]
   }
 }
 
-/** Reads the latest list, changes it and writes it back (two tabs on one file each add to what the other wrote). */
+/** Changes the list in one storage transaction (two tabs on one file each add to what the other wrote). */
 export async function updatePast(fileId: string, change: (list: PastConversation[]) => PastConversation[]): Promise<PastConversation[]> {
-  const next = change(await loadPast(fileId));
-  await savePast(fileId, next);
+  let next: PastConversation[] = [];
+  try {
+    await update(chatsKey(fileId), (old: unknown) => {
+      next = change(readPast(old));
+      return { v: 1, list: next };
+    });
+    if (!next.length) await del(chatsKey(fileId));
+  } catch {
+    /* storage unavailable or full: the history is a convenience */
+  }
   return next;
 }
 

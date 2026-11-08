@@ -10,6 +10,10 @@ const IDEAS = ["A landing page for a coffee subscription", "A habit tracker mobi
 /** A queued prompt, shortened for display. */
 const preview = (q: string) => (q.length > 160 ? q.slice(0, 160) + "…" : q);
 
+/** Pages whose card already took focus by itself (it does that once per file and page). */
+const autoFocused = new Set<string>();
+const emptyPromptKey = (pageId: string) => `${location.hash}|${pageId}`;
+
 /** After the first close (`closeEmptyPrompt`) blank files show a one-line pill instead of the centred card. */
 function compactPref(): boolean {
   try {
@@ -33,15 +37,20 @@ export function EmptyPrompt({ pageId, forceCompact = false }: { pageId: string; 
   // A new or untouched file: the card takes focus, so typing goes into it (a bare "a" would pick the
   // Frame tool and the card would vanish). Not on a page someone just emptied (something to undo),
   // and never over a dialog, a menu or another field.
-  const untouched = useStore((s) => !s.es.canUndo);
+  // Once per file and page, and only with nothing to undo or redo: after Ctrl+Z (or a template undone) the
+  // card comes back without taking the keys, so Ctrl+Shift+Z still redoes.
+  const untouched = useStore((s) => !s.es.canUndo && !s.es.canRedo);
   useEffect(() => {
-    if (compact || !untouched) return;
+    if (compact || !untouched || autoFocused.has(emptyPromptKey(pageId))) return;
     const free = () => {
       const a = document.activeElement;
       return !a || a === document.body || !!a.closest(".canvas");
     };
     const t = requestAnimationFrame(() => {
-      if (free() && !document.querySelector(".modal-bg, .menu, .hint-card")) input.current?.focus();
+      if (free() && !document.querySelector(".modal-bg, .menu, .hint-card")) {
+        autoFocused.add(emptyPromptKey(pageId));
+        input.current?.focus();
+      }
     });
     return () => cancelAnimationFrame(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
