@@ -1,6 +1,6 @@
 // Collapsible slash folders for the Assets panel and the Variables dialog (see groupBySlash.ts).
 
-import { useMemo, useReducer, type ReactNode } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { folderSize, groupBySlash, type Entry, type Folder } from "./groupBySlash";
 
@@ -22,6 +22,42 @@ export function useFolderState(scope: string) {
 }
 
 /**
+ * The name field that replaces a folder's label while it is renamed (double-click or F2): Enter or
+ * blur commits, Escape cancels. `onDone` gets the new path of the folder (parents included), or
+ * null when nothing changed.
+ */
+export function FolderRenameInput({ path, onDone }: { path: string; onDone: (to: string | null) => void }) {
+  const ref = useRef<HTMLInputElement>(null);
+  const [text, setText] = useState(path);
+  const done = useRef(false);
+  useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
+  const finish = (to: string | null) => {
+    if (done.current) return;
+    done.current = true;
+    onDone(to);
+  };
+  return (
+    <input
+      ref={ref}
+      className="textinput wf-folder-rename"
+      aria-label={`Rename folder ${path}`}
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") finish(text.trim() === path ? null : text.trim());
+        else if (e.key === "Escape") finish(null);
+      }}
+      onBlur={() => finish(text.trim() === path ? null : text.trim())}
+    />
+  );
+}
+
+/**
  * Items grouped by the folders in their names. `scope` keeps the open/closed state of one list
  * apart from the others ("colour", "text", "components", "variables:<collection>").
  * With `forceOpen` (a search is active) every folder is open and nothing is remembered.
@@ -33,6 +69,7 @@ export function FolderTree<T>({
   row,
   forceOpen = false,
   indent = 0,
+  onRenameFolder,
 }: {
   scope: string;
   items: T[];
@@ -42,24 +79,41 @@ export function FolderTree<T>({
   forceOpen?: boolean;
   /** Extra left padding in px for the whole tree. */
   indent?: number;
+  /** Renames a folder (double-click or F2 on its row): the full path it had and the full path it should get. */
+  onRenameFolder?: (from: string, to: string) => void;
 }) {
   const folderState = useFolderState(scope);
+  const [renaming, setRenaming] = useState<string | null>(null);
   const tree = useMemo(() => groupBySlash(items, name), [items, name]);
   const renderFolder = (f: Folder<T>, depth: number): ReactNode => {
     const open = forceOpen || folderState.isOpen(f.path);
     return (
       <div key={f.path} className="asset-folder-wrap" role="group" aria-label={f.name}>
-        <button
-          className="asset-folder"
-          style={{ paddingLeft: indent + 4 + depth * 12 }}
-          aria-expanded={open}
-          title={f.path}
-          onClick={() => !forceOpen && folderState.toggle(f.path)}
-        >
-          {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          <span className="asset-folder-name">{f.name}</span>
-          <span className="muted small">{folderSize(f)}</span>
-        </button>
+        {renaming === f.path ? (
+          <div className="asset-folder" style={{ paddingLeft: indent + 4 + depth * 12 }}>
+            <FolderRenameInput
+              path={f.path}
+              onDone={(to) => {
+                setRenaming(null);
+                if (to) onRenameFolder?.(f.path, to);
+              }}
+            />
+          </div>
+        ) : (
+          <button
+            className="asset-folder"
+            style={{ paddingLeft: indent + 4 + depth * 12 }}
+            aria-expanded={open}
+            title={onRenameFolder ? `${f.path}\nDouble-click or press F2 to rename` : f.path}
+            onClick={() => !forceOpen && folderState.toggle(f.path)}
+            onDoubleClick={onRenameFolder ? () => setRenaming(f.path) : undefined}
+            onKeyDown={onRenameFolder ? (e) => e.key === "F2" && (e.preventDefault(), setRenaming(f.path)) : undefined}
+          >
+            {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <span className="asset-folder-name">{f.name}</span>
+            <span className="muted small">{folderSize(f)}</span>
+          </button>
+        )}
         {open && (
           <>
             {f.folders.map((g) => renderFolder(g, depth + 1))}

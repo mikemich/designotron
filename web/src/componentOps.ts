@@ -1,9 +1,11 @@
 // Component, variant and style operations built from existing engine commands.
 // Multi-command edits run inside one gesture so each is a single undo step.
 
-import { dispatch, dispatchOrThrow, getDoc, getEngine, toast } from "./store";
+import { dispatch, dispatchOrThrow, getDoc, getEngine, toast, useStore } from "./store";
 import type { Doc, Effect, LayoutGrid, Node } from "./types";
 import { MOD } from "./ui/controls";
+import { renameFolder } from "./panels/groupBySlash";
+import { layersUsing, usageMessage } from "./panels/layersUsing";
 
 type Props = Record<string, string>;
 type TextStyle = Doc["styles"]["texts"][number];
@@ -323,6 +325,35 @@ export function updateColorStyle(id: string, change: { name?: string; color?: st
   const taken = change.name !== undefined ? takenStyleName("colors", id, change.name) : null;
   if (taken) return toast(taken, "error"), false;
   return dispatch({ op: "updateColorStyle", id, name: change.name ?? null, color: change.color ?? null }) !== null;
+}
+
+/** Sets what a style is for (shown as the title of its picker row); empty clears it. */
+export function setStyleDescription(id: string, description: string): boolean {
+  return dispatch({ op: "setStyleDescription", id, description }) !== null;
+}
+
+type StyleListKind = "colors" | "texts" | "effects" | "grids";
+
+/**
+ * Renames a folder of styles: every style inside gets the new prefix, as one undo step. A new name
+ * another style of the kind already has is refused with a toast naming it.
+ */
+export function renameStyleFolder(kind: StyleListKind, from: string, to: string): boolean {
+  const list: { id: string; name: string }[] = getDoc().styles[kind] ?? [];
+  const { renames, collision } = renameFolder(list.map((s) => s.name), from, to);
+  if (collision) return toast(`${collision} already exists`, "error"), false;
+  if (!renames.length) return false;
+  const op = { colors: "updateColorStyle", texts: "updateTextStyle", effects: "updateEffectStyle", grids: "updateGridStyle" }[kind];
+  return batch(() => {
+    for (const r of renames) dispatchOrThrow({ op, id: list[r.index].id, name: r.name });
+  });
+}
+
+/** Selects the layers of the current page that use a style or variable, and says how many (and how many elsewhere). */
+export function selectLayersUsing(id: string, name: string): void {
+  const usage = layersUsing(getDoc(), useStore.getState().es.page, id);
+  if (usage.here.length) dispatch({ op: "select", ids: usage.here });
+  toast(usageMessage(name, usage));
 }
 
 /** Deletes a style; layers using it keep their look but are detached (undoable). */

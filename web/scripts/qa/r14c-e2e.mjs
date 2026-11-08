@@ -289,12 +289,17 @@ const openVariables = async (page) => {
   await sleep(300);
   await page.getByRole("button", { name: "Bind a property" }).click();
   await sleep(200);
-  const sel = page.locator("select[aria-label='Bound variable']").first();
-  const labels = await sel.locator("optgroup").evaluateAll((els) => els.map((e) => e.label));
-  check("the bound-variable select has optgroups", labels.length > 0, JSON.stringify(labels));
-  check("groups are 'Collection / folder'", labels.includes("Primitives / Blue") && labels.includes("Theme"), JSON.stringify(labels));
-  const opt = await sel.locator("optgroup[label='Primitives / Blue'] option").allInnerTexts();
-  check("options show the full name within the collection (a closed select shows no group)", opt.length === 1 && /Blue\/500$/.test(opt[0]), JSON.stringify(opt));
+  // r21b: the field is a button that opens the searchable picker (collection headings, then folders).
+  await page.locator("[data-bound-pick]").first().click();
+  await page.waitForSelector("[data-token-picker]");
+  const labels = await page.locator("[data-token-picker] [data-tp-folder]").evaluateAll((els) => els.map((e) => e.getAttribute("data-tp-folder")));
+  check("the bound-variable picker has groups", labels.length > 0, JSON.stringify(labels));
+  check("groups are collections and their folders", labels.includes("Primitives") && labels.includes("Blue") && labels.includes("Theme"), JSON.stringify(labels));
+  await page.keyboard.insertText("blue/500");
+  const opt = await page.locator("[data-token-picker] [data-tp-item]").evaluateAll((els) => els.map((e) => e.getAttribute("data-tp-name")));
+  check("options show the full name within the collection", opt.length === 1 && /Blue\/500$/.test(opt[0]), JSON.stringify(opt));
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
   await shot(page, "05-picker-groups");
 
   // V-09: the chip of a fill bound to an alias has the swatch of the layer's fill.

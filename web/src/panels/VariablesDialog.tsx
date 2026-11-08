@@ -1,14 +1,18 @@
-import { useDeferredValue, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Download, Hash, Link2, Palette, Plus, Search, SlidersHorizontal, ToggleLeft, Trash2, Type as TypeIcon, Unlink, Upload, X } from "lucide-react";
-import { dispatch, dispatchOrThrow, toast, useDoc, useStore } from "../store";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, ChevronRight, Crosshair, Download, Hash, Info, Link2, Palette, Plus, Search, SlidersHorizontal, ToggleLeft, Trash2, Type as TypeIcon, Unlink, Upload, X } from "lucide-react";
+import { dispatch, dispatchOrThrow, getDoc, toast, useDoc, useStore } from "../store";
 import type { VarKind, Variable, VariableCollection } from "../types";
 import { Menu, MOD, type MenuItem, Popover, useDialog } from "../ui/controls";
 import { ConfirmDialog } from "../dashboard/ConfirmDialog";
 import { cssColor } from "../ui/color";
 import { exportTokensJson } from "../exporter";
 import { useCollab } from "../collab";
-import { useFolderState } from "./FolderTree";
-import { folderSize, groupBySlash, type Folder } from "./groupBySlash";
+import { selectLayersUsing } from "../componentOps";
+import { FolderRenameInput, useFolderState } from "./FolderTree";
+import { folderSize, groupBySlash, renameFolder, type Folder } from "./groupBySlash";
+import { layersUsing } from "./layersUsing";
+import { TokenPicker, type PickerItem } from "./TokenPicker";
+import { aliasOf, deleteImpact, impactMessage, resolveValue } from "./variableImpact";
 import { aliasCycle, SCOPES, SCOPES_FOR_KIND } from "./variableScopes";
 
 const uid = (p: string) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -26,37 +30,26 @@ function save(collections: VariableCollection[]) {
   return dispatch({ op: "setVariables", collections });
 }
 
-/** What deleting these variables leaves behind: layers bound to them, and aliases of them in variables that stay. */
-export function deleteImpact(nodes: Record<string, { bindings?: Record<string, string> }>, collections: VariableCollection[], gone: Set<string>) {
-  const layers = Object.values(nodes).filter((n) => n.bindings && Object.values(n.bindings).some((id) => gone.has(id))).length;
-  let aliases = 0;
-  for (const c of collections)
-    for (const v of c.variables) {
-      if (gone.has(v.id)) continue;
-      for (const x of Object.values(v.values)) {
-        const a = aliasOf(x);
-        if (a !== null && gone.has(a)) aliases++;
-      }
-    }
-  return { layers, aliases };
-}
-
-/** "3 layers keep their current value; 2 aliases now show Missing variable." Empty when nothing depended on it. */
-export function impactMessage({ layers, aliases }: { layers: number; aliases: number }): string {
-  const parts: string[] = [];
-  if (layers) parts.push(layers === 1 ? "1 layer keeps its current value" : `${layers} layers keep their current value`);
-  if (aliases) parts.push(aliases === 1 ? "1 alias now shows Missing variable" : `${aliases} aliases now show Missing variable`);
-  return parts.length ? parts.join("; ") + "." : "";
-}
+export { deleteImpact, impactMessage, resolveValue };
 
 /** Text input that commits on blur or Enter (one undo step per edit). A refused edit goes back to the stored text. */
-function Commit({ value, onCommit, className, type = "text", title, label }: { value: string; onCommit: (v: string) => void; className?: string; type?: string; title?: string; label?: string }) {
+function Commit({ value, onCommit, className, type = "text", title, label, focusOnMount, onFocused }: { value: string; onCommit: (v: string) => void; className?: string; type?: string; title?: string; label?: string; focusOnMount?: boolean; onFocused?: () => void }) {
   const [v, setV] = useState(value);
   const latest = useRef(value);
+  const ref = useRef<HTMLInputElement>(null);
   latest.current = value;
   useEffect(() => setV(value), [value]);
+  // A variable that was just created: its name is focused and selected, ready to be typed over.
+  useEffect(() => {
+    if (!focusOnMount) return;
+    ref.current?.focus();
+    ref.current?.select();
+    ref.current?.scrollIntoView({ block: "nearest" });
+    onFocused?.();
+  }, [focusOnMount]);
   return (
     <input
+      ref={ref}
       className={className ?? "textinput"}
       type={type}
       title={title}
@@ -78,30 +71,11 @@ function Commit({ value, onCommit, className, type = "text", title, label }: { v
   );
 }
 
-const aliasOf = (val: unknown): string | null => {
-  const a = val && typeof val === "object" ? (val as { alias?: unknown }).alias : null;
-  return typeof a === "string" ? a : null;
-};
-
-/** A variable's value in a mode with aliases followed (the first mode's value when this mode has none). */
-export function resolveValue(collections: VariableCollection[], id: string, mode: string): unknown {
-  const all = new Map(collections.flatMap((c) => c.variables.map((v) => [v.id, { v, first: c.modes[0]?.id }] as const)));
-  let cur = id;
-  for (let i = 0; i < 8; i++) {
-    const x = all.get(cur);
-    if (!x) return undefined;
-    const val = x.v.values[mode] ?? (x.first ? x.v.values[x.first] : undefined) ?? Object.values(x.v.values)[0];
-    const next = aliasOf(val);
-    if (!next) return val;
-    cur = next;
-  }
-  return undefined;
-}
-
 function ValueCell({
   v,
   mode,
   modeName,
+  defaultModeName,
   collections,
   onChange,
   onAlias,
@@ -109,9 +83,11 @@ function ValueCell({
   v: Variable;
   mode: string;
   modeName: string;
+  /** What a missing alias target shows instead ("Missing variable (shows Light)"). */
+  defaultModeName: string;
   collections: VariableCollection[];
   onChange: (val: unknown) => void;
-  /** Opens the "Alias…" picker anchored at the button. */
+  /** Opens the alias picker anchored at the button (a chip click re-targets the alias). */
   onAlias: (anchor: DOMRect) => void;
 }) {
   const val = v.values[mode];
@@ -126,10 +102,16 @@ function ValueCell({
     const resolved = resolveValue(collections, v.id, mode);
     return (
       <div className="row var-alias" style={{ gap: 6 }} data-alias={found?.x.name ?? "missing"}>
-        <span className="wf-chip var-alias-chip" title={found ? `Alias of ${found.c.name} / ${found.x.name}` : "The variable this pointed to is gone"}>
+        <button
+          type="button"
+          className="wf-chip var-alias-chip"
+          title={found ? `Alias of ${found.c.name} / ${found.x.name}. Click to point it at another variable.` : `The variable this pointed to is gone; it shows the ${defaultModeName} value. Click to pick another.`}
+          aria-label={`${v.name}, ${modeName}: ${found ? `alias of ${found.x.name}` : "missing variable"}. Change the alias`}
+          onClick={(e) => onAlias(e.currentTarget.getBoundingClientRect())}
+        >
           <Link2 size={12} className="wf-purple" />
-          <span className="wf-chip-name">{found ? found.x.name : "Missing variable"}</span>
-        </span>
+          <span className="wf-chip-name">{found ? found.x.name : `Missing variable (shows ${defaultModeName})`}</span>
+        </button>
         {v.type === "color" && typeof resolved === "string" && (
           <span className="swatch" title={resolved}>
             <i style={{ background: cssColor(resolved) }} />
@@ -236,6 +218,12 @@ export function VariablesDialog() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [modeDelete, setModeDelete] = useState<{ id: string; message: string } | null>(null);
   const [scopeFor, setScopeFor] = useState<{ id: string; anchor: DOMRect } | null>(null);
+  const [detailsFor, setDetailsFor] = useState<{ id: string; anchor: DOMRect } | null>(null);
+  /** The alias picker: which variable and mode it re-targets. */
+  const [aliasPick, setAliasPick] = useState<{ v: Variable; mode: string; anchor: DOMRect } | null>(null);
+  /** The variable just created, whose name field takes focus. */
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const [renamingFolder, setRenamingFolder] = useState<string | null>(null);
   const coll = collections.find((c) => c.id === active) ?? collections[0];
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
@@ -246,6 +234,12 @@ export function VariablesDialog() {
     if (query && document.activeElement === searchRef.current) return setQuery("");
     close();
   });
+  // The dialog opens on the search field (a long list is searched before it is read); useDialog's own
+  // first focus goes to the collection name, so this one lands just after it.
+  useEffect(() => {
+    const t = setTimeout(() => searchRef.current?.focus(), 30);
+    return () => clearTimeout(t);
+  }, []);
   const folders = useFolderState("variables:" + (coll?.id ?? ""));
   const colSpan = (coll?.modes.length ?? 0) + 2;
   // Typing stays responsive with hundreds of rows: the filter follows a beat behind.
@@ -257,7 +251,7 @@ export function VariablesDialog() {
   const remove = (gone: Variable[], what: string, next: VariableCollection[]) => {
     const impact = deleteImpact(doc.nodes, collections, new Set(gone.map((v) => v.id)));
     if (save(next) === null) return;
-    const msg = impactMessage(impact);
+    const msg = impactMessage(impact, gone.length === 1 ? gone[0].name : undefined);
     if (msg) toast(`Deleted ${what}. ${msg} ${MOD}Z undoes.`);
   };
 
@@ -267,9 +261,11 @@ export function VariablesDialog() {
         <div className="row" style={{ gap: 6, paddingLeft: depth * 12 }}>
           <span className="muted">{KIND_ICON[v.type]}</span>
           <Commit
-            title={v.name}
+            title={v.description ? `${v.name}\n${v.description}` : v.name}
             label={`Variable name`}
             value={label}
+            focusOnMount={focusId === v.id}
+            onFocused={() => setFocusId(null)}
             onCommit={(name) => {
               const t = name.trim();
               if (!t) return;
@@ -291,22 +287,44 @@ export function VariablesDialog() {
               <SlidersHorizontal size={12} />
             </button>
           )}
+          <button
+            className={"ibtn" + (v.description ? " on" : "")}
+            title={v.description ? `Details: ${v.description}` : "Details: description and usage"}
+            aria-label={`Details of ${v.name}`}
+            data-var-details
+            onClick={(e) => setDetailsFor({ id: v.id, anchor: e.currentTarget.getBoundingClientRect() })}
+          >
+            <Info size={12} />
+          </button>
         </div>
       </td>
       {coll!.modes.map((m) => (
         <td key={m.id}>
-          <ValueCell v={v} mode={m.id} modeName={m.name} collections={collections} onChange={(val) => setValue(v.id, m.id, val)} onAlias={(a) => pickAlias(v, m.id, a)} />
+          <ValueCell
+            v={v}
+            mode={m.id}
+            modeName={m.name}
+            defaultModeName={coll!.modes[0]?.name ?? ""}
+            collections={collections}
+            onChange={(val) => setValue(v.id, m.id, val)}
+            onAlias={(a) => setAliasPick({ v, mode: m.id, anchor: a })}
+          />
         </td>
       ))}
       <td>
-        <button
-          className="ibtn"
-          title="Delete variable"
-          aria-label={`Delete ${v.name}`}
-          onClick={() => remove([v], v.name, collections.map((c) => (c.id === coll!.id ? { ...c, variables: c.variables.filter((x) => x.id !== v.id) } : c)))}
-        >
-          <Trash2 size={12} />
-        </button>
+        <div className="row" style={{ gap: 0 }}>
+          <button className="ibtn" title="Select layers using this" aria-label={`Select layers using ${v.name}`} data-var-select-users onClick={() => selectUsers(v)}>
+            <Crosshair size={12} />
+          </button>
+          <button
+            className="ibtn"
+            title="Delete variable"
+            aria-label={`Delete ${v.name}`}
+            onClick={() => remove([v], v.name, collections.map((c) => (c.id === coll!.id ? { ...c, variables: c.variables.filter((x) => x.id !== v.id) } : c)))}
+          >
+            <Trash2 size={12} />
+          </button>
+        </div>
       </td>
     </tr>
   );
@@ -318,11 +336,36 @@ export function VariablesDialog() {
       return [
         <tr key={"folder:" + g.path} className="var-folder">
           <td colSpan={colSpan}>
-            <button className="asset-folder" style={{ paddingLeft: 4 + depth * 12 }} aria-expanded={open} title={g.path} onClick={() => folders.toggle(g.path)}>
-              {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-              <span className="asset-folder-name">{g.name}</span>
-              <span className="muted small">{folderSize(g)}</span>
-            </button>
+            {renamingFolder === g.path ? (
+              <div className="asset-folder" style={{ paddingLeft: 4 + depth * 12 }}>
+                <FolderRenameInput
+                  path={g.path}
+                  onDone={(to) => {
+                    setRenamingFolder(null);
+                    if (to) renameVariableFolder(g.path, to);
+                  }}
+                />
+              </div>
+            ) : (
+              <>
+                <button
+                  className="asset-folder"
+                  style={{ paddingLeft: 4 + depth * 12 }}
+                  aria-expanded={open}
+                  title={`${g.path}\nDouble-click or press F2 to rename`}
+                  onClick={() => folders.toggle(g.path)}
+                  onDoubleClick={() => setRenamingFolder(g.path)}
+                  onKeyDown={(e) => e.key === "F2" && (e.preventDefault(), setRenamingFolder(g.path))}
+                >
+                  {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                  <span className="asset-folder-name">{g.name}</span>
+                  <span className="muted small">{folderSize(g)}</span>
+                </button>
+                <button className="ibtn var-folder-add" title={`Create variable in ${g.path}`} aria-label={`Create variable in ${g.path}`} onClick={() => addVariable(firstKind(g), g.path)}>
+                  <Plus size={12} />
+                </button>
+              </>
+            )}
           </td>
         </tr>,
         ...(open ? renderFolder(g, depth + 1) : []),
@@ -339,16 +382,46 @@ export function VariablesDialog() {
     save([...collections, c]);
     setActive(c.id);
   };
-  const addVariable = (type: VarKind) => {
-    // A new variable must show up, whatever the search says.
+  /** Creates `color 3` (at the root, or inside `folder`) and focuses its name, selected, so it can be typed over. */
+  const addVariable = (type: VarKind, folder = "") => {
+    // A new variable must show up, whatever the search says, and a folded folder opens to show it.
     setQuery("");
-    update((c) => {
+    if (folder) {
+      const parts = folder.split("/");
+      for (let i = 1; i <= parts.length; i++) {
+        const p = parts.slice(0, i).join("/");
+        if (!folders.isOpen(p)) folders.toggle(p);
+      }
+    }
+    const id = uid("v_");
+    const ok = update((c) => {
       // The first free "color 3": counting alone collides after a delete or rename.
+      const prefix = folder ? `${folder}/` : "";
       let n = c.variables.filter((v) => v.type === type).length + 1;
-      while (c.variables.some((v) => v.name === `${type} ${n}`)) n++;
+      while (c.variables.some((v) => v.name === `${prefix}${type} ${n}`)) n++;
       const values = Object.fromEntries(c.modes.map((m) => [m.id, DEFAULTS[type]]));
-      return { ...c, variables: [...c.variables, { id: uid("v_"), name: `${type} ${n}`, type, values, description: "" }] };
+      return { ...c, variables: [...c.variables, { id, name: `${prefix}${type} ${n}`, type, values, description: "" }] };
     });
+    if (ok !== null) setFocusId(id);
+  };
+  /** The kind of the first variable in a folder: "+" on a folder of numbers makes a number. */
+  const firstKind = (f: Folder<Variable>): VarKind => {
+    const first = f.items[0]?.item ?? f.folders.map((g) => g.items[0]?.item).find(Boolean);
+    return first?.type ?? "color";
+  };
+  /** Renames a folder of variables: every variable inside gets the new prefix, in one change. A clash is refused. */
+  const renameVariableFolder = (from: string, to: string) => {
+    if (!coll) return;
+    const { renames, collision } = renameFolder(coll.variables.map((v) => v.name), from, to);
+    if (collision) return void toast(`${collision} already exists in ${coll.name}`, "error");
+    if (!renames.length) return;
+    const names = new Map(renames.map((r) => [coll.variables[r.index].id, r.name]));
+    update((c) => ({ ...c, variables: c.variables.map((v) => (names.has(v.id) ? { ...v, name: names.get(v.id)! } : v)) }));
+  };
+  /** Closes the dialog and selects the layers on this page that use the variable. */
+  const selectUsers = (v: Variable) => {
+    close();
+    selectLayersUsing(v.id, v.name);
   };
   /** Removes a mode and its values; layers pinned to it follow the engine's prune (back to the default mode). */
   const deleteMode = (id: string) =>
@@ -380,28 +453,28 @@ export function VariablesDialog() {
         variables: c.variables.map((v) => ({ ...v, values: { ...v.values, [id]: first ? v.values[first] : DEFAULTS[v.type] } })),
       };
     });
-  /** The "Alias…" picker: variables of the same type from any collection, never the variable itself. */
-  const pickAlias = (v: Variable, mode: string, anchor: DOMRect) => {
-    const items: MenuItem[] = [{ heading: `Alias ${v.name} to…` }];
-    for (const c of collections) {
-      const same = c.variables.filter((x) => x.type === v.type && x.id !== v.id);
-      if (!same.length) continue;
-      items.push({ heading: c.name });
-      for (const x of same) {
-        items.push({
-          label: x.name,
-          onClick: () => {
-            if (aliasCycle(collections, v.id, x.id)) {
-              toast(`Can't alias ${v.name} to ${x.name}: ${x.name} already refers back to ${v.name}.`, "error");
-              return;
-            }
-            setValue(v.id, mode, { alias: x.id });
-          },
-        });
-      }
+  /** The alias picker's rows: variables of the same type from any collection, never the variable itself. */
+  const aliasItems = useMemo((): PickerItem[] => {
+    if (!aliasPick) return [];
+    const { v } = aliasPick;
+    return collections.flatMap((c) =>
+      c.variables
+        .filter((x) => x.type === v.type && x.id !== v.id)
+        .map((x): PickerItem => {
+          const shown = v.type === "color" ? resolveValue(collections, x.id, c.modes[0]?.id ?? "") : undefined;
+          return { id: x.id, name: x.name, group: c.name, description: x.description, preview: typeof shown === "string" ? { type: "color", color: shown } : { type: "icon", icon: v.type } };
+        }),
+    );
+  }, [aliasPick]);
+  const chooseAlias = (v: Variable, mode: string, targetId: string) => {
+    const target = collections.flatMap((c) => c.variables).find((x) => x.id === targetId);
+    if (!target) return;
+    if (aliasCycle(collections, v.id, target.id)) {
+      toast(`Can't alias ${v.name} to ${target.name}: ${target.name} already refers back to ${v.name}.`, "error");
+      return;
     }
-    if (items.length === 1) items.push({ label: `No other ${v.type} variables`, disabled: true });
-    setMenu({ x: anchor.left, y: anchor.bottom + 4, items });
+    // Pointing it where it already points is not a change.
+    if (aliasOf(v.values[mode]) !== target.id) setValue(v.id, mode, { alias: target.id });
   };
   const setScopes = (vid: string, scopes: string[]) =>
     update((c) => ({ ...c, variables: c.variables.map((v) => (v.id === vid ? withScopes(v, scopes) : v)) }));
@@ -620,6 +693,27 @@ export function VariablesDialog() {
         />
       )}
       {menu && <Menu {...menu} onClose={() => setMenu(null)} />}
+      {aliasPick && (
+        <TokenPicker
+          anchor={aliasPick.anchor}
+          label={`Alias ${aliasPick.v.name} to`}
+          placeholder={`Search ${aliasPick.v.type} variables`}
+          emptyText={`No other ${aliasPick.v.type} variables`}
+          items={aliasItems}
+          selectedId={aliasOf(aliasPick.v.values[aliasPick.mode])}
+          onPick={(x) => chooseAlias(aliasPick.v, aliasPick.mode, x.id)}
+          onClose={() => setAliasPick(null)}
+        />
+      )}
+      {detailsFor && coll && (
+        <DetailsPopover
+          variable={coll.variables.find((v) => v.id === detailsFor.id)}
+          anchor={detailsFor.anchor}
+          onDescription={(description) => update((c) => ({ ...c, variables: c.variables.map((v) => (v.id === detailsFor.id ? { ...v, description } : v)) }))}
+          onSelectUsers={selectUsers}
+          onClose={() => setDetailsFor(null)}
+        />
+      )}
       {scopeFor && coll && (
         <ScopePopover
           variable={coll.variables.find((v) => v.id === scopeFor.id)}
@@ -636,6 +730,29 @@ const withScopes = (v: Variable, scopes: string[]): Variable => {
   const { scopes: _drop, ...rest } = v;
   return scopes.length ? { ...rest, scopes } : rest;
 };
+
+/** Details of one variable: what it is for, and where it is used (counted when this opens). */
+function DetailsPopover({ variable, anchor, onDescription, onSelectUsers, onClose }: { variable?: Variable; anchor: DOMRect; onDescription: (d: string) => void; onSelectUsers: (v: Variable) => void; onClose: () => void }) {
+  const usage = useMemo(() => (variable ? layersUsing(getDoc(), useStore.getState().es.page, variable.id) : null), [variable?.id]);
+  if (!variable || !usage) return null;
+  const text = !usage.here.length && !usage.other ? "Not bound to any layer" : `Bound to ${usage.here.length} layer${usage.here.length === 1 ? "" : "s"} on this page` + (usage.other ? ` and ${usage.other} on other pages` : "");
+  return (
+    <Popover anchor={anchor} onClose={onClose} label={`Details of ${variable.name}`} width={260}>
+      <div className="var-details">
+        <div className="small muted">Description</div>
+        <Commit value={variable.description ?? ""} label="Description" title="What this variable is for" onCommit={(d) => onDescription(d.trim())} />
+        <div className="small muted" data-var-usage>
+          {text}
+        </div>
+        {(usage.here.length > 0 || usage.other > 0) && (
+          <button className="btn" onClick={() => onSelectUsers(variable)}>
+            Select layers using this
+          </button>
+        )}
+      </div>
+    </Popover>
+  );
+}
 
 /** "Show in" checkboxes: all supported properties (nothing ticked), or a subset. */
 function ScopePopover({ variable, anchor, onChange, onClose }: { variable?: Variable; anchor: DOMRect; onChange: (scopes: string[]) => void; onClose: () => void }) {

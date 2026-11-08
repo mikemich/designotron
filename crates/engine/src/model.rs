@@ -1488,6 +1488,9 @@ pub struct ColorStyle {
   pub id: String,
   pub name: String,
   pub color: String,
+  /// Where to use it. Not saved when empty (older editors ignore it and drop it on a rewrite).
+  #[serde(skip_serializing_if = "String::is_empty")]
+  pub description: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -1510,6 +1513,9 @@ pub struct TextStyle {
   pub case: Option<TextCase>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub decoration: Option<TextDecoration>,
+  /// Where to use it. Not saved when empty.
+  #[serde(skip_serializing_if = "String::is_empty")]
+  pub description: String,
 }
 
 impl TextStyle {

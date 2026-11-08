@@ -9,6 +9,7 @@ import { pickFile } from "../files";
 import { getDoc, useStore } from "../store";
 import { useCollab } from "../collab";
 import { PhotoSearch } from "../panels/PhotoSearch";
+import { TokenList } from "../panels/TokenPicker";
 import { paintAriaLabel, paintLabel } from "./paintText";
 import { sliderKey, type SliderKind } from "./sliderKeys";
 
@@ -67,6 +68,9 @@ function hsvToRgb(h: number, s: number, v: number): { r: number; g: number; b: n
   const [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
   return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255 };
 }
+
+/** More colour styles than this are a searchable, foldered list; fewer are a grid of swatches. */
+const MANY_STYLES = 12;
 
 /** HSV picker with alpha, hex entry, eyedropper and document colour styles. */
 export function ColorPicker(props: { color: string; onChange: (hex8: string) => void }) {
@@ -205,7 +209,32 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
           </button>
         )}
       </div>
-      {styles.length > 0 && (
+      {styles.length > MANY_STYLES && (
+        <>
+          <div className="small muted" style={{ marginTop: 8 }}>
+            Colour styles
+          </div>
+          {/* A long list: search and folders, drawn in place (the same list as "Apply colour style"). */}
+          <div className="tp-inplace" data-colour-styles-list>
+            <TokenList
+              label="Colour styles"
+              placeholder="Search colour styles"
+              maxHeight={180}
+              autoFocus={false}
+              items={styles.map((s) => ({ id: s.id, name: s.name, description: s.description, preview: { type: "color", color: s.color } }))}
+              onPick={(item) => {
+                const s = styles.find((x) => x.id === item.id);
+                if (!s) return;
+                const nc = parseColor(s.color);
+                setHsv(rgbToHsv(nc));
+                setHexText(toHex(nc));
+                props.onChange(s.color);
+              }}
+            />
+          </div>
+        </>
+      )}
+      {styles.length > 0 && styles.length <= MANY_STYLES && (
         <>
           <div className="small muted" style={{ marginTop: 8 }}>
             Colour styles

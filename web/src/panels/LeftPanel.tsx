@@ -35,7 +35,7 @@ import { canvasMenu } from "../canvas/contextMenu";
 import { LAYER_FILTERS, LAYER_FILTER_LABELS, collapseAllLayers, descendantContainers, rangeIds, searchLayers, setLayerExpanded, useLayerTree, type LayerFilter, type LayerSearch } from "./layerTree";
 import { PanelClose } from "./PanelChrome";
 import * as A from "../actions";
-import { ColorStylesSection, EffectStylesSection, GridStylesSection, TextStylesSection } from "./StyleControls";
+import { ColorStylesSection, EffectStylesSection, GridStylesSection, styleMatchCount, TextStylesSection } from "./StyleControls";
 import { FolderTree } from "./FolderTree";
 import { useThumb } from "./assetThumbs";
 import { orderedEntries, propertyOrder, swapGroups } from "../componentOps";
@@ -1296,6 +1296,8 @@ function Assets() {
   const readOnly = useStore((s) => s.es.readOnly);
   const noInsert = viewer || readOnly;
   const [q, setQ] = useState("");
+  /** Image rows the search leaves (reported by the Images section, which reads the file on its own timer). */
+  const [imagesShown, setImagesShown] = useState(0);
   const match = (s: string) => s.toLowerCase().includes(q.toLowerCase());
   // Variants are listed under their set (in the set's order), other components on their own.
   const groups = swapGroups(doc)
@@ -1393,16 +1395,41 @@ ${description}` : "")}
   return (
     <div className="scroll">
       <div className="section">
-        <input className="textinput" placeholder="Search assets" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.stopPropagation()} />
+        <input
+          className="textinput"
+          type="search"
+          aria-label="Search assets"
+          placeholder="Search assets"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            // The first Escape clears the search; the next leaves the field for the canvas.
+            if (e.key === "Escape") {
+              if (q) setQ("");
+              else {
+                (e.target as HTMLInputElement).blur();
+                focusCanvas();
+              }
+            }
+          }}
+        />
+        {q.trim() && entries.length === 0 && !imagesShown && !styleMatchCount(doc, q) && (
+          <div className="muted small" role="status" data-assets-empty style={{ marginTop: 8 }}>
+            No matches for “{q.trim()}”
+          </div>
+        )}
       </div>
-      <div className="section" data-styles="components">
-        <div className="section-head">
-          <span>Components</span>
+      {(!q.trim() || entries.length > 0) && (
+        <div className="section" data-styles="components">
+          <div className="section-head">
+            <span>Components</span>
+          </div>
+          {groups.length === 0 && <div className="muted small">Select layers and press {ALT_MOD}K to create a component.</div>}
+          <FolderTree scope="components" items={entries} name={entryName} forceOpen={!!q.trim()} row={(e, label) => entryRow(e, label)} />
         </div>
-        {groups.length === 0 && <div className="muted small">Select layers and press {ALT_MOD}K to create a component.</div>}
-        <FolderTree scope="components" items={entries} name={entryName} forceOpen={!!q.trim()} row={(e, label) => entryRow(e, label)} />
-      </div>
-      {!viewer && <ImageAssets filter={q} />}
+      )}
+      {!viewer && <ImageAssets filter={q} onShown={setImagesShown} />}
       {!viewer && (
         <div className="section" data-testid="photos-section">
           <div className="section-head">
