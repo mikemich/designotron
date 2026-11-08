@@ -2,6 +2,8 @@
 // components (a private engine that holds the variant state), motion tables and key names.
 
 import { inlineAssets } from "./assets";
+import { bezierOf, cssBezier, easeOf, linear, type Ease } from "./easing";
+import type { Side } from "./smart";
 import { getDoc, getEngine, toast } from "./store";
 import type { WasmEngine } from "./wasm/pkg/designotron_engine_wasm";
 import type { Direction, Doc, Easing, Interaction, Node, Overflow, Rect } from "./types";
@@ -22,8 +24,12 @@ let changes = 0;
 
 export const playerRevision = () => changes;
 
+/** Layers `pq` leaves out of every picture it draws (see `buildSceneWithout`). */
+let skipLayers: string[] = [];
+
 /** Query through the player's engine when it exists, else the editor's. */
 export function pq<T = any>(q: Record<string, unknown>): T {
+  if (skipLayers.length && q.q === "exportSvg") q = { ...q, hide: [...((q.hide as string[] | undefined) ?? []), ...skipLayers] };
   return JSON.parse((pe?.engine ?? getEngine()).query(JSON.stringify(q)));
 }
 
@@ -140,39 +146,44 @@ export interface Motion {
   ms: number;
   /** CSS timing function. */
   easing: string;
+  /** The same curve as a function (smart animate and drags read their own clock). */
+  ease: Ease;
 }
 
-export const INSTANT: Motion = { kind: "instant", dir: "left", ms: 0, easing: "linear" };
+export const INSTANT: Motion = { kind: "instant", dir: "left", ms: 0, easing: "linear", ease: linear };
 
 const SLIDES: Record<string, Direction> = { slideLeft: "left", slideRight: "right", slideUp: "up", slideDown: "down" };
 
 /** The motion an interaction asks for (old files: 300 ms ease-out; Slide is Move in). */
 export function motionOf(it: Interaction): Motion {
   const ms = it.durationMs > 0 ? it.durationMs : 300;
-  const easing = EASING_CSS[it.easing ?? "easeOut"] ?? "ease-out";
+  // A custom curve replaces the preset; the CSS string and the function describe the same one.
+  const bz = bezierOf(it);
+  const easing = it.bezier ? cssBezier(bz) : (EASING_CSS[it.easing ?? "easeOut"] ?? "ease-out");
+  const ease = easeOf(bz);
   const dir = it.direction ?? "left";
   switch (it.transition) {
     case "instant":
       return INSTANT;
     case "smartAnimate":
-      return { kind: "smart", dir, ms, easing };
+      return { kind: "smart", dir, ms, easing, ease };
     case "moveIn":
     case "moveOut":
     case "push":
-      return { kind: it.transition, dir, ms, easing };
+      return { kind: it.transition, dir, ms, easing, ease };
     case "slideLeft":
     case "slideRight":
     case "slideUp":
     case "slideDown":
       // The classic Slide: only the new screen moves, over nothing.
-      return { kind: "slide", dir: SLIDES[it.transition], ms, easing };
+      return { kind: "slide", dir: SLIDES[it.transition], ms, easing, ease };
     default:
-      return { kind: "dissolve", dir, ms, easing };
+      return { kind: "dissolve", dir, ms, easing, ease };
   }
 }
 
 /** The slide the next/previous frame buttons and arrow keys play. */
-export const slide = (dir: Direction): Motion => ({ kind: "slide", dir, ms: 300, easing: EASING_CSS.easeOut });
+export const slide = (dir: Direction): Motion => ({ kind: "slide", dir, ms: 300, easing: EASING_CSS.easeOut, ease: easeOf(bezierOf({ easing: "easeOut" })) });
 
 export const OPPOSITE: Record<Direction, Direction> = { left: "right", right: "left", up: "down", down: "up" };
 
@@ -525,76 +536,34 @@ export function carryScroll(from: Pick<Scene, "id" | "scrollers">, to: Pick<Scen
   return result;
 }
 
-// ---------- smart animate (stage 1: direct children matched by name) ----------
+// ---------- smart animate (the matching and the tween are in smart.ts) ----------
 
-/** One direct child of a container, drawn on its own. */
-export interface Piece {
-  name: string;
-  svg: string;
-  /** What it paints, frame coordinates (the crop of `svg`). */
-  crop: Rect;
-  /** Its box centre in frame coordinates, its size and rotation in degrees. */
-  cx: number;
-  cy: number;
-  w: number;
-  h: number;
-  rot: number;
-  opacity: number;
-}
+/** The screens the player shows now, as one state of a smart animate. */
+export const liveSide = (root: string): Side => ({ nodes: pdoc().nodes, root, q: pq });
 
-/** More direct children than this and a smart animate dissolves instead. */
-export const SMART_MAX_CHILDREN = 200;
-
-/** Whether `container`'s direct children can be smart animated. */
-export const smartable = (container: string) => (pdoc().nodes[container]?.children.length ?? 0) <= SMART_MAX_CHILDREN;
-
-/** The visible direct children of a container, each as its own picture (frame = the screen
- *  the coordinates are relative to). Renders each child only, never the whole screen. */
-export function piecesOf(container: string, frame: string): Piece[] {
+/** The layers under `root` as they are now, with an engine that can still draw them after the
+ *  player's engine has changed (a Change to). `free` gives the copy back. */
+export function frozenSide(root: string): { side: Side; free: () => void } {
   const doc = pdoc();
-  const ids = (doc.nodes[container]?.children ?? []).filter((c) => doc.nodes[c]?.visible !== false);
-  if (!ids.length) return [];
-  const fb = pq<{ union: Rect }>({ q: "bounds", ids: [frame] }).union;
-  const geo = pq<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids }).items;
-  return ids.flatMap((id) => {
+  const engine = ensurePlayerEngine().engine.fork();
+  const nodes: Record<string, Node> = {};
+  const take = (id: string) => {
     const n = doc.nodes[id];
-    const b = geo.find((g) => g.id === id)?.bounds;
-    if (!b) return [];
-    const c = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id, withBounds: true });
-    return [
-      {
-        name: n.name,
-        svg: inlineAssets(c.svg),
-        crop: { x: c.x - fb.x, y: c.y - fb.y, width: c.width, height: c.height },
-        cx: b.x - fb.x + b.width / 2,
-        cy: b.y - fb.y + b.height / 2,
-        w: Math.max(1, n.width),
-        h: Math.max(1, n.height),
-        rot: n.rotation ?? 0,
-        opacity: n.opacity ?? 1,
-      },
-    ];
-  });
+    if (!n) return;
+    nodes[id] = n;
+    for (const c of n.children) take(c);
+  };
+  take(root);
+  return { side: { nodes, root, q: (q) => JSON.parse(engine.query(JSON.stringify(q))) }, free: () => engine.free() };
 }
 
-/** Pairs old and new pieces by layer name; repeated names pair in order. */
-export function matchPieces(from: Piece[], to: Piece[]): { pairs: [Piece, Piece][]; gone: Piece[]; added: Piece[] } {
-  const free = new Map<string, Piece[]>();
-  for (const p of to) free.set(p.name, [...(free.get(p.name) ?? []), p]);
-  const pairs: [Piece, Piece][] = [];
-  const gone: Piece[] = [];
-  const used = new Set<Piece>();
-  for (const p of from) {
-    const q = free.get(p.name)?.shift();
-    if (q) {
-      pairs.push([p, q]);
-      used.add(q);
-    } else gone.push(p);
+/** The screen's scene with some layers left out of every picture (the rest of a screen behind a
+ *  Change to that is being smart animated). */
+export function buildSceneWithout(frameId: string, skip: string[]): Scene {
+  skipLayers = skip;
+  try {
+    return buildScene(frameId);
+  } finally {
+    skipLayers = [];
   }
-  return { pairs, gone, added: to.filter((p) => !used.has(p)) };
-}
-
-/** CSS transform that makes `a`'s box look like `b`'s (about `a`'s centre). */
-export function morph(a: Piece, b: Piece): string {
-  return `translate(${b.cx - a.cx}px, ${b.cy - a.cy}px) rotate(${b.rot - a.rot}deg) scale(${b.w / a.w}, ${b.h / a.h})`;
 }

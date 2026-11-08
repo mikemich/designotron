@@ -804,13 +804,16 @@ pub enum Query {
   /// The prototype player's smart animate frames: each of `ids` drawn alone as `{id, svg, x, y,
   /// width, height}` (the crop in page space) on a copy of the document with the merge patches of
   /// `patch` applied (resolved geometry and paint, no layout pass) and the `hide` layers left out.
-  /// The engine's own document is never touched.
+  /// Ids in `own` are drawn without their children (a container's own paint). The engine's own
+  /// document is never touched.
   ExportPieces {
     ids: Vec<NodeId>,
     #[serde(default)]
     patch: std::collections::BTreeMap<NodeId, Value>,
     #[serde(default)]
     hide: Vec<NodeId>,
+    #[serde(default)]
+    own: Vec<NodeId>,
   },
   ExportHtml {
     id: NodeId,
@@ -4463,7 +4466,12 @@ impl Engine {
           }
         }
       }
-      Query::ExportPieces { ids, patch: patches, hide } => {
+      Query::ExportPieces {
+        ids,
+        patch: patches,
+        hide,
+        own,
+      } => {
         let mut doc = self.doc.clone();
         for (id, p) in &patches {
           let Some(n) = doc.get_mut(id) else { continue };
@@ -4472,7 +4480,18 @@ impl Engine {
         let items: Vec<Value> = ids
           .iter()
           .map(|id| {
-            let c = render::export_svg_parts(&doc, id, m, &hide, false);
+            let kids;
+            let hidden: &[NodeId] = if own.contains(id) {
+              kids = hide
+                .iter()
+                .cloned()
+                .chain(doc.get(id).map(|n| n.children.clone()).unwrap_or_default())
+                .collect::<Vec<_>>();
+              &kids
+            } else {
+              &hide
+            };
+            let c = render::export_svg_parts(&doc, id, m, hidden, false);
             json!({ "id": id, "svg": c.svg, "x": c.bounds.x, "y": c.bounds.y, "width": c.bounds.width, "height": c.bounds.height })
           })
           .collect();
@@ -4916,6 +4935,7 @@ mod tests {
       ids: ids.iter().map(|s| s.to_string()).collect(),
       patch: serde_json::from_value(patch).unwrap(),
       hide: hide.iter().map(|s| s.to_string()).collect(),
+      own: vec![],
     })
   }
 
@@ -4929,7 +4949,13 @@ mod tests {
     let wide = pieces(&e, &[&a], json!({ a.clone(): { "width": 120.0 } }), &[]).unwrap();
     assert_ne!(plain[0]["svg"], wide[0]["svg"]);
     assert!(wide[0]["width"].as_f64().unwrap() > plain[0]["width"].as_f64().unwrap() + 50.0);
-    let red = pieces(&e, &[&a], json!({ a.clone(): { "fills": [{ "type": "solid", "color": "#FF0000" }] } }), &[]).unwrap();
+    let red = pieces(
+      &e,
+      &[&a],
+      json!({ a.clone(): { "fills": [{ "type": "solid", "color": "#FF0000" }] } }),
+      &[],
+    )
+    .unwrap();
     assert!(red[0]["svg"].as_str().unwrap().to_lowercase().contains("#ff0000"));
     assert_eq!(e.doc_rev, rev);
     assert_eq!(serde_json::to_string(&e.doc.get(&a)).unwrap(), before);
@@ -4958,6 +4984,35 @@ mod tests {
     let alone = pieces(&e, &[&g], json!({}), &[&c]).unwrap();
     let full = pieces(&e, &[&g], json!({}), &[]).unwrap();
     assert_ne!(alone[0]["svg"], full[0]["svg"]);
+  }
+
+  #[test]
+  fn export_pieces_own_leaves_the_children_out() {
+    let mut e = engine();
+    let g = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 0.0,
+        y: 0.0,
+        width: 300.0,
+        height: 300.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let c = rect(&mut e, 10.0, 10.0, 40.0, 40.0, Some(g.clone()));
+    let own = e
+      .query(Query::ExportPieces {
+        ids: vec![g.clone(), c.clone()],
+        patch: Default::default(),
+        hide: vec![],
+        own: vec![g.clone()],
+      })
+      .unwrap();
+    let full = pieces(&e, &[&g, &c], json!({}), &[]).unwrap();
+    assert_ne!(own[0]["svg"], full[0]["svg"]);
+    // The child, drawn alone in the same call, is not affected.
+    assert_eq!(own[1]["svg"], full[1]["svg"]);
   }
 
   #[test]

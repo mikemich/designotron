@@ -1,41 +1,57 @@
-import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { ChevronLeft, ChevronRight, RotateCcw, Settings2, X } from "lucide-react";
 import { toast, useStore } from "./store";
 import type { Interaction, OverlaySettings, Rect } from "./types";
 import { REPO_URL } from "./panels/GuestBar";
 import { DEFAULT_OVERLAY, overlayBox, overlayDim, TRIGGER_LABELS } from "./prototype";
 import { loadPrefs, savePrefs } from "./presenterPrefs";
-import { inlineAssets } from "./assets";
 import { focusedByPointer } from "./ui/controls";
 import {
   buildScene,
+  buildSceneWithout,
   carryScroll,
   changeTarget,
   closePlayer,
+  frozenSide,
   INSTANT,
   keepsOldScreen,
   keyName,
-  matchPieces,
-  morph,
+  liveSide,
   motionAnimation,
   motionOf,
   pdoc,
-  piecesOf,
   playerRevision,
   pq,
   reverseMotion,
   scrollersOf,
   slide,
-  smartable,
   swapVariant,
   type AboveScene,
   type FixedScene,
   type Hotspot,
   type Motion,
-  type Piece,
   type Scene,
   type ScrollerScene,
 } from "./player";
+import { linear, type Ease } from "./easing";
+import {
+  completes,
+  DRAG_SLOP,
+  dragAxis,
+  dragProgress,
+  matchTrees,
+  measure,
+  planSmart,
+  ramp,
+  rubberBand,
+  smartVector,
+  SmartTween,
+  touchActionFor,
+  velocityAlong,
+  type SmartPlan,
+  type Vec,
+} from "./smart";
 
 /** Undoes what an interaction did (While hovering / While pressing). */
 type Revert = () => void;
@@ -66,16 +82,53 @@ interface Leaving {
   motion: Motion;
   /** Where the leaving screen's scrollers were, so it doesn't jump to the top while it goes. */
   pos: Map<string, { left: number; top: number }>;
+  /** A drag drives the two screens' animations (they start paused). */
+  manual?: boolean;
 }
 
-/** A smart animate in progress: the new state's background, and the pieces of both states. */
+/** A smart animate in progress: the plan of its pieces and what is drawn under them. */
 interface Smart {
   key: number;
   motion: Motion;
-  bg: string;
-  from: Piece[];
-  to: Piece[];
+  plan: SmartPlan;
+  /** The rest of the screen, for a Change to (the new screen is hidden while the pieces play). */
+  backdrop?: React.ReactNode;
+  /** A drag drives the tween instead of a clock. */
+  manual?: boolean;
+  /** Pieces inside this overlay: they show over the overlays and its own picture is hidden. */
+  overlay?: number;
+  /** Gives back the copy of the old state's engine. */
+  free?: () => void;
 }
+
+/** A change a drag is following: progress 0 is where it started, 1 is done. */
+interface Manual {
+  /** The vector (frame pixels) the change travels along. */
+  vec: Vec;
+  set: (v: number) => void;
+  ramp: (to: 0 | 1, ms: number, ease: Ease) => Promise<unknown>;
+  /** The change stays: the animation layers go. */
+  settle: () => void;
+  /** Puts everything back as it was. */
+  revert: Revert;
+  ms: number;
+  ease: Ease;
+}
+
+/** A drag drives the screen animations: they start paused (one `animation` value, so the shorthand isn't mixed with a longhand). */
+const paused = (a: string | undefined, manual?: boolean) => (a && manual ? `${a} paused` : a);
+
+const DIR_VEC: Record<string, Vec> = { left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, up: { x: 0, y: -1 }, down: { x: 0, y: 1 } };
+
+/** The box `r` of `a` and `b` where both overlap (null when they don't). */
+const overlap = (a: Rect | null, b: Rect): Rect | null => {
+  if (!a) return b;
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const w = Math.min(a.x + a.width, b.x + b.width) - x;
+  const h = Math.min(a.y + a.height, b.y + b.height) - y;
+  return { x, y, width: Math.max(0, w), height: Math.max(0, h) };
+};
 
 /** People who asked for less motion get instant transitions. */
 const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -135,6 +188,10 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   const [leaving, setLeaving] = useState<Leaving | null>(null);
   const [smart, setSmart] = useState<Smart | null>(null);
   const motionKey = useRef(0);
+  const smartCtl = useRef<SmartTween | null>(null);
+  // The drag in progress (calling it cancels it) and the revert of a While pressing that is held.
+  const dragging = useRef<(() => void) | null>(null);
+  const pressUndo = useRef<(() => void) | null>(null);
   // Moves when the player's own engine changes (a Change to), so scenes are rebuilt.
   const [revision, setRevision] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -198,36 +255,36 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   }, [current.id]);
   useEffect(() => closePlayer, []);
 
-  /** The motion that really plays: none with reduced motion, a dissolve for a smart animate
-   *  between containers with too many children. */
-  const playable = (m: Motion, ...containers: string[]): Motion =>
-    reducedMotion() ? INSTANT : m.kind === "smart" && !containers.every(smartable) ? { ...m, kind: "dissolve" } : m;
+  /** The motion that really plays: none with reduced motion. */
+  const playable = (m: Motion): Motion => (reducedMotion() ? INSTANT : m);
 
-  /** Starts a change of screen from `from` (the screen that goes away) to `to`. */
-  const startMotion = (from: string, to: string, m: Motion) => {
-    const motion = playable(m, from, to);
+  /** Starts a change of screen from `from` (the screen that goes away) to `to`. A smart animate
+   *  that is too big to animate dissolves. With `manual` the animation waits for a drag. */
+  const startMotion = (from: string, to: string, m: Motion, manual = false) => {
+    let motion = playable(m);
     setSmart(null);
     if (motion.kind === "instant") return setLeaving(null);
     const key = ++motionKey.current;
     if (motion.kind === "smart") {
-      const kids = pdoc().nodes[to]?.children ?? [];
-      const bg = inlineAssets(pq<string>({ q: "exportSvg", id: to, hide: kids }));
-      setSmart({ key, motion, bg, from: piecesOf(from, from), to: piecesOf(to, to) });
+      const plan = planSmart(liveSide(from), liveSide(to));
+      if (plan) setSmart({ key, motion, plan, manual });
+      else motion = { ...motion, kind: "dissolve" };
     }
-    setLeaving({ key, id: from, motion, pos: new Map(scrolls.current.pos) });
+    setLeaving({ key, id: from, motion, pos: new Map(scrolls.current.pos), manual });
   };
 
-  const navigate = (id: string, m: Motion, keepScroll = false) => {
+  const navigate = (id: string, m: Motion, keepScroll = false, manual = false) => {
     // The new screen starts where this one is scrolled (a destination without scrollers ignores it).
     if (keepScroll && doc.nodes[id]) carried.current = carryScroll(sceneFor(current.id), sceneFor(id), scrolls.current.pos);
     setOverlays([]);
-    startMotion(current.id, id, m);
+    startMotion(current.id, id, m, manual);
     setHistory((h) => [...h, { id, via: m }]);
   };
   /** R: back to the start screen with nothing open, as if the prototype had just been opened. */
   const restart = () => {
     hovering.current?.();
     pressing.current?.();
+    dragging.current?.();
     cancelKeyPresses();
     carried.current = null;
     closePlayer();
@@ -248,6 +305,8 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   // The change of screen is over: take the old screen away.
   useEffect(() => {
     if (!leaving) return;
+    // A smart animate ends with its tween; a drag ends the change itself.
+    if (leaving.manual || smart?.key === leaving.key) return;
     const t = setTimeout(() => {
       setLeaving(null);
       setSmart(null);
@@ -298,7 +357,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       const s = sceneFor(inFrame);
       scrollTo(it, s);
     } else if (it.action === "changeTo" && it.destination) {
-      return changeVariant(it, source, inFrame);
+      return changeVariant(it, source, inFrame)?.undo ?? null;
     } else if (it.action === "navigate" && it.destination && doc.nodes[it.destination]) {
       const undo = snapshot();
       navigate(it.destination, motionOf(it), it.preserveScroll);
@@ -325,34 +384,110 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     return null;
   };
 
-  /** Change to: the instance holding `source` switches to another variant of its set, in place. */
-  const changeVariant = (it: Interaction, source: string, inFrame: string): Revert | null => {
+  /** Change to: the instance holding `source` switches to another variant of its set, in place.
+   *  Smart animate draws the old and the new state's layers moving into each other; `manual` leaves
+   *  that to a drag. */
+  const changeVariant = (it: Interaction, source: string, inFrame: string, manual = false): { undo: Revert; smart: Smart | null } | null => {
     const instance = changeTarget(source, it.destination!);
     const before = instance ? pdoc().nodes[instance]?.instance?.componentId : null;
     if (!instance || !before || before === it.destination) return null;
-    const m = playable(motionOf(it), instance);
-    // Smart animate: the instance's direct children, before and after. Only on the visible screen
-    // and outside scrolling layers (their pictures are placed by the scroller).
+    const m = playable(motionOf(it));
     const sc = sceneFor(inFrame);
-    let pieces: Piece[] | null = null;
-    if (m.kind === "smart" && inFrame === current.id && !overlays.length && !scrollersOf(sc, instance).length && !sc.fixed.some((f) => f.id === instance)) {
-      pieces = piecesOf(instance, inFrame);
+    // Smart animate on the visible screen, or in the top overlay.
+    const topO = overlays.length ? overlays[overlays.length - 1] : null;
+    const onBase = inFrame === current.id && !overlays.length;
+    const inTop = !!topO && topO.id === inFrame;
+    const smartOk = m.kind === "smart" && (onBase || inTop);
+    // The old state is drawn from a copy of the engine taken before the swap.
+    const frozen = smartOk ? frozenSide(instance) : null;
+    const posBefore = new Map(scrolls.current.pos);
+    const inner = scrollersOf(sc, instance);
+    const sticky = (pos: Map<string, { left: number; top: number }>) => stickyShift(sc, instance, inFrame, pos);
+    const stickyA = frozen ? sticky(posBefore) : 0;
+    if (!swapVariant(instance, it.destination!)) {
+      frozen?.free();
+      return null;
     }
-    if (!swapVariant(instance, it.destination!)) return null;
     // Preserve scroll position: the variant's scrollers start where the old ones were.
     if (it.preserveScroll) for (const [id, at] of carryScroll(sc, sceneFor(inFrame), scrolls.current.pos)) scrolls.current.pos.set(id, at);
-    if (pieces) {
-      const kids = pdoc().nodes[instance].children;
-      const bg = inlineAssets(pq<string>({ q: "exportSvg", id: inFrame, hide: kids }));
-      const key = ++motionKey.current;
-      setSmart({ key, motion: m, bg, from: pieces, to: piecesOf(instance, inFrame) });
-      setLeaving({ key, id: inFrame, motion: { ...m, kind: "dissolve" }, pos: new Map() });
+    let sm: Smart | null = null;
+    if (frozen) {
+      const fb = pq<{ union: Rect }>({ q: "bounds", ids: [inFrame] }).union;
+      const ib = pq<{ union: Rect }>({ q: "bounds", ids: [instance] }).union;
+      const off = (pos: Map<string, { left: number; top: number }>, dy: number): Vec => {
+        let x = 0;
+        let y = dy;
+        for (const s of inner) {
+          const p = pos.get(s.id);
+          x -= p?.left ?? 0;
+          y -= p?.top ?? 0;
+        }
+        const ov = topO && inTop ? pos.get(`ov:${topO.key}`) : null;
+        return { x: x - (ov?.left ?? 0), y: y - (ov?.top ?? 0) };
+      };
+      const shiftX = topO && inTop ? topO.x : 0;
+      const shiftY = topO && inTop ? topO.y : 0;
+      let clip: Rect | null = topO && inTop ? { x: topO.x, y: topO.y, width: topO.w, height: topO.h } : null;
+      for (const s of inner) clip = overlap(clip, { ...s.rect, x: s.rect.x + shiftX, y: s.rect.y + shiftY });
+      const A = off(posBefore, -stickyA);
+      const B = off(scrolls.current.pos, -sticky(scrolls.current.pos));
+      const plan = planSmart(frozen.side, liveSide(instance), {
+        at: { x: ib.x - fb.x + shiftX, y: ib.y - fb.y + shiftY },
+        offsetA: A,
+        offsetB: B,
+        clip,
+      });
+      if (plan) {
+        const rest = buildSceneWithout(inFrame, [instance]);
+        const pos = new Map(scrolls.current.pos);
+        const view = (
+          <SceneView scene={rest} flash={false} interactive={false} scrolls={{ current: { key: "", pos } }} scrollEls={scrollEls} />
+        );
+        const n = pdoc().nodes[inFrame];
+        const backdrop =
+          topO && inTop ? (
+            <div style={{ position: "absolute", left: topO.x, top: topO.y, width: topO.w, height: topO.h, overflow: "hidden" }}>
+              <div style={{ position: "relative", left: -(pos.get(`ov:${topO.key}`)?.left ?? 0), top: -(pos.get(`ov:${topO.key}`)?.top ?? 0), width: n.width, height: n.height }}>{view}</div>
+            </div>
+          ) : (
+            view
+          );
+        const key = ++motionKey.current;
+        sm = { key, motion: m, plan, backdrop, manual, overlay: inTop ? topO!.key : undefined, free: frozen.free };
+        setSmart(sm);
+        setLeaving({ key, id: inFrame, motion: { ...m, kind: "dissolve" }, pos: new Map(), manual });
+      } else frozen.free();
     }
     setRevision((r) => r + 1);
     say(`Changed to ${pdoc().nodes[it.destination!]?.name ?? "another variant"}`);
-    return () => {
-      if (swapVariant(instance, before)) setRevision((r) => r + 1);
+    return {
+      smart: sm,
+      undo: () => {
+        if (swapVariant(instance, before)) setRevision((r) => r + 1);
+      },
     };
+  };
+
+  /** How far a sticky layer holding `instance` is pushed down by a scroller's position (0 when none). */
+  const stickyShift = (sc: Scene, instance: string, inFrame: string, pos: Map<string, { left: number; top: number }>): number => {
+    const d = pdoc();
+    const chain: string[] = [];
+    for (let at: string | null = instance; at && at !== inFrame; at = (d.nodes[at]?.parent as string | null | undefined) ?? null) chain.push(at);
+    for (const id of chain) {
+      const n = d.nodes[id];
+      if (n?.scrollBehavior !== "sticky" || !n.parent) continue;
+      const s = scrollersOf(sc, id)[0];
+      if (!s || (s.overflow !== "vertical" && s.overflow !== "both")) return 0;
+      const items = pq<{ union: Rect; items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids: [id, n.parent] }).items;
+      const box = items.find((i) => i.id === id)?.bounds;
+      const parent = items.find((i) => i.id === n.parent)?.bounds;
+      if (!box || !parent) return 0;
+      const top = pos.get(s.id)?.top ?? 0;
+      const frameAt = pq<{ union: Rect }>({ q: "bounds", ids: [inFrame] }).union;
+      const rel = box.y - frameAt.y - s.rect.y;
+      return Math.min(Math.max(0, top - rel), Math.max(0, parent.y + parent.height - (box.y + box.height)));
+    }
+    return 0;
   };
 
   // "While hovering": acts when the pointer enters the layer and undoes it when the pointer is
@@ -392,6 +527,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       window.removeEventListener("pointerup", release);
       window.removeEventListener("pointercancel", release);
       pressing.current = null;
+      pressUndo.current = null;
     };
     const release = (e: PointerEvent) => {
       if (e.pointerId !== pointerId) return;
@@ -400,39 +536,224 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
       // A layer with both "While pressing" and "On click": the release over the layer is the tap,
       // so the click runs once the press is put back (not when the press is cancelled).
       if (tap && e.type === "pointerup" && (within(tap.box, e.clientX, e.clientY) || Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < TAP_SLOP)) tap.act();
-      // A mouse release sends no click into the player (the layer under the pointer was replaced),
-      // so the next pointerdown, which starts a real click, disarms the swallow too.
-      disarmSwallow.current?.();
-      const swallow = (c: Event) => {
-        if (!(c.target as Element | null)?.closest?.(".presenter")) return;
-        c.stopPropagation();
-        c.preventDefault();
-        disarm();
-      };
-      const timer = setTimeout(() => disarm(), SWALLOW_CLICK_MS);
-      const disarm = () => {
-        window.removeEventListener("click", swallow, true);
-        window.removeEventListener("pointerdown", disarm, true);
-        clearTimeout(timer);
-        disarmSwallow.current = null;
-      };
-      window.addEventListener("click", swallow, true);
-      window.addEventListener("pointerdown", disarm, true);
-      disarmSwallow.current = disarm;
+      armSwallow();
     };
     window.addEventListener("pointerup", release);
     window.addEventListener("pointercancel", release);
     pressing.current = stop;
+    // A drag that starts puts the press back itself (no tap).
+    pressUndo.current = () => {
+      stop();
+      undo();
+    };
   };
+  /** The click the browser sends after a press or drag that was released is ignored, so it can't
+   *  run another link. A mouse release sends no click into the player (the layer under the pointer
+   *  was replaced), so the next pointerdown, which starts a real click, disarms the swallow too. */
+  const armSwallow = () => {
+    disarmSwallow.current?.();
+    const swallow = (c: Event) => {
+      if (!(c.target as Element | null)?.closest?.(".presenter")) return;
+      c.stopPropagation();
+      c.preventDefault();
+      disarm();
+    };
+    const timer = setTimeout(() => disarm(), SWALLOW_CLICK_MS);
+    const disarm = () => {
+      window.removeEventListener("click", swallow, true);
+      window.removeEventListener("pointerdown", disarm, true);
+      clearTimeout(timer);
+      disarmSwallow.current = null;
+    };
+    window.addEventListener("click", swallow, true);
+    window.addEventListener("pointerdown", disarm, true);
+    disarmSwallow.current = disarm;
+  };
+
+  // ---- On drag ----
+  const scaleRef = useRef(scale);
+  scaleRef.current = scale;
+  const vecCache = useRef({ rev: -1, map: new Map<string, Vec | null>() });
+  /** The vector a drag of `it` on `source` moves things along (frame pixels), or null when there is
+   *  none to follow. Reads layer data and bounds, draws nothing; cached per player revision. */
+  const dragVec = (it: Interaction, source: string, inFrame: string): Vec | null => {
+    const rev = playerRevision();
+    if (vecCache.current.rev !== rev) vecCache.current = { rev, map: new Map() };
+    const key = [it.action, it.destination, it.transition, it.direction, source, inFrame].join("|");
+    const cache = vecCache.current.map;
+    if (cache.has(key)) return cache.get(key)!;
+    let out: Vec | null = null;
+    const m = motionOf(it);
+    const d = pdoc();
+    if (it.action === "navigate" && it.destination && d.nodes[it.destination]) {
+      const fr = d.nodes[inFrame];
+      const to = d.nodes[it.destination];
+      if (m.kind === "smart") {
+        const mt = matchTrees(d.nodes, inFrame, d.nodes, it.destination);
+        out = smartVector(mt, measure(liveSide(inFrame), liveSide(it.destination), mt), source);
+      } else if (m.kind === "push" || m.kind === "moveIn" || m.kind === "moveOut" || m.kind === "slide") {
+        const dir = DIR_VEC[m.dir];
+        out = { x: dir.x * (dir.x ? to.width || fr.width : 0), y: dir.y * (dir.y ? to.height || fr.height : 0) };
+      }
+    } else if (it.action === "changeTo" && it.destination && m.kind === "smart") {
+      const inst = changeTarget(source, it.destination);
+      if (inst && d.nodes[it.destination]) {
+        const mt = matchTrees(d.nodes, inst, d.nodes, it.destination);
+        out = smartVector(mt, measure(liveSide(inst), liveSide(it.destination), mt), source);
+      }
+    }
+    cache.set(key, out);
+    return out;
+  };
+
+  /** Starts the change a drag follows. Null when the action ran once instead (no vector to follow,
+   *  an instant or dissolve, reduced motion, an action that isn't a screen change). */
+  const beginManual = (it: Interaction, from: Rect, source: string, inFrame: string): Manual | null => {
+    const m = playable(motionOf(it));
+    const vec = m.kind === "instant" ? null : dragVec(it, source, inFrame);
+    const base = inFrame === current.id && !overlays.length;
+    if (vec && it.action === "navigate" && it.destination && base) {
+      const undo = snapshot();
+      const dest = it.destination;
+      flushSync(() => navigate(dest, m, it.preserveScroll, true));
+      if (m.kind === "smart") {
+        const tw = smartCtl.current;
+        if (tw) return { vec, set: (v) => tw.seek(v, linear), ramp: (to, ms, ease) => tw.play(to, ms, ease), settle: finishMotion, revert: undo, ms: m.ms, ease: m.ease };
+        // Too big to animate: it dissolved instead; the change has happened.
+        flushSync(finishMotion);
+        return null;
+      }
+      // Both screens' own animations, paused and scrubbed with the pointer.
+      const stages = [...(rootRef.current?.querySelectorAll<HTMLElement>(".presenter-viewport .stage") ?? [])];
+      const anims = stages.flatMap((el) => el.getAnimations());
+      for (const a of anims) {
+        a.pause();
+        const fx = a.effect as KeyframeEffect | null;
+        // Linear while dragging: the effect's own easing and the one each keyframe interval carries.
+        fx?.updateTiming({ easing: "linear", fill: "both", duration: m.ms });
+        fx?.setKeyframes(fx.getKeyframes().map((k) => ({ ...k, easing: "linear" })));
+      }
+      let at = 0;
+      const set = (v: number) => {
+        at = Math.min(1, Math.max(0, v));
+        for (const a of anims) a.currentTime = at * m.ms;
+      };
+      set(0);
+      return { vec, set, ramp: (to, ms, ease) => ramp(at, to, ms, ease, set).done, settle: finishMotion, revert: undo, ms: m.ms, ease: m.ease };
+    }
+    if (vec && it.action === "changeTo" && m.kind === "smart") {
+      const held: { r: ReturnType<typeof changeVariant> } = { r: null };
+      flushSync(() => {
+        held.r = changeVariant(it, source, inFrame, true);
+      });
+      const r = held.r;
+      if (!r) return null;
+      const tw = smartCtl.current;
+      if (r.smart && tw) {
+        return {
+          vec,
+          set: (v) => tw.seek(v, linear),
+          ramp: (to, ms, ease) => tw.play(to, ms, ease),
+          settle: finishMotion,
+          revert: () => {
+            finishMotion();
+            r.undo();
+          },
+          ms: m.ms,
+          ease: m.ease,
+        };
+      }
+      return null;
+    }
+    go(it, from, source, inFrame);
+    return null;
+  };
+  /** The animation layers go; what the change did stays. */
+  const finishMotion = () => {
+    setLeaving(null);
+    setSmart(null);
+  };
+
+  /** A press on a layer with On drag: after DRAG_SLOP screen pixels it becomes a drag that the
+   *  change follows; a release at half way or with a flick completes it, otherwise it snaps back. */
+  const dragStart = (it: Interaction, from: Rect, source: string, inFrame: string, pointerId: number, x0: number, y0: number) => {
+    if (dragging.current) return;
+    const samples: { t: number; x: number; y: number }[] = [{ t: performance.now(), x: x0, y: y0 }];
+    let manual: Manual | null | undefined; // undefined: still a press
+    let at = 0;
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+    const move = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return;
+      samples.push({ t: performance.now(), x: e.clientX, y: e.clientY });
+      if (samples.length > 30) samples.shift();
+      if (manual === undefined) {
+        if (Math.hypot(e.clientX - x0, e.clientY - y0) < DRAG_SLOP) return;
+        // The drag takes over: a While pressing on the layer is put back first.
+        pressUndo.current?.();
+        manual = beginManual(it, from, source, inFrame);
+        if (!manual) {
+          stop();
+          dragging.current = null;
+          armSwallow();
+          return;
+        }
+      }
+      if (!manual) return;
+      const k = scaleRef.current || 1;
+      at = rubberBand(dragProgress({ x: (e.clientX - x0) / k, y: (e.clientY - y0) / k }, manual.vec));
+      manual.set(at);
+    };
+    const up = (e: PointerEvent) => {
+      if (e.pointerId !== pointerId) return;
+      stop();
+      const mm = manual;
+      if (!mm) {
+        dragging.current = null;
+        return;
+      }
+      armSwallow();
+      const len = Math.hypot(mm.vec.x, mm.vec.y) || 1;
+      const speed = velocityAlong(samples, { x: mm.vec.x / len, y: mm.vec.y / len });
+      const p = Math.min(1, Math.max(0, at));
+      const done = e.type === "pointerup" && completes(p, speed);
+      dragging.current = () => {};
+      const end = () => {
+        dragging.current = null;
+      };
+      if (done) mm.ramp(1, (1 - p) * mm.ms, mm.ease).then(() => (mm.settle(), end()));
+      else mm.ramp(0, p * mm.ms, mm.ease).then(() => (mm.revert(), end()));
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    dragging.current = () => {
+      stop();
+      dragging.current = null;
+    };
+  };
+
   useEffect(
     () => () => {
       pressing.current?.();
       disarmSwallow.current?.();
       hovering.current?.();
+      dragging.current?.();
       cancelKeyPresses();
     },
     [],
   );
+  // Test hook: freeze the running smart animate at a moment and read what it draws.
+  useEffect(() => {
+    const dt = ((globalThis as any).__dt ??= {});
+    dt.smart = { seek: (p: number) => smartCtl.current?.seek(p), state: () => smartCtl.current?.state() ?? null, variant: (id: string) => pdoc().nodes[id]?.instance?.componentId ?? null };
+    return () => {
+      delete dt.smart;
+    };
+  }, []);
 
   // Timers and keys call `go` through a ref so they never act on a stale render (e.g. "after
   // delay → Back" firing while a modal is open must close the modal).
@@ -559,18 +880,20 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
     >
       <div
         className="stage"
-        style={{ width: frame.width, height: frame.height, animation: m ? motionAnimation(m, true) : undefined, visibility: smart ? "hidden" : undefined }}
+        style={{ width: frame.width, height: frame.height, animation: m ? paused(motionAnimation(m, true), leaving?.manual) : undefined, visibility: smart && smart.overlay === undefined ? "hidden" : undefined }}
       >
         <SceneView
           scene={scene}
           flash={flash}
-          interactive={!smart}
+          interactive={!smart || smart.overlay !== undefined}
           tabbable={!smart && overlays.length === 0}
           scrolls={scrolls}
           scrollEls={scrollEls}
           onAct={(h, it) => go(it, h.rect, h.id, current.id)}
           onHover={hover}
           onPress={(h, it, pointerId, tap) => press(it, h.rect, h.id, current.id, pointerId, tap)}
+          onDrag={(h, it, pointerId, x, y) => dragStart(it, h.rect, h.id, current.id, pointerId, x, y)}
+          dragVec={(h, it) => dragVec(it, h.id, current.id)}
         />
       </div>
     </div>
@@ -591,7 +914,7 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         zIndex: old.motion.kind === "moveOut" ? 2 : 0,
       }}
     >
-      <div className="stage stage-leaving" style={{ width: pdoc().nodes[old.id].width, height: pdoc().nodes[old.id].height, animation: motionAnimation(old.motion, false) }}>
+      <div className="stage stage-leaving" style={{ width: pdoc().nodes[old.id].width, height: pdoc().nodes[old.id].height, animation: paused(motionAnimation(old.motion, false), old.manual) }}>
         <SceneView scene={sceneFor(old.id)} flash={false} interactive={false} scrolls={{ current: { key: "", pos: old.pos } }} scrollEls={scrollEls} />
       </div>
     </div>
@@ -691,7 +1014,20 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
         {old && m?.kind !== "moveOut" && oldStage}
         {curStage}
         {old && m?.kind === "moveOut" && oldStage}
-        {smart && <SmartLayer key={smart.key} smart={smart} width={frame.width} height={frame.height} scale={scale} />}
+        {smart && (
+          <SmartLayer
+            key={smart.key}
+            smart={smart}
+            width={frame.width}
+            height={frame.height}
+            scale={scale}
+            ctl={smartCtl}
+            onDone={() => {
+              setSmart((x) => (x?.key === smart.key ? null : x));
+              setLeaving((x) => (x?.key === smart.key ? null : x));
+            }}
+          />
+        )}
         {overlays.length > 0 && (
           <div className="overlays" style={{ width: frame.width, height: frame.height, transform: `scale(${scale})` }}>
             {overlays.map((o, i) => (
@@ -706,6 +1042,9 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
                 onAct={(h, it) => go(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, h.id, o.id)}
                 onHover={hover}
                 onPress={(h, it, pointerId, tap) => press(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, h.id, o.id, pointerId, tap)}
+                onDrag={(h, it, pointerId, x, y) => dragStart(it, { ...h.rect, x: h.rect.x + o.x, y: h.rect.y + o.y }, h.id, o.id, pointerId, x, y)}
+                dragVec={() => null}
+                hidden={smart?.overlay === o.key}
                 onDelay={(it, from) => goRef.current(it, from, o.id, o.id)}
               />
             ))}
@@ -716,54 +1055,30 @@ export function Presenter({ start, remixUrl }: { start: string; remixUrl?: strin
   );
 }
 
-/** Smart animate, stage 1: the direct children of the old and new state matched by layer name
- *  move, resize, rotate and fade from one to the other over the new state's background; what
- *  only one state has fades out or in. The real screen replaces this when it is done. */
-function SmartLayer({ smart, width, height, scale }: { smart: Smart; width: number; height: number; scale: number }) {
+/** Smart animate: the layers of the old and new state, matched by name through frames, groups and
+ *  instances, move, resize, recolour and fade into each other on one clock (see smart.ts). The real
+ *  screen replaces this when it is done. */
+function SmartLayer({ smart, width, height, scale, ctl, onDone }: { smart: Smart; width: number; height: number; scale: number; ctl: React.MutableRefObject<SmartTween | null>; onDone: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
-  const { pairs, gone, added } = useMemo(() => matchPieces(smart.from, smart.to), [smart]);
-  // What each picture does: [element key, piece, keyframes, side].
-  const items = useMemo(() => {
-    const out: { key: string; piece: Piece; frames: Keyframe[]; side: "old" | "new" | "both" }[] = [];
-    pairs.forEach(([a, b], i) => {
-      if (a.svg === b.svg) {
-        // Same picture: it only moves (a cross-fade would dim it halfway).
-        out.push({ key: `p${i}`, piece: a, frames: [{ transform: "none" }, { transform: morph(a, b) }], side: "both" });
-      } else {
-        out.push({ key: `o${i}`, piece: a, frames: [{ transform: "none", opacity: 1 }, { transform: morph(a, b), opacity: 0 }], side: "old" });
-        out.push({ key: `n${i}`, piece: b, frames: [{ transform: morph(b, a), opacity: 0 }, { transform: "none", opacity: 1 }], side: "new" });
-      }
-    });
-    gone.forEach((p, i) => out.push({ key: `g${i}`, piece: p, frames: [{ opacity: 1 }, { opacity: 0 }], side: "old" }));
-    added.forEach((p, i) => out.push({ key: `a${i}`, piece: p, frames: [{ opacity: 0 }, { opacity: 1 }], side: "new" }));
-    return out;
-  }, [pairs, gone, added]);
-  useEffect(() => {
-    const els = ref.current?.querySelectorAll<HTMLElement>("[data-piece]");
-    if (!els) return;
-    const anims = [...els].map((el) => el.animate(items[Number(el.dataset.piece)].frames, { duration: smart.motion.ms, easing: smart.motion.easing, fill: "both" }));
-    return () => anims.forEach((a) => a.cancel());
-  }, [items]);
+  useLayoutEffect(() => {
+    const host = ref.current;
+    if (!host) return;
+    const tw = new SmartTween(host, smart.plan, smart.motion.ease);
+    ctl.current = tw;
+    tw.seek(0, linear);
+    let live = true;
+    if (!smart.manual) tw.play(1, smart.motion.ms, smart.motion.ease).then((reached) => reached && live && onDone());
+    return () => {
+      live = false;
+      tw.cancel();
+      if (ctl.current === tw) ctl.current = null;
+      smart.free?.();
+    };
+  }, []);
   return (
-    <div ref={ref} className="smart-layer" style={{ position: "absolute", left: 0, top: 0, width, height, transform: `scale(${scale})`, transformOrigin: "0 0", pointerEvents: "none", zIndex: 3 }}>
-      <div dangerouslySetInnerHTML={{ __html: smart.bg }} />
-      {items.map((it, i) => (
-        <div
-          key={it.key}
-          data-piece={i}
-          data-smart={it.piece.name}
-          data-smart-side={it.side}
-          style={{
-            position: "absolute",
-            left: it.piece.crop.x,
-            top: it.piece.crop.y,
-            width: it.piece.crop.width,
-            height: it.piece.crop.height,
-            transformOrigin: `${it.piece.cx - it.piece.crop.x}px ${it.piece.cy - it.piece.crop.y}px`,
-          }}
-          dangerouslySetInnerHTML={{ __html: it.piece.svg }}
-        />
-      ))}
+    <div className="smart-layer" style={{ position: "absolute", left: 0, top: 0, width, height, transform: `scale(${scale})`, transformOrigin: "0 0", pointerEvents: "none", zIndex: smart.overlay === undefined ? 3 : 6 }}>
+      {smart.backdrop}
+      <div ref={ref} style={{ position: "absolute", left: 0, top: 0, width, height }} />
     </div>
   );
 }
@@ -780,6 +1095,9 @@ function OverlayLayer({
   onAct,
   onHover,
   onPress,
+  onDrag,
+  dragVec,
+  hidden,
   onDelay,
 }: {
   overlay: OpenOverlay;
@@ -791,6 +1109,10 @@ function OverlayLayer({
   onAct: (h: Hotspot, it: Interaction) => Revert | null;
   onHover: (owner: string, run: () => Revert | null) => void;
   onPress: (h: Hotspot, it: Interaction, pointerId: number, tap?: Tap) => void;
+  onDrag: (h: Hotspot, it: Interaction, pointerId: number, x: number, y: number) => void;
+  dragVec: (h: Hotspot, it: Interaction) => Vec | null;
+  /** A smart animate is drawing this overlay's pieces; its own picture waits. */
+  hidden: boolean;
   onDelay: (it: Interaction, from: Rect) => void;
 }) {
   const n = pdoc().nodes[o.id];
@@ -834,8 +1156,8 @@ function OverlayLayer({
         onScroll={(e) => scrolls.current.pos.set(`ov:${o.key}`, { left: e.currentTarget.scrollLeft, top: e.currentTarget.scrollTop })}
         onClick={(e) => e.stopPropagation()}
       >
-        <div style={{ position: "relative", width: n.width, height: n.height }}>
-          <SceneView scene={scene} flash={false} interactive tabbable={isTop} scrolls={scrolls} scrollEls={scrollEls} onAct={onAct} onHover={onHover} onPress={onPress} />
+        <div style={{ position: "relative", width: n.width, height: n.height, visibility: hidden ? "hidden" : undefined }}>
+          <SceneView scene={scene} flash={false} interactive tabbable={isTop} scrolls={scrolls} scrollEls={scrollEls} onAct={onAct} onHover={onHover} onPress={onPress} onDrag={onDrag} dragVec={dragVec} />
         </div>
       </div>
     </div>
@@ -856,13 +1178,17 @@ interface SceneProps {
   onAct?: (h: Hotspot, it: Interaction) => Revert | null;
   onHover?: (owner: string, run: () => Revert | null) => void;
   onPress?: (h: Hotspot, it: Interaction, pointerId: number, tap?: Tap) => void;
+  /** A press on a layer with On drag (the owner, its drag and where the pointer went down). */
+  onDrag?: (h: Hotspot, it: Interaction, pointerId: number, x: number, y: number) => void;
+  /** The vector a drag moves things along, for the layer's `touch-action`. */
+  dragVec?: (h: Hotspot, it: Interaction) => Vec | null;
 }
 
 /** A screen's picture, its scrolling boxes and fixed layers, and a hotspot per layer with
  *  interactions. Hotspots are siblings, so a layer without its own click runs its nearest
  *  ancestor's click, and pointer hover counts for every layer in the chain (entering a child is
  *  still hovering the parent). */
-function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, onAct, onHover, onPress }: SceneProps) {
+function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, onAct, onHover, onPress, onDrag, dragVec }: SceneProps) {
   const byId = scene.all;
   const is = (t: Interaction["trigger"]) => (i: Interaction) => i.trigger === t;
   // How many hotspots of each owner's chain the pointer is inside; fire on 0 → 1 and 1 → 0 only.
@@ -927,13 +1253,27 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
     // key goes down as the press and up as the release.
     const pressers = h.interactions.filter((i) => i.trigger === "onPress" || i.trigger === "mouseDown" || i.trigger === "mouseUp");
     const presser = !hit && tabbable && pressers.length ? pressers[0] : null;
+    // A layer whose only pointer trigger is On drag is a stop too: Enter or Space plays the drag's action.
+    const dragger = !hit && !presser && tabbable ? (h.interactions.find(is("onDrag")) ?? null) : null;
+    // The browser keeps the pan along the other axis; the drag's own axis is ours.
+    const owner = nearest(h.chain, "onDrag");
+    const touchAction = owner && dragVec ? touchActionFor(dragAxis(dragVec(owner.o, owner.it))) : undefined;
     // Everything else (hover-only layers, layers that share an ancestor's click, anything under an
     // overlay) is pointer-only and hidden from assistive technology.
     const a11y = hit
       ? { tabIndex: 0, role: "button", "aria-label": name || (dest ? `Go to ${dest}` : "Button") }
       : presser
         ? { tabIndex: 0, role: "button", "aria-label": `${name || "Button"}, ${TRIGGER_LABELS[presser.trigger].toLowerCase()}` }
-        : { "aria-hidden": true as const };
+        : dragger
+          ? { tabIndex: 0, role: "button", "aria-label": `${name || "Button"}, ${TRIGGER_LABELS.onDrag.toLowerCase()}` }
+          : { "aria-hidden": true as const };
+    const dragKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (e.target !== e.currentTarget || (e.key !== "Enter" && e.key !== " ") || !dragger) return;
+      if (focusedByPointer(e.currentTarget)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onAct?.(h, dragger);
+    };
     const pressKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
       if (e.target !== e.currentTarget || e.repeat || (e.key !== "Enter" && e.key !== " ")) return;
       if (focusedByPointer(e.currentTarget)) return;
@@ -981,9 +1321,11 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
               }
             : presser
               ? pressKey
-              : undefined
+              : dragger
+                ? dragKey
+                : undefined
         }
-        style={{ left: h.rect.x - origin.x, top: h.rect.y - origin.y, width: h.rect.width, height: h.rect.height }}
+        style={{ left: h.rect.x - origin.x, top: h.rect.y - origin.y, width: h.rect.width, height: h.rect.height, touchAction }}
         onClick={(e) => {
           e.stopPropagation();
           click(h.chain);
@@ -992,6 +1334,9 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
           if (e.button !== 0) return;
           const down = nearest(h.chain, "mouseDown");
           if (down) onAct?.(down.o, down.it);
+          // On drag: the press may become a drag (after a few pixels); the loop below still starts a press.
+          const drag = nearest(h.chain, "onDrag");
+          if (drag) onDrag?.(drag.o, drag.it, e.pointerId, e.clientX, e.clientY);
           for (const owner of h.chain) {
             const o = byId.get(owner);
             const p = o?.interactions.find(is("onPress"));
