@@ -868,7 +868,7 @@ try {
         await newFile(c);
         await c.click(".tbtn[title='Share for live editing']");
         await sleep(300);
-        if (!(await c.locator(".share-dialog input.mono").count())) await c.click("text=Use a different relay");
+        if (!(await c.locator(".share-dialog input.mono").count())) await c.click(".share-dialog >> text=Use a different relay");
         await c.locator(".share-dialog input.mono").fill(relayUrl);
         await c.click("button:has-text('Share online')");
         await c.waitForSelector("#share-link", { timeout: 8000 });

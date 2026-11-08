@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { FileJson, Loader2, X } from "lucide-react";
 import { useStore, toast } from "../store";
+import { plainError } from "../errors";
 import { checkFigmaJson, fetchFigmaUrl, figmaFileName, importFigmaJson, importFigmaUrl, type ImportResult } from "../figma";
 import { useDialog } from "../ui/controls";
 
@@ -90,7 +91,7 @@ export function FigmaImportDialog({ onCreate }: { onCreate?: (src: FigmaSource, 
     } catch (e) {
       if (closed.current) return;
       setBusy(null);
-      setError(String(e instanceof Error ? e.message : e));
+      setError(plainError(e));
     }
   };
   const fromFile = async (f: File | undefined) => {
@@ -99,9 +100,12 @@ export function FigmaImportDialog({ onCreate }: { onCreate?: (src: FigmaSource, 
     try {
       const json = JSON.parse(await f.text());
       if (onCreate) await create({ file: json, images: {} }, figmaFileName(json) ?? (f.name.replace(/\.json$/i, "").trim() || undefined));
-      else finish(importFigmaJson(json));
+      else {
+        checkFigmaJson(json);
+        finish(importFigmaJson(json));
+      }
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
+      setError(plainError(e, { json: "That file isn't a Figma JSON export: it isn't valid JSON." }));
     }
   };
 

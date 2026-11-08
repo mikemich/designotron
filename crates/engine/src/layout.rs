@@ -1,5 +1,7 @@
 //! Auto layout, hug/fill sizing, text auto-resize, group bounds and constraints.
 
+use std::collections::HashSet;
+
 use crate::geom::Rect;
 use crate::model::{Align, ConstraintH, ConstraintV, Document, LayoutDirection, Node, NodeId, NodeType, Sizing, TextAutoResize};
 use crate::text::{first_baseline, layout_for_box, layout_of_node, TextMeasurer};
@@ -8,12 +10,66 @@ use crate::text::{first_baseline, layout_for_box, layout_of_node, TextMeasurer};
 pub fn relayout_all(doc: &mut Document, m: &dyn TextMeasurer) {
   let roots: Vec<NodeId> = doc.pages.iter().flat_map(|p| p.children.clone()).collect();
   for r in roots {
-    layout_node(doc, &r, m);
+    layout_root(doc, &r, m);
   }
+}
+
+/// Lays out a top-level layer. Auto layout can resize a frame (hug growth, Fill), and a frame's
+/// children follow their constraints whenever it changes size, so the sizes of the frames that
+/// have constrained children are noted on the way down (a frame is visited before its parent
+/// arranges it, so the size is still the one before the pass) and compared once the whole pass
+/// has settled. Applying inside the pass would run on its intermediate sizes (hug measuring,
+/// then sharing).
+pub fn layout_root(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
+  layout_root_skipping(doc, id, m, &HashSet::new());
+}
+
+/// `layout_root` for a tree that has layers nobody has seen yet (`fresh`: just created by a
+/// tool). A new frame's size is whatever its first layout makes it, not a resize, so its
+/// children keep the positions they were given.
+pub fn layout_root_skipping(doc: &mut Document, id: &str, m: &dyn TextMeasurer, fresh: &HashSet<NodeId>) {
+  let mut before = Vec::new();
+  layout_walk(doc, id, m, Some(&mut before));
+  // Outermost first: a frame moved or resized by its parent's constraints is compared with
+  // its own noted size, so its children move once, by the whole change.
+  for (fid, ow, oh) in before {
+    if fresh.contains(&fid) {
+      continue;
+    }
+    let Some(f) = doc.get(&fid) else { continue };
+    if (f.width - ow).abs() <= 0.001 && (f.height - oh).abs() <= 0.001 {
+      continue;
+    }
+    let kids: Vec<(NodeId, f64, f64)> = f
+      .children
+      .iter()
+      .filter_map(|c| doc.get(c).map(|c| (c.id.clone(), c.width, c.height)))
+      .collect();
+    apply_constraints_with(doc, &fid, ow, oh, false);
+    // Children the constraints moved or resized settle their own content (hug, wrap, text, and
+    // a group's bounds), so another layout pass changes nothing.
+    for (cid, cw, ch) in kids {
+      let Some(c) = doc.get(&cid) else { continue };
+      let resized = (c.width - cw).abs() > 0.001 || (c.height - ch).abs() > 0.001;
+      if resized {
+        layout_node(doc, &cid, m);
+      }
+    }
+  }
+}
+
+fn is_pinned(c: &Node) -> bool {
+  c.constraints.horizontal != ConstraintH::Left || c.constraints.vertical != ConstraintV::Top
 }
 
 /// Lays out a node and its subtree bottom-up.
 pub fn layout_node(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
+  layout_walk(doc, id, m, None);
+}
+
+/// `layout_node`; with `note`, every frame that has a child following constraints is recorded
+/// as (id, width, height) before its subtree is laid out.
+fn layout_walk(doc: &mut Document, id: &str, m: &dyn TextMeasurer, mut note: Option<&mut Vec<(NodeId, f64, f64)>>) {
   let Some(node) = doc.get(id) else { return };
   let kind = node.kind;
   let children = node.children.clone();
@@ -21,13 +77,23 @@ pub fn layout_node(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
     NodeType::Text => size_text(doc, id, m),
     NodeType::Group => {
       for c in &children {
-        layout_node(doc, c, m);
+        layout_walk(doc, c, m, note.as_deref_mut());
       }
       normalize_group(doc, id);
     }
     k if k.is_frame_like() => {
+      if let Some(out) = note.as_deref_mut() {
+        let n = doc.get(id).unwrap();
+        let flow = n.layout.is_some();
+        if children
+          .iter()
+          .any(|c| doc.get(c).is_some_and(|c| (!flow || c.absolute_position) && is_pinned(c)))
+        {
+          out.push((id.to_string(), n.width, n.height));
+        }
+      }
       for c in &children {
-        layout_node(doc, c, m);
+        layout_walk(doc, c, m, note.as_deref_mut());
       }
       if doc.get(id).map(|n| n.layout.is_some()).unwrap_or(false) {
         arrange(doc, id, m);
@@ -182,7 +248,8 @@ fn arrange(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
     pad_main: pad_main_start + pad_main_end,
     pad_cross: pad_cross_start + pad_cross_end,
     gap_total,
-    gap: al.gap,
+    // Space between wraps with no column gap, like the exported CSS: the rows spread instead.
+    gap: if al.primary_align == Align::SpaceBetween { 0.0 } else { al.gap },
   };
   // A hugging frame with wrap and a max width wraps once its content passes the max.
   let wrap_at_max = al.wrap && horizontal && main_sizing == Sizing::Hug && main_bounds.1.is_finite();
@@ -571,7 +638,9 @@ fn hug_size(doc: &mut Document, id: &str, horizontal: bool, m: &dyn TextMeasurer
 fn arrange_wrapped(doc: &mut Document, id: &str, items: &[Item], width: f64, hug_cross: bool) {
   let al = doc.get(id).unwrap().layout.clone().unwrap();
   let inner = width - al.padding_left - al.padding_right;
-  let mut rows: Vec<&[Item]> = wrap_rows(items, inner, al.gap).into_iter().map(|r| &items[r]).collect();
+  let between = al.primary_align == Align::SpaceBetween;
+  let gap = if between { 0.0 } else { al.gap };
+  let mut rows: Vec<&[Item]> = wrap_rows(items, inner, gap).into_iter().map(|r| &items[r]).collect();
   if rows.is_empty() {
     rows.push(&[]);
   }
@@ -586,7 +655,14 @@ fn arrange_wrapped(doc: &mut Document, id: &str, items: &[Item], width: f64, hug
   }
   for row in &rows {
     let row_h = row.iter().map(|i| i.counter).fold(0.0, f64::max);
-    let used: f64 = row.iter().map(|i| i.main).sum::<f64>() + al.gap * (row.len().max(1) as f64 - 1.0);
+    let sum: f64 = row.iter().map(|i| i.main).sum();
+    let used: f64 = sum + gap * (row.len().max(1) as f64 - 1.0);
+    // A row of one item sits at the start; the others spread, never closer than touching.
+    let step = if between && row.len() > 1 {
+      ((inner - sum) / (row.len() as f64 - 1.0)).max(0.0)
+    } else {
+      gap
+    };
     let mut x = al.padding_left
       + match al.primary_align {
         Align::Center => (inner - used) / 2.0,
@@ -603,7 +679,7 @@ fn arrange_wrapped(doc: &mut Document, id: &str, items: &[Item], width: f64, hug
         c.x = x + it.dx;
         c.y = cy + it.dy;
       });
-      x += it.main + al.gap;
+      x += it.main + step;
     }
     y += row_h + al.counter_gap;
   }
@@ -642,6 +718,12 @@ fn set_size(doc: &mut Document, id: &str, horizontal: bool, main: Option<f64>, c
 /// children that opted out of the flow (absolute position) have constraints; the others are
 /// placed by the layout.
 pub fn apply_constraints(doc: &mut Document, frame_id: &str, old_w: f64, old_h: f64) {
+  apply_constraints_with(doc, frame_id, old_w, old_h, true);
+}
+
+/// `deep` also carries a resized child frame's own change down to its children; `layout_root`
+/// passes false because it compares every such frame with its own noted size.
+fn apply_constraints_with(doc: &mut Document, frame_id: &str, old_w: f64, old_h: f64, deep: bool) {
   let Some(f) = doc.get(frame_id) else { return };
   if !f.kind.is_frame_like() {
     return;
@@ -680,9 +762,15 @@ pub fn apply_constraints(doc: &mut Document, frame_id: &str, old_w: f64, old_h: 
         c.height = (c.height * sy).max(1.0);
       }
     }
+    if !deep {
+      // Float noise from a scale or a half step would make a file look edited on open. Only
+      // what a constraint computed is rounded: layout places everything else.
+      let r = |v: f64| (v * 1e6).round() / 1e6;
+      (c.x, c.y, c.width, c.height) = (r(c.x), r(c.y), r(c.width), r(c.height));
+    }
     let kind = c.kind;
-    if kind.is_frame_like() {
-      apply_constraints(doc, &cid, cw, ch);
+    if deep && kind.is_frame_like() {
+      apply_constraints_with(doc, &cid, cw, ch, true);
     }
   }
 }
@@ -1563,5 +1651,221 @@ mod tests {
       near(wide[0].2, 400.0) && near(wide[1].2, 400.0) && wide[1].1 > wide[0].1,
       "{wide:?}"
     );
+  }
+
+  #[test]
+  fn wrap_space_between_spreads_each_row_like_the_export() {
+    let kids = vec![(Sizing::Fixed, 80.0, None, None); 4];
+    // 300 wide, gap 10 (a column gap is not used): three fit, spread 0 / 110 / 220, the fourth starts row two.
+    let got = wrap_fill(300.0, 0.0, 10.0, Align::SpaceBetween, &kids);
+    let xs: Vec<f64> = got.iter().map(|g| g.0).collect();
+    assert_eq!(xs, [0.0, 110.0, 220.0, 0.0], "{got:?}");
+    assert!(near(got[0].1, got[2].1));
+    // The row gap is unchanged: counter_gap 10 below a 50 high row.
+    assert!(near(got[3].1, 60.0), "{got:?}");
+    // A single long item sits at the start.
+    let one = wrap_fill(300.0, 0.0, 10.0, Align::SpaceBetween, &[(Sizing::Fixed, 400.0, None, None)]);
+    assert_eq!(one[0].0, 0.0);
+    // Padding moves the whole row.
+    let padded = wrap_fill(320.0, 10.0, 10.0, Align::SpaceBetween, &kids);
+    assert!(near(padded[0].0, 10.0) && near(padded[2].0, 230.0), "{padded:?}");
+  }
+
+  #[test]
+  fn wrap_space_between_with_fill_children_leaves_no_space_to_spread() {
+    let got = wrap_fill(300.0, 0.0, 10.0, Align::SpaceBetween, &fills(2, None, None));
+    assert!(near(got[0].2, 150.0) && near(got[1].0, 150.0), "{got:?}");
+  }
+
+  fn pin(h: ConstraintH, v: ConstraintV) -> crate::model::Constraints {
+    crate::model::Constraints {
+      horizontal: h,
+      vertical: v,
+    }
+  }
+
+  /// A horizontal hug card: a flow child of width 50 and an absolute 20 x 20 badge at (40, 4)
+  /// with the given constraints.
+  fn badge_card(h: ConstraintH, v: ConstraintV) -> Document {
+    let (mut doc, page) = setup();
+    let card = Node {
+      id: "card".into(),
+      kind: NodeType::Frame,
+      width: 70.0,
+      height: 40.0,
+      sizing_h: Sizing::Hug,
+      sizing_v: Sizing::Hug,
+      layout: Some(AutoLayout {
+        direction: LayoutDirection::Horizontal,
+        ..Default::default()
+      }),
+      ..Default::default()
+    };
+    doc.insert(card, None, &page, None);
+    let label = Node {
+      id: "label".into(),
+      width: 50.0,
+      height: 20.0,
+      ..Default::default()
+    };
+    doc.insert(label, Some("card"), &page, None);
+    let badge = Node {
+      id: "badge".into(),
+      x: 40.0,
+      y: 4.0,
+      width: 20.0,
+      height: 20.0,
+      absolute_position: true,
+      constraints: pin(h, v),
+      ..Default::default()
+    };
+    doc.insert(badge, Some("card"), &page, None);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    doc
+  }
+
+  #[test]
+  fn a_hug_frame_that_grows_moves_its_absolute_children_by_their_constraints() {
+    let grow = |h, v| {
+      let mut doc = badge_card(h, v);
+      let c = doc.get("card").unwrap();
+      assert_eq!((c.width, c.height), (70.0, 40.0));
+      doc.get_mut("label").unwrap().width = 208.0;
+      doc.get_mut("label").unwrap().height = 60.0;
+      relayout_all(&mut doc, &HeuristicMeasurer);
+      let c = doc.get("card").unwrap();
+      assert_eq!((c.width, c.height), (228.0, 80.0));
+      let b = doc.get("badge").unwrap();
+      let snap = (b.x, b.y, b.width, b.height);
+      // A second pass changes nothing.
+      relayout_all(&mut doc, &HeuristicMeasurer);
+      let b = doc.get("badge").unwrap();
+      assert_eq!(snap, (b.x, b.y, b.width, b.height));
+      snap
+    };
+    assert_eq!(grow(ConstraintH::Left, ConstraintV::Top), (40.0, 4.0, 20.0, 20.0));
+    assert_eq!(grow(ConstraintH::Right, ConstraintV::Bottom), (198.0, 44.0, 20.0, 20.0));
+    assert_eq!(grow(ConstraintH::Center, ConstraintV::Center), (119.0, 24.0, 20.0, 20.0));
+    assert_eq!(grow(ConstraintH::LeftRight, ConstraintV::TopBottom), (40.0, 4.0, 178.0, 60.0));
+    // Scale applies once per real change: x and width grow by 228 / 70.
+    let s = grow(ConstraintH::Scale, ConstraintV::Scale);
+    assert!(near(s.0, 40.0 * 228.0 / 70.0) && near(s.2, 20.0 * 228.0 / 70.0), "{s:?}");
+  }
+
+  #[test]
+  fn a_user_resize_moves_the_badge_exactly_once() {
+    let mut doc = badge_card(ConstraintH::Right, ConstraintV::Top);
+    {
+      let c = doc.get_mut("card").unwrap();
+      c.sizing_h = Sizing::Fixed;
+      c.width = 400.0;
+    }
+    // What the Update arm does: constraints first (the width is already set), then layout.
+    apply_constraints(&mut doc, "card", 70.0, 40.0);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert_eq!(doc.get("badge").unwrap().x, 370.0);
+    assert_eq!(doc.get("card").unwrap().width, 400.0);
+  }
+
+  #[test]
+  fn a_frame_resized_by_fill_moves_its_children_by_their_constraints() {
+    let (mut doc, page) = setup();
+    let stack = Node {
+      id: "stack".into(),
+      kind: NodeType::Frame,
+      width: 300.0,
+      height: 200.0,
+      layout: Some(AutoLayout {
+        direction: LayoutDirection::Vertical,
+        ..Default::default()
+      }),
+      ..Default::default()
+    };
+    doc.insert(stack, None, &page, None);
+    let panel = Node {
+      id: "panel".into(),
+      kind: NodeType::Frame,
+      width: 280.0,
+      height: 50.0,
+      sizing_h: Sizing::Fill,
+      ..Default::default()
+    };
+    doc.insert(panel, Some("stack"), &page, None);
+    let dot = Node {
+      id: "dot".into(),
+      x: 250.0,
+      width: 20.0,
+      height: 20.0,
+      constraints: pin(ConstraintH::Right, ConstraintV::Top),
+      ..Default::default()
+    };
+    doc.insert(dot, Some("panel"), &page, None);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    let (pw, x0) = (doc.get("panel").unwrap().width, doc.get("dot").unwrap().x);
+    assert_eq!(pw, 280.0);
+    // The stack grows 300 -> 400 (a user resize: constraints on its own children first).
+    doc.get_mut("stack").unwrap().width = 400.0;
+    apply_constraints(&mut doc, "stack", 300.0, 200.0);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert_eq!(doc.get("panel").unwrap().width, 380.0);
+    assert_eq!(doc.get("dot").unwrap().x, x0 + 100.0);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert_eq!(doc.get("dot").unwrap().x, x0 + 100.0);
+  }
+
+  #[test]
+  fn nested_frames_follow_constraints_once_when_the_hug_parent_grows() {
+    let (mut doc, page) = setup();
+    let hug = Node {
+      id: "hug".into(),
+      kind: NodeType::Frame,
+      width: 100.0,
+      height: 100.0,
+      sizing_h: Sizing::Hug,
+      sizing_v: Sizing::Hug,
+      layout: Some(AutoLayout {
+        direction: LayoutDirection::Horizontal,
+        padding_left: 0.0,
+        padding_right: 0.0,
+        padding_top: 0.0,
+        padding_bottom: 0.0,
+        ..Default::default()
+      }),
+      ..Default::default()
+    };
+    doc.insert(hug, None, &page, None);
+    let sizer = Node {
+      id: "sizer".into(),
+      width: 100.0,
+      height: 100.0,
+      ..Default::default()
+    };
+    doc.insert(sizer, Some("hug"), &page, None);
+    // An absolute plain frame pinned Left & right, holding a Right-pinned child.
+    let inner = Node {
+      id: "inner".into(),
+      kind: NodeType::Frame,
+      width: 100.0,
+      height: 30.0,
+      absolute_position: true,
+      constraints: pin(ConstraintH::LeftRight, ConstraintV::Top),
+      ..Default::default()
+    };
+    doc.insert(inner, Some("hug"), &page, None);
+    let dot = Node {
+      id: "dot".into(),
+      x: 80.0,
+      width: 20.0,
+      height: 20.0,
+      constraints: pin(ConstraintH::Right, ConstraintV::Top),
+      ..Default::default()
+    };
+    doc.insert(dot, Some("inner"), &page, None);
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    doc.get_mut("sizer").unwrap().width = 250.0;
+    relayout_all(&mut doc, &HeuristicMeasurer);
+    assert_eq!(doc.get("hug").unwrap().width, 250.0);
+    assert_eq!(doc.get("inner").unwrap().width, 250.0);
+    assert_eq!(doc.get("dot").unwrap().x, 230.0);
   }
 }

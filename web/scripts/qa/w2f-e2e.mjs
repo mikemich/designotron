@@ -114,7 +114,8 @@ try {
   check("a failed rename shows an error", renameToast, await toastText(p));
   await sleep(5200);
   await menu("Duplicate");
-  check("a failed duplicate shows an error", /Couldn't duplicate the file/.test(await toastText(p)), await toastText(p));
+  const dupToast = await waitFor(p, () => [...document.querySelectorAll(".toast.error")].some((t) => /Couldn't duplicate the file/.test(t.textContent ?? "")));
+  check("a failed duplicate shows an error", dupToast, await toastText(p));
   await sleep(5200);
   await menu("Delete");
   await p.click('[role=alertdialog] button:has-text("Delete")');
@@ -133,7 +134,8 @@ try {
   await sleep(5200);
   await p.hover(".version");
   await p.click(".version [title='Restore this version']");
-  check("a failed restore shows an error", /Couldn't restore the version/.test(await toastText(p)), await toastText(p));
+  const restoreToast = await waitFor(p, () => [...document.querySelectorAll(".toast.error")].some((t) => /Couldn't restore the version/.test(t.textContent ?? "")));
+  check("a failed restore shows an error", restoreToast, await toastText(p));
   check("...and changes nothing", (await p.locator(".version").count()) === 1 && Object.values(await p.evaluate(() => window.__dt.doc().nodes)).some((n) => n.name === "Box"));
   await setFlag(p, "failWrite", false);
   await sleep(5200);
@@ -188,7 +190,7 @@ try {
   await owner.click(".tbtn[title='Share for live editing']");
   await owner.waitForSelector(".share-dialog");
   await sleep(500);
-  if (!(await owner.locator(".share-dialog input.mono").count())) await owner.click("text=Use a different relay");
+  if (!(await owner.locator(".share-dialog input.mono").count())) await owner.click(".share-dialog >> text=Use a different relay");
   await owner.fill(".share-dialog input.mono", BASE);
   await owner.click("button:has-text('Share online')");
   await owner.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 10000 });

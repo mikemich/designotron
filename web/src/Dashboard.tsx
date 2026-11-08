@@ -29,7 +29,7 @@ import { bootEngine, getEngine, newEngine, dispatch, toast, useBoot, useStore } 
 import { TEMPLATES, type Template } from "./templates";
 import { isEmptyFile, persistentStorage } from "./files";
 import { Menu, ToastLive, useDialog, type MenuItem } from "./ui/controls";
-import { attempt, reportFailure } from "./errors";
+import { attempt, plainError, reportFailure } from "./errors";
 import { ProjectTree, NameInput, dragState } from "./dashboard/ProjectTree";
 import { ConfirmDialog } from "./dashboard/ConfirmDialog";
 import { MoveDialog, type MoveTarget } from "./dashboard/MoveDialog";
@@ -309,7 +309,8 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
     try {
       onOpen(await importDtron(await f.text(), f.name.replace(/\.(dtron|json)$/, ""), currentFolder));
     } catch (err) {
-      toast(err instanceof Error ? err.message : String(err), "error");
+      console.error(err);
+      toast(plainError(err), "error");
     }
   };
   // --- Dropping .dtron files from the computer ---
@@ -352,11 +353,11 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
         let figma = false;
         try {
           const j = JSON.parse(await f.text());
-          figma = !!(j && (j.document || (j.nodes && !j.pages)));
+          figma = !!(j && j.format !== "designotron" && (j.document || (j.nodes && !j.pages)));
         } catch {
           /* not JSON: the error above stands */
         }
-        toast(figma ? `${f.name} looks like a Figma export. Open a file and use File > Import from Figma instead.` : `${f.name}: ${err instanceof Error ? err.message : String(err)}`, "error");
+        toast(figma ? `${f.name} looks like a Figma export. Open a file and use File > Import from Figma instead.` : `${f.name}: ${plainError(err)}`, "error");
       }
     }
     if (ids.length === 1 && ours.length === 1) onOpen(ids[0]);
@@ -511,6 +512,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   const folderMenu = (id: string, x: number, y: number, where: "tree" | "card") =>
     openMenu(x, y, "Folder actions", [
       { label: "Open", onClick: () => go(id) },
+      { label: "Open in new tab", onClick: () => openInTab(hashFor(id)) },
       { label: "New folder", onClick: () => addFolder(id, where) },
       { label: "Rename", onClick: () => setRenaming({ kind: "folder", id, in: where }) },
       { label: "Move to…", onClick: () => askMove({ kind: "folder", id }) },
@@ -520,6 +522,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   const fileMenu = (f: FileMeta, x: number, y: number) =>
     openMenu(x, y, "File actions", [
       { label: "Open", onClick: () => onOpen(f.id) },
+      { label: "Open in new tab", onClick: () => openInTab(`#/file/${f.id}`) },
       { label: "Rename", onClick: () => setRenaming({ kind: "file", id: f.id, in: "card" }) },
       {
         label: "Duplicate",
@@ -532,6 +535,25 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       { sep: true },
       { label: "Delete", onClick: () => askDelete({ kind: "file", id: f.id }) },
     ]);
+  const openInTab = (hash: string) => window.open(location.pathname + hash, "_blank", "noopener");
+  /** Right-click, or Shift+F10 / the Menu key, on a card opens its actions menu (at the pointer, or
+   * at the card for the keyboard). A rename field keeps the browser's own menu. */
+  const cardMenu = (open: (x: number, y: number) => void, focusSel: string) => ({
+    onContextMenu: (e: React.MouseEvent<HTMLElement>) => {
+      if ((e.target as HTMLElement).closest("input,textarea")) return;
+      e.preventDefault();
+      // So Escape hands focus back to the card (Safari doesn't focus a button on click).
+      e.currentTarget.querySelector<HTMLElement>(focusSel)?.focus({ preventScroll: true });
+      open(e.clientX, e.clientY);
+    },
+    onKeyDown: (e: React.KeyboardEvent<HTMLElement>) => {
+      if ((e.target as HTMLElement).closest("input,textarea")) return;
+      if (e.key !== "ContextMenu" && !(e.shiftKey && e.key === "F10")) return;
+      e.preventDefault();
+      const r = e.currentTarget.getBoundingClientRect();
+      open(r.left + 16, r.top + 16);
+    },
+  });
   const newMenu = (x: number, y: number) =>
     openMenu(x, y, "New", [
       { label: "New design file", onClick: () => create(null) },
@@ -628,7 +650,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
     const summary = `${c.files} file${c.files === 1 ? "" : "s"} · ${c.folders} folder${c.folders === 1 ? "" : "s"}`;
     const renamingHere = renaming?.kind === "folder" && renaming.id === f.id && renaming.in === "card";
     return (
-      <div key={f.id} className={"folder-card" + (dropOver === f.id && canDrop(f.id) ? " drop-ok" : "")} {...dragProps("folder", f.id)} {...dropProps(f.id)}>
+      <div key={f.id} className={"folder-card" + (dropOver === f.id && canDrop(f.id) ? " drop-ok" : "")} {...dragProps("folder", f.id)} {...dropProps(f.id)} {...cardMenu((x, y) => folderMenu(f.id, x, y, "card"), ".folder-open")}>
         {renamingHere ? (
           <div className="folder-open">
             <FolderIcon size={22} aria-hidden="true" />
@@ -663,7 +685,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
   };
 
   const fileCard = (f: FileMeta, showPlace: boolean) => (
-    <div key={f.id} className="file-card" {...dragProps("file", f.id)}>
+    <div key={f.id} className="file-card" {...dragProps("file", f.id)} {...cardMenu((x, y) => fileMenu(f, x, y), ".file-open")}>
       <button className="file-open" onClick={() => onOpen(f.id)}>
         <div className="thumb">{f.thumbnail ? <img src={f.thumbnail} alt="" draggable={false} /> : <span className="muted">No preview yet</span>}</div>
         <div className="meta">

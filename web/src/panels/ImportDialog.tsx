@@ -2,6 +2,7 @@ import { useState } from "react";
 import { create } from "zustand";
 import { Loader2, X } from "lucide-react";
 import { canvasSize, dispatch, getDoc, toast, zoomToRect } from "../store";
+import { plainError } from "../errors";
 import { viewportCenter } from "../actions";
 import { useDialog } from "../ui/controls";
 
@@ -37,7 +38,7 @@ export function ImportDialog() {
       toast("Imported as layers");
       close();
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e).replace(/^./, (c) => c.toUpperCase()));
+      setError(plainError(e));
     } finally {
       setBusy(false);
     }

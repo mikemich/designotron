@@ -68,7 +68,7 @@ try {
 
   // Share online; Ann joins.
   await Promise.all([owner.waitForResponse((r) => r.url().endsWith("/health"), { timeout: 3000 }).catch(() => {}), owner.click(".tbtn[title='Share for live editing']")]); // the dialog asks /health whether this page is a relay
-  if (!(await owner.locator(".share-dialog input.mono").count())) await owner.click("text=Use a different relay");
+  if (!(await owner.locator(".share-dialog input.mono").count())) await owner.click(".share-dialog >> text=Use a different relay");
   await owner.fill(".share-dialog input.mono", RELAY);
   await owner.click("button:has-text('Share online')");
   await owner.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 10000 });
@@ -146,7 +146,7 @@ try {
     await p.click("button:has-text('New design file')");
     await p.waitForSelector("#dt-canvas");
     await Promise.all([p.waitForResponse((r) => r.url().endsWith("/health"), { timeout: 3000 }).catch(() => {}), p.click(".tbtn[title='Share for live editing']")]);
-    if (!(await p.locator(".share-dialog input.mono").count())) await p.click("text=Use a different relay");
+    if (!(await p.locator(".share-dialog input.mono").count())) await p.click(".share-dialog >> text=Use a different relay");
     await p.fill(".share-dialog input.mono", RELAY);
     await p.click("button:has-text('Share online')");
     await p.waitForFunction(() => window.__dt.collab().status === "live", null, { timeout: 10000 });

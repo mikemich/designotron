@@ -448,7 +448,7 @@ function PositionSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           Absolute position (ignore auto layout)
         </label>
       )}
-      {parent && !inFlow && !parent.layout && ["frame", "component", "instance"].includes(parent.type) && (
+      {parent && (!parent.layout || nodes.every((n) => n.absolutePosition)) && ["frame", "component", "instance"].includes(parent.type) && (
         <div className="grid2">
           <SelectField
             label="↔"
@@ -569,6 +569,10 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
   const set = (patch: Record<string, unknown>) => update(ids, { layout: patch });
   const horizontal = al.direction === "horizontal";
   const cells = ["start", "center", "end"] as const;
+  const hugNoMax = nodes.some((n) => n.layout!.direction === "horizontal" && n.sizingH === "hug" && n.maxWidth == null);
+  // The two sides of a padding pair show Mixed when they differ on any selected layer.
+  const sides = (a: "paddingLeft" | "paddingTop", b: "paddingRight" | "paddingBottom") =>
+    nodes.some((n) => n.layout![a] !== n.layout![b]) ? MIXED : common(nodes, (n) => n.layout![a]);
   return (
     <Section
       title="Auto layout"
@@ -589,10 +593,22 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
           ]}
         />
         <IconButton
-          title={horizontal ? "Wrap" : "Wrap needs a horizontal layout: switch the direction first"}
+          title={
+            !horizontal
+              ? "Wrap needs a horizontal layout: switch the direction first"
+              : hugNoMax
+                ? "Wrap (a Hug width becomes Fixed at its current size, so rows can break)"
+                : "Wrap"
+          }
           on={al.wrap && horizontal}
           disabled={!horizontal}
-          onClick={() => set({ wrap: !al.wrap, ...(!al.wrap && al.counterAlign === "baseline" ? { counterAlign: "start" } : {}) })}
+          onClick={() =>
+            // A Hug width never wraps (it grows instead), so turning Wrap on fixes the width where it is.
+            updateEach(nodes, (n) => ({
+              layout: { wrap: !al.wrap, ...(!al.wrap && n.layout!.counterAlign === "baseline" ? { counterAlign: "start" } : {}) },
+              ...(!al.wrap && n.layout!.direction === "horizontal" && n.sizingH === "hug" && n.maxWidth == null ? { sizingH: "fixed" } : {}),
+            }))
+          }
         >
           <WrapText size={13} />
         </IconButton>
@@ -642,8 +658,8 @@ function AutoLayoutSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         </div>
       </div>
       <div className="grid2">
-        <NumberField label="↔" title="Horizontal padding" min={0} value={common(nodes, (n) => n.layout!.paddingLeft)} onChange={(p) => set({ paddingLeft: p, paddingRight: p })} onScrubStart={begin} onScrubEnd={end} />
-        <NumberField label="↕" title="Vertical padding" min={0} value={common(nodes, (n) => n.layout!.paddingTop)} onChange={(p) => set({ paddingTop: p, paddingBottom: p })} onScrubStart={begin} onScrubEnd={end} />
+        <NumberField label="↔" title="Horizontal padding" min={0} value={sides("paddingLeft", "paddingRight")} onChange={(p) => set({ paddingLeft: p, paddingRight: p })} onScrubStart={begin} onScrubEnd={end} />
+        <NumberField label="↕" title="Vertical padding" min={0} value={sides("paddingTop", "paddingBottom")} onChange={(p) => set({ paddingTop: p, paddingBottom: p })} onScrubStart={begin} onScrubEnd={end} />
       </div>
       <div className="grid2" style={{ gridTemplateColumns: "1fr 1fr 1fr 1fr" }}>
         <NumberField label="T" min={0} value={al.paddingTop} onChange={(paddingTop) => set({ paddingTop })} />
@@ -1632,10 +1648,20 @@ function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
         return { ...rest, ...(width ? { width } : {}), ...(height ? { height } : {}) };
       }),
     );
+  // A size that isn't one says so under its row for a few seconds, and the old value comes back.
+  const [sizeError, setSizeError] = useState<number | null>(null);
+  const errorTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(errorTimer.current), []);
   /** Applies what was typed in a row's size field; anything that isn't a size puts the old value back. */
   const setSize = (i: number, text: string): boolean => {
     const size = parseExportSize(text);
-    if (!size) return false;
+    if (!size) {
+      setSizeError(i);
+      window.clearTimeout(errorTimer.current);
+      errorTimer.current = window.setTimeout(() => setSizeError(null), 4000);
+      return false;
+    }
+    setSizeError(null);
     if ("width" in size) setRow(i, { width: size.width, height: undefined });
     else if ("height" in size) setRow(i, { height: size.height, width: undefined });
     else setRow(i, { scale: size.scale, width: undefined, height: undefined });
@@ -1719,6 +1745,9 @@ function ExportSection({ nodes, ids }: { nodes: Node[]; ids: string[] }) {
                 ]}
                 onChange={(format) => setRow(i, { format })}
               />
+            </div>
+            <div role="status" className="export-error">
+              {sizeError === i && "Use a scale like 2x, a width like 512w or a height like 300h"}
             </div>
             {fixed && (
               <div className="grid2">

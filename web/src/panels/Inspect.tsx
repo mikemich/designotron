@@ -8,6 +8,7 @@ import { assetUrl } from "../assets";
 import { downloadImageAsset, downloadLayerAsset } from "../exporter";
 import { Seg } from "../ui/controls";
 import { framePosition } from "./groupOffset";
+import { constraintsText, strokeRows } from "./inspectStroke";
 import { formatColor, parseColor, toHex, type ColorFormat } from "../ui/color";
 import type { Doc, Effect, ImageCredit, Node, Paint, TextRun } from "../types";
 
@@ -59,6 +60,10 @@ export function Inspect({ node }: { node: Node }) {
   const applied = node.device?.applied ?? [0, 0, 0, 0];
   // Same X/Y as the design panel: measured from the frame, not from a group.
   const framePos = framePosition(doc.nodes, node);
+  const constraints = constraintsText(node, node.parent ? doc.nodes[node.parent] : null);
+  const strokeInfo = strokeRows(node);
+  // The format toggle sits on whichever colour group comes first.
+  const formatSeg = <Seg ariaLabel="Colour format" value={format} options={FORMATS} onChange={pick} />;
   return (
     <div className="section insp" data-testid="inspect">
       <div className="section-head">
@@ -80,6 +85,11 @@ export function Inspect({ node }: { node: Node }) {
             W {node.sizingH}, H {node.sizingV}
           </span>
         </Row>
+        {constraints && (
+          <Row k="Constraints">
+            <span className="muted">{constraints}</span>
+          </Row>
+        )}
         {L && (
           <>
             <Row k="Auto layout">
@@ -136,22 +146,28 @@ export function Inspect({ node }: { node: Node }) {
         <Row k="Blend">{val(node.blendMode)}</Row>
       </Group>
       {(info.fills.length > 0 || info.strokes.length > 0) && (
-        <Group
-          title="Colours"
-          actions={<Seg ariaLabel="Colour format" value={format} options={FORMATS} onChange={pick} />}
-        >
-          {info.fills.map((c, i) => (
-            <ColorRow key={`f${i}`} kind="Fill" c={c} format={format} val={val} />
-          ))}
-          {info.strokes.map((c, i) => (
-            <ColorRow key={`s${i}`} kind="Stroke" c={c} format={format} val={val} />
-          ))}
-          {info.strokes.length > 0 && (
-            <Row k="Stroke">
-              {val(`${r(node.strokeWeight)}px`)} <span className="muted">{node.strokeAlign}</span>
-            </Row>
+        <>
+          {info.fills.length > 0 && (
+            <Group title="Fill" actions={formatSeg}>
+              {info.fills.map((c, i) => (
+                <ColorRow key={`f${i}`} kind="Fill" c={c} format={format} val={val} />
+              ))}
+            </Group>
           )}
-        </Group>
+          {info.strokes.length > 0 && (
+            <Group title="Stroke" actions={info.fills.length === 0 ? formatSeg : undefined}>
+              {info.strokes.map((c, i) => (
+                <ColorRow key={`s${i}`} kind="Colour" c={c} format={format} val={val} />
+              ))}
+              {strokeInfo.map((row) => (
+                <Row key={row.k} k={row.k}>
+                  {row.k === "Weight" || row.k === "Dash" ? val(row.v, `Stroke ${row.k.toLowerCase()}`) : <span className="muted">{row.v}</span>}
+                  {row.note && <span className="muted small"> {row.note}</span>}
+                </Row>
+              ))}
+            </Group>
+          )}
+        </>
       )}
       {node.text && (
         <Group title="Typography">

@@ -380,6 +380,15 @@ textarea {
   gap: 6px;
   margin-bottom: 6px;
 }
+/* Rendered even when empty so the live region is in place before its text arrives. */
+.export-error:empty {
+  margin: 0;
+}
+.export-error {
+  margin: -2px 0 6px;
+  font-size: 11px;
+  color: #ff8a73; /* same contrast fix as .var-import-report.error: --danger is 3.2:1 on the panel */
+}
 .muted {
   color: var(--text-2);
 }
@@ -2184,6 +2193,60 @@ body:has(.modal-bg) .hint-card {
   }
 }
 
+/* Version preview (read-only look before restoring) */
+.version-preview {
+  width: min(960px, calc(100vw - 32px));
+  height: min(680px, calc(100vh - 64px));
+}
+.vp-head {
+  gap: 8px;
+}
+.vp-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.vp-title b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vp-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--canvas);
+  cursor: grab;
+  touch-action: none;
+}
+.vp-stage:active {
+  cursor: grabbing;
+}
+.vp-svg {
+  display: block;
+  user-select: none;
+}
+.vp-note {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--text-2);
+}
+.vp-actions .vp-hint {
+  margin-right: auto;
+}
+@media (max-width: 640px) {
+  .vp-actions {
+    flex-wrap: wrap;
+  }
+  .vp-actions .vp-hint {
+    display: none;
+  }
+}
+
 /* Modal + variables editor */
 .modal-bg {
   position: fixed;
@@ -3638,6 +3701,39 @@ body:has(.phone-note) .toast {
   white-space: nowrap;
   color: var(--text);
 }
+/* R20-D view only: a disabled fieldset wraps the Design and Prototype panels, laid out like its content. */
+.panel-lock-scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.panel-lock:disabled .panel-lock-scroll {
+  overflow: auto;
+}
+.panel-lock:disabled .panel-lock-scroll > .scroll {
+  overflow: visible;
+  flex: none;
+}
+fieldset.panel-lock {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.view-only-note {
+  flex-shrink: 0;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text-2);
+  background: var(--panel-2, var(--panel-3));
+  border-bottom: 1px solid var(--border);
+}
 /* W3-F inspect */
 .insp-live {
   font-weight: 500;
@@ -4040,17 +4136,7 @@ button.layer.asset-row:focus-visible {
 .view-only [title="Boolean operations"] {
   display: none;
 }
-.view-only [aria-labelledby="right-tab-design"] input,
-.view-only [aria-labelledby="right-tab-design"] select,
-.view-only [aria-labelledby="right-tab-design"] textarea,
-.view-only [aria-labelledby="right-tab-design"] .btn,
-.view-only [aria-labelledby="right-tab-prototype"] input,
-.view-only [aria-labelledby="right-tab-prototype"] select,
-.view-only [aria-labelledby="right-tab-prototype"] textarea,
-.view-only [aria-labelledby="right-tab-prototype"] .btn {
-  pointer-events: none;
-  opacity: 0.7;
-}
+/* (The design and prototype fields are disabled by their fieldset, `.panel-lock`.) */
 
 /* ---------- Projects and folders (files dashboard) ---------- */
 .dash {

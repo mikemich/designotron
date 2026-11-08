@@ -379,7 +379,7 @@ try {
     check("Wrap button is disabled until the layout is horizontal", await p.locator("button[title^='Wrap needs a horizontal layout']").isDisabled());
     await p.click("button[title='Horizontal']");
     await sleep(150);
-    await p.click("button[title='Wrap']");
+    await p.click("button[title^='Wrap']:not([title^='Wrap needs'])");
     await sleep(150);
     s = await named(p, "Stack");
     check("Wrap on a horizontal layout", s.layout.wrap === true && s.layout.direction === "horizontal");

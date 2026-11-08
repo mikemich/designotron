@@ -800,6 +800,39 @@ impl Run {
         let ids = self.pick_up_to(6, |n| n.parent.is_none());
         self.both(Command::Nudge { ids, dx: 10.0, dy: 5.0 });
       }
+      98 => {
+        // Constraints: absolute layers pinned inside auto layout frames (those frames grow and
+        // shrink with text edits and resizes), and wrap frames spread by Space between.
+        let parent = self.pick(|n| n.kind == NodeType::Frame && n.layout.is_some() && n.instance.is_none() && n.master_id.is_none());
+        if let Some(p) = parent {
+          let h = ["left", "right", "left-right", "center", "scale"][self.r.below(5)];
+          let v = ["top", "bottom", "top-bottom", "center", "scale"][self.r.below(5)];
+          let (x, y) = (self.r.below(200) as f64, self.r.below(60) as f64);
+          self.both(Command::Ai {
+            tool: "create_nodes".into(),
+            input: json!({"parentId": p, "nodes": [{"type":"frame","name":"Pinned","absolute":true,"x":x,"y":y,"width":40,"height":24,
+              "constraints":{"horizontal":h,"vertical":v},
+              "layout":{"direction":"horizontal"},
+              "children":[{"type":"text","text":"pin"}]},
+              {"type":"group","name":"PinnedGroup","absolute":true,"x":x/2.0,"y":y/2.0,"constraints":{"horizontal":h,"vertical":v},
+              "children":[{"type":"rectangle","width":10,"height":4},{"type":"rectangle","x":20,"width":10,"height":4}]}]}),
+          });
+        }
+        if self.r.chance(50) {
+          let ids = self.pick_up_to(2, |n| n.layout.as_ref().is_some_and(|l| l.direction == LayoutDirection::Horizontal));
+          self.both(Command::Update {
+            ids,
+            patch: json!({ "layout": { "wrap": true, "primaryAlign": "spaceBetween" } }),
+          });
+        }
+        let ids = self.pick_up_to(2, |n| n.kind == NodeType::Frame && n.layout.is_some() && n.master_id.is_none());
+        let patch = match self.r.below(3) {
+          0 => json!({ "sizingH": "hug", "sizingV": "hug" }),
+          1 => json!({ "width": 120.0 + self.r.below(300) as f64 }),
+          _ => json!({ "height": 80.0 + self.r.below(200) as f64 }),
+        };
+        self.both(Command::Update { ids, patch });
+      }
       100.. => self.extra(k - 100),
       _ => {
         // A colour style made, applied to a few layers and sometimes deleted.

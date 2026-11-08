@@ -61,8 +61,8 @@ export function MoveDialog(props: {
           />
         </div>
         <div className="confirm-actions">
-          <span className="muted small move-path" role="status">
-            {chosen === start ? "Pick a new location" : `Move to ${path}`}
+          <span className="muted small move-path" role="status" aria-live="polite">
+            {chosen === start ? "Pick a different place to move it to" : `Move to ${path}`}
           </span>
           <button className="btn" onClick={props.onCancel}>
             Cancel
