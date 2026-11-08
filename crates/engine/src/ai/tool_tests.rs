@@ -491,6 +491,98 @@ mod prototype {
   }
 
   #[test]
+  fn drag_trigger_and_custom_bezier() {
+    use crate::model::Trigger;
+    let (mut e, ids) = screens();
+    let (other, btn) = (&ids[1], &ids[2]);
+    let r = run(
+      &mut e,
+      "set_prototype",
+      json!({ "nodeId": btn, "trigger": "drag", "destinationId": other, "transition": "smart_animate", "bezier": [0.2, 0.0, 0.4, 1.5] }),
+    );
+    assert_eq!(r["interaction"]["trigger"], "onDrag");
+    let i = &e.doc.get(btn).unwrap().interactions[0];
+    assert_eq!(i.trigger, Trigger::OnDrag);
+    assert_eq!(i.bezier, Some([0.2, 0.0, 0.4, 1.5]), "bezier alone implies the custom curve");
+    // "on_drag" is the same trigger and replaces it; easing custom with a bezier works, a preset
+    // easing next to a bezier keeps both.
+    run(
+      &mut e,
+      "set_prototype",
+      json!({ "nodeId": btn, "trigger": "on_drag", "destinationId": other, "easing": "custom", "bezier": [0.1, 0.1, 0.9, 0.9] }),
+    );
+    let list = &e.doc.get(btn).unwrap().interactions;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].bezier, Some([0.1, 0.1, 0.9, 0.9]));
+    run(
+      &mut e,
+      "set_prototype",
+      json!({ "nodeId": btn, "trigger": "click", "destinationId": other, "easing": "linear", "bezier": [0, 0, 1, 1] }),
+    );
+    let click = e.doc.get(btn).unwrap().interactions.iter().find(|i| i.trigger == Trigger::OnClick).unwrap().clone();
+    assert_eq!((click.easing, click.bezier), (crate::model::Easing::Linear, Some([0.0, 0.0, 1.0, 1.0])));
+    // A new interaction without a bezier has none.
+    run(&mut e, "set_prototype", json!({ "nodeId": btn, "trigger": "click", "destinationId": other, "easing": "ease_in" }));
+    let click = e.doc.get(btn).unwrap().interactions.iter().find(|i| i.trigger == Trigger::OnClick).unwrap().clone();
+    assert_eq!(click.bezier, None);
+    // The saved JSON names the new values; unset curves are not written.
+    let json = serde_json::to_string(&e.doc.get(btn).unwrap().interactions).unwrap();
+    assert!(json.contains("\"onDrag\"") && json.contains("\"bezier\":[0.1,0.1,0.9,0.9]"), "{json}");
+    assert_eq!(json.matches("bezier").count(), 1, "{json}");
+    // Errors: not four numbers, x outside 0-1, custom without a curve.
+    for bad in [
+      json!({ "bezier": [0.1, 0.2, 0.3] }),
+      json!({ "bezier": [0.1, "a", 0.3, 0.4] }),
+      json!({ "bezier": "ease" }),
+      json!({ "bezier": [1.5, 0, 0.5, 1] }),
+      json!({ "bezier": [0.5, 0, -0.1, 1] }),
+      json!({ "easing": "custom" }),
+    ] {
+      let mut input = json!({ "nodeId": btn, "destinationId": other });
+      input.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+      let err = e.dispatch(ai("set_prototype", input.clone())).unwrap_err();
+      assert!(err.contains("bezier"), "{input}: {err}");
+    }
+  }
+
+  #[test]
+  fn sticky_is_stored_and_warns_only_without_a_vertically_scrolling_ancestor() {
+    use crate::model::ScrollBehavior;
+    let mut e = engine();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Home", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "frame", "name": "Section", "width": 100, "height": 300,
+          "children": [{ "type": "rectangle", "name": "Header", "width": 100, "height": 20, "scrollBehavior": "sticky" }] }] }] }),
+    );
+    assert!(r.get("warnings").is_none(), "no 'not supported' warning, and none inside a scroller: {r}");
+    let header = e.doc.nodes.values().find(|n| n.name == "Header").unwrap().id.clone();
+    assert_eq!(e.doc.get(&header).unwrap().scroll_behavior, ScrollBehavior::Sticky);
+    // A horizontal-only frame gets a warning, and the value is kept.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Row", "width": 100, "height": 100, "overflow": "horizontal",
+        "children": [{ "type": "rectangle", "name": "Tab", "width": 20, "height": 20, "scrollBehavior": "Sticky" }] }] }),
+    );
+    let text = r.to_string();
+    assert!(text.contains("sticky") && text.contains("scrolls vertically") && !text.contains("not supported"), "{r}");
+    let tab = e.doc.nodes.values().find(|n| n.name == "Tab").unwrap().id.clone();
+    assert_eq!(e.doc.get(&tab).unwrap().scroll_behavior, ScrollBehavior::Sticky);
+    // update_nodes: quiet inside a scroller, a warning outside one.
+    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": header, "scrollBehavior": "fixed" }] }));
+    assert!(r.get("warnings").is_none(), "{r}");
+    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": header, "scrollBehavior": "sticky" }] }));
+    assert!(r.get("warnings").is_none(), "{r}");
+    assert_eq!(e.doc.get(&header).unwrap().scroll_behavior, ScrollBehavior::Sticky);
+    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": tab, "scrollBehavior": "scroll" }] }));
+    assert!(r.get("warnings").is_none(), "{r}");
+    let r = run(&mut e, "update_nodes", json!({ "updates": [{ "id": tab, "scrollBehavior": "sticky" }] }));
+    assert!(r.to_string().contains("scrolls vertically"), "{r}");
+  }
+
+  #[test]
   fn a_new_interaction_replaces_the_one_with_the_same_trigger() {
     let (mut e, ids) = screens();
     let (home, other, btn) = (&ids[0], &ids[1], &ids[2]);

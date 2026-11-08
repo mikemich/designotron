@@ -124,12 +124,12 @@ export default function App() {
     setOverlays([]);
     setHistory((h) => (s === "back" ? (h.length > 1 ? h.slice(0, -1) : h) : [...h, s]));
   };
-  const live = useRef({ overlays, current, onNavigate });
-  live.current = { overlays, current, onNavigate };
   const run = (step: Step) => {
     if (step.to) live.current.onNavigate(step.to, step.opts);
     else if (step.url) window.open(step.url, "_blank", "noopener,noreferrer");
   };
+  const live = useRef({ overlays, current, onNavigate, run });
+  live.current = { overlays, current, onNavigate, run };
   useEffect(() => {
     // Enter and Space belong to a focused control, unless a click (not Tab) put the focus there.
     let byPointer = false;
@@ -158,11 +158,52 @@ export default function App() {
       setOverlays([]);
       setHistory([startScreen()]);
     };
+    // On drag: a swipe of 24 px or more from a layer that has one (along its direction, when it has
+    // one) runs its action; the click that ends the swipe is swallowed.
+    let swipe: { x: number; y: number; id: number; step: Step & { dir?: string } } | null = null;
+    let swipedAt = -1e9;
+    const onSwipeDown = (e: PointerEvent) => {
+      swipe = null;
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      const raw = (e.target as HTMLElement | null)?.closest?.("[data-dt-swipe]")?.getAttribute("data-dt-swipe");
+      if (!raw) return;
+      try {
+        swipe = { x: e.clientX, y: e.clientY, id: e.pointerId, step: JSON.parse(raw) };
+      } catch {
+        /* not a step */
+      }
+    };
+    const onSwipeUp = (e: PointerEvent) => {
+      const s = swipe;
+      swipe = null;
+      if (!s || s.id !== e.pointerId) return;
+      const dx = e.clientX - s.x;
+      const dy = e.clientY - s.y;
+      const d = s.step.dir;
+      const along = d === "left" ? -dx : d === "right" ? dx : d === "up" ? -dy : d === "down" ? dy : Math.hypot(dx, dy);
+      if (along < 24) return;
+      swipedAt = performance.now();
+      live.current.run(s.step);
+    };
+    const onSwipeCancel = () => (swipe = null);
+    const onClick = (e: MouseEvent) => {
+      if (performance.now() - swipedAt > 400) return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
     window.addEventListener("pointerdown", onPointer, true);
+    window.addEventListener("pointerdown", onSwipeDown, true);
+    window.addEventListener("pointerup", onSwipeUp, true);
+    window.addEventListener("pointercancel", onSwipeCancel, true);
+    window.addEventListener("click", onClick, true);
     window.addEventListener("keydown", onKey);
     window.addEventListener("hashchange", onHash);
     return () => {
       window.removeEventListener("pointerdown", onPointer, true);
+      window.removeEventListener("pointerdown", onSwipeDown, true);
+      window.removeEventListener("pointerup", onSwipeUp, true);
+      window.removeEventListener("pointercancel", onSwipeCancel, true);
+      window.removeEventListener("click", onClick, true);
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("hashchange", onHash);
     };
@@ -295,6 +336,12 @@ struct El {
   pass_navigate: bool,
   /// The click goes to a screen: a plain element can be written as `<a href="#Screen">`.
   nav_link: bool,
+  /// On drag: what a swipe of 24 px or more does (a `{ to | url, opts?, dir? }` step as JSON), written
+  /// as `data-dt-swipe` in the project (`App.tsx` listens for it).
+  swipe: Option<String>,
+  /// This element is, or holds, a sticky layer: a clipping box around it uses `overflow: clip`,
+  /// which (unlike `hidden`) doesn't become the scroll container the layer sticks to.
+  sticky_inside: bool,
 }
 
 impl El {
@@ -328,6 +375,8 @@ impl El {
       action_label: None,
       pass_navigate: false,
       nav_link: false,
+      swipe: None,
+      sticky_inside: false,
     }
   }
 
@@ -386,6 +435,9 @@ struct Ctx<'a> {
   change_keys: BTreeMap<String, String>,
   /// Main component id → whether it, or a component nested in it, runs click actions.
   navigate_cache: BTreeMap<String, bool>,
+  /// The nearest scrolling frame around the layer being built scrolls vertically, and no fixed or
+  /// sticky layer lies between: a sticky layer sticks (`position: sticky`) only then.
+  vscroll: bool,
 }
 
 /// Props an instance sets on its component: string attributes and expression attributes.
@@ -441,6 +493,7 @@ impl<'a> Ctx<'a> {
       scroll_targets: BTreeMap::new(),
       change_keys: BTreeMap::new(),
       navigate_cache: BTreeMap::new(),
+      vscroll: false,
     };
     c.collect_targets();
     for p in &doc.pages {
@@ -919,14 +972,66 @@ impl<'a> Ctx<'a> {
       let mut stuck = Vec::new();
       let interactive = matches!(el.tag, "button" | "a");
       self.interactive_depth += usize::from(interactive);
-      for cid in &n.children {
+      // Sticky layers stick at the top of the nearest scrolling frame, when it scrolls vertically
+      // (a horizontal-only scroller scrolls them away).
+      let scrolls_v = split && matches!(n.overflow, crate::model::Overflow::Vertical | crate::model::Overflow::Both);
+      let v_here = match n.overflow {
+        _ if !split => self.vscroll,
+        crate::model::Overflow::Horizontal => false,
+        crate::model::Overflow::None => self.vscroll,
+        _ => true,
+      };
+      // What a sticky layer may travel: to the bottom of its parent (a scroller: of its content).
+      let content_h = if scrolls_v {
+        n.children
+          .iter()
+          .filter_map(|c| self.doc.get(c))
+          .filter(|c| c.visible)
+          .map(|c| {
+            let b = self.doc.local_matrix(c).bounds_of(c.width, c.height);
+            b.y + b.height
+          })
+          .fold(n.height, f64::max)
+      } else {
+        n.height
+      };
+      let mut sticky_kids = false;
+      let mut layered: Vec<(usize, usize)> = Vec::new();
+      for (layer, cid) in n.children.iter().enumerate() {
         let Some(c) = self.doc.get(cid).cloned() else { continue };
-        if let Some(ce) = self.build(cid, child_place(&c)) {
+        let place_c = child_place(&c);
+        let sticky = c.scroll_behavior == crate::model::ScrollBehavior::Sticky && v_here;
+        let was = self.vscroll;
+        self.vscroll = v_here && !sticky && !(split && fixed(&c));
+        let built = self.build(cid, place_c);
+        self.vscroll = was;
+        if let Some(ce) = built {
           if split && fixed(&c) {
             stuck.push(ce);
+          } else if sticky {
+            sticky_kids = true;
+            let ce = self.stick(ce, &c, place_c, content_h, layer + 1);
+            el.children.push(ce);
           } else {
+            layered.push((el.children.len(), layer + 1));
             el.children.push(ce);
           }
+        }
+      }
+      // Layer order decides who covers whom, so positioned siblings of a sticky layer say where
+      // they are in it.
+      if sticky_kids {
+        for (at, z) in layered {
+          let ce = &mut el.children[at];
+          if ce.styles.iter().any(|(k, v)| k == "position" && v != "static") && !ce.styles.iter().any(|(k, _)| k == "z-index") {
+            ce.s("z-index", z.to_string());
+          }
+        }
+      }
+      if el.children.iter().any(|c| c.sticky_inside) && !scrolls_v {
+        el.sticky_inside = true;
+        for (_, v) in el.styles.iter_mut().filter(|(k, v)| k == "overflow" && v == "hidden") {
+          *v = "clip".into();
         }
       }
       if !stuck.is_empty() {
@@ -1589,12 +1694,97 @@ impl<'a> Ctx<'a> {
           };
           table.entry(screen).or_default().push(serde_json::Value::Object(v));
         }
-        Trigger::OnHover | Trigger::MouseEnter | Trigger::MouseLeave | Trigger::OnDrag => {}
+        Trigger::OnDrag => {
+          // A swipe of 24 px or more (along the direction, when the transition has one) runs the
+          // action; there is no follow animation. The first On drag of a layer is the one.
+          if el.swipe.is_some() {
+            continue;
+          }
+          let Some((nav, overlay, url)) = self.action_of(n, i) else {
+            continue;
+          };
+          let mut v = serde_json::Map::new();
+          match (nav, url) {
+            (Some(to), _) => {
+              v.insert("to".into(), json!(to));
+              if let Some(o) = overlay {
+                v.insert("opts".into(), o);
+              }
+            }
+            (None, Some(u)) => {
+              v.insert("url".into(), json!(u));
+            }
+            _ => continue,
+          }
+          use crate::model::{Direction, Transition};
+          let dir = match i.transition {
+            Transition::Push | Transition::MoveIn | Transition::MoveOut => Some(i.direction),
+            Transition::SlideLeft => Some(Direction::Left),
+            Transition::SlideRight => Some(Direction::Right),
+            Transition::SlideUp => Some(Direction::Up),
+            Transition::SlideDown => Some(Direction::Down),
+            _ => None,
+          };
+          if let Some(d) = dir {
+            v.insert("dir".into(), json!(d));
+            el.s("touch-action", if matches!(d, Direction::Left | Direction::Right) { "pan-y" } else { "pan-x" });
+          }
+          el.swipe = Some(serde_json::Value::Object(v).to_string());
+        }
+        Trigger::OnHover | Trigger::MouseEnter | Trigger::MouseLeave => {}
       }
     }
     if el.navigate.is_some() || el.url.is_some() {
       el.s("cursor", "pointer");
     }
+  }
+
+  /// A sticky layer of a vertically scrolling frame. In flow it is `position: sticky; top: 0`. An
+  /// absolutely placed one gets a wrapper that spans from its top to the bottom of its parent
+  /// (where it stops) and lets pointers through; the layer inside sticks within it.
+  fn stick(&self, mut ce: El, c: &Node, place: Place, content_h: f64, z: usize) -> El {
+    if matches!(c.kind, NodeType::Vector | NodeType::Polygon | NodeType::Star) && c.rotation != 0.0 {
+      return ce;
+    }
+    ce.sticky_inside = true;
+    if let Place::Flow { horizontal } = place {
+      ce.s("position", "sticky");
+      ce.s("top", "0");
+      ce.s("z-index", z.to_string());
+      // In a row the layer would stretch to the row's height and have nowhere to travel.
+      if horizontal && !ce.styles.iter().any(|(k, _)| k == "align-self") {
+        ce.s("align-self", "flex-start");
+      }
+      return ce;
+    }
+    let mut w = El::new("div");
+    w.sticky_inside = true;
+    w.s("position", "absolute");
+    // Sideways it keeps its constraints; from the top it is placed by its own y.
+    let mut probe = c.clone();
+    probe.constraints.vertical = ConstraintV::Top;
+    let own_w = self.pin(&mut w, &probe).0;
+    if !own_w {
+      w.s("width", px(c.width));
+    }
+    w.s("height", px((content_h - c.y).max(c.height)));
+    w.s("pointer-events", "none");
+    w.s("z-index", z.to_string());
+    ce.styles.retain(|(k, _)| !matches!(k.as_str(), "position" | "left" | "top" | "right" | "bottom"));
+    if own_w {
+      ce.styles.retain(|(k, _)| k != "width");
+    }
+    if !ce.styles.iter().any(|(k, _)| k == "width") {
+      ce.s("width", "100%");
+    }
+    if matches!(c.constraints.vertical, ConstraintV::TopBottom | ConstraintV::Scale) {
+      ce.s("height", px(c.height));
+    }
+    ce.s("position", "sticky");
+    ce.s("top", "0");
+    ce.s("pointer-events", "auto");
+    w.children.push(ce);
+    w
   }
 
   /// What `App.tsx` needs to place an overlay; manual offsets become a point on the screen.
@@ -3381,6 +3571,13 @@ fn tw_class_raw(k: &str, v: &str) -> String {
   match (k, v) {
     ("position", "absolute") => "absolute".into(),
     ("position", "relative") => "relative".into(),
+    ("position", "sticky") => "sticky".into(),
+    ("top", "0") => "top-0".into(),
+    ("z-index", z) if z.parse::<u32>().is_ok() => format!("z-[{z}]"),
+    ("overflow", "clip") => "overflow-clip".into(),
+    ("pointer-events", "auto") => "pointer-events-auto".into(),
+    ("touch-action", "pan-y") => "touch-pan-y".into(),
+    ("touch-action", "pan-x") => "touch-pan-x".into(),
     ("display", "flex") => "flex".into(),
     ("flex-direction", "column") => "flex-col".into(),
     ("flex-wrap", "wrap") => "flex-wrap".into(),
@@ -3681,6 +3878,11 @@ fn jsx_el(el: &El, depth: usize, out: &mut String) {
     format!("{handler} onNavigate={{onNavigate}}")
   } else {
     handler
+  };
+  // A component reference takes no data attributes: its swipe isn't written.
+  let handler = match (&el.swipe, &el.component_ref) {
+    (Some(swipe), None) => format!("{handler} data-dt-swipe={}", jsx_attr_value(swipe)),
+    _ => handler,
   };
   if let Some(name) = &el.component_ref {
     match &el.slot {
@@ -4373,7 +4575,7 @@ const FOCUS_CSS: &str = ":focus-visible { outline: 2px solid #2563eb !important;
 /// What the prototype and the export don't carry over, and the top-level layers left out.
 fn readme_limits(doc: &Document) -> String {
   let mut out = String::from(
-    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- While hovering / While pressing Change to, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert).\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n- Strokes are CSS `outline`s (they take no layout space, like Figma's), so `src/index.css` ends with a `:focus-visible` rule that keeps a keyboard focus ring; restyle it to taste.\n- Fixed-size layers don't shrink below their design width, so in a window narrower than the screen's design they can overflow (the screen is as wide as the window up to its design width); layers pinned to both sides or scaled follow the screen.\n- Below its design width a screen scrolls sideways (`overflow-x: auto`) instead of cutting content off; there are no breakpoints, so reflow for small windows is up to you.\n- `env(safe-area-inset-*)` is 0 in a desktop browser, so the content of a device frame sits higher than on the device.\n- Accessible names (`aria-label`) generated for icon-only controls are in English (\"Go to Detail\", \"Back\"); translate them for other languages.\n",
+    "\n## What isn't exported\n\n- Screen transitions and animations (screens change instantly).\n- While hovering / While pressing Change to, and mouse enter / mouse leave triggers. While pressing becomes a click when the layer has no On click (it doesn't revert).\n- On drag is a swipe: a drag of 24 px or more (along the transition's direction, when it has one) runs the action, with no follow animation (`data-dt-swipe` on the layer, handled in `src/App.tsx`).\n- Sticky layers use `position: sticky` inside frames that scroll vertically; frames around them that clip use `overflow: clip`. Sticky layers inside a reusable component don't stick, because the component doesn't know the scroller around it.\n- Key and After delay triggers inside reusable components (the ones on screens are in `src/App.tsx`).\n- Strokes are CSS `outline`s (they take no layout space, like Figma's), so `src/index.css` ends with a `:focus-visible` rule that keeps a keyboard focus ring; restyle it to taste.\n- Fixed-size layers don't shrink below their design width, so in a window narrower than the screen's design they can overflow (the screen is as wide as the window up to its design width); layers pinned to both sides or scaled follow the screen.\n- Below its design width a screen scrolls sideways (`overflow-x: auto`) instead of cutting content off; there are no breakpoints, so reflow for small windows is up to you.\n- `env(safe-area-inset-*)` is 0 in a desktop browser, so the content of a device frame sits higher than on the device.\n- Accessible names (`aria-label`) generated for icon-only controls are in English (\"Go to Detail\", \"Back\"); translate them for other languages.\n",
   );
   let left_out: Vec<&str> = doc
     .pages
@@ -9276,5 +9478,191 @@ mod r19b_tests {
       6,
       "{html}"
     );
+  }
+}
+
+#[cfg(test)]
+mod w4ab_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::model::{AutoLayout, Direction, Interaction, Overflow, ScrollBehavior, Sizing, Transition, Trigger};
+  use crate::text::HeuristicMeasurer;
+
+  fn base() -> Document {
+    let mut gen = IdGen::new(31);
+    new_document(&mut gen, "W4AB")
+  }
+
+  fn add(doc: &mut Document, kind: NodeType, id: &str, parent: Option<&str>, w: f64, h: f64, y: f64) {
+    let page = doc.pages[0].id.clone();
+    let mut n = crate::ops::default_node(kind, id.into(), id.into());
+    n.width = w;
+    n.height = h;
+    n.y = y;
+    doc.insert(n, parent, &page, None);
+  }
+
+  fn tight(s: String) -> String {
+    s.replace(": ", ":").replace("; ", ";")
+  }
+
+  /// Home 390x844 scrolls vertically; Section is 600 tall inside it; Header (sticky) sits at y 300.
+  fn home(overflow: Overflow) -> Document {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "home", None, 390.0, 844.0, 0.0);
+    doc.get_mut("home").unwrap().overflow = overflow;
+    add(&mut doc, NodeType::Frame, "section", Some("home"), 390.0, 600.0, 0.0);
+    add(&mut doc, NodeType::Rectangle, "header", Some("section"), 390.0, 48.0, 300.0);
+    doc.get_mut("header").unwrap().scroll_behavior = ScrollBehavior::Sticky;
+    add(&mut doc, NodeType::Rectangle, "badge", Some("section"), 40.0, 40.0, 310.0);
+    add(&mut doc, NodeType::Frame, "tail", Some("home"), 390.0, 900.0, 600.0);
+    doc
+  }
+
+  /// The opening tag of the element whose tag text holds `needle`.
+  fn tag_with<'a>(html: &'a str, needle: &str) -> &'a str {
+    let at = html.find(needle).unwrap_or_else(|| panic!("{needle} in {html}"));
+    let open = html[..at].rfind('<').unwrap();
+    &html[open..open + html[open..].find('>').unwrap()]
+  }
+
+  #[test]
+  fn an_absolute_sticky_layer_gets_a_wrapper_up_to_the_bottom_of_its_parent() {
+    let html = tight(export_html(&home(Overflow::Vertical), "home", &HeuristicMeasurer));
+    assert!(html.contains("position:sticky;top:0") || html.contains("position:sticky"), "{html}");
+    // The wrapper starts at the header's y and ends where the 600 px section ends: 300 px.
+    let wrap = tag_with(&html, "pointer-events:none");
+    assert!(wrap.contains("position:absolute") && wrap.contains("top:300px") && wrap.contains("height:300px"), "{wrap}");
+    assert!(wrap.contains("left:0") && wrap.contains("width:390px"), "{wrap}");
+    // The layer inside fills it, sticks, and takes pointers itself.
+    let inner = tag_with(&html, "pointer-events:auto");
+    assert!(inner.contains("position:sticky") && inner.contains("top:0") && !inner.contains("top:300px"), "{inner}");
+    // The later Badge is positioned in layer order, above the sticky wrapper.
+    let z = |tag: &str| -> usize {
+      tag.split("z-index:").nth(1).and_then(|r| r.split(';').next()).and_then(|v| v.trim_end_matches('"').parse().ok()).unwrap_or(0)
+    };
+    let badge = tag_with(&html, "width:40px");
+    assert!(z(wrap) >= 1 && z(badge) > z(wrap), "wrapper {wrap}, badge {badge}");
+  }
+
+  #[test]
+  fn sticky_needs_a_vertically_scrolling_ancestor() {
+    for overflow in [Overflow::Horizontal, Overflow::None] {
+      let html = tight(export_html(&home(overflow), "home", &HeuristicMeasurer));
+      assert!(!html.contains("position:sticky"), "{overflow:?}: {html}");
+      assert!(!html.contains("pointer-events:none"), "{overflow:?}: {html}");
+    }
+    for overflow in [Overflow::Vertical, Overflow::Both] {
+      let html = tight(export_html(&home(overflow), "home", &HeuristicMeasurer));
+      assert!(html.contains("position:sticky"), "{overflow:?}: {html}");
+    }
+  }
+
+  #[test]
+  fn sticky_inside_a_sticky_layer_does_not_stick() {
+    let mut doc = home(Overflow::Vertical);
+    // The section itself is sticky: its header scrolls inside it.
+    doc.get_mut("section").unwrap().scroll_behavior = ScrollBehavior::Sticky;
+    let html = tight(export_html(&doc, "home", &HeuristicMeasurer));
+    assert_eq!(html.matches("position:sticky").count(), 1, "{html}");
+  }
+
+  #[test]
+  fn a_clipping_frame_around_a_sticky_layer_clips_without_scrolling() {
+    let mut doc = home(Overflow::Vertical);
+    doc.get_mut("section").unwrap().clip_content = true;
+    let html = tight(export_html(&doc, "home", &HeuristicMeasurer));
+    assert!(html.contains("overflow:clip"), "{html}");
+    // Without a sticky layer it stays hidden.
+    doc.get_mut("header").unwrap().scroll_behavior = ScrollBehavior::Scroll;
+    let html = tight(export_html(&doc, "home", &HeuristicMeasurer));
+    assert!(html.contains("overflow:hidden") && !html.contains("overflow:clip"), "{html}");
+  }
+
+  #[test]
+  fn a_sticky_layer_in_a_flow_sticks_in_place() {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "list", None, 390.0, 800.0, 0.0);
+    {
+      let f = doc.get_mut("list").unwrap();
+      f.overflow = Overflow::Vertical;
+      f.layout = Some(AutoLayout::default());
+    }
+    add(&mut doc, NodeType::Rectangle, "head", Some("list"), 390.0, 40.0, 0.0);
+    doc.get_mut("head").unwrap().scroll_behavior = ScrollBehavior::Sticky;
+    add(&mut doc, NodeType::Rectangle, "row", Some("list"), 390.0, 900.0, 0.0);
+    let html = tight(export_html(&doc, "list", &HeuristicMeasurer));
+    assert!(html.contains("position:sticky;top:0") || html.contains("position:sticky"), "{html}");
+    assert!(html.contains("z-index:1"), "{html}");
+    assert!(!html.contains("pointer-events:none"), "no wrapper in flow: {html}");
+    // The React export spells it as classes.
+    let react = export_react(&doc, "list", &HeuristicMeasurer);
+    assert!(react.contains("sticky") && react.contains("top-0") && react.contains("z-[1]"), "{react}");
+    // In a row the layer is kept from stretching to the row's height.
+    doc.get_mut("list").unwrap().layout.as_mut().unwrap().direction = LayoutDirection::Horizontal;
+    doc.get_mut("head").unwrap().sizing_v = Sizing::Fixed;
+    let html = tight(export_html(&doc, "list", &HeuristicMeasurer));
+    assert!(html.contains("position:sticky") && html.contains("align-self:flex-start"), "{html}");
+  }
+
+  /// Home with a card that has an On drag to Detail.
+  fn swipe_doc(transition: Transition, direction: Direction) -> Document {
+    let mut doc = base();
+    add(&mut doc, NodeType::Frame, "home", None, 390.0, 844.0, 0.0);
+    add(&mut doc, NodeType::Frame, "detail", None, 390.0, 844.0, 0.0);
+    doc.get_mut("detail").unwrap().x = 500.0;
+    add(&mut doc, NodeType::Rectangle, "card", Some("home"), 200.0, 100.0, 10.0);
+    doc.get_mut("card").unwrap().interactions.push(Interaction {
+      trigger: Trigger::OnDrag,
+      destination: Some("detail".into()),
+      transition,
+      direction,
+      ..Default::default()
+    });
+    doc
+  }
+
+  fn file(doc: &Document, path: &str) -> String {
+    export_project(doc, &HeuristicMeasurer)
+      .into_iter()
+      .find(|f| f.path == path)
+      .map(|f| f.content)
+      .unwrap_or_default()
+  }
+
+  #[test]
+  fn on_drag_becomes_a_swipe_attribute_and_one_listener() {
+    let doc = swipe_doc(Transition::Push, Direction::Left);
+    let home = file(&doc, "src/screens/Home.tsx");
+    assert!(home.contains("data-dt-swipe="), "{home}");
+    let step = home.split("data-dt-swipe=").nth(1).unwrap().replace("\\\"", "\"");
+    assert!(step.contains("\"to\":\"Detail\"") && step.contains("\"dir\":\"left\""), "{step}");
+    assert!(home.contains("touch-pan-y"), "a horizontal swipe leaves vertical scrolling to the browser: {home}");
+    assert!(!home.contains("cursor-pointer"), "a swipe is not a click: {home}");
+    let app = file(&doc, "src/App.tsx");
+    assert!(app.contains("[data-dt-swipe]") && app.contains("along < 24") && app.contains("pointerup"), "{app}");
+    // Smart animate has no direction: any direction of 24 px counts.
+    let doc = swipe_doc(Transition::SmartAnimate, Direction::Left);
+    let home = file(&doc, "src/screens/Home.tsx").replace("\\\"", "\"");
+    assert!(home.contains("data-dt-swipe=") && !home.contains("\"dir\"") && !home.contains("touch-pan"), "{home}");
+    // The single-layer HTML export is not interactive.
+    assert!(!export_html(&doc, "home", &HeuristicMeasurer).contains("data-dt-swipe"));
+    // An On drag that can't resolve its action (no destination) writes nothing.
+    let mut doc = swipe_doc(Transition::Dissolve, Direction::Left);
+    doc.get_mut("card").unwrap().interactions[0].destination = None;
+    assert!(!file(&doc, "src/screens/Home.tsx").contains("data-dt-swipe"));
+  }
+
+  #[test]
+  fn on_drag_and_a_click_on_one_layer_both_work() {
+    let mut doc = swipe_doc(Transition::SlideUp, Direction::Left);
+    doc.get_mut("card").unwrap().interactions.push(Interaction {
+      trigger: Trigger::OnClick,
+      destination: Some("detail".into()),
+      ..Default::default()
+    });
+    let home = file(&doc, "src/screens/Home.tsx").replace("\\\"", "\"");
+    assert!(home.contains("data-dt-swipe=") && home.contains("onClick="), "{home}");
+    assert!(home.contains("\"dir\":\"up\"") && home.contains("touch-pan-x"), "{home}");
   }
 }

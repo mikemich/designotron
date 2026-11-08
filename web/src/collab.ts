@@ -203,7 +203,7 @@ function settleColor() {
 const myName = () => userName() || "Anonymous";
 
 /** The document model revision this editor writes (keep in step with `collab::MODEL_REVISION`). */
-const MODEL_REVISION = 3;
+const MODEL_REVISION = 4;
 /** Nothing to downgrade: a relay built with this editor (the bridge) or not known yet. */
 const CURRENT = 1_000_000;
 /** The model the room's relay understands (0: an older relay, which says nothing). Changes
@@ -561,7 +561,7 @@ function connect(join: Record<string, unknown>) {
       if (heardPong && lastPing > lastHeard && now - lastHeard > SILENT_MS && now - lastPing >= PING_MS / 2 - 500) return lost();
       if (now - lastPing >= PING_MS - 500) ping();
     }, PING_MS / 2);
-    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, granular: getEngine().collabGranular(), lists: getEngine().collabLists(), ...join }));
+    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, granular: getEngine().collabGranular(), lists: getEngine().collabLists(), model: MODEL_REVISION, ...join }));
   };
   socket.onmessage = (e) => ws === socket && onMessage(JSON.parse(e.data));
   socket.onclose = lost;

@@ -138,7 +138,7 @@ pub fn delta_hinted(base: &Document, doc: &Document, opts: DeltaOpts, hint: &Has
 
 /// Which generation of the document model this build understands. Rooms say it in their welcome, so
 /// an editor can tell a relay that predates the model it uses (older relays say nothing).
-pub const MODEL_REVISION: u32 = 3;
+pub const MODEL_REVISION: u32 = 4;
 
 /// `value` (a delta or a document, as JSON) rewritten so a relay that understands only model
 /// `relay_model` can store it: values it has no names for are replaced by the closest old one
@@ -148,39 +148,52 @@ pub const MODEL_REVISION: u32 = 3;
 /// whole change that holds an unknown name, so this is applied to what is *sent* only, never to
 /// the editor's own copy. Works on names alone, anywhere in the JSON (fills, strokes, styles,
 /// instance overrides, patches). A relay at this build's model gets `value` back unchanged.
+///
+/// The rewrites are layered by revision: below 3 the ones above; below 4 also the On drag trigger
+/// (dropped: it has no old equivalent) and sticky scrolling (shown as scroll). `bezier` stays,
+/// older code ignores it and plays `easing`.
 pub fn downgrade(value: &Value, relay_model: u32) -> Value {
   let mut v = value.clone();
   if relay_model < MODEL_REVISION {
-    downgrade_in_place(&mut v);
+    downgrade_in_place(&mut v, relay_model);
   }
   v
 }
 
-fn downgrade_in_place(v: &mut Value) {
+fn downgrade_in_place(v: &mut Value, model: u32) {
   match v {
-    Value::Array(a) => a.iter_mut().for_each(downgrade_in_place),
+    Value::Array(a) => a.iter_mut().for_each(|x| downgrade_in_place(x, model)),
     Value::Object(o) => {
-      if matches!(o.get("type").and_then(Value::as_str), Some("angularGradient" | "diamondGradient")) {
+      if o.get("scrollBehavior").and_then(Value::as_str) == Some("sticky") {
+        o.insert("scrollBehavior".into(), json!("scroll"));
+      }
+      if model < 3 && matches!(o.get("type").and_then(Value::as_str), Some("angularGradient" | "diamondGradient")) {
         o.insert("type".into(), json!("radialGradient"));
         o.remove("handles");
       }
-      if o.get("scaleMode").and_then(Value::as_str) == Some("crop") {
+      if model < 3 && o.get("scaleMode").and_then(Value::as_str) == Some("crop") {
         o.insert("scaleMode".into(), json!("fill"));
         o.remove("crop");
       }
       if let Some(Value::Array(list)) = o.get_mut("interactions") {
-        *list = std::mem::take(list).into_iter().filter_map(downgrade_interaction).collect();
+        *list = std::mem::take(list).into_iter().filter_map(|i| downgrade_interaction(i, model)).collect();
       }
-      o.values_mut().for_each(downgrade_in_place);
+      o.values_mut().for_each(|x| downgrade_in_place(x, model));
     }
     _ => {}
   }
 }
 
 /// An interaction as an old relay knows it, or None when it has no old equivalent.
-fn downgrade_interaction(mut i: Value) -> Option<Value> {
+fn downgrade_interaction(mut i: Value, model: u32) -> Option<Value> {
   let o = i.as_object_mut()?;
   let name = |o: &Map<String, Value>, k: &str| o.get(k).and_then(Value::as_str).map(str::to_string);
+  if name(o, "trigger").as_deref() == Some("onDrag") {
+    return None;
+  }
+  if model >= 3 {
+    return Some(i);
+  }
   match name(o, "trigger").as_deref() {
     Some("mouseLeave" | "key") => return None,
     Some("mouseEnter") => drop(o.insert("trigger".into(), json!("onHover"))),
@@ -1929,6 +1942,48 @@ mod tests {
     let d = json!({ "nodes": { "a": { "fills": [{ "type": "angularGradient" }], "interactions": [{ "trigger": "key" }] } } });
     assert_eq!(downgrade(&d, MODEL_REVISION), d);
     assert_ne!(downgrade(&d, 0), d);
+  }
+
+  /// A change with everything revision 4 added, next to things revision 3 already had.
+  fn v4_delta() -> Value {
+    let list = json!([
+      { "trigger": "onDrag", "action": "navigate", "transition": "smartAnimate", "bezier": [0.1, 0.2, 0.3, 0.4] },
+      { "trigger": "mouseEnter", "action": "navigate", "transition": "push", "direction": "down" },
+      { "trigger": "onClick", "action": "navigate", "bezier": [0.1, 0.2, 0.3, 0.4] }
+    ]);
+    let fills = json!([{ "type": "angularGradient", "stops": [], "handles": [1] }]);
+    json!({
+      "nodes": { "a": { "scrollBehavior": "sticky", "fills": fills, "interactions": list } },
+      "patch": { "b": { "scrollBehavior": "sticky", "interactions": list } },
+      "x": { "overrides": { "c": { "scrollBehavior": "sticky" } } },
+    })
+  }
+
+  #[test]
+  fn downgrade_layers_by_revision() {
+    let d = v4_delta();
+    // Revision 3 keeps what it knew (angular gradients, Move, Push), drops On drag, maps sticky.
+    let out = downgrade(&d, 3);
+    let list = &out["nodes"]["a"]["interactions"];
+    assert_eq!(list.as_array().unwrap().len(), 2);
+    assert_eq!(list[0]["trigger"], "mouseEnter");
+    assert_eq!(list[0]["transition"], "push");
+    assert_eq!(list[1]["bezier"], json!([0.1, 0.2, 0.3, 0.4]), "bezier is left for old code to ignore");
+    assert_eq!(out["nodes"]["a"]["fills"][0]["type"], "angularGradient");
+    assert_eq!(out["nodes"]["a"]["scrollBehavior"], "scroll");
+    assert_eq!(out["patch"]["b"]["scrollBehavior"], "scroll");
+    assert_eq!(out["patch"]["b"]["interactions"].as_array().unwrap().len(), 2);
+    assert_eq!(out["x"]["overrides"]["c"]["scrollBehavior"], "scroll");
+    // Revision 0 does both.
+    let out = downgrade(&d, 0);
+    let list = out["nodes"]["a"]["interactions"].as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!((list[0]["trigger"].clone(), list[0]["transition"].clone()), (json!("onHover"), json!("slideDown")));
+    assert_eq!(out["nodes"]["a"]["fills"][0]["type"], "radialGradient");
+    assert_eq!(out["nodes"]["a"]["scrollBehavior"], "scroll");
+    // Revision 4 is the identity.
+    assert_eq!(downgrade(&d, 4), d);
+    assert_eq!(MODEL_REVISION, 4);
   }
 
   fn engine(seed: u64) -> Engine {

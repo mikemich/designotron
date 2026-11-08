@@ -759,7 +759,7 @@ mod tests {
     async fn editors_get_the_derived_view_id_and_the_model_revision() {
       let (addr, _) = start(None).await;
       let (room, mut a, first) = owner(addr).await;
-      assert_eq!(first["model"], 3);
+      assert_eq!(first["model"], 4);
       assert_eq!(first["view"], designotron_rooms::view_id(&room));
       assert_eq!(first["view"].as_str().unwrap().len(), 32);
       assert!(first.get("role").is_none());
@@ -778,7 +778,7 @@ mod tests {
         .unwrap();
       let welcome = next_json(&mut v).await;
       assert_eq!(welcome["role"], "viewer");
-      assert_eq!(welcome["model"], 3);
+      assert_eq!(welcome["model"], 4);
       assert_eq!(welcome["doc"]["name"], "Shared");
       assert!(welcome.get("view").is_none(), "viewers get no link of their own");
       assert_eq!(welcome["peers"][0]["name"], "Ana");
@@ -1035,7 +1035,7 @@ mod tests {
     async fn health_says_which_model_and_features() {
       let (addr, _) = start(None).await;
       let h = start_stats(addr).await;
-      assert_eq!(h["model"], 3);
+      assert_eq!(h["model"], 4);
       assert_eq!(h["features"], json!(["viewLinks"]));
     }
 
