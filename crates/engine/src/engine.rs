@@ -1305,7 +1305,11 @@ impl Engine {
     self.collab_granular = ordered && granular;
     self.collab_lists = self.collab_granular && lists;
     let mut base = self.doc.clone();
-    components::restore_default_set_outline(&mut base, &self.stripped_outlines);
+    // A viewer can't send the strip (the room refuses a whole delta that edits), so its baseline
+    // keeps the stripped state.
+    if !self.read_only {
+      components::restore_default_set_outline(&mut base, &self.stripped_outlines);
+    }
     self.stripped_outlines.clear();
     self.collab_synced = Some(base.clone());
     self.collab_confirmed = ordered.then_some(base);
@@ -5983,6 +5987,12 @@ mod tests {
     assert!(!d.contains(&red), "the user's stroke isn't touched: {d}");
     assert!(!d.contains("fills") && !d.contains("123456"), "only the strokes: {d}");
     assert!(crate::collab::is_empty(&loaded.collab_delta()), "sent once");
+    // A viewer sends nothing for the strip, so its first comment isn't refused with it.
+    let mut viewer = engine();
+    viewer.dispatch(Command::SetReadOnly { on: true }).unwrap();
+    viewer.load(&json).unwrap();
+    viewer.collab_reset(true, true, false);
+    assert!(crate::collab::is_empty(&viewer.collab_delta()), "viewer's first delta is empty");
     let mut replaced = engine();
     replaced
       .dispatch(Command::ReplaceDocument {
