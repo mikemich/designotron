@@ -93,6 +93,8 @@ const idbPut = (page, key, value) =>
 const openHistory = async (page) => {
   await page.getByRole("tab", { name: /history/i }).click();
   await page.locator(".history").waitFor();
+  // The stored list loads from IndexedDB after the tab is drawn.
+  await page.locator(".version .version-name").first().waitFor({ timeout: 5000 }).catch(() => {});
 };
 const names = (page) => page.locator(".version .version-name").allTextContents();
 /** The row's action buttons are clipped until the row is hovered or focused. */
