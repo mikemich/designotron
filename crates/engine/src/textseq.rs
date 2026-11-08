@@ -38,6 +38,30 @@ pub const MAX_SPAN_LEN: u32 = 1 << 20;
 /// Inserts, deletes and style changes in one delta entry (the work of a lookup is bounded by
 /// the number of spans, so this bounds the work of a hostile entry).
 pub const MAX_ENTRY_OPS: usize = 4096;
+/// Sites are 48-bit numbers (what a JSON number in a browser holds exactly).
+pub const MAX_SITE: u64 = (1 << 48) - 1;
+/// Work one entry may cost, and all the entries of one delta together (see `Meter`): charged
+/// before the work is done and counted in pieces and spans touched, so every copy rejects the same
+/// entry and nobody spends minutes on a crafted one.
+pub const ENTRY_BUDGET: u64 = 1 << 24;
+pub const DELTA_BUDGET: u64 = 1 << 25;
+
+/// Fails to compile when `TextRun` gains a field: `ATTRS`, `attr` and `merge_attr` must learn it.
+#[allow(dead_code)]
+fn every_run_field_is_an_attribute(r: &TextRun) {
+  let TextRun {
+    start: _,
+    end: _,
+    font_family: _,
+    font_size: _,
+    font_weight: _,
+    italic: _,
+    color: _,
+    decoration: _,
+    letter_spacing: _,
+    link: _,
+  } = r;
+}
 
 /// The style attributes of a run (`TextRun` field names).
 const ATTRS: [&str; 8] = [
@@ -52,8 +76,18 @@ const ATTRS: [&str; 8] = [
 ];
 
 /// Identity of one character: `[site, ctr]` in JSON.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct CharId(pub u64, pub u32);
+
+impl<'de> Deserialize<'de> for CharId {
+  fn deserialize<D: Deserializer<'de>>(d: D) -> Result<CharId, D::Error> {
+    let (site, ctr) = <(u64, u32)>::deserialize(d)?;
+    if site > MAX_SITE {
+      return Err(de::Error::custom("site out of range"));
+    }
+    Ok(CharId(site, ctr))
+  }
+}
 
 /// Consecutive ids of one site (`ctr .. ctr + len`), all visible or all deleted at `del` (the
 /// text's clock when it was deleted). JSON `[site, ctr, len]` or `[site, ctr, len, deletedAt]`.
@@ -112,8 +146,8 @@ impl<'de> Deserialize<'de> for Span {
       [a, b, c, d] => (*a, num(*b)?, num(*c)?, Some(num(*d)?)),
       _ => return Err(de::Error::custom("a span has 3 or 4 numbers")),
     };
-    if len == 0 || len > MAX_SPAN_LEN || ctr as u64 + len as u64 > 1 << 32 {
-      return Err(de::Error::custom("bad span length"));
+    if len == 0 || len > MAX_SPAN_LEN || ctr as u64 + len as u64 > 1 << 32 || site > MAX_SITE {
+      return Err(de::Error::custom("bad span"));
     }
     Ok(Span { site, ctr, len, del })
   }
@@ -176,7 +210,7 @@ fn within_limits(seq: &TextSeq, visible: usize) -> bool {
   }
   let (mut vis, mut items) = (0usize, 0usize);
   for sp in &seq.s {
-    if sp.len == 0 || sp.len > MAX_SPAN_LEN || sp.ctr as u64 + sp.len as u64 > 1 << 32 {
+    if sp.len == 0 || sp.len > MAX_SPAN_LEN || sp.ctr as u64 + sp.len as u64 > 1 << 32 || sp.site > MAX_SITE {
       return false;
     }
     items += sp.len as usize;
@@ -333,6 +367,33 @@ impl TextSeq {
     }
   }
 
+  /// Makes the sequence fit the limits for `visible` characters by forgetting the oldest deleted
+  /// stretches (as `gc` does), so two people deleting halves of a long text are never refused.
+  fn fit(&mut self, visible: usize) {
+    let limit = 4 * visible + MAX_EXTRA_ITEMS;
+    let mut items: usize = self.s.iter().map(|s| s.len as usize).sum();
+    let mut spans = self.s.len();
+    if spans <= MAX_SPANS && items <= limit {
+      return;
+    }
+    let mut order: Vec<(u32, usize)> = self.s.iter().enumerate().filter_map(|(i, s)| s.del.map(|d| (d, i))).collect();
+    order.sort_unstable();
+    let mut drop = vec![false; self.s.len()];
+    for (_, i) in order {
+      if spans <= MAX_SPANS && items <= limit {
+        break;
+      }
+      drop[i] = true;
+      spans -= 1;
+      items -= self.s[i].len as usize;
+    }
+    let mut i = 0;
+    self.s.retain(|_| {
+      i += 1;
+      !drop[i - 1]
+    });
+  }
+
   /// Marks the visible characters `start..end` as deleted at `age`.
   fn tombstone_visible(&mut self, start: usize, end: usize, age: u32) {
     let mut vis = 0;
@@ -417,6 +478,7 @@ pub fn local_edit(t: &mut TextProps, start: usize, end: usize, text: &str, ids: 
   let mut seq = effective(t).into_owned();
   edit_seq(&mut seq, start, end, text.chars().count(), ids).ok_or("out of character ids")?;
   text::edit_text(t, start, end, text);
+  seq.fit(t.characters.chars().count());
   seq.h = fnv32(&t.characters);
   t.seq = Some(seq);
   Ok(())
@@ -427,7 +489,9 @@ pub fn local_edit(t: &mut TextProps, start: usize, end: usize, text: &str, ids: 
 /// middle is deleted and inserted). Does nothing when `t`'s own sequence is still valid. `false`
 /// when the ids ran out.
 pub fn fixup(prev: &TextProps, t: &mut TextProps, ids: &mut SiteIds) -> bool {
-  if t.seq.as_ref().is_some_and(|s| valid(s, &t.characters)) {
+  // (A sequence the same as the old one beside other characters is stale, whatever its hash says.)
+  let stale = t.seq.is_some() && t.seq == prev.seq && t.characters != prev.characters;
+  if !stale && t.seq.as_ref().is_some_and(|s| valid(s, &t.characters)) {
     return true;
   }
   if prev.characters == t.characters {
@@ -450,6 +514,7 @@ pub fn fixup(prev: &TextProps, t: &mut TextProps, ids: &mut SiteIds) -> bool {
     t.seq = None;
     return false;
   }
+  seq.fit(b.len());
   seq.h = fnv32(&t.characters);
   // (A text longer than the limits just has no sequence.)
   t.seq = within_limits(&seq, b.len()).then_some(seq);
@@ -900,6 +965,12 @@ fn diff(base: &TextProps, doc: &TextProps, strict: bool) -> Option<Parts> {
 /// don't share an epoch (the whole text travels instead). An entry with no changes is `{e}` only.
 pub fn ops(base: &TextProps, doc: &TextProps) -> Option<Value> {
   let parts = diff(base, doc, false)?;
+  // An entry the receivers would refuse (too many pieces or characters, or too much work) travels
+  // as the whole text instead.
+  let seq_len = effective(doc).s.len();
+  if fits(&parts).is_err() || estimate(&parts, seq_len, doc.characters.len(), doc.runs.len()) > ENTRY_BUDGET / 2 {
+    return None;
+  }
   let mut o = Map::new();
   o.insert("e".into(), json!(effective(doc).e));
   if !parts.p.is_empty() {
@@ -1003,26 +1074,69 @@ struct WireSty {
 /// Applies a `text` entry of a delta to `t`, as every copy does in the relay's order. `Err` for a
 /// malformed or over-limit entry (the caller then rejects the whole delta); never panics.
 pub fn apply(t: &mut TextProps, entry: &Value) -> Result<(), String> {
-  apply_as(t, entry, false)
+  apply_as(t, entry, false, &mut ENTRY_BUDGET.clone())
+}
+
+/// `apply` that also takes its work out of `budget` (what is left of a delta's `DELTA_BUDGET`).
+pub fn apply_budgeted(t: &mut TextProps, entry: &Value, budget: &mut u64) -> Result<(), String> {
+  apply_as(t, entry, false, budget)
 }
 
 /// `apply` for a change this editor re-applies as its own (made while it was offline): no clock
 /// tick and nothing forgotten, because the delta it sends afterwards is made from the difference
 /// and the room does the ticking.
 pub fn apply_local(t: &mut TextProps, entry: &Value) -> Result<(), String> {
-  apply_as(t, entry, true)
+  apply_as(t, entry, true, &mut u64::MAX.clone())
 }
 
-fn apply_as(t: &mut TextProps, entry: &Value, local: bool) -> Result<(), String> {
-  let en = Entry::deserialize(entry).map_err(|e| format!("bad text entry: {e}"))?;
-  if en.ins.len() + en.del.len() + en.sty.len() > MAX_ENTRY_OPS {
-    return Err("too many text operations".into());
+/// Work counted in pieces and spans touched, charged before it is done.
+struct Meter(u64);
+
+impl Meter {
+  fn charge(&mut self, units: u64) -> Result<(), String> {
+    match self.0.checked_sub(units) {
+      Some(left) => {
+        self.0 = left;
+        Ok(())
+      }
+      None => Err("text entry over its work budget".into()),
+    }
   }
+}
+
+/// What the limits allow in one entry (the writer and the reader both ask).
+fn fits(parts: &Parts) -> Result<(), &'static str> {
+  if parts.ins.len() + parts.del.len() + parts.sty.len() > MAX_ENTRY_OPS {
+    return Err("too many text operations");
+  }
+  let chars: usize = parts.ins.iter().map(|i| i.len as usize).sum();
+  if chars > MAX_ENTRY_CHARS {
+    return Err("text entry: too long");
+  }
+  Ok(())
+}
+
+/// About what applying `parts` to a text of `spans` spans, `n` bytes of characters and `runs` runs
+/// costs, one piece per insert (the writer's view; the reader charges the pieces it really makes).
+fn estimate(parts: &Parts, spans: usize, n: usize, runs: usize) -> u64 {
+  let ops = (parts.ins.len() + parts.del.len() + parts.sty.len()) as u64;
+  let spans = spans as u64 + 2 * ops;
+  let runs = runs as u64 + parts.ins.iter().map(|i| i.runs.len() as u64).sum::<u64>() + 2 * parts.sty.len() as u64;
+  let n = n as u64;
+  let mut c = spans + n;
+  for i in &parts.ins {
+    c += spans + n / 8 + runs + i.len as u64 / 4;
+  }
+  c += parts.del.len() as u64 * spans + if parts.del.is_empty() { 0 } else { n + runs };
+  c + parts.sty.len() as u64 * (16 * runs + 4 * spans)
+}
+
+fn apply_as(t: &mut TextProps, entry: &Value, local: bool, budget: &mut u64) -> Result<(), String> {
+  let en = Entry::deserialize(entry).map_err(|e| format!("bad text entry: {e}"))?;
   let mut parts = Parts {
     p: en.p,
     ..Default::default()
   };
-  let mut chars_total = 0usize;
   for i in en.ins {
     let CharId(site, ctr) = i.id;
     let len = match (&i.s, i.n, i.d) {
@@ -1038,10 +1152,6 @@ fn apply_as(t: &mut TextProps, entry: &Value, local: bool) -> Result<(), String>
     };
     if len == 0 || len > MAX_ENTRY_CHARS || ctr as u64 + len as u64 > 1 << 32 {
       return Err("text entry: bad insert length".into());
-    }
-    chars_total += len;
-    if chars_total > MAX_ENTRY_CHARS {
-      return Err("text entry: too long".into());
     }
     let mut runs = i.runs;
     for r in runs.iter_mut() {
@@ -1061,7 +1171,7 @@ fn apply_as(t: &mut TextProps, entry: &Value, local: bool) -> Result<(), String>
     });
   }
   for (site, ctr, len) in en.del {
-    if len == 0 || ctr as u64 + len as u64 > 1 << 32 {
+    if len == 0 || ctr as u64 + len as u64 > 1 << 32 || site > MAX_SITE {
       return Err("text entry: bad delete".into());
     }
     parts.del.push((site, ctr, len));
@@ -1075,14 +1185,25 @@ fn apply_as(t: &mut TextProps, entry: &Value, local: bool) -> Result<(), String>
       olds: BTreeMap::new(),
     });
   }
-  let epoch = en.e;
-  apply_parts(t, &parts, Some(epoch), local)
+  fits(&parts).map_err(|e| e.to_string())?;
+  // All or nothing: a failed entry leaves the text as it was.
+  let backup = t.clone();
+  let mut meter = Meter(if local { u64::MAX } else { (*budget).min(ENTRY_BUDGET) });
+  let before = meter.0;
+  let out = apply_parts(t, &parts, Some(en.e), local, &mut meter);
+  if out.is_err() {
+    *t = backup;
+  }
+  if !local {
+    *budget = budget.saturating_sub(before - meter.0);
+  }
+  out
 }
 
 /// The sequence-relevant work of `apply_parts`. `epoch` is the sender's (`None`: the parts were
 /// diffed against this very text, so it is the same); `local` marks a change made here (a revert):
 /// no clock tick, deletions stamped with the current clock, nothing forgotten.
-fn apply_parts(t: &mut TextProps, parts: &Parts, epoch: Option<u32>, local: bool) -> Result<(), String> {
+fn apply_parts(t: &mut TextProps, parts: &Parts, epoch: Option<u32>, local: bool, m: &mut Meter) -> Result<(), String> {
   if !parts.p.is_empty() {
     apply_props(t, &parts.p)?;
   }
@@ -1092,15 +1213,18 @@ fn apply_parts(t: &mut TextProps, parts: &Parts, epoch: Option<u32>, local: bool
   let mut seq = effective(t).into_owned();
   let same = epoch.is_none_or(|e| e == seq.e);
   let age = if local { seq.k } else { seq.k.saturating_add(1) };
+  let len = t.characters.chars().count();
+  m.charge(seq.s.len() as u64 + len as u64 + t.runs.len() as u64)?;
   for ins in &parts.ins {
-    apply_ins(t, &mut seq, ins, same, age)?;
+    apply_ins(t, &mut seq, ins, same, age, m)?;
   }
   if same {
     if !parts.del.is_empty() {
-      apply_del(t, &mut seq, &parts.del, age);
+      apply_del(t, &mut seq, &parts.del, age, m)?;
     }
+    let len = t.characters.chars().count();
     for sty in &parts.sty {
-      apply_sty(t, &seq, sty)?;
+      apply_sty(t, &seq, sty, len, m)?;
     }
   }
   if !local {
@@ -1108,8 +1232,9 @@ fn apply_parts(t: &mut TextProps, parts: &Parts, epoch: Option<u32>, local: bool
     seq.gc();
   }
   seq.coalesce();
-  seq.h = fnv32(&t.characters);
   let len = t.characters.chars().count();
+  seq.fit(len);
+  seq.h = fnv32(&t.characters);
   text::normalize_runs(&mut t.runs, len);
   if !within_limits(&seq, len) {
     return Err("text sequence over its limits".into());
@@ -1152,6 +1277,9 @@ fn apply_props(t: &mut TextProps, p: &Map<String, Value>) -> Result<(), String> 
 }
 
 fn byte_of(s: &str, ci: usize) -> usize {
+  if s.is_ascii() {
+    return ci.min(s.len());
+  }
   s.char_indices().nth(ci).map_or(s.len(), |(b, _)| b)
 }
 
@@ -1192,17 +1320,53 @@ fn insert_chars(t: &mut TextProps, v: usize, s: &str, n: usize, runs: &[TextRun]
   t.runs = out;
 }
 
-/// Takes the visible characters `a..b` out (runs follow).
-fn remove_chars(t: &mut TextProps, a: usize, b: usize) {
-  let len = t.characters.chars().count();
-  let (x, y) = (byte_of(&t.characters, a), byte_of(&t.characters, b));
-  t.characters.replace_range(x..y, "");
-  t.runs = text::splice_runs(&t.runs, a, b, 0, len - (b - a));
+/// Takes the visible character ranges (sorted, apart, code points) out in one pass; the runs
+/// follow (a run end inside a range collapses to its start).
+fn remove_ranges(t: &mut TextProps, ranges: &[(usize, usize)]) {
+  if ranges.is_empty() {
+    return;
+  }
+  let mut out = String::with_capacity(t.characters.len());
+  let mut ri = 0;
+  for (i, c) in t.characters.chars().enumerate() {
+    while ri < ranges.len() && ranges[ri].1 <= i {
+      ri += 1;
+    }
+    if ri < ranges.len() && ranges[ri].0 <= i {
+      continue;
+    }
+    out.push(c);
+  }
+  let mut cum = vec![0usize];
+  for (a, b) in ranges {
+    cum.push(cum.last().unwrap() + (b - a));
+  }
+  // Where old index `i` ends up.
+  let shifted = |i: usize| -> usize {
+    let k = ranges.partition_point(|r| r.1 <= i);
+    let partial = ranges.get(k).map_or(0, |r| i.saturating_sub(r.0));
+    i - cum[k] - partial
+  };
+  let len = out.chars().count();
+  t.runs = t
+    .runs
+    .iter()
+    .filter_map(|r| {
+      let (s, e) = (shifted(r.start), shifted(r.end));
+      (e > s).then(|| TextRun {
+        start: s,
+        end: e,
+        ..r.clone()
+      })
+    })
+    .collect();
+  t.characters = out;
+  text::normalize_runs(&mut t.runs, len);
 }
 
 /// The ids of `ins` that are new here go in (by `l`, `r` or `at`; by `at` alone when the epochs
 /// differ), the ones that exist as tombstones come back in place, the ones that exist visibly stay.
-fn apply_ins(t: &mut TextProps, seq: &mut TextSeq, ins: &Ins, same: bool, age: u32) -> Result<(), String> {
+fn apply_ins(t: &mut TextProps, seq: &mut TextSeq, ins: &Ins, same: bool, age: u32, m: &mut Meter) -> Result<(), String> {
   let born_deleted = ins.chars.is_none();
   if !same && born_deleted {
     return Ok(());
@@ -1217,6 +1381,7 @@ fn apply_ins(t: &mut TextProps, seq: &mut TextSeq, ins: &Ins, same: bool, age: u
         let n = (sp.len - off).min(end - j);
         if sp.del.is_some() && !born_deleted && same {
           // Back in place.
+          m.charge(piece_cost(t, seq, n))?;
           let mid = seq.isolate(i, off, off + n);
           seq.s[mid].del = None;
           let v = seq.vis_before(mid);
@@ -1237,10 +1402,13 @@ fn apply_ins(t: &mut TextProps, seq: &mut TextSeq, ins: &Ins, same: bool, age: u
           .min()
           .unwrap_or(end);
         let n = next - j;
-        let pos = if !same {
-          seq.at_visible(ins.at)
-        } else if j == ins.ctr {
-          seq.place(ins.l, ins.r, ins.at)
+        m.charge(piece_cost(t, seq, n))?;
+        let pos = if j == ins.ctr {
+          if same {
+            seq.place(ins.l, ins.r, ins.at)
+          } else {
+            seq.at_visible(ins.at)
+          }
         } else {
           seq.place(Some(CharId(ins.site, j - 1)), None, ins.at)
         };
@@ -1261,6 +1429,12 @@ fn apply_ins(t: &mut TextProps, seq: &mut TextSeq, ins: &Ins, same: bool, age: u
   Ok(())
 }
 
+/// What making a piece of `n` characters costs: the spans looked through, the characters moved
+/// and the runs shifted.
+fn piece_cost(t: &TextProps, seq: &TextSeq, n: u32) -> u64 {
+  4 * seq.s.len() as u64 + t.characters.len() as u64 / 8 + t.runs.len() as u64 + n as u64 / 4 + 1
+}
+
 /// The runs of an insert restricted to its characters `k..k + n`, relative to `k`.
 fn runs_slice(runs: &[TextRun], k: usize, n: usize) -> Vec<TextRun> {
   runs
@@ -1274,37 +1448,45 @@ fn runs_slice(runs: &[TextRun], k: usize, n: usize) -> Vec<TextRun> {
     .collect()
 }
 
-/// Deletes the id spans: visible characters in them become tombstones.
-fn apply_del(t: &mut TextProps, seq: &mut TextSeq, del: &[(u64, u32, u32)], age: u32) {
+/// Deletes the id spans: visible characters in them become tombstones, and their characters go out
+/// in one pass.
+fn apply_del(t: &mut TextProps, seq: &mut TextSeq, del: &[(u64, u32, u32)], age: u32, m: &mut Meter) -> Result<(), String> {
+  // Stamp of what this call deletes (counted as visible while the positions are worked out).
+  const FRESH: u32 = u32::MAX;
+  let mut gone: Vec<(usize, usize)> = Vec::new();
   for &(site, ctr, len) in del {
+    m.charge(4 * seq.s.len() as u64 + 1)?;
     let (lo, hi) = (ctr as u64, ctr as u64 + len as u64);
-    // Positions in the text as it was; the characters go out from the end.
-    let mut gone: Vec<(usize, usize)> = Vec::new();
     let mut vis = 0usize;
     let mut i = 0;
     while i < seq.s.len() {
       let sp = seq.s[i];
       let visible = sp.del.is_none();
+      let counted = visible || sp.del == Some(FRESH);
       let (c0, c1) = (sp.ctr as u64, sp.ctr as u64 + sp.len as u64);
       if visible && sp.site == site && c0 < hi && c1 > lo {
         let a = (lo.max(c0) - c0) as u32;
         let b = (hi.min(c1) - c0) as u32;
         let mid = seq.isolate(i, a, b);
-        seq.s[mid].del = Some(age);
+        seq.s[mid].del = Some(FRESH);
         gone.push((vis + a as usize, vis + b as usize));
         vis += b as usize;
         i = mid + 1;
       } else {
-        if visible {
+        if counted {
           vis += sp.len as usize;
         }
         i += 1;
       }
     }
-    for (a, b) in gone.into_iter().rev() {
-      remove_chars(t, a, b);
-    }
   }
+  for sp in seq.s.iter_mut().filter(|s| s.del == Some(FRESH)) {
+    sp.del = Some(age);
+  }
+  gone.sort_unstable();
+  m.charge(t.characters.len() as u64 + t.runs.len() as u64 + gone.len() as u64)?;
+  remove_ranges(t, &gone);
+  Ok(())
 }
 
 /// The visible characters between ids `a` and `b` (either may be deleted; swapped when `b` comes
@@ -1318,7 +1500,8 @@ fn resolve_range(seq: &TextSeq, a: CharId, b: CharId) -> Option<(usize, usize)> 
   (start < end).then_some((start, end))
 }
 
-fn apply_sty(t: &mut TextProps, seq: &TextSeq, sty: &Sty) -> Result<(), String> {
+fn apply_sty(t: &mut TextProps, seq: &TextSeq, sty: &Sty, len: usize, m: &mut Meter) -> Result<(), String> {
+  m.charge(4 * seq.s.len() as u64 + 16 * t.runs.len() as u64 + 1)?;
   let Some((start, end)) = resolve_range(seq, sty.a, sty.b) else {
     return Ok(());
   };
@@ -1335,7 +1518,6 @@ fn apply_sty(t: &mut TextProps, seq: &TextSeq, sty: &Sty) -> Result<(), String> 
     patch.link = safe_link(&l);
   }
   let clr: Vec<&str> = sty.clr.iter().map(|s| s.as_str()).filter(|k| ATTRS.contains(k)).collect();
-  let len = t.characters.chars().count();
   if sty.olds.is_empty() {
     t.runs = text::style_range(&t.runs, len, start, end, &patch, &clr);
     return Ok(());
@@ -1402,7 +1584,7 @@ pub fn revert(cur: &TextProps, from: &TextProps, to: &TextProps) -> Option<TextP
   let mut parts = diff(from, to, true)?;
   parts.p.clear();
   let mut out = cur.clone();
-  apply_parts(&mut out, &parts, None, true).ok()?;
+  apply_parts(&mut out, &parts, None, true, &mut Meter(u64::MAX)).ok()?;
   Some(out)
 }
 
@@ -2106,6 +2288,251 @@ mod tests {
     let a = text("abc");
     let b = text("xyz");
     assert!(revert(&a, &a, &b).is_none());
+  }
+
+  #[test]
+  fn the_writer_never_emits_what_apply_refuses() {
+    // A paste of more than an entry may hold travels as the whole text.
+    let base = text("x");
+    let mut doc = base.clone();
+    local_edit(&mut doc, 1, 1, &"y".repeat(MAX_ENTRY_CHARS + 1), &mut ids(3)).unwrap();
+    assert!(ops(&base, &doc).is_none(), "an over-long paste");
+    // A style over more runs than an entry may hold.
+    let base = text(&"ab".repeat(4200));
+    let mut doc = base.clone();
+    doc.runs = (0..4100).map(|i| bold(i * 2, i * 2 + 1)).collect();
+    assert!(ops(&base, &doc).is_none(), "4,100 style pieces");
+    // A select-all delete over more id runs than an entry may hold.
+    let n = 5000;
+    let chars = "z".repeat(n);
+    let seq = TextSeq {
+      e: 7,
+      h: fnv32(&chars),
+      k: 0,
+      s: (0..n as u32)
+        .map(|i| Span {
+          site: 1,
+          ctr: i * 2,
+          len: 1,
+          del: None,
+        })
+        .collect(),
+    };
+    let base = TextProps {
+      seq: Some(seq),
+      ..text(&chars)
+    };
+    let mut doc = base.clone();
+    local_edit(&mut doc, 0, n, "", &mut ids(2)).unwrap();
+    assert!(ops(&base, &doc).is_none(), "5,000 deleted id runs");
+    // An ordinary edit of a long text still travels as an entry.
+    let base = text(&"line\n".repeat(20_000));
+    let mut doc = base.clone();
+    local_edit(&mut doc, 50_000, 50_001, "X", &mut ids(2)).unwrap();
+    let e = ops(&base, &doc).unwrap();
+    let mut room = base.clone();
+    apply(&mut room, &e).unwrap();
+    assert_eq!(room.characters, doc.characters);
+  }
+
+  #[test]
+  fn two_halves_of_a_long_text_deleted_at_once_are_both_taken() {
+    let base = text(&"w".repeat(70_000));
+    let mut a = base.clone();
+    local_edit(&mut a, 0, 35_000, "", &mut ids(1)).unwrap();
+    let mut b = base.clone();
+    local_edit(&mut b, 35_000, 70_000, "", &mut ids(2)).unwrap();
+    let (ea, eb) = (ops(&base, &a).unwrap(), ops(&base, &b).unwrap());
+    let mut room = base.clone();
+    apply(&mut room, &ea).unwrap();
+    apply(&mut room, &eb).unwrap();
+    assert_eq!(room.characters, "");
+    assert!(
+      valid(room.seq.as_ref().unwrap(), &room.characters),
+      "old stretches were forgotten to fit"
+    );
+    // The sender's own copy never holds more than the limits allow either.
+    assert!(a.seq.as_ref().is_none_or(|s| valid(s, &a.characters)));
+  }
+
+  #[test]
+  fn sites_are_held_to_javascript_safe_integers() {
+    let base = text("ab");
+    let big = 1u64 << 60;
+    let mut e = ops(&base, &base).unwrap();
+    e["ins"] = json!([{ "id": [big + 1, 0], "s": "x", "l": null, "r": null, "at": 0 }]);
+    assert!(apply(&mut base.clone(), &e).is_err());
+    e["ins"] = json!([{ "id": [MAX_SITE + 1, 0], "s": "x", "l": null, "r": null, "at": 0 }]);
+    assert!(apply(&mut base.clone(), &e).is_err());
+    e["ins"] = json!([{ "id": [MAX_SITE, 0], "s": "x", "l": null, "r": null, "at": 0 }]);
+    let mut ok = base.clone();
+    apply(&mut ok, &e).unwrap();
+    assert_eq!(ok.characters, "xab");
+    let mut e = ops(&base, &base).unwrap();
+    e["del"] = json!([[big, 0, 1]]);
+    assert!(apply(&mut base.clone(), &e).is_err());
+    let mut e = ops(&base, &base).unwrap();
+    e["sty"] = json!([{ "a": [big, 0], "b": [0, 0], "set": { "italic": true } }]);
+    assert!(apply(&mut base.clone(), &e).is_err());
+    assert!(serde_json::from_value::<Span>(json!([big, 0, 1])).is_err());
+    assert!(serde_json::from_value::<Span>(json!([MAX_SITE, 0, 1])).is_ok());
+    // A stored sequence with such a site is no sequence at all.
+    let seq = TextSeq {
+      e: 1,
+      h: fnv32("ab"),
+      k: 0,
+      s: vec![Span {
+        site: big,
+        ctr: 0,
+        len: 2,
+        del: None,
+      }],
+    };
+    assert!(!valid(&seq, "ab"));
+  }
+
+  #[test]
+  fn a_refused_entry_leaves_the_text_untouched() {
+    let base = text("abc");
+    let mut e = ops(&base, &base).unwrap();
+    e["ins"] = json!([{ "id": [9, 0], "s": "X", "l": [0, 2], "r": null, "at": 3 }]);
+    e["sty"] = json!([{ "a": [0, 0], "b": [0, 1], "set": { "nope": 1 } }]);
+    let mut t = base.clone();
+    assert!(apply(&mut t, &e).is_err());
+    assert_eq!(t, base);
+  }
+
+  #[test]
+  fn the_position_fallback_keeps_the_pieces_of_an_insert_in_order() {
+    let mut t = text("helloB");
+    t.seq = Some(TextSeq {
+      e: 1,
+      h: fnv32("helloB"),
+      k: 0,
+      s: vec![
+        Span {
+          site: 0,
+          ctr: 0,
+          len: 5,
+          del: None,
+        },
+        Span {
+          site: 9,
+          ctr: 1,
+          len: 1,
+          del: None,
+        },
+      ],
+    });
+    let e = json!({ "e": 2, "ins": [{ "id": [9, 0], "s": "ABC", "l": null, "r": null, "at": 2 }] });
+    apply(&mut t, &e).unwrap();
+    assert_eq!(t.characters, "heAlloBC", "A by position, C after B");
+  }
+
+  #[test]
+  fn a_stale_sequence_beside_other_characters_is_rebuilt_whatever_its_hash() {
+    let mut prev = text("hello");
+    local_edit(&mut prev, 5, 5, "!", &mut ids(4)).unwrap();
+    // (Pretend the hashes collided: both sequences say they describe the new characters.)
+    prev.seq.as_mut().unwrap().h = fnv32("jello!");
+    let mut t = prev.clone();
+    t.characters = "jello!".into();
+    assert!(valid(t.seq.as_ref().unwrap(), &t.characters));
+    let mut gen = ids(8);
+    fixup(&prev, &mut t, &mut gen);
+    assert_ne!(t.seq, prev.seq);
+    assert_eq!(gen.ctr, 1, "the changed letter has a new id");
+  }
+
+  #[test]
+  fn work_is_bounded_in_release() {
+    if cfg!(debug_assertions) {
+      return;
+    }
+    let ms = |f: &mut dyn FnMut()| {
+      let s = std::time::Instant::now();
+      f();
+      s.elapsed().as_millis()
+    };
+    // 4,096 style pieces on 200,000 characters: taken or refused, quickly.
+    let base = text(&"a".repeat(200_000));
+    let mut e = ops(&base, &base).unwrap();
+    e["sty"] = json!((0..4096u32)
+      .map(|i| json!({ "a": [0, i * 2], "b": [0, i * 2], "set": { "fontWeight": 700 } }))
+      .collect::<Vec<_>>());
+    let mut t = base.clone();
+    let took = ms(&mut || drop(apply(&mut t, &e)));
+    eprintln!("4096 sty ops on 200k characters: {took} ms");
+    assert!(took < 100, "{took} ms");
+    // 256 of them are taken.
+    e["sty"] = json!((0..256u32)
+      .map(|i| json!({ "a": [0, i * 2], "b": [0, i * 2], "set": { "fontWeight": 700 } }))
+      .collect::<Vec<_>>());
+    let mut t = base.clone();
+    let took = ms(&mut || apply(&mut t, &e).unwrap());
+    assert!(took < 100, "{took} ms");
+    assert_eq!(t.runs.len(), 256);
+    // One delete over 65,536 spans.
+    let n = 32_768u32;
+    let chars = "q".repeat(n as usize);
+    let spans: Vec<Span> = (0..n)
+      .flat_map(|i| {
+        [
+          Span {
+            site: 1,
+            ctr: i * 2,
+            len: 1,
+            del: None,
+          },
+          Span {
+            site: 1,
+            ctr: i * 2 + 1,
+            len: 1,
+            del: Some(0),
+          },
+        ]
+      })
+      .collect();
+    let planted = TextProps {
+      seq: Some(TextSeq {
+        e: 5,
+        h: fnv32(&chars),
+        k: 0,
+        s: spans,
+      }),
+      ..text(&chars)
+    };
+    assert!(valid(planted.seq.as_ref().unwrap(), &planted.characters));
+    let e = json!({ "e": 5, "del": [[1, 0, n * 2]] });
+    let mut t = planted.clone();
+    let took = ms(&mut || apply(&mut t, &e).unwrap());
+    eprintln!("one delete over 65,536 spans: {took} ms");
+    assert!(took < 100, "{took} ms");
+    assert_eq!(t.characters, "");
+    // Reviving 32,768 tombstones one by one is refused by the budget, quickly and the same way twice.
+    let all_gone = TextProps {
+      seq: Some(TextSeq {
+        e: 5,
+        h: fnv32(""),
+        k: 0,
+        s: (0..n)
+          .map(|i| Span {
+            site: 1,
+            ctr: i * 2,
+            len: 1,
+            del: Some(0),
+          })
+          .collect(),
+      }),
+      ..text("")
+    };
+    let e = json!({ "e": 5, "ins": [{ "id": [1, 0], "s": "q".repeat(n as usize * 2 - 1), "l": null, "r": null, "at": 0 }] });
+    let (mut a, mut b) = (all_gone.clone(), all_gone.clone());
+    let took = ms(&mut || {
+      assert_eq!(apply(&mut a, &e).is_err(), apply(&mut b, &e).is_err());
+    });
+    assert!(took < 200, "{took} ms");
+    assert_eq!(a, all_gone, "refused entries change nothing");
   }
 
   #[test]

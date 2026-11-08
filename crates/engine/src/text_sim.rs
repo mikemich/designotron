@@ -649,6 +649,29 @@ fn a_text_only_change_of_the_sequence_is_neutral_for_layout_and_render() {
 }
 
 #[test]
+fn enabling_text_again_with_the_same_site_keeps_the_counter() {
+  let (mut sim, id) = hello(&[Text]);
+  edit(&mut sim.eds[0], &id, 0, 0, "abc");
+  sim.eds[0].collab_enable_text(site_for(5, 0, 0));
+  edit(&mut sim.eds[0], &id, 0, 0, "d");
+  let d = sim.eds[0].collab_delta();
+  let ctrs: Vec<u64> = d["text"][&id]["ins"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|i| i["id"][1].as_u64().unwrap())
+    .collect();
+  assert!(ctrs.contains(&3), "d continues the counter: {d}");
+  let t = sim.eds[0].doc.get(&id).unwrap().text.as_ref().unwrap();
+  assert!(textseq::valid(t.seq.as_ref().unwrap(), &t.characters), "no id is used twice");
+  // A site beyond 48 bits is brought into range.
+  sim.eds[0].collab_enable_text(u64::MAX);
+  edit(&mut sim.eds[0], &id, 0, 0, "e");
+  let d = sim.eds[0].collab_delta();
+  assert!(d["text"][&id]["ins"][0]["id"][0].as_u64().unwrap() <= textseq::MAX_SITE, "{d}");
+}
+
+#[test]
 fn offline_edits_merge_on_rejoin() {
   let (mut sim, id) = hello(&[Text, Text, Text]);
   sim.go_offline(2, 1000);

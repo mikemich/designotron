@@ -1274,10 +1274,16 @@ thread_local! {
 
 /// `apply_opts` for changes this editor re-applies as its own (see `textseq::apply_local`).
 pub fn apply_local(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<NodeId>, String> {
+  // (A guard, so an unwind can't leave later remote applies on this thread in local mode.)
+  struct Reset;
+  impl Drop for Reset {
+    fn drop(&mut self) {
+      LOCAL_TEXT.with(|l| l.set(false));
+    }
+  }
   LOCAL_TEXT.with(|l| l.set(true));
-  let out = apply_opts(doc, d, opts);
-  LOCAL_TEXT.with(|l| l.set(false));
-  out
+  let _reset = Reset;
+  apply_opts(doc, d, opts)
 }
 
 fn apply_inner(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<NodeId>, String> {
@@ -1324,6 +1330,8 @@ fn apply_inner(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<Nod
   }
   // Characters, runs and props of text layers that merge per character.
   if let Some(texts) = d.get("text").and_then(|v| v.as_object()) {
+    // What the text entries of one delta may cost together (the same on every copy).
+    let mut budget = textseq::DELTA_BUDGET;
     for (id, entry) in texts {
       let Some(mut t) = doc.get(id).and_then(|n| n.text.clone()) else {
         continue;
@@ -1331,7 +1339,7 @@ fn apply_inner(doc: &mut Document, d: &Value, opts: ApplyOpts) -> Result<Vec<Nod
       let applied = if LOCAL_TEXT.with(|l| l.get()) {
         textseq::apply_local(&mut t, entry)
       } else {
-        textseq::apply(&mut t, entry)
+        textseq::apply_budgeted(&mut t, entry, &mut budget)
       };
       applied.map_err(|e| format!("bad text {id}: {e}"))?;
       doc.modify(id, |n| n.text = Some(t));

@@ -1358,7 +1358,11 @@ impl Engine {
   /// of every text and is never used); call it again with a fresh one after every (re)join.
   pub fn collab_enable_text(&mut self, site: u64) {
     self.collab_text = self.collab_lists;
-    self.text_ids = crate::textseq::SiteIds { site: site.max(1), ctr: 0 };
+    let site = site.clamp(1, crate::textseq::MAX_SITE);
+    // (The same site again keeps its counter: ids are never used twice.)
+    if self.text_ids.site != site {
+      self.text_ids = crate::textseq::SiteIds { site, ctr: 0 };
+    }
   }
 
   /// Whether texts are merging per character right now.
