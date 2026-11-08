@@ -3205,8 +3205,10 @@ pub fn insert_specs_ex(e: &mut Engine, specs: &[Value], parent: Option<&str>) ->
         tops.push(top);
       }
     }
+    // What this call created is laid out for the first time: its first size isn't a resize.
+    let fresh: HashSet<crate::model::NodeId> = roots.iter().flat_map(|r| e.doc.subtree(r)).collect();
     for top in &tops {
-      crate::layout::layout_root(&mut e.doc, top, e.measurer.as_ref());
+      crate::layout::layout_root_skipping(&mut e.doc, top, e.measurer.as_ref(), &fresh);
     }
   }
   if parent.is_none() {

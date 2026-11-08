@@ -4177,4 +4177,96 @@ mod r20c {
     run(&mut e, "update_nodes", json!({ "updates": [{ "id": card, "width": 400 }] }));
     assert_eq!(e.doc.get(&close).unwrap().x, 370.0);
   }
+
+  /// A hug card ("Go", padding 10) with an absolute 10 x 10 badge at x 5 pinned with `h`.
+  fn hug_card(e: &mut Engine, h: &str, extra: Value) -> (String, String, String) {
+    let mut badge = json!({ "type": "rectangle", "name": "Badge", "width": 10, "height": 10, "absolute": true, "x": 5, "y": 0,
+      "constraints": { "horizontal": h, "vertical": "top" } });
+    if let (Some(b), Some(x)) = (badge.as_object_mut(), extra.as_object()) {
+      b.extend(x.clone());
+    }
+    let r = run(
+      e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Card", "width": "hug", "height": "hug", "layout": { "direction": "horizontal", "padding": 10 }, "children": [
+        { "type": "text", "name": "Label", "text": "Go", "fontSize": 16 }, badge] }] }),
+    );
+    let card = created(&r)[0].clone();
+    let k = e.doc.get(&card).unwrap().children.clone();
+    (card, k[0].clone(), k[1].clone())
+  }
+
+  #[test]
+  fn create_nodes_keeps_the_given_positions_of_pinned_children_in_a_hug_frame() {
+    for h in ["right", "center", "scale", "left-right"] {
+      let mut e = engine();
+      let (_, _, badge) = hug_card(&mut e, h, json!({}));
+      let b = e.doc.get(&badge).unwrap();
+      assert_eq!((b.x, b.width), (5.0, 10.0), "{h}: a new frame's first size is not a resize");
+    }
+    // Once it exists, growing it moves the badge as usual.
+    let mut e = engine();
+    let (card, label, badge) = hug_card(&mut e, "right", json!({}));
+    let w = e.doc.get(&card).unwrap().width;
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": label, "text": "A much longer label" }] }),
+    );
+    let grown = e.doc.get(&card).unwrap().width;
+    assert!(grown > w);
+    assert_eq!(e.doc.get(&badge).unwrap().x, 5.0 + (grown - w));
+  }
+
+  #[test]
+  fn an_existing_frame_that_grows_for_new_children_moves_its_pinned_children() {
+    let mut e = engine();
+    let (card, _, badge) = hug_card(&mut e, "right", json!({}));
+    let w = e.doc.get(&card).unwrap().width;
+    run(
+      &mut e,
+      "create_nodes",
+      json!({ "parentId": card, "nodes": [{ "type": "rectangle", "name": "Wide", "width": 100, "height": 10 }] }),
+    );
+    let grown = e.doc.get(&card).unwrap().width;
+    assert!(grown > w);
+    assert_eq!(e.doc.get(&badge).unwrap().x, 5.0 + (grown - w));
+  }
+
+  fn fixed_point(e: &Engine, what: &str) {
+    let mut again = e.doc.clone();
+    crate::layout::relayout_all(&mut again, &HeuristicMeasurer);
+    assert!(again == e.doc, "{what}: another layout pass changed the document");
+  }
+
+  #[test]
+  fn a_pinned_group_is_a_layout_fixed_point_and_peers_agree() {
+    let mut a = engine();
+    let r = run(
+      &mut a,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Card", "width": "hug", "height": "hug", "layout": { "direction": "horizontal", "padding": 10 }, "children": [
+        { "type": "text", "name": "Label", "text": "Go", "fontSize": 16 },
+        { "type": "group", "name": "G", "absolute": true, "x": 0, "y": 0, "constraints": { "horizontal": "left-right", "vertical": "top" }, "children": [
+          { "type": "rectangle", "width": 10, "height": 4 }, { "type": "rectangle", "x": 20, "width": 10, "height": 4 }] }] }] }),
+    );
+    let card = created(&r)[0].clone();
+    let label = a.doc.get(&card).unwrap().children[0].clone();
+    let mut b = engine();
+    b.load(&a.to_json()).unwrap();
+    a.collab_reset(false, true, true);
+    b.collab_reset(false, true, true);
+    for t in ["A much longer label", "x", "Medium text"] {
+      a.dispatch(Command::SetText {
+        id: label.clone(),
+        characters: t.into(),
+        runs: None,
+      })
+      .unwrap();
+      fixed_point(&a, t);
+      let d = serde_json::to_value(a.collab_delta()).unwrap();
+      b.dispatch(Command::ApplyRemote { delta: d, local: false }).unwrap();
+      assert!(a.doc.nodes == b.doc.nodes, "peers differ after {t}");
+    }
+  }
 }

@@ -1,5 +1,7 @@
 //! Auto layout, hug/fill sizing, text auto-resize, group bounds and constraints.
 
+use std::collections::HashSet;
+
 use crate::geom::Rect;
 use crate::model::{Align, ConstraintH, ConstraintV, Document, LayoutDirection, Node, NodeId, NodeType, Sizing, TextAutoResize};
 use crate::text::{first_baseline, layout_for_box, layout_of_node, TextMeasurer};
@@ -14,19 +16,26 @@ pub fn relayout_all(doc: &mut Document, m: &dyn TextMeasurer) {
 
 /// Lays out a top-level layer. Auto layout can resize a frame (hug growth, Fill), and a frame's
 /// children follow their constraints whenever it changes size, so the sizes of the frames that
-/// have constrained children are noted first and compared once the whole pass has settled.
-/// Applying inside the pass would run on its intermediate sizes (hug measuring, then sharing).
+/// have constrained children are noted on the way down (a frame is visited before its parent
+/// arranges it, so the size is still the one before the pass) and compared once the whole pass
+/// has settled. Applying inside the pass would run on its intermediate sizes (hug measuring,
+/// then sharing).
 pub fn layout_root(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
-  if !has_constrained(doc, id) {
-    layout_node(doc, id, m);
-    return;
-  }
+  layout_root_skipping(doc, id, m, &HashSet::new());
+}
+
+/// `layout_root` for a tree that has layers nobody has seen yet (`fresh`: just created by a
+/// tool). A new frame's size is whatever its first layout makes it, not a resize, so its
+/// children keep the positions they were given.
+pub fn layout_root_skipping(doc: &mut Document, id: &str, m: &dyn TextMeasurer, fresh: &HashSet<NodeId>) {
   let mut before = Vec::new();
-  note_constrained(doc, id, &mut before);
-  layout_node(doc, id, m);
+  layout_walk(doc, id, m, Some(&mut before));
   // Outermost first: a frame moved or resized by its parent's constraints is compared with
   // its own noted size, so its children move once, by the whole change.
   for (fid, ow, oh) in before {
+    if fresh.contains(&fid) {
+      continue;
+    }
     let Some(f) = doc.get(&fid) else { continue };
     if (f.width - ow).abs() <= 0.001 && (f.height - oh).abs() <= 0.001 {
       continue;
@@ -37,54 +46,40 @@ pub fn layout_root(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
       .filter_map(|c| doc.get(c).map(|c| (c.id.clone(), c.width, c.height)))
       .collect();
     apply_constraints_with(doc, &fid, ow, oh, false);
-    // Children the constraints resized settle their own content (hug, wrap, text).
+    // Children the constraints moved or resized settle their own content (hug, wrap, text, and
+    // a group's bounds), so another layout pass changes nothing.
     for (cid, cw, ch) in kids {
       let Some(c) = doc.get(&cid) else { continue };
       let resized = (c.width - cw).abs() > 0.001 || (c.height - ch).abs() > 0.001;
-      if resized && (c.kind == NodeType::Text || (c.kind.is_frame_like() && c.layout.is_some())) {
+      if resized {
         layout_node(doc, &cid, m);
+      }
+      // Float noise from a scale or a half step would make a file look edited on open.
+      let r = |v: f64| (v * 1e6).round() / 1e6;
+      if doc
+        .get(&cid)
+        .is_some_and(|c| [c.x, c.y, c.width, c.height].iter().any(|v| r(*v) != *v))
+      {
+        doc.modify(&cid, |c| {
+          (c.x, c.y, c.width, c.height) = (r(c.x), r(c.y), r(c.width), r(c.height));
+        });
       }
     }
   }
-}
-
-/// True when a child of a frame in the subtree follows non-default constraints.
-fn has_constrained(doc: &Document, id: &str) -> bool {
-  let Some(n) = doc.get(id) else { return false };
-  if !matches!(n.kind, NodeType::Group) && !n.kind.is_frame_like() {
-    return false;
-  }
-  let frame = n.kind.is_frame_like();
-  n.children.iter().any(|c| {
-    doc
-      .get(c)
-      .is_some_and(|c| (frame && (n.layout.is_none() || c.absolute_position) && is_pinned(c)) || has_constrained(doc, &c.id))
-  })
 }
 
 fn is_pinned(c: &Node) -> bool {
   c.constraints.horizontal != ConstraintH::Left || c.constraints.vertical != ConstraintV::Top
 }
 
-/// Notes (id, width, height) of every frame in the subtree with a child that follows constraints.
-fn note_constrained(doc: &Document, id: &str, out: &mut Vec<(NodeId, f64, f64)>) {
-  let Some(n) = doc.get(id) else { return };
-  if n.kind.is_frame_like()
-    && n.children.iter().any(|c| {
-      doc
-        .get(c)
-        .is_some_and(|c| (n.layout.is_none() || c.absolute_position) && is_pinned(c))
-    })
-  {
-    out.push((id.to_string(), n.width, n.height));
-  }
-  for c in &n.children {
-    note_constrained(doc, c, out);
-  }
-}
-
 /// Lays out a node and its subtree bottom-up.
 pub fn layout_node(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
+  layout_walk(doc, id, m, None);
+}
+
+/// `layout_node`; with `note`, every frame that has a child following constraints is recorded
+/// as (id, width, height) before its subtree is laid out.
+fn layout_walk(doc: &mut Document, id: &str, m: &dyn TextMeasurer, mut note: Option<&mut Vec<(NodeId, f64, f64)>>) {
   let Some(node) = doc.get(id) else { return };
   let kind = node.kind;
   let children = node.children.clone();
@@ -92,13 +87,23 @@ pub fn layout_node(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
     NodeType::Text => size_text(doc, id, m),
     NodeType::Group => {
       for c in &children {
-        layout_node(doc, c, m);
+        layout_walk(doc, c, m, note.as_deref_mut());
       }
       normalize_group(doc, id);
     }
     k if k.is_frame_like() => {
+      if let Some(out) = note.as_deref_mut() {
+        let n = doc.get(id).unwrap();
+        let flow = n.layout.is_some();
+        if children
+          .iter()
+          .any(|c| doc.get(c).is_some_and(|c| (!flow || c.absolute_position) && is_pinned(c)))
+        {
+          out.push((id.to_string(), n.width, n.height));
+        }
+      }
       for c in &children {
-        layout_node(doc, c, m);
+        layout_walk(doc, c, m, note.as_deref_mut());
       }
       if doc.get(id).map(|n| n.layout.is_some()).unwrap_or(false) {
         arrange(doc, id, m);

@@ -3232,14 +3232,19 @@ impl Engine {
           // A lone layer that sits outside its parent's flow hands that to the wrapper.
           let lone_absolute = ids.len() == 1 && self.doc.get(&ids[0]).is_some_and(|n| n.absolute_position);
           let id = ops::wrap_in_frame(&mut self.doc, &ids, &mut self.gen, NodeType::Frame).ok_or("nothing selected")?;
+          // ... and its pins: the wrapper is what sits in the parent now.
+          let pins = if lone_absolute {
+            self.doc.get_mut(&ids[0]).map(|c| {
+              c.absolute_position = false;
+              std::mem::take(&mut c.constraints)
+            })
+          } else {
+            None
+          };
           if let Some(n) = self.doc.get_mut(&id) {
             n.fills.clear();
             n.absolute_position = lone_absolute;
-          }
-          if lone_absolute {
-            if let Some(c) = self.doc.get_mut(&ids[0]) {
-              c.absolute_position = false;
-            }
+            n.constraints = pins.unwrap_or_default();
           }
           id
         };
@@ -7566,6 +7571,38 @@ mod tests {
     assert!(e.doc.get(&wrapper).is_none());
     assert_eq!(e.doc.get(&f).unwrap().layout.clone().unwrap(), before);
     assert!(e.doc.get(&f).unwrap().parent.is_none());
+  }
+
+  #[test]
+  fn shift_a_on_a_lone_absolute_pinned_frame_hands_the_wrapper_its_pins() {
+    let mut e = engine();
+    let r = e
+      .dispatch(Command::Ai {
+        tool: "create_nodes".into(),
+        input: json!({ "nodes": [{ "type": "frame", "name": "Card", "width": 300, "height": 120, "layout": { "direction": "horizontal" }, "children": [
+          { "type": "rectangle", "name": "Label", "width": 100, "height": 20 },
+          { "type": "frame", "name": "Badge", "width": 20, "height": 20, "absolute": true, "x": 270, "y": 90, "layout": { "direction": "horizontal" },
+            "constraints": { "horizontal": "right", "vertical": "bottom" }, "children": [{ "type": "rectangle", "width": 8, "height": 8 }] }] }] }),
+      })
+      .unwrap();
+    let card = r["created"][0]["id"].as_str().unwrap().to_string();
+    let badge = e.doc.get(&card).unwrap().children[1].clone();
+    let wrapper = id_of(&e.dispatch(Command::AddAutoLayout { ids: vec![badge.clone()] }).unwrap());
+    let w = e.doc.get(&wrapper).unwrap();
+    assert!(w.absolute_position);
+    assert_eq!(
+      (w.constraints.horizontal, w.constraints.vertical),
+      (crate::model::ConstraintH::Right, crate::model::ConstraintV::Bottom)
+    );
+    assert_eq!(e.doc.get(&badge).unwrap().constraints, crate::model::Constraints::default());
+    assert!(!e.doc.get(&badge).unwrap().absolute_position);
+    let x = w.x;
+    update_ids(&mut e, vec![card], json!({ "width": 400 }));
+    assert_eq!(
+      e.doc.get(&wrapper).unwrap().x,
+      x + 100.0,
+      "the wrapper stays pinned to the right edge"
+    );
   }
 
   #[test]

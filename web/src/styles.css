@@ -380,8 +380,9 @@ textarea {
   gap: 6px;
   margin-bottom: 6px;
 }
+/* Rendered even when empty so the live region is in place before its text arrives. */
 .export-error:empty {
-  display: none;
+  margin: 0;
 }
 .export-error {
   margin: -2px 0 6px;

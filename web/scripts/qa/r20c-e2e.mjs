@@ -115,6 +115,7 @@ const btn = created(await tool("create_nodes", { nodes: [{ type: "frame", name: 
   { type: "ellipse", name: "Badge", width: 10, height: 10, fill: "#FF0000", absolute: true, x: 0, y: 0, constraints: { horizontal: "right", vertical: "top" } }] }] }))[0];
 d = await doc();
 const [label, badge] = kids(d, btn);
+check("create_nodes keeps the badge where the spec put it (x 0, 10 wide) in the new hug frame", d.nodes[badge].x === 0 && d.nodes[badge].width === 10, `${d.nodes[badge].x} ${d.nodes[badge].width}`);
 // Put the badge on the right edge (4 px in), then grow the label.
 await tool("update_nodes", { updates: [{ id: badge, x: d.nodes[btn].width - 14, y: 2 }] });
 d = await doc();

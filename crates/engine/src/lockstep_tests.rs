@@ -813,7 +813,9 @@ impl Run {
             input: json!({"parentId": p, "nodes": [{"type":"frame","name":"Pinned","absolute":true,"x":x,"y":y,"width":40,"height":24,
               "constraints":{"horizontal":h,"vertical":v},
               "layout":{"direction":"horizontal"},
-              "children":[{"type":"text","text":"pin"}]}]}),
+              "children":[{"type":"text","text":"pin"}]},
+              {"type":"group","name":"PinnedGroup","absolute":true,"x":x/2.0,"y":y/2.0,"constraints":{"horizontal":h,"vertical":v},
+              "children":[{"type":"rectangle","width":10,"height":4},{"type":"rectangle","x":20,"width":10,"height":4}]}]}),
           });
         }
         if self.r.chance(50) {
