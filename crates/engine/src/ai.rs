@@ -112,7 +112,7 @@ fn spec_schema() -> Value {
       "backgroundBlur": { "type": "number" },
       "clip": { "type": "boolean" },
       "overflow": { "type": "string", "enum": ["none", "horizontal", "vertical", "both"], "description": "Frames: which directions the content scrolls in the prototype (the frame also clips). Needs content taller or wider than the frame" },
-      "scrollBehavior": { "type": "string", "enum": ["scroll", "fixed"], "description": "Layers inside a scrolling frame: scroll with the content (default) or stay put (a fixed header or tab bar). Sticky is not supported" },
+      "scrollBehavior": { "type": "string", "enum": ["scroll", "fixed", "sticky"], "description": "Layers inside a scrolling frame: scroll with the content (default), fixed (stay put, like a tab bar) or sticky (scrolls until it reaches the top of the frame, then stays until its parent scrolls away; needs a frame that scrolls vertically)" },
       "layout": {
         "type": "object",
         "description": "Auto layout for frames",
@@ -310,11 +310,12 @@ pub fn tool_defs() -> Value {
           "backgroundOpacity": { "type": "number", "description": "0-1, default 0.3" }
         } },
         "preserveScroll": { "type": "boolean", "description": "For navigate, swap_overlay and change_to: the screen that opens keeps the scroll position of the one it replaces (scrolling frames matched by layer name). Default false" },
-        "trigger": { "type": "string", "enum": ["click", "hover", "press", "delay", "mouse_enter", "mouse_leave", "mouse_down", "mouse_up", "key"], "description": "hover and press revert when the pointer leaves or lets go; key needs `key`" },
+        "trigger": { "type": "string", "enum": ["click", "hover", "press", "delay", "mouse_enter", "mouse_leave", "mouse_down", "mouse_up", "key", "drag"], "description": "hover and press revert when the pointer leaves or lets go; key needs `key`; drag (also on_drag) starts when the pointer has moved a few pixels and follows it with smart_animate, move_in, move_out, push or a slide; other transitions play when the drag starts" },
         "key": { "type": "string", "description": "For trigger key: a key or combination such as 'Enter', 'ArrowRight' or 'Shift+K'" },
-        "transition": { "type": "string", "enum": ["instant", "dissolve", "smart_animate", "slide_left", "slide_right", "slide_up", "slide_down", "move_in", "move_out", "push"], "description": "smart_animate matches the direct children of both screens by name" },
+        "transition": { "type": "string", "enum": ["instant", "dissolve", "smart_animate", "slide_left", "slide_right", "slide_up", "slide_down", "move_in", "move_out", "push"], "description": "smart_animate matches layers by name through nested frames, groups and instances" },
         "direction": { "type": "string", "enum": ["left", "right", "up", "down"], "description": "For move_in, move_out and push (default left)" },
-        "easing": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out", "ease_in_back", "ease_out_back", "ease_in_out_back"], "description": "Default ease_out" },
+        "easing": { "type": "string", "enum": ["linear", "ease_in", "ease_out", "ease_in_out", "ease_in_back", "ease_out_back", "ease_in_out_back", "custom"], "description": "Default ease_out. custom needs `bezier`" },
+        "bezier": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4, "description": "A custom timing curve [x1, y1, x2, y2] like CSS cubic-bezier (x1 and x2 between 0 and 1). Given without easing it implies custom" },
         "duration": { "type": "number", "description": "Transition milliseconds (default 300)" },
         "clear": { "type": "boolean", "description": "Remove existing interactions first. With nothing else given, only clears them and returns {cleared: n}" },
         "delay": { "type": "number", "description": "Milliseconds before a delay trigger fires (default 800)" }
@@ -1618,6 +1619,9 @@ fn update_nodes(e: &mut Engine, input: &Value) -> Result<Value, String> {
         }
       }
     }
+    if spec.get("scrollBehavior").is_some() {
+      warn_sticky(&mut cx, &e.doc, id);
+    }
     // A merge patch can't delete map entries: unbound properties and unpinned collections go
     // through their own commands.
     // Stale keys (a property this build doesn't know, a collection that is gone) are dropped
@@ -1984,6 +1988,8 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
       ("mouse_down", Trigger::MouseDown),
       ("mouse_up", Trigger::MouseUp),
       ("key", Trigger::Key),
+      ("drag", Trigger::OnDrag),
+      ("on_drag", Trigger::OnDrag),
     ],
   )?;
   let key = match input.get("key").filter(|v| !v.is_null()) {
@@ -2006,10 +2012,21 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
       ("down", crate::model::Direction::Down),
     ],
   )?;
+  // `easing: "custom"` (or a `bezier` alone) means the custom curve; the preset stays ease-out
+  // for editors that don't know curves.
+  let custom = input
+    .get("easing")
+    .and_then(Value::as_str)
+    .is_some_and(|t| t.trim().eq_ignore_ascii_case("custom"));
+  let bezier = match input.get("bezier").filter(|v| !v.is_null()) {
+    Some(v) => Some(bezier_of(&cx, v)?),
+    None if custom => return Err(cx.err("bezier", "easing custom needs `bezier`, [x1, y1, x2, y2]")),
+    None => None,
+  };
   let easing = parse::exact(
     &cx,
     "easing",
-    input.get("easing"),
+    input.get("easing").filter(|_| !custom),
     crate::model::Easing::EaseOut,
     &[
       ("linear", crate::model::Easing::Linear),
@@ -2156,6 +2173,7 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
     key,
     direction,
     easing,
+    bezier,
     overlay,
     preserve_scroll,
   });
@@ -2177,6 +2195,37 @@ fn set_prototype(e: &mut Engine, input: &Value) -> Result<Value, String> {
       .collect::<Vec<_>>());
   }
   Ok(r)
+}
+
+/// Sticky is stored wherever it is set but only does something inside a frame that scrolls
+/// vertically: says so when no ancestor does.
+fn warn_sticky(cx: &mut Ctx, doc: &Document, id: &str) {
+  if doc.get(id).is_none_or(|n| n.scroll_behavior != ScrollBehavior::Sticky) {
+    return;
+  }
+  let scrolls = doc
+    .ancestors(id)
+    .iter()
+    .filter_map(|a| doc.get(a))
+    .any(|a| matches!(a.overflow, Overflow::Vertical | Overflow::Both));
+  if !scrolls {
+    cx.warn("scrollBehavior \"sticky\" is saved, but takes effect only inside a frame that scrolls vertically (set overflow \"vertical\" on a parent frame)");
+  }
+}
+
+/// `[x1, y1, x2, y2]` of a custom timing curve: four finite numbers, the x values within 0 to 1.
+fn bezier_of(cx: &Ctx, v: &Value) -> Result<[f64; 4], String> {
+  let nums: Option<Vec<f64>> = v
+    .as_array()
+    .filter(|a| a.len() == 4)
+    .and_then(|a| a.iter().map(Value::as_f64).collect());
+  let Some(n) = nums.filter(|n| n.iter().all(|x| x.is_finite())) else {
+    return Err(cx.err("bezier", "must be four numbers [x1, y1, x2, y2]"));
+  };
+  if !(0.0..=1.0).contains(&n[0]) || !(0.0..=1.0).contains(&n[2]) {
+    return Err(cx.err("bezier", "x1 and x2 must be between 0 and 1"));
+  }
+  Ok([n[0], n[1], n[2], n[3]])
 }
 
 /// The style a rename/delete entry names: by name or id, across colour, text, effect and grid
@@ -3301,6 +3350,7 @@ fn build(e: &mut Engine, cx: &mut Ctx, spec: &Value, parent: Option<&str>, page:
     let id = n.id.clone();
     let index = parent.and_then(|p| crate::devices::before_chrome(&e.doc, p));
     e.doc.insert(n, parent, page, index);
+    warn_sticky(cx, &e.doc, &id);
     match spec.get("children") {
       None | Some(Value::Null) => {}
       // An empty list is fine on any layer (models often send `children: []` everywhere).
@@ -3480,19 +3530,17 @@ pub fn apply_spec(cx: &mut Ctx, doc: &Document, n: &mut Node, s: &Value, creatin
     )?;
   }
   if let Some(v) = s.get("scrollBehavior").filter(|v| !v.is_null()) {
-    if v.as_str().is_some_and(|t| t.trim().eq_ignore_ascii_case("sticky")) {
-      cx.warn(
-        "scrollBehavior \"sticky\" is not supported; the layer keeps its current behaviour (use \"fixed\" to keep it in place)".to_string(),
-      );
-    } else {
-      n.scroll_behavior = parse::choice(
-        cx,
-        "scrollBehavior",
-        v,
-        &[(&["scroll"], ScrollBehavior::Scroll), (&["fixed"], ScrollBehavior::Fixed)],
-        &parse::no_hint,
-      )?;
-    }
+    n.scroll_behavior = parse::choice(
+      cx,
+      "scrollBehavior",
+      v,
+      &[
+        (&["scroll"], ScrollBehavior::Scroll),
+        (&["fixed"], ScrollBehavior::Fixed),
+        (&["sticky"], ScrollBehavior::Sticky),
+      ],
+      &parse::no_hint,
+    )?;
   }
   if let Some(v) = parse::opt_bool(cx, s, "absolute")? {
     n.absolute_position = v;
@@ -4676,6 +4724,12 @@ pub fn diff_patch(before: &Node, after: &Node) -> Value {
     ] {
       if bm.contains_key(k) && !am.contains_key(k) {
         out.insert(k.into(), Value::Null);
+      }
+    }
+    // Enums left out of saved nodes at their default: going back to it is the default's name.
+    for (k, default) in [("overflow", "none"), ("scrollBehavior", "scroll")] {
+      if bm.contains_key(k) && !am.contains_key(k) {
+        out.insert(k.into(), json!(default));
       }
     }
   }

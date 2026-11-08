@@ -129,6 +129,8 @@ interface Store {
   hover: string | null;
   editingText: string | null;
   editingVector: string | null;
+  /** Vector edit's Bend toggle: a plain drag on a segment bends it, on an anchor pulls out handles. Never saved. */
+  vectorBend: boolean;
   /** Pages whose empty-page prompt was closed in this session (it still goes away once something is drawn). */
   emptyPromptClosed: string[];
   /** A layer the Layers tree should start renaming (F2 on the canvas); the tree clears it. */
@@ -228,6 +230,7 @@ export const useStore = create<Store>(() => ({
   hover: null,
   editingText: null,
   editingVector: null,
+  vectorBend: false,
   emptyPromptClosed: [],
   renameRequest: null,
   vectorPoints: [],
@@ -485,6 +488,8 @@ useStore.subscribe((s, prev) => {
   if (s.editingVector !== prev.editingVector) {
     pathShape = shapeOf(s.editingVector);
     if (s.vectorPoints.length) useStore.setState({ vectorPoints: [] });
+    // Bend belongs to one vector edit session too.
+    if (!s.editingVector && s.vectorBend) useStore.setState({ vectorBend: false });
   }
 });
 

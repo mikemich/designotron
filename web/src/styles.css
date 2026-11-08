@@ -830,6 +830,12 @@ button.swatch > i {
   outline: 2px solid var(--select);
   outline-offset: -2px;
 }
+/* Vector edit, over a segment a drag would bend (Bend on, or Ctrl/Cmd held): a curve with a white halo. */
+.canvas.bend-ready {
+  cursor:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath d='M3 19C3 9 11 5 21 5' fill='none' stroke='white' stroke-width='4' stroke-linecap='round'/%3E%3Cpath d='M3 19C3 9 11 5 21 5' fill='none' stroke='black' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E") 12 12,
+    crosshair;
+}
 .canvas > svg {
   position: absolute;
   left: 0;
@@ -847,6 +853,12 @@ button.swatch > i {
 }
 .dt-content .zoom-lod .gk {
   display: inline;
+}
+/* A background blur's copy of what lies below it is the costliest thing the canvas paints, so it
+   waits until zooming or panning stops (`render.rs` marks it `dt-bb`). */
+.dt-content .zooming .dt-bb,
+.dt-content .moving .dt-bb {
+  display: none;
 }
 .canvas .overlay {
   pointer-events: none;
@@ -1383,6 +1395,12 @@ a.btn {
 }
 .presenter:focus {
   outline: none;
+}
+/* Full screen: fill the screen whatever the browser's own fullscreen box does. */
+.presenter:fullscreen {
+  width: 100%;
+  height: 100%;
+  background: #111;
 }
 .presenter .stage {
   position: relative;

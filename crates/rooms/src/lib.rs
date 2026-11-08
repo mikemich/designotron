@@ -270,6 +270,70 @@ struct Peer {
   granular: bool,
   /// Also reads moves and per-message comment changes, and prunes dangling references itself.
   lists: bool,
+  /// The document model revision this editor understands (`MODEL_REVISION` at most); the room
+  /// rewrites what it sends it with `collab::downgrade`.
+  model: u32,
+}
+
+/// The model of an editor that joined without saying (the field came with revision 4).
+const UNSAID_MODEL: u32 = 3;
+
+/// `text` (a message the room sends, as JSON) as an editor at document model `model` can read
+/// it, or `text` itself when nothing in it needs rewriting. Revisions 3 and up only differ by
+/// the names On drag and sticky, so a message without them is passed on as it is.
+fn for_model(text: &Arc<String>, model: u32) -> Arc<String> {
+  if model >= MODEL_REVISION || (model >= 3 && !text.contains("\"onDrag\"") && !text.contains("\"sticky\"")) {
+    return text.clone();
+  }
+  match serde_json::from_str::<Value>(text) {
+    Ok(mut v) => {
+      designotron_engine::collab::downgrade_value(&mut v, model);
+      Arc::new(v.to_string())
+    }
+    Err(_) => text.clone(),
+  }
+}
+
+/// The document as one editor can read it. Only the document is rewritten, and only for editors
+/// below this build's model; the images next to it are never parsed or copied.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum DocOut<'a> {
+  Raw(&'a Document),
+  /// Already text, with nothing in it that needs rewriting.
+  Text(Box<RawValue>),
+  Older(Value),
+}
+
+fn doc_for(doc: &Document, model: u32) -> DocOut<'_> {
+  if model >= MODEL_REVISION {
+    return DocOut::Raw(doc);
+  }
+  // Revisions 3 and up differ only by the names On drag and sticky: look for them in the text
+  // before building a tree.
+  let text = serde_json::to_string(doc).unwrap_or_default();
+  if model >= 3 && !text.contains("\"onDrag\"") && !text.contains("\"sticky\"") {
+    if let Ok(raw) = RawValue::from_string(text) {
+      return DocOut::Text(raw);
+    }
+    return DocOut::Raw(doc);
+  }
+  let mut v = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+  designotron_engine::collab::downgrade_value(&mut v, model);
+  DocOut::Older(v)
+}
+
+/// `for_model` for one message sent to several peers: one rewrite per distinct model.
+#[derive(Default)]
+struct ModelTexts(HashMap<u32, Arc<String>>);
+
+impl ModelTexts {
+  fn get(&mut self, text: &Arc<String>, model: u32) -> Arc<String> {
+    if model >= MODEL_REVISION {
+      return text.clone();
+    }
+    self.0.entry(model).or_insert_with(|| for_model(text, model)).clone()
+  }
 }
 
 /// The sending half of one connection.
@@ -309,6 +373,9 @@ struct Incoming<'a> {
   granular: bool,
   #[serde(default)]
   lists: bool,
+  /// The editor's document model revision; editors that predate the field are at 3.
+  #[serde(default)]
+  model: Option<u32>,
   #[serde(borrow, default)]
   delta: Option<&'a RawValue>,
   #[serde(borrow, default)]
@@ -320,7 +387,7 @@ struct Welcome<'a> {
   #[serde(rename = "type")]
   kind: &'static str,
   you: u64,
-  doc: Option<&'a Document>,
+  doc: Option<DocOut<'a>>,
   assets: &'a Map<String, Value>,
   peers: Vec<PeerInfo<'a>>,
   /// Deltas are acknowledged in order (see the protocol above).
@@ -352,7 +419,7 @@ struct PeerInfo<'a> {
 struct Reload<'a> {
   #[serde(rename = "type")]
   kind: &'static str,
-  doc: &'a Option<Document>,
+  doc: Option<DocOut<'a>>,
   assets: &'a Map<String, Value>,
 }
 
@@ -1336,11 +1403,16 @@ impl Rooms {
       return Step::Close(BUSY.into());
     }
     let none = Map::new();
+    let own_model = m.model.unwrap_or(UNSAID_MODEL).min(MODEL_REVISION);
     let welcome = Welcome {
       kind: "welcome",
       you: id,
       // Omitted when this editor's own document became the room's.
-      doc: if adopt { None } else { r.doc.as_ref() },
+      doc: if adopt {
+        None
+      } else {
+        r.doc.as_ref().map(|d| doc_for(d, own_model))
+      },
       assets: if adopt { &none } else { &r.assets },
       peers: r
         .peers
@@ -1361,21 +1433,35 @@ impl Rooms {
       role: role.name(),
     };
     let welcome = serde_json::to_string(&welcome).unwrap_or_default();
+    let welcome = Arc::new(welcome);
     if adopt && self.data_dir.is_some() {
       // The sharer is told once its file is saved (the commit that follows snapshots it).
-      self.put(r, out, Arc::new(welcome), true);
+      self.put(r, out, welcome, true);
     } else {
-      out.send(welcome);
+      out.send_shared(welcome);
     }
     if adopt && !r.peers.is_empty() {
       // A reset replaces everyone's document.
-      let reload = Reload {
-        kind: "reload",
-        doc: &r.doc,
-        assets: &r.assets,
-      };
-      let reload = serde_json::to_string(&reload).unwrap_or_default();
-      self.hold_text(r, id, reload);
+      // One text per model among the others: older editors get the document they can read.
+      let mut texts: HashMap<u32, Arc<String>> = HashMap::new();
+      let to: Vec<(Outbox, Arc<String>)> = r
+        .peers
+        .values()
+        .map(|p| {
+          let text = texts.entry(p.model).or_insert_with(|| {
+            let reload = Reload {
+              kind: "reload",
+              doc: r.doc.as_ref().map(|d| doc_for(d, p.model)),
+              assets: &r.assets,
+            };
+            Arc::new(serde_json::to_string(&reload).unwrap_or_default())
+          });
+          (p.out.clone(), text.clone())
+        })
+        .collect();
+      for (out, text) in to {
+        self.put(r, &out, text, false);
+      }
     }
     r.peers.insert(
       id,
@@ -1387,6 +1473,7 @@ impl Rooms {
         presence: Value::Null,
         granular: m.granular,
         lists: m.lists && m.granular,
+        model: m.model.unwrap_or(UNSAID_MODEL).min(MODEL_REVISION),
       },
     );
     self.people.fetch_add(1, Ordering::Relaxed);
@@ -1524,19 +1611,21 @@ impl Rooms {
       .flatten()
       .and_then(|w| to_raw(&w));
     let old_text = whole.as_deref().map(text_of).or_else(|| gran_text.clone());
+    // Older models get each variant once, rewritten (On drag dropped, sticky as scroll).
+    let mut by_model: [ModelTexts; 3] = Default::default();
     let to: Vec<(Outbox, Arc<String>)> = r
       .peers
       .iter()
       .filter(|(pid, _)| **pid != id)
       .filter_map(|(_, p)| {
-        let text = if p.lists {
-          raw_text.clone()
+        let (variant, text) = if p.lists {
+          (0, raw_text.clone())
         } else if p.granular {
-          gran_text.clone()
+          (1, gran_text.clone())
         } else {
-          old_text.clone()
+          (2, old_text.clone())
         };
-        text.map(|t| (p.out.clone(), t))
+        text.map(|t| (p.out.clone(), by_model[variant].get(&t, p.model)))
       })
       .collect();
     for (o, text) in to {
@@ -1555,7 +1644,14 @@ impl Rooms {
           delta: &fix,
           assets: None,
         };
-        self.put(r, &out, Arc::new(serde_json::to_string(&text).unwrap_or_default()), false);
+        // It carries whole layers from the room's document: in the sender's model.
+        let model = r.peers.get(&id).map_or(UNSAID_MODEL, |p| p.model);
+        self.put(
+          r,
+          &out,
+          for_model(&Arc::new(serde_json::to_string(&text).unwrap_or_default()), model),
+          false,
+        );
       }
     }
     if assets.is_some() && !keep {
@@ -2088,6 +2184,7 @@ mod tests {
         presence: Value::Null,
         granular,
         lists,
+        model: MODEL_REVISION,
         role: Role::Editor,
       },
       rx,
@@ -2207,6 +2304,12 @@ mod tests {
     /// Joins as an editor of the given dialect (`granular`: per-id changes, `lists`: moves and
     /// per-message comments); the welcome is the first message in the receiver.
     async fn join_as(&mut self, doc: Option<Value>, reset: bool, granular: bool, lists: bool) -> (u64, Rx) {
+      self.join_model(doc, reset, granular, lists, None).await
+    }
+
+    /// `join_as` for an editor that says its document model revision (or none, like editors
+    /// that predate revision 4).
+    async fn join_model(&mut self, doc: Option<Value>, reset: bool, granular: bool, lists: bool, model: Option<u32>) -> (u64, Rx) {
       self.next += 1;
       let id = self.next;
       let (tx, rx) = mpsc::unbounded_channel();
@@ -2219,6 +2322,9 @@ mod tests {
       let mut msg = json!({ "type": "join", "name": "p", "color": "#000", "granular": granular, "lists": lists, "reset": reset });
       if let Some(d) = doc {
         msg["doc"] = d;
+      }
+      if let Some(model) = model {
+        msg["model"] = json!(model);
       }
       let text = msg.to_string();
       let m: Incoming = serde_json::from_str(&text).unwrap();
@@ -2361,6 +2467,93 @@ mod tests {
     assert_eq!(doc.comments["c1"].messages.len(), 2);
   }
 
+  /// A frame with a sticky layer and On drag, a click interaction, and a Move one.
+  fn v4_doc() -> (Value, String) {
+    let (mut doc, ids) = lists_doc();
+    let frame = ids[0].clone();
+    doc["nodes"][&frame]["scrollBehavior"] = json!("sticky");
+    doc["nodes"][&frame]["interactions"] = json!([
+      { "trigger": "onDrag", "action": "navigate", "transition": "smartAnimate" },
+      { "trigger": "onClick", "action": "navigate", "transition": "push", "direction": "left" }
+    ]);
+    (doc, frame)
+  }
+
+  fn v4_change(frame: &str) -> String {
+    delta_msg(json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [],
+      "patch": { frame: { "scrollBehavior": "sticky",
+        "interactions": [{ "trigger": "onDrag", "action": "back" }, { "trigger": "onClick", "action": "back" }] } } }))
+  }
+
+  #[tokio::test]
+  async fn older_editors_are_sent_sticky_as_scroll_and_no_on_drag() {
+    let dir = tmp_dir("model-peers");
+    let mut h = Harness::open(&dir).await;
+    let (doc, frame) = v4_doc();
+    let (ana, _) = h.join_model(Some(doc), true, true, true, Some(4)).await;
+    h.commit().await;
+    // Ben joins without a model (revision 3), Cai says 4, Dan says 2.
+    let (_ben, mut ben_rx) = h.join_model(None, false, true, true, None).await;
+    let (_cai, mut cai_rx) = h.join_model(None, false, true, true, Some(4)).await;
+    let (_dan, mut dan_rx) = h.join_model(None, false, true, true, Some(2)).await;
+    h.commit().await;
+    let welcomes: Vec<Value> = [&mut ben_rx, &mut cai_rx, &mut dan_rx]
+      .into_iter()
+      .map(|rx| drain(rx).into_iter().find(|m| m["type"] == "welcome").unwrap())
+      .collect();
+    let node = |w: &Value| w["doc"]["nodes"][&frame].clone();
+    assert_eq!(node(&welcomes[0])["scrollBehavior"], "scroll");
+    assert_eq!(node(&welcomes[0])["interactions"].as_array().unwrap().len(), 1);
+    assert_eq!(node(&welcomes[0])["interactions"][0]["trigger"], "onClick");
+    assert_eq!(node(&welcomes[0])["interactions"][0]["transition"], "push", "revision 3 keeps Push");
+    assert_eq!(welcomes[0]["model"], 4, "the room says its own model");
+    assert_eq!(node(&welcomes[1])["scrollBehavior"], "sticky");
+    assert_eq!(node(&welcomes[1])["interactions"].as_array().unwrap().len(), 2);
+    assert_eq!(
+      node(&welcomes[2])["interactions"][0]["transition"],
+      "slideLeft",
+      "revision 2 gets the old names too"
+    );
+    // A change from Ana: raw for Cai, downgraded for Ben and Dan, and the room keeps it whole.
+    h.delta_text(ana, &v4_change(&frame)).await;
+    h.commit().await;
+    let get = |rx: &mut Rx| drain(rx).into_iter().find(|m| m["type"] == "delta").unwrap()["delta"]["patch"][&frame].clone();
+    let (ben, cai, dan) = (get(&mut ben_rx), get(&mut cai_rx), get(&mut dan_rx));
+    assert_eq!(cai["scrollBehavior"], "sticky");
+    assert_eq!(cai["interactions"].as_array().unwrap().len(), 2);
+    for old in [&ben, &dan] {
+      assert_eq!(old["scrollBehavior"], "scroll");
+      assert_eq!(old["interactions"].as_array().unwrap().len(), 1);
+      assert_eq!(old["interactions"][0]["trigger"], "onClick");
+    }
+    let r = h.room.lock().await;
+    let n = r.doc.as_ref().unwrap().get(&frame).unwrap();
+    assert_eq!(n.interactions.len(), 2, "the room stores revision 4 values");
+    assert_eq!(n.scroll_behavior, designotron_engine::model::ScrollBehavior::Sticky);
+  }
+
+  #[tokio::test]
+  async fn a_reload_is_downgraded_for_older_editors_only() {
+    let dir = tmp_dir("model-reload");
+    let mut h = Harness::open(&dir).await;
+    let (doc, frame) = v4_doc();
+    let (_ana, _) = h.join_model(Some(doc.clone()), true, true, true, Some(4)).await;
+    h.commit().await;
+    let (_ben, mut ben_rx) = h.join_model(None, false, true, true, None).await;
+    let (_cai, mut cai_rx) = h.join_model(None, false, true, true, Some(4)).await;
+    h.commit().await;
+    drain(&mut ben_rx);
+    drain(&mut cai_rx);
+    let (_dee, _) = h.join_model(Some(doc), true, true, true, Some(4)).await;
+    h.commit().await;
+    let reload = |rx: &mut Rx| drain(rx).into_iter().find(|m| m["type"] == "reload").unwrap()["doc"]["nodes"][&frame].clone();
+    let (ben, cai) = (reload(&mut ben_rx), reload(&mut cai_rx));
+    assert_eq!(ben["scrollBehavior"], "scroll");
+    assert_eq!(ben["interactions"].as_array().unwrap().len(), 1);
+    assert_eq!(cai["scrollBehavior"], "sticky");
+    assert_eq!(cai["interactions"].as_array().unwrap().len(), 2);
+  }
+
   #[tokio::test]
   async fn concurrent_replies_through_the_room_both_stay() {
     let dir = tmp_dir("lists-replies");
@@ -2394,8 +2587,10 @@ mod tests {
   async fn a_pruned_layer_reaches_older_peers_whole_and_lists_peers_prune_themselves() {
     let dir = tmp_dir("lists-prune");
     let mut h = Harness::open(&dir).await;
-    let (doc, ids) = lists_doc();
+    let (mut doc, ids) = lists_doc();
     let (rect, var) = (ids[5].clone(), ids[6].clone());
+    // The pruned layer is a revision 4 one: an editor without `model` must get it as scroll.
+    doc["nodes"][&rect]["scrollBehavior"] = json!("sticky");
     let (ana, _, mut ana_rx) = h.join_as_welcomed(Some(doc), true).await;
     let (_ben, mut ben_rx) = h.join_as(None, false, true, true).await;
     let (cai, mut cai_rx) = h.join_as(None, false, true, false).await;
@@ -2445,6 +2640,15 @@ mod tests {
     assert_eq!(got[1]["type"], "delta");
     assert_eq!(got[1]["delta"]["nodes"][&rect]["id"], json!(rect));
     assert!(got[1]["delta"]["nodes"][&rect]["bindings"].as_object().is_none_or(|b| b.is_empty()));
+    assert_eq!(
+      got[1]["delta"]["nodes"][&rect]["scrollBehavior"].as_str().unwrap_or("scroll"),
+      "scroll",
+      "the repair is in the sender's model too"
+    );
+    assert_eq!(
+      cai_got[0]["delta"]["nodes"][&rect]["scrollBehavior"].as_str().unwrap_or("scroll"),
+      "scroll"
+    );
   }
 
   #[test]
@@ -2795,6 +2999,7 @@ mod tests {
             presence: Value::Null,
             granular: true,
             lists: true,
+            model: MODEL_REVISION,
           },
         );
       }

@@ -2,6 +2,8 @@
 // components (a private engine that holds the variant state), motion tables and key names.
 
 import { inlineAssets } from "./assets";
+import { bezierOf, cssBezier, easeOf, linear, type Ease } from "./easing";
+import type { Side } from "./smart";
 import { getDoc, getEngine, toast } from "./store";
 import type { WasmEngine } from "./wasm/pkg/designotron_engine_wasm";
 import type { Direction, Doc, Easing, Interaction, Node, Overflow, Rect } from "./types";
@@ -22,8 +24,12 @@ let changes = 0;
 
 export const playerRevision = () => changes;
 
+/** Layers `pq` leaves out of every picture it draws (see `buildSceneWithout`). */
+let skipLayers: string[] = [];
+
 /** Query through the player's engine when it exists, else the editor's. */
 export function pq<T = any>(q: Record<string, unknown>): T {
+  if (skipLayers.length && q.q === "exportSvg") q = { ...q, hide: [...((q.hide as string[] | undefined) ?? []), ...skipLayers] };
   return JSON.parse((pe?.engine ?? getEngine()).query(JSON.stringify(q)));
 }
 
@@ -140,39 +146,44 @@ export interface Motion {
   ms: number;
   /** CSS timing function. */
   easing: string;
+  /** The same curve as a function (smart animate and drags read their own clock). */
+  ease: Ease;
 }
 
-export const INSTANT: Motion = { kind: "instant", dir: "left", ms: 0, easing: "linear" };
+export const INSTANT: Motion = { kind: "instant", dir: "left", ms: 0, easing: "linear", ease: linear };
 
 const SLIDES: Record<string, Direction> = { slideLeft: "left", slideRight: "right", slideUp: "up", slideDown: "down" };
 
 /** The motion an interaction asks for (old files: 300 ms ease-out; Slide is Move in). */
 export function motionOf(it: Interaction): Motion {
   const ms = it.durationMs > 0 ? it.durationMs : 300;
-  const easing = EASING_CSS[it.easing ?? "easeOut"] ?? "ease-out";
+  // A custom curve replaces the preset; the CSS string and the function describe the same one.
+  const bz = bezierOf(it);
+  const easing = it.bezier ? cssBezier(bz) : (EASING_CSS[it.easing ?? "easeOut"] ?? "ease-out");
+  const ease = easeOf(bz);
   const dir = it.direction ?? "left";
   switch (it.transition) {
     case "instant":
       return INSTANT;
     case "smartAnimate":
-      return { kind: "smart", dir, ms, easing };
+      return { kind: "smart", dir, ms, easing, ease };
     case "moveIn":
     case "moveOut":
     case "push":
-      return { kind: it.transition, dir, ms, easing };
+      return { kind: it.transition, dir, ms, easing, ease };
     case "slideLeft":
     case "slideRight":
     case "slideUp":
     case "slideDown":
       // The classic Slide: only the new screen moves, over nothing.
-      return { kind: "slide", dir: SLIDES[it.transition], ms, easing };
+      return { kind: "slide", dir: SLIDES[it.transition], ms, easing, ease };
     default:
-      return { kind: "dissolve", dir, ms, easing };
+      return { kind: "dissolve", dir, ms, easing, ease };
   }
 }
 
 /** The slide the next/previous frame buttons and arrow keys play. */
-export const slide = (dir: Direction): Motion => ({ kind: "slide", dir, ms: 300, easing: EASING_CSS.easeOut });
+export const slide = (dir: Direction): Motion => ({ kind: "slide", dir, ms: 300, easing: EASING_CSS.easeOut, ease: easeOf(bezierOf({ easing: "easeOut" })) });
 
 export const OPPOSITE: Record<Direction, Direction> = { left: "right", right: "left", up: "down", down: "up" };
 
@@ -243,6 +254,8 @@ export interface ScrollerScene {
   scrollers: ScrollerScene[];
   /** Layers painted after this scroller, drawn over it (in the container that holds it). */
   above: AboveScene | null;
+  /** Sticky layers of this scroller (only scrollers that scroll vertically have any). */
+  sticky: StickyScene[];
   /** This scroller's own layer, then the hotspot owners above it (for a click on its empty area). */
   chain: string[];
 }
@@ -255,11 +268,41 @@ export interface AboveScene {
   hotspots: Hotspot[];
 }
 
+/** A layer's background blur, drawn live behind a fixed or sticky layer: an underlay with CSS
+ *  `backdrop-filter`, so the content that scrolls under the layer is blurred. `blur` is the
+ *  CSS radius in px (the layer's blur / 2, as in code export). */
+export interface Backdrop {
+  blur: number;
+  /** CSS border-radius of the layer ("50%" for an ellipse). */
+  radius: string;
+}
+
 export interface FixedScene {
   id: string;
   svg: string;
   rect: Rect;
   hotspots: Hotspot[];
+  /** The layer's own box (the picture's `rect` can be bigger: shadows), for the backdrop. */
+  box: Rect;
+  backdrop: Backdrop | null;
+}
+
+/** A layer that scrolls with its scroller until it reaches the top, then stays while its parent
+ *  is in view (`position: sticky` in the view). */
+export interface StickyScene {
+  id: string;
+  svg: string;
+  /** The picture, frame coordinates. */
+  crop: Rect;
+  /** The layer's own box, frame coordinates. */
+  box: Rect;
+  /** Where it stops: the bottom of its parent (of the scroller's content when the parent is the
+   *  scroller), frame coordinates. */
+  limit: number;
+  hotspots: Hotspot[];
+  /** Layers painted after it, which cover it where they overlap. */
+  above: AboveScene | null;
+  backdrop: Backdrop | null;
 }
 
 export interface Scene {
@@ -291,6 +334,16 @@ const isInside = (doc: Doc, id: string, ancestor: string) => {
   return false;
 };
 
+/** The live backdrop of a fixed or sticky layer: it has a visible background blur and is a
+ *  frame, rectangle or ellipse (other shapes show none). */
+export function backdropOf(n: Node): Backdrop | null {
+  const e = n.effects?.find((x) => x.type === "backgroundBlur" && x.visible !== false && x.blur > 0);
+  if (!e || n.rotation) return null;
+  if (n.type === "ellipse") return { blur: e.blur / 2, radius: "50%" };
+  if (n.type === "rectangle" || FRAME_LIKE.includes(n.type)) return { blur: e.blur / 2, radius: radiusOf(n) };
+  return null;
+}
+
 const radiusOf = (n: Node) => (n.cornerRadii ? n.cornerRadii.map((r) => `${r}px`).join(" ") : n.cornerRadius ? `${n.cornerRadius}px` : "0");
 
 /** Whether the children of `n` extend past its box in a direction it scrolls. */
@@ -320,6 +373,8 @@ export function buildScene(frameId: string): Scene {
   // 1. Scrollers (outermost first) and fixed layers.
   const infos: Info[] = [];
   const fixedIds: string[] = [];
+  // Sticky layers: inside a scroller that scrolls vertically, not inside a fixed or sticky layer.
+  const stickies: { id: string; scroller: string; parent: string }[] = [];
   const top = overflows(doc, frame, fb);
   if (top) infos.push({ id: frameId, parent: null, rect: fb, overflow: frame.overflow ?? "none" });
   const walk = (id: string, scroller: string | null) => {
@@ -329,6 +384,13 @@ export function buildScene(frameId: string): Scene {
       if (top && id === frameId && c.scrollBehavior === "fixed" && (!frame.layout || c.absolutePosition)) {
         fixedIds.push(cid);
         continue;
+      }
+      if (c.scrollBehavior === "sticky" && scroller) {
+        const o = infos.find((i) => i.id === scroller)?.overflow;
+        if (o === "vertical" || o === "both") {
+          stickies.push({ id: cid, scroller, parent: id });
+          continue;
+        }
       }
       let next = scroller;
       if (c.overflow && c.overflow !== "none") {
@@ -348,6 +410,7 @@ export function buildScene(frameId: string): Scene {
   const owners: { id: string; its: Interaction[] }[] = [];
   const keyed: Keyed[] = [];
   const fixedSet = new Set(fixedIds);
+  const stickySet = new Set(stickies.map((t) => t.id));
   // Layers painted after a scroller are drawn over it, each as a picture of its own (so the
   // ancestors between it and the container lose their clipping and opacity there). Every such
   // layer goes over the last scroller that comes before it, so a badge between two carousels is
@@ -368,7 +431,7 @@ export function buildScene(frameId: string): Scene {
       for (let x: string | null = sc.id; x && x !== node; x = doc.nodes[x].parent) {
         const sibs = doc.nodes[doc.nodes[x].parent!].children;
         for (const sib of sibs.slice(sibs.indexOf(x) + 1)) {
-          if (doc.nodes[sib]?.visible === false || fixedSet.has(sib) || infoOf.has(sib) || all.includes(sib)) continue;
+          if (doc.nodes[sib]?.visible === false || fixedSet.has(sib) || infoOf.has(sib) || stickySet.has(sib) || all.includes(sib)) continue;
           all.push(sib);
           let owner: string | null = null;
           for (const o of mine) if ((order.get(o.id) ?? 0) < (order.get(sib) ?? 0) && !isInside(doc, o.id, sib)) owner = o.id;
@@ -380,6 +443,30 @@ export function buildScene(frameId: string): Scene {
   }
   const rootOwner = new Map<string, string>();
   for (const [o, list] of aboveRoots) for (const r of list) rootOwner.set(r, o);
+  // Layers painted after a sticky layer cover it: each is a picture of its own over it.
+  const stickyAbove = new Map<string, string[]>();
+  const stickyRootOwner = new Map<string, string>();
+  for (const t of stickies) {
+    const list: string[] = [];
+    for (let x: string | null = t.id; x && x !== t.scroller; x = doc.nodes[x].parent) {
+      const sibs = doc.nodes[doc.nodes[x].parent!].children;
+      for (const sib of sibs.slice(sibs.indexOf(x) + 1)) {
+        if (doc.nodes[sib]?.visible === false || fixedSet.has(sib) || infoOf.has(sib) || stickySet.has(sib) || stickyRootOwner.has(sib) || list.includes(sib)) continue;
+        // A layer with a scroller inside would paint over that scroller as one picture: it doesn't cover the sticky layer.
+        if (infos.some((i) => isInside(doc, i.id, sib))) continue;
+        list.push(sib);
+        stickyRootOwner.set(sib, t.id);
+      }
+    }
+    stickyAbove.set(t.id, list);
+  }
+  // A layer after a sticky layer covers it, so it is drawn after the sticky layer (in its list)
+  // and no longer over the scroller that came before.
+  for (const [o, list] of aboveRoots) {
+    const kept = list.filter((r) => !stickyRootOwner.has(r));
+    aboveRoots.set(o, kept);
+    for (const r of list) if (!kept.includes(r)) rootOwner.delete(r);
+  }
   const visit = (id: string) => {
     const n = doc.nodes[id];
     if (!n) return;
@@ -412,11 +499,15 @@ export function buildScene(frameId: string): Scene {
     // A fixed layer owns its subtree; otherwise the innermost scroller that is a proper ancestor.
     let key = "";
     const fixed = line.find((l) => fixedSet.has(l));
+    const sticky = line.find((l) => stickySet.has(l));
     if (fixed) key = "fixed:" + fixed;
+    else if (sticky) key = "sticky:" + sticky;
     else {
       key = line.slice(1).find((l) => infoOf.has(l)) ?? "";
       const root = line.find((l) => rootOwner.has(l));
       if (root && !line.slice(1).slice(0, line.indexOf(root)).some((l) => infoOf.has(l))) key = "above:" + rootOwner.get(root);
+      const sroot = line.find((l) => stickyRootOwner.has(l));
+      if (sroot && !line.slice(1).slice(0, line.indexOf(sroot)).some((l) => infoOf.has(l))) key = "stickyabove:" + stickyRootOwner.get(sroot);
     }
     if (!into.has(key)) into.set(key, []);
     into.get(key)!.push(h);
@@ -431,15 +522,31 @@ export function buildScene(frameId: string): Scene {
     if (!roots?.length) return null;
     const pieces = roots.map((id) => {
       // A scroller inside keeps its own picture: leave its children out here.
-      const hide = infos.filter((i) => isInside(doc, i.id, id)).flatMap((i) => kids(i.id));
+      const hide = [...infos.filter((i) => isInside(doc, i.id, id)).flatMap((i) => kids(i.id)), ...stickies.filter((t) => isInside(doc, t.id, id)).map((t) => t.id)];
       const r = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id, hide, withBounds: true });
       return { svg: inlineAssets(r.svg), x: r.x - fb.x, y: r.y - fb.y, width: r.width, height: r.height };
     });
     return { pieces, hotspots: into.get("above:" + scroller) ?? [] };
   };
+  const stickyAboveScene = (sticky: string): AboveScene | null => {
+    const roots = stickyAbove.get(sticky);
+    if (!roots?.length) return null;
+    const pieces = roots.map((id) => {
+      // Other sticky layers and scrollers inside keep their own pictures.
+      const hide = [...infos.filter((i) => isInside(doc, i.id, id)).flatMap((i) => kids(i.id)), ...stickies.filter((t) => t.id !== id && isInside(doc, t.id, id)).map((t) => t.id)];
+      const r = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id, hide, withBounds: true });
+      return { svg: inlineAssets(r.svg), x: r.x - fb.x, y: r.y - fb.y, width: r.width, height: r.height };
+    });
+    return { pieces, hotspots: into.get("stickyabove:" + sticky) ?? [] };
+  };
+  // Boxes of sticky layers and their parents, in one query.
+  const stickyIds = [...new Set(stickies.flatMap((t) => [t.id, t.parent]))];
+  const stickyBox = new Map<string, Rect>();
+  if (stickyIds.length) for (const it of pq<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids: stickyIds }).items) stickyBox.set(it.id, rel(it.bounds));
   const byId = new Map<string, ScrollerScene>();
   const build = (i: Info): ScrollerScene => {
-    const hide = [...infos.filter((o) => o.parent === i.id).flatMap((o) => kids(o.id)), ...(rootsIn.get(i.id) ?? [])];
+    const mine = stickies.filter((t) => t.scroller === i.id);
+    const hide = [...infos.filter((o) => o.parent === i.id).flatMap((o) => kids(o.id)), ...(rootsIn.get(i.id) ?? []), ...mine.flatMap((t) => [t.id, ...(stickyAbove.get(t.id) ?? [])])];
     if (i.id === frameId) hide.push(...fixedIds);
     const c = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id: i.id, hide, childrenOnly: true });
     const rect = rel(i.rect);
@@ -452,15 +559,38 @@ export function buildScene(frameId: string): Scene {
       hotspots: into.get(i.id) ?? [],
       scrollers: infos.filter((o) => o.parent === i.id).map(build),
       above: aboveScene(i.id),
+      sticky: [],
       chain: lineage(i.id).filter((l) => withHotspot.has(l)),
     };
+    const contentBottom = Math.max(rect.y + rect.height, s.content.y + s.content.height);
+    s.sticky = mine.flatMap<StickyScene>((t) => {
+      const box = stickyBox.get(t.id);
+      if (!box) return [];
+      const r = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id: t.id, withBounds: true });
+      const parent = stickyBox.get(t.parent);
+      const limit = t.parent === i.id || !parent ? contentBottom : parent.y + parent.height;
+      return [
+        {
+          id: t.id,
+          svg: inlineAssets(r.svg),
+          crop: { x: r.x - fb.x, y: r.y - fb.y, width: r.width, height: r.height },
+          box,
+          limit: Math.max(limit, box.y + box.height),
+          hotspots: into.get("sticky:" + t.id) ?? [],
+          above: stickyAboveScene(t.id),
+          backdrop: backdropOf(doc.nodes[t.id]),
+        },
+      ];
+    });
     byId.set(i.id, s);
     return s;
   };
   const scrollers = infos.filter((i) => i.parent === null).map(build);
   const fixed = fixedIds.map<FixedScene>((id) => {
     const c = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id, withBounds: true });
-    return { id, svg: inlineAssets(c.svg), rect: rel(c), hotspots: into.get("fixed:" + id) ?? [] };
+    const backdrop = backdropOf(doc.nodes[id]);
+    const box = backdrop ? rel(pq<{ items: { bounds: Rect }[] }>({ q: "bounds", ids: [id] }).items[0]?.bounds ?? c) : rel(c);
+    return { id, svg: inlineAssets(c.svg), rect: rel(c), hotspots: into.get("fixed:" + id) ?? [], box, backdrop };
   });
   return { id: frameId, width: frame.width, height: frame.height, base, hotspots: into.get("") ?? [], scrollers, fixed, keyed, byId, all };
 }
@@ -525,76 +655,34 @@ export function carryScroll(from: Pick<Scene, "id" | "scrollers">, to: Pick<Scen
   return result;
 }
 
-// ---------- smart animate (stage 1: direct children matched by name) ----------
+// ---------- smart animate (the matching and the tween are in smart.ts) ----------
 
-/** One direct child of a container, drawn on its own. */
-export interface Piece {
-  name: string;
-  svg: string;
-  /** What it paints, frame coordinates (the crop of `svg`). */
-  crop: Rect;
-  /** Its box centre in frame coordinates, its size and rotation in degrees. */
-  cx: number;
-  cy: number;
-  w: number;
-  h: number;
-  rot: number;
-  opacity: number;
-}
+/** The screens the player shows now, as one state of a smart animate. */
+export const liveSide = (root: string): Side => ({ nodes: pdoc().nodes, root, q: pq });
 
-/** More direct children than this and a smart animate dissolves instead. */
-export const SMART_MAX_CHILDREN = 200;
-
-/** Whether `container`'s direct children can be smart animated. */
-export const smartable = (container: string) => (pdoc().nodes[container]?.children.length ?? 0) <= SMART_MAX_CHILDREN;
-
-/** The visible direct children of a container, each as its own picture (frame = the screen
- *  the coordinates are relative to). Renders each child only, never the whole screen. */
-export function piecesOf(container: string, frame: string): Piece[] {
+/** The layers under `root` as they are now, with an engine that can still draw them after the
+ *  player's engine has changed (a Change to). `free` gives the copy back. */
+export function frozenSide(root: string): { side: Side; free: () => void } {
   const doc = pdoc();
-  const ids = (doc.nodes[container]?.children ?? []).filter((c) => doc.nodes[c]?.visible !== false);
-  if (!ids.length) return [];
-  const fb = pq<{ union: Rect }>({ q: "bounds", ids: [frame] }).union;
-  const geo = pq<{ items: { id: string; bounds: Rect }[] }>({ q: "bounds", ids }).items;
-  return ids.flatMap((id) => {
+  const engine = ensurePlayerEngine().engine.fork();
+  const nodes: Record<string, Node> = {};
+  const take = (id: string) => {
     const n = doc.nodes[id];
-    const b = geo.find((g) => g.id === id)?.bounds;
-    if (!b) return [];
-    const c = pq<{ svg: string; x: number; y: number; width: number; height: number }>({ q: "exportSvg", id, withBounds: true });
-    return [
-      {
-        name: n.name,
-        svg: inlineAssets(c.svg),
-        crop: { x: c.x - fb.x, y: c.y - fb.y, width: c.width, height: c.height },
-        cx: b.x - fb.x + b.width / 2,
-        cy: b.y - fb.y + b.height / 2,
-        w: Math.max(1, n.width),
-        h: Math.max(1, n.height),
-        rot: n.rotation ?? 0,
-        opacity: n.opacity ?? 1,
-      },
-    ];
-  });
+    if (!n) return;
+    nodes[id] = n;
+    for (const c of n.children) take(c);
+  };
+  take(root);
+  return { side: { nodes, root, q: (q) => JSON.parse(engine.query(JSON.stringify(q))) }, free: () => engine.free() };
 }
 
-/** Pairs old and new pieces by layer name; repeated names pair in order. */
-export function matchPieces(from: Piece[], to: Piece[]): { pairs: [Piece, Piece][]; gone: Piece[]; added: Piece[] } {
-  const free = new Map<string, Piece[]>();
-  for (const p of to) free.set(p.name, [...(free.get(p.name) ?? []), p]);
-  const pairs: [Piece, Piece][] = [];
-  const gone: Piece[] = [];
-  const used = new Set<Piece>();
-  for (const p of from) {
-    const q = free.get(p.name)?.shift();
-    if (q) {
-      pairs.push([p, q]);
-      used.add(q);
-    } else gone.push(p);
+/** The screen's scene with some layers left out of every picture (the rest of a screen behind a
+ *  Change to that is being smart animated). */
+export function buildSceneWithout(frameId: string, skip: string[]): Scene {
+  skipLayers = skip;
+  try {
+    return buildScene(frameId);
+  } finally {
+    skipLayers = [];
   }
-  return { pairs, gone, added: to.filter((p) => !used.has(p)) };
-}
-
-/** CSS transform that makes `a`'s box look like `b`'s (about `a`'s centre). */
-export function morph(a: Piece, b: Piece): string {
-  return `translate(${b.cx - a.cx}px, ${b.cy - a.cy}px) rotate(${b.rot - a.rot}deg) scale(${b.w / a.w}, ${b.h / a.h})`;
 }

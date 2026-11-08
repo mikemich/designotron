@@ -142,6 +142,10 @@ function ScrollingSection({ node: n }: { node: Node }) {
   // In an auto layout frame only layers with an absolute position can stay put.
   const canFix = !!parent && (!parent.layout || n.absolutePosition);
   const topLevelParent = !!parent && !parent.parent;
+  // Sticky sticks inside a frame that scrolls vertically (any depth above the layer).
+  let vScroller = false;
+  for (let a = parent; a && !vScroller; a = a.parent ? doc.nodes[a.parent] : null) vScroller = a.overflow === "vertical" || a.overflow === "both";
+  const behavior = n.scrollBehavior ?? "scroll";
   const set = (patch: Record<string, unknown>) => dispatch({ op: "update", ids: [n.id], patch });
   return (
     <Section title="Scrolling">
@@ -170,17 +174,19 @@ function ScrollingSection({ node: n }: { node: Node }) {
             <SelectField
               label="Position"
               ariaLabel="Position when scrolling"
-              value={canFix ? (n.scrollBehavior ?? "scroll") : "scroll"}
+              value={behavior === "sticky" || canFix ? behavior : "scroll"}
               options={[
                 { value: "scroll", label: "Scroll with parent" },
-                { value: "fixed", label: "Fixed" },
+                { value: "fixed", label: "Fixed (stay in place)" },
+                { value: "sticky", label: "Sticky (stay in place)" },
               ]}
               onChange={(v) => set({ scrollBehavior: v })}
             />
           </div>
-          {!canFix && <div className="muted small">In an auto layout frame only layers with an absolute position can be fixed.</div>}
-          {canFix && topLevelParent && parent?.layout && <div className="muted small">Code export keeps fixed layers of an auto layout frame inside the scrolling box, so they scroll there.</div>}
-          {canFix && !topLevelParent && <div className="muted small">Fixed layers work in a scrolling top-level frame; inside other frames they scroll with the frame.</div>}
+          {behavior === "sticky" && !vScroller && <div className="muted small">Sticky works inside a frame that scrolls vertically.</div>}
+          {!canFix && behavior !== "sticky" && <div className="muted small">In an auto layout frame only layers with an absolute position can be fixed.</div>}
+          {canFix && behavior !== "sticky" && topLevelParent && parent?.layout && <div className="muted small">Code export keeps fixed layers of an auto layout frame inside the scrolling box, so they scroll there.</div>}
+          {canFix && behavior !== "sticky" && !topLevelParent && <div className="muted small">Fixed layers work in a scrolling top-level frame; inside other frames they scroll with the frame.</div>}
         </>
       )}
     </Section>
@@ -200,7 +206,9 @@ const MOTIONS: { value: Interaction["transition"]; label: string }[] = [
   { value: "slideDown", label: "Slide down" },
 ];
 
-const EASINGS: { value: Easing; label: string }[] = [
+const CUSTOM_BEZIER: [number, number, number, number] = [0.42, 0, 0.58, 1];
+
+const EASINGS: { value: Easing | "custom"; label: string }[] = [
   { value: "linear", label: "Linear" },
   { value: "easeIn", label: "Ease in" },
   { value: "easeOut", label: "Ease out" },
@@ -208,7 +216,31 @@ const EASINGS: { value: Easing; label: string }[] = [
   { value: "easeInBack", label: "Ease in back" },
   { value: "easeOutBack", label: "Ease out back" },
   { value: "easeInOutBack", label: "Ease in and out back" },
+  { value: "custom", label: "Custom bezier" },
 ];
+
+/** Four numbers of a custom curve with a 64 x 40 preview of it (x 0 to 1 across, y up). */
+function BezierEditor({ value, onChange }: { value: [number, number, number, number]; onChange: (b: [number, number, number, number]) => void }) {
+  const [x1, y1, x2, y2] = value;
+  const set = (i: number, v: number) => onChange(value.map((x, k) => (k === i ? v : x)) as [number, number, number, number]);
+  // The curve in a box with room above and below for values past 0 and 1.
+  const X = (x: number) => 4 + x * 56;
+  const Y = (y: number) => 30 - y * 20;
+  return (
+    <div className="bezier-editor" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+      <svg width={64} height={40} viewBox="0 0 64 40" role="img" aria-label="Curve preview" style={{ flex: "none", background: "var(--panel)", borderRadius: 4 }}>
+        <path d={`M ${X(0)} ${Y(0)} L ${X(x1)} ${Y(y1)} M ${X(1)} ${Y(1)} L ${X(x2)} ${Y(y2)}`} stroke="var(--muted, #888)" strokeWidth={0.75} fill="none" />
+        <path data-bezier-curve d={`M ${X(0)} ${Y(0)} C ${X(x1)} ${Y(y1)} ${X(x2)} ${Y(y2)} ${X(1)} ${Y(1)}`} stroke="var(--accent, #7c5cff)" strokeWidth={1.5} fill="none" />
+      </svg>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, flex: 1 }}>
+        <NumberField label="x1" title="First handle, x (0 to 1)" ariaLabel="Bezier x1" value={x1} min={0} max={1} precision={2} onChange={(v) => set(0, v)} />
+        <NumberField label="y1" title="First handle, y" ariaLabel="Bezier y1" value={y1} min={-5} max={5} precision={2} onChange={(v) => set(1, v)} />
+        <NumberField label="x2" title="Second handle, x (0 to 1)" ariaLabel="Bezier x2" value={x2} min={0} max={1} precision={2} onChange={(v) => set(2, v)} />
+        <NumberField label="y2" title="Second handle, y" ariaLabel="Bezier y2" value={y2} min={-5} max={5} precision={2} onChange={(v) => set(3, v)} />
+      </div>
+    </div>
+  );
+}
 
 const DIRECTIONS: { value: Direction; label: string }[] = [
   { value: "left", label: "Left" },
@@ -387,8 +419,22 @@ function InteractionEditor({ node, index, frames }: { node: Node; index: number;
       {timed && (
         <div className="row">
           <NumberField label="ms" title="Duration in milliseconds" ariaLabel="Duration (ms)" value={it.durationMs > 0 ? it.durationMs : 300} min={1} max={60000} precision={0} onChange={(durationMs) => set({ durationMs })} />
-          <SelectField ariaLabel="Easing" value={it.easing ?? "easeOut"} options={EASINGS} onChange={(easing) => set({ easing })} />
+          <SelectField
+            ariaLabel="Easing"
+            value={it.bezier ? "custom" : (it.easing ?? "easeOut")}
+            options={EASINGS}
+            // A custom curve keeps the preset next to it, which older editors still play.
+            onChange={(v) => (v === "custom" ? set({ bezier: it.bezier ?? CUSTOM_BEZIER }) : set({ easing: v, bezier: null }))}
+          />
         </div>
+      )}
+      {timed && it.bezier && (
+        <div className="row">
+          <BezierEditor value={it.bezier} onChange={(bezier) => set({ bezier })} />
+        </div>
+      )}
+      {it.trigger === "onDrag" && animates && !["smartAnimate", "moveIn", "moveOut", "push", "slideLeft", "slideRight", "slideUp", "slideDown"].includes(it.transition) && (
+        <div className="muted small">On drag follows the pointer with Smart animate, Move or Push; other transitions play when the drag starts.</div>
       )}
       {(it.action === "navigate" || it.action === "swapOverlay" || it.action === "changeTo") && (
         <label className="row" style={{ cursor: "pointer" }} title="The screen that opens starts scrolled where this one is (scrolling frames are matched by layer name)">

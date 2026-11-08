@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_OVERLAY, overlayBox, overlayOrigin } from "./prototype";
+import { DEFAULT_OVERLAY, overlayBox, overlayOrigin, presentStart } from "./prototype";
 import { DEFAULT_PREFS, loadPrefs, savePrefs } from "./presenterPrefs";
 import { carryScroll, scrollRange, type ScrollerScene } from "./player";
 import type { Doc, Node, OverlaySettings } from "./types";
@@ -171,5 +171,40 @@ describe("carryScroll", () => {
     const doc = docOf([["a", "A", null], ["b", "B", null]]);
     expect(carryScroll(sceneOf("a", [scroller("a", 900)]), sceneOf("b", []), new Map([["a", { left: 0, top: 100 }]]), doc).size).toBe(0);
     expect(carryScroll(sceneOf("a", []), sceneOf("b", [scroller("b", 900)]), new Map(), doc).size).toBe(0);
+  });
+});
+
+describe("presentStart", () => {
+  const n = (id: string, type: string, parent: string | null, page = "p1"): Node => ({ id, type, parent, page }) as unknown as Node;
+  const doc = {
+    pages: [
+      { id: "p1", children: ["f1", "f2", "set"], flowStart: "f1" },
+      { id: "p2", children: ["g1"] },
+    ],
+    nodes: Object.fromEntries(
+      [
+        n("f1", "frame", null),
+        n("f2", "frame", null),
+        n("inner", "frame", "f2"),
+        n("leaf", "rectangle", "inner"),
+        n("set", "componentSet", null),
+        n("variant", "component", "set"),
+        n("g1", "frame", null, "p2"),
+      ].map((x) => [x.id, x]),
+    ),
+  } as unknown as Doc;
+
+  it("starts on the top-level frame holding the selection", () => {
+    expect(presentStart(doc, "p1", ["leaf"])).toBe("f2");
+    expect(presentStart(doc, "p1", ["inner"])).toBe("f2");
+    expect(presentStart(doc, "p1", ["f2", "f1"])).toBe("f2");
+  });
+
+  it("falls back to the flow start", () => {
+    expect(presentStart(doc, "p1", [])).toBe("f1");
+    expect(presentStart(doc, "p1", ["variant"])).toBe("f1");
+    expect(presentStart(doc, "p1", ["set"])).toBe("f1");
+    expect(presentStart(doc, "p1", ["g1"])).toBe("f1");
+    expect(presentStart(doc, "p1", ["gone"])).toBe("f1");
   });
 });

@@ -477,6 +477,23 @@ impl Import<'_> {
       "clipContent".into(),
       json!(f.get("clipsContent").and_then(|v| v.as_bool()).unwrap_or(false)),
     );
+    // Prototype scrolling: which way a frame scrolls, and how a layer inside it behaves
+    // (`scrollBehavior`; older files have `isFixed`).
+    match str_of(f, "overflowDirection") {
+      Some("HORIZONTAL_SCROLLING") => drop(n.insert("overflow".into(), json!("horizontal"))),
+      Some("VERTICAL_SCROLLING") => drop(n.insert("overflow".into(), json!("vertical"))),
+      Some("HORIZONTAL_AND_VERTICAL_SCROLLING") => drop(n.insert("overflow".into(), json!("both"))),
+      _ => {}
+    }
+    match str_of(f, "scrollBehavior") {
+      Some("FIXED") => drop(n.insert("scrollBehavior".into(), json!("fixed"))),
+      Some("STICKY_SCROLLS") => drop(n.insert("scrollBehavior".into(), json!("sticky"))),
+      Some(_) => {}
+      None if f.get("isFixed").and_then(|v| v.as_bool()) == Some(true) => {
+        n.insert("scrollBehavior".into(), json!("fixed"));
+      }
+      None => {}
+    }
     if f.get("isMask").and_then(|v| v.as_bool()).unwrap_or(false) {
       n.insert("isMask".into(), json!(true));
     }
@@ -884,7 +901,7 @@ impl Import<'_> {
     let ttype = str_of(trigger, "type").unwrap_or("ON_CLICK");
     let mut it = Map::new();
     match ttype {
-      "ON_CLICK" | "ON_HOVER" | "ON_PRESS" | "MOUSE_ENTER" | "MOUSE_LEAVE" | "MOUSE_DOWN" | "MOUSE_UP" => {
+      "ON_CLICK" | "ON_HOVER" | "ON_PRESS" | "ON_DRAG" | "MOUSE_ENTER" | "MOUSE_LEAVE" | "MOUSE_DOWN" | "MOUSE_UP" => {
         it.insert("trigger".into(), json!(camel(ttype)));
       }
       "AFTER_TIMEOUT" => {
@@ -1034,6 +1051,17 @@ impl Import<'_> {
       // A transition without a duration plays for 300 ms, like Figma's default.
       let d = t.and_then(|t| num(t, "duration")).map(|d| to_ms(d, unit)).unwrap_or(300.0);
       out.insert("durationMs".into(), json!(d));
+      let curve = t
+        .and_then(|t| t.get("easing"))
+        .filter(|e| str_of(e, "type") == Some("CUSTOM_CUBIC_BEZIER"));
+      if let Some(c) = curve.and_then(|e| e.get("easingFunctionCubicBezier")) {
+        let p: Vec<f64> = ["x1", "y1", "x2", "y2"].iter().filter_map(|k| num(c, k)).collect();
+        if p.len() == 4 && p.iter().all(|v| v.is_finite()) && (0.0..=1.0).contains(&p[0]) && (0.0..=1.0).contains(&p[2]) {
+          // Ease out stays as what older editors play.
+          out.insert("bezier".into(), json!(p));
+          return;
+        }
+      }
       let easing = match t.and_then(|t| t.get("easing")).and_then(|e| str_of(e, "type")) {
         None | Some("EASE_OUT") => None,
         Some("EASE_IN") => Some("easeIn"),
@@ -1043,7 +1071,7 @@ impl Import<'_> {
         Some("EASE_OUT_BACK") => Some("easeOutBack"),
         Some("EASE_IN_AND_OUT_BACK") => Some("easeInOutBack"),
         Some(_) => {
-          self.note("Springs, custom curves and named easings play as Ease out");
+          self.note("Springs, named easings and invalid custom curves play as Ease out");
           None
         }
       };
@@ -1838,12 +1866,81 @@ mod tests {
   }
 
   #[test]
+  fn imports_on_drag_custom_curves_sticky_and_overflow() {
+    use crate::model::{Overflow, ScrollBehavior, Transition, Trigger};
+    let nav = |trigger: &str, t: Value| {
+      json!({ "interactions": [{ "trigger": { "type": trigger },
+        "actions": [{ "type": "NODE", "destinationId": "1:1", "navigation": "NAVIGATE", "transition": t }] }] })
+    };
+    let file = proto_file(vec![frame(
+      "1:1",
+      "Home",
+      json!({ "overflowDirection": "VERTICAL_SCROLLING" }),
+      vec![
+        rect(
+          "1:2",
+          "Swipe",
+          nav(
+            "ON_DRAG",
+            json!({ "type": "SMART_ANIMATE", "duration": 400,
+          "easing": { "type": "CUSTOM_CUBIC_BEZIER", "easingFunctionCubicBezier": { "x1": 0.1, "y1": 0.2, "x2": 0.3, "y2": 1.4 } } }),
+          ),
+        ),
+        rect(
+          "1:3",
+          "BadCurve",
+          nav(
+            "ON_CLICK",
+            json!({ "type": "DISSOLVE",
+          "easing": { "type": "CUSTOM_CUBIC_BEZIER", "easingFunctionCubicBezier": { "x1": 2.0, "y1": 0.2, "x2": 0.3, "y2": 1.4 } } }),
+          ),
+        ),
+        rect("1:4", "Header", json!({ "scrollBehavior": "STICKY_SCROLLS" })),
+        rect("1:5", "Bar", json!({ "scrollBehavior": "FIXED" })),
+        rect("1:6", "Old", json!({ "isFixed": true })),
+        rect("1:7", "Plain", json!({ "scrollBehavior": "SCROLLS" })),
+        frame("1:8", "Row", json!({ "overflowDirection": "HORIZONTAL_SCROLLING" }), vec![]),
+        frame(
+          "1:9",
+          "Both",
+          json!({ "overflowDirection": "HORIZONTAL_AND_VERTICAL_SCROLLING" }),
+          vec![],
+        ),
+        frame("1:10", "NoScroll", json!({ "overflowDirection": "NONE" }), vec![]),
+      ],
+    )]);
+    let (doc, r) = run(&file);
+    let w = warnings(&r);
+    let swipe = &named(&doc, "Swipe").interactions[0];
+    assert_eq!(
+      (swipe.trigger, swipe.transition, swipe.duration_ms),
+      (Trigger::OnDrag, Transition::SmartAnimate, 400.0)
+    );
+    assert_eq!(swipe.bezier, Some([0.1, 0.2, 0.3, 1.4]));
+    assert_eq!(swipe.easing, crate::model::Easing::EaseOut, "ease out stays as the fallback");
+    let bad = &named(&doc, "BadCurve").interactions[0];
+    assert_eq!(bad.bezier, None, "a curve with x outside 0-1 is not kept");
+    assert!(!w.iter().any(|x| x.contains("ON_DRAG")), "{w:?}");
+    let sb = |n: &str| named(&doc, n).scroll_behavior;
+    assert_eq!(sb("Header"), ScrollBehavior::Sticky);
+    assert_eq!(
+      (sb("Bar"), sb("Old"), sb("Plain")),
+      (ScrollBehavior::Fixed, ScrollBehavior::Fixed, ScrollBehavior::Scroll)
+    );
+    let ov = |n: &str| named(&doc, n).overflow;
+    assert_eq!(
+      (ov("Home"), ov("Row"), ov("Both"), ov("NoScroll")),
+      (Overflow::Vertical, Overflow::Horizontal, Overflow::Both, Overflow::None)
+    );
+  }
+
+  #[test]
   fn unsupported_triggers_actions_and_destinations_warn_with_counts() {
     let drag = |id: &str, name: &str| {
       rect(
         id,
         name,
-        json!({ "interactions": [{ "trigger": { "type": "ON_DRAG" }, "actions": go("1:1") }] }),
+        json!({ "interactions": [{ "trigger": { "type": "ON_MEDIA_END" }, "actions": go("1:1") }] }),
       )
     };
     let nav = |t: Value| click(json!([{ "type": "NODE", "destinationId": "1:1", "navigation": "NAVIGATE", "transition": t }]));
@@ -1880,7 +1977,7 @@ mod tests {
     let (doc, r) = run(&file);
     let w = warnings(&r);
     let has = |s: &str| w.iter().any(|x| x.contains(s));
-    assert!(w.iter().any(|x| x.contains("ON_DRAG") && x.ends_with("(×2)")), "{w:?}");
+    assert!(w.iter().any(|x| x.contains("ON_MEDIA_END") && x.ends_with("(×2)")), "{w:?}");
     assert!(has("SET_VARIABLE action isn't supported"), "{w:?}");
     assert!(has("several actions keep only the first"), "{w:?}");
     assert!(has("destination isn't in this import"), "{w:?}");

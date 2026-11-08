@@ -131,6 +131,8 @@ async function build(page) {
 const crumb = (p) => p.locator(".presenter .crumb").first().innerText();
 const overlayCount = (p) => p.locator(".presenter .overlay-backdrop").count();
 async function present(p) {
+  // Present starts at the selected frame when there is one: clear the selection.
+  await p.evaluate(() => window.__dt.dispatch({ op: "select", ids: [] }));
   await p.click("button[title='Present']");
   await p.waitForSelector(".presenter");
   await sleep(250);
@@ -216,7 +218,8 @@ try {
   // Tab follows the screen (top to bottom), not the order the hotspots were drawn in.
   await p.evaluate(() => document.querySelector(".presenter").focus());
   const order = [];
-  for (let i = 0; i < 20; i++) {
+  // Enough presses to pass the bar's controls (Wave 4 added full screen) and wrap to the first hotspot.
+  for (let i = 0; i < 30; i++) {
     await p.keyboard.press("Tab");
     const l = await p.evaluate(() => (document.activeElement?.classList.contains("hotspot") ? document.activeElement.getAttribute("aria-label") : null));
     if (l) order.push(l);

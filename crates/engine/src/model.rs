@@ -1235,6 +1235,9 @@ pub enum Trigger {
   MouseUp,
   /// A key or key combination, see `Interaction::key`.
   Key,
+  /// The pointer drags the layer (past a few pixels); with Smart animate, Move in, Move out or
+  /// Push the change follows the pointer and completes or snaps back on release.
+  OnDrag,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1334,6 +1337,9 @@ pub enum ScrollBehavior {
   #[default]
   Scroll,
   Fixed,
+  /// Scrolls with the content until its top reaches the top of the vertically scrolling frame
+  /// around it, then stays there while its parent is still in view (CSS `position: sticky`).
+  Sticky,
 }
 
 impl ScrollBehavior {
@@ -1359,6 +1365,10 @@ pub struct Interaction {
   pub direction: Direction,
   #[serde(skip_serializing_if = "Easing::is_default")]
   pub easing: Easing,
+  /// A custom timing curve `[x1, y1, x2, y2]` (CSS `cubic-bezier`); when set it replaces `easing`
+  /// (which older editors still play). Not saved when unset.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub bezier: Option<[f64; 4]>,
   /// Placement and behaviour of the overlay for `OpenOverlay` / `SwapOverlay`.
   pub overlay: OverlaySettings,
   /// Navigate to, Swap overlay and Change to: the screen that opens starts scrolled where the
@@ -1655,6 +1665,26 @@ mod interaction_tests {
       (v["overflow"].as_str(), v["scrollBehavior"].as_str()),
       (Some("both"), Some("fixed"))
     );
+  }
+
+  #[test]
+  fn revision_4_values_round_trip_and_older_files_load_unchanged() {
+    let n: Node = serde_json::from_value(serde_json::json!({
+      "scrollBehavior": "sticky",
+      "interactions": [{ "trigger": "onDrag", "action": "back", "bezier": [0.1, 0.2, 0.3, 0.4] }]
+    }))
+    .unwrap();
+    assert_eq!(n.scroll_behavior, ScrollBehavior::Sticky);
+    assert_eq!(n.interactions[0].trigger, Trigger::OnDrag);
+    assert_eq!(n.interactions[0].bezier, Some([0.1, 0.2, 0.3, 0.4]));
+    let v = serde_json::to_value(&n).unwrap();
+    assert_eq!(v["scrollBehavior"], "sticky");
+    assert_eq!(v["interactions"][0]["trigger"], "onDrag");
+    assert_eq!(v["interactions"][0]["bezier"], serde_json::json!([0.1, 0.2, 0.3, 0.4]));
+    // A revision 3 interaction has no curve and doesn't write one.
+    let old: Interaction = serde_json::from_str(r#"{"trigger":"onClick","action":"back"}"#).unwrap();
+    assert_eq!(old.bezier, None);
+    assert!(serde_json::to_value(&old).unwrap().get("bezier").is_none());
   }
 
   #[test]

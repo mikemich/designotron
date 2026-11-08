@@ -70,9 +70,13 @@ type Drag =
   | { kind: "draw"; start: Pt; cur: Pt }
   | { kind: "pencil"; points: Pt[] }
   | { kind: "penHandle"; index: number; /** The incoming handle once Alt breaks the mirror (kept for the rest of the drag). */ broken: Pt | null }
-  | { kind: "vector"; id: string; sub: number; idx: number; part: "anchor" | "in" | "out"; pts: [number, number][]; startLocal: Pt; start: Node; moved: boolean; cands: Pt[] }
+  | { kind: "vector"; id: string; sub: number; idx: number; part: "anchor" | "in" | "out" | "pull"; pts: [number, number][]; startLocal: Pt; start: Node; moved: boolean; cands: Pt[] }
+  | { kind: "bend"; id: string; sub: number; seg: number; t: number; start: Pt; /** The grabbed point on the curve (page space). */ hit: Pt; moved: boolean }
   | { kind: "vmarquee"; id: string; start: Pt; base: [number, number][]; hitId: string | null; moved: boolean }
   | { kind: "link"; from: string; cur: Pt };
+
+/** Cmd (Mac) or Ctrl held: a drag on a path segment bends it instead of adding an anchor. */
+const bendModifier = (e: { metaKey: boolean; ctrlKey: boolean }) => (isMac ? e.metaKey : e.ctrlKey);
 
 /** The point on a path nearest the pointer (`vectorSegmentAt` query, page coordinates). */
 interface SegmentHit {
@@ -233,6 +237,8 @@ export function Canvas() {
   const [penFrom, setPenFrom] = useState<PenFrom | null>(null);
   // Vector edit mode: the point on the path under the pointer (where a click adds an anchor).
   const [vHover, setVHover] = useState<SegmentHit | null>(null);
+  /** The pointer is over a segment that a drag would bend (Bend on, or the modifier held). */
+  const [bendReady, setBendReady] = useState(false);
   const lastInsert = useRef<{ key: string; time: number } | null>(null);
   const vectorPts = useStore((s) => s.vectorPoints);
   const [pencil, setPencil] = useState<Pt[] | null>(null);
@@ -271,6 +277,8 @@ export function Canvas() {
   // roots far outside the view can be left out of the layout and painting.
   const rootInfo = useRef(new Map<string, { b: Rect; texts: number }>());
   const culled = useRef(new Set<string>());
+  const lastView = useRef(useStore.getState().viewport);
+  const movingTimer = useRef<ReturnType<typeof setTimeout>>();
   /** Hides roots outside the view and turns on the cheap zoom look when the view is heavy. */
   const applyView = () => {
     const host = contentRef.current;
@@ -298,6 +306,15 @@ export function Canvas() {
       }
     }
     host.classList.toggle("zoom-lod", z && texts > ZOOM_TEXT_BUDGET);
+    host.classList.toggle("zooming", z);
+    // Panning repaints a background blur's copies as often as zooming does, so they wait for it too.
+    const last = lastView.current;
+    if (last.x !== vp.x || last.y !== vp.y || last.zoom !== vp.zoom) {
+      lastView.current = { x: vp.x, y: vp.y, zoom: vp.zoom };
+      host.classList.add("moving");
+      clearTimeout(movingTimer.current);
+      movingTimer.current = setTimeout(() => host.classList.remove("moving"), 150);
+    }
   };
   useLayoutEffect(() => {
     const host = contentRef.current;
@@ -450,7 +467,7 @@ export function Canvas() {
       drag.current = null;
       pointerDrag.active = false;
       if (d) {
-        if ((d.kind === "move" && d.started) || d.kind === "resize" || d.kind === "rotate" || d.kind === "vector") dispatch({ op: "cancelGesture" });
+        if ((d.kind === "move" && d.started) || d.kind === "resize" || d.kind === "rotate" || d.kind === "vector" || d.kind === "bend") dispatch({ op: "cancelGesture" });
         if (d.kind === "marquee" || d.kind === "vmarquee") useStore.setState({ marquee: null });
         if (d.kind === "draw") setDraw(null);
         if (d.kind === "pencil") setPencil(null);
@@ -615,7 +632,20 @@ export function Canvas() {
 
   useEffect(() => {
     setVHover(null);
+    setBendReady(false);
     if (!editingVector) return;
+    // Capture phase, before the global Escape shortcut closes vector edit (and this effect with it):
+    // an Escape mid-drag takes a bend or anchor drag back. It stops nothing and changes no store state.
+    const onCancel = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const d = drag.current;
+      if (d && (d.kind === "bend" || d.kind === "vector")) {
+        drag.current = null;
+        pointerDrag.active = false;
+        dispatch({ op: "cancelGesture" });
+        setSnapMark(null);
+      }
+    };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") useStore.setState({ editingVector: null });
       // Enter leaves too: selectChildren (the Enter shortcut) toggles vector edit.
@@ -627,8 +657,12 @@ export function Canvas() {
         joinVectorEnds();
       }
     };
+    window.addEventListener("keydown", onCancel, true);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onCancel, true);
+      window.removeEventListener("keydown", onKey);
+    };
   }, [editingVector]);
 
   const local = (e: { clientX: number; clientY: number }): Pt => {
@@ -652,7 +686,7 @@ export function Canvas() {
   }
 
   /** Starts dragging an anchor (with the other selected anchors) or a handle of the edited vector. */
-  function startVectorDrag(id: string, sub: number, idx: number, part: "anchor" | "in" | "out", p: Pt) {
+  function startVectorDrag(id: string, sub: number, idx: number, part: "anchor" | "in" | "out" | "pull", p: Pt) {
     const n = getDoc().nodes[id];
     const m = query<{ items: BoundsItem[] }>({ q: "bounds", ids: [id] }).items[0];
     const pts = part === "anchor" ? vectorPoints() : [];
@@ -822,12 +856,21 @@ export function Canvas() {
         } else if (!has) useStore.setState({ vectorPoints: [key] });
       }
       dispatch({ op: "beginGesture" });
-      startVectorDrag(editingVector, +sub, +idx, part as "anchor" | "in" | "out", p);
+      // With Bend on, a plain drag on an anchor pulls mirrored handles out of it (the modifier keeps the move).
+      const pull = part === "anchor" && st.vectorBend && !bendModifier(e) && !e.shiftKey;
+      startVectorDrag(editingVector, +sub, +idx, pull ? "pull" : (part as "anchor" | "in" | "out"), p);
       return;
     }
     if (editingVector && tool === "move") {
       // Click on the path: add an anchor there (and drag it, all one undo step).
       const hit = query<SegmentHit | null>({ q: "vectorSegmentAt", id: editingVector, x: p.x, y: p.y, zoom: zoom() });
+      if (hit && (st.vectorBend || bendModifier(e))) {
+        // Bend: drag the segment itself, so the curve follows the pointer.
+        dispatch({ op: "beginGesture" });
+        drag.current = { kind: "bend", id: editingVector, sub: hit.sub, seg: hit.seg, t: hit.t, start: p, hit: { x: hit.x, y: hit.y }, moved: false };
+        setVHover(null);
+        return;
+      }
       if (hit) {
         dispatch({ op: "beginGesture" });
         const r = dispatch<{ index: number }>({ op: "insertVectorPoint", id: editingVector, sub: hit.sub, seg: hit.seg, t: hit.t });
@@ -924,6 +967,8 @@ export function Canvas() {
         const onPoint = (e.target as Element).hasAttribute?.("data-vpt");
         const hit = onPoint ? null : query<SegmentHit | null>({ q: "vectorSegmentAt", id: editingVector, x: p.x, y: p.y, zoom: zoom() });
         if (hit?.x !== vHover?.x || hit?.y !== vHover?.y) setVHover(hit);
+        const ready = !!hit && (useStore.getState().vectorBend || bendModifier(e));
+        if (ready !== bendReady) setBendReady(ready);
         if (useStore.getState().hover) useStore.setState({ hover: null });
         return;
       }
@@ -1037,7 +1082,7 @@ export function Canvas() {
         if (d.part === "anchor") {
           // The dragged anchor snaps (to another anchor, else to whole pixels, in page space) and
           // every selected anchor moves by its snapped delta. Ctrl drags freely.
-          const sn = snapPoint(apply(m.matrix, { x: orig.x + dx, y: orig.y + dy }), d.cands, zoom(), { pixel: true, off: e.ctrlKey });
+          const sn = snapPoint(apply(m.matrix, { x: orig.x + dx, y: orig.y + dy }), d.cands, zoom(), { pixel: true, off: e.ctrlKey || e.metaKey });
           const back = apply(invert(m.matrix), sn.p);
           const clean = (v: number) => Math.round(v * 1e6) / 1e6;
           const sdx = sn.kind ? clean(back.x - orig.x) : dx;
@@ -1052,6 +1097,12 @@ export function Canvas() {
             q.x = o.x + sdx;
             q.y = o.y + sdy;
           }
+        } else if (d.part === "pull") {
+          // Bend on an anchor: the pointer is the out handle's tip, the in handle mirrors it.
+          pt.outX = lp.x - orig.x;
+          pt.outY = lp.y - orig.y;
+          pt.inX = -pt.outX;
+          pt.inY = -pt.outY;
         } else if (d.part === "out") {
           pt.outX = orig.outX + dx;
           pt.outY = orig.outY + dy;
@@ -1068,6 +1119,14 @@ export function Canvas() {
           }
         }
         dispatch({ op: "update", ids: [d.id], patch: { vector: vec } }, { quiet: true });
+        break;
+      }
+      case "bend": {
+        if (!d.moved) {
+          if (Math.hypot(p.x - d.start.x, p.y - d.start.y) * zoom() < 2) return;
+          d.moved = true;
+        }
+        dispatch({ op: "bendVectorSegment", id: d.id, sub: d.sub, seg: d.seg, t: d.t, x: d.hit.x + (p.x - d.start.x), y: d.hit.y + (p.y - d.start.y) }, { quiet: true });
         break;
       }
       case "vmarquee": {
@@ -1125,6 +1184,9 @@ export function Canvas() {
         setSnapMark(null);
         // Points may have left the layer's box: refit it in the same undo step.
         if (d.moved) dispatch({ op: "fitVectorBounds", id: d.id }, { quiet: true });
+        dispatch({ op: "endGesture" });
+        break;
+      case "bend":
         dispatch({ op: "endGesture" });
         break;
       case "vmarquee":
@@ -1424,7 +1486,7 @@ export function Canvas() {
     navigator.vibrate?.(10);
     openMenuAt(x, y);
   };
-  const cursor = panning ? "grabbing" : keys.space || tool === "hand" ? "grab" : tool === "move" ? (vHover ? "crosshair" : "default") : tool === "text" ? "text" : "crosshair";
+  const cursor = panning ? "grabbing" : keys.space || tool === "hand" ? "grab" : tool === "move" ? (bendReady ? undefined : vHover ? "crosshair" : "default") : tool === "text" ? "text" : "crosshair";
   const emptyPromptClosed = useStore((s) => s.emptyPromptClosed);
   /** The Figma import dialog is open: it has the say, not the blank-file prompt. */
   const figmaOpen = useStore((s) => s.figmaOpen);
@@ -1438,7 +1500,7 @@ export function Canvas() {
     <div
       id="dt-canvas"
       ref={ref}
-      className="canvas"
+      className={"canvas" + (bendReady ? " bend-ready" : "")}
       tabIndex={0}
       role="application"
       aria-roledescription="design canvas"

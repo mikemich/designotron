@@ -273,6 +273,17 @@ pub enum Command {
     seg: usize,
     t: f64,
   },
+  /// Vector edit mode: bends segment `seg` of subpath `sub` so the curve passes through the
+  /// page-space point (`x`, `y`) at parameter `t`. Gesture-relative: every move of one drag
+  /// applies from the gesture's base, so the drag's last pointer position decides the shape.
+  BendVectorSegment {
+    id: NodeId,
+    sub: usize,
+    seg: usize,
+    t: f64,
+    x: f64,
+    y: f64,
+  },
   /// Deletes anchors (`[subpath, index]` pairs), joining their neighbours. Deleting all
   /// but one anchor deletes the layer.
   DeleteVectorPoints {
@@ -800,6 +811,20 @@ pub enum Query {
     /// Answer `{svg, x, y, width, height}` (the crop in page space) for the whole layer too.
     #[serde(default)]
     with_bounds: bool,
+  },
+  /// The prototype player's smart animate frames: each of `ids` drawn alone as `{id, svg, x, y,
+  /// width, height}` (the crop in page space) on a copy of the document with the merge patches of
+  /// `patch` applied (resolved geometry and paint, no layout pass) and the `hide` layers left out.
+  /// Ids in `own` are drawn without their children (a container's own paint). The engine's own
+  /// document is never touched.
+  ExportPieces {
+    ids: Vec<NodeId>,
+    #[serde(default)]
+    patch: std::collections::BTreeMap<NodeId, Value>,
+    #[serde(default)]
+    hide: Vec<NodeId>,
+    #[serde(default)]
+    own: Vec<NodeId>,
   },
   ExportHtml {
     id: NodeId,
@@ -1717,7 +1742,10 @@ impl Engine {
     } else {
       None
     };
-    let gesture_relative = matches!(cmd, Command::Translate { .. } | Command::Resize { .. } | Command::Rotate { .. });
+    let gesture_relative = matches!(
+      cmd,
+      Command::Translate { .. } | Command::Resize { .. } | Command::Rotate { .. } | Command::BendVectorSegment { .. }
+    );
     // Inside a gesture there's no undo snapshot, but a command that fails still has to leave
     // nothing behind: AI tools change several layers before they can fail on a later one.
     let rollback = self.gesture.is_some().then(|| self.snapshot());
@@ -2678,6 +2706,14 @@ impl Engine {
           vector_edit::insert_point(sp, seg, t)
         })?;
         Ok(json!({ "index": index }))
+      }
+      Command::BendVectorSegment { id, sub, seg, t, x, y } => {
+        let target = self.doc.abs_matrix(&id).invert().apply(Point::new(x, y));
+        self.edit_vector(&id, true, |v| {
+          let sp = v.subpaths.get_mut(sub).ok_or("no such subpath")?;
+          vector_edit::bend_segment(sp, seg, t, target)
+        })?;
+        Ok(json!({}))
       }
       Command::DeleteVectorPoints { id, points } => {
         // Decide on a copy first: a refused delete must leave the path (and any open
@@ -4452,6 +4488,37 @@ impl Engine {
           }
         }
       }
+      Query::ExportPieces {
+        ids,
+        patch: patches,
+        hide,
+        own,
+      } => {
+        let mut doc = self.doc.clone();
+        for (id, p) in &patches {
+          let Some(n) = doc.get_mut(id) else { continue };
+          patch::apply(n, p).map_err(|e| format!("{id}: {e}"))?;
+        }
+        let items: Vec<Value> = ids
+          .iter()
+          .map(|id| {
+            let kids;
+            let hidden: &[NodeId] = if own.contains(id) {
+              kids = hide
+                .iter()
+                .cloned()
+                .chain(doc.get(id).map(|n| n.children.clone()).unwrap_or_default())
+                .collect::<Vec<_>>();
+              &kids
+            } else {
+              &hide
+            };
+            let c = render::export_svg_parts(&doc, id, m, hidden, false);
+            json!({ "id": id, "svg": c.svg, "x": c.bounds.x, "y": c.bounds.y, "width": c.bounds.width, "height": c.bounds.height })
+          })
+          .collect();
+        json!(items)
+      }
       Query::ExportHtml { id } => json!(codegen::export_html(&self.doc, &id, m)),
       Query::ExportReact { id } => json!(codegen::export_react(&self.doc, &id, m)),
       Query::ExportProject => {
@@ -4883,6 +4950,102 @@ mod tests {
 
   fn ai(e: &mut Engine, tool: &str, input: Value) -> Value {
     e.dispatch(Command::Ai { tool: tool.into(), input }).unwrap()
+  }
+
+  fn pieces(e: &Engine, ids: &[&str], patch: Value, hide: &[&str]) -> Result<Value, String> {
+    e.query(Query::ExportPieces {
+      ids: ids.iter().map(|s| s.to_string()).collect(),
+      patch: serde_json::from_value(patch).unwrap(),
+      hide: hide.iter().map(|s| s.to_string()).collect(),
+      own: vec![],
+    })
+  }
+
+  #[test]
+  fn export_pieces_draws_with_the_patch_and_leaves_the_document_alone() {
+    let mut e = engine();
+    let a = rect(&mut e, 10.0, 20.0, 40.0, 40.0, None);
+    let plain = pieces(&e, &[&a], json!({}), &[]).unwrap();
+    let rev = e.doc_rev;
+    let before = serde_json::to_string(&e.doc.get(&a)).unwrap();
+    let wide = pieces(&e, &[&a], json!({ a.clone(): { "width": 120.0 } }), &[]).unwrap();
+    assert_ne!(plain[0]["svg"], wide[0]["svg"]);
+    assert!(wide[0]["width"].as_f64().unwrap() > plain[0]["width"].as_f64().unwrap() + 50.0);
+    let red = pieces(
+      &e,
+      &[&a],
+      json!({ a.clone(): { "fills": [{ "type": "solid", "color": "#FF0000" }] } }),
+      &[],
+    )
+    .unwrap();
+    assert!(red[0]["svg"].as_str().unwrap().to_lowercase().contains("#ff0000"));
+    assert_eq!(e.doc_rev, rev);
+    assert_eq!(serde_json::to_string(&e.doc.get(&a)).unwrap(), before);
+  }
+
+  #[test]
+  fn export_pieces_patch_on_an_ancestor_moves_the_child() {
+    let mut e = engine();
+    let g = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 0.0,
+        y: 0.0,
+        width: 300.0,
+        height: 300.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let c = rect(&mut e, 10.0, 10.0, 40.0, 40.0, Some(g.clone()));
+    let at = pieces(&e, &[&c], json!({}), &[]).unwrap();
+    let moved = pieces(&e, &[&c], json!({ g.clone(): { "x": 100.0, "y": 50.0 } }), &[]).unwrap();
+    assert_eq!(moved[0]["x"].as_f64().unwrap() - at[0]["x"].as_f64().unwrap(), 100.0);
+    assert_eq!(moved[0]["y"].as_f64().unwrap() - at[0]["y"].as_f64().unwrap(), 50.0);
+    // Hiding the child draws the frame alone.
+    let alone = pieces(&e, &[&g], json!({}), &[&c]).unwrap();
+    let full = pieces(&e, &[&g], json!({}), &[]).unwrap();
+    assert_ne!(alone[0]["svg"], full[0]["svg"]);
+  }
+
+  #[test]
+  fn export_pieces_own_leaves_the_children_out() {
+    let mut e = engine();
+    let g = id_of(
+      &e.dispatch(Command::CreateShape {
+        kind: NodeType::Frame,
+        x: 0.0,
+        y: 0.0,
+        width: 300.0,
+        height: 300.0,
+        parent: None,
+      })
+      .unwrap(),
+    );
+    let c = rect(&mut e, 10.0, 10.0, 40.0, 40.0, Some(g.clone()));
+    let own = e
+      .query(Query::ExportPieces {
+        ids: vec![g.clone(), c.clone()],
+        patch: Default::default(),
+        hide: vec![],
+        own: vec![g.clone()],
+      })
+      .unwrap();
+    let full = pieces(&e, &[&g, &c], json!({}), &[]).unwrap();
+    assert_ne!(own[0]["svg"], full[0]["svg"]);
+    // The child, drawn alone in the same call, is not affected.
+    assert_eq!(own[1]["svg"], full[1]["svg"]);
+  }
+
+  #[test]
+  fn export_pieces_unknown_ids_and_bad_patches() {
+    let mut e = engine();
+    let a = rect(&mut e, 0.0, 0.0, 10.0, 10.0, None);
+    let out = pieces(&e, &["nope", &a], json!({ "ghost": { "width": 5 } }), &[]).unwrap();
+    assert_eq!(out[0]["svg"], "");
+    assert!(!out[1]["svg"].as_str().unwrap().is_empty());
+    let err = pieces(&e, &[&a], json!({ a.clone(): { "width": "wide" } }), &[]).unwrap_err();
+    assert!(err.contains(&a), "{err}");
   }
 
   #[test]
@@ -8078,6 +8241,114 @@ mod tests {
       assert_eq!(crate::shapes::vector_d(e.doc.get(&id).unwrap()), d_before);
       e.dispatch(Command::Redo).unwrap();
       assert_eq!(points(&e, &id).len(), 4);
+    }
+
+    #[test]
+    fn bending_a_segment_passes_through_the_pointer_and_undoes() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      let d_before = crate::shapes::vector_d(e.doc.get(&id).unwrap());
+      // The first segment's middle is (125, 125); pull it to (110, 140).
+      e.dispatch(Command::BendVectorSegment {
+        id: id.clone(),
+        sub: 0,
+        seg: 0,
+        t: 0.5,
+        x: 110.0,
+        y: 140.0,
+      })
+      .unwrap();
+      let m = e.doc.abs_matrix(&id);
+      let c = vector_edit::segment(&e.doc.get(&id).unwrap().vector.as_ref().unwrap().subpaths[0], 0);
+      let at = m.apply(vector_edit::cubic_at(&c, 0.5));
+      assert!((at.x - 110.0).abs() < 1e-6 && (at.y - 140.0).abs() < 1e-6, "{at:?}");
+      assert_eq!(points(&e, &id).len(), 3);
+      e.dispatch(Command::Undo).unwrap();
+      assert_eq!(crate::shapes::vector_d(e.doc.get(&id).unwrap()), d_before);
+    }
+
+    #[test]
+    fn a_bend_drag_is_one_step_and_applies_from_the_base() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      let d_before = crate::shapes::vector_d(e.doc.get(&id).unwrap());
+      let depth = e.past.len();
+      let bend = |x: f64, y: f64| Command::BendVectorSegment {
+        id: id.clone(),
+        sub: 0,
+        seg: 0,
+        t: 0.5,
+        x,
+        y,
+      };
+      e.dispatch(Command::BeginGesture).unwrap();
+      for (x, y) in [(120.0, 130.0), (90.0, 160.0), (60.0, 150.0)] {
+        e.dispatch(bend(x, y)).unwrap();
+      }
+      e.dispatch(Command::EndGesture).unwrap();
+      assert_eq!(e.past.len(), depth + 1);
+      let dragged = e.doc.get(&id).unwrap().clone();
+      // The same final point in one go gives the same path, box included.
+      e.dispatch(Command::Undo).unwrap();
+      assert_eq!(crate::shapes::vector_d(e.doc.get(&id).unwrap()), d_before);
+      e.dispatch(bend(60.0, 150.0)).unwrap();
+      let once = e.doc.get(&id).unwrap();
+      assert_eq!(once.vector, dragged.vector);
+      assert_eq!(
+        (once.x, once.y, once.width, once.height),
+        (dragged.x, dragged.y, dragged.width, dragged.height)
+      );
+    }
+
+    #[test]
+    fn bending_in_an_instance_records_an_override_and_raw_paths_refuse() {
+      let mut e = engine();
+      let vec = path(&mut e, false);
+      let comp = id_of(&e.dispatch(Command::CreateComponent { ids: vec![vec] }).unwrap());
+      let inst = id_of(
+        &e.dispatch(Command::CreateInstance {
+          component_id: comp,
+          x: 400.0,
+          y: 0.0,
+          parent: None,
+          anchor: None,
+          into_components: false,
+        })
+        .unwrap(),
+      );
+      let inner = e
+        .doc
+        .subtree(&inst)
+        .into_iter()
+        .find(|i| e.doc.get(i).map(|n| n.kind == NodeType::Vector).unwrap_or(false))
+        .expect("the instance has a vector");
+      let main_before = crate::shapes::vector_d(e.doc.get(&inner).unwrap());
+      e.dispatch(Command::BendVectorSegment {
+        id: inner.clone(),
+        sub: 0,
+        seg: 0,
+        t: 0.5,
+        x: 430.0,
+        y: 160.0,
+      })
+      .unwrap();
+      assert_ne!(crate::shapes::vector_d(e.doc.get(&inner).unwrap()), main_before);
+      assert!(
+        !e.doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides.is_empty(),
+        "the bend is recorded on the instance"
+      );
+      let raw = path(&mut e, false);
+      e.doc.get_mut(&raw).unwrap().vector.as_mut().unwrap().raw = Some(Default::default());
+      assert!(e
+        .dispatch(Command::BendVectorSegment {
+          id: raw,
+          sub: 0,
+          seg: 0,
+          t: 0.5,
+          x: 0.0,
+          y: 0.0,
+        })
+        .is_err());
     }
 
     #[test]

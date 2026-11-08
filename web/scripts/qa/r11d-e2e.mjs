@@ -162,7 +162,8 @@ try {
 
   // ---- Presenter: Back from a smart animate plays a reversed smart animate ----
   {
-    const anims = () => page.evaluate(() => document.getAnimations().length);
+    // Smart animate pieces on one clock (w4a-a): one element per matched layer, no longer one CSS animation each.
+    const anims = () => page.evaluate(() => document.querySelectorAll(".presenter .smart-layer [data-smart]").length);
     await present(page);
     await page.locator(`.presenter [data-hotspot="${await node(page, "Open")}"]`).click();
     const forward = await anims();

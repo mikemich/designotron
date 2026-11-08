@@ -40,6 +40,17 @@ struct Renderer<'a> {
   scope: String,
   /// Paint bounds per node (see `local_render_bounds`), so nested effects don't rescan subtrees.
   bounds: HashMap<&'a str, Rect>,
+  /// Where a background blur's walk stops: the exported layer (`None`: the top-level layer).
+  /// The flag says whether that layer's own fills are part of what lies below.
+  stop: Option<(NodeId, bool)>,
+  /// Above 0 while a background blur's copy of the content below is being painted: no canvas
+  /// hooks, no text bars, no nested blur.
+  backdrop: u32,
+  /// Page-space box a background blur's copy still needs (the layer grown by 3 sigma): inside the
+  /// copy, `list` leaves out the siblings that miss it, at any depth.
+  cull: Option<Rect>,
+  /// Image pattern ids by paint (address), size and padding, so a copy reuses the original's.
+  images: HashMap<(usize, u64, u64, u64), String>,
 }
 
 /// Renders all roots of a page as SVG markup (`<defs>` + content), page coordinates.
@@ -52,6 +63,10 @@ pub fn render_page(doc: &Document, page: &str, m: &dyn TextMeasurer, opts: Rende
     uid: 0,
     scope: String::new(),
     bounds: HashMap::new(),
+    stop: None,
+    backdrop: 0,
+    cull: None,
+    images: HashMap::new(),
   };
   let roots = doc.page(page).map(|p| p.children.clone()).unwrap_or_default();
   let body = r.list(&roots);
@@ -69,6 +84,10 @@ pub fn render_root(doc: &Document, root: &str, m: &dyn TextMeasurer, opts: Rende
     uid: 0,
     scope: format!("{}_", root.replace(|c: char| !c.is_ascii_alphanumeric(), "")),
     bounds: HashMap::new(),
+    stop: None,
+    backdrop: 0,
+    cull: None,
+    images: HashMap::new(),
   };
   let body = r.node(root, None);
   if r.defs.is_empty() {
@@ -122,6 +141,10 @@ pub fn export_svg_parts(doc: &Document, id: &str, m: &dyn TextMeasurer, hidden: 
     uid: 0,
     scope: export_scope(id, true, hidden),
     bounds: HashMap::new(),
+    stop: Some((id.to_string(), false)),
+    backdrop: 0,
+    cull: None,
+    images: HashMap::new(),
   };
   let place = Mat::translate(-b.x, -b.y).mul(&doc.abs_matrix(id));
   let body = r.children(n);
@@ -201,6 +224,10 @@ fn export_svg_with(doc: &Document, id: &str, m: &dyn TextMeasurer, b: Rect, plac
     uid: 0,
     scope: export_scope(id, false, hidden),
     bounds: HashMap::new(),
+    stop: Some((id.to_string(), true)),
+    backdrop: 0,
+    cull: None,
+    images: HashMap::new(),
   };
   let body = r.node(&n.id, Some(place));
   format!(
@@ -444,7 +471,7 @@ impl<'a> Renderer<'a> {
       None => self.doc.local_matrix(n),
     };
     let mut attrs = String::new();
-    if self.opts.mode == Mode::Canvas {
+    if self.canvas() {
       attrs.push_str(&format!(" data-id=\"{}\"", esc(&n.id)));
     }
     if !m.is_identity() {
@@ -459,16 +486,132 @@ impl<'a> Renderer<'a> {
     if self.opts.hidden.contains(&n.id) {
       // Exports leave hidden layers (and everything inside them) out; the canvas keeps them so
       // text being edited still measures.
-      if self.opts.mode == Mode::Export {
+      if self.opts.mode == Mode::Export || self.backdrop > 0 {
         return String::new();
       }
       attrs.push_str(" visibility=\"hidden\"");
     }
-    if let Some(f) = self.effects_filter(n) {
-      attrs.push_str(&format!(" filter=\"url(#{f})\""));
-    }
+    let fx = self.effects_filter(n);
+    let backdrop = self.backdrop(n);
     let body = self.body(n);
-    format!("<g{attrs}>{body}</g>")
+    match fx {
+      // The shadows are cast by the layer alone, not by the blurred copy under it.
+      Some(f) if !backdrop.is_empty() => format!("<g{attrs}>{backdrop}<g filter=\"url(#{f})\">{body}</g></g>"),
+      Some(f) => format!("<g{attrs} filter=\"url(#{f})\">{body}</g>"),
+      None => format!("<g{attrs}>{backdrop}{body}</g>"),
+    }
+  }
+
+  /// Canvas markup with its editor hooks (not inside a background blur's copy).
+  fn canvas(&self) -> bool {
+    self.opts.mode == Mode::Canvas && self.backdrop == 0
+  }
+
+  /// A visible background blur: the content below the layer within the render root (the
+  /// top-level layer on the canvas, the exported layer in an export), painted again in the
+  /// layer's own space, blurred and clipped to its shape. Paints first, under the layer's fills.
+  fn backdrop(&mut self, n: &'a Node) -> String {
+    let eligible = n.kind.is_frame_like()
+      || matches!(
+        n.kind,
+        NodeType::Rectangle | NodeType::Ellipse | NodeType::Polygon | NodeType::Star | NodeType::Vector
+      );
+    if self.backdrop > 0 || n.is_mask || !eligible || n.width <= 0.0 || n.height <= 0.0 {
+      return String::new();
+    }
+    let Some(blur) = n
+      .effects
+      .iter()
+      .find(|e| e.visible && e.kind == EffectType::BackgroundBlur && e.blur > 0.0)
+      .map(|e| e.blur)
+    else {
+      return String::new();
+    };
+    let path = self.doc.path(&n.id);
+    let from = match &self.stop {
+      Some((s, _)) => path.iter().position(|p| p == s),
+      None => Some(0),
+    };
+    let Some(from) = from.filter(|f| path.len() - f >= 2) else {
+      return String::new();
+    };
+    let sigma = blur / 2.0;
+    let margin = 3.0 * sigma;
+    let abs_n = self.doc.abs_matrix(&n.id);
+    let inv_n = abs_n.invert();
+    let cull = {
+      let b = abs_n.bounds_of(n.width, n.height);
+      Rect::new(b.x - margin, b.y - margin, b.width + 2.0 * margin, b.height + 2.0 * margin)
+    };
+    self.cull = Some(cull);
+    self.backdrop += 1;
+    let doc = self.doc;
+    let mut abs_a = doc.abs_matrix(&path[from]);
+    let mut below = String::new();
+    for i in from..path.len() - 1 {
+      let Some(a) = doc.get(&path[i]) else { continue };
+      if i > from {
+        abs_a = abs_a.mul(&doc.local_matrix(a));
+      }
+      let own_fills = i > from || self.stop.as_ref().is_none_or(|(_, fills)| *fills);
+      let upto = a.children.iter().position(|c| *c == path[i + 1]).unwrap_or(0);
+      let kids = &a.children[..upto];
+      let mut part = String::new();
+      let geo = Geo::Rect {
+        w: a.width,
+        h: a.height,
+        r: shapes::corner_radii(a),
+      };
+      if own_fills && a.kind.is_frame_like() {
+        part.push_str(&self.fills(a, &geo));
+      }
+      let content = self.list(kids);
+      if a.kind.is_frame_like() && a.clip_content && !content.is_empty() {
+        let cid = self.id("clip");
+        self
+          .defs
+          .push_str(&format!("<clipPath id=\"{cid}\">{}</clipPath>", geo_el(&geo, "")));
+        part.push_str(&format!("<g clip-path=\"url(#{cid})\">{content}</g>"));
+      } else {
+        part.push_str(&content);
+      }
+      if !part.is_empty() {
+        let t = inv_n.mul(&abs_a);
+        if t.is_identity() {
+          below.push_str(&part);
+        } else {
+          below.push_str(&format!("<g transform=\"{}\">{part}</g>", t.svg()));
+        }
+      }
+    }
+    self.backdrop -= 1;
+    self.cull = None;
+    if below.is_empty() {
+      return String::new();
+    }
+    let geo = if n.kind.is_frame_like() {
+      Geo::Rect {
+        w: n.width,
+        h: n.height,
+        r: shapes::corner_radii(n),
+      }
+    } else {
+      self.geometry(n)
+    };
+    let (cid, fid) = (self.id("bbc"), self.id("bbf"));
+    // Inside a clipPath only `clip-rule` counts, so an even-odd vector keeps its holes.
+    let clip = geo_el(&geo, "").replace(" fill-rule=", " clip-rule=");
+    self.defs.push_str(&format!("<clipPath id=\"{cid}\">{clip}</clipPath>"));
+    self.defs.push_str(&format!(
+      "<filter id=\"{fid}\" filterUnits=\"userSpaceOnUse\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" color-interpolation-filters=\"sRGB\"><feGaussianBlur stdDeviation=\"{}\"/></filter>",
+      fmt(-margin),
+      fmt(-margin),
+      fmt(n.width + 2.0 * margin),
+      fmt(n.height + 2.0 * margin),
+      fmt(sigma)
+    ));
+    let class = if self.opts.mode == Mode::Canvas { " class=\"dt-bb\"" } else { "" };
+    format!("<g{class} clip-path=\"url(#{cid})\"><g filter=\"url(#{fid})\">{below}</g></g>")
   }
 
   fn body(&mut self, n: &Node) -> String {
@@ -539,7 +682,22 @@ impl<'a> Renderer<'a> {
   fn list(&mut self, ids: &[String]) -> String {
     let mut out = String::new();
     let mut masked: Option<(String, String)> = None;
+    // Inside a background blur's copy only what reaches the blurred layer is painted.
+    let cull = self.cull.filter(|_| self.backdrop > 0);
+    let parent = cull.map(|_| {
+      let p = ids.first().and_then(|c| self.doc.get(c)).and_then(|n| n.parent.clone());
+      p.map_or(Mat::IDENTITY, |p| self.doc.abs_matrix(&p))
+    });
     for c in ids {
+      if let (Some(cull), Some(parent)) = (&cull, &parent) {
+        let doc = self.doc;
+        if let Some(k) = doc.get(c).filter(|k| !k.is_mask) {
+          let lb = local_render_bounds(doc, self.m, &mut self.bounds, k);
+          if intersect(&mat_bounds(&parent.mul(&doc.local_matrix(k)), &lb), cull).is_none() {
+            continue;
+          }
+        }
+      }
       let is_mask = self.doc.get(c).map(|m| m.is_mask && m.visible).unwrap_or(false);
       if is_mask {
         if let Some((mid, body)) = masked.take() {
@@ -844,7 +1002,12 @@ impl<'a> Renderer<'a> {
         filters,
         ..
       } => {
+        let key = (std::ptr::from_ref(p) as usize, w.to_bits(), h.to_bits(), pad.to_bits());
+        if let Some(pid) = self.images.get(&key) {
+          return format!("url(#{pid})");
+        }
         let pid = self.id("img");
+        self.images.insert(key, pid.clone());
         let ip = paint::ImagePaint {
           src,
           scale_mode: *scale_mode,
@@ -994,7 +1157,7 @@ impl<'a> Renderer<'a> {
     let mut body = String::new();
     for line in &lay.lines {
       let top = offset + line.top;
-      if self.opts.mode == Mode::Canvas {
+      if self.canvas() {
         bars.push_str(&greek_bar(line, base.size, top, n.width, t.align_h));
       }
       // Justify stretches the gaps of wrapped lines to the box's width.
@@ -1078,7 +1241,7 @@ impl<'a> Renderer<'a> {
   /// Canvas only: the text's size class (see `TEXT_SIZE_STEPS`), so the editor can hide text too
   /// small to read, and show its `greek_bar`s, by switching one class on the canvas.
   fn lod_size(&self, t: &model::TextProps, lay: &crate::text::TextLayout) -> Option<u32> {
-    if self.opts.mode != Mode::Canvas {
+    if !self.canvas() {
       return None;
     }
     let size = lay
@@ -2300,5 +2463,307 @@ mod r18d_tests {
     ] {
       assert!(el.contains(want), "{want} in {el}");
     }
+  }
+}
+
+#[cfg(test)]
+mod w4ad_tests {
+  use super::*;
+  use crate::doc::{new_document, IdGen};
+  use crate::text::HeuristicMeasurer;
+
+  /// Frame `f` (400x300) holding `blue` (0,0,200x200), `far` (350,250,20x20), the glass `card`
+  /// (50,50,100x100, background blur 20) and `above` (60,60,10x10), painted in that order.
+  fn glass() -> Document {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut f = crate::ops::default_node(NodeType::Frame, "f".into(), "F".into());
+    f.width = 400.0;
+    f.height = 300.0;
+    doc.insert(f, None, &page, None);
+    for (id, x, y, w, h) in [
+      ("blue", 0.0, 0.0, 200.0, 200.0),
+      ("far", 350.0, 250.0, 20.0, 20.0),
+      ("card", 50.0, 50.0, 100.0, 100.0),
+      ("above", 60.0, 60.0, 10.0, 10.0),
+    ] {
+      let mut r = crate::ops::default_node(NodeType::Rectangle, id.into(), id.into());
+      (r.x, r.y, r.width, r.height) = (x, y, w, h);
+      r.fills = vec![model::Paint::solid(match id {
+        "blue" => "#0000FF",
+        "far" => "#00FF00",
+        _ => "#ffffff66",
+      })];
+      r.strokes.clear();
+      r.stroke_weight = 0.0;
+      if id == "card" {
+        r.effects = vec![bg_blur(20.0)];
+      }
+      doc.insert(r, Some("f"), &page, None);
+    }
+    doc
+  }
+
+  fn bg_blur(blur: f64) -> Effect {
+    Effect {
+      kind: EffectType::BackgroundBlur,
+      blur,
+      ..Effect::default()
+    }
+  }
+
+  fn canvas(doc: &Document, root: &str) -> String {
+    let opts = RenderOptions {
+      mode: Mode::Canvas,
+      hidden: &[],
+      editing: None,
+    };
+    render_root(doc, root, &HeuristicMeasurer, opts)
+  }
+
+  /// The card's `<g>` markup, up to the layer painted above it.
+  fn card_group(svg: &str) -> String {
+    let i = svg.find("data-id=\"card\"").expect("card group");
+    let rest = &svg[i..];
+    let j = rest.find("<g data-id=\"above\"").unwrap_or(rest.len());
+    rest[..j].to_string()
+  }
+
+  fn count(s: &str, pat: &str) -> usize {
+    s.matches(pat).count()
+  }
+
+  /// The blurred copy of an SVG without hooks and def ids, to compare canvas with export.
+  fn copy_of(svg: &str) -> String {
+    let i = svg.find("<g filter=\"url(#").expect("backdrop");
+    let rest = &svg[i..];
+    let mut s = rest[..rest.find("</g></g>").unwrap()].to_string();
+    while let Some(i) = s.find(" data-id=\"") {
+      let j = s[i + 10..].find('"').unwrap() + i + 11;
+      s.replace_range(i..j, "");
+    }
+    s.split("url(#")
+      .map(|p| p.split_once(')').map_or(p, |(_, r)| r))
+      .collect::<Vec<_>>()
+      .join("url()")
+  }
+
+  #[test]
+  fn a_card_repaints_the_content_below_it_blurred_and_clipped() {
+    let svg = canvas(&glass(), "f");
+    let card = card_group(&svg);
+    assert!(card.contains("class=\"dt-bb\""), "{card}");
+    assert!(card.contains("clip-path=\"url(#"));
+    assert!(card.contains("filter=\"url(#"));
+    assert!(svg.contains("feGaussianBlur stdDeviation=\"10\""));
+    // the blue rectangle: once as itself, once as the copy; hooks only on the real one
+    assert_eq!(count(&svg, "data-id=\"blue\""), 1);
+    assert_eq!(count(&svg, "#0000FF"), 2);
+    // the copy is in the card's own space: blue sits at (-50,-50)
+    assert!(card.contains("matrix(1 0 0 1 -50 -50)"), "{card}");
+    // what paints above the card is not copied
+    assert_eq!(count(&svg, "data-id=\"above\""), 1);
+    assert_eq!(count(&card, "rgba(255, 255, 255, 0.4)"), 1, "only the card's own fill");
+  }
+
+  #[test]
+  fn far_siblings_are_culled() {
+    let svg = canvas(&glass(), "f");
+    assert_eq!(count(&svg, "#00FF00"), 1, "far is painted once, not copied");
+  }
+
+  #[test]
+  fn no_backdrop_for_a_top_level_layer_an_invisible_effect_or_blur_zero() {
+    let mut doc = glass();
+    doc.get_mut("card").unwrap().effects[0].visible = false;
+    assert!(!canvas(&doc, "f").contains("dt-bb"));
+    doc.get_mut("card").unwrap().effects[0].visible = true;
+    doc.get_mut("card").unwrap().effects[0].blur = 0.0;
+    assert!(!canvas(&doc, "f").contains("dt-bb"));
+    let page = doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Rectangle, "top".into(), "top".into());
+    t.effects = vec![bg_blur(20.0)];
+    doc.insert(t, None, &page, None);
+    assert!(!canvas(&doc, "top").contains("dt-bb"));
+  }
+
+  #[test]
+  fn export_stops_at_the_exported_layer() {
+    let doc = glass();
+    let m = &HeuristicMeasurer;
+    let card = export_svg(&doc, "card", m);
+    assert!(!card.contains("feGaussianBlur"), "{card}");
+    let frame = export_svg(&doc, "f", m);
+    assert!(frame.contains("feGaussianBlur stdDeviation=\"10\""));
+    assert!(!frame.contains("data-id") && !frame.contains("dt-bb"));
+    let kids = export_svg_parts(&doc, "f", m, &[], true).svg;
+    assert!(kids.contains("feGaussianBlur"));
+  }
+
+  #[test]
+  fn the_canvas_and_export_copies_match_apart_from_hooks() {
+    let doc = glass();
+    let (a, b) = (copy_of(&canvas(&doc, "f")), copy_of(&export_svg(&doc, "f", &HeuristicMeasurer)));
+    assert!(a.contains("#0000FF"));
+    assert_eq!(a, b);
+  }
+
+  #[test]
+  fn nested_blurs_are_not_expanded() {
+    let mut doc = glass();
+    let page = doc.pages[0].id.clone();
+    let mut g2 = crate::ops::default_node(NodeType::Rectangle, "g2".into(), "g2".into());
+    (g2.x, g2.y, g2.width, g2.height) = (60.0, 60.0, 50.0, 50.0);
+    g2.effects = vec![bg_blur(8.0)];
+    doc.insert(g2, Some("f"), &page, Some(2));
+    let svg = canvas(&doc, "f");
+    // g2 blurs `blue`; the card blurs `blue` and a plain copy of g2 (no backdrop of its own)
+    assert_eq!(count(&svg, "feGaussianBlur"), 2);
+    assert_eq!(count(&svg, "data-id=\"g2\""), 1);
+  }
+
+  #[test]
+  fn a_mask_below_the_card_is_kept_in_the_copy() {
+    let mut doc = glass();
+    let page = doc.pages[0].id.clone();
+    let mut m = crate::ops::default_node(NodeType::Ellipse, "mk".into(), "mk".into());
+    (m.x, m.y, m.width, m.height) = (0.0, 0.0, 300.0, 300.0);
+    m.is_mask = true;
+    doc.insert(m, Some("f"), &page, Some(0));
+    let card = card_group(&canvas(&doc, "f"));
+    assert!(card.contains("mask=\"url(#"), "{card}");
+  }
+
+  #[test]
+  fn a_rotated_card_carries_the_inverse_transform() {
+    let mut doc = glass();
+    doc.get_mut("card").unwrap().rotation = 30.0;
+    let card = card_group(&canvas(&doc, "f"));
+    assert!(card.contains("matrix("), "{card}");
+    assert!(card.contains("#0000FF"));
+  }
+
+  #[test]
+  fn hidden_layers_are_left_out_of_the_copy() {
+    let doc = glass();
+    let hidden = vec!["blue".to_string()];
+    let opts = RenderOptions {
+      mode: Mode::Canvas,
+      hidden: &hidden,
+      editing: None,
+    };
+    let svg = render_root(&doc, "f", &HeuristicMeasurer, opts);
+    assert_eq!(count(&svg, "#0000FF"), 1, "hidden stays on the canvas but is not copied");
+  }
+
+  #[test]
+  fn text_has_no_background_blur() {
+    let mut doc = glass();
+    let page = doc.pages[0].id.clone();
+    let mut t = crate::ops::default_node(NodeType::Text, "tx".into(), "tx".into());
+    t.effects = vec![bg_blur(20.0)];
+    doc.insert(t, Some("f"), &page, None);
+    assert_eq!(count(&canvas(&doc, "f"), "dt-bb"), 1);
+  }
+
+  #[test]
+  fn a_list_inside_a_container_is_culled_to_the_rows_near_the_card() {
+    let mut gen = IdGen::new(5);
+    let mut doc = new_document(&mut gen, "t");
+    let page = doc.pages[0].id.clone();
+    let mut s = crate::ops::default_node(NodeType::Frame, "s".into(), "S".into());
+    (s.width, s.height) = (400.0, 5000.0);
+    doc.insert(s, None, &page, None);
+    let mut list = crate::ops::default_node(NodeType::Frame, "list".into(), "List".into());
+    (list.width, list.height) = (400.0, 4400.0);
+    doc.insert(list, Some("s"), &page, None);
+    for i in 0..100 {
+      let mut r = crate::ops::default_node(NodeType::Rectangle, format!("row{i}"), format!("row{i}"));
+      (r.x, r.y, r.width, r.height) = (0.0, f64::from(i) * 44.0, 400.0, 40.0);
+      r.fills = vec![model::Paint::solid("#123456")];
+      doc.insert(r, Some("list"), &page, None);
+    }
+    let mut nav = crate::ops::default_node(NodeType::Rectangle, "nav".into(), "Nav".into());
+    (nav.width, nav.height) = (400.0, 64.0);
+    nav.effects = vec![bg_blur(20.0)];
+    doc.insert(nav, Some("s"), &page, None);
+    let svg = canvas(&doc, "s");
+    let copied = count(&svg, "#123456") - 100;
+    assert!((2..=4).contains(&copied), "{copied} rows copied");
+  }
+
+  #[test]
+  fn an_even_odd_vector_clips_with_clip_rule() {
+    let mut doc = glass();
+    let page = doc.pages[0].id.clone();
+    let mut v = crate::ops::default_node(NodeType::Vector, "ring".into(), "ring".into());
+    (v.x, v.y, v.width, v.height) = (0.0, 0.0, 100.0, 100.0);
+    v.vector = Some(model::VectorData {
+      subpaths: vec![],
+      raw: Some(model::RawPath {
+        d: "M0 0H100V100H0Z M25 25H75V75H25Z".into(),
+        view_box: [0.0, 0.0, 100.0, 100.0],
+        fill_rule: "evenodd".into(),
+      }),
+    });
+    v.effects = vec![bg_blur(10.0)];
+    doc.insert(v, Some("f"), &page, None);
+    let svg = canvas(&doc, "f");
+    assert!(svg.contains("clip-rule=\"evenodd\""), "{svg}");
+  }
+
+  #[test]
+  fn a_mask_layer_gets_no_backdrop() {
+    let mut doc = glass();
+    doc.get_mut("card").unwrap().is_mask = true;
+    assert!(!canvas(&doc, "f").contains("dt-bb"));
+  }
+
+  #[test]
+  fn a_glass_cards_shadow_is_the_one_it_has_without_the_blur() {
+    let drop = Effect {
+      y: 8.0,
+      blur: 16.0,
+      ..Effect::default()
+    };
+    let inner = Effect {
+      kind: EffectType::InnerShadow,
+      ..Effect::default()
+    };
+    let mut doc = glass();
+    doc.get_mut("card").unwrap().effects = vec![bg_blur(20.0), drop.clone(), inner.clone()];
+    let glass_svg = canvas(&doc, "f");
+    doc.get_mut("card").unwrap().effects = vec![drop, inner];
+    let plain = canvas(&doc, "f");
+    let filter = |s: &str| {
+      let i = s.find("<filter id=\"f_fx").expect("shadow filter");
+      let rest = &s[i..];
+      rest[rest.find('>').unwrap()..rest.find("</filter>").unwrap()].to_string()
+    };
+    assert_eq!(filter(&glass_svg), filter(&plain));
+    // the filter wraps the card's own paint only, after the copy
+    let card = card_group(&glass_svg);
+    let at = card.find("<g filter=\"url(#f_fx").expect("inner filter group");
+    assert!(card[..at].contains("dt-bb") && !card[at..].contains("dt-bb"), "{card}");
+  }
+
+  #[test]
+  fn copies_reuse_the_originals_image_pattern() {
+    let mut doc = glass();
+    doc.get_mut("blue").unwrap().fills = vec![Paint::Image {
+      src: "asset:a".into(),
+      scale_mode: model::ScaleMode::Fill,
+      opacity: 1.0,
+      visible: true,
+      crop: None,
+      credit: None,
+      scaling_factor: 1.0,
+      rotation: 0.0,
+      filters: None,
+    }];
+    let svg = canvas(&doc, "f");
+    assert_eq!(count(&svg, "<pattern"), 1, "{svg}");
+    assert_eq!(count(&svg, "fill=\"url(#f_img"), 2, "used by the layer and its copy");
   }
 }

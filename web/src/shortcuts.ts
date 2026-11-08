@@ -108,6 +108,8 @@ export function installShortcuts(): () => void {
     };
 
     if (mod) {
+      // Present (Figma's Ctrl+Alt+Enter, Cmd+Option+Enter on a Mac), from the selected frame.
+      if (e.altKey && !e.shiftKey && e.key === "Enter") return run(A.startPresenting);
       if (e.shiftKey && e.code === "Digit4") return run(() => toggleView("showGrids"));
       if (k === "z") return run(e.shiftKey ? A.redo : A.undo);
       if (k === "e" && !e.shiftKey) return run(A.flatten);
