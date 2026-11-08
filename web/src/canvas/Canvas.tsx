@@ -71,7 +71,7 @@ type Drag =
   | { kind: "pencil"; points: Pt[] }
   | { kind: "penHandle"; index: number; /** The incoming handle once Alt breaks the mirror (kept for the rest of the drag). */ broken: Pt | null }
   | { kind: "vector"; id: string; sub: number; idx: number; part: "anchor" | "in" | "out" | "pull"; pts: [number, number][]; startLocal: Pt; start: Node; moved: boolean; cands: Pt[] }
-  | { kind: "bend"; id: string; sub: number; seg: number; t: number; start: Pt; moved: boolean }
+  | { kind: "bend"; id: string; sub: number; seg: number; t: number; start: Pt; /** The grabbed point on the curve (page space). */ hit: Pt; moved: boolean }
   | { kind: "vmarquee"; id: string; start: Pt; base: [number, number][]; hitId: string | null; moved: boolean }
   | { kind: "link"; from: string; cur: Pt };
 
@@ -625,6 +625,8 @@ export function Canvas() {
     if (!editingVector) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // This Escape is ours: the global shortcut would otherwise see vector edit already closed and clear the selection.
+        e.stopPropagation();
         // Mid-drag, Escape takes the drag back first (the bend or anchor move), like the other drags.
         const d = drag.current;
         if (d && (d.kind === "bend" || d.kind === "vector")) {
@@ -644,8 +646,10 @@ export function Canvas() {
         joinVectorEnds();
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Capture phase: the global Escape shortcut also leaves vector edit, and by then this listener
+    // would be gone, with the bend or anchor drag still running.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [editingVector]);
 
   const local = (e: { clientX: number; clientY: number }): Pt => {
@@ -850,7 +854,7 @@ export function Canvas() {
       if (hit && (st.vectorBend || bendModifier(e))) {
         // Bend: drag the segment itself, so the curve follows the pointer.
         dispatch({ op: "beginGesture" });
-        drag.current = { kind: "bend", id: editingVector, sub: hit.sub, seg: hit.seg, t: hit.t, start: p, moved: false };
+        drag.current = { kind: "bend", id: editingVector, sub: hit.sub, seg: hit.seg, t: hit.t, start: p, hit: { x: hit.x, y: hit.y }, moved: false };
         setVHover(null);
         return;
       }
@@ -1065,7 +1069,7 @@ export function Canvas() {
         if (d.part === "anchor") {
           // The dragged anchor snaps (to another anchor, else to whole pixels, in page space) and
           // every selected anchor moves by its snapped delta. Ctrl drags freely.
-          const sn = snapPoint(apply(m.matrix, { x: orig.x + dx, y: orig.y + dy }), d.cands, zoom(), { pixel: true, off: e.ctrlKey });
+          const sn = snapPoint(apply(m.matrix, { x: orig.x + dx, y: orig.y + dy }), d.cands, zoom(), { pixel: true, off: e.ctrlKey || e.metaKey });
           const back = apply(invert(m.matrix), sn.p);
           const clean = (v: number) => Math.round(v * 1e6) / 1e6;
           const sdx = sn.kind ? clean(back.x - orig.x) : dx;
@@ -1109,7 +1113,7 @@ export function Canvas() {
           if (Math.hypot(p.x - d.start.x, p.y - d.start.y) * zoom() < 2) return;
           d.moved = true;
         }
-        dispatch({ op: "bendVectorSegment", id: d.id, sub: d.sub, seg: d.seg, t: d.t, x: p.x, y: p.y }, { quiet: true });
+        dispatch({ op: "bendVectorSegment", id: d.id, sub: d.sub, seg: d.seg, t: d.t, x: d.hit.x + (p.x - d.start.x), y: d.hit.y + (p.y - d.start.y) }, { quiet: true });
         break;
       }
       case "vmarquee": {

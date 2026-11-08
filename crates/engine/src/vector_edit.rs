@@ -20,6 +20,8 @@ const NEAREST_REFINE: usize = 40;
 
 /// The parameter range a bend works in; nearer the ends the pull would blow up.
 const BEND_T_MIN: f64 = 0.1;
+/// Smallest share of a pull that reaches the grabbed point (see `bend_segment`).
+const BEND_K_MIN: f64 = 0.05;
 /// cos(1 degree): how collinear two handles must be to count as one smooth anchor.
 const BEND_SMOOTH_COS: f64 = 0.999_847_695_156_391_3;
 
@@ -125,13 +127,22 @@ pub fn bend_segment(sp: &mut SubPath, seg: usize, t: f64, target: Point) -> Resu
   if seg >= segment_count(sp) {
     return Err("no such segment".into());
   }
+  let grabbed = t.clamp(0.0, 1.0);
   let t = t.clamp(BEND_T_MIN, 1.0 - BEND_T_MIN);
   let n = sp.points.len();
   let (ia, ib) = (seg, (seg + 1) % n);
   let (old_a, old_b) = (sp.points[ia], sp.points[ib]);
-  let at = cubic_at(&segment(sp, seg), t);
+  // The grabbed point is where the pointer started (the unclamped t): the curve follows its
+  // displacement. Only the weights use the clamped t, which keeps them well behaved near the ends.
+  let at = cubic_at(&segment(sp, seg), grabbed);
   let (dx, dy) = (target.x - at.x, target.y - at.y);
   let w = bend_weight(t);
+  // The handles' pull reaches the grabbed point scaled by k (1 within the weights' own range), so
+  // divide it out: the grabbed point then lands exactly on the target. The floor keeps a grab
+  // almost on an anchor from blowing the handles up.
+  let k =
+    grabbed * (1.0 - grabbed).powi(2) * (1.0 - w) / (t * (1.0 - t).powi(2)) + grabbed * grabbed * (1.0 - grabbed) * w / (t * t * (1.0 - t));
+  let (dx, dy) = (dx / k.max(BEND_K_MIN), dy / k.max(BEND_K_MIN));
   let ka = (1.0 - w) / (3.0 * t * (1.0 - t) * (1.0 - t));
   let kb = w / (3.0 * t * t * (1.0 - t));
   {
@@ -145,15 +156,21 @@ pub fn bend_segment(sp: &mut SubPath, seg: usize, t: f64, target: Point) -> Resu
     b.in_y += dy * kb;
   }
   // `ia != ib`: a subpath with a segment has two anchors or more.
+  // An open path's end has one handle only: the unused one stays as it is.
+  let open_end = |i: usize| !sp.closed && (i == 0 || i + 1 == n);
   let a = sp.points[ia];
-  if let Some((x, y)) = keep_opposite((old_a.in_x, old_a.in_y), (old_a.out_x, old_a.out_y), (a.out_x, a.out_y)) {
-    sp.points[ia].in_x = x;
-    sp.points[ia].in_y = y;
+  if !open_end(ia) {
+    if let Some((x, y)) = keep_opposite((old_a.in_x, old_a.in_y), (old_a.out_x, old_a.out_y), (a.out_x, a.out_y)) {
+      sp.points[ia].in_x = x;
+      sp.points[ia].in_y = y;
+    }
   }
   let b = sp.points[ib];
-  if let Some((x, y)) = keep_opposite((old_b.out_x, old_b.out_y), (old_b.in_x, old_b.in_y), (b.in_x, b.in_y)) {
-    sp.points[ib].out_x = x;
-    sp.points[ib].out_y = y;
+  if !open_end(ib) {
+    if let Some((x, y)) = keep_opposite((old_b.out_x, old_b.out_y), (old_b.in_x, old_b.in_y), (b.in_x, b.in_y)) {
+      sp.points[ib].out_x = x;
+      sp.points[ib].out_y = y;
+    }
   }
   Ok(())
 }
@@ -742,16 +759,59 @@ mod tests {
   }
 
   #[test]
-  fn bend_clamps_t_near_the_ends() {
-    let mut a = curvy(false);
-    let mut b = curvy(false);
-    let target = Point::new(30.0, 70.0);
-    bend_segment(&mut a, 0, 0.0, target).unwrap();
-    bend_segment(&mut b, 0, 0.1, target).unwrap();
-    assert_eq!(a, b);
-    let m = cubic_at(&segment(&a, 0), 0.1);
-    assert!((m.x - 30.0).abs() < EPS && (m.y - 70.0).abs() < EPS);
-    assert!(bend_segment(&mut a, 9, 0.5, target).is_err());
+  fn bend_follows_the_grabbed_point_near_the_ends() {
+    // Grabbed at t = 0.02 and not moved: nothing changes. Moved a little: the point moves that much.
+    let mut sp = curvy(false);
+    let before = sp.clone();
+    let grab = cubic_at(&segment(&sp, 0), 0.02);
+    bend_segment(&mut sp, 0, 0.02, grab).unwrap();
+    for (a, b) in sp.points.iter().zip(&before.points) {
+      assert!((a.out_x - b.out_x).abs() < EPS && (a.out_y - b.out_y).abs() < EPS);
+      assert!((a.in_x - b.in_x).abs() < EPS && (a.in_y - b.in_y).abs() < EPS);
+    }
+    bend_segment(&mut sp, 0, 0.02, Point::new(grab.x + 2.0, grab.y + 3.0)).unwrap();
+    let m = cubic_at(&segment(&sp, 0), 0.02);
+    assert!((m.x - grab.x - 2.0).abs() < EPS && (m.y - grab.y - 3.0).abs() < EPS);
+    assert!(bend_segment(&mut sp, 9, 0.5, grab).is_err());
+  }
+
+  #[test]
+  fn a_near_end_bend_on_a_long_line_makes_no_hook() {
+    let mut sp = SubPath {
+      points: vec![VectorPoint::at(0.0, 0.0), VectorPoint::at(600.0, 0.0)],
+      closed: false,
+    };
+    // Grabbed 10 px from the start (t = 1/60), moved 3 px down.
+    bend_segment(&mut sp, 0, 10.0 / 600.0, Point::new(10.0, 3.0)).unwrap();
+    let a = sp.points[0];
+    assert!(a.out_x > 0.0, "the handle points forward: {a:?}");
+    assert!(a.out_y > 0.0 && a.out_y < 100.0, "{a:?}");
+    let m = cubic_at(&segment(&sp, 0), 10.0 / 600.0);
+    assert!((m.x - 10.0).abs() < 1e-6 && (m.y - 3.0).abs() < 1e-6, "{m:?}");
+  }
+
+  #[test]
+  fn bend_at_the_very_end_stays_finite() {
+    let mut sp = curvy(false);
+    bend_segment(&mut sp, 0, 0.0, Point::new(0.0, 50.0)).unwrap();
+    assert!(sp.points.iter().all(|p| p.out_x.is_finite() && p.in_x.is_finite()));
+  }
+
+  #[test]
+  fn bend_leaves_an_open_ends_unused_handle_alone() {
+    let mut sp = SubPath {
+      points: vec![
+        VectorPoint {
+          in_x: -20.0,
+          out_x: 20.0,
+          ..VectorPoint::at(0.0, 0.0)
+        },
+        VectorPoint::at(100.0, 0.0),
+      ],
+      closed: false,
+    };
+    bend_segment(&mut sp, 0, 0.5, Point::new(50.0, 40.0)).unwrap();
+    assert_eq!((sp.points[0].in_x, sp.points[0].in_y), (-20.0, 0.0));
   }
 
   #[test]

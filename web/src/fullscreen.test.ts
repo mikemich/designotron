@@ -40,9 +40,16 @@ describe("toggleFullscreen", () => {
   });
 
   it("leaves when something is already in full screen", async () => {
-    const { exit } = stubDocument({ request: async () => {}, current: {} });
-    expect(await toggleFullscreen(el())).toBe(true);
+    const inner = {};
+    const { exit } = stubDocument({ request: async () => {}, current: inner });
+    expect(await toggleFullscreen(el((x) => x === inner))).toBe(true);
     expect(exit).toHaveBeenCalledOnce();
+  });
+
+  it("leaves another element's full screen alone", async () => {
+    const { exit } = stubDocument({ request: async () => {}, current: {} });
+    expect(await toggleFullscreen(el())).toBe(false);
+    expect(exit).not.toHaveBeenCalled();
   });
 
   it("reports a refusal instead of throwing", async () => {

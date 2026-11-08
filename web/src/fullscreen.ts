@@ -18,6 +18,8 @@ export async function toggleFullscreen(el: Element | null | undefined): Promise<
   try {
     if (typeof document === "undefined") return false;
     if (document.fullscreenElement) {
+      // Only the presenter's own full screen is ours to leave.
+      if (!el || !el.contains(document.fullscreenElement)) return false;
       await document.exitFullscreen();
       return true;
     }

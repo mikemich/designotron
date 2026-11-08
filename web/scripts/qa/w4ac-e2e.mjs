@@ -216,6 +216,59 @@ await newFile();
   check("escape: the cancelled bend left no undo step (one undo removes the layer itself)", !(await node(id)));
 }
 
+// ---------- 5b. Escape without the modifier: the Bend toggle, and a plain anchor drag ----------
+await newFile();
+{
+  const id = await mkVector([pt(100, 100), pt(300, 100)]);
+  await enterEdit(id);
+  await bendBtn().click();
+  await page.mouse.move(...(await S(200, 100)));
+  await page.mouse.down();
+  await page.mouse.move(...(await S(200, 150)), { steps: 6 });
+  await page.keyboard.press("Escape");
+  await page.mouse.move(...(await S(200, 190)), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const n = await node(id);
+  check("escape (toggle, no modifier): the bend is cancelled and stays cancelled", straight(n), JSON.stringify(abs(n)));
+  check("escape (toggle, no modifier): vector edit is left", (await edit()).id === null);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  check("escape (toggle, no modifier): no undo step was left (undo removes the layer)", !(await node(id)));
+}
+await newFile();
+{
+  const id = await mkVector([pt(100, 100), pt(300, 100)]);
+  await enterEdit(id);
+  await page.mouse.move(...(await S(300, 100)));
+  await page.mouse.down();
+  await page.mouse.move(...(await S(340, 150)), { steps: 6 });
+  await page.keyboard.press("Escape");
+  await page.mouse.move(...(await S(360, 170)), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const n = await node(id);
+  const e = abs(n)[1];
+  check("escape (anchor drag): the anchor is back where it was", e.x === 300 && e.y === 100, `${e.x}, ${e.y}`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  check("escape (anchor drag): no undo step was left", !(await node(id)));
+}
+
+// ---------- 5c. A bend grabbed near the end of a long segment does not hook ----------
+await newFile();
+{
+  const id = await mkVector([pt(-200, 100), pt(400, 100)]);
+  await enterEdit(id);
+  await dt(() => window.__dt.setViewport({ zoom: 1, x: 300, y: 0 }));
+  await page.waitForTimeout(150);
+  const from = await S(-190, 100);
+  await drag(from, [from[0], from[1] + 3], { ctrl: true });
+  const a = abs(await node(id))[0];
+  check("near-end bend: the start handle points forward, no hook", a.outX > -1e-6 && a.outY > 0 && a.outY < 100, JSON.stringify([a.outX, a.outY]));
+  await dt(() => window.__dt.setViewport({ zoom: 1, x: 0, y: 0 }));
+}
+
 // ---------- 6. A rotated vector and a flattened rectangle ----------
 await newFile();
 {
@@ -418,6 +471,46 @@ const closePresenter = async () => {
   await page.waitForTimeout(700);
   check("Q-1: a real move onto the layer still fires it", (await crumb()) === "Hovered", await crumb());
   void go;
+  await closePresenter();
+}
+
+{
+  // Q-1: arming enters only the topmost hotspot, so a parent's Mouse leave still fires.
+  await newFile();
+  const mk = async (name, x) => {
+    const f = await run({ op: "createShape", kind: "frame", x, y: 0, width: 300, height: 300, parent: null });
+    await run({ op: "update", ids: [f.id], patch: { name } });
+    return f.id;
+  };
+  const home = await mk("Home", 0);
+  const b = await mk("Screen B", 400);
+  const left = await mk("Left", 800);
+  const go = await run({ op: "createShape", kind: "rectangle", x: 20, y: 20, width: 100, height: 40, parent: home });
+  await run({ op: "update", ids: [go.id], patch: { name: "Go", interactions: [{ trigger: "onClick", action: "navigate", destination: b }] } });
+  const p = await run({ op: "createShape", kind: "frame", x: 450, y: 100, width: 100, height: 100, parent: b });
+  await run({ op: "update", ids: [p.id], patch: { name: "P", interactions: [{ trigger: "mouseLeave", action: "navigate", destination: left }] } });
+  const k = await run({ op: "createShape", kind: "rectangle", x: 500, y: 120, width: 50, height: 60, parent: p.id });
+  await run({ op: "update", ids: [k.id], patch: { name: "K", interactions: [{ trigger: "onClick", action: "navigate", destination: home }] } });
+  const pageId = await dt(() => window.__dt.doc().pages[0].id);
+  await run({ op: "setFlowStart", page: pageId, id: home });
+  await run({ op: "select", ids: [] });
+  await page.locator(".topbar .tbtn[title='Present']").click();
+  await page.waitForSelector(".presenter");
+  await page.waitForTimeout(400);
+  const vp = await page.locator(".presenter-viewport").boundingBox();
+  const onK = [vp.x + 125, vp.y + 150];
+  await page.mouse.move(...onK, { steps: 3 });
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Tab");
+  await page.locator('.presenter .hotspot[aria-label="Go"]').focus();
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(800);
+  check("Q-1 leave: Enter arrived on screen B", (await crumb()) === "Screen B", await crumb());
+  await page.mouse.move(onK[0] + 1, onK[1]);
+  await page.waitForTimeout(200);
+  await page.mouse.move(vp.x + 220, onK[1], { steps: 4 });
+  await page.waitForTimeout(700);
+  check("Q-1 leave: leaving the child out of the parent fires the parent's Mouse leave", (await crumb()) === "Left", await crumb());
   await closePresenter();
 }
 

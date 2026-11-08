@@ -959,12 +959,12 @@ function SceneView({ scene, flash, interactive, tabbable, scrolls, scrollEls, on
     const arm = (x: number, y: number) => {
       stop();
       armed.current = true;
-      // The pointer is over layers that appeared under it: they are entered now.
-      for (const el of document.elementsFromPoint(x, y)) {
-        const id = el.getAttribute("data-hotspot");
-        const h = id && el.getAttribute("data-scene") === scene.id ? byId.get(id) : undefined;
-        if (h) enterRef.current(h);
-      }
+      // The pointer is over a layer that appeared under it: it is entered now.
+      // Only the topmost hotspot, as the browser would: its chain covers the ancestors.
+      const el = document.elementFromPoint(x, y)?.closest("[data-hotspot]");
+      const id = el?.getAttribute("data-hotspot");
+      const h = id && el?.getAttribute("data-scene") === scene.id ? byId.get(id) : undefined;
+      if (h) enterRef.current(h);
     };
     const onMove = (e: PointerEvent) => {
       if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) < HOVER_ARM_DISTANCE) return;
