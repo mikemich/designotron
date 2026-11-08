@@ -118,6 +118,9 @@ export function canAct(it: Interaction, doc: Doc): boolean {
       return true;
     case "openUrl":
       return !!it.url?.trim();
+    case "changeTo":
+      // The variant to switch to is a component.
+      return !!it.destination && doc.nodes[it.destination]?.type === "component";
     default:
       return !!it.destination && !!doc.nodes[it.destination];
   }

@@ -63,7 +63,7 @@ fn is_pinned(c: &Node) -> bool {
 }
 
 /// Levels of nesting past which layout stops descending.
-const MAX_LAYOUT_DEPTH: usize = 1000;
+const MAX_LAYOUT_DEPTH: usize = 256;
 
 /// Lays out a node and its subtree bottom-up.
 pub fn layout_node(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
@@ -80,7 +80,14 @@ fn layout_walk(doc: &mut Document, id: &str, m: &dyn TextMeasurer, mut note: Opt
   }
   let Some(node) = doc.get(id) else { return };
   let kind = node.kind;
-  let children = node.children.clone();
+  // Only children that point back and aren't the node itself (a damaged file can list a layer
+  // under itself or under a parent it doesn't belong to).
+  let children: Vec<NodeId> = node
+    .children
+    .iter()
+    .filter(|c| c.as_str() != id && doc.get(c).is_some_and(|cn| cn.parent.as_deref() == Some(id)))
+    .cloned()
+    .collect();
   match kind {
     NodeType::Text => size_text(doc, id, m),
     NodeType::Group => {

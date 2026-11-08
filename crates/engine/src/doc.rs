@@ -248,11 +248,94 @@ impl Document {
     }
   }
 
-  /// Repairs a loaded or damaged tree: a node that is its own child or ancestor is cut loose, and
-  /// children lists keep only nodes that point back. A sound document is left untouched.
+  /// Repairs a loaded or damaged tree in one pass, in key order (every peer repairs the same way)
+  /// and linear in the number of layers: parent cycles are cut, a missing parent becomes none and
+  /// a missing page the first page, children lists keep only existing, distinct children that
+  /// point back, a layer its parent doesn't list is added to it, and each page lists exactly its
+  /// own top-level layers. A sound document is left untouched.
   pub fn repair_tree(&mut self) {
+    use std::collections::{HashMap as Map, HashSet};
     let ids: Vec<NodeId> = self.nodes.keys().cloned().collect();
+    // 1. Cycles and self-children.
     self.break_parent_cycles(&ids);
+    // 2. Missing parents and pages.
+    let first_page = self.pages.first().map(|p| p.id.clone()).unwrap_or_default();
+    for id in &ids {
+      let n = &self.nodes[id];
+      let no_parent = n.parent.as_ref().is_some_and(|p| !self.nodes.contains_key(p));
+      let no_page = self.page(&n.page).is_none();
+      if no_parent || no_page {
+        let m = self.get_mut(id).unwrap();
+        if no_parent {
+          m.parent = None;
+        }
+        if no_page {
+          m.page = first_page.clone();
+        }
+      }
+    }
+    // 3. Children lists: existing, pointing back, not the node itself, no duplicates.
+    for id in &ids {
+      let n = &self.nodes[id];
+      let mut seen: HashSet<&str> = HashSet::new();
+      let kids: Vec<NodeId> = n
+        .children
+        .iter()
+        .filter(|c| {
+          c.as_str() != id.as_str()
+            && self.nodes.get(*c).is_some_and(|cn| cn.parent.as_deref() == Some(id.as_str()))
+            && seen.insert(c.as_str())
+        })
+        .cloned()
+        .collect();
+      if kids != n.children {
+        self.get_mut(id).unwrap().children = kids;
+      }
+    }
+    // 4. A layer its parent doesn't list is appended to the parent.
+    let mut listed: Map<&str, HashSet<&str>> = Map::new();
+    for (id, n) in self.nodes.iter() {
+      listed.insert(id.as_str(), n.children.iter().map(String::as_str).collect());
+    }
+    let missing: Vec<(NodeId, NodeId)> = self
+      .nodes
+      .iter()
+      .filter_map(|(id, n)| n.parent.as_ref().map(|p| (p, id)))
+      .filter(|(p, id)| !listed.get(p.as_str()).is_some_and(|s| s.contains(id.as_str())))
+      .map(|(p, id)| (p.clone(), id.clone()))
+      .collect();
+    drop(listed);
+    for (p, id) in missing {
+      self.get_mut(&p).unwrap().children.push(id);
+    }
+    // 5. Pages list exactly their own top-level layers, once each.
+    let mut tops: Map<NodeId, Vec<NodeId>> = Map::new();
+    for (id, n) in self.nodes.iter() {
+      if n.parent.is_none() {
+        tops.entry(n.page.clone()).or_default().push(id.clone());
+      }
+    }
+    let page_ids: Vec<String> = self.pages.iter().map(|p| p.id.clone()).collect();
+    for pid in page_ids {
+      let mine = tops.remove(&pid).unwrap_or_default();
+      let mine_set: HashSet<&str> = mine.iter().map(String::as_str).collect();
+      let page = self.page(&pid).unwrap();
+      let mut seen: HashSet<&str> = HashSet::new();
+      let mut list: Vec<NodeId> = page
+        .children
+        .iter()
+        .filter(|c| mine_set.contains(c.as_str()) && seen.insert(c.as_str()))
+        .cloned()
+        .collect();
+      for c in &mine {
+        if !seen.contains(c.as_str()) {
+          list.push(c.clone());
+        }
+      }
+      if list != page.children {
+        self.page_mut(&pid).unwrap().children = list;
+      }
+    }
   }
 
   /// Makes every node in `ids` that is its own ancestor top-level, and keeps only children
@@ -453,8 +536,16 @@ impl Document {
   pub fn clone_subtree(&self, id: &str, ids: &mut IdGen) -> (Vec<Node>, HashMap<NodeId, NodeId>) {
     let order = self.subtree(id);
     let mut map = HashMap::new();
+    let mut given: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     for old in &order {
-      map.insert(old.clone(), ids.next("n_"));
+      // Never an id the document has, nor one already given to a copy.
+      let new = loop {
+        let id = self.fresh_id(ids, "n_");
+        if given.insert(id.clone()) {
+          break id;
+        }
+      };
+      map.insert(old.clone(), new);
     }
     let nodes = order
       .iter()

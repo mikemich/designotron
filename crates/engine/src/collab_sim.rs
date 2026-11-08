@@ -823,7 +823,7 @@ fn last_steps() -> String {
 
 /// A problem in the tree of `d` (a layer its parent or page doesn't list, a child that points
 /// elsewhere, one on a page that is gone), if any.
-fn unsound(d: &Document) -> Option<String> {
+pub(crate) fn unsound(d: &Document) -> Option<String> {
   for n in d.nodes.values() {
     for c in &n.children {
       if d.get(c).and_then(|x| x.parent.clone()).as_deref() != Some(n.id.as_str()) {
