@@ -437,6 +437,56 @@ async function newRoomCases() {
     check("5c: Ctrl+Z after Escape removes Ana's session only", t.every((x) => x === "BBB Hello world"), JSON.stringify(t));
   }
 
+  // 5d: Ben types inside Ana's open run; her undo leaves his characters.
+  {
+    const id = await newText(R);
+    await openEditor(ana, id);
+    await openEditor(ben, id);
+    await setSel(ana, 5);
+    await type(ana, "f");
+    await waitUntil(async () => (await textOf(ben, id)) === "Hellof world", 8000);
+    await setSel(ben, 6);
+    await type(ben, "X");
+    await waitUntil(async () => (await textOf(ana, id)) === "HellofX world", 8000);
+    await ana.page.evaluate(() => document.querySelector(".text-editor").focus());
+    await type(ana, "oo");
+    await sameText(peers, id, "5d typing around a collaborator");
+    await ana.page.keyboard.press("Control+z");
+    await sleep(300);
+    await sameText(peers, id, "5d undo");
+    const t = await WORLD(peers, id);
+    check("5d: Ana's undo removes her last typing, Ben's X stays", t.every((x) => x === "HellofX world"), JSON.stringify(t));
+    await closeEditor(ana);
+    await closeEditor(ben);
+  }
+
+  // 5e: redo never brings back what a collaborator deleted.
+  {
+    const id = await newText(R);
+    await openEditor(ana, id);
+    await openEditor(ben, id);
+    await setSel(ana, 11);
+    await type(ana, "foo");
+    await waitUntil(async () => (await textOf(ben, id)) === "Hello worldfoo", 8000);
+    await setSel(ben, 0);
+    await type(ben, "X");
+    await waitUntil(async () => (await textOf(ana, id)) === "XHello worldfoo", 8000);
+    await ana.page.evaluate(() => document.querySelector(".text-editor").focus());
+    await ana.page.keyboard.press("Control+z");
+    await waitUntil(async () => (await textOf(ben, id)) === "XHello world", 8000);
+    await setSel(ben, 1);
+    await ben.page.keyboard.press("Backspace");
+    await waitUntil(async () => (await textOf(ana, id)) === "Hello world", 8000);
+    await ana.page.evaluate(() => document.querySelector(".text-editor").focus());
+    await ana.page.keyboard.press("Control+Shift+z");
+    await sleep(300);
+    await sameText(peers, id, "5e redo");
+    const t = await WORLD(peers, id);
+    check("5e: Ana's redo brings back her foo, not Ben's deleted X", t.every((x) => x === "Hello worldfoo"), JSON.stringify(t));
+    await closeEditor(ana);
+    await closeEditor(ben);
+  }
+
   // 6 and 7: caret stability and the remote caret.
   {
     const id = await newText(R);

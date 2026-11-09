@@ -313,7 +313,8 @@ export function TextEditor({ id }: { id: string }) {
     foreignSeen.current = foreignChangeCount();
     if (!changed) return;
     // Merging keeps the runs valid through others' typing; only a replaced text (new ids) ends them.
-    if (sameEpoch()) return;
+    // A run never spans someone else's edit, or an undo would take their characters with it.
+    if (sameEpoch()) return history.current.breakRun();
     const k = known.current;
     if (now.characters !== k.characters || !sameRuns(now.runs, k.runs) || !sameLook(now.look as Look, k.look)) history.current.clear();
   };
@@ -332,26 +333,26 @@ export function TextEditor({ id }: { id: string }) {
     const { from, to } = step;
     const look = to.look as Look | undefined;
     const was = from.look as Look | undefined;
-    const now = readLook(id);
-    let patched = false;
+    const before = readLook(id);
+    const r = dispatch<{ start: number; end: number }>(
+      { op: "revertText", id, from: { characters: from.characters, runs: from.runs, seq: from.seq }, to: { characters: to.characters, runs: to.runs, seq: to.seq } },
+      { quiet: true },
+    );
+    // (Nothing of a step that can't be made is applied.)
+    if (!r) return false;
     if (look && was) {
-      const diff = Object.fromEntries(Object.entries(look.text).filter(([k, v]) => v !== now.text[k] && now.text[k] === was.text[k]));
-      const fills = JSON.stringify(look.fills) !== JSON.stringify(now.fills) && JSON.stringify(now.fills) === JSON.stringify(was.fills);
+      const diff = Object.fromEntries(Object.entries(look.text).filter(([k, v]) => v !== before.text[k] && before.text[k] === was.text[k]));
+      const fills = JSON.stringify(look.fills) !== JSON.stringify(before.fills) && JSON.stringify(before.fills) === JSON.stringify(was.fills);
       if (Object.keys(diff).length || fills) {
         const patch: Record<string, unknown> = { text: diff };
         if (fills) patch.fills = look.fills;
+        // The look clears those keys from the runs, so the runs the step restored are put back after it.
+        const runs = getDoc().nodes[id]?.text?.runs;
         dispatch({ op: "update", ids: [id], patch }, { quiet: true });
-        patched = true;
+        const chars = getDoc().nodes[id]?.text?.characters;
+        if (runs && chars !== undefined) dispatch({ op: "setText", id, characters: chars, runs }, { quiet: true });
       }
     }
-    // (A look change clears those keys from the runs: the run's own end then is what is there now.)
-    const cur = getDoc().nodes[id]?.text;
-    const fromRuns = patched && cur && cur.characters === from.characters ? cur.runs : from.runs;
-    const r = dispatch<{ start: number; end: number }>(
-      { op: "revertText", id, from: { characters: from.characters, runs: fromRuns, seq: from.seq }, to: { characters: to.characters, runs: to.runs, seq: to.seq } },
-      { quiet: true },
-    );
-    if (!r) return false;
     const chars = getDoc().nodes[id]?.text?.characters ?? ta.value;
     const same = chars === ta.value;
     ta.value = chars;
@@ -510,9 +511,11 @@ export function TextEditor({ id }: { id: string }) {
     if (c !== known.current.characters) {
       // Someone else changed the text: the runs kept here no longer fit it.
       if (!keep) history.current.clear();
+      else history.current.breakRun();
     } else if (!sameRuns(cur.runs, known.current.runs) || !sameLook(readLook(id), known.current.look)) {
       if (foreignChangeCount() !== foreignSeen.current) {
         if (!keep) history.current.clear();
+        else history.current.breakRun();
       } else {
         // A style change from the panel or a shortcut: a run of its own, undone like typing.
         const at = { selStart: ta.selectionStart, selEnd: ta.selectionEnd };
@@ -850,6 +853,7 @@ export function TextEditor({ id }: { id: string }) {
           // (unless the text merges and kept its ids).
           if (foreignChangeCount() !== foreignSeen.current) {
             if (!sameEpoch()) history.current.clear();
+            else history.current.breakRun();
             foreignSeen.current = foreignChangeCount();
           }
           if (before) note(before, "ime");

@@ -239,7 +239,8 @@ const charId = (v: unknown): CharId | null | undefined => {
   if (v === null) return null;
   if (!Array.isArray(v) || v.length !== 2) return undefined;
   const [site, ctr] = v;
-  return Number.isSafeInteger(site) && Number.isSafeInteger(ctr) && site >= 0 && ctr >= 0 ? [site, ctr] : undefined;
+  // The engine's own bounds (48-bit sites, 32-bit counters): a value it would refuse can't reach a query.
+  return Number.isSafeInteger(site) && Number.isSafeInteger(ctr) && site >= 0 && site <= 2 ** 48 - 1 && ctr >= 0 && ctr <= 2 ** 32 - 1 ? [site, ctr] : undefined;
 };
 
 /** A colour that is safe to put in a style: `#rrggbb`, else `fallback`. */

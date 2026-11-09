@@ -1614,10 +1614,11 @@ impl Rooms {
     let untexted = no_text.then(|| designotron_engine::collab::legacy_text(&delta, doc_now)).flatten();
     let untexted_raw = untexted.as_ref().and_then(to_raw);
     let base: &Value = untexted.as_ref().unwrap_or(&delta);
-    let lists_text = others(&|p| p.lists && !p.text).then(|| match &untexted_raw {
+    let base_text = no_text.then(|| match &untexted_raw {
       Some(w) => text_of(w),
       None => raw_text.clone().unwrap_or_else(|| text_of(raw)),
     });
+    let lists_text = others(&|p| p.lists && !p.text).then(|| base_text.clone()).flatten();
     // Editors that predate `lists` get whole child lists and comments, and the layers pruned.
     let older_lists = others(&|p| !p.lists);
     let rewritten = older_lists
@@ -1626,7 +1627,7 @@ impl Rooms {
     let rewritten_raw = rewritten.as_ref().and_then(to_raw);
     let gran_text = match &rewritten_raw {
       Some(w) => Some(text_of(w)),
-      None => older_lists.then(|| lists_text.clone().or_else(|| raw_text.clone()).unwrap_or_else(|| text_of(raw))),
+      None => older_lists.then(|| base_text.clone()).flatten(),
     };
     // Peers that predate per-id changes get the room's whole lists instead.
     let whole = others(&|p| !p.granular)
@@ -3243,6 +3244,31 @@ mod tests {
       assert_eq!(d["patch"][&id]["text"], room_text, "{name}: the whole text, without seq");
     }
     assert_eq!(types(&drain(&mut ana_rx)), ["ack"]);
+  }
+
+  #[tokio::test]
+  async fn older_peers_get_whole_texts_when_no_lists_only_peer_is_there() {
+    let dir = tmp_dir("text-no-lists-peer");
+    let mut h = Harness::open(&dir).await;
+    let (doc, id, mut e) = text_doc();
+    let (ana, mut ana_rx) = h.join_full(Some(doc), true, true, true, true, None).await;
+    let (_ben, mut ben_rx) = h.join_full(None, false, true, true, true, None).await;
+    let (_dan, mut dan_rx) = h.join_full(None, false, true, false, false, None).await;
+    let (_eve, mut eve_rx) = h.join_full(None, false, false, false, false, None).await;
+    h.commit().await;
+    for rx in [&mut ana_rx, &mut ben_rx, &mut dan_rx, &mut eve_rx] {
+      drain(rx);
+    }
+    let d = edit_text(&mut e, &id, 5, 5, ",");
+    h.delta_text(ana, &delta_msg(d)).await;
+    h.commit().await;
+    assert!(delta_in(&mut ben_rx)["text"][&id].is_object());
+    for (name, rx) in [("dan", &mut dan_rx), ("eve", &mut eve_rx)] {
+      let d = delta_in(rx);
+      assert!(d.get("text").is_none(), "{name}: no text key: {d}");
+      assert_eq!(d["patch"][&id]["text"]["characters"], json!("Hello, world"), "{name}");
+      assert!(d["patch"][&id]["text"].get("seq").is_none(), "{name}: no seq");
+    }
   }
 
   #[tokio::test]

@@ -31,6 +31,8 @@ describe("presence text", () => {
       { id: "n", a: [-1, 0], f: null },
       { id: "n", a: [1.5, 0], f: null },
       { id: "n", a: [2 ** 53, 0], f: null },
+      { id: "n", a: [2 ** 48, 0], f: null },
+      { id: "n", a: [1, 2 ** 32], f: null },
       { id: "n", a: ["1", 0], f: null },
       { id: "n", a: [1, 2, 3], f: null },
       { id: "n", a: undefined, f: null },

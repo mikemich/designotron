@@ -3,7 +3,7 @@
 // selection starts and ends after (presence `text`); this maps them to indices in this editor's own
 // copy of the text and draws them from the engine's line layout, as the local editor does.
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useCollab, type Peer, type TextPresence } from "../collab";
 import { getDoc, query, useStore } from "../store";
 import type { Mat } from "../types";
@@ -23,7 +23,13 @@ export function RemoteTextCarets({ v }: { v: View }) {
 function Carets({ v }: { v: View }) {
   const peers = useCollab((s) => s.peers);
   const page = useStore((s) => s.es.page);
-  const rev = useStore((s) => s.rev);
+  const now = useStore((s) => s.rev);
+  // Measured at most once a frame, however fast the document changes (every keystroke and ack bumps `rev`).
+  const [rev, setRev] = useState(now);
+  useEffect(() => {
+    const h = requestAnimationFrame(() => setRev(now));
+    return () => cancelAnimationFrame(h);
+  }, [now]);
   const doc = getDoc();
   return (
     <>
@@ -44,6 +50,15 @@ interface Placed {
 }
 
 function place(t: TextPresence): Placed | null {
+  try {
+    return measure(t);
+  } catch {
+    // (A peer's caret the engine can't place is left out, not everyone's.)
+    return null;
+  }
+}
+
+function measure(t: TextPresence): Placed | null {
   const at = query<{ indices: (number | null)[] } | null>({ q: "textIndices", id: t.id, anchors: [t.a, t.f] });
   if (!at || at.indices[0] == null || at.indices[1] == null) return null;
   const [anchor, focus] = at.indices as number[];

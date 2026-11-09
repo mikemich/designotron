@@ -36,6 +36,9 @@ interface Entry {
   at: number;
   /** Nothing joins this run any more. */
   closed: boolean;
+  /** What was shown when the run was last undone or redone: the exact state a text that doesn't merge
+   * goes back to. (`before` and `after` stay the run's own ends: merging reverses those by id.) */
+  shown?: Snapshot;
 }
 
 /** A pause longer than this starts a new run. */
@@ -96,6 +99,7 @@ export class TextHistory {
       last.after.selStart === last.after.selEnd;
     if (joins) {
       last.after = after;
+      last.shown = undefined;
       last.at = at;
     } else {
       this.undoStack.push({ before, after, kind, at, closed: false });
@@ -116,17 +120,17 @@ export class TextHistory {
   undo(current: Snapshot): Snapshot | null {
     const e = this.undoStack.pop();
     if (!e) return null;
-    this.redoStack.push({ ...e, after: current, closed: true });
+    this.redoStack.push({ ...e, shown: current, closed: true });
     this.lastStep = { from: e.after, to: e.before };
-    return e.before;
+    return e.shown ?? e.before;
   }
 
   redo(current: Snapshot): Snapshot | null {
     const e = this.redoStack.pop();
     if (!e) return null;
-    this.undoStack.push({ ...e, before: current, closed: true });
+    this.undoStack.push({ ...e, shown: current, closed: true });
     this.lastStep = { from: e.before, to: e.after };
-    return e.after;
+    return e.shown ?? e.after;
   }
 }
 
