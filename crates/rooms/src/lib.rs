@@ -13,11 +13,15 @@
 //! - client → `{type:"join", …, lists:true}` when the editor can also read child orders as moves
 //!   (`moves`, `pageMoves`) and comments per message (`commentChanges`), and prunes references to
 //!   deleted styles and variables itself (see `collab::DeltaOpts`, `collab::prune_refs`).
-//! - server → `{type:"welcome", you, doc|null, assets, peers, ordered:true, granular:true, lists:true}`
+//! - client → `{type:"join", …, text:true}` when the editor can also read per-character text changes
+//!   (the delta's `text` key, see `collab::DeltaOpts` and `textseq`); it needs `lists`.
+//! - server → `{type:"welcome", you, doc|null, assets, peers, ordered:true, granular:true, lists:true, text:true}`
 //!   (`granular`: this room takes per-id changes; editors that sent none get the whole lists
 //!   instead, taken from the room's document. `lists`: it takes moves and per-message comment
 //!   changes; editors that sent no `lists` get whole child lists and comments, and the layers
-//!   the room pruned, taken from the room's document)
+//!   the room pruned, taken from the room's document. `text`: it merges text per character; editors
+//!   that sent no `text` get each `text` entry as the layer's whole text from the room's document, and
+//!   their own whole-text changes reset that layer's character ids)
 //! - client ↔ `{type:"delta", delta, assets?}`, `{type:"presence", presence}`
 //! - server → `{type:"ack", rejected?}` to the sender of each delta, at its place in the
 //!   order the room applied changes (`ordered`): editors keep their own unacknowledged
@@ -270,6 +274,8 @@ struct Peer {
   granular: bool,
   /// Also reads moves and per-message comment changes, and prunes dangling references itself.
   lists: bool,
+  /// Also reads per-character text changes (the delta's `text` key); implies `lists`.
+  text: bool,
   /// The document model revision this editor understands (`MODEL_REVISION` at most); the room
   /// rewrites what it sends it with `collab::downgrade`.
   model: u32,
@@ -373,6 +379,8 @@ struct Incoming<'a> {
   granular: bool,
   #[serde(default)]
   lists: bool,
+  #[serde(default)]
+  text: bool,
   /// The editor's document model revision; editors that predate the field are at 3.
   #[serde(default)]
   model: Option<u32>,
@@ -396,6 +404,8 @@ struct Welcome<'a> {
   granular: bool,
   /// Child orders may travel as moves and comments per message (see the protocol above).
   lists: bool,
+  /// Text may travel as per-character changes (see the protocol above).
+  text: bool,
   /// The document model revision this server understands.
   model: u32,
   /// The id of this room's view-only link (editors, when the server has them).
@@ -1428,6 +1438,7 @@ impl Rooms {
       ordered: true,
       granular: true,
       lists: true,
+      text: true,
       model: designotron_engine::collab::MODEL_REVISION,
       view: (self.view_links && role == Role::Editor).then(|| view_id(room_id)),
       role: role.name(),
@@ -1473,6 +1484,7 @@ impl Rooms {
         presence: Value::Null,
         granular: m.granular,
         lists: m.lists && m.granular,
+        text: m.text && m.lists && m.granular,
         model: m.model.unwrap_or(UNSAID_MODEL).min(MODEL_REVISION),
       },
     );
@@ -1593,37 +1605,51 @@ impl Rooms {
     };
     let doc_now = r.doc.as_ref().unwrap();
     let others = |f: &dyn Fn(&Peer) -> bool| r.peers.iter().any(|(pid, p)| *pid != id && f(p));
-    let raw_text = others(&|p| p.lists).then(|| text_of(raw));
+    let to_raw = |v: &Value| serde_json::value::to_raw_value(v).ok();
+    // Editors that read `text` get the delta as sent.
+    let raw_text = others(&|p| p.text).then(|| text_of(raw));
+    // The others get each `text` entry as the layer's whole text from the room's document; the
+    // `lists` and per-id rewrites below build on that.
+    let no_text = others(&|p| !p.text);
+    let untexted = no_text.then(|| designotron_engine::collab::legacy_text(&delta, doc_now)).flatten();
+    let untexted_raw = untexted.as_ref().and_then(to_raw);
+    let base: &Value = untexted.as_ref().unwrap_or(&delta);
+    let base_text = no_text.then(|| match &untexted_raw {
+      Some(w) => text_of(w),
+      None => raw_text.clone().unwrap_or_else(|| text_of(raw)),
+    });
+    let lists_text = others(&|p| p.lists && !p.text).then(|| base_text.clone()).flatten();
     // Editors that predate `lists` get whole child lists and comments, and the layers pruned.
     let older_lists = others(&|p| !p.lists);
     let rewritten = older_lists
-      .then(|| designotron_engine::collab::legacy_lists(&delta, doc_now, &pruned))
+      .then(|| designotron_engine::collab::legacy_lists(base, doc_now, &pruned))
       .flatten();
-    let to_raw = |v: &Value| serde_json::value::to_raw_value(v).ok();
     let rewritten_raw = rewritten.as_ref().and_then(to_raw);
     let gran_text = match &rewritten_raw {
       Some(w) => Some(text_of(w)),
-      None => older_lists.then(|| raw_text.clone().unwrap_or_else(|| text_of(raw))),
+      None => older_lists.then(|| base_text.clone()).flatten(),
     };
     // Peers that predate per-id changes get the room's whole lists instead.
     let whole = others(&|p| !p.granular)
-      .then(|| designotron_engine::collab::legacy(rewritten.as_ref().unwrap_or(&delta), doc_now))
+      .then(|| designotron_engine::collab::legacy(rewritten.as_ref().unwrap_or(base), doc_now))
       .flatten()
       .and_then(|w| to_raw(&w));
     let old_text = whole.as_deref().map(text_of).or_else(|| gran_text.clone());
     // Older models get each variant once, rewritten (On drag dropped, sticky as scroll).
-    let mut by_model: [ModelTexts; 3] = Default::default();
+    let mut by_model: [ModelTexts; 4] = Default::default();
     let to: Vec<(Outbox, Arc<String>)> = r
       .peers
       .iter()
       .filter(|(pid, _)| **pid != id)
       .filter_map(|(_, p)| {
-        let (variant, text) = if p.lists {
+        let (variant, text) = if p.text {
           (0, raw_text.clone())
+        } else if p.lists {
+          (1, lists_text.clone())
         } else if p.granular {
-          (1, gran_text.clone())
+          (2, gran_text.clone())
         } else {
-          (2, old_text.clone())
+          (3, old_text.clone())
         };
         text.map(|t| (p.out.clone(), by_model[variant].get(&t, p.model)))
       })
@@ -2184,6 +2210,7 @@ mod tests {
         presence: Value::Null,
         granular,
         lists,
+        text: false,
         model: MODEL_REVISION,
         role: Role::Editor,
       },
@@ -2310,6 +2337,19 @@ mod tests {
     /// `join_as` for an editor that says its document model revision (or none, like editors
     /// that predate revision 4).
     async fn join_model(&mut self, doc: Option<Value>, reset: bool, granular: bool, lists: bool, model: Option<u32>) -> (u64, Rx) {
+      self.join_full(doc, reset, granular, lists, false, model).await
+    }
+
+    /// `join_model` for an editor that may also say `text`.
+    async fn join_full(
+      &mut self,
+      doc: Option<Value>,
+      reset: bool,
+      granular: bool,
+      lists: bool,
+      text: bool,
+      model: Option<u32>,
+    ) -> (u64, Rx) {
       self.next += 1;
       let id = self.next;
       let (tx, rx) = mpsc::unbounded_channel();
@@ -2319,7 +2359,8 @@ mod tests {
         kick: Arc::new(Notify::new()),
       };
       self.kicks.push(out.kick.clone());
-      let mut msg = json!({ "type": "join", "name": "p", "color": "#000", "granular": granular, "lists": lists, "reset": reset });
+      let mut msg =
+        json!({ "type": "join", "name": "p", "color": "#000", "granular": granular, "lists": lists, "text": text, "reset": reset });
       if let Some(d) = doc {
         msg["doc"] = d;
       }
@@ -2999,6 +3040,7 @@ mod tests {
             presence: Value::Null,
             granular: true,
             lists: true,
+            text: false,
             model: MODEL_REVISION,
           },
         );
@@ -3119,5 +3161,164 @@ mod tests {
     assert!(sync_dir(&std::env::temp_dir().join("x")).is_ok());
     // A bare file name (an empty parent) syncs the current directory.
     assert!(sync_dir(std::path::Path::new("x")).is_ok());
+  }
+
+  /// A document with the text layer "Hello world" and the engine that holds it, merging text.
+  fn text_doc() -> (Value, String, designotron_engine::engine::Engine) {
+    use designotron_engine::engine::{Command, Engine};
+    let mut e = Engine::new(Box::new(designotron_engine::text::HeuristicMeasurer), 5);
+    let id = e
+      .dispatch(Command::CreateText {
+        x: 0.0,
+        y: 0.0,
+        characters: "Hello world".into(),
+        parent: None,
+      })
+      .unwrap()["id"]
+      .as_str()
+      .unwrap()
+      .to_string();
+    let doc = serde_json::to_value(&e.doc).unwrap();
+    e.collab_reset(true, true, true);
+    e.collab_enable_text(777);
+    (doc, id, e)
+  }
+
+  fn edit_text(e: &mut designotron_engine::engine::Engine, id: &str, start: usize, end: usize, text: &str) -> Value {
+    e.dispatch(designotron_engine::engine::Command::EditText {
+      id: id.into(),
+      start,
+      end,
+      text: text.into(),
+    })
+    .unwrap();
+    e.collab_delta()
+  }
+
+  fn delta_in(rx: &mut Rx) -> Value {
+    drain(rx).into_iter().find(|m| m["type"] == "delta").expect("a delta")["delta"].clone()
+  }
+
+  #[tokio::test]
+  async fn text_editors_get_the_entry_and_the_others_the_whole_text() {
+    let dir = tmp_dir("text-fanout");
+    let mut h = Harness::open(&dir).await;
+    let (doc, id, mut e) = text_doc();
+    let (ana, mut ana_rx) = h.join_full(Some(doc), true, true, true, true, None).await;
+    // Ben reads `text`, Cai `lists` only, Dan per-id changes, Eve whole lists, Fay is at model 3.
+    let (_ben, mut ben_rx) = h.join_full(None, false, true, true, true, None).await;
+    let (_cai, mut cai_rx) = h.join_full(None, false, true, true, false, None).await;
+    let (_dan, mut dan_rx) = h.join_full(None, false, true, false, false, None).await;
+    let (_eve, mut eve_rx) = h.join_full(None, false, false, false, false, None).await;
+    let (_fay, mut fay_rx) = h.join_full(None, false, true, true, false, Some(3)).await;
+    h.commit().await;
+    let welcome = drain(&mut ana_rx).into_iter().find(|m| m["type"] == "welcome").unwrap();
+    assert_eq!(welcome["text"], json!(true));
+    for rx in [&mut ben_rx, &mut cai_rx, &mut dan_rx, &mut eve_rx, &mut fay_rx] {
+      let w = drain(rx).into_iter().find(|m| m["type"] == "welcome").unwrap();
+      assert_eq!(w["text"], json!(true), "the room always offers it");
+    }
+    let d = edit_text(&mut e, &id, 5, 5, ",");
+    assert!(d["text"][&id].is_object(), "the writer sends an entry: {d}");
+    h.delta_text(ana, &delta_msg(d)).await;
+    h.commit().await;
+    let ben = delta_in(&mut ben_rx);
+    assert!(ben["text"][&id]["ins"].is_array(), "a text editor gets the delta as sent");
+    assert!(ben["patch"].get(&id).is_none_or(|p| p.get("text").is_none()));
+    let room_text = {
+      let r = h.room.lock().await;
+      let mut t = serde_json::to_value(r.doc.as_ref().unwrap().get(&id).unwrap().text.as_ref().unwrap()).unwrap();
+      assert!(t.get("seq").is_some(), "the room keeps the character ids");
+      t.as_object_mut().unwrap().remove("seq");
+      t
+    };
+    assert_eq!(room_text["characters"], json!("Hello, world"));
+    for (name, rx) in [
+      ("cai", &mut cai_rx),
+      ("dan", &mut dan_rx),
+      ("eve", &mut eve_rx),
+      ("fay", &mut fay_rx),
+    ] {
+      let d = delta_in(rx);
+      assert!(d.get("text").is_none(), "{name}: no text key");
+      assert_eq!(d["patch"][&id]["text"], room_text, "{name}: the whole text, without seq");
+    }
+    assert_eq!(types(&drain(&mut ana_rx)), ["ack"]);
+  }
+
+  #[tokio::test]
+  async fn older_peers_get_whole_texts_when_no_lists_only_peer_is_there() {
+    let dir = tmp_dir("text-no-lists-peer");
+    let mut h = Harness::open(&dir).await;
+    let (doc, id, mut e) = text_doc();
+    let (ana, mut ana_rx) = h.join_full(Some(doc), true, true, true, true, None).await;
+    let (_ben, mut ben_rx) = h.join_full(None, false, true, true, true, None).await;
+    let (_dan, mut dan_rx) = h.join_full(None, false, true, false, false, None).await;
+    let (_eve, mut eve_rx) = h.join_full(None, false, false, false, false, None).await;
+    h.commit().await;
+    for rx in [&mut ana_rx, &mut ben_rx, &mut dan_rx, &mut eve_rx] {
+      drain(rx);
+    }
+    let d = edit_text(&mut e, &id, 5, 5, ",");
+    h.delta_text(ana, &delta_msg(d)).await;
+    h.commit().await;
+    assert!(delta_in(&mut ben_rx)["text"][&id].is_object());
+    for (name, rx) in [("dan", &mut dan_rx), ("eve", &mut eve_rx)] {
+      let d = delta_in(rx);
+      assert!(d.get("text").is_none(), "{name}: no text key: {d}");
+      assert_eq!(d["patch"][&id]["text"]["characters"], json!("Hello, world"), "{name}");
+      assert!(d["patch"][&id]["text"].get("seq").is_none(), "{name}: no seq");
+    }
+  }
+
+  #[tokio::test]
+  async fn malformed_and_oversized_text_entries_are_rejected_and_change_nothing() {
+    let dir = tmp_dir("text-reject");
+    let mut h = Harness::open(&dir).await;
+    let (doc, id, _e) = text_doc();
+    let (ana, mut ana_rx) = h.join_full(Some(doc), true, true, true, true, None).await;
+    let (_ben, mut ben_rx) = h.join_full(None, false, true, true, true, None).await;
+    h.commit().await;
+    drain(&mut ana_rx);
+    drain(&mut ben_rx);
+    let before = {
+      let r = h.room.lock().await;
+      serde_json::to_value(r.doc.as_ref().unwrap()).unwrap()
+    };
+    let wrap = |entry: Value| json!({ "nodes": {}, "removed": [], "comments": {}, "commentsRemoved": [], "text": { id.clone(): entry } });
+    let bad = [
+      // `n` and `s` disagree, a site beyond 48 bits (inserted and deleted), too many characters.
+      json!({ "e": 0, "ins": [{ "id": [5, 0], "s": "ab", "n": 5, "l": null, "r": null, "at": 0 }] }),
+      json!({ "e": 0, "ins": [{ "id": [1u64 << 50, 0], "s": "a", "l": null, "r": null, "at": 0 }] }),
+      json!({ "e": 0, "del": [[1u64 << 50, 0, 2]] }),
+      json!({ "e": 0, "ins": [{ "id": [5, 0], "s": "x".repeat(200_001), "l": null, "r": null, "at": 0 }] }),
+    ];
+    for entry in bad {
+      h.delta_text(ana, &delta_msg(wrap(entry.clone()))).await;
+      h.commit().await;
+      let got = drain(&mut ana_rx);
+      assert_eq!(got.len(), 1, "{entry}");
+      assert_eq!(
+        got[0]["rejected"],
+        json!(true),
+        "{}",
+        &entry.to_string()[..entry.to_string().len().min(200)]
+      );
+      assert!(drain(&mut ben_rx).is_empty(), "nothing reaches the others");
+      let r = h.room.lock().await;
+      assert_eq!(
+        serde_json::to_value(r.doc.as_ref().unwrap()).unwrap(),
+        before,
+        "the room is unchanged"
+      );
+    }
+  }
+
+  #[test]
+  fn a_viewer_cannot_send_text() {
+    let (doc, id, mut e) = text_doc();
+    let d = edit_text(&mut e, &id, 0, 0, "x");
+    let doc: Document = serde_json::from_value(doc).unwrap();
+    assert!(viewer_delta(&d, &doc).is_none());
   }
 }

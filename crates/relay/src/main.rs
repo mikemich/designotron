@@ -299,7 +299,7 @@ async fn health(State(app): State<App>) -> Json<serde_json::Value> {
     // What editors check before offering features: the document model this build
     // understands and the optional things it can do. Older relays report neither.
     "model": designotron_rooms::MODEL_REVISION,
-    "features": ["viewLinks"],
+    "features": ["viewLinks", "text"],
     "rooms": s.rooms,
     "people": s.people,
     "memory": {
@@ -1036,7 +1036,7 @@ mod tests {
       let (addr, _) = start(None).await;
       let h = start_stats(addr).await;
       assert_eq!(h["model"], 4);
-      assert_eq!(h["features"], json!(["viewLinks"]));
+      assert_eq!(h["features"], json!(["viewLinks", "text"]));
     }
 
     #[test]

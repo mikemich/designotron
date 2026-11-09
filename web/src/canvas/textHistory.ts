@@ -1,4 +1,4 @@
-import type { TextRun } from "../types";
+import type { TextRun, TextSeq } from "../types";
 
 /** Undo and redo while a text is being edited. The whole editing session is one step of the
  * document's own history, so Ctrl+Z inside the editor works on runs of typing kept here:
@@ -21,6 +21,9 @@ export interface Snapshot {
   runs: TextRun[];
   /** The layer-wide look a style change can touch (opaque here: the editor reads and restores it). */
   look?: unknown;
+  /** The engine's character ids for this text (absent when nobody edited it in a room that merges text);
+   * only handed back to `revertText`, never read. */
+  seq?: TextSeq;
   selStart: number;
   selEnd: number;
 }
@@ -33,6 +36,9 @@ interface Entry {
   at: number;
   /** Nothing joins this run any more. */
   closed: boolean;
+  /** What was shown when the run was last undone or redone: the exact state a text that doesn't merge
+   * goes back to. (`before` and `after` stay the run's own ends: merging reverses those by id.) */
+  shown?: Snapshot;
 }
 
 /** A pause longer than this starts a new run. */
@@ -42,9 +48,18 @@ export const MAX_RUNS = 200;
 
 const isSpace = (c: string | undefined) => !!c && /\s/u.test(c);
 
+/** The change an undo or redo makes: the text as the run left it (`from`) and as it should become
+ * (`to`). When others edited meanwhile, only the run's own characters and styles are reversed. */
+export interface Step {
+  from: Snapshot;
+  to: Snapshot;
+}
+
 export class TextHistory {
   private undoStack: Entry[] = [];
   private redoStack: Entry[] = [];
+  /** The step of the last `undo` or `redo` that returned a state. */
+  lastStep: Step | null = null;
 
   get size(): number {
     return this.undoStack.length;
@@ -84,6 +99,7 @@ export class TextHistory {
       last.after.selStart === last.after.selEnd;
     if (joins) {
       last.after = after;
+      last.shown = undefined;
       last.at = at;
     } else {
       this.undoStack.push({ before, after, kind, at, closed: false });
@@ -104,15 +120,17 @@ export class TextHistory {
   undo(current: Snapshot): Snapshot | null {
     const e = this.undoStack.pop();
     if (!e) return null;
-    this.redoStack.push({ ...e, after: current, closed: true });
-    return e.before;
+    this.redoStack.push({ ...e, shown: current, closed: true });
+    this.lastStep = { from: e.after, to: e.before };
+    return e.shown ?? e.before;
   }
 
   redo(current: Snapshot): Snapshot | null {
     const e = this.redoStack.pop();
     if (!e) return null;
-    this.undoStack.push({ ...e, before: current, closed: true });
-    return e.after;
+    this.undoStack.push({ ...e, shown: current, closed: true });
+    this.lastStep = { from: e.before, to: e.after };
+    return e.shown ?? e.after;
   }
 }
 
