@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { dispatch, foreignChangeCount, getDoc, query, styleTextSelection, useStore } from "../store";
-import type { Mat, TextProps } from "../types";
+import { setTextPresence } from "../collab";
+import { dispatch, foreignChangeCount, getDoc, getEngine, query, styleTextSelection, useStore } from "../store";
+import type { CharId, Mat, TextProps, TextSeq } from "../types";
 import { apply, invert, type Pt } from "./geometry";
 import {
   caretRect,
@@ -18,7 +19,8 @@ import {
   type CaretGeometry,
   type Pos,
 } from "./textCaret";
-import { kindOf, TextHistory, type EditKind, type Snapshot } from "./textHistory";
+import { editFromValues, shiftIndex } from "./textEdit";
+import { kindOf, TextHistory, type EditKind, type Snapshot, type Step } from "./textHistory";
 
 type Look = { text: Record<string, unknown>; fills: unknown[] };
 
@@ -58,6 +60,28 @@ function readLook(id: string): Look {
   };
 }
 const sameLook = (a: Look, b: Look) => JSON.stringify(a) === JSON.stringify(b);
+
+/** Whether texts merge per character in the room this editor is in. */
+function merging(): boolean {
+  try {
+    return getEngine().collabText();
+  } catch {
+    return false;
+  }
+}
+
+/** Where the caret positions `at` (code points) of the text as it was (`seq`) are in the text now,
+ * following the characters around them. Null when the engine can't tell. */
+function followIndices(id: string, seq: TextSeq | undefined, at: number[]): number[] | null {
+  if (!seq || !merging()) return null;
+  try {
+    const a = query<{ anchors: (CharId | null)[] } | null>({ q: "textAnchors", id, indices: at, seq });
+    const r = a && query<{ indices: (number | null)[] } | null>({ q: "textIndices", id, anchors: a.anchors });
+    return r && r.indices.every((i) => i !== null) ? (r.indices as number[]) : null;
+  } catch {
+    return null;
+  }
+}
 const sameRuns = (a: TextProps["runs"], b: TextProps["runs"]) => a === b || JSON.stringify(a) === JSON.stringify(b);
 
 interface SpanStyle {
@@ -170,7 +194,7 @@ export function TextEditor({ id }: { id: string }) {
   // Undo inside the editor, in runs. `known` is the text and runs this editor last saw, so a style
   // change from the panel (or a collaborator's edit) can be told from typing.
   const history = useRef(new TextHistory());
-  const known = useRef<{ characters: string; runs: TextProps["runs"]; look: Look }>({ characters: node?.text?.characters ?? "", runs: node?.text?.runs ?? [], look: readLook(id) });
+  const known = useRef<{ characters: string; runs: TextProps["runs"]; look: Look; seq?: TextSeq }>({ characters: node?.text?.characters ?? "", runs: node?.text?.runs ?? [], look: readLook(id), seq: node?.text?.seq });
   const foreignSeen = useRef(foreignChangeCount());
   const pending = useRef<{ before: Snapshot; kind: EditKind | null } | null>(null);
   const composeBefore = useRef<Snapshot | null>(null);
@@ -225,16 +249,61 @@ export function TextEditor({ id }: { id: string }) {
   };
   const trackSel = (ta: HTMLTextAreaElement) => {
     const before = (i: number) => Array.from(ta.value.slice(0, i)).length;
-    useStore.setState({ textSel: { id, start: before(ta.selectionStart), end: before(ta.selectionEnd) } });
+    const start = before(ta.selectionStart);
+    const end = before(ta.selectionEnd);
+    useStore.setState({ textSel: { id, start, end } });
+    // Others see the caret and selection as the characters they sit after.
+    if (merging()) {
+      const back = ta.selectionDirection === "backward";
+      try {
+        const a = query<{ anchors: (CharId | null)[] } | null>({ q: "textAnchors", id, indices: back ? [end, start] : [start, end] });
+        if (a) setTextPresence({ id, a: a.anchors[0], f: a.anchors[1] });
+      } catch {
+        /* the caret simply isn't shared */
+      }
+    }
+  };
+  /** Whether the text still has the character ids this editor last saw (others' typing then leaves
+   * its undo runs valid: they reverse by id). */
+  const sameEpoch = () => {
+    const s = known.current.seq;
+    const c = getDoc().nodes[id]?.text?.seq;
+    return merging() && !!s && !!c && s.e === c.e;
+  };
+  /** Tells the engine what the textarea did as a range edit, carried to where those characters are now
+   * when the document moved on since this editor last looked. Returns true when it had to (the
+   * textarea then shows the merged text and the undo runs are dropped). */
+  const sendEdit = (ta: HTMLTextAreaElement): boolean => {
+    const k = known.current;
+    const ed = editFromValues(k.characters, ta.value, ta.selectionEnd);
+    const cur = getDoc().nodes[id]?.text?.characters;
+    let { start, end } = ed;
+    const moved = cur !== undefined && cur !== k.characters;
+    if (moved) {
+      const at = followIndices(id, k.seq, [start, end]) ?? [shiftIndex(k.characters, cur, start), shiftIndex(k.characters, cur, end)];
+      [start, end] = [at[0], Math.max(at[0], at[1])];
+    }
+    dispatch({ op: "editText", id, start, end, text: ed.text }, { quiet: true });
+    if (moved) {
+      // Show the merged text: the textarea only has this person's edit on the old one.
+      const now = getDoc().nodes[id]?.text?.characters;
+      if (now !== undefined && now !== ta.value && !composing.current) {
+        const caret = toOffset(now, start + Array.from(ed.text).length);
+        ta.value = now;
+        ta.setSelectionRange(caret, caret);
+      }
+      history.current.clear();
+    }
+    return moved;
   };
   /** The text, runs and selection now. */
   const snapshot = (): Snapshot => {
     const ta = ref.current!;
     const runs = getDoc().nodes[id]?.text?.runs ?? [];
-    return { characters: ta.value, runs: runs.map((r) => ({ ...r })), look: readLook(id), selStart: ta.selectionStart, selEnd: ta.selectionEnd };
+    return { characters: ta.value, runs: runs.map((r) => ({ ...r })), look: readLook(id), seq: getDoc().nodes[id]?.text?.seq, selStart: ta.selectionStart, selEnd: ta.selectionEnd };
   };
   const remember = (s: Snapshot, seen = true) => {
-    known.current = { characters: s.characters, runs: s.runs, look: s.look as Look };
+    known.current = { characters: s.characters, runs: s.runs, look: s.look as Look, seq: s.seq };
     if (seen) foreignSeen.current = foreignChangeCount();
   };
   /** Drops the history when something other than this editor changed the text since it last
@@ -243,6 +312,8 @@ export function TextEditor({ id }: { id: string }) {
     const changed = foreignChangeCount() !== foreignSeen.current;
     foreignSeen.current = foreignChangeCount();
     if (!changed) return;
+    // Merging keeps the runs valid through others' typing; only a replaced text (new ids) ends them.
+    if (sameEpoch()) return;
     const k = known.current;
     if (now.characters !== k.characters || !sameRuns(now.runs, k.runs) || !sameLook(now.look as Look, k.look)) history.current.clear();
   };
@@ -253,10 +324,58 @@ export function TextEditor({ id }: { id: string }) {
     remember(after);
     history.current.record(before, after, kind, Date.now());
   };
+  /** Undo or redo while merging: the run's own characters and styles are reversed by id, so what
+   * others typed or styled meanwhile stays. The layer-wide look is restored three-way: a key goes back
+   * only where it still has the value the run left. Returns false when the text can't be reversed
+   * (it was replaced meanwhile): the history is dropped then. */
+  const revertStep = (ta: HTMLTextAreaElement, step: Step): boolean => {
+    const { from, to } = step;
+    const look = to.look as Look | undefined;
+    const was = from.look as Look | undefined;
+    const now = readLook(id);
+    let patched = false;
+    if (look && was) {
+      const diff = Object.fromEntries(Object.entries(look.text).filter(([k, v]) => v !== now.text[k] && now.text[k] === was.text[k]));
+      const fills = JSON.stringify(look.fills) !== JSON.stringify(now.fills) && JSON.stringify(now.fills) === JSON.stringify(was.fills);
+      if (Object.keys(diff).length || fills) {
+        const patch: Record<string, unknown> = { text: diff };
+        if (fills) patch.fills = look.fills;
+        dispatch({ op: "update", ids: [id], patch }, { quiet: true });
+        patched = true;
+      }
+    }
+    // (A look change clears those keys from the runs: the run's own end then is what is there now.)
+    const cur = getDoc().nodes[id]?.text;
+    const fromRuns = patched && cur && cur.characters === from.characters ? cur.runs : from.runs;
+    const r = dispatch<{ start: number; end: number }>(
+      { op: "revertText", id, from: { characters: from.characters, runs: fromRuns, seq: from.seq }, to: { characters: to.characters, runs: to.runs, seq: to.seq } },
+      { quiet: true },
+    );
+    if (!r) return false;
+    const chars = getDoc().nodes[id]?.text?.characters ?? ta.value;
+    const same = chars === ta.value;
+    ta.value = chars;
+    // A style-only step puts the selection back as it was; a text step puts the caret at the change.
+    if (same) ta.setSelectionRange(Math.min(to.selStart, chars.length), Math.min(to.selEnd, chars.length));
+    else {
+      const at = toOffset(chars, r.end);
+      ta.setSelectionRange(at, at);
+    }
+    return true;
+  };
   /** Shows a snapshot: the textarea, the selection and the layer's text and runs. */
-  const showSnapshot = (s: Snapshot) => {
+  const showSnapshot = (s: Snapshot, step: Step | null) => {
     const ta = ref.current;
     if (!ta) return;
+    if (step && merging()) {
+      if (!revertStep(ta, step)) history.current.clear();
+      remember(snapshot());
+      goalX.current = null;
+      affRef.current = "after";
+      trackSel(ta);
+      sync();
+      return;
+    }
     ta.value = s.characters;
     ta.setSelectionRange(s.selStart, s.selEnd);
     // A style applied to all the text lives in the layer's own properties: restore only the keys
@@ -288,7 +407,7 @@ export function TextEditor({ id }: { id: string }) {
     foreignGuard(here);
     const s = redo ? history.current.redo(here) : history.current.undo(here);
     // At the start (or end) of the runs there is nothing to do; never the browser's own undo.
-    if (s) showSnapshot(s);
+    if (s) showSnapshot(s, history.current.lastStep);
   };
 
   useEffect(() => {
@@ -302,6 +421,7 @@ export function TextEditor({ id }: { id: string }) {
     const el = ref.current;
     if (el) {
       el.focus();
+      queueMicrotask(() => ref.current && trackSel(ref.current));
       // A textarea reads line breaks as "\n": make the layer's text agree before indices are used.
       const chars0 = getDoc().nodes[id]?.text?.characters;
       if (chars0 !== undefined && chars0 !== el.value) dispatch({ op: "setText", id, characters: el.value }, { quiet: true });
@@ -344,7 +464,11 @@ export function TextEditor({ id }: { id: string }) {
     el?.addEventListener("beforeinput", onBeforeInput);
     // Some browsers report a textarea's selection only here, not on the element.
     const onSelChange = () => {
-      if (document.activeElement === ref.current) sync();
+      if (document.activeElement === ref.current) {
+        sync();
+        // (Also what others see of the caret: a selection set by script or by the browser's own handles.)
+        trackSel(ref.current!);
+      }
     };
     document.addEventListener("selectionchange", onSelChange);
     return () => {
@@ -352,6 +476,7 @@ export function TextEditor({ id }: { id: string }) {
       el?.removeEventListener("beforeinput", onBeforeInput);
       document.removeEventListener("selectionchange", onSelChange);
       useStore.setState({ textSel: null });
+      setTextPresence(null);
       // Empty text is removed inside the gesture, so abandoning a new text leaves no undo step.
       const n = getDoc().nodes[id];
       if (n && n.type === "text" && !n.text?.characters.trim()) dispatch({ op: "delete", ids: [id] });
@@ -373,37 +498,43 @@ export function TextEditor({ id }: { id: string }) {
   // A change to the text from elsewhere (a collaborator) shows in the textarea, so the next key
   // doesn't write the old text back over it. The caret stays with the content around it: an
   // offset after the changed span moves by the change in length.
-  useEffect(() => {
+  const absorb = () => {
     const ta = ref.current;
     const cur = getDoc().nodes[id]?.text;
     const c = cur?.characters;
     if (!ta || !cur || c === undefined || composing.current) return;
+    // While merging, others' typing and styling leave this editor's runs valid (they reverse by id);
+    // a replaced text (a new epoch) or a text that doesn't merge ends them.
+    const keep = sameEpoch();
+    const oldSeq = known.current.seq;
     if (c !== known.current.characters) {
       // Someone else changed the text: the runs kept here no longer fit it.
-      history.current.clear();
+      if (!keep) history.current.clear();
     } else if (!sameRuns(cur.runs, known.current.runs) || !sameLook(readLook(id), known.current.look)) {
-      if (foreignChangeCount() !== foreignSeen.current) history.current.clear();
-      else {
+      if (foreignChangeCount() !== foreignSeen.current) {
+        if (!keep) history.current.clear();
+      } else {
         // A style change from the panel or a shortcut: a run of its own, undone like typing.
         const at = { selStart: ta.selectionStart, selEnd: ta.selectionEnd };
         const now = { characters: c, runs: cur.runs.map((r) => ({ ...r })), look: readLook(id), ...at };
         history.current.record({ characters: c, runs: known.current.runs, look: known.current.look, ...at }, now, "style", Date.now());
       }
     }
-    known.current = { characters: c, runs: cur.runs.map((r) => ({ ...r })), look: readLook(id) };
+    known.current = { characters: c, runs: cur.runs.map((r) => ({ ...r })), look: readLook(id), seq: cur.seq };
     foreignSeen.current = foreignChangeCount();
     if (ta.value === c) return;
     const old = ta.value;
-    let pre = 0;
-    while (pre < old.length && pre < c.length && old[pre] === c[pre]) pre++;
-    let suf = 0;
-    while (suf < old.length - pre && suf < c.length - pre && old[old.length - 1 - suf] === c[c.length - 1 - suf]) suf++;
-    const shift = (o: number) => (o <= pre ? o : o >= old.length - suf ? o + c.length - old.length : c.length - suf);
-    const { selectionStart: s0, selectionEnd: e0 } = ta;
+    const { selectionStart: s0, selectionEnd: e0, selectionDirection: dir } = ta;
+    const [a0, b0] = [toIndex(old, s0), toIndex(old, e0)];
+    // The caret stays after the character it was after (typing by others at the caret goes behind
+    // it); without character ids it shifts by the change.
+    const [a1, b1] = followIndices(id, oldSeq, [a0, b0]) ?? [shiftIndex(old, c, a0), shiftIndex(old, c, b0)];
     ta.value = c;
-    ta.setSelectionRange(shift(s0), shift(e0));
+    ta.setSelectionRange(toOffset(c, a1), toOffset(c, Math.max(a1, b1)), dir);
+    trackSel(ta);
     sync();
-  }, [rev]);
+  };
+  useEffect(absorb, [rev]);
 
   if (!node || !node.text || !m) return null;
   const t = node.text;
@@ -593,7 +724,7 @@ export function TextEditor({ id }: { id: string }) {
     try {
       if (!document.execCommand("insertText", false, rich.text)) {
         ta.setRangeText(rich.text, ta.selectionStart, ta.selectionEnd, "end");
-        dispatch({ op: "setText", id, characters: ta.value }, { quiet: true });
+        sendEdit(ta);
       }
     } finally {
       suppress.current--;
@@ -629,7 +760,7 @@ export function TextEditor({ id }: { id: string }) {
     ta.setRangeText(SOFT_BREAK, ta.selectionStart, ta.selectionEnd, "end");
     goalX.current = null;
     affRef.current = "after";
-    dispatch({ op: "setText", id, characters: ta.value }, { quiet: true });
+    sendEdit(ta);
     note(before, "break");
     trackSelection(ta);
     sync();
@@ -681,7 +812,7 @@ export function TextEditor({ id }: { id: string }) {
         onChange={(e) => {
           goalX.current = null;
           affRef.current = "after";
-          dispatch({ op: "setText", id, characters: e.target.value }, { quiet: true });
+          sendEdit(e.target);
           const p = pending.current;
           pending.current = null;
           // While composing, a foreign change must stay noticeable: it is checked at the commit.
@@ -689,6 +820,7 @@ export function TextEditor({ id }: { id: string }) {
           // An edit with no `beforeinput` (a browser that skips it) is a run of its own.
           else if (p?.kind) note(p.before, p.kind);
           else note({ ...known.current, selStart: e.target.selectionStart, selEnd: e.target.selectionStart }, "paste");
+          trackSelection(e.target);
           sync();
         }}
         onSelect={(e) => {
@@ -714,12 +846,14 @@ export function TextEditor({ id }: { id: string }) {
           // The committed text is one run, however many keys made it.
           const before = composeBefore.current;
           composeBefore.current = null;
-          // A collaborator or a reload changed things during the composition: the runs are stale.
+          // A collaborator or a reload changed things during the composition: the runs are stale
+          // (unless the text merges and kept its ids).
           if (foreignChangeCount() !== foreignSeen.current) {
-            history.current.clear();
+            if (!sameEpoch()) history.current.clear();
             foreignSeen.current = foreignChangeCount();
           }
           if (before) note(before, "ime");
+          absorb();
         }}
         onFocus={() => setFocused(true)}
         onBlur={(e) => {

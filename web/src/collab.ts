@@ -29,6 +29,19 @@ export interface Presence {
   chat?: { text: string; t: number };
   /** This person's colour, when it isn't the one they joined with (another person had it). */
   color?: string;
+  /** While editing a text layer: the characters their selection starts and ends after (ids from the
+   *  engine; null = the start), so every copy can draw their caret and selection inside the text. */
+  text?: TextPresence;
+}
+
+/** `[site, ctr]` of a character, as the engine names it. */
+export type CharId = [number, number];
+
+export interface TextPresence {
+  id: string;
+  /** The character before the selection's anchor (where it started) and focus (the caret). */
+  a: CharId | null;
+  f: CharId | null;
 }
 
 export interface Peer {
@@ -222,6 +235,13 @@ const OLD_RELAY_HINT = "Ask the relay's owner to update it.";
 const HEX = /^#[0-9a-f]{6}$/i;
 const finite = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && Math.abs(n) < 1e7;
 
+const charId = (v: unknown): CharId | null | undefined => {
+  if (v === null) return null;
+  if (!Array.isArray(v) || v.length !== 2) return undefined;
+  const [site, ctr] = v;
+  return Number.isSafeInteger(site) && Number.isSafeInteger(ctr) && site >= 0 && ctr >= 0 ? [site, ctr] : undefined;
+};
+
 /** A colour that is safe to put in a style: `#rrggbb`, else `fallback`. */
 export const safeColor = (c: unknown, fallback = "#7C5CFF") => (typeof c === "string" && HEX.test(c) ? c : fallback);
 
@@ -242,6 +262,12 @@ export function cleanPresence(p: any): Presence | null {
   if (typeof p.spotlight === "number" && Number.isFinite(p.spotlight)) out.spotlight = p.spotlight;
   if (p.chat && typeof p.chat === "object") out.chat = { text: typeof p.chat.text === "string" ? p.chat.text.slice(0, 52) : "", t: finite(p.chat.t) ? p.chat.t : 0 };
   if (typeof p.color === "string" && HEX.test(p.color)) out.color = p.color;
+  const t = p.text;
+  if (t && typeof t === "object" && typeof t.id === "string" && t.id.length <= 100) {
+    const a = charId(t.a);
+    const f = charId(t.f);
+    if (a !== undefined && f !== undefined) out.text = { id: t.id, a, f };
+  }
   return out;
 }
 
@@ -270,6 +296,8 @@ let granular = false;
  *  references to deleted styles and variables (needs a relay that says `lists`; older ones
  *  keep whole lists and last writer wins). */
 let lists = false;
+/** The room merges text per character (the welcome said `text`): every join gets a fresh site. */
+let textMerge = false;
 /** The relay said the owner stopped sharing this room. */
 let roomEnded = false;
 let flushQueued = false;
@@ -305,6 +333,7 @@ function isEmptyDelta(d: any): boolean {
     !Object.keys(d.moves ?? {}).length &&
     !Object.keys(d.pageMoves ?? {}).length &&
     !Object.keys(d.commentChanges ?? {}).length &&
+    !Object.keys(d.text ?? {}).length &&
     !["name", "pages", "styles", "variables", ...GRANULAR_KEYS].some((k) => k in d)
   );
 }
@@ -364,8 +393,24 @@ function loadShared(doc: unknown, assets: Record<string, string>, fit = true) {
   getEngine().load(JSON.stringify(doc));
   noteForeignChange();
   dispatch({ op: "relayout" });
-  getEngine().collabReset(ordered, granular, lists);
+  resetCollab();
   if (fit) requestAnimationFrame(zoomToFit);
+}
+
+/** A random 48-bit number (what the engine's text ids are made of): never 0, and fresh on every join,
+ *  because ids are never used twice. */
+function randomSite(): number {
+  const w = new Uint32Array(2);
+  crypto.getRandomValues(w);
+  return ((w[0] & 0xffff) * 0x1_0000_0000 + w[1]) || 1;
+}
+
+/** Starts the engine's collaboration baseline at its document, with per-character text merging when
+ *  the room offers it. */
+function resetCollab() {
+  const engine = getEngine();
+  engine.collabReset(ordered, granular, lists);
+  if (textMerge) engine.collabEnableText(randomSite());
 }
 
 function onMessage(m: any) {
@@ -380,11 +425,12 @@ function onMessage(m: any) {
       ordered = !!m.ordered;
       granular = !!m.granular;
       lists = !!m.lists;
+      textMerge = !!m.text && lists && granular && ordered;
       relayModel = typeof m.model === "number" ? m.model : useCollab.getState().mode === "online" ? 0 : CURRENT;
       // A viewer's engine refuses every edit (comments still work).
       if (m.role === "viewer") dispatch({ op: "setReadOnly", on: true }, { quiet: true });
       if (m.doc) loadShared(m.doc, m.assets, !joinedOnce);
-      else getEngine().collabReset(ordered, granular, lists);
+      else resetCollab();
       // Put them back on top of the room's copy; the flush below sends them, so nothing made
       // offline is lost.
       applying = true;
@@ -561,7 +607,7 @@ function connect(join: Record<string, unknown>) {
       if (heardPong && lastPing > lastHeard && now - lastHeard > SILENT_MS && now - lastPing >= PING_MS / 2 - 500) return lost();
       if (now - lastPing >= PING_MS - 500) ping();
     }, PING_MS / 2);
-    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, granular: getEngine().collabGranular(), lists: getEngine().collabLists(), model: MODEL_REVISION, ...join }));
+    socket.send(JSON.stringify({ type: "join", name: myName(), color: myColor, granular: getEngine().collabGranular(), lists: getEngine().collabLists(), text: getEngine().collabTextSupported(), model: MODEL_REVISION, ...join }));
   };
   socket.onmessage = (e) => ws === socket && onMessage(JSON.parse(e.data));
   socket.onclose = lost;
@@ -840,6 +886,16 @@ export function setPresenceSource(fn: () => Partial<Presence>) {
   presenceSource = fn;
 }
 
+/** What the text editor reports while a text layer is being edited (see `Presence.text`). */
+let textPresence: TextPresence | null = null;
+
+/** Tells the room where this person's caret is inside a text layer (null: editing ended). */
+export function setTextPresence(t: TextPresence | null) {
+  if (JSON.stringify(t) === JSON.stringify(textPresence)) return;
+  textPresence = t;
+  sendPresence(t === null);
+}
+
 let lastPresence = 0;
 let presenceTimer: ReturnType<typeof setTimeout> | null = null;
 let cursor: { x: number; y: number } | null = null;
@@ -859,7 +915,7 @@ export function sendPresence(now: boolean) {
     const st = useStore.getState();
     const owner = useCollab.getState().role === "owner" || undefined;
     const color = colorChanged ? myColor : undefined;
-    send({ type: "presence", presence: { page: st.es.page, cursor, selection: st.es.selection, owner, color, ...presenceSource?.() } satisfies Presence });
+    send({ type: "presence", presence: { page: st.es.page, cursor, selection: st.es.selection, owner, color, text: textPresence ?? undefined, ...presenceSource?.() } satisfies Presence });
   };
   if (now) return go();
   if (presenceTimer) return;

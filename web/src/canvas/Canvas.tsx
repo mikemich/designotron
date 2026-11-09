@@ -23,6 +23,7 @@ import { GridOverlay, PageGuides, Rulers } from "./Rulers";
 import { CommentLayer } from "./Comments";
 import { Measure, SpacingGaps, trackPointer } from "./Measure";
 import { RemoteCursors, RemoteSelections } from "./RemoteCursors";
+import { RemoteTextCarets } from "./RemoteTextCarets";
 import { PaintHandles } from "./PaintHandles";
 import { pickTouchHandle } from "./touchHandles";
 import { CropMode } from "./CropMode";
@@ -1637,6 +1638,7 @@ export function Canvas() {
       <PaintHandles v={v} />
       <CropMode v={v} />
       <CommentLayer v={v} />
+      <RemoteTextCarets v={v} />
       <RemoteCursors v={v} />
       <CursorChat v={v} />
       <GuestBar />

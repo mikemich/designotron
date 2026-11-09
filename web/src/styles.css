@@ -2950,6 +2950,21 @@ button.plugin-log-line {
   border-radius: 4px;
   white-space: nowrap;
 }
+/* A collaborator's caret and selection inside the text they edit (`RemoteTextCarets`). */
+.remote-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+  transform-origin: 0 0;
+  z-index: 3;
+}
+@media (forced-colors: active) {
+  .remote-text {
+    forced-color-adjust: none;
+  }
+}
 .peer-avatars {
   display: flex;
   margin-right: 4px;
