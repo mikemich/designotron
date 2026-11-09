@@ -351,6 +351,8 @@ impl Run {
     let mut a = build();
     let mut b = build();
     let mut peer = build();
+    // Its own id sequence: a peer that replayed `a`'s draws would make the same ids as the engines.
+    peer.gen = crate::doc::IdGen::new(8);
     if loaded {
       // A file just opened: not yet settled, so the first change runs the passes over everything.
       let json = a.to_json();
@@ -1943,4 +1945,176 @@ fn run_colour_and_link_changes_lay_out_like_the_whole_file_passes_with_a_kerning
     assert_eq!(ra, rb);
     assert!(a.doc == b.doc, "{c:?}: the documents differ");
   }
+}
+
+/// A generated id never replaces a layer that exists: forced by rewinding the id generator to the
+/// draw that made an instance, then adding a layer to its main so the instance grows a copy. The
+/// copy used to take the instance's own id and list itself as its child.
+#[test]
+fn a_new_copy_never_takes_an_existing_id() {
+  let mut e = build();
+  let main = e
+    .doc
+    .nodes
+    .values()
+    .find(|n| n.kind == NodeType::Component && n.name == "Card")
+    .unwrap()
+    .id
+    .clone();
+  let r = ai(
+    &mut e,
+    "create_nodes",
+    json!({"nodes":[{"type":"rectangle","name":"Loose","width":20,"height":20}]}),
+  );
+  let loose = r["created"][0]["id"].as_str().unwrap().to_string();
+  let known: std::collections::HashSet<NodeId> = e.doc.nodes.keys().cloned().collect();
+  let before = e.gen.clone();
+  e.dispatch(Command::CreateInstance {
+    component_id: main.clone(),
+    x: 0.0,
+    y: 0.0,
+    parent: None,
+    anchor: None,
+    into_components: false,
+  })
+  .unwrap();
+  let inst = e
+    .doc
+    .nodes
+    .values()
+    .find(|n| n.kind == NodeType::Instance && !known.contains(&n.id))
+    .unwrap()
+    .id
+    .clone();
+  // The next draw repeats the instance's id; moving a layer into the main makes the instance grow a copy.
+  e.gen = before;
+  e.dispatch(Command::MoveToParent {
+    ids: vec![loose],
+    parent: Some(main),
+    index: None,
+  })
+  .unwrap();
+  for n in e.doc.nodes.values() {
+    assert!(!n.children.contains(&n.id), "{} lists itself", n.id);
+    for c in &n.children {
+      assert_eq!(
+        e.doc.get(c).and_then(|c| c.parent.as_deref()),
+        Some(n.id.as_str()),
+        "{c} points elsewhere"
+      );
+    }
+  }
+  assert_eq!(e.doc.get(&inst).map(|n| n.kind), Some(NodeType::Instance), "the instance survives");
+}
+
+/// A damaged file is repaired on load into a sound tree (`collab_sim::unsound`, and pages list
+/// only top-level layers of their own, once each), layout returns, and a sound file loads
+/// byte-identical.
+#[test]
+fn load_repairs_damaged_trees() {
+  fn sound_after(e: &mut Engine, v: &Value, what: &str) {
+    e.load(&v.to_string()).unwrap();
+    if let Some(p) = crate::collab_sim::unsound(&e.doc) {
+      panic!("{what}: {p}");
+    }
+    for n in e.doc.nodes.values() {
+      assert!(!n.children.contains(&n.id), "{what}: {} lists itself", n.id);
+      assert!(!e.doc.ancestors(&n.id).contains(&n.id), "{what}: {} is its own ancestor", n.id);
+      let mut kids = n.children.clone();
+      kids.sort();
+      kids.dedup();
+      assert_eq!(kids.len(), n.children.len(), "{what}: {} lists a child twice", n.id);
+    }
+    for p in e.doc.pages.iter() {
+      let mut seen = std::collections::HashSet::new();
+      for c in &p.children {
+        let n = e.doc.get(c).unwrap_or_else(|| panic!("{what}: page lists a missing layer {c}"));
+        assert!(
+          n.parent.is_none() && n.page == p.id,
+          "{what}: page lists {c} which is not its top-level layer"
+        );
+        assert!(seen.insert(c.clone()), "{what}: page lists {c} twice");
+      }
+    }
+    crate::layout::relayout_all(&mut e.doc, &HeuristicMeasurer);
+  }
+  let mut e = build();
+  let sound = e.to_json();
+  e.load(&sound).unwrap();
+  assert_eq!(e.to_json(), sound, "a sound file is untouched");
+  let base: Value = serde_json::from_str(&sound).unwrap();
+  let frames: Vec<String> = base["nodes"]
+    .as_object()
+    .unwrap()
+    .iter()
+    .filter(|(_, n)| n["type"] == "frame" && n["parent"].is_null())
+    .map(|(k, _)| k.clone())
+    .take(2)
+    .collect();
+  let (a, b) = (frames[0].clone(), frames[1].clone());
+
+  // A layer in its own children, and a two-layer loop (each also on the page).
+  let mut v = base.clone();
+  let nodes = v["nodes"].as_object_mut().unwrap();
+  nodes.get_mut(&a).unwrap()["children"].as_array_mut().unwrap().push(json!(a));
+  nodes.get_mut(&a).unwrap()["parent"] = json!(b);
+  nodes.get_mut(&b).unwrap()["parent"] = json!(a);
+  nodes.get_mut(&b).unwrap()["children"].as_array_mut().unwrap().push(json!(a));
+  nodes.get_mut(&a).unwrap()["children"].as_array_mut().unwrap().push(json!(b));
+  sound_after(&mut e, &v, "self child and two-cycle");
+
+  // The shape of the P1 file: a layer its frame lists is its own parent and child.
+  let mut v = base.clone();
+  let nodes = v["nodes"].as_object_mut().unwrap();
+  let kid = nodes[&a]["children"][0].as_str().unwrap().to_string();
+  nodes.get_mut(&kid).unwrap()["parent"] = json!(kid);
+  nodes.get_mut(&kid).unwrap()["children"].as_array_mut().unwrap().push(json!(kid));
+  sound_after(&mut e, &v, "self-child instance");
+  assert!(e.doc.get(&kid).is_some_and(|n| n.parent.is_none()), "it is cut loose");
+  assert!(
+    e.doc.page(&e.doc.get(&kid).unwrap().page).unwrap().children.contains(&kid),
+    "and shown on its page"
+  );
+
+  // Orphans: a child its parent doesn't list, duplicate entries, a parent and a page that are gone.
+  let mut v = base.clone();
+  let nodes = v["nodes"].as_object_mut().unwrap();
+  nodes.get_mut(&a).unwrap()["children"].as_array_mut().unwrap().remove(0);
+  let dup = nodes[&b]["children"][0].clone();
+  nodes.get_mut(&b).unwrap()["children"].as_array_mut().unwrap().push(dup);
+  let lost = nodes[&b]["children"][1].as_str().unwrap().to_string();
+  nodes.get_mut(&lost).unwrap()["parent"] = json!("n_gone");
+  nodes.get_mut(&lost).unwrap()["page"] = json!("p_gone");
+  sound_after(&mut e, &v, "orphans");
+  assert!(
+    e.doc.get(&kid).is_some_and(|n| n.parent.as_deref() == Some(a.as_str())),
+    "the unlisted child is listed again"
+  );
+}
+
+/// Layout stops at an absurdly deep chain instead of overflowing the stack.
+#[test]
+fn layout_stops_on_a_very_deep_chain() {
+  let mut e = build();
+  let page = e.doc.pages[0].id.clone();
+  let template = e.doc.nodes.values().find(|n| n.kind == NodeType::Frame).unwrap().as_ref().clone();
+  let mut parent: Option<String> = None;
+  let mut first = String::new();
+  for i in 0..3000 {
+    let id = format!("deep_{i}");
+    let mut n = template.clone();
+    n.id = id.clone();
+    n.parent = parent.clone();
+    n.children = Vec::new();
+    n.page = page.clone();
+    n.layout = None;
+    if let Some(p) = &parent {
+      e.doc.get_mut(p).unwrap().children.push(id.clone());
+    } else {
+      first = id.clone();
+    }
+    e.doc.nodes.insert(id.clone(), std::sync::Arc::new(n));
+    parent = Some(id);
+  }
+  crate::layout::layout_node(&mut e.doc, &first, &HeuristicMeasurer);
 }

@@ -208,6 +208,178 @@
 .wf-style-edit .field {
   flex: none;
 }
+.wf-usage {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+}
+.wf-usage .btn {
+  padding: 2px 8px;
+}
+.wf-folder-rename {
+  flex: 1;
+  min-width: 0;
+  margin: 2px 4px;
+}
+/* Variables dialog: room for the Details button beside the name and Select + Delete at the row's end */
+.variables-dialog .var-table col.var-col-name {
+  width: 300px;
+}
+.variables-dialog .var-table col.var-col-del {
+  width: 64px;
+}
+.variables-dialog .var-table {
+  min-width: calc(300px + var(--modes, 1) * 180px + 64px);
+}
+.var-folder td .var-folder-add {
+  position: static;
+  display: inline-flex;
+  vertical-align: middle;
+  min-width: 24px;
+  min-height: 24px;
+  justify-content: center;
+  align-items: center;
+  opacity: 0.6;
+}
+.var-folder td:hover .var-folder-add,
+.var-folder td .var-folder-add:focus-visible {
+  opacity: 1;
+}
+.var-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+button.var-alias-chip {
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+button.var-alias-chip:hover {
+  border-color: #666;
+}
+
+/* Token picker (styles, bound variables, aliases): search field, then folders and rows */
+.tp {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tp-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tp-search .textinput {
+  flex: 1;
+  min-width: 0;
+}
+.tp-list {
+  overflow-y: auto;
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+.tp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.tp-row:hover,
+.tp-row.active {
+  background: #1565c0;
+  color: white;
+}
+.tp-row:hover .muted,
+.tp-row.active .muted {
+  color: #e0f0ff;
+}
+.tp-folder,
+.tp-group {
+  color: var(--text-2);
+}
+/* Held open by a search: a heading, not a control */
+.tp-row.tp-fixed,
+.tp-row.tp-fixed:hover {
+  background: none;
+  color: var(--text-2);
+  cursor: default;
+}
+.tp-group {
+  font-weight: 600;
+}
+.tp-action {
+  border-bottom: 1px solid var(--border);
+  border-radius: 4px 4px 0 0;
+  margin-bottom: 2px;
+}
+.tp-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tp-hint {
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tp-pre {
+  width: 18px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.tp-ag {
+  font-size: 12px;
+}
+.tp-check {
+  flex-shrink: 0;
+}
+.tp-empty,
+.tp-more {
+  padding: 8px 6px;
+}
+.tp-inplace .tp-list {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 0;
+  padding: 2px;
+}
+.wf-pick-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel-2);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.wf-pick-btn:hover {
+  border-color: #555;
+}
+.wf-pick-btn span:first-of-type {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* Component properties (PropertyControls) */
 .wf-purple-text {

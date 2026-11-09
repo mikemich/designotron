@@ -75,6 +75,15 @@ pub enum SelectMode {
   Toggle,
 }
 
+/// The characters, runs and sequence of a text layer at one moment (what `RevertText` moves between).
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TextState {
+  pub characters: String,
+  pub runs: Vec<crate::model::TextRun>,
+  pub seq: Option<crate::textseq::TextSeq>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Command {
@@ -373,6 +382,26 @@ pub enum Command {
     #[serde(default)]
     runs: Option<Vec<crate::model::TextRun>>,
   },
+  /// Replaces the characters `start..end` (code points) of a text layer with `text`: what typing,
+  /// deleting and pasting plain text do. In a room that merges text, the new characters get ids of
+  /// this editor and the deleted ones become tombstones, so other people's typing around them
+  /// survives (see `textseq`). Runs follow `SetText`'s remapping.
+  EditText {
+    id: NodeId,
+    start: usize,
+    end: usize,
+    text: String,
+  },
+  /// Makes the change that took a text layer from `from` to `to` again (the editor's own undo and
+  /// redo inside a text): when the text is still `from` it becomes `to` exactly, else the step's
+  /// own characters are reversed and everyone else's stay (`textseq::revert`). Fails with
+  /// "the text changed" when the two don't share a sequence epoch. Returns `{start, end}`, the
+  /// changed range in code points, for the caret.
+  RevertText {
+    id: NodeId,
+    from: TextState,
+    to: TextState,
+  },
   /// Applies style overrides to characters `start..end` of a text layer.
   /// `style` uses TextRun field names; `clear` lists overrides to remove.
   StyleText {
@@ -456,6 +485,10 @@ pub enum Command {
   },
   /// Merges shapes into one editable vector, keeping curves.
   Flatten {
+    ids: Vec<NodeId>,
+  },
+  /// Turns raw-path vectors (imported icons, older files) into editable points, keeping the layer.
+  MakeEditable {
     ids: Vec<NodeId>,
   },
   /// Converts strokes into filled vector shapes.
@@ -630,6 +663,11 @@ pub enum Command {
     grids: Option<Vec<LayoutGrid>>,
     description: Option<String>,
   },
+  /// Sets the description of a colour, text, effect or grid style (empty clears it).
+  SetStyleDescription {
+    id: String,
+    description: String,
+  },
   DeleteStyle {
     id: String,
   },
@@ -708,6 +746,20 @@ pub enum Query {
     from: Option<usize>,
     #[serde(default)]
     to: Option<usize>,
+  },
+  /// The character before each caret index (`null` = the start), as ids; against `seq` (an older
+  /// state the editor kept) when given, else the current text.
+  TextAnchors {
+    id: NodeId,
+    indices: Vec<usize>,
+    #[serde(default)]
+    seq: Option<crate::textseq::TextSeq>,
+  },
+  /// The current caret index of each anchor from `TextAnchors` (a deleted anchor maps to where it
+  /// was, an unknown one to `null`).
+  TextIndices {
+    id: NodeId,
+    anchors: Vec<Option<crate::textseq::CharId>>,
   },
   Bounds {
     ids: Vec<NodeId>,
@@ -958,6 +1010,9 @@ pub struct Engine {
   synced: Option<Document>,
   /// Document as last sent to collaborators (see `collab_delta`).
   collab_synced: Option<Document>,
+  /// Component sets whose legacy outline `load` removed: the collaboration baseline still has it,
+  /// so the first delta sends the removal to the room.
+  stripped_outlines: Vec<NodeId>,
   /// With a relay that orders changes: the room's document as of every change it has
   /// ordered so far, and this editor's changes it hasn't yet (oldest first). The document
   /// is always `collab_confirmed` with `collab_pending` on top, so once nothing is pending
@@ -969,6 +1024,11 @@ pub struct Engine {
   /// The room also understands child orders as moves and comments per message, and every
   /// copy of the document drops references to deleted tokens (`collab::DeltaOpts`, `prune_refs`).
   pub(crate) collab_lists: bool,
+  /// The room merges text layers per character (`collab_enable_text`): edits make character ids and
+  /// deltas carry `text` entries. Off, texts travel whole and lose their sequence when edited.
+  collab_text: bool,
+  /// Where this editor's new character ids come from (its site and a counter that only grows).
+  text_ids: crate::textseq::SiteIds,
   /// Layers moved on purpose by commands since the last `collab_delta` (`collab::moved_hinted`).
   moved_hint: std::collections::HashSet<NodeId>,
   /// Layers moved by the commands of the step being made (a gesture's drags add up).
@@ -1120,10 +1180,13 @@ impl Engine {
       render_cache: RenderCache::default(),
       synced: None,
       collab_synced: None,
+      stripped_outlines: Vec::new(),
       collab_confirmed: None,
       collab_pending: Default::default(),
       collab_granular: false,
       collab_lists: false,
+      collab_text: false,
+      text_ids: Default::default(),
       moved_hint: Default::default(),
       step_moved: Vec::new(),
       vars_settled: false,
@@ -1155,11 +1218,11 @@ impl Engine {
       return Err("document has no pages".into());
     }
     // Files and links can come from anyone: never let a parent cycle hang layout or rendering.
-    let ids: Vec<NodeId> = doc.nodes.keys().cloned().collect();
-    doc.break_parent_cycles(&ids);
+    doc.repair_tree();
     components::repair_masters(&mut doc);
     // Nor may a crafted link survive: unsafe schemes are dropped from text and prototypes.
     sanitize_links(&mut doc, None);
+    self.stripped_outlines = components::strip_default_set_outline(&mut doc);
     self.page = doc.pages[0].id.clone();
     self.doc = doc;
     self.selection.clear();
@@ -1295,11 +1358,36 @@ impl Engine {
   pub fn collab_reset(&mut self, ordered: bool, granular: bool, lists: bool) {
     self.collab_granular = ordered && granular;
     self.collab_lists = self.collab_granular && lists;
-    self.collab_synced = Some(self.doc.clone());
-    self.collab_confirmed = ordered.then(|| self.doc.clone());
+    self.collab_text = false;
+    let mut base = self.doc.clone();
+    // A viewer can't send the strip (the room refuses a whole delta that edits), so its baseline
+    // keeps the stripped state.
+    if !self.read_only {
+      components::restore_default_set_outline(&mut base, &self.stripped_outlines);
+    }
+    self.stripped_outlines.clear();
+    self.collab_synced = Some(base.clone());
+    self.collab_confirmed = ordered.then_some(base);
     self.collab_pending.clear();
     // What was moved before joining is part of the baseline, not of the first delta.
     self.moved_hint.clear();
+  }
+
+  /// Turns on per-character text merging for the room joined with the last `collab_reset` (the room
+  /// said `text`; needs `lists`). `site` is a random number nobody else uses (0 is the base
+  /// of every text and is never used); call it again with a fresh one after every (re)join.
+  pub fn collab_enable_text(&mut self, site: u64) {
+    self.collab_text = self.collab_lists;
+    let site = site.clamp(1, crate::textseq::MAX_SITE);
+    // (The same site again keeps its counter: ids are never used twice.)
+    if self.text_ids.site != site {
+      self.text_ids = crate::textseq::SiteIds { site, ctr: 0 };
+    }
+  }
+
+  /// Whether texts are merging per character right now.
+  pub fn collab_text(&self) -> bool {
+    self.collab_text
   }
 
   /// This editor's changes the relay hasn't acknowledged, plus any not yet sent, oldest
@@ -1321,6 +1409,7 @@ impl Engine {
       patches: ordered,
       granular: self.collab_granular,
       lists: self.collab_lists,
+      text: self.collab_text,
     }
   }
 
@@ -1350,6 +1439,52 @@ impl Engine {
     if !crate::collab::prune_refs(&mut self.doc, scope).is_empty() {
       // A main component's link may be the one that went: its instances follow.
       self.after_mutation(&pruned_from);
+    }
+  }
+
+  /// After a local change: gives every text it changed a sequence that describes it, so that a
+  /// change that knows nothing about sequences (a paste with runs, a plugin, Claude, a variable, a
+  /// component property, an undo that fell back to the whole-text rule) merges as the smallest edit
+  /// (`textseq::fixup`). Texts not merging (no text room, inside an instance, new layers) lose any
+  /// sequence. Looks only at the layers that changed.
+  fn text_fixup(&mut self, prev: &Document) {
+    // (layer, true: give it a sequence made from its old one / false: it has none)
+    let mut fixes: Vec<(NodeId, bool)> = Vec::new();
+    for item in prev.nodes.diff(&self.doc.nodes) {
+      let (new, old) = match item {
+        imbl::ordmap::DiffItem::Add(_, n) => (n, None),
+        imbl::ordmap::DiffItem::Update { old: (_, o), new: (_, n) } => (n, Some(o)),
+        imbl::ordmap::DiffItem::Remove(..) => continue,
+      };
+      let Some(t) = new.text.as_ref() else { continue };
+      let old_t = old.and_then(|o| o.text.as_ref());
+      if old_t == Some(t) {
+        continue;
+      }
+      let merges = self.collab_text && old_t.is_some() && self.doc.instance_ancestor(&new.id).is_none();
+      if !merges {
+        if t.seq.is_some() {
+          fixes.push((new.id.clone(), false));
+        }
+      } else if !t.seq.as_ref().is_some_and(|s| crate::textseq::valid(s, &t.characters)) {
+        fixes.push((new.id.clone(), true));
+      }
+    }
+    for (id, merge) in fixes {
+      let Some(mut t) = self.doc.get(&id).and_then(|n| n.text.clone()) else {
+        continue;
+      };
+      match prev.get(&id).and_then(|n| n.text.as_ref()) {
+        Some(old) if merge => {
+          crate::textseq::fixup(old, &mut t, &mut self.text_ids);
+        }
+        _ => t.seq = None,
+      }
+      if self.doc.get(&id).and_then(|n| n.text.as_ref()) != Some(&t) {
+        if let Some(n) = self.doc.get_mut(&id) {
+          n.text = Some(t);
+        }
+      }
     }
   }
 
@@ -1567,7 +1702,7 @@ impl Engine {
         // never recorded in local history. Callers flush their own delta first.
         let prev = self.doc.clone();
         if local {
-          Self::collab_apply(self.collab_lists, &mut self.doc, &delta)?;
+          crate::collab::apply_local(&mut self.doc, &delta, crate::collab::ApplyOpts { prune: self.collab_lists })?;
           sanitize_links(&mut self.doc, Some(&delta_ids(&delta)));
           self.after_mutation(&prev);
           self.rev += 1;
@@ -1618,7 +1753,10 @@ impl Engine {
             Some(c) => Self::collab_apply(self.collab_lists, c, &d).unwrap_or_default(),
             None => vec![],
           };
-          if pruned.is_empty() {
+          // A text change is re-applied on the room's document, so this copy's bookkeeping (clock,
+          // deletion stamps, forgotten stretches) is the room's: the copies stay equal.
+          let texts = d.get("text").is_some_and(|t| t.as_object().is_some_and(|m| !m.is_empty()));
+          if pruned.is_empty() && !texts {
             return Ok(json!({}));
           }
           // The room dropped a link this editor still shows (something it knew nothing about at
@@ -1760,6 +1898,7 @@ impl Engine {
       Ok(v) => {
         self.after_mutation(&prev);
         self.prune_local(&prev);
+        self.text_fixup(&prev);
         if prev != self.doc {
           self.moved_hint.extend(moved.iter().cloned());
           self.step_moved.extend(moved);
@@ -1845,6 +1984,7 @@ impl Engine {
     if !exact {
       self.after_mutation(&prev);
       self.prune_local(&prev);
+      self.text_fixup(&prev);
     }
     self.future.push(step);
   }
@@ -1876,6 +2016,7 @@ impl Engine {
     if !exact {
       self.after_mutation(&prev);
       self.prune_local(&prev);
+      self.text_fixup(&prev);
     }
     self.past.push(step);
   }
@@ -2351,6 +2492,7 @@ impl Engine {
       | Command::CreateComponents { ids }
       | Command::BooleanOp { ids, .. }
       | Command::Flatten { ids }
+      | Command::MakeEditable { ids }
       | Command::OutlineStroke { ids }
       | Command::UseAsMask { ids }
       | Command::MoveToPage { ids, .. } => ids,
@@ -2477,6 +2619,8 @@ impl Engine {
           .collect();
         if !removed.is_empty() {
           crate::components::keep_values_of_removed(&mut self.doc, &removed);
+          // Aliases of a removed variable keep what each mode showed (read from the old set).
+          crate::variables::inline_removed_aliases(&self.doc, &mut collections, &removed);
         }
         // Equal collections and variables keep their old allocations, so this step shares them.
         self.doc.variables = crate::variables::intern(collections, &self.doc.variables);
@@ -2631,6 +2775,7 @@ impl Engine {
           return Err("document has no pages".into());
         }
         sanitize_links(&mut doc, None);
+        components::strip_default_set_outline(&mut doc);
         if keep_comments {
           doc.comments = carry_comments(&self.doc, &doc);
         }
@@ -2850,6 +2995,7 @@ impl Engine {
           }
           drop_unsafe_links(self.doc.get_mut(id).unwrap());
           self.scale_group_to_patch(id, &before);
+          self.scale_vector_to_patch(id, &before, &p);
           let after = self.doc.get(id).unwrap().clone();
           if after.kind.is_frame_like() && (after.width != before.width || after.height != before.height) {
             layout::apply_constraints(&mut self.doc, id, before.width, before.height);
@@ -2908,14 +3054,54 @@ impl Engine {
         let n = self.doc.get_mut(&id).ok_or("no such node")?;
         patch::apply(n, &p)?;
         drop_unsafe_links(n);
-        // The name follows the text until the user renames the layer.
-        let auto_name = |s: &str| -> String { s.trim_start().chars().take(40).collect() };
-        let old_name: String = old.chars().take(40).collect();
-        if n.name.is_empty() || n.name == "Text" || n.name == old_name || n.name == auto_name(&old) {
-          n.name = auto_name(&characters);
-        }
+        follow_name(n, &old, &characters);
         components::record_override(&mut self.doc, &id, &p);
         Ok(json!({}))
+      }
+      Command::EditText { id, start, end, text } => {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut t = self.doc.get(&id).and_then(|n| n.text.clone()).ok_or("not a text layer")?;
+        let old = t.characters.clone();
+        let merges = self.collab_text && self.doc.instance_ancestor(&id).is_none();
+        if !merges || crate::textseq::local_edit(&mut t, start, end, &text, &mut self.text_ids).is_err() {
+          crate::text::edit_text(&mut t, start, end, &text);
+          t.seq = None;
+        }
+        let p = json!({ "text": { "characters": t.characters, "runs": t.runs } });
+        let n = self.doc.get_mut(&id).ok_or("no such node")?;
+        follow_name(n, &old, &t.characters);
+        n.text = Some(t);
+        drop_unsafe_links(n);
+        components::record_override(&mut self.doc, &id, &p);
+        Ok(json!({}))
+      }
+      Command::RevertText { id, from, to } => {
+        let cur = self.doc.get(&id).and_then(|n| n.text.clone()).ok_or("not a text layer")?;
+        let merges = self.collab_text && self.doc.instance_ancestor(&id).is_none();
+        let with = |s: TextState| crate::model::TextProps {
+          characters: s.characters,
+          runs: s.runs,
+          seq: s.seq.filter(|_| merges),
+          ..cur.clone()
+        };
+        let (from, to) = (with(from), with(to));
+        let reverted = if merges { crate::textseq::revert(&cur, &from, &to) } else { None };
+        let mut new = match reverted {
+          Some(r) => r,
+          // Nobody changed the text since: the step's other end, exactly.
+          None if cur.characters == from.characters && cur.runs == from.runs => crate::model::TextProps { seq: None, ..to },
+          None => return Err("the text changed".into()),
+        };
+        // (A restored sequence must describe the characters it comes with.)
+        new.seq = new.seq.filter(|s| merges && crate::textseq::valid(s, &new.characters));
+        let (start, end) = crate::textseq::changed_range(&cur.characters, &new.characters);
+        let p = json!({ "text": { "characters": new.characters, "runs": new.runs } });
+        let n = self.doc.get_mut(&id).ok_or("no such node")?;
+        follow_name(n, &cur.characters, &new.characters);
+        n.text = Some(new);
+        drop_unsafe_links(n);
+        components::record_override(&mut self.doc, &id, &p);
+        Ok(json!({ "start": start, "end": end }))
       }
       Command::StyleText {
         id,
@@ -3131,6 +3317,45 @@ impl Engine {
         };
         let id = self.replace_with_vector(&ids, sps, &name)?;
         Ok(json!({ "id": id }))
+      }
+      Command::MakeEditable { ids } => {
+        let mut done = Vec::new();
+        let mut evenodd: Option<String> = None;
+        for id in &ids {
+          let Some(n) = self.doc.get(id) else { continue };
+          let Some(raw) = n
+            .vector
+            .as_ref()
+            .and_then(|v| v.raw.as_ref())
+            .filter(|_| n.kind == NodeType::Vector)
+          else {
+            continue;
+          };
+          if n.locked {
+            continue;
+          }
+          if raw.fill_rule.eq_ignore_ascii_case("evenodd") {
+            evenodd = Some(n.name.clone());
+            continue;
+          }
+          let subpaths = crate::paths::raw_subpaths(raw, n.width, n.height);
+          if subpaths.iter().all(|sp| sp.points.is_empty()) {
+            continue;
+          }
+          let n = self.doc.get_mut(id).unwrap();
+          n.vector = Some(VectorData { subpaths, raw: None });
+          let p = json!({ "vector": n.vector });
+          components::record_override(&mut self.doc, id, &p);
+          done.push(id.clone());
+        }
+        if done.is_empty() {
+          return Err(if let Some(name) = evenodd {
+            format!("{name} uses even-odd filling: Flatten it (Ctrl/Cmd+E) to edit its points")
+          } else {
+            "select a vector icon with a raw path (nothing to make editable)".into()
+          });
+        }
+        Ok(json!({ "ids": done }))
       }
       Command::OutlineStroke { ids } => {
         let mut created = Vec::new();
@@ -3472,6 +3697,7 @@ impl Engine {
           id: id.clone(),
           name,
           color: crate::color::normalize(&color),
+          ..Default::default()
         });
         Ok(json!({ "id": id }))
       }
@@ -3490,6 +3716,7 @@ impl Engine {
           paragraph_spacing: Some(t.paragraph_spacing),
           case: Some(t.case),
           decoration: Some(t.decoration),
+          description: String::new(),
         });
         if let Some(n) = self.doc.get_mut(&from) {
           n.text_style = Some(id.clone());
@@ -3598,6 +3825,22 @@ impl Engine {
         self
           .doc
           .update_where(|n| n.grid_style.as_deref() == Some(id.as_str()), |n| n.layout_grids = grids.clone());
+        Ok(json!({}))
+      }
+      Command::SetStyleDescription { id, description } => {
+        let description = description.trim().to_string();
+        let st = self.doc.styles_mut();
+        if let Some(s) = st.colors.iter_mut().find(|s| s.id == id) {
+          s.description = description;
+        } else if let Some(s) = st.texts.iter_mut().find(|s| s.id == id) {
+          s.description = description;
+        } else if let Some(s) = st.effects.iter_mut().find(|s| s.id == id) {
+          s.description = description;
+        } else if let Some(s) = st.grids.iter_mut().find(|s| s.id == id) {
+          s.description = description;
+        } else {
+          return Err("no such style".into());
+        }
         Ok(json!({}))
       }
       Command::DeleteStyle { id } => {
@@ -3874,6 +4117,48 @@ impl Engine {
       let p = json!({ "x": n.x, "y": n.y, "width": n.width, "height": n.height });
       components::record_override(&mut self.doc, &d, &p);
     }
+  }
+
+  /// Typing a new W or H on an editable vector scales its points with the box, like the resize
+  /// handles do (a raw path scales through its viewBox; a patch carrying the path itself wins).
+  fn scale_vector_to_patch(&mut self, id: &str, before: &Node, patch: &Value) {
+    let Some(now) = self.doc.get(id) else { return };
+    if now.kind != NodeType::Vector
+      || patch.get("vector").is_some()
+      || (now.width == before.width && now.height == before.height)
+      || now.vector.as_ref().is_none_or(|v| v.raw.is_some() || v.subpaths.is_empty())
+    {
+      return;
+    }
+    // A box typed down to nothing would flatten the path for good: leave the points alone then.
+    let sx = if before.width > 0.001 && now.width > 0.001 {
+      now.width / before.width
+    } else {
+      1.0
+    };
+    let sy = if before.height > 0.001 && now.height > 0.001 {
+      now.height / before.height
+    } else {
+      1.0
+    };
+    if sx == 1.0 && sy == 1.0 {
+      return;
+    }
+    let n = self.doc.get_mut(id).unwrap();
+    if let Some(v) = n.vector.as_mut() {
+      for sp in &mut v.subpaths {
+        for pt in &mut sp.points {
+          pt.x *= sx;
+          pt.in_x *= sx;
+          pt.out_x *= sx;
+          pt.y *= sy;
+          pt.in_y *= sy;
+          pt.out_y *= sy;
+        }
+      }
+    }
+    let p = json!({ "vector": n.vector });
+    components::record_override(&mut self.doc, id, &p);
   }
 
   /// Whether `id` is positioned by its parent's auto layout (not absolutely placed).
@@ -4428,6 +4713,14 @@ impl Engine {
         }
         None => Value::Null,
       },
+      Query::TextAnchors { id, indices, seq } => match self.doc.get(&id).and_then(|n| n.text.as_ref()) {
+        Some(t) => json!({ "anchors": crate::textseq::anchors(t, seq.as_ref(), &indices) }),
+        None => Value::Null,
+      },
+      Query::TextIndices { id, anchors } => match self.doc.get(&id).and_then(|n| n.text.as_ref()) {
+        Some(t) => json!({ "indices": crate::textseq::indices(t, &anchors) }),
+        None => Value::Null,
+      },
       Query::OverrideGroups { id } => {
         let groups: Vec<Value> = components::override_groups(&self.doc, &id)
           .into_iter()
@@ -4602,6 +4895,10 @@ impl Engine {
     for nid in self.doc.subtree(root) {
       if let Some(n) = self.doc.get(&nid) {
         let mut c = n.clone();
+        // (A copy starts a new history: it carries no character ids.)
+        if let Some(t) = c.text.as_mut() {
+          t.seq = None;
+        }
         if nid == root {
           let local = self.doc.local_matrix(n).bounds_of(n.width, n.height);
           c.x = b.x + (n.x - local.x);
@@ -4664,9 +4961,18 @@ fn recolor_stroke(n: &mut Node, color: &str) {
   }
 }
 
+/// The layer's name follows its text until the user renames it.
+fn follow_name(n: &mut Node, old: &str, new: &str) {
+  let auto_name = |s: &str| -> String { s.trim_start().chars().take(40).collect() };
+  let old_name: String = old.chars().take(40).collect();
+  if n.name.is_empty() || n.name == "Text" || n.name == old_name || n.name == auto_name(old) {
+    n.name = auto_name(new);
+  }
+}
+
 /// Ids of the nodes a peer's delta adds or patches.
 fn delta_ids(d: &Value) -> Vec<NodeId> {
-  ["nodes", "patch"]
+  ["nodes", "patch", "text"]
     .iter()
     .filter_map(|k| d.get(*k).and_then(|v| v.as_object()))
     .flat_map(|m| m.keys().cloned())
@@ -5786,6 +6092,121 @@ mod tests {
     let page = e.page.clone();
     let svg = e.render(&page, &[], None);
     assert!(svg.contains("<mask id=") && svg.contains("mask=\"url(#"), "{svg}");
+  }
+
+  /// A component set made the usual way, plus its export SVG, canvas SVG, HTML and React code.
+  fn set_with(e: &mut Engine, edit: impl FnOnce(&mut Node)) -> String {
+    let a = rect(e, 0.0, 0.0, 40.0, 40.0, None);
+    let b = rect(e, 100.0, 0.0, 40.0, 40.0, None);
+    let made = e.dispatch(Command::CreateComponents { ids: vec![a, b] }).unwrap();
+    let ids: Vec<NodeId> = made["ids"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|v| v.as_str().unwrap().to_string())
+      .collect();
+    let set = id_of(&e.dispatch(Command::CombineVariants { ids }).unwrap());
+    edit(e.doc.get_mut(&set).unwrap());
+    set
+  }
+
+  fn legacy_outline(n: &mut Node) {
+    n.strokes = vec![Paint::solid("#9747ff")];
+    n.stroke_dash = vec![6.0, 4.0];
+    n.stroke_weight = 1.0;
+  }
+
+  #[test]
+  fn a_new_component_set_has_no_stroke_and_the_canvas_draws_its_outline() {
+    let mut e = engine();
+    let set = set_with(&mut e, |_| {});
+    let n = e.doc.get(&set).unwrap();
+    assert!(n.strokes.is_empty() && n.stroke_dash.is_empty());
+    assert_eq!(n.corner_radius, 6.0);
+    let page = e.page.clone();
+    let canvas = e.render(&page, &[], None);
+    assert_eq!(canvas.matches("dt-set-outline").count(), 1, "{canvas}");
+    let m = e.measurer.as_ref();
+    let export = render::export_svg(&e.doc, &set, m);
+    assert!(
+      !export.contains("dt-set-outline") && !export.contains("9747FF") && !export.contains("stroke-dasharray"),
+      "{export}"
+    );
+  }
+
+  #[test]
+  fn the_legacy_set_stroke_is_never_drawn_or_exported_but_a_changed_one_is() {
+    let mut e = engine();
+    let set = set_with(&mut e, legacy_outline);
+    let m = e.measurer.as_ref();
+    let export = render::export_svg(&e.doc, &set, m);
+    assert!(!export.contains("stroke-dasharray") && !export.contains("9747"), "{export}");
+    let page = e.page.clone();
+    let canvas = e.render(&page, &[], None);
+    assert_eq!(
+      canvas.matches("stroke-dasharray=\"6 4\"").count(),
+      1,
+      "only the chrome outline: {canvas}"
+    );
+    let html = codegen::export_html(&e.doc, &set, m);
+    assert!(!html.contains("dashed") && !html.contains("9747"), "{html}");
+    let react = codegen::export_react(&e.doc, &set, m);
+    assert!(!react.contains("dashed") && !react.contains("9747"), "{react}");
+    // The user changed the weight: it is a real stroke now, drawn and exported.
+    let set2 = set_with(&mut e, |n| {
+      legacy_outline(n);
+      n.stroke_weight = 2.0;
+    });
+    let m = e.measurer.as_ref();
+    assert!(render::export_svg(&e.doc, &set2, m).contains("stroke-dasharray=\"6 4\""));
+    assert!(codegen::export_html(&e.doc, &set2, m).contains("dashed"));
+    assert!(codegen::export_react(&e.doc, &set2, m).contains("dashed"));
+  }
+
+  #[test]
+  fn loading_and_replacing_a_document_strip_only_the_exact_default_outline() {
+    let mut e = engine();
+    let plain = set_with(&mut e, legacy_outline);
+    let red = set_with(&mut e, |n| {
+      n.strokes = vec![Paint::solid("#FF0000")];
+      n.stroke_dash = vec![6.0, 4.0];
+    });
+    let filled = set_with(&mut e, |n| {
+      legacy_outline(n);
+      n.fills = vec![Paint::solid("#123456")];
+    });
+    let json = serde_json::to_string(&e.doc).unwrap();
+    let check = |e: &Engine| {
+      assert!(e.doc.get(&plain).unwrap().strokes.is_empty() && e.doc.get(&plain).unwrap().stroke_dash.is_empty());
+      assert_eq!(e.doc.get(&red).unwrap().strokes, vec![Paint::solid("#FF0000")]);
+      assert_eq!(e.doc.get(&red).unwrap().stroke_dash, vec![6.0, 4.0]);
+      let f = e.doc.get(&filled).unwrap();
+      assert!(f.strokes.is_empty() && f.fills == vec![Paint::solid("#123456")], "fill kept");
+    };
+    let mut loaded = engine();
+    loaded.load(&json).unwrap();
+    check(&loaded);
+    // Joining a room: the strip is a change the room hasn't seen, so the first delta sends it.
+    loaded.collab_reset(true, true, false);
+    let d = loaded.collab_delta().to_string();
+    assert!(d.contains(&plain) && d.contains(&filled), "{d}");
+    assert!(!d.contains(&red), "the user's stroke isn't touched: {d}");
+    assert!(!d.contains("fills") && !d.contains("123456"), "only the strokes: {d}");
+    assert!(crate::collab::is_empty(&loaded.collab_delta()), "sent once");
+    // A viewer sends nothing for the strip, so its first comment isn't refused with it.
+    let mut viewer = engine();
+    viewer.dispatch(Command::SetReadOnly { on: true }).unwrap();
+    viewer.load(&json).unwrap();
+    viewer.collab_reset(true, true, false);
+    assert!(crate::collab::is_empty(&viewer.collab_delta()), "viewer's first delta is empty");
+    let mut replaced = engine();
+    replaced
+      .dispatch(Command::ReplaceDocument {
+        doc: serde_json::from_str(&json).unwrap(),
+        keep_comments: false,
+      })
+      .unwrap();
+    check(&replaced);
   }
 
   #[test]
@@ -8445,6 +8866,192 @@ mod tests {
           y: 0.0,
         })
         .is_err());
+    }
+
+    /// A 24x24 raw square icon shown at 48x48.
+    fn raw_icon(e: &mut Engine, fill_rule: &str) -> String {
+      let id = path(e, true);
+      let n = e.doc.get_mut(&id).unwrap();
+      n.x = 10.0;
+      n.y = 20.0;
+      n.width = 48.0;
+      n.height = 48.0;
+      n.vector = Some(crate::model::VectorData {
+        subpaths: vec![],
+        raw: Some(crate::model::RawPath {
+          d: "M2 2h20v20H2z".into(),
+          view_box: [0.0, 0.0, 24.0, 24.0],
+          fill_rule: fill_rule.into(),
+        }),
+      });
+      id
+    }
+
+    fn outline(e: &Engine, id: &str) -> Vec<(f64, f64)> {
+      crate::paths::page_outline(&e.doc, id)
+        .iter()
+        .flat_map(|sp| sp.points.iter().map(|p| (p.x, p.y)))
+        .collect()
+    }
+
+    #[test]
+    fn make_editable_keeps_the_outline_the_layer_and_undoes_in_one_step() {
+      let mut e = engine();
+      let id = raw_icon(&mut e, "");
+      let before = outline(&e, &id);
+      assert_eq!(before.len(), 4);
+      let d_before = e.doc.get(&id).unwrap().vector.clone();
+      e.dispatch(Command::MakeEditable { ids: vec![id.clone()] }).unwrap();
+      let n = e.doc.get(&id).unwrap();
+      assert!(n.vector.as_ref().unwrap().raw.is_none() && !n.vector.as_ref().unwrap().subpaths.is_empty());
+      let after = outline(&e, &id);
+      assert_eq!(before.len(), after.len());
+      for (a, b) in before.iter().zip(&after) {
+        assert!((a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6, "{a:?} vs {b:?}");
+      }
+      // Now it edits.
+      e.dispatch(Command::BendVectorSegment {
+        id: id.clone(),
+        sub: 0,
+        seg: 0,
+        t: 0.5,
+        x: 30.0,
+        y: 10.0,
+      })
+      .unwrap();
+      e.dispatch(Command::Undo).unwrap();
+      assert!(
+        e.doc.get(&id).unwrap().vector.as_ref().unwrap().raw.is_none(),
+        "the bend was its own step"
+      );
+      e.dispatch(Command::Undo).unwrap();
+      assert_eq!(e.doc.get(&id).unwrap().vector, d_before, "one undo restores the raw path");
+    }
+
+    #[test]
+    fn make_editable_refuses_even_odd_and_locked_and_plain_vectors() {
+      let mut e = engine();
+      let eo = raw_icon(&mut e, "evenodd");
+      let err = e.dispatch(Command::MakeEditable { ids: vec![eo.clone()] }).unwrap_err();
+      assert!(err.contains("Flatten"), "{err}");
+      assert!(e.doc.get(&eo).unwrap().vector.as_ref().unwrap().raw.is_some());
+      let locked = raw_icon(&mut e, "");
+      e.doc.get_mut(&locked).unwrap().locked = true;
+      assert!(e.dispatch(Command::MakeEditable { ids: vec![locked.clone()] }).is_err());
+      assert!(e.doc.get(&locked).unwrap().vector.as_ref().unwrap().raw.is_some());
+      // A plain editable vector has nothing to convert.
+      let plain = path(&mut e, false);
+      assert!(e.dispatch(Command::MakeEditable { ids: vec![plain] }).is_err());
+      // Several: the convertible ones convert, the even-odd one stays.
+      let ok = raw_icon(&mut e, "");
+      e.dispatch(Command::MakeEditable {
+        ids: vec![eo.clone(), ok.clone()],
+      })
+      .unwrap();
+      assert!(e.doc.get(&ok).unwrap().vector.as_ref().unwrap().raw.is_none());
+      assert!(e.doc.get(&eo).unwrap().vector.as_ref().unwrap().raw.is_some());
+    }
+
+    #[test]
+    fn make_editable_in_an_instance_records_an_override() {
+      let mut e = engine();
+      let icon = raw_icon(&mut e, "");
+      let comp = id_of(&e.dispatch(Command::CreateComponent { ids: vec![icon] }).unwrap());
+      let inst = id_of(
+        &e.dispatch(Command::CreateInstance {
+          component_id: comp.clone(),
+          x: 400.0,
+          y: 0.0,
+          parent: None,
+          anchor: None,
+          into_components: false,
+        })
+        .unwrap(),
+      );
+      let inner = e
+        .doc
+        .subtree(&inst)
+        .into_iter()
+        .find(|i| e.doc.get(i).is_some_and(|n| n.kind == NodeType::Vector))
+        .unwrap();
+      e.dispatch(Command::MakeEditable { ids: vec![inner.clone()] }).unwrap();
+      assert!(e.doc.get(&inner).unwrap().vector.as_ref().unwrap().raw.is_none());
+      assert!(
+        !e.doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides.is_empty(),
+        "recorded on the instance"
+      );
+    }
+
+    #[test]
+    fn typing_width_or_height_scales_the_points() {
+      let mut e = engine();
+      let id = path(&mut e, false);
+      // (100,100) (150,150) (200,100): 100 x 50.
+      let n = e.doc.get(&id).unwrap();
+      assert_eq!((n.width, n.height), (100.0, 50.0));
+      e.dispatch(Command::Update {
+        ids: vec![id.clone()],
+        patch: json!({ "width": 200 }),
+      })
+      .unwrap();
+      let pts: Vec<(f64, f64)> = points(&e, &id).iter().map(|p| (p.x, p.y)).collect();
+      assert_eq!(pts, vec![(0.0, 0.0), (100.0, 50.0), (200.0, 0.0)]);
+      e.dispatch(Command::Update {
+        ids: vec![id.clone()],
+        patch: json!({ "height": 25 }),
+      })
+      .unwrap();
+      let pts: Vec<(f64, f64)> = points(&e, &id).iter().map(|p| (p.x, p.y)).collect();
+      assert_eq!(pts, vec![(0.0, 0.0), (100.0, 25.0), (200.0, 0.0)]);
+      // A patch that carries the path itself is taken as it is.
+      let v = e.doc.get(&id).unwrap().vector.clone();
+      e.dispatch(Command::Update {
+        ids: vec![id.clone()],
+        patch: json!({ "width": 10, "vector": v }),
+      })
+      .unwrap();
+      assert_eq!(points(&e, &id)[2].x, 200.0);
+      // Moving doesn't scale.
+      e.dispatch(Command::Update {
+        ids: vec![id.clone()],
+        patch: json!({ "x": 5 }),
+      })
+      .unwrap();
+      assert_eq!(points(&e, &id)[2].x, 200.0);
+    }
+
+    #[test]
+    fn typing_width_in_an_instance_records_the_scaled_path() {
+      let mut e = engine();
+      let vec = path(&mut e, false);
+      let comp = id_of(&e.dispatch(Command::CreateComponent { ids: vec![vec] }).unwrap());
+      let inst = id_of(
+        &e.dispatch(Command::CreateInstance {
+          component_id: comp,
+          x: 400.0,
+          y: 0.0,
+          parent: None,
+          anchor: None,
+          into_components: false,
+        })
+        .unwrap(),
+      );
+      let inner = e
+        .doc
+        .subtree(&inst)
+        .into_iter()
+        .find(|i| e.doc.get(i).is_some_and(|n| n.kind == NodeType::Vector))
+        .unwrap();
+      e.dispatch(Command::Update {
+        ids: vec![inner.clone()],
+        patch: json!({ "width": 200 }),
+      })
+      .unwrap();
+      assert_eq!(points(&e, &inner)[2].x, 200.0);
+      assert!(
+        !e.doc.get(&inst).unwrap().instance.as_ref().unwrap().overrides.is_empty(),
+        "recorded on the instance"
+      );
     }
 
     #[test]

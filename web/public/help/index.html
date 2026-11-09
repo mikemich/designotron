@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Designotron help</title>
+<!-- This page is bundled with the editor. It loads nothing from anywhere else. -->
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #1b1b1b;
+    --panel: #242424;
+    --text: #ececec;
+    --muted: #a8a8a8;
+    --border: #3a3a3a;
+    --accent: #7cb7ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 32px 16px 80px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 36px 0 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+  p, li { color: var(--text); }
+  .lead, .muted { color: var(--muted); }
+  a { color: var(--accent); }
+  nav { margin: 16px 0 0; display: flex; flex-wrap: wrap; gap: 6px 16px; }
+  code, kbd {
+    font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+  pre {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td:last-child { text-align: right; white-space: nowrap; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <h1>Designotron help</h1>
+  <p class="lead">A short guide to the first hour. Everything here works offline.</p>
+  <nav aria-label="On this page">
+    <a href="#start">Getting started</a>
+    <a href="#claude">Claude setup</a>
+    <a href="#share">Sharing</a>
+    <a href="#files">Where your files live</a>
+    <a href="#keys">Shortcuts</a>
+  </nav>
+
+  <h2 id="start">Getting started</h2>
+  <ol>
+    <li>On the files page, describe what you want to design and press Enter, or start from a template.</li>
+    <li>Draw with the tools in the top bar: Frame (<kbd>F</kbd>), Rectangle (<kbd>R</kbd>), Text (<kbd>T</kbd>), Pen (<kbd>P</kbd>).</li>
+    <li>Select a layer to change its size, colours and layout in the Design panel on the right. Drag layers in the Layers panel on the left to reorder or nest them.</li>
+    <li>Link screens in the Prototype tab, then press the Present button (<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd>, or <kbd>&#8984;</kbd><kbd>&#8997;</kbd><kbd>Enter</kbd> on a Mac) to try the flow.</li>
+    <li>Open the Code tab for React, HTML or CSS of the selection, or use Export code for a whole project.</li>
+  </ol>
+  <p class="muted">Press <kbd>?</kbd> in the editor for every shortcut. Main menu, Help, Show tips again brings the first-run hints back.</p>
+
+  <h2 id="claude">Claude setup</h2>
+  <p>Claude can design, critique and fix your file. Open its panel with <kbd>Ctrl</kbd>+<kbd>/</kbd> (<kbd>&#8984;</kbd><kbd>/</kbd> on a Mac). It needs one of two things:</p>
+  <p><b>Claude Pro or Max, through Claude Code.</b> No extra cost.</p>
+  <ol>
+    <li>Install Claude Code, run <code>claude</code> once and type <code>/login</code>.</li>
+    <li>Install the Designotron bridge (macOS or Linux):
+      <pre>curl -fsSL https://raw.githubusercontent.com/mikemich/designotron/main/install.sh | sh</pre>
+      On Windows, download it from the project's Releases page.</li>
+    <li>The bridge starts in the background. If the installer tells you to start it yourself, run <code>~/.local/bin/designotron</code>.</li>
+    <li>The editor connects by itself a few seconds later. The panel says "Bridge connected" when it has.</li>
+  </ol>
+  <p>If the panel says the bridge is running but Claude Code isn't installed, finish step 1 and restart the bridge.</p>
+  <p><b>An Anthropic API key.</b> Paste it in the panel. It is kept in this browser only and billed per use.</p>
+  <p class="muted">Each file keeps its own conversation. New conversation (the plus button) keeps the old one under Past conversations, up to 20 per file in this browser.</p>
+
+  <h2 id="share">Sharing</h2>
+  <p>The Share button offers three ways:</p>
+  <ul>
+    <li><b>Online:</b> a live session through a relay server, with cursors and selections.</li>
+    <li><b>Send a copy:</b> a link that carries the file itself.</li>
+    <li><b>Local network:</b> a link for people on the same Wi-Fi. It needs the bridge running on your computer.</li>
+  </ul>
+  <p>Links can allow editing or viewing only. Anyone with an editing link can change the file, so share it with people you trust.</p>
+
+  <h2 id="files">Where your files live</h2>
+  <p>Files are stored in this browser (IndexedDB) on this computer. They are not uploaded anywhere unless you share them. Clearing site data for this address deletes them, so keep a copy of anything important: File menu, Save as .dtron downloads a plain JSON file you can open again from the same menu.</p>
+  <p>The Claude conversations are stored in the same place. Deleting a file deletes its conversations.</p>
+  <p>Files Claude Code writes (an exported project, for example) go to the bridge's workspace folder, <code>~/Designotron</code> by default.</p>
+
+  <h2 id="keys">Shortcuts</h2>
+  <table>
+    <tr><td>Move / Frame / Rectangle / Text / Pen</td><td><kbd>V</kbd> <kbd>F</kbd> <kbd>R</kbd> <kbd>T</kbd> <kbd>P</kbd></td></tr>
+    <tr><td>Undo / redo</td><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td></tr>
+    <tr><td>Duplicate</td><td><kbd>Ctrl</kbd>+<kbd>D</kbd></td></tr>
+    <tr><td>Group / ungroup</td><td><kbd>Ctrl</kbd>+<kbd>G</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd></td></tr>
+    <tr><td>Zoom to fit</td><td><kbd>Shift</kbd>+<kbd>1</kbd></td></tr>
+    <tr><td>Claude panel</td><td><kbd>Ctrl</kbd>+<kbd>/</kbd></td></tr>
+    <tr><td>Present from the selected frame</td><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd></td></tr>
+    <tr><td>Save in this browser</td><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td></tr>
+    <tr><td>All shortcuts</td><td><kbd>?</kbd></td></tr>
+  </table>
+  <p class="muted">On a Mac, <kbd>Ctrl</kbd> is <kbd>&#8984;</kbd> and <kbd>Alt</kbd> is <kbd>&#8997;</kbd>.</p>
+
+  <p class="muted" style="margin-top:40px">This page is part of the editor and works without a network connection. Back to the <a href="../">editor</a>.</p>
+</main>
+</body>
+</html>

@@ -8,7 +8,7 @@ use crate::model::{
   Document, Effect, EffectType, Node, NodeId, NodeType, Paint, StrokeAlign, StrokeCap, StrokeJoin, TextAlignH, TextAlignV, TextDecoration,
 };
 use crate::text::{layout_of_node, SpanStyle, TextMeasurer};
-use crate::{color, model};
+use crate::{color, components, model};
 use crate::{paint, shapes};
 
 /// Size classes of canvas text (px, rounded up to the next step): about 1.25x apart, so the
@@ -360,7 +360,7 @@ fn per_side_weights(n: &Node) -> Option<[f64; 4]> {
 /// How far the visible strokes reach beyond the node's box.
 fn stroke_margin(n: &Node) -> f64 {
   let sw = n.stroke_weight;
-  if sw <= 0.0 || n.kind == NodeType::Group || !n.strokes.iter().any(|p| p.visible()) {
+  if sw <= 0.0 || n.kind == NodeType::Group || !n.strokes.iter().any(|p| p.visible()) || components::is_default_set_outline(n) {
     return 0.0;
   }
   if n.kind == NodeType::Text {
@@ -638,6 +638,13 @@ impl<'a> Renderer<'a> {
           }
         }
         out.push_str(&self.strokes(n, &geo));
+        // The set's purple dashed outline is editor chrome: only the canvas draws it.
+        if n.kind == NodeType::ComponentSet && self.canvas() {
+          out.push_str(&geo_el_stroke(
+            &geo,
+            " class=\"dt-set-outline\" fill=\"none\" stroke=\"#9747FF\" stroke-width=\"1\" stroke-dasharray=\"6 4\" vector-effect=\"non-scaling-stroke\" pointer-events=\"none\"",
+          ));
+        }
         out
       }
       _ => {
@@ -773,6 +780,9 @@ impl<'a> Renderer<'a> {
 
   /// `merged_fill` is the fill paint drawn by the same element (see `single_fill_stroke`).
   fn strokes_with(&mut self, n: &Node, geo: &Geo, merged_fill: Option<&str>) -> String {
+    if components::is_default_set_outline(n) {
+      return String::new();
+    }
     if let (Some(weights), Geo::Rect { w, h, r }) = (per_side_weights(n), geo) {
       return self.side_strokes(n, weights, paint::ring_path(*w, *h, weights, n.stroke_align, *r));
     }

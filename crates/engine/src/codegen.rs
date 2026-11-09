@@ -2534,7 +2534,12 @@ impl<'a> Ctx<'a> {
       }
       if let (Some(weights), Some(Paint::Solid { color, opacity, .. })) = (side_weights(n), n.strokes.iter().find(|p| p.visible())) {
         side_strokes(el, n, weights, &color::css_with_opacity(color, *opacity));
-      } else if let Some(Paint::Solid { color, opacity, .. }) = n.strokes.iter().find(|p| p.visible()) {
+      } else if let Some(Paint::Solid { color, opacity, .. }) = n
+        .strokes
+        .iter()
+        .find(|p| p.visible())
+        .filter(|_| !crate::components::is_default_set_outline(n))
+      {
         if n.stroke_weight > 0.0 {
           let style = if n.stroke_dash.is_empty() { "solid" } else { "dashed" };
           let c = color::css_with_opacity(color, *opacity);
@@ -5704,6 +5709,7 @@ mod tests {
       id: id.into(),
       name: name.into(),
       color: c.into(),
+      ..Default::default()
     };
     doc.styles_mut().colors = vec![
       color("c1", "Brand/Primary", "#111111"),
@@ -5763,6 +5769,7 @@ mod tests {
       id: "cs".into(),
       name: "Brand".into(),
       color: "#7C5CFF".into(),
+      ..Default::default()
     });
     let b = doc.get_mut("btn").unwrap();
     b.fill_style = Some("cs".into());
@@ -5979,6 +5986,7 @@ mod tests {
       id: "cs1".into(),
       name: "Brand/Primary".into(),
       color: "#7C5CFF".into(),
+      ..Default::default()
     });
     {
       let t = doc.get_mut("t").unwrap();
@@ -8014,6 +8022,7 @@ mod r15_tests {
       id: "cs".into(),
       name: h.into(),
       color: "#112233".into(),
+      ..Default::default()
     });
     doc.styles_mut().texts.push(crate::model::TextStyle {
       id: "ts".into(),
@@ -8440,6 +8449,7 @@ mod r16c_tests {
       id: "cs".into(),
       name: "Brand/Primary".into(),
       color: "#5B3DF5".into(),
+      ..Default::default()
     });
     {
       let f = doc.get_mut("f0").unwrap();

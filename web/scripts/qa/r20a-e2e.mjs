@@ -336,6 +336,8 @@ for (const [label, init] of [
   await page.click("button:has-text('New design file')");
   await page.waitForSelector("#dt-canvas");
   await sleep(800);
+  // The new file's prompt has focus (round 21) and keeps shortcuts for itself; Escape leaves it.
+  await page.keyboard.press("Escape");
   const name = "Emoji \u{1F3A8} x";
   await page.evaluate((n) => window.__dt.dispatch({ op: "setDocName", name: n }), name);
   await sleep(400);

@@ -41,7 +41,7 @@ const doc = () => page.evaluate(() => window.__dt.doc());
 const tool = (name, input) => page.evaluate(([n, i]) => window.__dt.tool(n, i), [name, input]);
 const byName = (d, name) => Object.values(d.nodes).find((n) => n.name === name);
 const crumb = (page) => page.locator(".presenter .bar .muted").innerText();
-const overlays = (page) => page.locator(".presenter .overlay-backdrop").count();
+const overlays = (page) => page.locator(".presenter [data-overlay]").count();
 const box = (page, sel) => page.locator(sel).first().boundingBox();
 
 async function playTests(page, label, ids) {
@@ -51,12 +51,12 @@ async function playTests(page, label, ids) {
 
   // Open the modal: centred, dimmed.
   await hot("Open modal").click();
-  await page.waitForSelector(".presenter .overlay-backdrop");
+  await page.waitForSelector(".presenter [data-overlay]");
   await page.waitForTimeout(400);
-  const modal = await box(page, ".presenter .overlay-frame");
+  const modal = await box(page, ".presenter [data-overlay] .overlay-frame");
   const centred = Math.abs(modal.x + modal.width / 2 - (stage.x + stage.width / 2)) < 3 && Math.abs(modal.y + modal.height / 2 - (stage.y + stage.height / 2)) < 3;
   check(`${label}: modal opens centred`, centred, `${JSON.stringify(modal)} on ${JSON.stringify(stage)}`);
-  const dim = await page.locator(".presenter .overlay-backdrop").evaluate((e) => getComputedStyle(e).backgroundColor);
+  const dim = await page.locator(".presenter [data-overlay]").evaluate((e) => getComputedStyle(e).backgroundColor);
   check(`${label}: background dimmed 30% black`, dim === "rgba(0, 0, 0, 0.3)", dim);
   await shotOf(page, `${label}-1-modal`);
 
@@ -67,15 +67,15 @@ async function playTests(page, label, ids) {
 
   // Open again, close with its Close button (hotspot inside the overlay).
   await hot("Open modal").click();
-  await page.waitForSelector(".presenter .overlay-frame");
+  await page.waitForSelector(".presenter [data-overlay] .overlay-frame");
   await hot("Close").click();
   await page.waitForTimeout(100);
   check(`${label}: close button closes`, (await overlays(page)) === 0);
 
   // Click inside the modal (not on a hotspot) keeps it open.
   await hot("Open modal").click();
-  await page.waitForSelector(".presenter .overlay-frame");
-  const m2 = await box(page, ".presenter .overlay-frame");
+  await page.waitForSelector(".presenter [data-overlay] .overlay-frame");
+  const m2 = await box(page, ".presenter [data-overlay] .overlay-frame");
   await page.mouse.click(m2.x + 10, m2.y + 10);
   check(`${label}: click inside the overlay keeps it open`, (await overlays(page)) === 1);
 
@@ -83,9 +83,9 @@ async function playTests(page, label, ids) {
   await hot("To menu").click();
   await page.waitForTimeout(400);
   check(`${label}: swap replaces the overlay`, (await overlays(page)) === 1 && (await crumb(page)).includes("Menu"), await crumb(page));
-  const menu = await box(page, ".presenter .overlay-frame");
+  const menu = await box(page, ".presenter [data-overlay] .overlay-frame");
   check(`${label}: menu at the top right`, Math.abs(menu.x + menu.width - (stage.x + stage.width)) < 3 && Math.abs(menu.y - stage.y) < 3, JSON.stringify(menu));
-  const dim2 = await page.locator(".presenter .overlay-backdrop").evaluate((e) => getComputedStyle(e).backgroundColor);
+  const dim2 = await page.locator(".presenter [data-overlay]").evaluate((e) => getComputedStyle(e).backgroundColor);
   check(`${label}: menu has no dim`, dim2 === "rgba(0, 0, 0, 0)", dim2);
   await shotOf(page, `${label}-2-menu`);
 
@@ -96,7 +96,7 @@ async function playTests(page, label, ids) {
 
   // Nested: menu -> item opens the modal over it (stack of 2); back pops one at a time.
   await hot("Menu button").click();
-  await page.waitForSelector(".presenter .overlay-frame");
+  await page.waitForSelector(".presenter [data-overlay] .overlay-frame");
   await hot("Item modal").click(); // menu item opens modal
   await page.waitForTimeout(300);
   check(`${label}: overlays stack`, (await overlays(page)) === 2);
@@ -108,7 +108,7 @@ async function playTests(page, label, ids) {
 
   // Navigating closes overlays; the menu's "Settings" item navigates to Settings.
   await hot("Menu button").click();
-  await page.waitForSelector(".presenter .overlay-frame");
+  await page.waitForSelector(".presenter [data-overlay] .overlay-frame");
   await hot("Item settings").click();
   await page.waitForTimeout(400);
   check(`${label}: navigate from an overlay leaves it`, (await overlays(page)) === 0 && (await crumb(page)).trim() === "Settings", await crumb(page));
@@ -179,7 +179,7 @@ try {
 
   // Present from Home.
   await page.evaluate((i) => window.__dt.dispatch({ op: "select", ids: [i] }), id("Home"));
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter", { timeout: 5000 });
   await page.waitForTimeout(500);
   const ids = Object.fromEntries(["Open modal", "Menu button", "Close", "To menu", "Item modal", "Item settings"].map((n) => [n, id(n)]));
@@ -207,14 +207,14 @@ try {
   // Manual position and "close on outside click" off.
   await tool("set_prototype", { nodeId: ids["Open modal"], clear: true, action: "open_overlay", destinationId: id("Modal"), overlay: { position: "manual", offsetX: 10, offsetY: 60, closeOnClickOutside: false } });
   await page.evaluate((i) => window.__dt.dispatch({ op: "select", ids: [i] }), id("Home"));
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter");
   await page.waitForTimeout(400);
   const hs = await box(page, `.presenter [data-hotspot="${ids["Open modal"]}"]`);
   await page.locator(`.presenter [data-hotspot="${ids["Open modal"]}"]`).click();
-  await page.waitForSelector(".presenter .overlay-frame");
+  await page.waitForSelector(".presenter [data-overlay] .overlay-frame");
   await page.waitForTimeout(400);
-  const mf = await box(page, ".presenter .overlay-frame");
+  const mf = await box(page, ".presenter [data-overlay] .overlay-frame");
   check("manual position: offset from the trigger layer", Math.abs(mf.x - (hs.x + 10)) < 2 && Math.abs(mf.y - (hs.y + 60)) < 2, `${JSON.stringify(mf)} vs ${JSON.stringify(hs)}`);
   await shot("5-manual");
   const st = await box(page, ".presenter .stage");
@@ -226,9 +226,9 @@ try {
   await page.keyboard.press("Escape");
   await page.waitForTimeout(100);
   await tool("set_prototype", { nodeId: id("Home"), trigger: "delay", action: "open_overlay", destinationId: id("Modal") });
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter");
-  await page.waitForSelector(".presenter .overlay-frame", { timeout: 4000 });
+  await page.waitForSelector(".presenter [data-overlay] .overlay-frame", { timeout: 4000 });
   check("after-delay opens the overlay", (await overlays(page)) === 1);
   await page.keyboard.press("Escape");
   await page.waitForTimeout(2500);
@@ -243,10 +243,10 @@ try {
   check("parent overlay frame built", parent.ok);
   await tool("set_prototype", { nodeId: parentId, trigger: "delay", action: "open_overlay", destinationId: id("Menu"), overlay: { position: "top_right", background: "none" } });
   await tool("set_prototype", { nodeId: ids["Open modal"], clear: true, action: "open_overlay", destinationId: parentId });
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter");
   await page.locator(`.presenter [data-hotspot="${ids["Open modal"]}"]`).click();
-  await page.waitForFunction(() => document.querySelectorAll(".presenter .overlay-backdrop").length === 2, null, { timeout: 4000 });
+  await page.waitForFunction(() => document.querySelectorAll(".presenter [data-overlay]").length === 2, null, { timeout: 4000 });
   check("overlay's after-delay opens the nested overlay", true);
   await page.keyboard.press("Escape");
   await page.waitForTimeout(2500);
@@ -263,12 +263,12 @@ try {
     const n = window.__dt.doc().nodes[i];
     window.__dt.dispatch({ op: "update", ids: [i], patch: { interactions: n.interactions.map((x) => ({ ...x, delayMs: 3000 })) } });
   }, id("Home"));
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter");
   // The frame's own after-delay interaction must not leave a click-swallowing hotspot over its children.
   check("after-delay on a frame makes no hotspot", (await page.locator(`.presenter [data-hotspot="${id("Home")}"]`).count()) === 0);
   await page.locator(`.presenter [data-hotspot="${ids["Open modal"]}"]`).click();
-  await page.waitForSelector(".presenter .overlay-frame");
+  await page.waitForSelector(".presenter [data-overlay] .overlay-frame");
   await page.waitForTimeout(3500);
   check("base after-delay Back closes the open modal", (await overlays(page)) === 0 && (await crumb(page)).trim() === "Home", `${await overlays(page)} overlay(s), ${await crumb(page)}`);
   // Hotspot stacking and inheritance, on their own screen.
@@ -303,7 +303,7 @@ try {
   const present = async () => {
     // Present starts on the selected frame: clear the selection to start on the flow start.
     await page.evaluate(() => window.__dt.dispatch({ op: "select", ids: [] }));
-    await page.click("button[title='Present']");
+    await page.click("button[title^='Present (']");
     await page.waitForSelector(".presenter");
     await page.waitForTimeout(300);
   };

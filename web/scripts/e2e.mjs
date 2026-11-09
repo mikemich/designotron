@@ -365,7 +365,7 @@ try {
   await page.evaluate(() => window.__dt.zoomToFit());
   await page.waitForTimeout(300);
   await shot("05-after-edits");
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter", { timeout: 5000 });
   await page.waitForTimeout(300);
   await shot("06-present");
@@ -505,7 +505,8 @@ try {
     return { frame, tile };
   }, varId);
   await page.click(".section:has-text('Variables') .ibtn[title='Bind a property']");
-  await page.locator(".section:has-text('Variables') .row:has-text('Fill') select").selectOption(varId);
+  await page.locator("[data-bound-pick='fill']").click();
+  await page.locator(`[data-tp-item="${varId}"]`).click();
   const light = await page.evaluate((id) => window.__dt.doc().nodes[id].fills[0].color, themed.tile);
   await page.evaluate((id) => window.__dt.dispatch({ op: "select", ids: [id] }), themed.frame);
   const modeSelect = page.locator(".section:has-text('Variables') .row").first().locator("select");

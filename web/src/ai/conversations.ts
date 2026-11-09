@@ -3,7 +3,7 @@
 // Records live in IndexedDB next to the files (`dt:chat:<fileId>`); they are user text in the
 // same origin as the files, never sent anywhere.
 
-import { get, set, del } from "idb-keyval";
+import { get, set, del, update } from "idb-keyval";
 
 /** A chat item as stored: no screenshots, and images are only counted. */
 export type StoredItem =
@@ -108,10 +108,114 @@ export async function saveConversation(fileId: string, rec: ChatRecord): Promise
   }
 }
 
+/** Deleting a file clears the current conversation and every past one. */
 export async function dropConversation(fileId: string): Promise<void> {
-  try {
-    await del(chatKey(fileId));
-  } catch {
-    /* ignore */
+  for (const key of [chatKey(fileId), chatsKey(fileId)]) {
+    try {
+      await del(key);
+    } catch {
+      /* ignore */
+    }
   }
+}
+
+// ---- Past conversations ("New conversation" archives the current one) ----
+
+/** A conversation set aside by New conversation, newest first in the list. */
+export interface PastConversation {
+  id: string;
+  title: string;
+  savedAt: number;
+  record: ChatRecord;
+}
+
+export const MAX_PAST = 20;
+export const MAX_PAST_BYTES = 1024 * 1024;
+export const TITLE_CHARS = 60;
+
+export const chatsKey = (fileId: string) => `dt:chats:${fileId}`;
+
+/** `text` cut to at most `max` characters at a word boundary, with "…" when something was cut. */
+export function cutAtWord(text: string, max: number): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  const head = t.slice(0, max);
+  // Back up to the last space when that keeps at least a few letters; one long word is cut hard.
+  const at = head.lastIndexOf(" ");
+  const cut = at >= Math.min(8, max / 2) ? head.slice(0, at) : head;
+  return cut.replace(/[\s.,;:!?-]+$/, "") + "…";
+}
+
+/** What a past conversation is called: its first message from the person. */
+export function conversationTitle(rec: Pick<ChatRecord, "items">): string {
+  const first = rec.items.find((i) => i.kind === "user");
+  const text = first && "text" in first ? first.text.replace(/\s+/g, " ").trim() : "";
+  return text ? cutAtWord(text, TITLE_CHARS) : "Conversation";
+}
+
+/** Whether a conversation is worth keeping in the history: it has at least one message. */
+export const worthArchiving = (rec: ChatRecord) => rec.items.length > 0;
+
+/** `list` (newest first) with `rec` added at the front, capped to `MAX_PAST` entries and `MAX_PAST_BYTES`
+ *  (the oldest go first; the newest always stays). */
+export function addPast(list: readonly PastConversation[], rec: ChatRecord, id: string, now = Date.now()): PastConversation[] {
+  const next = [{ id, title: conversationTitle(rec), savedAt: now, record: rec }, ...list].slice(0, MAX_PAST);
+  while (next.length > 1 && JSON.stringify(next).length > MAX_PAST_BYTES) next.pop();
+  return next;
+}
+
+/** Entries read from storage, dropping anything malformed. */
+export function readPast(raw: unknown): PastConversation[] {
+  const r = raw as { v?: number; list?: unknown } | null | undefined;
+  if (!r || r.v !== 1 || !Array.isArray(r.list)) return [];
+  return (r.list as PastConversation[]).filter(
+    (e) => e && typeof e.id === "string" && typeof e.title === "string" && typeof e.savedAt === "number" && e.record && e.record.v === 1 && Array.isArray(e.record.items),
+  );
+}
+
+export async function loadPast(fileId: string): Promise<PastConversation[]> {
+  try {
+    return readPast(await get(chatsKey(fileId)));
+  } catch {
+    return [];
+  }
+}
+
+/** Stores the list (an empty one removes the record). Failures are ignored, like the conversation's own. */
+export async function savePast(fileId: string, list: readonly PastConversation[]): Promise<void> {
+  try {
+    if (!list.length) await del(chatsKey(fileId));
+    else await set(chatsKey(fileId), { v: 1, list });
+  } catch {
+    /* storage unavailable or full: the history is a convenience */
+  }
+}
+
+/** Changes the list in one storage transaction (two tabs on one file each add to what the other wrote). */
+export async function updatePast(fileId: string, change: (list: PastConversation[]) => PastConversation[]): Promise<PastConversation[]> {
+  let next: PastConversation[] = [];
+  try {
+    await update(chatsKey(fileId), (old: unknown) => {
+      next = change(readPast(old));
+      return { v: 1, list: next };
+    });
+    if (!next.length) await del(chatsKey(fileId));
+  } catch {
+    /* storage unavailable or full: the history is a convenience */
+  }
+  return next;
+}
+
+/** "just now", "5 minutes ago", "yesterday", or the date. */
+export function relativeDate(at: number, now = Date.now()): string {
+  const s = Math.max(0, Math.round((now - at) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} minute${m === 1 ? "" : "s"} ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
+  const d = Math.round(h / 24);
+  if (d === 1) return "yesterday";
+  if (d < 7) return `${d} days ago`;
+  return new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: d > 300 ? "numeric" : undefined });
 }

@@ -201,9 +201,9 @@ try {
   da = await doc(a);
   check("both variables keep their names", da.variables.find((c) => c.name === "Primitives").variables.map((v) => v.name).join() === "Gray/0,Gray/900");
   // New variables never collide: delete color 1 and add two.
-  await a.getByRole("button", { name: /Create variable/ }).click();
+  await a.getByRole("button", { name: "Create variable", exact: true }).click();
   await a.getByRole("menuitem", { name: "Color" }).click();
-  await a.getByRole("button", { name: /Create variable/ }).click();
+  await a.getByRole("button", { name: "Create variable", exact: true }).click();
   await a.getByRole("menuitem", { name: "Color" }).click();
   da = await doc(a);
   const names = da.variables.find((c) => c.name === "Primitives").variables.map((v) => v.name);

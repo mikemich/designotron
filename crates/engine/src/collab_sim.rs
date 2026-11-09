@@ -758,6 +758,7 @@ fn local_op_in(e: &mut Engine, r: &mut Rng, solo: bool, rich: bool) {
       patches: true,
       granular: true,
       lists: true,
+      text: false,
     },
   ));
   let mut by_moves = before.clone();
@@ -823,7 +824,7 @@ fn last_steps() -> String {
 
 /// A problem in the tree of `d` (a layer its parent or page doesn't list, a child that points
 /// elsewhere, one on a page that is gone), if any.
-fn unsound(d: &Document) -> Option<String> {
+pub(crate) fn unsound(d: &Document) -> Option<String> {
   for n in d.nodes.values() {
     for c in &n.children {
       if d.get(c).and_then(|x| x.parent.clone()).as_deref() != Some(n.id.as_str()) {

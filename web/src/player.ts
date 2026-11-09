@@ -108,6 +108,24 @@ export function effectiveInteractions(doc: Doc, n: Node): Interaction[] {
   return extra.length ? [...n.interactions, ...extra] : n.interactions;
 }
 
+/** Whether an interaction does anything when it fires: the actions that go somewhere need a
+ *  destination that exists (a screen, overlay, scroll target or variant) or a non-empty URL; back and
+ *  close always act. An interaction that can't act gets no hotspot and no keyboard stop. */
+export function canAct(it: Interaction, doc: Doc): boolean {
+  switch (it.action) {
+    case "back":
+    case "closeOverlay":
+      return true;
+    case "openUrl":
+      return !!it.url?.trim();
+    case "changeTo":
+      // The variant to switch to is a component.
+      return !!it.destination && doc.nodes[it.destination]?.type === "component";
+    default:
+      return !!it.destination && !!doc.nodes[it.destination];
+  }
+}
+
 /** Interactions that need a hotspot (the pointer ones). */
 export const isPointerTrigger = (i: Interaction) => i.trigger !== "afterDelay" && i.trigger !== "key";
 
@@ -470,7 +488,7 @@ export function buildScene(frameId: string): Scene {
   const visit = (id: string) => {
     const n = doc.nodes[id];
     if (!n) return;
-    const its = effectiveInteractions(doc, n);
+    const its = effectiveInteractions(doc, n).filter((it) => canAct(it, doc));
     for (const it of its) if (it.trigger === "key" && it.key) keyed.push({ id, it });
     if (its.some(isPointerTrigger)) owners.push({ id, its });
     for (const c of n.children) if (doc.nodes[c]?.visible !== false) visit(c);

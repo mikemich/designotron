@@ -112,6 +112,14 @@ export class WasmEngine {
         wasm.__wbg_wasmengine_free(ptr, 0);
     }
     /**
+     * Whether texts are merging per character right now.
+     * @returns {boolean}
+     */
+    collabText() {
+        const ret = wasm.wasmengine_collabText(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * Local changes since the last call, for collaborators (`{full}` the first time).
      * @returns {string}
      */
@@ -258,6 +266,15 @@ export class WasmEngine {
         }
     }
     /**
+     * Turns on per-character text merging for the room joined with the last `collabReset` (the
+     * room's welcome said `text`). `site` is a random 48-bit number nobody else uses; call it again
+     * with a fresh one after every (re)join, before re-applying unsent deltas.
+     * @param {number} site
+     */
+    collabEnableText(site) {
+        wasm.wasmengine_collabEnableText(this.__wbg_ptr, site);
+    }
+    /**
      * JSON `{order, changed}`: only top-level layers changed since the last call are re-rendered.
      * @param {string} page
      * @param {string} hidden
@@ -282,6 +299,15 @@ export class WasmEngine {
         } finally {
             wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
         }
+    }
+    /**
+     * Whether this engine reads and writes text layers as per-character changes in deltas (what an
+     * editor tells the room it can do when joining).
+     * @returns {boolean}
+     */
+    collabTextSupported() {
+        const ret = wasm.wasmengine_collabGranular(this.__wbg_ptr);
+        return ret !== 0;
     }
     /**
      * @param {number} seed

@@ -175,10 +175,19 @@ function ScrollingSection({ node: n }: { node: Node }) {
   // In an auto layout frame only layers with an absolute position can stay put.
   const canFix = !!parent && (!parent.layout || n.absolutePosition);
   const topLevelParent = !!parent && !parent.parent;
-  // Sticky sticks inside a frame that scrolls vertically (any depth above the layer).
+  // Sticky sticks when the nearest scrolling frame above the layer scrolls vertically, with no
+  // fixed or sticky layer between (the rule code export and the engine's warning use too).
   let vScroller = false;
-  for (let a = parent; a && !vScroller; a = a.parent ? doc.nodes[a.parent] : null) vScroller = a.overflow === "vertical" || a.overflow === "both";
+  for (let a = parent; a; a = a.parent ? doc.nodes[a.parent] : null) {
+    if (a.overflow && a.overflow !== "none") {
+      vScroller = a.overflow === "vertical" || a.overflow === "both";
+      break;
+    }
+    if (a.scrollBehavior === "fixed" || a.scrollBehavior === "sticky") break;
+  }
   const behavior = n.scrollBehavior ?? "scroll";
+  // Layers later in the order are painted over a stuck layer, as in Figma.
+  const covered = behavior === "sticky" && !!parent && parent.children.indexOf(n.id) < parent.children.length - 1;
   const set = (patch: Record<string, unknown>) => dispatch({ op: "update", ids: [n.id], patch });
   return (
     <Section title="Scrolling">
@@ -217,6 +226,14 @@ function ScrollingSection({ node: n }: { node: Node }) {
             />
           </div>
           {behavior === "sticky" && !vScroller && <div className="muted small">Sticky works inside a frame that scrolls vertically.</div>}
+          {covered && (
+            <div className="muted small sticky-hint" data-sticky-hint="">
+              Layers above this one in the Layers panel scroll over it while it sticks.{" "}
+              <button className="link-btn" onClick={() => dispatch({ op: "reorder", ids: [n.id], to: "front" })}>
+                Bring to front
+              </button>
+            </div>
+          )}
           {!canFix && behavior !== "sticky" && <div className="muted small">In an auto layout frame only layers with an absolute position can be fixed.</div>}
           {canFix && behavior !== "sticky" && topLevelParent && parent?.layout && <div className="muted small">Code export keeps fixed layers of an auto layout frame inside the scrolling box, so they scroll there.</div>}
           {canFix && behavior !== "sticky" && !topLevelParent && <div className="muted small">Fixed layers work in a scrolling top-level frame; inside other frames they scroll with the frame.</div>}

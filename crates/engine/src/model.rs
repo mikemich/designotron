@@ -953,6 +953,10 @@ pub struct TextProps {
   /// that fit its height.
   #[serde(skip_serializing_if = "is_false")]
   pub truncate: bool,
+  /// Identity of each character for merging concurrent edits (see `textseq`). Not saved when unset;
+  /// older builds ignore it. Only kept for texts edited in a room that merges text.
+  #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "crate::textseq::lenient")]
+  pub seq: Option<crate::textseq::TextSeq>,
 }
 
 /// Overrides the text layer's base style for characters `start..end` (char offsets).
@@ -1023,6 +1027,7 @@ impl Default for TextProps {
       runs: Vec::new(),
       max_lines: None,
       truncate: false,
+      seq: None,
     }
   }
 }
@@ -1488,6 +1493,9 @@ pub struct ColorStyle {
   pub id: String,
   pub name: String,
   pub color: String,
+  /// Where to use it. Not saved when empty (older editors ignore it and drop it on a rewrite).
+  #[serde(skip_serializing_if = "String::is_empty")]
+  pub description: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -1510,6 +1518,9 @@ pub struct TextStyle {
   pub case: Option<TextCase>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub decoration: Option<TextDecoration>,
+  /// Where to use it. Not saved when empty.
+  #[serde(skip_serializing_if = "String::is_empty")]
+  pub description: String,
 }
 
 impl TextStyle {

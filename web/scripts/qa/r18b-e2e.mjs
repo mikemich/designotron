@@ -827,7 +827,7 @@ try {
     await run(c, { op: "setFlowStart", page: (await c.evaluate(() => window.__dt.doc().pages[0].id)), id: a1.id });
     await run(c, { op: "select", ids: [a1.id] });
     await c.keyboard.press("Control+Alt+Enter").catch(() => {});
-    if (!(await c.locator(".presenter").count())) await c.locator(".tbtn[title^='Present']").click();
+    if (!(await c.locator(".presenter").count())) await c.locator(".tbtn[title^='Present (']").click();
     await c.waitForSelector(".presenter");
     await sleep(900);
     const live = () => c.locator("[data-presenter-live]").innerText().then((t) => t.trim());

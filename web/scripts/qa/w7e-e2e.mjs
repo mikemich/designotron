@@ -103,7 +103,8 @@ try {
     check("Enter on a file card opens the editor", opened);
     await page.waitForTimeout(600);
     const f = await focused(page);
-    check("a newly opened file focuses the canvas", f.id === "dt-canvas", JSON.stringify(f));
+    // An empty file puts focus in the "What do you want to design?" prompt (round 21); any other focuses the canvas.
+    check("a newly opened file focuses the canvas or its empty-file prompt", f.id === "dt-canvas" || f.id === "empty-prompt-input", JSON.stringify(f));
 
 
     // The "more" button: named, and its menu opens at the button and is operable.
@@ -170,7 +171,7 @@ try {
     const home = f.label;
     await page.keyboard.press("End");
     f = await focused(page);
-    check("Home and End jump to the first and last item", home.startsWith("Back to files") && f.label.startsWith("Manage plugins"), `${home} / ${f.label}`);
+    check("Home and End jump to the first and last item", home.startsWith("Back to files") && f.label.startsWith("About Designotron"), `${home} / ${f.label}`);
     await page.keyboard.press("Home");
     await page.keyboard.type("k");
     f = await focused(page);
@@ -301,7 +302,7 @@ try {
     check("closing the Claude panel with its X leaves focus on its toolbar button", f.tag !== "BODY" && f.id === "claude-toggle", JSON.stringify(f));
 
     // Presenter
-    await kbFocus(page, ".tbtn[title='Present']");
+    await kbFocus(page, ".tbtn[title^='Present (']");
     await page.keyboard.press("Enter");
     await page.waitForSelector(".presenter");
     await page.waitForTimeout(200);
@@ -316,7 +317,7 @@ try {
     await page.keyboard.press("Escape");
     await page.waitForSelector(".presenter", { state: "detached" });
     f = await focused(page);
-    check("leaving the presenter returns focus to the Present button", (await page.evaluate(() => document.activeElement.title)) === "Present", JSON.stringify(f));
+    check("leaving the presenter returns focus to the Present button", (await page.evaluate(() => document.activeElement.title)).startsWith("Present"), JSON.stringify(f));
 
     // Labels, roles and live regions
     check("tool buttons report pressed", (await page.getAttribute(".tbtn[title^='Move']", "aria-pressed")) === "true" && (await page.getAttribute(".tbtn[title^='Hand']", "aria-pressed")) === "false");

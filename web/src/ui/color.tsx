@@ -1,14 +1,17 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Image as ImageIcon, Pipette, Plus, RotateCw, Trash2 } from "lucide-react";
 import type { GradientHandles, GradientPaintType, ImageCrop, ImageFilters, Paint } from "../types";
 import { addStop } from "../gradient";
 import { NumberField, Popover, Seg, SelectField } from "./controls";
-import { addAsset, assetUrl, readFileAsDataUrl } from "../assets";
+import { addAsset, assetUrl } from "../assets";
+import { MAX_IMAGE_SIDE, prepareImageFile } from "../imageAssets";
+import { scaledMessage } from "../imageDrop";
 import { safeImageSrc } from "../imageSrc";
 import { pickFile } from "../files";
-import { getDoc, useStore } from "../store";
+import { getDoc, toast, useStore } from "../store";
 import { useCollab } from "../collab";
 import { PhotoSearch } from "../panels/PhotoSearch";
+import { TokenList } from "../panels/TokenPicker";
 import { paintAriaLabel, paintLabel } from "./paintText";
 import { sliderKey, type SliderKind } from "./sliderKeys";
 
@@ -68,6 +71,9 @@ function hsvToRgb(h: number, s: number, v: number): { r: number; g: number; b: n
   return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255 };
 }
 
+/** More colour styles than this are a searchable, foldered list; fewer are a grid of swatches. */
+const MANY_STYLES = 12;
+
 /** HSV picker with alpha, hex entry, eyedropper and document colour styles. */
 export function ColorPicker(props: { color: string; onChange: (hex8: string) => void }) {
   const c = parseColor(props.color);
@@ -97,6 +103,8 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
   };
   const hueRgb = hsvToRgb(hsv.h, 1, 1);
   const styles = getDoc().styles.colors;
+  // Rebuilt only when the styles change, not on every frame of an HSV drag.
+  const styleItems = useMemo(() => styles.map((s) => ({ id: s.id, name: s.name, description: s.description, preview: { type: "color" as const, color: s.color } })), [styles]);
   const pct = (v: number) => Math.round(v * 100);
   /** A key on one of the sliders: the new colour from `sliderKey`, emitted like a drag. */
   const sliderKeys = (e: React.KeyboardEvent, kind: SliderKind) => {
@@ -205,7 +213,32 @@ export function ColorPicker(props: { color: string; onChange: (hex8: string) => 
           </button>
         )}
       </div>
-      {styles.length > 0 && (
+      {styles.length > MANY_STYLES && (
+        <>
+          <div className="small muted" style={{ marginTop: 8 }}>
+            Colour styles
+          </div>
+          {/* A long list: search and folders, drawn in place (the same list as "Apply colour style"). */}
+          <div className="tp-inplace" data-colour-styles-list>
+            <TokenList
+              label="Colour styles"
+              placeholder="Search colour styles"
+              maxHeight={180}
+              autoFocus={false}
+              items={styleItems}
+              onPick={(item) => {
+                const s = styles.find((x) => x.id === item.id);
+                if (!s) return;
+                const nc = parseColor(s.color);
+                setHsv(rgbToHsv(nc));
+                setHexText(toHex(nc));
+                props.onChange(s.color);
+              }}
+            />
+          </div>
+        </>
+      )}
+      {styles.length > 0 && styles.length <= MANY_STYLES && (
         <>
           <div className="small muted" style={{ marginTop: 8 }}>
             Colour styles
@@ -420,8 +453,16 @@ export function PaintEditor(props: { paint: Paint; onChange: (p: Paint) => void 
               className="btn"
               onClick={async () => {
                 const f = await pickFile("image/*");
-                // Another file is not the photo whose credit this paint carried.
-                if (f) props.onChange({ ...p, src: "asset:" + addAsset(await readFileAsDataUrl(f)), credit: undefined });
+                if (!f) return;
+                try {
+                  // Over 4096 px on the long side it is scaled down first (GIF and SVG are kept as they are).
+                  const img = await prepareImageFile(f);
+                  if (img.scaledFrom) toast(scaledMessage(1, MAX_IMAGE_SIDE));
+                  // Another file is not the photo whose credit this paint carried.
+                  props.onChange({ ...p, src: "asset:" + addAsset(img.url), credit: undefined });
+                } catch {
+                  toast(`Couldn't read “${f.name}” as an image`, "error");
+                }
               }}
             >
               Choose image…

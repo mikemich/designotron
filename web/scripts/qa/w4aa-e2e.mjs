@@ -59,7 +59,7 @@ const present = async (frame) => {
   await dispatch({ op: "setFlowStart", page: pg, id: ids[frame] });
   // Present starts at the selected frame when there is one: clear the selection.
   await dispatch({ op: "select", ids: [] });
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter");
   await sleep(300);
 };
@@ -254,7 +254,7 @@ await closePresent();
   const pg = await p2.evaluate(() => window.__dt.state().page);
   await p2.evaluate(([a, g]) => window.__dt.dispatch({ op: "setFlowStart", page: g, id: a }), [ra, pg]);
   await p2.evaluate(() => window.__dt.dispatch({ op: "select", ids: [] }));
-  await p2.click("button[title='Present']");
+  await p2.click("button[title^='Present (']");
   await p2.waitForSelector(".presenter");
   await sleep(200);
   await p2.locator(`.presenter [data-hotspot="${q}"]`).click();

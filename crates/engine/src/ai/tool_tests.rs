@@ -631,6 +631,83 @@ mod prototype {
   }
 
   #[test]
+  fn sticky_uses_the_nearest_scroller_and_warns_about_later_layers() {
+    let mut e = engine();
+    // The nearest scrolling frame scrolls sideways only, though an outer one scrolls vertically.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Outer", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "frame", "name": "Strip", "width": 100, "height": 50, "overflow": "horizontal",
+          "children": [{ "type": "rectangle", "name": "Tab", "width": 20, "height": 20, "scrollBehavior": "sticky" }] }] }] }),
+    );
+    assert!(r.to_string().contains("nearest scrolling frame"), "{r}");
+    // A sticky parent in between breaks the chain too.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Page", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "frame", "name": "Bar", "width": 100, "height": 50, "scrollBehavior": "sticky",
+          "children": [{ "type": "rectangle", "name": "Chip", "width": 20, "height": 20, "scrollBehavior": "sticky" }] }] }] }),
+    );
+    assert!(r.to_string().contains("nearest scrolling frame"), "{r}");
+    // A header first in layer order: later posts cover it, and the warning says how to fix it.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Feed", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "rectangle", "name": "Header", "width": 100, "height": 20 },
+                     { "type": "rectangle", "name": "Post", "width": 100, "height": 200 }] }] }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+    let header = e.doc.nodes.values().find(|n| n.name == "Header").unwrap().id.clone();
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": header, "scrollBehavior": "sticky" }] }),
+    );
+    let text = r.to_string();
+    assert!(
+      text.contains("later layers in 'Feed' are drawn over it") && text.contains("move it to the front"),
+      "{r}"
+    );
+    // create_nodes warns too, once the later siblings exist; a header last in the order is quiet.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Board", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "rectangle", "name": "Top", "width": 100, "height": 20, "scrollBehavior": "sticky" },
+                     { "type": "rectangle", "name": "Item", "width": 100, "height": 200 }] }] }),
+    );
+    assert!(r.to_string().contains("later layers in 'Board'"), "{r}");
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "name": "Board2", "width": 100, "height": 100, "overflow": "vertical",
+        "children": [{ "type": "rectangle", "name": "Item2", "width": 100, "height": 200 },
+                     { "type": "rectangle", "name": "Top2", "width": 100, "height": 20, "scrollBehavior": "sticky" }] }] }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+    // Last in the order: no warning.
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": header, "scrollBehavior": "scroll" }] }),
+    );
+    e.dispatch(crate::engine::Command::Reorder {
+      ids: vec![header.clone()],
+      to: crate::ops::ReorderTo::Front,
+    })
+    .unwrap();
+    let r = run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": header, "scrollBehavior": "sticky" }] }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+  }
+
+  #[test]
   fn a_new_interaction_replaces_the_one_with_the_same_trigger() {
     let (mut e, ids) = screens();
     let (home, other, btn) = (&ids[0], &ids[1], &ids[2]);
@@ -1969,6 +2046,91 @@ mod svg {
     assert!(f.children.iter().all(|c| e.doc.get(c).unwrap().page == e.page));
   }
 
+  fn outline_of(e: &Engine, id: &str) -> Vec<(f64, f64)> {
+    crate::paths::page_outline(&e.doc, id)
+      .iter()
+      .flat_map(|sp| sp.points.iter().map(|p| (p.x, p.y)))
+      .collect()
+  }
+
+  #[test]
+  fn svg_path_makes_an_editable_vector_with_the_default_icon_box() {
+    let mut e = engine();
+    let id = one(&mut e, json!({ "type": "vector", "svgPath": "M2 2h20v20H2z" }));
+    let n = e.doc.get(&id).unwrap();
+    let v = n.vector.as_ref().unwrap();
+    assert!(v.raw.is_none() && v.subpaths.len() == 1, "{v:?}");
+    assert_eq!((n.width, n.height), (24.0, 24.0));
+    let pts = outline_of(&e, &id);
+    assert_eq!(pts.first(), Some(&(2.0, 2.0)));
+    assert!(pts.contains(&(22.0, 22.0)));
+    // A later width scales the icon with its box (the points follow).
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "width": 48, "height": 48 }] }),
+    );
+    let pts = outline_of(&e, &id);
+    assert!(pts.contains(&(4.0, 4.0)) && pts.contains(&(44.0, 44.0)), "{pts:?}");
+    // The points are editable.
+    e.dispatch(crate::engine::Command::BendVectorSegment {
+      id: id.clone(),
+      sub: 0,
+      seg: 0,
+      t: 0.5,
+      x: 20.0,
+      y: 0.0,
+    })
+    .unwrap();
+  }
+
+  #[test]
+  fn svg_path_maps_the_view_box_onto_the_box_and_takes_arcs_and_relative_commands() {
+    let mut e = engine();
+    // A 48x48 view box with a non-zero origin, shown at 24x24 (half size).
+    let id = one(
+      &mut e,
+      json!({ "type": "vector", "svgPath": "m10 10 h20 v20 h-20 z", "viewBox": [10, 10, 48, 48], "width": 24, "height": 24 }),
+    );
+    let pts = outline_of(&e, &id);
+    let n = e.doc.get(&id).unwrap();
+    let (x, y) = (n.x, n.y);
+    assert!(pts.iter().any(|p| (p.0 - x).abs() < 1e-9 && (p.1 - y).abs() < 1e-9), "{pts:?}");
+    assert!(
+      pts.iter().any(|p| (p.0 - x - 10.0).abs() < 1e-9 && (p.1 - y - 10.0).abs() < 1e-9),
+      "{pts:?}"
+    );
+    let arcs = one(
+      &mut e,
+      json!({ "type": "vector", "svgPath": "M4 12a8 8 0 1 0 16 0a8 8 0 1 0-16 0z" }),
+    );
+    assert!(e.doc.get(&arcs).unwrap().vector.as_ref().unwrap().subpaths[0].points.len() >= 4);
+    // A 0-height line icon keeps its width.
+    let line = one(&mut e, json!({ "type": "vector", "svgPath": "M0 0h24", "height": 0 }));
+    assert!(e.doc.get(&line).unwrap().vector.as_ref().unwrap().raw.is_none());
+  }
+
+  #[test]
+  fn update_nodes_svg_path_replaces_the_points_and_a_bad_path_is_refused() {
+    let mut e = engine();
+    let id = one(&mut e, json!({ "type": "vector", "svgPath": "M2 2h20v20H2z" }));
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": id, "svgPath": "M0 0L24 0L12 24z", "width": 48, "height": 48 }] }),
+    );
+    let pts = outline_of(&e, &id);
+    assert_eq!(pts.len(), 3, "{pts:?}");
+    assert!(e.doc.get(&id).unwrap().vector.as_ref().unwrap().raw.is_none());
+    let err = e
+      .dispatch(ai(
+        "create_nodes",
+        json!({ "nodes": [{ "type": "vector", "svgPath": "nonsense" }] }),
+      ))
+      .unwrap_err();
+    assert!(err.contains("svgPath"), "{err}");
+  }
+
   #[test]
   fn svg_goes_inside_a_parent_and_refusals_say_why() {
     let mut e = engine();
@@ -2741,7 +2903,13 @@ mod r15b {
     let r = run(&mut e, "define_variables", json!({ "collection": "Theme", "delete": ["Brand"] }));
     assert_eq!(r["unbound"], 1);
     assert!(r["note"].as_str().unwrap().contains("1 layer"), "{r}");
-    assert!(r["note"].as_str().unwrap().contains("2 aliases"), "{r}");
+    assert!(
+      r["note"]
+        .as_str()
+        .unwrap()
+        .contains("2 aliases now use the deleted variable's value"),
+      "{r}"
+    );
     assert!(!e.doc.get(&id).unwrap().bindings.contains_key("fill"));
     assert!(e.doc.get(&id).unwrap().bindings.contains_key("gap"));
     assert_eq!(fill_of(&e, &id).to_lowercase(), "#7c5cff", "the layer keeps its value");
@@ -4297,5 +4465,239 @@ mod r20c {
     let d = serde_json::to_value(a.collab_delta()).unwrap();
     b.dispatch(Command::ApplyRemote { delta: d, local: false }).unwrap();
     assert!(a.doc.nodes == b.doc.nodes, "peers differ");
+  }
+}
+
+mod r21b {
+  use super::*;
+  use crate::model::Paint;
+
+  fn fill(e: &Engine, id: &str) -> String {
+    match &e.doc.get(id).unwrap().fills[0] {
+      Paint::Solid { color, .. } => color.to_uppercase(),
+      other => panic!("{other:?}"),
+    }
+  }
+
+  /// Primitives (Ink, Paper) and a Theme (Light, Dark) whose Surface aliases them, with a frame
+  /// bound to Surface and pinned to Dark: (engine, frame).
+  fn themed_surface() -> (Engine, String) {
+    let mut e = engine();
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Primitives", "variables": [
+        { "name": "Ink", "type": "color", "value": "#111111" },
+        { "name": "Paper", "type": "color", "value": "#FAFAFA" }] }),
+    );
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "modes": ["Light", "Dark"], "variables": [
+        { "name": "Surface", "type": "color", "values": { "Light": { "alias": "Primitives/Paper" }, "Dark": { "alias": "Primitives/Ink" } } }] }),
+    );
+    let f = one(
+      &mut e,
+      json!({ "type": "frame", "width": 50, "height": 50, "bind": { "fill": "Surface" }, "variableModes": { "Theme": "Dark" } }),
+    );
+    (e, f)
+  }
+
+  #[test]
+  fn deleting_an_aliased_variable_keeps_every_mode_showing_its_colour() {
+    let (mut e, f) = themed_surface();
+    assert_eq!(fill(&e, &f), "#111111");
+    let r = run(&mut e, "define_variables", json!({ "collection": "Primitives", "delete": ["Ink"] }));
+    let note = r["note"].as_str().unwrap();
+    assert!(note.contains("1 alias now uses the deleted variable's value"), "{note}");
+    assert!(!note.contains("missing"), "{note}");
+    assert_eq!(fill(&e, &f), "#111111");
+    // Light and back to Dark: still Ink's colour in Dark, Paper in Light.
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": f, "variableModes": { "Theme": "Light" } }] }),
+    );
+    assert_eq!(fill(&e, &f), "#FAFAFA");
+    run(
+      &mut e,
+      "update_nodes",
+      json!({ "updates": [{ "id": f, "variableModes": { "Theme": "Dark" } }] }),
+    );
+    assert_eq!(fill(&e, &f), "#111111");
+    // tokens.css has the Dark entry.
+    let css = crate::variables::tokens_css(&e.doc);
+    let dark = css.split("[data-theme=\"dark\"]").nth(1).unwrap();
+    assert!(dark.contains("--surface: #111111;"), "{css}");
+  }
+
+  #[test]
+  fn deleting_one_variable_is_one_undo_step_that_restores_the_alias() {
+    let (mut e, _) = themed_surface();
+    let before = crate::variables::plain(&e.doc.variables);
+    run(&mut e, "define_variables", json!({ "collection": "Primitives", "delete": ["Ink"] }));
+    e.dispatch(Command::Undo).unwrap();
+    assert_eq!(crate::variables::plain(&e.doc.variables), before);
+  }
+
+  #[test]
+  fn two_aliases_read_in_the_plural() {
+    let (mut e, _) = themed_surface();
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Theme", "variables": [{ "name": "Edge", "type": "color", "value": { "alias": "Primitives/Ink" } }] }),
+    );
+    let r = run(&mut e, "define_variables", json!({ "collection": "Primitives", "delete": ["Ink"] }));
+    assert!(
+      r["note"]
+        .as_str()
+        .unwrap()
+        .contains("3 aliases now use the deleted variable's value"),
+      "{r}"
+    );
+  }
+
+  /// Two collections that both have a "Brand" colour.
+  fn two_brands() -> Engine {
+    let mut e = engine();
+    for (c, hex) in [("A", "#FF0000"), ("B", "#00FF00")] {
+      run(
+        &mut e,
+        "define_variables",
+        json!({ "collection": c, "variables": [{ "name": "Brand", "type": "color", "value": hex }] }),
+      );
+    }
+    e
+  }
+
+  #[test]
+  fn a_bare_name_in_two_collections_binds_the_first_and_warns() {
+    let mut e = two_brands();
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": 50, "height": 50, "bind": { "fill": "Brand" } }] }),
+    );
+    let f = created(&r)[0].clone();
+    let warnings = r["warnings"].to_string();
+    assert!(
+      warnings.contains("'Brand' is in A and B; bound A/Brand. Write 'B/Brand' for the other."),
+      "{warnings}"
+    );
+    assert_eq!(fill(&e, &f), "#FF0000");
+    // The collection prefix picks the other one, with no warning.
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": 50, "height": 50, "bind": { "fill": "B/Brand" } }] }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+    assert_eq!(fill(&e, &created(&r)[0]), "#00FF00");
+    // A name in one collection only does not warn.
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "B", "variables": [{ "name": "Solo", "type": "color", "value": "#0000FF" }] }),
+    );
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": 50, "height": 50, "bind": { "fill": "Solo" } }] }),
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+  }
+
+  #[test]
+  fn three_collections_name_the_others() {
+    let mut e = two_brands();
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "C", "variables": [{ "name": "Brand", "type": "color", "value": "#0000FF" }] }),
+    );
+    let r = run(
+      &mut e,
+      "create_nodes",
+      json!({ "nodes": [{ "type": "frame", "width": 50, "height": 50, "bind": { "fill": "Brand" } }] }),
+    );
+    let w = r["warnings"].to_string();
+    assert!(
+      w.contains("'Brand' is in A, B and C; bound A/Brand. Write 'B/Brand' or 'C/Brand' for the others."),
+      "{w}"
+    );
+  }
+
+  #[test]
+  fn an_alias_prefers_the_collection_being_written() {
+    let mut e = two_brands();
+    let r = run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "B", "variables": [{ "name": "Alias", "type": "color", "value": { "alias": "Brand" } }] }),
+    );
+    let b = &e.doc.variables[1];
+    let own = b.variables.iter().find(|v| v.name == "Brand").unwrap().id.clone();
+    let alias = b.variables.iter().find(|v| v.name == "Alias").unwrap();
+    assert_eq!(alias.values.values().next().unwrap(), &json!({ "alias": own }));
+    assert!(r.get("warnings").is_none(), "{r}");
+    // From a collection without a Brand of its own the first one wins, and the call says so.
+    let r = run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "C", "variables": [{ "name": "Alias", "type": "color", "value": { "alias": "Brand" } }] }),
+    );
+    let first = e.doc.variables[0].variables[0].id.clone();
+    assert_eq!(
+      e.doc.variables[2].variables[0].values.values().next().unwrap(),
+      &json!({ "alias": first })
+    );
+    assert!(r["warnings"].to_string().contains("'Brand' is in A and B; aliased A/Brand"), "{r}");
+    // The exact Collection/name still wins over everything.
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "B", "variables": [{ "name": "Alias", "type": "color", "value": { "alias": "A/Brand" } }] }),
+    );
+    let alias = e.doc.variables[1].variables.iter().find(|v| v.name == "Alias").unwrap();
+    assert_eq!(alias.values.values().next().unwrap(), &json!({ "alias": first }));
+  }
+
+  #[test]
+  fn styles_and_variables_take_a_description() {
+    let mut e = engine();
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand/Primary", "color": "#7C5CFF", "description": "Buttons" }],
+        "texts": [{ "name": "Heading/H1", "fontSize": 32, "description": "Page titles" }] }),
+    );
+    assert_eq!(e.doc.styles.colors[0].description, "Buttons");
+    assert_eq!(e.doc.styles.texts[0].description, "Page titles");
+    // Updating in place changes it; leaving it out keeps it; an empty one clears it.
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand/Primary", "color": "#7C5CFF", "description": "Primary actions" }] }),
+    );
+    assert_eq!(e.doc.styles.colors[0].description, "Primary actions");
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "colors": [{ "name": "Brand/Primary", "color": "#7C5CFE" }] }),
+    );
+    assert_eq!(e.doc.styles.colors[0].description, "Primary actions");
+    run(
+      &mut e,
+      "define_styles",
+      json!({ "texts": [{ "name": "Heading/H1", "fontSize": 30, "description": "" }] }),
+    );
+    assert_eq!(e.doc.styles.texts[0].description, "");
+    run(
+      &mut e,
+      "define_variables",
+      json!({ "collection": "Tokens", "variables": [{ "name": "Gap", "type": "number", "value": 8, "description": "Between cards" }] }),
+    );
+    assert_eq!(e.doc.variables[0].variables[0].description, "Between cards");
   }
 }

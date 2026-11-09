@@ -86,7 +86,7 @@ try {
   await dispatch({ op: "delete", ids: [id("Home")] });
   await dispatch({ op: "delete", ids: [id("Detail")] });
   check("deleting the start clears it", (await flowStart()) === null);
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter", { timeout: 3000 });
   check("toolbar Present opens the next frame", (await crumb()) === "Third", await crumb());
   await closePresenter();
@@ -108,10 +108,12 @@ try {
   check("panel flags the missing destination", (await page.locator(".panel.right .missing-destination").count()) === 1);
   await dispatch({ op: "setFlowStart", page: pageId, id: id("Home") });
   await dispatch({ op: "select", ids: [] });
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter");
-  const go = await hotspotBox(id("Go"));
-  await page.mouse.click(go.x + 5, go.y + 5);
+  // A link that can't act gets no hotspot at all (round 21), so there is nothing to click.
+  check("a dangling link has no hotspot", (await page.locator(`.presenter [data-hotspot="${id("Go")}"]`).count()) === 0);
+  const go = await page.locator(".presenter").first().boundingBox();
+  await page.mouse.click(go.x + go.width / 2, go.y + go.height / 2);
   await page.waitForTimeout(300);
   check("player ignores the dangling link", (await page.locator(".presenter").count()) === 1 && (await crumb()) === "Home", await crumb());
   await closePresenter();
@@ -124,7 +126,7 @@ try {
   await dispatch({ op: "setInteractions", id: id("Hold"), interactions: [navigate(id("Detail"), "onPress")] });
   await dispatch({ op: "setInteractions", id: id("Go"), interactions: [navigate(id("Detail"))] });
   await dispatch({ op: "select", ids: [] });
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter");
   const start = await crumb();
   const hold = await hotspotBox(id("Hold"));
@@ -150,7 +152,7 @@ try {
   await closePresenter();
 
   // Two fingers: only the pointer that pressed controls the revert, and a second press is ignored.
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter");
   const fire = (type, pointerId, sel) =>
     page.evaluate(([t, pid, s]) => {
@@ -200,7 +202,7 @@ try {
     },
     [tid("Home"), tid("Hold"), tid("Detail"), tid("Third"), ix("onPress", tid("Detail")), ix("onClick", tid("Third"))],
   );
-  await tp.click("button[title='Present']");
+  await tp.click("button[title^='Present (']");
   await tp.waitForSelector(".presenter");
   const tb = await tp.locator(`.presenter [data-hotspot="${tid("Hold")}"]`).boundingBox();
   await tp.touchscreen.tap(tb.x + 10, tb.y + 10);

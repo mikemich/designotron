@@ -1,6 +1,6 @@
 // Starter files, built through the same AI tool layer Claude uses.
 
-import { dispatchOrThrow, getDoc } from "./store";
+import { dispatchOrThrow, getDoc, query } from "./store";
 import { buildSample } from "./sample";
 
 export interface Template {
@@ -311,27 +311,6 @@ function buildDesignSystem() {
       { name: "Caption", fontFamily: "Inter", fontSize: 13, fontWeight: 500, lineHeight: 18, letterSpacing: 0 },
     ],
   });
-  const button = (state: string, fill: string, text: string, stroke?: string) => ({
-    type: "frame",
-    name: `State=${state}`,
-    fill,
-    stroke: stroke ?? "none",
-    cornerRadius: 10,
-    layout: { direction: "horizontal", padding: [12, 20], align: "center", crossAlign: "center" },
-    children: [{ type: "text", text: "Button", fontSize: 15, fontWeight: 600, color: text }],
-  });
-  const created = ai("create_nodes", {
-    nodes: [
-      button("Default", "#C2410C", "#FFFFFF"),
-      button("Hover", "#9A3412", "#FFFFFF"),
-      button("Secondary", "#FFFFFF", "#1C1917", "#D6D3D1"),
-      button("Disabled", "#F5F5F4", "#A8A29E"),
-    ].map((b, i) => ({ ...b, x: 80 + i * 150, y: 420 })),
-  }).created.map((c: any) => c.id);
-  const comps = created.map((id: string) => ai("arrange", { action: "create_component", ids: [id] }).id);
-  const set = ai("arrange", { action: "combine_variants", ids: comps }).id;
-  ai("update_nodes", { updates: [{ id: set, name: "Button" }] });
-
   const swatch = (name: string, color: string) => ({
     type: "frame",
     name,
@@ -342,7 +321,9 @@ function buildDesignSystem() {
       { type: "text", text: color, fontSize: 12, color: "#78716C" },
     ],
   });
-  ai("create_nodes", {
+  // Foundations hugs its content, so its height depends on text metrics: it goes in first and everything
+  // else is placed 80 px below its real bottom (a fixed y overlapped it on some machines).
+  const foundations = ai("create_nodes", {
     nodes: [
       {
         type: "frame",
@@ -382,11 +363,38 @@ function buildDesignSystem() {
           },
         ],
       },
+    ],
+  }).created[0].id;
+  const box = query<{ items: { id: string; bounds: { y: number; height: number } }[] }>({ q: "bounds", ids: [foundations] }).items[0].bounds;
+  const below = Math.ceil(box.y + box.height) + 80;
+  const button = (state: string, fill: string, text: string, stroke?: string) => ({
+    type: "frame",
+    name: `State=${state}`,
+    fill,
+    stroke: stroke ?? "none",
+    cornerRadius: 10,
+    layout: { direction: "horizontal", padding: [12, 20], align: "center", crossAlign: "center" },
+    children: [{ type: "text", text: "Button", fontSize: 15, fontWeight: 600, color: text }],
+  });
+  const created = ai("create_nodes", {
+    nodes: [
+      button("Default", "#C2410C", "#FFFFFF"),
+      button("Hover", "#9A3412", "#FFFFFF"),
+      button("Secondary", "#FFFFFF", "#1C1917", "#D6D3D1"),
+      button("Disabled", "#F5F5F4", "#A8A29E"),
+    ].map((b, i) => ({ ...b, x: 80 + i * 150, y: below })),
+  }).created.map((c: any) => c.id);
+  const comps = created.map((id: string) => ai("arrange", { action: "create_component", ids: [id] }).id);
+  const set = ai("arrange", { action: "combine_variants", ids: comps }).id;
+  ai("update_nodes", { updates: [{ id: set, name: "Button" }] });
+
+  ai("create_nodes", {
+    nodes: [
       {
         type: "frame",
         name: "Input",
         x: 80,
-        y: 560,
+        y: below + 140,
         width: 320,
         layout: { direction: "vertical", gap: 6 },
         children: [
@@ -407,7 +415,7 @@ function buildDesignSystem() {
         type: "frame",
         name: "Card",
         x: 460,
-        y: 560,
+        y: below + 140,
         width: 340,
         fill: "#FFFFFF",
         cornerRadius: 18,

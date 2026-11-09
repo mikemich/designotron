@@ -1340,10 +1340,14 @@ fn ts_without_themes(sets: &[TsSet], report: &mut Report) -> Vec<IColl> {
 /// collections (untouched ones included) and what happened. Nothing in `doc` changes.
 pub fn import(doc: &Document, text: &str, file_name: &str, gen: &mut IdGen) -> Result<(Vec<Collection>, Report), String> {
   let root = read_json(text)?;
+  if root.obj().is_none() {
+    return Err("a tokens file is a JSON object".into());
+  }
+  let mut report = Report::default();
+  let root = without_styles(root, &mut report);
   let Some(entries) = root.obj() else {
     return Err("a tokens file is a JSON object".into());
   };
-  let mut report = Report::default();
   // Tokens Studio writes `$themes` / `$metadata`, or `value` where DTCG writes `$value`.
   let ts = root.get("$themes").is_some()
     || root.get("$metadata").is_some()
@@ -1371,6 +1375,30 @@ pub fn import(doc: &Document, text: &str, file_name: &str, gen: &mut IdGen) -> R
   }
   let out = merge(doc, imported, gen, &mut report);
   Ok((out, report))
+}
+
+/// Leaves out the group an export wrote for the colour and text styles (marked with the
+/// `styles` extension): styles aren't variables, so the file's other groups import as before.
+fn without_styles(root: J, report: &mut Report) -> J {
+  let is_styles = |g: &J| {
+    g.get("$extensions")
+      .and_then(|e| e.get(EXT))
+      .and_then(|x| x.get("styles"))
+      .is_some_and(|s| *s == J::Bool(true))
+  };
+  let J::Obj(entries) = root else { return root };
+  if !entries.iter().any(|(_, g)| is_styles(g)) {
+    return J::Obj(entries);
+  }
+  let mut kept = Vec::with_capacity(entries.len());
+  for (k, g) in entries {
+    if is_styles(&g) {
+      report.skip(short(&k), "styles aren't imported as variables");
+    } else {
+      kept.push((k, g));
+    }
+  }
+  J::Obj(kept)
 }
 
 struct Plan {

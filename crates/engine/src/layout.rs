@@ -29,7 +29,7 @@ pub fn layout_root(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
 /// children keep the positions they were given.
 pub fn layout_root_skipping(doc: &mut Document, id: &str, m: &dyn TextMeasurer, fresh: &HashSet<NodeId>) {
   let mut before = Vec::new();
-  layout_walk(doc, id, m, Some(&mut before));
+  layout_walk(doc, id, m, Some(&mut before), 0);
   // Outermost first: a frame moved or resized by its parent's constraints is compared with
   // its own noted size, so its children move once, by the whole change.
   for (fid, ow, oh) in before {
@@ -62,22 +62,37 @@ fn is_pinned(c: &Node) -> bool {
   c.constraints.horizontal != ConstraintH::Left || c.constraints.vertical != ConstraintV::Top
 }
 
+/// Levels of nesting past which layout stops descending.
+const MAX_LAYOUT_DEPTH: usize = 256;
+
 /// Lays out a node and its subtree bottom-up.
 pub fn layout_node(doc: &mut Document, id: &str, m: &dyn TextMeasurer) {
-  layout_walk(doc, id, m, None);
+  layout_walk(doc, id, m, None, 0);
 }
 
 /// `layout_node`; with `note`, every frame that has a child following constraints is recorded
 /// as (id, width, height) before its subtree is laid out.
-fn layout_walk(doc: &mut Document, id: &str, m: &dyn TextMeasurer, mut note: Option<&mut Vec<(NodeId, f64, f64)>>) {
+fn layout_walk(doc: &mut Document, id: &str, m: &dyn TextMeasurer, mut note: Option<&mut Vec<(NodeId, f64, f64)>>, depth: usize) {
+  // A sound tree is a few dozen levels deep; a longer chain is a damaged file (a loop of
+  // children), and recursing on it would overflow the stack.
+  if depth > MAX_LAYOUT_DEPTH {
+    return;
+  }
   let Some(node) = doc.get(id) else { return };
   let kind = node.kind;
-  let children = node.children.clone();
+  // Only children that point back and aren't the node itself (a damaged file can list a layer
+  // under itself or under a parent it doesn't belong to).
+  let children: Vec<NodeId> = node
+    .children
+    .iter()
+    .filter(|c| c.as_str() != id && doc.get(c).is_some_and(|cn| cn.parent.as_deref() == Some(id)))
+    .cloned()
+    .collect();
   match kind {
     NodeType::Text => size_text(doc, id, m),
     NodeType::Group => {
       for c in &children {
-        layout_walk(doc, c, m, note.as_deref_mut());
+        layout_walk(doc, c, m, note.as_deref_mut(), depth + 1);
       }
       normalize_group(doc, id);
     }
@@ -93,7 +108,7 @@ fn layout_walk(doc: &mut Document, id: &str, m: &dyn TextMeasurer, mut note: Opt
         }
       }
       for c in &children {
-        layout_walk(doc, c, m, note.as_deref_mut());
+        layout_walk(doc, c, m, note.as_deref_mut(), depth + 1);
       }
       if doc.get(id).map(|n| n.layout.is_some()).unwrap_or(false) {
         arrange(doc, id, m);

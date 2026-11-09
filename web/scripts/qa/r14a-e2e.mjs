@@ -301,6 +301,8 @@ try {
   await p.click("button:has-text('New design file')");
   await p.waitForSelector("#dt-canvas");
   await sleep(300);
+  // The new file's prompt has focus (round 21); Escape hands the keyboard to the canvas so Ctrl+V pastes layers.
+  await p.keyboard.press("Escape");
   await tool(p, "define_variables", { collection: "Theme", modes: ["Light", "Dark"], variables: [{ name: "Surface", type: "color", values: { Light: "#F0F0F0", Dark: "#111111" } }, { name: "Only here", type: "color", values: { Light: "#ABCDEF", Dark: "#123456" } }] });
   await p.keyboard.press("Control+v");
   await sleep(700);

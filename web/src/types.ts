@@ -120,6 +120,23 @@ export interface TextProps {
   maxLines?: number | null;
   /** Cut text that doesn't fit with "…" (fixed-size boxes show the lines that fit). */
   truncate?: boolean;
+  /**
+   * Identity of each character, so concurrent edits in a room merge per character (the engine's;
+   * the editor only passes it back, never reads inside). Absent for texts nobody edited in a room
+   * that merges text.
+   */
+  seq?: TextSeq;
+}
+
+/** `[site, ctr]`: the id of one character. */
+export type CharId = [number, number];
+
+/** Spans of consecutive ids in document order: `[site, ctr, len]` or `[site, ctr, len, deletedAt]`. */
+export interface TextSeq {
+  e: number;
+  h: number;
+  k: number;
+  s: number[][];
 }
 
 export interface TextRun {
@@ -403,7 +420,7 @@ export interface Doc {
   pages: Page[];
   nodes: Record<string, Node>;
   styles: {
-    colors: { id: string; name: string; color: string }[];
+    colors: { id: string; name: string; color: string; /** Where to use it; left out when empty. */ description?: string }[];
     texts: {
       id: string;
       name: string;
@@ -417,6 +434,8 @@ export interface Doc {
       paragraphSpacing?: number;
       case?: "original" | "upper" | "lower" | "title";
       decoration?: "none" | "underline" | "strikethrough";
+      /** Where to use it; left out when empty. */
+      description?: string;
     }[];
     /** Left out of files that have none. */
     effects?: EffectStyle[];

@@ -158,6 +158,144 @@ fn designotron_export_imports_back_identically() {
 }
 
 #[test]
+fn exported_styles_are_a_marked_group_that_an_import_skips() {
+  let mut src = with_scene();
+  let id = src
+    .dispatch(Command::AddColorStyle {
+      name: "Brand/Primary".into(),
+      color: "#7C5CFF".into(),
+    })
+    .unwrap()["id"]
+    .as_str()
+    .unwrap()
+    .to_string();
+  src
+    .dispatch(Command::SetStyleDescription {
+      id,
+      description: "Buttons".into(),
+    })
+    .unwrap();
+  src.doc.styles_mut().texts.push(crate::model::TextStyle {
+    id: "t1".into(),
+    name: "Heading/H1".into(),
+    font_family: "Inter".into(),
+    font_size: 32.0,
+    font_weight: 700,
+    line_height: Some(40.0),
+    letter_spacing: -0.5,
+    ..Default::default()
+  });
+  let text = tokens_json_text(&src.doc);
+  let file: Value = serde_json::from_str(&text).unwrap();
+  let styles = &file["Styles"];
+  assert_eq!(styles["$extensions"]["com.designotron"]["styles"], json!(true));
+  let brand = &styles["Brand"]["Primary"];
+  assert_eq!(
+    (&brand["$type"], &brand["$value"], &brand["$description"]),
+    (&json!("color"), &json!("#7C5CFF"), &json!("Buttons"))
+  );
+  let h1 = &styles["Heading"]["H1"];
+  assert_eq!(h1["$type"], json!("typography"));
+  assert_eq!(
+    h1["$value"],
+    json!({ "fontFamily": "Inter", "fontSize": "32px", "fontWeight": 700, "lineHeight": "40px", "letterSpacing": "-0.5px" })
+  );
+  // Importing it skips the group with a reason and leaves the variables as they were.
+  let mut dst = engine(2);
+  let r = import(&mut dst, &text, "tokens.json");
+  assert_eq!(r["variablesAdded"], 8);
+  assert_eq!(r["skippedCount"], 1);
+  assert_eq!(r["skipped"][0]["path"], json!("Styles"));
+  assert!(
+    r["skipped"][0]["reason"]
+      .as_str()
+      .unwrap()
+      .contains("styles aren't imported as variables"),
+    "{r}"
+  );
+  assert_eq!(canon(&dst), canon(&with_scene()));
+  assert!(dst.doc.styles.colors.is_empty());
+  let again = import(&mut dst, &text, "tokens.json");
+  assert_eq!(
+    (again["variablesAdded"].as_u64(), again["variablesUpdated"].as_u64()),
+    (Some(0), Some(0))
+  );
+  // A file with only styles has nothing to import.
+  let only = json!({ "Styles": file["Styles"].clone() }).to_string();
+  let err = engine(3)
+    .dispatch(Command::ImportVariables {
+      json: only,
+      name: "tokens.json".into(),
+    })
+    .unwrap_err();
+  assert!(err.contains("no tokens found"), "{err}");
+}
+
+#[test]
+fn tokens_css_has_the_colour_styles_under_the_names_index_css_uses() {
+  let mut e = with_scene();
+  e.dispatch(Command::AddColorStyle {
+    name: "Brand/Primary".into(),
+    color: "#7c5cff".into(),
+  })
+  .unwrap();
+  let css = crate::variables::tokens_css(&e.doc);
+  assert!(
+    css.contains("/* Colour styles */\n:root {\n  --color-brand-primary: #7C5CFF;\n}\n"),
+    "{css}"
+  );
+  // The colour styles come before the theme blocks.
+  assert!(
+    css.find("--color-brand-primary").unwrap() < css.find("[data-theme=").unwrap_or(usize::MAX),
+    "{css}"
+  );
+}
+
+#[test]
+fn style_descriptions_are_optional_in_saved_files() {
+  let mut e = engine(4);
+  let id = e
+    .dispatch(Command::AddColorStyle {
+      name: "Ink".into(),
+      color: "#111111".into(),
+    })
+    .unwrap()["id"]
+    .as_str()
+    .unwrap()
+    .to_string();
+  let plain = serde_json::to_value(&e.doc.styles).unwrap();
+  assert!(plain["colors"][0].get("description").is_none(), "{plain}");
+  e.dispatch(Command::SetStyleDescription {
+    id: id.clone(),
+    description: "  Body text  ".into(),
+  })
+  .unwrap();
+  let saved = serde_json::to_value(&e.doc.styles).unwrap();
+  assert_eq!(saved["colors"][0]["description"], json!("Body text"));
+  let back: crate::model::Styles = serde_json::from_value(saved).unwrap();
+  assert_eq!(back.colors[0].description, "Body text");
+  // A file from before descriptions loads with none, and clearing removes the key again.
+  let old: crate::model::Styles =
+    serde_json::from_value(json!({ "colors": [{ "id": "a", "name": "A", "color": "#000000" }], "texts": [{ "id": "t", "name": "T" }] }))
+      .unwrap();
+  assert!(old.colors[0].description.is_empty() && old.texts[0].description.is_empty());
+  e.dispatch(Command::SetStyleDescription {
+    id,
+    description: String::new(),
+  })
+  .unwrap();
+  assert!(serde_json::to_value(&e.doc.styles).unwrap()["colors"][0]
+    .get("description")
+    .is_none());
+  assert!(e
+    .dispatch(Command::SetStyleDescription {
+      id: "nope".into(),
+      description: "x".into()
+    })
+    .is_err());
+}
+
+#[test]
 fn reimport_updates_values_without_duplicating_and_deletes_nothing() {
   let mut e = with_scene();
   let mut changed = scene();

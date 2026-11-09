@@ -3,6 +3,7 @@ import { ChevronRight, Figma, FilePlus, FileStack, Folder as FolderIcon, FolderO
 import { askWhenOpen, demoWhenOpen } from "./Editor";
 import { claudeReady, useChat } from "./ai/chatState";
 import { ClaudeSetupSteps } from "./ai/ClaudeSetup";
+import { nameFromPrompt } from "./promptName";
 import { FigmaImportDialog, type FigmaSource } from "./panels/FigmaImportDialog";
 import { REPO_URL } from "./panels/GuestBar";
 import {
@@ -255,7 +256,7 @@ export function Dashboard({ onOpen }: { onOpen: (id: string) => void }) {
       const draft = await emptyClaudeDraft();
       if (draft) return onOpen(draft);
     }
-    if (!(await create(null, "claude"))) askWhenOpen(null);
+    if (!(await create(null, "claude", nameFromPrompt(prompt)))) askWhenOpen(null);
   };
   const [idea, setIdea] = useState("");
   /** The replay of Claude designing a page, in a new file. */

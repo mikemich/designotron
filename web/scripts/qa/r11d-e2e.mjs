@@ -63,7 +63,7 @@ const setStart = (page, id) =>
   }, id);
 const crumb = (page) => page.locator(".presenter .bar .crumb").first().innerText().then((t) => t.trim());
 const present = async (page) => {
-  await page.click("button[title='Present']");
+  await page.click("button[title^='Present (']");
   await page.waitForSelector(".presenter");
   await page.waitForTimeout(400);
 };
